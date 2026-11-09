@@ -2,10 +2,10 @@
 // a real adapter must answer what this one answers for the same state.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
-  agentXError, CodeHostEventSchema, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
+  agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
   type BranchPage, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
   type ChangeRequestRef, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
-  type GitCredential, type HostAccount, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
+  type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
   type RepositoryRef,
 } from "@agentx/contracts";
 import type { FakeChangeRequest, FakeHostModel } from "./model.js";
@@ -228,6 +228,31 @@ export class FakeCodeHost implements CodeHost {
       changeRequest: { ...this.details(cr), headTreeRevision: this.model.revision(head).tree }, comments,
       threads: cr.threads.map((thread) => ({ id: thread.id, resolved: thread.resolved, commentIds: thread.commentIds.filter((id) => !own.has(id)) })),
     });
+  }
+
+  async comments(ref: ChangeRequestRef, options: { since?: string; page?: number }, scope: HostScope, budget?: ReadBudget): Promise<HostCommentsPage> {
+    this.checkScope(scope);
+    this.spend(budget);
+    const cr = this.cr(ref);
+    const since = options.since === undefined ? undefined : Date.parse(options.since);
+    const page = options.page ?? 1;
+    const all = cr.comments.filter((comment) => comment.kind === "discussion" && (since === undefined || Date.parse(comment.updatedAt) >= since));
+    const listed = all.slice((page - 1) * 100, page * 100).map((comment) => ({
+      id: comment.id, ref: this.ref(cr.id), author: { login: comment.author, ...(this.model.accounts.get(comment.author) === undefined ? {} : { hostUserId: this.model.accounts.get(comment.author)!.hostUserId }), accountType: this.model.accounts.get(comment.author)?.accountType ?? "User" },
+      body: comment.body, createdAt: comment.createdAt ?? comment.updatedAt, updatedAt: comment.updatedAt,
+    }));
+    return { comments: listed, ...(all.length > page * 100 ? { nextPage: page + 1 } : {}) };
+  }
+
+  /** Rovara's own comment: a person's account (the owner's token), so the text carries the marker the core reads it by. */
+  async postComment(ref: ChangeRequestRef, text: string, scope: HostScope, budget?: ReadBudget): Promise<"posted" | "gone"> {
+    this.checkScope(scope);
+    this.spend(budget);
+    if (text.length === 0 || text.length > 200 || /[\p{Cc}@]/u.test(text)) throw agentXError("CONFIG_INVALID", "the comment is not Rovara's fixed text");
+    const found = this.model.changeRequests.find((entry) => entry.id === ref.id);
+    if (found === undefined) return "gone";
+    this.model.addDiscussionComment(found.id, "rovara-owner", `${text}\n\n${ROVARA_REPLY_MARKER}`);
+    return "posted";
   }
 
   async reply(ref: ChangeRequestRef, commentId: string, body: string, scope: HostScope, budget?: ReadBudget): Promise<"replied" | "gone"> {

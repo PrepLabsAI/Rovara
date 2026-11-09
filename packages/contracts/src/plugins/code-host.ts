@@ -307,6 +307,30 @@ export const ChangeRequestFeedbackSchema = z.object({
 }).strict();
 export type ChangeRequestFeedback = z.infer<typeof ChangeRequestFeedbackSchema>;
 
+/**
+ * Rovara's own replies on a change request carry this hidden marker when the host account that posts them is also a person's (a laptop signed in with the owner's own token): the core reads a comment
+ * with the marker as Rovara's, never as a command. A host account of its own (an App's bot) needs none.
+ */
+export const ROVARA_REPLY_MARKER = "<!-- rovara-reply -->";
+
+/**
+ * A comment on a change request's conversation, as the host reports it (lane L12, owner decision 66): the text, who wrote it, when, and the change request it is on. NOTHING in it is a decision: whether it is a
+ * command, whether it is fresh or edited, whether its author may approve and whether it is on the right change request are all decided by Rovara's core. `updatedAt` differs from `createdAt` once the host
+ * records an edit. The text is untrusted.
+ */
+export const HostCommentSchema = z.object({
+  id: ExternalIdSchema,
+  /** The change request (or issue) the comment is on. */
+  ref: ChangeRequestRefSchema,
+  author: HostAccountSchema.extend({ accountType: z.string().min(1).max(40) }).strict(),
+  body: z.string().max(65_536),
+  createdAt: ISO_TIME,
+  updatedAt: ISO_TIME,
+}).strict();
+export type HostComment = z.infer<typeof HostCommentSchema>;
+export const HostCommentsPageSchema = z.object({ comments: z.array(HostCommentSchema).max(200), nextPage: z.number().int().positive().optional() }).strict();
+export type HostCommentsPage = z.infer<typeof HostCommentsPageSchema>;
+
 export const MergeMethodSchema = z.enum(["squash", "merge"]);
 export type MergeMethod = z.infer<typeof MergeMethodSchema>;
 export const MERGE_REFUSAL_REASONS = ["head_changed", "not_mergeable", "closed", "forbidden"] as const;
@@ -427,6 +451,16 @@ export interface CodeHost {
   /** Comments and threads. Untrusted text. */
   feedback(ref: ChangeRequestRef, scope: HostScope): Promise<ChangeRequestFeedback>;
   reply(ref: ChangeRequestRef, commentId: string, body: UntrustedText, scope: HostScope, budget?: ReadBudget): Promise<"replied" | "gone">;
+  /**
+   * Optional (lane L12, decision 66): the comments on the change request's conversation, oldest first, created or edited since `since` (an ISO time; absent: from the start), 100 a page. FETCH ONLY: the host
+   * says what was written, by whom, when and where, and every safety check on it is Rovara's. A host's rate limit is `HostRateLimitError`. A host that has no such read leaves it out and no comment command is read from it.
+   */
+  comments?(ref: ChangeRequestRef, options: { since?: string; page?: number }, scope: HostScope, budget?: ReadBudget): Promise<HostCommentsPage>;
+  /**
+   * Optional (lane L12): posts ONE comment of Rovara's own fixed text on the change request's conversation (the answer to a command). On a host whose account is also a person's, the text carries
+   * `ROVARA_REPLY_MARKER`. `gone` when the change request is. A host that cannot is left out and Rovara answers on its own pages only.
+   */
+  postComment?(ref: ChangeRequestRef, text: string, scope: HostScope, budget?: ReadBudget): Promise<"posted" | "gone">;
   markReady?(ref: ChangeRequestRef, scope: HostScope, budget?: ReadBudget): Promise<"ready" | "already_ready">;
   requestReviewers?(ref: ChangeRequestRef, reviewers: readonly string[], scope: HostScope, budget?: ReadBudget): Promise<"requested" | "refused">;
   /** Only after a person approves and presses Merge. Rovara never merges by itself. */

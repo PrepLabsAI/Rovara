@@ -11,7 +11,7 @@ import {
   agentXError, ChangeRequestInputSchema, ChangeRequestUpdateSchema, HostScopeSchema,
   type BranchPage, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
   type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
-  type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef,
+  type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef,
 } from "@agentx/contracts";
 import { parseGitHubRepository } from "../../../github-app.js";
 import { githubCodeHostEvents } from "./events.js";
@@ -55,6 +55,8 @@ function checkedScope(scope: HostScope): HostScope {
 
 export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHubCodeHostOptions): CodeHost {
   const pathKindOfProvider = typeof provider.getPathKindAtCommit === "function" ? provider.getPathKindAtCommit.bind(provider) : undefined;
+  const listComments = typeof provider.listPullRequestComments === "function" ? provider.listPullRequestComments.bind(provider) : undefined;
+  const postComment = typeof provider.postPullRequestComment === "function" ? provider.postPullRequestComment.bind(provider) : undefined;
   const host: CodeHost = {
     kind: GITHUB_HOST_KIND,
     capabilities: GITHUB_CODE_HOST_CAPABILITIES,
@@ -180,6 +182,25 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
       if (target.kind === "none") return "gone";
       return provider.replyToReviewThread(ref.repository.url, number, target.id, body, checked, budget);
     },
+
+    // Lane L12 (decision 66): fetch only. Only where the client can read comments.
+    ...(listComments === undefined ? {} : {
+      async comments(ref: ChangeRequestRef, commentOptions: { since?: string; page?: number }, scope: HostScope, budget?: ReadBudget): Promise<HostCommentsPage> {
+        const listed = await listComments(ref.repository.url, pullRequestNumber(ref), commentOptions, checkedScope(scope), budget);
+        return {
+          comments: listed.comments.map((comment) => ({
+            id: comment.id, ref: refOf(ref.repository.url, comment.number, ref.url), author: { login: comment.authorLogin, ...(comment.authorId === undefined ? {} : { hostUserId: comment.authorId }), accountType: comment.authorType },
+            body: comment.body, createdAt: comment.createdAt, updatedAt: comment.updatedAt,
+          })),
+          ...(listed.nextPage === undefined ? {} : { nextPage: listed.nextPage }),
+        };
+      },
+    }),
+    ...(postComment === undefined ? {} : {
+      async postComment(ref: ChangeRequestRef, text: string, scope: HostScope, budget?: ReadBudget): Promise<"posted" | "gone"> {
+        return postComment(ref.repository.url, pullRequestNumber(ref), text, checkedScope(scope), budget);
+      },
+    }),
 
     async markReady(ref: ChangeRequestRef, scope: HostScope, budget?: ReadBudget): Promise<"ready" | "already_ready"> {
       return provider.markPullRequestReady(ref.repository.url, pullRequestNumber(ref), checkedScope(scope), budget);

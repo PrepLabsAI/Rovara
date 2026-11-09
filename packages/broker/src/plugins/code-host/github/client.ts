@@ -1021,6 +1021,53 @@ export class GitHubAppCredentialProvider {
   }
 
   /**
+   * Lane L12 (decision 66): the comments on a pull request's conversation (`GET issues/{n}/comments`: the comments of the pull request itself, not of its review threads), oldest first, created or edited since `since`,
+   * one page of 100. FETCH ONLY: each comment is what GitHub says (text, author, times, the issue it is on); whether it is a command, fresh, edited or from someone who may approve is the core's to decide. A comment
+   * that says it is on another issue than the one asked is left out. A pull request that is gone reads as no comments.
+   */
+  async listPullRequestComments(repositoryUrl: string, number: number, options: { since?: string; page?: number }, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<{ comments: GitHubIssueComment[]; nextPage?: number }> {
+    const page = options.page ?? 1;
+    if (!Number.isSafeInteger(number) || number < 1 || !Number.isSafeInteger(page) || page < 1 || page > 50) throw agentXError("CONFIG_INVALID", "the pull request or the page is invalid");
+    if (options.since !== undefined && !Number.isFinite(Date.parse(options.since))) throw agentXError("CONFIG_INVALID", "the time to read comments from is invalid");
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await provider.createInstallationToken(repository, { pull_requests: "read", issues: "read", metadata: "read" }, scope);
+    const root = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/issues/${String(number)}/comments`;
+    const answered = await provider.trackingJson(`${root}?per_page=100&page=${String(page)}${options.since === undefined ? "" : `&since=${encodeURIComponent(new Date(Date.parse(options.since)).toISOString())}`}`, token);
+    if (answered.status === 404 || answered.status === 410) return { comments: [] };
+    if (answered.status !== 200 || !Array.isArray(answered.body)) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub comment read failed with HTTP ${answered.status}`);
+    const comments = answered.body.flatMap((value): GitHubIssueComment[] => {
+      const record = statusRecord(value);
+      const user = statusRecord(record.user);
+      const issue = typeof record.issue_url === "string" ? /\/issues\/([1-9][0-9]*)$/u.exec(record.issue_url)?.[1] : undefined;
+      if (!(typeof record.id === "number" || typeof record.id === "string") || typeof record.body !== "string" || typeof user.login !== "string" || user.login === ""
+        || typeof record.created_at !== "string" || typeof record.updated_at !== "string" || (issue !== undefined && Number(issue) !== number)) return [];
+      return [{
+        id: String(record.id), number, body: record.body.slice(0, 65_536), authorLogin: user.login, ...(typeof user.id === "number" ? { authorId: String(user.id) } : {}),
+        authorType: typeof user.type === "string" && user.type !== "" ? user.type.slice(0, 40) : "User", createdAt: record.created_at, updatedAt: record.updated_at,
+        url: typeof record.html_url === "string" && record.html_url.startsWith("https://") ? record.html_url : "",
+      }];
+    });
+    return { comments, ...(answered.body.length >= 100 ? { nextPage: page + 1 } : {}) };
+  }
+
+  /**
+   * Lane L12: posts one comment of Rovara's own fixed text on a pull request's conversation (`POST issues/{n}/comments`). The text is one short sentence with no mention or control character; with the owner's
+   * own token (L11) it carries the hidden marker, so the core reads it as Rovara's and never as a command. A pull request that is gone is `gone`.
+   */
+  async postPullRequestComment(repositoryUrl: string, number: number, text: string, scope: GitHubTokenScope, budget?: GithubMergeReadBudget): Promise<"posted" | "gone"> {
+    if (!Number.isSafeInteger(number) || number < 1 || text.length === 0 || text.length > 200 || /[\p{Cc}@]/u.test(text)) throw agentXError("CONFIG_INVALID", "the comment is not Rovara's fixed text");
+    const provider = this.trackingProvider(budget);
+    const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await provider.createInstallationToken(repository, { issues: "write", pull_requests: "write", metadata: "read" }, scope);
+    const marker = this.options.personalToken?.ownComment.marker;
+    const answered = await provider.trackingJson(`https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/issues/${String(number)}/comments`, token, { method: "POST", body: { body: marker === undefined ? text : `${text}\n\n${marker}` } });
+    if (answered.status === 404 || answered.status === 410) return "gone";
+    if (answered.status !== 201 && answered.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub comment failed with HTTP ${answered.status}`);
+    return "posted";
+  }
+
+  /**
    * Slice 5 (ticket updates): posts one comment on an issue (`POST issues/{n}/comments`), with a token that asks for `issues: write` on this one repository only. `requirePrivate`: the
    * repository must say it is private, or nothing is posted and the answer is `public` (a task only its owner sees never writes to a public issue). An issue that is gone (404, 410) is
    * `not_found`; an App that may not write issues there is GitHub's refusal of the token (`GITHUB_NOT_CONNECTED`), thrown for the caller to report. Other faults throw `RUNTIME_UNAVAILABLE`.
@@ -2421,6 +2468,19 @@ export class GitHubAppCredentialProvider {
   }
 }
 
+/** A comment on a pull request's conversation as GitHub reports it (lane L12): the facts only. */
+export interface GitHubIssueComment {
+  id: string;
+  /** The pull request (issue) number it is on. */
+  number: number;
+  body: string;
+  authorLogin: string;
+  authorId?: string;
+  authorType: string;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+}
 export interface GitHubFeedbackComment {
   id: string; threadId?: string; kind: "REVIEW" | "REVIEW_COMMENT" | "DISCUSSION";
   /** In-memory identity only; never part of feedback bundles or refs. */

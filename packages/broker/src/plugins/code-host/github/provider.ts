@@ -80,6 +80,19 @@ export interface GitHubFeedbackComment {
   path?: string;
   line?: number;
 }
+/** A comment on a pull request's conversation as GitHub reports it (lane L12): the facts only. */
+export interface GitHubIssueComment {
+  id: string;
+  /** The pull request (issue) number it is on. */
+  number: number;
+  body: string;
+  authorLogin: string;
+  authorId?: string;
+  authorType: string;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+}
 export interface GitHubFeedbackThread { id: string; resolved: boolean; commentIds: string[] }
 export interface GitHubPullRequestFeedback {
   pullRequest: GitHubPullRequestDetails & { headTreeSha: string };
@@ -131,6 +144,10 @@ export interface GitHubCodeHostProvider {
   listPullRequestFiles(repositoryUrl: string, number: number, options: { page: number }, scope: GitHubTokenScope): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; nextPage?: number }>;
   getPullRequestFeedback(repositoryUrl: string, number: number, scope: GitHubTokenScope): Promise<GitHubPullRequestFeedback>;
   replyToReviewThread(repositoryUrl: string, number: number, commentId: string, body: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"replied" | "gone">;
+  /** Optional (lane L12): the comments on a pull request's conversation, fetch only. A client that cannot leaves it out and the adapter has no `comments`. */
+  listPullRequestComments?(repositoryUrl: string, number: number, options: { since?: string; page?: number }, scope: GitHubTokenScope, budget?: ReadBudget): Promise<{ comments: GitHubIssueComment[]; nextPage?: number }>;
+  /** Optional (lane L12): one comment of Rovara's own fixed text on a pull request's conversation. */
+  postPullRequestComment?(repositoryUrl: string, number: number, text: string, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"posted" | "gone">;
   markPullRequestReady(repositoryUrl: string, number: number, scope: GitHubTokenScope, budget?: ReadBudget): Promise<"ready" | "already_ready">;
   requestReviewers(repositoryUrl: string, number: number, reviewers: readonly string[], scope: GitHubTokenScope, budget?: ReadBudget): Promise<"requested" | "refused">;
   mergePullRequest(repositoryUrl: string, number: number, input: { sha: string; method: "squash" | "merge" }, scope: GitHubTokenScope): Promise<MergePullRequestResult>;

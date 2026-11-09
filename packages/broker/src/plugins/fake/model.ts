@@ -10,7 +10,7 @@ import {
 
 export interface FakeAccount { login: string; permission: HostPermission; accountType: string; hostUserId: string }
 export interface FakeComment {
-  id: string; kind: "review" | "review_comment" | "discussion"; author: string; body: string; updatedAt: string;
+  id: string; kind: "review" | "review_comment" | "discussion"; author: string; body: string; updatedAt: string; createdAt?: string;
   path?: string; line?: number; threadId?: string; reviewState?: ReviewState;
 }
 export interface FakeThread { id: string; resolved: boolean; commentIds: string[] }
@@ -208,8 +208,18 @@ export class FakeHostModel {
 
   addDiscussionComment(id: string, author: string, body: string): FakeComment {
     const cr = this.cr(id);
-    const comment: FakeComment = { id: this.nextCommentId(), kind: "discussion", author, body, updatedAt: this.now() };
+    const at = this.now();
+    const comment: FakeComment = { id: this.nextCommentId(), kind: "discussion", author, body, updatedAt: at, createdAt: at };
     cr.comments.push(comment);
+    return comment;
+  }
+
+  /** The author edits a comment of the conversation: its text changes and the host records the edit (`updatedAt` moves, `createdAt` does not). */
+  editDiscussionComment(id: string, commentId: string, body: string): FakeComment {
+    const comment = this.cr(id).comments.find((entry) => entry.id === commentId && entry.kind === "discussion");
+    if (comment === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the host has no such comment");
+    comment.body = body;
+    comment.updatedAt = this.now();
     return comment;
   }
 
