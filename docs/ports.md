@@ -263,6 +263,16 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
   path never reaches an address. The suite found five Cloud requests (create, update and read of a pull request, a commit tree, the open-pull-request lookup) with no redirect refusal
   and no timeout; `client.ts` now has both there (marked `L7a`; the suite fails with any one of the five removed), and Cloud should take the same fix. It also pins the exact
   permission set each method may mint a token with, so a widened scope (not only a write) fails, and fails when a method never reaches the repository (a path it cannot see).
+- **The laptop's GitHub client signs in with the owner's own token** (lane L11: `code-host/github/token-client.ts`, the adapter `token-code-host.ts`; `rovara up` registers it as `code-host/github` when a token is found, a configured entry replaces it).
+  It is Cloud's `client.ts` unchanged and answers only the App's two requests itself (the installation lookup becomes one read of the repository with the owner's token; the token mint hands back the owner's token for that
+  one repository, after checking the token can see it, and can push for a write): its redirect refusal, time limits, rate-limit mapping and body bounds are Cloud's. No App request and no App JWT ever leaves the process, and the
+  token goes to `api.github.com` only. Only the provider's methods are reachable on it. It passes the client conformance suite under the `owner-token` credential model, in which the suite pins "no mint and no App request" and
+  "the owner's token for the one repository, with an expiry inside the hour" in place of the App's per-repository permission sets. **What a personal token cannot do:** GitHub mints narrow, short-lived credentials for an App only, so clone
+  and push use the owner's token; the credential's `expiresAt` is Rovara's own 50-minute re-issue time (never later than the token's own expiry). **Rovara's own replies** are the owner's, so each ends with a hidden marker and only the
+  token owner's marked comments are left out of feedback. The synthetic installation number the branch listing pins is derived from the owner's name; it is not a GitHub installation id.
+  **Sign-in and the setup check are the adapter's** (BOTH-OWNERS-INTERFACE-ITEMS C3): `CodeHost.resolveCredentials?()` finds the sign-in (key file, `GH_TOKEN` / `GITHUB_TOKEN`, then `gh auth token`), says where and returns no secret;
+  `CodeHost.checkAccess?()` tests the connection once (`GET /user`) and answers `ok`, `warn` or `fail` with the fix in words. Both are optional methods of the contract; `rovara up --check` calls them instead of GitHub-specific
+  code, and `github-access.ts` moved into the adapter. (Decision 59's optional methods are not in Code's contract yet, so the client has none of them.)
 - **The merge core calls the routing.** `core/merge/` (lane L7a) reaches a repository through `registryRepositoryResolver(registry, ...)`, which picks the code host by the
   repository record's `host.kind` (`codeHostForRecord`). The task flow's other calls to `github-app.ts` move in their own lanes.
 - **Untrusted text** from a code host or tracker (comments, logs, item bodies) is data: it reaches a model only inside a labelled block, and

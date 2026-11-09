@@ -29,6 +29,8 @@ import { OUTBOX_PENDING_INDEX } from "@agentx/contracts";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
+import type { GhRunner } from "../plugins/code-host/github/token-access.js";
+import { createLocalGithubCodeHost } from "./github-code-host.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
@@ -111,6 +113,9 @@ export interface LocalRuntimeOptions {
   allowedDomains?: readonly string[] | undefined;
   /** Stop the running workers when the runtime stops. Default true. */
   stopWorkersOnClose?: boolean;
+  /** Port lane L11: runs the GitHub CLI when the owner's GitHub sign-in is looked for, and the fetch the GitHub code host uses. Tests substitute both. */
+  gh?: GhRunner | undefined;
+  fetch?: typeof fetch | undefined;
 }
 
 export interface LocalRuntime {
@@ -195,6 +200,10 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   });
   registry.register("worker-machines", DOCKER_ADAPTER_NAME, docker);
   registry.register("worker-machines", THIS_MACHINE_ADAPTER_NAME, new ThisMachineWorkerMachines({ enabled: options.thisMachine === true }));
+
+  // Port lane L11: when the owner has a GitHub token (key file, GH_TOKEN or the GitHub CLI), GitHub is the `code-host` named `github`. A configured `code-host/github` plug-in replaces it.
+  const githubHost = createLocalGithubCodeHost({ stateDirectory, environment: options.environment, companyId: config.companyId, gh: options.gh, fetch: options.fetch });
+  if ((await githubHost.resolveCredentials?.())?.found === true) registry.register("code-host", "github", githubHost, { isDefault: true });
 
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
   registry.seal();

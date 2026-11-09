@@ -22,7 +22,7 @@ You need:
 | Docker | Docker Desktop, or Colima (`brew install colima docker && colima start`). Set `DOCKER_HOST` if the socket is elsewhere. |
 | The worker image | `docker build -f environments/base/Dockerfile -t rovara-worker:local .` from a Rovara checkout. Another image: `--worker-image <ref>` or `ROVARA_WORKER_IMAGE`. (No image is published yet.) |
 | A model key | `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`, `OPENROUTER_API_KEY`) in the environment, or `~/.rovara/keys.json`. |
-| GitHub access | `gh auth login`, or `GH_TOKEN` / `GITHUB_TOKEN`, or `{"github": "<token>"}` in `keys.json`. The first one found wins, in the order key file, environment, `gh` (asked for github.com's token by name). The check sends the token to api.github.com only. |
+| GitHub access | `gh auth login`, or `GH_TOKEN` / `GITHUB_TOKEN`, or `{"github": "<token>"}` in `keys.json`. The first one found wins, in the order key file, environment, `gh` (asked for github.com's token by name). The check sends the token to api.github.com only. | The sign-in belongs to the GitHub code host adapter (`resolveCredentials`, `checkAccess`), and `rovara up` registers that adapter as the `code-host` named `github` when it finds one. A `code-host/github` entry in the config replaces it.
 
 ## What lives in `~/.rovara`
 
@@ -220,3 +220,13 @@ the guard's rules.
   repository's view. From inside a sandbox, and inside the worker, it tries your loopback and LAN services, the broker, another
   worker, the metadata address, and every way to ask Docker for more than a sandbox, and checks each is refused, and that allowed sites,
   the worker's callbacks and its own sandboxes work.
+
+## GitHub on a laptop: your own token
+
+With no GitHub App, Rovara reaches GitHub as **you**, with your personal token (port lane L11, `plugins/code-host/github/token-client.ts`). It opens pull requests, reads reviews and checks, replies in review threads and, only after you press Merge, merges.
+
+- **One token does everything.** GitHub gives a short-lived, one-repository credential only to an App, so there is none for a personal token. The credential the worker clones and pushes with **is your token**; it is the same for clone and for push. Anything that runs in a worker can use whatever your token can. Make a fine-grained token limited to the repositories you want Rovara to touch, with Contents and Pull requests set to read and write (or a classic token with the `repo` scope), and keep it out of `GH_TOKEN` for shells you do not trust.
+- **The expiry Rovara states is its own.** A worker credential must expire inside an hour, and a classic token has no expiry, so Rovara hands the token out for at most 50 minutes at a time and asks again (sooner if GitHub says the token itself expires sooner). That limits how long one copy is used. It is not a GitHub-side limit.
+- **Rovara's comments are yours.** GitHub shows a reply Rovara posts as your account. Each reply ends with a hidden marker (`<!-- rovara-reply -->`), and Rovara leaves out of review feedback only the comments written by your account that carry it. Someone else's comment with the marker is still read as feedback.
+- **Your token is sent to `https://api.github.com` only.** No request follows a redirect, and every request has a time limit. `rovara up --check` tests it once with `GET /user` and warns when a classic token has no `repo` scope.
+

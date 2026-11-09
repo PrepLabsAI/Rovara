@@ -12,7 +12,7 @@ afterEach(async () => {
   while (cleanup.length > 0) await cleanup.pop()!();
 });
 
-async function launch(options: { environment?: NodeJS.ProcessEnv; config?: unknown; files?: Record<string, string>; thisMachine?: boolean } = {}) {
+async function launch(options: { environment?: NodeJS.ProcessEnv; config?: unknown; files?: Record<string, string>; thisMachine?: boolean; gh?: (args: readonly string[]) => Promise<string | undefined> } = {}) {
   const root = await mkdtemp(join(tmpdir(), "rovara-l4-run-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -28,6 +28,8 @@ async function launch(options: { environment?: NodeJS.ProcessEnv; config?: unkno
     docker,
     version: "9.9.9",
     thisMachine: options.thisMachine === true,
+    // The GitHub CLI is never run for real: the machine this test runs on may be signed in to it.
+    gh: options.gh ?? (async () => undefined),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
@@ -163,5 +165,30 @@ describe("rovara up runtime", () => {
     await runtime.stop();
     expect(docker.containers.get(handle.machineId)!.status).toBe("exited");
     await expect(fetch(`${runtime.url}/healthz`)).rejects.toThrow();
+  });
+
+  it("registers GitHub as the code host when the owner has a GitHub token, from the key file, the environment or the GitHub CLI (L11)", async () => {
+    expect((await launch()).runtime.wiring()["code-host"]).toBeUndefined();
+    expect((await launch({ environment: { GH_TOKEN: "from-env" } })).runtime.wiring()["code-host"]).toEqual(["github"]);
+    expect((await launch({ files: { "keys.json": JSON.stringify({ github: "from-file" }) } })).runtime.wiring()["code-host"]).toEqual(["github"]);
+    const calls: string[][] = [];
+    const cli = await launch({ gh: async (args) => { calls.push([...args]); return "logged in\n"; } });
+    expect(cli.runtime.wiring()["code-host"]).toEqual(["github"]);
+    // Starting only asks the CLI whether it is signed in; the token itself is not fetched until a task needs it.
+    expect(calls).toEqual([["auth", "status", "--hostname", "github.com"]]);
+    const host = cli.runtime.registry.require("code-host", "github");
+    expect(host.kind).toBe("github");
+    expect(host.events.mode).toBe("poll");
+    expect(host.capabilities.webhooks).toBe(false);
+  });
+
+  it("does not register GitHub when the key file cannot be read, and the check says why", async () => {
+    const { runtime } = await launch({ files: { "keys.json": "not json" } });
+    expect(runtime.wiring()["code-host"]).toBeUndefined();
+  });
+
+  it("lets a configured code-host plug-in named github take the place of the laptop's own", async () => {
+    // A module that does not exist is a startup error, which shows the configured entry was tried instead of the default silently winning.
+    await expect(launch({ environment: { GH_TOKEN: "from-env" }, config: { version: 1, plugins: [{ point: "code-host", name: "github", module: "./missing.js" }] } })).rejects.toBeDefined();
   });
 });

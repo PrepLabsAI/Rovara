@@ -25,13 +25,24 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 const text = (status: number, body: string) => new Response(body, { status, headers: { "content-type": "text/plain" } });
 const NOT_FOUND = () => json(404, { message: "Not Found" });
 
+/** Port lane L11: the fake GitHub in the mode of a laptop signed in with one personal token. The App's endpoints do not exist (401), and the one token is accepted everywhere else. */
+export interface GitHubFixtureOptions {
+  personalToken?: string;
+  /** The `github-authentication-token-expiration` header a personal token's answers carry. */
+  personalTokenExpiration?: string;
+  /** The login `GET /user` answers for the personal token. */
+  personalLogin?: string;
+}
+
 export class GitHubFixtureApi {
+  /** Every request made to an App-only endpoint (the App's own pages, the installation lookups, the token mints), in personal-token mode. A personal-token client makes none. */
+  readonly appRequests: Array<{ method: string; path: string }> = [];
   /** Every installation token minted, with what it asked for. */
   readonly tokens: Array<{ token: string; permissions: Record<string, string>; repositories?: string[] }> = [];
   /** Every request served, in order: method and path. */
   readonly requests: Array<{ method: string; path: string }> = [];
 
-  constructor(private readonly model: FakeHostModel) {}
+  constructor(private readonly model: FakeHostModel, private readonly options: GitHubFixtureOptions = {}) {}
 
   private crJson(cr: FakeChangeRequest): Record<string, unknown> {
     const head = this.model.headRevisionOf(cr);
@@ -78,6 +89,17 @@ export class GitHubFixtureApi {
     if (url.origin !== API) return NOT_FOUND();
     const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
 
+    const personal = this.options.personalToken;
+    if (personal !== undefined) {
+      if (path === "/app" || path.startsWith("/app/") || /^\/repos\/[^/]+\/[^/]+\/installation$/.test(path)) {
+        this.appRequests.push({ method, path });
+        return json(401, { message: "A JSON web token could not be decoded" });
+      }
+      if (authorization !== `Bearer ${personal}`) return json(401, { message: "Bad credentials" });
+      const expiration = this.options.personalTokenExpiration === undefined ? {} : { "github-authentication-token-expiration": this.options.personalTokenExpiration };
+      if (method === "GET" && path === "/user") return json(200, { login: this.options.personalLogin ?? "octo-dev" }, { "x-oauth-scopes": "repo, read:org", ...expiration });
+      if (method === "GET" && path === ROOT) return json(200, this.repositoryJson(), expiration);
+    }
     if (method === "GET" && path === "/app") return json(200, { slug: APP_SLUG });
     if (method === "GET" && path === `${ROOT}/installation`) return json(200, { id: INSTALLATION_ID, account: { login: GITHUB_OWNER } });
     if (method === "GET" && /^\/repos\/[^/]+\/[^/]+\/installation$/.test(path)) return NOT_FOUND();
@@ -87,10 +109,10 @@ export class GitHubFixtureApi {
       return json(201, { token, ...(this.tokenExpiry === null ? {} : { expires_at: this.tokenExpiry ?? new Date(Date.parse(this.model.now()) + 3_600_000).toISOString() }), permissions: body.permissions ?? {}, repository_selection: "selected" });
     }
     const token = authorization.slice("Bearer ".length);
-    if (!this.tokens.some((entry) => entry.token === token)) return json(401, { message: "Bad credentials" });
+    if (personal === undefined && !this.tokens.some((entry) => entry.token === token)) return json(401, { message: "Bad credentials" });
 
     if (method === "POST" && path === "/graphql") return json(200, this.graphql(body as { query: string; variables: Record<string, unknown> }));
-    if (method === "GET" && path === ROOT) return json(200, { id: Number(this.model.id), full_name: FULL, default_branch: this.model.defaultBranch });
+    if (method === "GET" && path === ROOT) return json(200, this.repositoryJson());
     if (method === "GET" && path === `${ROOT}/branches`) {
       const page = Number(url.searchParams.get("page") ?? "1");
       const rows = [...this.model.branches.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).slice((page - 1) * 100, page * 100).map(([name, sha]) => ({ name, commit: { sha } }));
@@ -171,7 +193,11 @@ export class GitHubFixtureApi {
       if (method === "POST" && match) {
         const found = cr.comments.find((comment) => comment.id === match![1] && comment.kind === "review_comment");
         if (found === undefined) return json(404, { message: "Not Found" });
-        this.model.reply(cr.id, found.id, String(body.body), `${APP_SLUG}[bot]`);
+        // The model holds Rovara's fixed one-line text; GitHub itself takes any text, so the hidden marker a personal-token client appends is kept on the stored comment.
+        const posted = String(body.body);
+        const marked = /^(.*)\n\n(<!-- [a-z-]+ -->)$/su.exec(posted);
+        this.model.reply(cr.id, found.id, marked?.[1] ?? posted, personal === undefined ? `${APP_SLUG}[bot]` : this.options.personalLogin ?? "octo-dev");
+        if (marked !== null) cr.comments.at(-1)!.body = posted;
         return json(201, {});
       }
       if (method === "POST" && rest === "/requested_reviewers") {
@@ -195,6 +221,12 @@ export class GitHubFixtureApi {
   private logBody(path: string): Response {
     void path;
     return NOT_FOUND();
+  }
+
+  private repositoryJson(): Record<string, unknown> {
+    return {
+      id: Number(this.model.id), full_name: FULL, default_branch: this.model.defaultBranch, owner: { login: GITHUB_OWNER, id: 9, type: "Organization" }, permissions: { push: true, pull: true },
+    };
   }
 
   private userJson(login: string): Record<string, unknown> {

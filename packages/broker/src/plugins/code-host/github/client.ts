@@ -76,6 +76,16 @@ export interface GitHubAppCredentialProviderOptions {
    * while GitHub answers 404 for it. Absent: the token is handed over unchecked.
    */
   tokenReadiness?: GitHubTokenReadinessOptions;
+  /**
+   * Port lane L11 (a laptop signed in with the owner's own token, `token-client.ts`): the hooks of a client that has no App identity. Absent for an App client, and then nothing here applies.
+   *  - `ownComment`: how Rovara's own replies are told from other comments. An App's replies carry its `<slug>[bot]` login; the owner's token writes as the owner, so every reply carries `marker`
+   *    (an HTML comment, hidden on the page) and a comment counts as Rovara's own only when its author is `login()` AND it carries the marker. Anyone else's comment with the marker stays feedback.
+   *  - `notReachable`: the sentence for a repository the credential cannot reach (the App wording is wrong for a token).
+   */
+  personalToken?: {
+    ownComment: { login(): Promise<string | undefined>; marker: string };
+    notReachable(repository: { owner: string; name: string }): string;
+  };
 }
 
 /** What `onTokenIssued` is told: names and words only. */
@@ -1002,7 +1012,8 @@ export class GitHubAppCredentialProvider {
     const provider = this.trackingProvider(budget);
     const repository = await provider.installed(parseGitHubRepository(repositoryUrl), scope);
     const token = await provider.createInstallationToken(repository, { contents: "read", pull_requests: "write" }, scope);
-    const answered = await provider.trackingJson(`${pullRequestUrl(repository, number)}/comments/${commentId}/replies`, token, { method: "POST", body: { body } });
+    const marker = this.options.personalToken?.ownComment.marker;
+    const answered = await provider.trackingJson(`${pullRequestUrl(repository, number)}/comments/${commentId}/replies`, token, { method: "POST", body: { body: marker === undefined ? body : `${body}\n\n${marker}` } });
     if (answered.status === 404 || answered.status === 422) return "gone";
     if (answered.status !== 201 && answered.status !== 200) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub reply failed with HTTP ${answered.status}`);
     return "replied";
@@ -1375,8 +1386,7 @@ export class GitHubAppCredentialProvider {
     if (final.number !== number || final.headCommit !== after.headCommit || final.state !== after.state) throw feedbackReadError("PR head or state changed during collection");
     // The App's own comments (Rovara's "Fixed in ..." replies, Plan 6 Task 16) are not feedback: they are left out of the comments and of their threads, after every consistency check above,
     // so a reply Rovara left never starts a round of its own and is never part of a round's comment set. A slug that cannot be read leaves the comments as they are.
-    const own = await this.ownBotLogin();
-    const ownIds = new Set(own === undefined ? [] : comments.filter((comment) => comment.author.toLowerCase() === own).map((comment) => comment.id));
+    const ownIds = await this.ownCommentIds(comments);
     if (ownIds.size > 0) {
       return {
         pullRequest: { ...final, headTreeSha }, comments: comments.filter((comment) => !ownIds.has(comment.id)),
@@ -1384,6 +1394,18 @@ export class GitHubAppCredentialProvider {
       };
     }
     return { pullRequest: { ...final, headTreeSha }, comments, threads, edits };
+  }
+
+  /** The ids of Rovara's own comments among `comments`: the App's (its `<slug>[bot]` login), or with the owner's token (L11) the owner's login plus the reply marker. A login that cannot be read leaves every comment as it is. */
+  private async ownCommentIds(comments: readonly GitHubFeedbackComment[]): Promise<Set<string>> {
+    const personal = this.options.personalToken?.ownComment;
+    if (personal !== undefined) {
+      let login: string | undefined;
+      try { login = (await personal.login())?.toLowerCase(); } catch { login = undefined; }
+      return new Set(login === undefined ? [] : comments.filter((comment) => comment.author.toLowerCase() === login && comment.body.includes(personal.marker)).map((comment) => comment.id));
+    }
+    const own = await this.ownBotLogin();
+    return new Set(own === undefined ? [] : comments.filter((comment) => comment.author.toLowerCase() === own).map((comment) => comment.id));
   }
 
   /** The login the App's own comments carry (`<slug>[bot]`, lower-case), or undefined when the slug cannot be read. */
@@ -2036,7 +2058,7 @@ export class GitHubAppCredentialProvider {
     if (response.status === 404) {
       throw agentXError(
         "CONFIG_INVALID",
-        `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`,
+        this.options.personalToken?.notReachable(repository) ?? `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`,
       );
     }
     if (!response.ok) {
