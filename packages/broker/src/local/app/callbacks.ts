@@ -15,6 +15,7 @@ import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { currentDocumentType } from "../../core/decisions/workflow-subject.js";
 import { operationKey, taskPointerKey } from "../../core/task-flow/keys.js";
 import { acknowledgeUpload } from "./candidate-export.js";
+import { openPullRequest } from "../../core/build-step/publish.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import type { StepOutcome } from "../../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
@@ -167,6 +168,13 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         const operation = await operationOf(deps, workspaceId, operationId);
         if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
         return json(200, acknowledgeUpload(bodyOf(request), { allowUnavailable: action !== "candidate-export" }));
+      }
+      if (action === "pull-request") {
+        const capability = capabilities.verify(token, action);
+        if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
+        const operation = await operationOf(deps, workspaceId, operationId);
+        if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
+        return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
       }
       if (action !== "events" && action !== "artifacts" && action !== "result") {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.

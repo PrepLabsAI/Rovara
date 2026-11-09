@@ -239,20 +239,23 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
       }),
     };
   }
-  const parsed = WorkerInvocationSchema.safeParse({
+  const draft = {
     protocolVersion: AGENTX_PROTOCOL_VERSION, kind: spec.kind, operationId: operation.id, workspaceId: workspace.id, fence: operation.fence,
     projectRevision: spec.projectRevision, callbackCapability: capability, payload,
-  });
-  if (!parsed.success) return "the job could not be built for the worker";
+  };
   // A publication of a checked tree carries the digest of its context (which workspace, operation, fence, repository, branch and tree it is for); the worker's signed token names the same
-  // digest, so a captured token cannot carry a different publication.
-  if (parsed.data.kind === "publish" && parsed.data.payload.publicationMode !== undefined) {
-    const context = workflowPublicationContext(parsed.data);
-    if (context === undefined) return "the publication could not be built for the worker";
-    const sealed = WorkerInvocationSchema.safeParse({ ...parsed.data, payload: { ...parsed.data.payload, publicationContextDigest: workflowPublicationContextDigest(context) } });
-    return sealed.success ? sealed.data : "the publication could not be built for the worker";
+  // digest, so a captured token cannot carry a different publication. The schema wants the digest and the mode together, so the digest is made from the draft before it is read.
+  if (spec.kind === "publish" && payload["publicationMode"] !== undefined) {
+    try {
+      const context = workflowPublicationContext(draft as unknown as WorkerInvocation);
+      if (context === undefined) return "the publication could not be built for the worker";
+      draft.payload = { ...payload, publicationContextDigest: workflowPublicationContextDigest(context) };
+    } catch {
+      return "the publication could not be built for the worker";
+    }
   }
-  return parsed.data;
+  const parsed = WorkerInvocationSchema.safeParse(draft);
+  return parsed.success ? parsed.data : "the job could not be built for the worker";
 }
 
 /** Records the workspace's machine (and the allowance taken for it). False when the workspace has moved on (the fence no longer holds): the caller must not use the machine. */

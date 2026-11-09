@@ -82,6 +82,8 @@ export interface StepInput {
   publication?: PublicationExpectation;
   /** Callback actions beyond the three every operation has. */
   extraActions?: readonly string[];
+  /** The id the operation is made with, when the caller needs it before the operation exists (a publication names its branch after it). */
+  operationId?: string;
 }
 
 /** Accepts the operation for one step. `STALE` and `WAITING` write nothing. */
@@ -105,7 +107,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
   const workflowRevision = input.workflow?.next.revision ?? task.workflow?.revision;
   const built = buildOperation(deps, {
     workspace: { id: workspace.id, ownerKey: workspace.ownerKey, fence: workspace.fence + 1 },
-    kind: operationKind, requestId: input.requestId, now, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
+    kind: operationKind, requestId: input.requestId, now, ...(input.operationId === undefined ? {} : { operationId: input.operationId }), ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     conversationId: task.conversationId,
     ...(workflowRevision === undefined ? {} : { workflowRevision }),
     ...(input.publication === undefined ? {} : { publication: input.publication }),

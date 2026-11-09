@@ -17,6 +17,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MESSAGES_PER_HOUR, MESSAGE_NOT_PASSED_ON, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/local/app/host.js";
 import { registerOpenCommand } from "../../packages/cli/src/up/cli.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
+import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
+import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/branch-writers.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
@@ -36,14 +39,22 @@ interface CallbackBody { accepted?: number; error?: { code: string } }
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string } = {}) {
+async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; host?: boolean } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const machines = new FakeWorkerMachines({ startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] });
+  // A fake code host that holds the repository (lane L10): the build step reads the pushed branch and opens the pull request through its port.
+  const hostedUrl = "https://github.com/example/demo.git";
+  const model = new FakeHostModel({ url: hostedUrl, id: "1", fullName: "example/demo" });
+  // A project cannot yet name another code host at registration (51 gap: the project contract refuses `repositories[].host`), so a repository is on the code host registered as `github`; the
+  // test's host is the fake one under that name.
+  const project = extra.host === true ? { ...PROJECT, repositories: [{ ...PROJECT.repositories[0]!, url: hostedUrl }] } : PROJECT;
+  const base = extra.host === true ? model.headOf("main") : BASE_COMMIT;
   const runtime: LocalRuntime = await startLocalRuntime({
     stateDirectory, cwd: join(root, "project"), environment: {}, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false, ...(extra.storage === undefined ? {} : { storage: extra.storage }),
+    ...(extra.host === true ? { registerAdapters: (registry) => registry.register("code-host", "github", Object.defineProperty(new FakeCodeHost(model), "kind", { value: "github" })) } : {}),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
@@ -80,18 +91,19 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string } = 
     }
     throw new Error("the flow did not hand a job to the worker");
   };
-  return { root, stateDirectory, runtime, machines, token, api, callback, nextJob };
+  return { root, stateDirectory, runtime, machines, token, api, callback, nextJob, model, project, base };
 }
 
 /** Registers the project, starts a task and answers its preparation, Understand and Plan, so it waits for the owner's approval. */
 async function toPlanReview(h: Awaited<ReturnType<typeof launch>>, requestId = "11111111-1111-4111-8111-111111111111") {
-  await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+  await h.api("/v1/admin/projects", { method: "POST", body: h.project });
   const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId, project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+  expect(started.status, JSON.stringify(started.body)).toBe(201);
   const taskId = started.body.task.taskId;
   const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
   const seen = new Set<string>();
   const prepare = await h.nextJob(workspaceId, seen);
-  await h.callback(prepare, "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: BASE_COMMIT }] } });
+  await h.callback(prepare, "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: h.base }] } });
   const understand = await h.nextJob(workspaceId, seen);
   await h.callback(understand, "artifacts", { name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify({ kind: "ready", path: "QUICK", restatement: "Add a /health endpoint that answers 200.", assumptions: [] }) });
   await h.callback(understand, "result", { status: "SUCCEEDED" });
@@ -350,7 +362,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
 // ---- Lane L10: the build step. A task runs on from the approved plan against a fake worker: coding, the checks, both reviews, Rovara's own sending back, and the pull request.
 const COMMIT = "c".repeat(40);
 const CHECK_REPORT = { status: "not_verified", notVerifiedReason: "no_checks", source: "none", preambleVersion: "1", preambleSha256: "a".repeat(64), checks: [], extraTry: "not_needed", agentClaim: "none" };
-const candidateOf = (tree: string, base = BASE_COMMIT) => [{ repositoryId: "demo", commitSha: COMMIT, treeSha: tree, baseCommitSha: base }];
+const candidateOf = (tree: string, base = BASE_COMMIT, commit = COMMIT) => [{ repositoryId: "demo", commitSha: commit, treeSha: tree, baseCommitSha: base }];
 
 /** The owner approves the plan on the review page, as a person would. */
 async function approvePlan(h: Awaited<ReturnType<typeof launch>>, taskId: string): Promise<void> {
@@ -369,17 +381,17 @@ async function toCoding(h: Awaited<ReturnType<typeof launch>>, requestId?: strin
   return { ...planned, coding };
 }
 
-const builtResult = (tree: string, base = BASE_COMMIT) => ({ status: "SUCCEEDED", result: { conversationId: "conversation", checks: CHECK_REPORT, workflowCandidateRepositories: candidateOf(tree, base), workflowCheckCandidateRepositories: candidateOf(tree, base) } });
+const builtResult = (tree: string, base = BASE_COMMIT, commit = COMMIT) => ({ status: "SUCCEEDED", result: { conversationId: "conversation", checks: CHECK_REPORT, workflowCandidateRepositories: candidateOf(tree, base, commit), workflowCheckCandidateRepositories: candidateOf(tree, base, commit) } });
 
-function reviewsOf(job: WorkerInvocation, tree: string, verdict: "pass" | "findings") {
-  const candidateDigest = createCandidateManifest(candidateOf(tree)).digest;
+function reviewsOf(job: WorkerInvocation, tree: string, verdict: "pass" | "findings", base = BASE_COMMIT, commit = COMMIT) {
+  const candidateDigest = createCandidateManifest(candidateOf(tree, base, commit)).digest;
   const report = (role: "CRITIC" | "SECURITY") => ({
     operationId: job.operationId, candidateDigest, role, provider: "examplehost-model", version: "1", readOnly: true, recordedAt: new Date().toISOString(),
     status: verdict === "pass" || role === "SECURITY" ? "PASS" : "FINDINGS",
     findings: verdict === "pass" || role === "SECURITY" ? [] : [{ text: "The endpoint answers 500 when the store is down.", origin: "INTRODUCED", severity: "HIGH", file: "src/health.ts", line: 4 }],
     ...(role === "CRITIC" ? { risk: "low" } : {}),
   });
-  return { status: "SUCCEEDED", result: { conversationId: "conversation", workflowCandidateRepositories: candidateOf(tree), workflowReviews: [report("CRITIC"), report("SECURITY")] } };
+  return { status: "SUCCEEDED", result: { conversationId: "conversation", workflowCandidateRepositories: candidateOf(tree, base, commit), workflowReviews: [report("CRITIC"), report("SECURITY")] } };
 }
 
 const taskRecord = async (h: Awaited<ReturnType<typeof launch>>, taskId: string) =>
@@ -452,13 +464,87 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
     expect(blocked.autofixAsk).toMatchObject({ reason: "send-back-limit" });
   });
 
+  it("opens the draft pull request on the code host for exactly the checked code, links it to the task, and waits for the merge", async () => {
+    const h = await launch({ host: true });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    // The coding run's commit on the host, and the tree the checks and reviews pass on.
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    await h.callback(coding, "result", builtResult(tree, h.base, commit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    const payload = publish.payload as Record<string, unknown>;
+    // The publication names its tree and its branch, carries the digest of its own context and a push grant for the one repository, and nothing else is pushed.
+    expect(publish).toMatchObject({ kind: "publish", payload: { mode: "create", repository: "demo", candidateTreeSha: tree, publicationMode: "CHECKED_TREE", workflowBaseCommit: h.base } });
+    expect(payload["headBranch"]).toMatch(/^agentx\/[0-9a-f-]{36}$/u);
+    expect(payload["publicationContextDigest"]).toMatch(/^[a-f0-9]{64}$/u);
+    expect(typeof payload["repositoryGrant"]).toBe("string");
+    expect(payload["title"]).toMatch(/^Rovara: /u);
+    expect(String(payload["body"])).toContain("a person merges it");
+
+    // The worker pushes the checked commit to its branch and asks for the pull request. A request for another title is refused.
+    h.model.branches.set(String(payload["headBranch"]), commit);
+    const ask = { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: payload["headBranch"], baseBranch: "main", commit, title: payload["title"], body: payload["body"] };
+    expect((await h.callback(publish, "pull-request", { ...ask, title: "Something else" })).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    const opened = await h.callback(publish, "pull-request", ask);
+    expect(opened.status).toBe(200);
+    expect(opened.body).toMatchObject({ number: 1, reconciled: false, draft: true });
+    expect(h.model.getChangeRequest("1")).toMatchObject({ draft: true, state: "open", sourceBranch: payload["headBranch"], targetBranch: "main" });
+    const result = { repository: "demo", number: 1, url: h.model.crUrl("1"), headBranch: payload["headBranch"], baseBranch: "main", commit, checks: [], reconciled: false, draft: true };
+    expect((await h.callback(publish, "result", { status: "SUCCEEDED", result })).status).toBe(200);
+
+    const waiting = await taskRecord(h, taskId) as unknown as { workflow: { stage: string; state: string; pullRequests: Array<{ number: number; headSha: string; headTreeSha: string }> } };
+    expect(waiting.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ number: 1, headSha: commit, headTreeSha: tree }] });
+    const store = h.runtime.registry.require("storage");
+    // The pull request is linked back to its task, merge tracking is enrolled, and the branch is recorded as Rovara's alone.
+    expect(await store.get({ pk: "CODEHOST_CR#github#example/demo", sk: "CR#0000000001" })).toMatchObject({ taskId, number: 1, repositoryId: "demo", url: h.model.crUrl("1") });
+    expect((await store.get({ pk: "WORKFLOW_MERGE_RECOVERY", sk: `TASK#${taskId}` }))).toMatchObject({ kind: "tracking", taskId });
+    expect(await readBranchWriters(store, { orgId: IMPLICIT_COMPANY_ID, repositoryId: "demo", branch: String(payload["headBranch"]) })).toEqual({ state: "rovara_only", restackRefused: false });
+    expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE" });
+  });
+
+  it("refuses to open a pull request from a branch that is not the checked code, closes nothing it did not open, and stops the task with Retry", async () => {
+    const h = await launch({ host: true });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    await h.callback(coding, "result", builtResult(tree, h.base, commit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    const payload = publish.payload as Record<string, unknown>;
+    // The worker's branch holds other code than the checked tree (its word for it is not taken).
+    const other = h.model.commit(String(payload["headBranch"]), { "src/health.ts": "export const health = 500;\n" });
+    const denied = await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: payload["headBranch"], baseBranch: "main", commit: other, title: payload["title"], body: payload["body"] });
+    expect(denied.body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(h.model.changeRequests).toHaveLength(0);
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "PULL_REQUEST", state: "BLOCKED", blockReason: "AgentX couldn't open the pull request automatically. Use Retry opening the pull request to try again." });
+    // The worker ends its publication as failed; the system never tries again on its own. The owner's Retry opens it again, as a new publication on a new branch, and this time the worker pushes the checked commit.
+    await h.callback(publish, "result", { status: "FAILED", error: "the pushed commit is not the checked code" });
+    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd" } })).status).toBe(200);
+    const second = await h.nextJob(workspaceId, seen);
+    const branch = (second.payload as { headBranch: string }).headBranch;
+    expect(second).toMatchObject({ kind: "publish" });
+    expect(branch).not.toBe(payload["headBranch"]);
+    h.model.branches.set(branch, commit);
+    const opened = await h.callback(second, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+    expect(opened.status).toBe(200);
+  });
+
   it("blocks a coding run that failed, with a reason, and does not try to fix it by itself", async () => {
     const h = await launch();
-    const { taskId, coding } = await toCoding(h);
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
     await h.callback(coding, "result", { status: "FAILED", error: "the model did not answer" });
     const blocked = await taskRecord(h, taskId);
     expect(blocked.workflow).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", blockReason: "implementation operation ended failed" });
     expect(blocked.autofixAsk).toBeUndefined();
+    // The owner's Retry codes again on the same approved plan.
+    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
+    const again = await h.nextJob(workspaceId, seen);
+    expect(again).toMatchObject({ payload: { workflowMode: "IMPLEMENT" } });
+    expect(again.operationId).not.toBe(coding.operationId);
+    expect((again.payload as { prompt: string }).prompt).toContain("Approved plan (sha256");
   });
 
   it("blocks code that did not start where the task started", async () => {

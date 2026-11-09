@@ -24,9 +24,9 @@ import {
 export interface RowRef { taskId: string; workflowRevision: number }
 
 /** The task a row stands for, when it is still open at the revision the row was written for; the workspace, when it can take a step. */
-interface Located { task: TaskRecord & { workflow: WorkflowSnapshot }; workspace: WorkspaceRecord }
+export interface Located { task: TaskRecord & { workflow: WorkflowSnapshot }; workspace: WorkspaceRecord }
 
-async function locate(deps: TaskFlowDeps, row: RowRef, where: (workflow: WorkflowSnapshot) => boolean): Promise<Located | "stale" | "waiting"> {
+export async function locate(deps: TaskFlowDeps, row: RowRef, where: (workflow: WorkflowSnapshot) => boolean): Promise<Located | "stale" | "waiting"> {
   const task = await readTask(deps, row.taskId);
   const workflow = task?.workflow;
   if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== row.workflowRevision || !where(workflow)) return "stale";
@@ -37,15 +37,15 @@ async function locate(deps: TaskFlowDeps, row: RowRef, where: (workflow: Workflo
 }
 
 /** Resolves the row, whatever the answer, when the step it stood for was started or is no longer wanted. */
-async function settled(deps: TaskFlowDeps, row: RowRef, result: StepStart): Promise<StepStart> {
+export async function settled(deps: TaskFlowDeps, row: RowRef, result: StepStart): Promise<StepStart> {
   if (result === "STALE" || result === "DUPLICATE") await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
   return result;
 }
 
-const jsonOf = <T extends object>(value: T): Record<string, JsonValue> => toDocument(value);
+export const jsonOf = <T extends object>(value: T): Record<string, JsonValue> => toDocument(value);
 
 /** The base commit of each repository the task started from: the pinned one, else the one preparation recorded. */
-function baseOf(task: TaskRecord, workflow: WorkflowSnapshot): { workflowBase?: Record<string, JsonValue>[] } {
+export function baseOf(task: TaskRecord, workflow: WorkflowSnapshot): { workflowBase?: Record<string, JsonValue>[] } {
   const base = workflow.reviewBase ?? task.preparedBase;
   return base === undefined ? {} : { workflowBase: base.map((entry) => jsonOf(entry)) };
 }
