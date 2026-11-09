@@ -17,7 +17,10 @@ import {
   main,
   nameSourceFromWords,
   runGuard,
+  isCodeFile,
+  looksLikeCode,
   splitNameFindings,
+  strayFileRule,
   type Finding,
   type NameSource,
 } from "../../scripts/port-guard.js";
@@ -235,6 +238,125 @@ describe("port-guard on a temp repository", () => {
         "packages/worker/src/engine.ts",
         'import { readFileSync } from "node:fs";\nimport { z } from "zod";\nimport { tasks } from "../../broker/src/tasks.js";\nimport { x } from "@agentx/contracts";\nexport const a = [readFileSync, z, tasks, x];\n',
       );
+      lane.commit();
+      expect(lane.guard()).toEqual([]);
+    });
+  });
+
+  describe("rule: stray files (editor, merge and sed leftovers)", () => {
+    const CLOUD_IMPORT = `import { m } from "./${ORG}/members.js";\nexport const a = m;\n`;
+
+    it.each([
+      ["a sed -E backup", "packages/worker/src/engine.ts-E"],
+      ["a sed -e backup", "packages/worker/src/engine.ts-e"],
+      ["a sed backup of a file with no extension", "Makefile-E"],
+      ["a patch original", "packages/worker/src/engine.ts.orig"],
+      ["a patch reject", "packages/worker/src/engine.ts.rej"],
+      ["a .bak copy", "packages/worker/src/engine.ts.bak"],
+      ["an editor backup", "packages/worker/src/engine.ts~"],
+      ["a vim swap file", "packages/worker/src/.engine.ts.swp"],
+      ["a vim swap file (.swo)", "packages/worker/src/engine.ts.swo"],
+      ["a .tmp file", "packages/worker/src/engine.ts.tmp"],
+      ["a macOS metadata file", ".DS_Store"],
+      ["a macOS metadata file in a directory, in any case", "packages/worker/.ds_store"],
+      ["a macOS resource-fork file", "packages/worker/src/._engine.ts"],
+      ["an emacs auto-save file", "packages/worker/src/#engine.ts#"],
+      ["a marker inside the name", "packages/worker/src/engine.orig.ts"],
+      ["a Finder duplicate", "packages/worker/src/engine copy.ts"],
+    ])("fails %s", (_name, path) => {
+      lane.write(path, "export const a = 1;\n");
+      lane.commit();
+      const findings = lane.guard();
+      const hit = findings.find((f) => f.rule === "stray-file");
+      expect(hit?.file).toBe(path);
+      expect(formatFinding(hit!)).toContain("stray-file");
+      expect(formatFinding(hit!)).toContain(path);
+    });
+
+    it("fails a stray file that is added in one commit and removed in the next (history is pushed too)", () => {
+      lane.write("docs/notes.md.orig", "x\n");
+      lane.commit("add");
+      git(lane.dir, "rm", "-q", "docs/notes.md.orig");
+      git(lane.dir, "commit", "-q", "-m", "remove");
+      expect(rules(lane.guard())).toContain("stray-file");
+    });
+
+    it("also runs the Cloud-only import check on a backup copy of source (a .ts-E file with a Cloud-only import)", () => {
+      lane.write("packages/worker/src/engine.ts-E", CLOUD_IMPORT);
+      lane.commit();
+      const findings = lane.guard();
+      expect(rules(findings)).toEqual(expect.arrayContaining(["stray-file", "cloud-import"]));
+      expect(findings.find((f) => f.rule === "cloud-import")?.file).toBe("packages/worker/src/engine.ts-E");
+    });
+
+    it.each(["engine.ts-E", "engine.ts.orig", "engine.tsx.bak", "engine.js~", "engine.mjs.tmp", "engine.cts.rej"])(
+      "checks the imports of %s as source",
+      (name) => {
+        lane.write(`packages/worker/src/${name}`, CLOUD_IMPORT);
+        lane.commit();
+        expect(rules(lane.guard())).toContain("cloud-import");
+      },
+    );
+
+    it("checks the imports of text that reads as source under any other name", () => {
+      lane.write("packages/worker/src/engine.txt", CLOUD_IMPORT);
+      lane.write("packages/worker/src/engine-copy", `import {\n  a,\n} from "./${ORG}/members.js";\n`);
+      lane.write("packages/worker/src/engine.dat", `const m = require("./${SPEND}/limits.js");\n`);
+      lane.commit();
+      const files = lane.guard().filter((f) => f.rule === "cloud-import").map((f) => f.file).sort();
+      expect(files).toEqual(["packages/worker/src/engine-copy", "packages/worker/src/engine.dat", "packages/worker/src/engine.txt"]);
+    });
+
+    it("checks a UTF-16 copy of source", () => {
+      lane.write("packages/worker/src/engine.txt", Buffer.from(CLOUD_IMPORT, "utf16le").toString("latin1"));
+      // written through latin1 so that every character is followed by a NUL byte, as in a UTF-16LE file
+      lane.commit();
+      expect(rules(lane.guard())).toContain("cloud-import");
+    });
+
+    it("does not read prose as source", () => {
+      lane.write("docs/notes.md", `We import things from the broker and export results; see "./${ORG}" in the plan.\nrequire a review before merge.\n`);
+      lane.commit();
+      expect(lane.guard()).toEqual([]);
+    });
+
+    it("checks the wiring of a package file kept under a backup name", () => {
+      lane.write("packages/worker/package.json.bak", '{ "dependencies": { "@agentx/ui": "*" } }\n');
+      lane.commit();
+      expect(rules(lane.guard())).toEqual(expect.arrayContaining(["stray-file", "cloud-import"]));
+    });
+
+    it("sees a backup copy of a Cloud-only file twice over: as a stray file and as a Cloud-only path", () => {
+      lane.write(`packages/broker/src/${ORG}/members.ts-E`, "export const a = 1;\n");
+      lane.commit();
+      expect(rules(lane.guard())).toEqual(expect.arrayContaining(["stray-file", "cloud-path"]));
+    });
+
+    it("finds a private name in added text whatever the file is called", () => {
+      for (const path of ["notes.weird", "engine.ts-E", "noext", "a/b.c.d"]) lane.write(`packages/worker/${path}`, `// ${PROSPECT}\n`);
+      lane.commit();
+      const files = lane.guard().filter((f) => f.rule === "private-name").map((f) => f.file).sort();
+      expect(files).toEqual(["packages/worker/a/b.c.d", "packages/worker/engine.ts-E", "packages/worker/noext", "packages/worker/notes.weird"]);
+    });
+
+    it.skipIf(!hasGitleaks)("finds a secret in added text whatever the file is called", () => {
+      const names = ["notes.weird", "engine.ts-E", "noext", "engine.ts.orig"];
+      for (const name of names) lane.write(`packages/worker/${name}`, `value = "${fakeAccessKey()}"\n`);
+      lane.commit();
+      const files = lane.guard({ gitleaks: "run" }).filter((f) => f.rule === "secret").map((f) => f.file);
+      expect(files).toEqual(expect.arrayContaining(names.map((name) => `packages/worker/${name}`)));
+    });
+
+    it("passes a clean range that has ordinary files, hidden files and names that only look close", () => {
+      lane.write("packages/worker/src/engine.ts", 'import { tasks } from "../../broker/src/tasks.js";\nexport const engine = tasks;\n');
+      lane.write("packages/worker/src/engine.test.ts", 'import { engine } from "./engine.js";\n');
+      lane.write(".gitignore", "node_modules\n");
+      lane.write(".github/workflows/lint.yml", "name: lint\n");
+      lane.write("docs/original-notes.md", "x\n");
+      lane.write("docs/tmp-plan.md", "x\n");
+      lane.write("packages/worker/src/backup-policy.ts", "export const policy = 1;\n");
+      lane.write("packages/worker/src/bak.ts", "export const bak = 1;\n");
+      lane.write("packages/worker/src/old.ts", "export const old = 1;\n");
       lane.commit();
       expect(lane.guard()).toEqual([]);
     });
@@ -878,6 +1000,22 @@ describe("the hashed name list and the private extended list", () => {
 });
 
 describe("port-guard pieces", () => {
+  it("strayFileRule names the leftover and only reads the last path segment", () => {
+    expect(strayFileRule("a/b/c.ts-E")?.rule).toBe("stray-file");
+    expect(strayFileRule("a/b/.DS_Store")?.detail).toMatch(/metadata/);
+    expect(strayFileRule("a.orig/b/c.ts")).toBeNull();
+    expect(strayFileRule("a/tmp/c.ts")).toBeNull();
+    expect(strayFileRule("a/b/review.md")).toBeNull();
+  });
+
+  it("isCodeFile and looksLikeCode read a code extension anywhere in the name, and source text under any name", () => {
+    for (const name of ["x.ts", "x.ts-E", "x.ts.orig", "d/x.mjs~", "x.TSX.bak", "x.cjs.tmp", "x.js"]) expect(isCodeFile(name)).toBe(true);
+    for (const name of ["x.json", "x.tsconfig", "x.md", "x.jsonc", "x"]) expect(isCodeFile(name)).toBe(false);
+    expect(looksLikeCode("x.txt", 'import a from "b";\n')).toBe(true);
+    expect(looksLikeCode("x.txt", "const a = require('b');\n")).toBe(true);
+    expect(looksLikeCode("x.txt", "plain words, and import in a sentence\n")).toBe(false);
+  });
+
   it("reads added lines and their numbers from a patch, including lines that look like headers", () => {
     const patch = [
       "diff --git a/a.ts b/a.ts",
