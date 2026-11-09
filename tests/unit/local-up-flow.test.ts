@@ -606,7 +606,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const seen = new Set<string>();
     await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
     const understand = await h.nextJob(workspaceId, seen);
-    expect((understand.payload as { modelRoute?: { alias: string; api: string } }).modelRoute).toMatchObject({ alias: expect.stringMatching(/^anthropic\//) as unknown as string, api: "anthropic-messages" });
+    expect((understand.payload as { modelRoute?: { alias: string; api: string } }).modelRoute).toMatchObject({ alias: expect.stringMatching(/^anthropic\//) as string, api: "anthropic-messages" });
     const access = () => new Promise<{ status: number; text: string }>((resolve, reject) => {
       const req = httpRequest({
         host: "127.0.0.1", port: h.runtime.callbackPort, method: "GET", path: "/v1/internal/model-access", setHost: false,

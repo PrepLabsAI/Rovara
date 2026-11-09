@@ -240,7 +240,7 @@ async function acquireStateLock(stateDirectory: string): Promise<() => Promise<v
     if (!Number.isInteger(pid) || pid <= 0) {
       if (age < LOCK_YOUNG_MS) throw held("?");
     } else {
-      let alive = false;
+      let alive: boolean;
       try { process.kill(pid, 0); alive = true; } catch (killError) { alive = (killError as NodeJS.ErrnoException).code === "EPERM"; }
       if (alive) throw held(pid);
     }

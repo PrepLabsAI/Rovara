@@ -159,7 +159,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     },
     async holds(operation) {
       const [record, workspace] = await Promise.all([store.get(operationKey(operation.workspaceId, operation.operationId)), store.get(workspaceKey(operation.workspaceId))]);
-      return record !== undefined && !isTerminalStatus(String(record["status"])) && record["fence"] === operation.fence && workspace?.["activeOperationId"] === operation.operationId && workspace["fence"] === operation.fence;
+      return record !== undefined && typeof record["status"] === "string" && !isTerminalStatus(record["status"]) && record["fence"] === operation.fence && workspace?.["activeOperationId"] === operation.operationId && workspace["fence"] === operation.fence;
     },
   });
 

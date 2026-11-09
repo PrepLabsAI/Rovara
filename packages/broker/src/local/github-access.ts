@@ -73,5 +73,6 @@ export function assertGithubCloneAccess(repositoryUrl: string, access: "clone" |
  * parsers part ways about the host, so such an address is refused when the project is registered (not only when a token would be handed out).
  */
 export function isPlainRepositoryUrl(repositoryUrl: string): boolean {
+  // eslint-disable-next-line no-control-regex -- control characters are exactly what is refused
   return !/[\\\s\u0000-\u001f\u007f-\uffff]/u.test(repositoryUrl) && !/%5c/iu.test(repositoryUrl);
 }
