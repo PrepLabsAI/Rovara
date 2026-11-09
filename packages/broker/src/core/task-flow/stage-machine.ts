@@ -158,9 +158,11 @@ export async function blockTaskWorkflow(deps: TaskFlowDeps, taskId: string, expe
 /** The changes the owner asked for in earlier plans of this task, oldest first (`PLAN_FEEDBACK#<revision>` items written with the decision). */
 export const PLAN_FEEDBACK_SK_PREFIX = "PLAN_FEEDBACK#";
 export const planFeedbackKey = (taskId: string, revision: number): DocumentKey => ({ pk: `DEVTASK#${taskId}`, sk: `${PLAN_FEEDBACK_SK_PREFIX}${String(revision).padStart(8, "0")}` });
-async function planFeedbackOf(deps: Pick<TaskFlowDeps, "store">, taskId: string): Promise<string[]> {
-  const page = await deps.store.query({ pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: PLAN_FEEDBACK_SK_PREFIX }, limit: 20 });
-  return page.items.flatMap((item) => (typeof item["text"] === "string" ? [item["text"]] : []));
+export const PLAN_FEEDBACK_MAX = 20;
+/** The newest `PLAN_FEEDBACK_MAX` requests for changes, oldest first: after a long back-and-forth the latest words are never the ones left out. */
+export async function planFeedbackOf(deps: Pick<TaskFlowDeps, "store">, taskId: string): Promise<string[]> {
+  const page = await deps.store.query({ pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: PLAN_FEEDBACK_SK_PREFIX }, descending: true, limit: PLAN_FEEDBACK_MAX });
+  return page.items.reverse().flatMap((item) => (typeof item["text"] === "string" ? [item["text"]] : []));
 }
 
 /** Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`, on the ports. */
