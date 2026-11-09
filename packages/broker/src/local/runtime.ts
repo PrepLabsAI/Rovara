@@ -26,6 +26,8 @@ import {
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
 import { OUTBOX_PENDING_INDEX } from "@agentx/contracts";
+import { LocalPageSessions } from "../core/local-pages/guard.js";
+import { localSessionProofVerifier } from "../core/decisions/local-session.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
@@ -115,6 +117,8 @@ export interface LocalRuntime {
   readonly config: PluginConfig;
   readonly configPath: string;
   readonly sessionTokenPath: string;
+  /** The local review pages' sessions: pass them to `createLocalPagesServer({ sessions })` so the proofs the pages sign are the ones the approvers accept. */
+  readonly pageSessions: LocalPageSessions;
   /** The adapters registered at each plug-in point, by name. */
   wiring(): Record<string, string[]>;
   stop(): Promise<void>;
@@ -154,12 +158,16 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   const sessionTokenPath = join(stateDirectory, SESSION_TOKEN_FILE_NAME);
   await writeOwnerFile(sessionTokenPath, `${sessionToken}\n`);
 
+  // The sessions of the local review pages: the pages server is given these, and the approvers check the proofs they sign.
+  const pageSessions = new LocalPageSessions();
   const registry = createAdapterRegistry();
   const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment);
   registerCodeDefaults(registry, {
     ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     displayName: ownerName(),
     isValidSession: (value) => constantTimeEqual(value, sessionToken),
+    // An approval is proved by a token the local pages sign over one request, revision and digest; the sign-in secret above is never an approval proof.
+    approvers: { verifySession: localSessionProofVerifier(pageSessions) },
     modelKeys,
     // Nothing is priced until a price table is configured: usage is recorded as "unknown", never guessed.
     priceTable: { currency: "USD", models: {} },
@@ -239,6 +247,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
     config,
     configPath: location.path,
     sessionTokenPath,
+    pageSessions,
     wiring,
     async stop() {
       if (stopped) return;

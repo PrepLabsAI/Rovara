@@ -158,8 +158,14 @@ export function approvalBindingId(companyId: string, kind: string, subjectId: st
   return `bind_${createHash("sha256").update(JSON.stringify([companyId, kind, subjectId, revision, artifactDigest]), "utf8").digest("hex")}`;
 }
 
-/** What the Approvers seam sees as the request id: the binding, plus a fresh part so an adapter's own memory of proofs it accepted can never burn a retry (the gate's markers are the single-use rule). */
-const adapterRequestId = (bindingId: string): string => `${bindingId}.${randomUUID()}`;
+/**
+ * What the Approvers seam sees as the request id: the decision's request id (the one a page or a comment names and signs over), plus a fresh part, so an adapter's own memory of proofs it accepted can never
+ * burn a retry after a fault (the gate's transactional markers are the single-use rule). The proof checks of a surface (the local pages sign a proof over the request id) use `decisionRequestIdOf`.
+ */
+const adapterRequestId = (requestId: string): string => `${requestId}.${randomUUID()}`;
+
+/** The decision's request id inside the id the Approvers seam was given (a request id has no dot, so everything before the first one). */
+export const decisionRequestIdOf = (adapterRequest: string): string => adapterRequest.split(".")[0]!;
 
 /** Where a used proof's marker lives: one per (method, token, request). The token itself is never stored, only its hash. */
 export function approvalProofMarkerKey(companyId: string, proofKey: string): DocumentKey {
@@ -230,7 +236,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
       const marker = await deps.store.get(markerOf(attempt.companyId, credential.method, credential.token, bindingId));
       if (marker === undefined || marker["requestId"] !== attempt.requestId) continue;
       const request: ApprovalRequest = {
-        companyId: attempt.companyId, requestId: adapterRequestId(bindingId), kind: record.approvalKind, subject: { type: record.subjectType, id: record.subjectId }, revision: record.revision, artifactDigest: record.artifactDigest,
+        companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), kind: record.approvalKind, subject: { type: record.subjectType, id: record.subjectId }, revision: record.revision, artifactDigest: record.artifactDigest,
         ...(record.projectName === undefined ? {} : { projectName: record.projectName }),
       };
       const verdict = await deps.approvers.verify(request, {
@@ -276,7 +282,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
 
       // ---- who may answer, and how
       const bindingId = approvalBindingId(attempt.companyId, attempt.kind, attempt.subjectId, loaded.request.revision, loaded.request.artifactDigest);
-      const request: ApprovalRequest = { ...loaded.request, companyId: attempt.companyId, requestId: adapterRequestId(bindingId) };
+      const request: ApprovalRequest = { ...loaded.request, companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId) };
       const requirement = await deps.approvers.requirement(request);
       const risk = loaded.request.risk ?? "high";
       const policyMethods = attempt.outcome !== "approve" ? rejectMethods : risk === "high" ? highRiskMethods : undefined;

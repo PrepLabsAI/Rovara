@@ -49,6 +49,8 @@ export interface WorkflowSubjectOptions {
   expiresAt?: (task: Record<string, unknown>, workflow: WorkflowSnapshot) => string | undefined;
   /** More steps for the decision's transaction, from the stage machine. They must not name the task's own key. */
   onDecided?: (context: { taskId: string; task: Record<string, unknown>; before: WorkflowSnapshot; after: WorkflowSnapshot; attempt: DecisionAttempt; approver: Principal; at: string }) => readonly TransactItem[] | Promise<readonly TransactItem[]>;
+  /** Whether a verified repository collaborator may decide as a project approver (decision 45.3). Default true. Ignored when `actorFor` is given. */
+  collaboratorsMayDecide?: boolean;
   /** The identity provider whose `owner` is the owner of every task (default: Code's local owner). Ignored when `actorFor` is given. */
   ownerProvider?: string;
   /** The id the engine knows a person by. Default: the local owner decides as the task's owner (a one-developer install owns every task). */
@@ -69,10 +71,16 @@ export function waitingDocumentDigest(workflow: WorkflowSnapshot): string | unde
 
 const jsonOf = <T>(value: T): never => JSON.parse(JSON.stringify(value)) as never;
 
-/** The default mapping: the local owner is the owner of every task on this install. Anyone else is not who the engine knows. An install with another identity adapter names its owner provider (or supplies `actorFor`). */
-function defaultActorFor(ownerProvider: string) {
-  return (approver: Principal, workflow: WorkflowSnapshot): { actorId: string; role: "TASK_OWNER" } | undefined =>
-    approver.provider === ownerProvider && approver.roles.includes("owner") ? { actorId: workflow.ownerId, role: "TASK_OWNER" } : undefined;
+/**
+ * The default mapping (decision 45.3): the local owner is the owner of every task on this install and decides as the task's owner. A repository collaborator whom the Approvers seam verified (a comment from someone
+ * with write access) decides as a project approver under a stable id of their own, recorded as theirs and never as the owner's. `collaboratorsMayDecide: false` makes the owner the only decider. Whatever the
+ * seam did not verify never reaches here.
+ */
+function defaultActorFor(ownerProvider: string, collaboratorsMayDecide: boolean) {
+  return (approver: Principal, workflow: WorkflowSnapshot): { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" } | undefined => {
+    if (approver.provider === ownerProvider && approver.roles.includes("owner")) return { actorId: workflow.ownerId, role: "TASK_OWNER" };
+    return collaboratorsMayDecide && approver.provider !== ownerProvider ? { actorId: hexActorId(approver), role: "PROJECT_ADMIN" } : undefined;
+  };
 }
 
 /** A stable 64-hex id for a person who is not the owner, for an engine that knows only hex ids. Not used by the default mapping. */
@@ -81,7 +89,7 @@ export function hexActorId(approver: Pick<Principal, "provider" | "personId">): 
 }
 
 export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): DecisionSubject {
-  const actorFor = options.actorFor ?? defaultActorFor(options.ownerProvider ?? LOCAL_OWNER_PROVIDER);
+  const actorFor = options.actorFor ?? defaultActorFor(options.ownerProvider ?? LOCAL_OWNER_PROVIDER, options.collaboratorsMayDecide !== false);
   return {
     kind: WORKFLOW_DOCUMENT_KIND,
 

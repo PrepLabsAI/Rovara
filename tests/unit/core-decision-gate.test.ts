@@ -9,7 +9,7 @@ import {
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal, type VerifiedComment } from "../../packages/broker/src/ports/policy-defaults.js";
-import { approvalBindingId, approvalProofMarkerKey, approvalRecordKey, createDecisionGate, type DecisionAttempt, type DecisionSubject } from "../../packages/broker/src/core/decisions/approval-gate.js";
+import { decisionRequestIdOf, approvalBindingId, approvalProofMarkerKey, approvalRecordKey, createDecisionGate, type DecisionAttempt, type DecisionSubject } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
@@ -136,11 +136,23 @@ describe("the approval gate: a forged or wrong proof", () => {
     expect(await gate.decide(attempt({ kind: "merge" }))).toMatchObject({ reason: "unsupported" });
   });
 
-  it("a collaborator's comment cannot decide a plan: the plan's owner is the local owner (the engine knows no one else)", async () => {
+  it("a write collaborator's comment decides a low-risk plan as a project approver, recorded as theirs and never as the owner's (decision 45.3)", async () => {
     const { store, gate, ready } = world();
     await ready;
     const result = await gate.decide(attempt({ credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT, claimedAccount: COLLABORATOR }] }));
-    expect(result).toMatchObject({ status: "refused", reason: "not_the_approver" });
+    expect(result).toMatchObject({ status: "decided", approver: { roles: ["collaborator"] } });
+    const decision = (await taskWorkflow(store)).decisions.at(-1)!;
+    expect(decision).toMatchObject({ decision: "APPROVE", actorRole: "PROJECT_ADMIN" });
+    expect(decision.actorId).not.toBe(OWNER_HEX);
+    expect(decision.actorId).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it("an install can make the owner the only decider of plans: then a collaborator's comment is refused", async () => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: { ...workflowTaskKey(TASK_ID), orgId: COMPANY, workflow: JSON.parse(JSON.stringify(waiting())) } });
+    const approvers = createLocalOwnerApprovers({ owner: OWNER, verifyComment: () => ({ author: COLLABORATOR, permission: "write", approves: true }) });
+    const gate = createDecisionGate({ store, approvers, audit: createNoopAuditSink(), subjects: [createWorkflowDocumentSubject({ store, riskOf: () => "low", collaboratorsMayDecide: false })], now: () => NOW });
+    expect(await gate.decide(attempt({ credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ status: "refused", reason: "not_the_approver" });
     expect((await taskWorkflow(store)).revision).toBe(R0);
   });
 
@@ -299,7 +311,8 @@ describe("the approval gate: replayed proofs and lost races", () => {
     const request = attempt();
     expect(await world2.decide(request)).toMatchObject({ status: "decided" });
     // The proof the gate built names the request, revision and digest of the stored state, not anything else.
-    expect(seen[0]!.proof.requestId.startsWith(binding())).toBe(true);
+    expect(seen[0]!.proof.requestId.startsWith(`${request.requestId}.`)).toBe(true);
+    expect(decisionRequestIdOf(seen[0]!.proof.requestId)).toBe(request.requestId);
     expect(seen[0]!.proof).toMatchObject({ requestId: seen[0]!.request.requestId, revision: R0, artifactDigest: request.seen.artifactDigest });
     expect(seen[0]!.request).toMatchObject({ companyId: COMPANY, subject: { type: "task", id: TASK_ID }, revision: R0, artifactDigest: request.seen.artifactDigest });
     void gate;
@@ -441,9 +454,10 @@ describe("the approval gate: what the review of round 1 found", () => {
       async requirement() { return { methods: [LOCAL_SESSION_METHOD], minApprovers: 2, selfApprovalAllowed: true }; },
       async verify(_request, proof) { return { approved: true, approver: proof.token === "second" ? stranger : OWNER, method: proof.method, proofId: proof.proofId }; },
     };
-    const { store, gate, ready } = world({ approvers });
+    const { store, ready } = world({ approvers });
     await ready;
-    expect(await gate.decide(attempt({ credentials: [{ method: LOCAL_SESSION_METHOD, token: "first" }, { method: LOCAL_SESSION_METHOD, token: "second" }] }))).toMatchObject({ status: "refused", reason: "not_the_approver" });
+    const strict = createDecisionGate({ store, approvers, audit: createNoopAuditSink(), subjects: [createWorkflowDocumentSubject({ store, riskOf: () => "low", collaboratorsMayDecide: false })], now: () => NOW });
+    expect(await strict.decide(attempt({ credentials: [{ method: LOCAL_SESSION_METHOD, token: "first" }, { method: LOCAL_SESSION_METHOD, token: "second" }] }))).toMatchObject({ status: "refused", reason: "not_the_approver" });
     expect((await taskWorkflow(store)).revision).toBe(R0);
   });
 

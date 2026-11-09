@@ -70,7 +70,7 @@ export function localOwnerPrincipal(options: LocalOwnerOptions = {}): Principal 
 }
 
 export interface LocalOwnerIdentityOptions extends LocalOwnerOptions {
-  /** Checks the secret of a local session (the one `rovara up` mints and puts in a cookie). Absent: no session is accepted. */
+  /** Checks the secret of a local session (the one `rovara up` mints and puts in a cookie). Absent: no session is accepted. This signs the owner IN; it is never an approval proof (see `registerCodeDefaults`). */
   isValidSession?: (value: string, remoteAddress: string | undefined) => boolean | Promise<boolean>;
   /** Outside accounts the owner linked in the config (decision: "only tracker accounts the owner linked"). Anyone else is unlinked. */
   linkedAccounts?: readonly ExternalAccountRef[];
@@ -217,7 +217,9 @@ export function registerCodeDefaults(registry: AdapterRegistry, options: CodeDef
   const owner = localOwnerPrincipal(options);
   registry.register("admission", "allow-all", createAllowAllAdmission(), { isDefault: true });
   registry.register("audit-sink", "none", createNoopAuditSink(), { isDefault: true });
-  const verifySession = options.approvers?.verifySession ?? (options.isValidSession === undefined ? undefined : (token: string) => options.isValidSession!(token, undefined));
+  // The identity adapter's `isValidSession` is the owner's SIGN-IN (the `rovara up` cookie). It is never an approval proof: a raw session secret would approve any request. Approval proofs come only from a verifier
+  // bound to one request, revision and digest (`options.approvers.verifySession`, for example `localSessionProofVerifier` over the local pages' sessions). Absent: `local-session` proofs are refused.
+  const verifySession = options.approvers?.verifySession;
   registry.register("approvers", "local-owner", createLocalOwnerApprovers({ ...options.approvers, owner, ...(verifySession === undefined ? {} : { verifySession }) }), { isDefault: true });
   registry.register("identity", LOCAL_OWNER_PROVIDER, createLocalOwnerIdentity(options), { isDefault: true });
   registry.register("metering", "price-table", createPriceTableMetering(options.priceTable, options.onMeter), { isDefault: true });
