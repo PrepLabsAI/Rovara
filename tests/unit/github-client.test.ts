@@ -130,11 +130,15 @@ function conformanceWorld(options: { binding?: boolean; stripRedirectMode?: bool
     client, net, binding, repositoryUrl: GITHUB_REPO_URL, strangerUrl: GITHUB_OTHER_URL, credentialRef: "github", scope: GITHUB_ORG_SCOPE, otherScope: { orgId: "org_bbbbbbbbbbbbbbbbbbbb" },
     installationId: 77, repositoryId: 4242,
     async prepare() {
-      const headSha = model.commit(WORKING_BRANCH(1), { "src/a.ts": "export const a = 1;\n" });
+      const headSha = model.commit(WORKING_BRANCH(1), { "src/a.ts": "export const a = 1;\n", "src/big.txt": "x".repeat(4_000) });
       model.setAccount("priya", "write");
       const { cr } = model.reconcile({ sourceBranch: WORKING_BRANCH(1), targetBranch: "main", title: "Add a", draft: true });
       const comment = model.addReviewComment(cr.id, "priya", "Please rename this.", "src/a.ts", 1);
-      return { number: Number(cr.id), headSha, commentId: comment.id };
+      let fresh = 100;
+      return {
+        number: Number(cr.id), headSha, commentId: comment.id, largeFile: "src/big.txt",
+        freshBranch: () => { fresh += 1; const branch = `agentx/00000000-0000-4000-8000-${String(fresh).padStart(12, "0")}`; model.commit(branch, { [`src/${String(fresh)}.ts`]: "export const b = 1;\n" }); return branch; },
+      };
     },
   };
 }

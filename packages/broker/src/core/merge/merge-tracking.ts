@@ -102,6 +102,8 @@ export interface MergeTrackingDependencies {
   /** The origin session links are made from (the control plane's own): the approved milestone links to the session with it. Without it the milestone says no link. */
   origin?: string | undefined;
   log?(event: string, fields: Record<string, unknown>): void;
+  /** The write of the task's next workflow snapshot, guarded by the revision read. The task-flow lane owns the record, so it can say how it is written; the default is `workflowUpdateItem`. */
+  workflowWrite?(taskId: string, next: WorkflowSnapshot, expectedRevision: number): TransactItem;
   /** Hooks at the end of a pass (the track record, the reviewers' reminders): best effort, outside the merge core. */
   hooks?: MergePassHooks;
 }
@@ -698,7 +700,7 @@ async function trackOne(
       if (merged.headByRovara) items.push(...prHeadItems({ orgId: task.orgId, repositoryKey, headSha: status.headRevision, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number }, now).slice(0, 1));
     }
     if (action !== undefined) {
-      items.push(workflowUpdateItem(task.taskId, action.workflow, task.workflow.revision), ...action.items);
+      items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision), ...action.items);
     }
     if (justReady) {
       const index = Math.max(0, (task.workflow.pullRequests ?? []).findIndex((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number));

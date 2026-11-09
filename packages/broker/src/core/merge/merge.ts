@@ -8,7 +8,9 @@
 //  - The proof of a person is W0's `Approvers` seam, not a browser session and a confirmation page. `prepareMerge` makes the `ApprovalRequest` (bound to the task's workflow revision and to a digest
 //    of the exact pull requests, heads, merge method and risk level the person sees); the surface collects an `ApprovalProof` (the local owner's session, or a repository collaborator's comment);
 //    `pressMerge` verifies it with `Approvers.verify` and only then merges. A proof is used once: it is stored under `approvalProofKey` in the claim's transaction.
-//  - A token (the CLI, an AI tool) never merges by its own press: it can only prepare the request and print how to approve it. That rule lives in the Approvers adapter's `requirement`.
+//  - The merge core trusts `Approvers.verify` and the adapter's `requirement` (the methods it accepts and `minApprovers`, which this core enforces). It does NOT know who is calling: Cloud's rule "a token
+//    (the CLI, an AI tool) never merges" is not enforced here. Keeping the local session secret away from tokens and agent tools is the job of the surface that collects the proof (lane L8, see
+//    DEFERRED-CHECKS.md), and a stronger proof for a high-risk merge is a rule of the Approvers adapter, which `request.risk` lets it make.
 //  - The audit fact commits with the claim through W0's `AuditSink.stage`, as Cloud's ledger row did.
 //  - Everything provider-specific is behind the `CodeHost` port; people, settings, the task record, the timeline and the milestones are seams (seams.ts).
 import { createHash } from "node:crypto";
@@ -45,6 +47,7 @@ import {
   type TransactItem,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
@@ -56,8 +59,6 @@ import { plain, readMergeTracking } from "./store.js";
 
 /** The kind of approval a merge asks for (`ApprovalRequest.kind`). */
 export const MERGE_APPROVAL_KIND = "merge";
-/** What a browser's HIGH press from outside its merge card hears: where it is merged. A Code surface says the same in its own words when the Approvers adapter wants a stronger method. */
-export const M_HIGH_ON_CARD = "This change is high risk. Merge it on its merge card on the task page, after a sign-in with the email code.";
 
 type PullRequestEntry = NonNullable<WorkflowSnapshot["pullRequests"]>[number];
 
@@ -171,7 +172,8 @@ export function mergeReadiness(input: ReadinessInput): Readiness {
     if (reason !== undefined) return notReady(several ? M.repository(pr.repositoryId, reason) : reason);
   }
   // Whoever presses Merge must have a linked GitHub account, whether the org allows self-approval or not (controller ruling 2026-10-26).
-  if (input.presser.githubUserId === undefined && input.requirePresserAccount !== false) return notReady(M.linkGithub);
+  // With self-approval off the presser must be known, whatever `requirePresserAccount` says: otherwise "the only approver cannot press" could not be checked.
+  if (input.presser.githubUserId === undefined && (input.requirePresserAccount !== false || !input.allowSelfApproval)) return notReady(M.linkGithub);
   if (!input.allowSelfApproval && input.presser.githubUserId !== undefined) {
     for (const pr of open) {
       const approval = input.approvals.get(pullRequestKey(pr));
@@ -327,6 +329,7 @@ export function mergeViewFromReadiness(readiness: Readiness): MergeView {
 /** A code host that does not offer `merge` (the port's `merge` is optional): Rovara never merges there, a person does on the host. */
 const HOST_WILL_NOT_MERGE = "Rovara can't merge on this repository's code host. Merge it there.";
 const NOT_APPROVED = "Nobody approved this merge, so nothing was merged.";
+const NEEDS_MORE_APPROVERS = "This merge needs more than one approver, which Rovara Code can't collect yet, so nothing was merged.";
 const PROOF_USED = "This approval was already used. Ask for a new one.";
 
 export interface MergeSubject {
@@ -341,6 +344,8 @@ export interface PreparedMerge {
   subject: MergeSubject;
   /** The words a surface shows the person: each pull request and how it will be merged. */
   changes: string[];
+  /** The merge method the digest was made with: the press merges by this one or not at all. */
+  mergeMethod: CodeSettings["mergeMethod"];
   risk: MergeRisk;
 }
 
@@ -403,7 +408,7 @@ export async function prepareMerge(
     revision: tracked.workflow.revision, artifactDigest: mergeArtifactDigest(subject, checked.settings.mergeMethod, risk.level), risk: risk.level,
   };
   return {
-    request, requirement: await deps.approvers.requirement(request), subject, risk,
+    request, requirement: await deps.approvers.requirement(request), subject, risk, mergeMethod: checked.settings.mergeMethod,
     changes: subject.pullRequests.map((pr) => changeText(pr.repositoryId, pr.number, checked.settings.mergeMethod)),
   };
 }
@@ -419,16 +424,24 @@ export async function pressMerge(
   input: { taskId: string; requestId: string; proof: ApprovalProof; presserPersonId?: string | undefined; expectedHeads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined },
 ): Promise<MergePressResult> {
   const prepared = await prepareMerge(deps, input);
+  // What the approver adapter requires is enforced here, before the proof is looked at: a method it does not list is no approval, and more than one approver cannot be collected yet.
+  if (!prepared.requirement.methods.includes(input.proof.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
+  if (prepared.requirement.minApprovers !== 1) throw agentXError("FORBIDDEN", NEEDS_MORE_APPROVERS);
   const verdict = await deps.approvers.verify(prepared.request, input.proof);
   if (!verdict.approved) {
     // A proof for what the person saw, when what would be merged is something else now, is "it changed", not "nobody approved": the person checks and approves again.
     if (verdict.reason === "other_content" || verdict.reason === "other_revision") throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+    if (verdict.reason === "proof_already_used") throw agentXError("FORBIDDEN", PROOF_USED);
     throw agentXError("FORBIDDEN", NOT_APPROVED);
   }
+  if (!prepared.requirement.methods.includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
   const task = await deps.host.loadTask(input.taskId);
   if (task === undefined || task.orgId === undefined || !tracksMerge(task.workflow)) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+  if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);
+  // The task must still be at the revision the person approved, and merged by the method they were shown.
+  if (task.workflow.revision !== prepared.request.revision) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   const merged = await mergeTask(deps, task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, prepared.subject, {
-    decidedBy: verdict.approver.personId, occurrence: input.requestId, proof: input.proof, method: verdict.method,
+    decidedBy: verdict.approver.personId, occurrence: input.requestId, proof: input.proof, method: verdict.method, mergeMethod: prepared.mergeMethod, requestId: input.requestId,
   });
   return { status: "MERGED", pullRequests: merged };
 }
@@ -559,6 +572,10 @@ async function approvalFromStatus(
 
 /** Where a used proof is kept: one item for each proof, keyed by what the proof is (method, token, request), so a token cannot be used again under a fresh proof id. */
 const proofUseKey = (companyId: string, proof: ApprovalProof): { pk: string; sk: string } => ({ pk: companyScoped(companyId, "MERGE_PROOF"), sk: approvalProofKey(proof) });
+/** Where a proof is used up by what it is (method and token), not by the request it is presented for. */
+const tokenUseKey = (companyId: string, proof: ApprovalProof): { pk: string; sk: string } => ({
+  pk: companyScoped(companyId, "MERGE_PROOF_TOKEN"), sk: createHash("sha256").update(JSON.stringify([proof.method, proof.token])).digest("hex"),
+});
 
 type ClaimResult = { claimed: true; at: string } | { claimed: false; reason: "held" | "proof_used" };
 
@@ -568,7 +585,7 @@ type ClaimResult = { claimed: true; at: string } | { claimed: false; reason: "he
  */
 async function claimMerge(
   deps: MergeDependencies, task: { taskId: string; orgId: OrgId }, pr: { repositoryId: string; number: number; url: string; repositoryKey: string }, headSha: string, by: string,
-  audit: { occurrence: string; method: string; proofMethod: string; proof: ApprovalProof | undefined },
+  audit: { occurrence: string; method: string; proofMethod: string; proof: ApprovalProof | undefined; requestId: string },
   useProof: boolean,
 ): Promise<ClaimResult> {
   const now = deps.now();
@@ -576,8 +593,16 @@ async function claimMerge(
   const eventId = createHash("sha256").update(`pull_request.merge_requested\n${audit.occurrence}\n${pr.repositoryId}\n${String(pr.number)}`).digest("hex");
   const staged = deps.audit.stage({
     eventId, companyId: task.orgId, at, actor: { type: "person", id: by }, action: "pull_request.merge_requested", subject: { type: "change_request", id: `${pr.repositoryKey}#${String(pr.number)}` },
-    details: { repository: pr.repositoryKey, number: pr.number, method: audit.method, approvedBy: audit.proofMethod },
+    // Which approval merged: its request and proof ids and its method. Never the token.
+    details: { repository: pr.repositoryKey, number: pr.number, method: audit.method, approvedBy: audit.proofMethod, requestId: audit.requestId, ...(audit.proof === undefined ? {} : { proofId: audit.proof.proofId }) },
   });
+  // The use of the proof, in the claim's transaction. A local session is a standing secret by design and is used again and again; a proof whose token names one act (a comment id) is also
+  // used up by what it IS, whatever request it is presented for, so the same comment cannot approve a second request (a new head, another task).
+  const useRows: TransactItem[] = [];
+  if (useProof && audit.proof !== undefined) {
+    useRows.push({ kind: "put", item: plain({ ...proofUseKey(task.orgId, audit.proof), entityType: "MERGE_PROOF", requestId: audit.proof.requestId, taskId: task.taskId, usedAt: at }), condition: when.absent() });
+    if (audit.proof.method !== LOCAL_SESSION_METHOD) useRows.push({ kind: "put", item: plain({ ...tokenUseKey(task.orgId, audit.proof), entityType: "MERGE_PROOF_TOKEN", requestId: audit.proof.requestId, taskId: task.taskId, usedAt: at }), condition: when.absent() });
+  }
   const items: TransactItem[] = [
     {
       kind: "update", key: mergeTrackingKey(task.taskId, pr.repositoryId, pr.number), ops: [change.set(["mergeClaim"], { headSha, by, at }), change.add(["version"], 1)],
@@ -586,15 +611,15 @@ async function claimMerge(
         when.or(when.notExists("mergeClaim"), when.lte(["mergeClaim", "at"], new Date(now - MERGE_CLAIM_SECONDS * 1000).toISOString())),
       ),
     },
-    ...(useProof && audit.proof !== undefined
-      ? [{ kind: "put" as const, item: plain({ ...proofUseKey(task.orgId, audit.proof), entityType: "MERGE_PROOF", requestId: audit.proof.requestId, taskId: task.taskId, usedAt: at }), condition: when.absent() }]
-      : []),
+    ...useRows,
     ...staged,
   ];
   const result = await deps.store.transact(items);
   if (result.applied) return { claimed: true, at };
-  // The step that failed says why: the claim (index 0) was held by someone else or the item is not there; the proof (index 1) was used before.
-  return { claimed: false, reason: result.failed.includes(0) ? "held" : "proof_used" };
+  // The step that failed says why: the claim (index 0) was held by someone else or the item is not there; a use row (the next ones) says the proof was used before. Anything else is a fault.
+  if (result.failed.includes(0)) return { claimed: false, reason: "held" };
+  if (result.failed.some((index) => index >= 1 && index <= useRows.length)) return { claimed: false, reason: "proof_used" };
+  throw agentXError("RUNTIME_UNAVAILABLE", "The merge could not be recorded.");
 }
 
 /**
@@ -616,9 +641,11 @@ const hashNumber = (seed: string): number => Number.parseInt(createHash("sha256"
  */
 async function mergeTask(
   deps: MergeDependencies, tracked: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, subject: MergeSubject,
-  who: { decidedBy: string; occurrence: string; proof: ApprovalProof; method: string },
+  who: { decidedBy: string; occurrence: string; proof: ApprovalProof; method: string; mergeMethod: CodeSettings["mergeMethod"]; requestId: string },
 ): Promise<Array<{ repositoryId: string; number: number }>> {
   const { plan, settings, alreadyMerged, mergedBefore, entries } = await mergeableNow(deps, tracked, subject, who.decidedBy);
+  // The method the person was shown is the method used: a setting changed since is a new question.
+  if (settings.mergeMethod !== who.mergeMethod) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   if (alreadyMerged) return entries.map((entry) => ({ repositoryId: entry.repositoryId, number: entry.number }));
   const scope = deps.host.scope(tracked.orgId);
   // A host that does not let Rovara merge is found before any claim is made or anything is merged: the person merges on the host itself.
@@ -630,7 +657,7 @@ async function mergeTask(
     const { entry, url, headSha } = step;
     const claim = await claimMerge(
       deps, tracked, { repositoryId: entry.repositoryId, number: entry.number, url, repositoryKey: requireRepositoryKey(step.codeHost.kind, url) }, headSha, who.decidedBy,
-      { occurrence: who.occurrence, method: settings.mergeMethod, proofMethod: who.method, proof: who.proof }, !proofUsed,
+      { occurrence: who.occurrence, method: settings.mergeMethod, proofMethod: who.method, proof: who.proof, requestId: who.requestId }, !proofUsed,
     );
     if (!claim.claimed) {
       if (claim.reason === "proof_used") throw agentXError("FORBIDDEN", PROOF_USED);

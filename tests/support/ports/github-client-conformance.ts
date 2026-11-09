@@ -96,6 +96,10 @@ export interface GitHubClientFixture {
   number: number;
   headSha: string;
   commentId: string;
+  /** A file of the head commit that is larger than 1,000 bytes. */
+  largeFile: string;
+  /** A working branch with a commit and NO pull request, each call a new one: `reconcilePullRequest` on it must create. */
+  freshBranch(): string;
 }
 
 export interface GitHubClientWorld {
@@ -122,6 +126,13 @@ interface Operation {
   name: string;
   /** Reads only: its tokens must not carry a write permission. */
   readOnly: boolean;
+  /**
+   * Every set of permissions this operation may mint a token with, exactly (a token with any other set fails, so a widened scope is caught, not only a write). An operation served from a cached
+   * token or from the App's own lookups may mint none.
+   */
+  mints: readonly string[];
+  /** The operation reads the repository (not only the App's installation lookups). */
+  reachesRepository: boolean;
   /** Names a tenant (a scope): the binding hook must be asked. */
   tenant: boolean;
   run(world: GitHubClientWorld, fixture: GitHubClientFixture, scope: HostScope): Promise<unknown>;
@@ -131,37 +142,43 @@ const budget = () => ({ signal: new AbortController().signal, beforeRequest: () 
 
 /** Every method of `GitHubCodeHostProvider` that makes a request, called with arguments that reach the network. */
 function operations(): Operation[] {
-  const op = (name: string, readOnly: boolean, run: Operation["run"], tenant = true): Operation => ({ name, readOnly, tenant, run });
+  const R = "contents:read";
+  const op = (name: string, readOnly: boolean, mints: readonly string[], run: Operation["run"], tenant = true, reachesRepository = true): Operation => ({ name, readOnly, mints, reachesRepository, tenant, run });
   return [
-    op("getRepositoryIdentity", true, (w, _f, s) => w.client.getRepositoryIdentity(w.repositoryUrl, s)),
-    op("checkRepository", true, (w, _f, s) => w.client.checkRepository({ credentialRef: w.credentialRef, url: w.repositoryUrl }, s)),
-    op("getRepositoryStanding", true, (w, _f, s) => w.client.getRepositoryStanding(w.repositoryUrl, "priya", s, budget())),
-    op("resolveWithExpiry:clone", true, (w, _f, s) => w.client.resolveWithExpiry(w.credentialRef, w.repositoryUrl, "clone", s)),
-    op("resolveWithExpiry:push", false, (w, _f, s) => w.client.resolveWithExpiry(w.credentialRef, w.repositoryUrl, "push", s)),
-    op("getFileAtCommit", true, (w, f, s) => w.client.getFileAtCommit(w.repositoryUrl, "src/a.ts", f.headSha, s)),
-    op("getPathKindAtCommit", true, (w, f, s) => w.client.getPathKindAtCommit?.(w.repositoryUrl, "src/a.ts", f.headSha, s) ?? Promise.resolve("none")),
-    op("getCommitTree", true, (w, f, s) => w.client.getCommitTree(w.repositoryUrl, f.headSha, s)),
-    op("getBranchHead", true, (w, _f, s) => w.client.getBranchHead(w.repositoryUrl, WORKING_BRANCH, s)),
-    op("listWorkingBranches", true, (w, _f, s) => w.client.listWorkingBranches(w.repositoryUrl, { installationId: w.installationId, repositoryId: w.repositoryId }, s, 1)),
-    op("getCommitParents", true, (w, f, s) => w.client.getCommitParents(w.repositoryUrl, f.headSha, s)),
-    op("getDefaultBranchHead", true, (w, _f, s) => w.client.getDefaultBranchHead(w.repositoryUrl, "main", s)),
-    op("getPullRequestMergeObservation", true, (w, f, s) => w.client.getPullRequestMergeObservation(w.repositoryUrl, f.number, budget(), s)),
-    op("readCodeOwners", true, (w, _f, s) => w.client.readCodeOwners(w.repositoryUrl, "main", s)),
-    op("reconcilePullRequest", false, (w, _f, s) => w.client.reconcilePullRequest({ repositoryUrl: w.repositoryUrl, headBranch: WORKING_BRANCH, baseBranch: "main", title: "Add a" }, s)),
-    op("getPullRequest", true, (w, f, s) => w.client.getPullRequest(w.repositoryUrl, f.number, s)),
-    op("updatePullRequest", false, (w, f, s) => w.client.updatePullRequest(w.repositoryUrl, f.number, { title: "Add a (edited)" }, s)),
-    op("getPullRequestStatus", true, (w, f, s) => w.client.getPullRequestStatus(w.repositoryUrl, f.number, s, budget())),
-    op("listPullRequestFiles", true, (w, f, s) => w.client.listPullRequestFiles(w.repositoryUrl, f.number, { page: 1 }, s)),
-    op("getPullRequestFeedback", true, (w, f, s) => w.client.getPullRequestFeedback(w.repositoryUrl, f.number, s)),
-    op("replyToReviewThread", false, (w, f, s) => w.client.replyToReviewThread(w.repositoryUrl, f.number, f.commentId, "Fixed in the latest push.", s, budget())),
-    op("markPullRequestReady", false, (w, f, s) => w.client.markPullRequestReady(w.repositoryUrl, f.number, s, budget())),
-    op("requestReviewers", false, (w, f, s) => w.client.requestReviewers(w.repositoryUrl, f.number, ["priya"], s, budget())),
-    op("mergePullRequest", false, (w, f, s) => w.client.mergePullRequest(w.repositoryUrl, f.number, { sha: f.headSha, method: "squash" }, s)),
-    op("getJobLogTail", true, (w, _f, s) => w.client.getJobLogTail(w.repositoryUrl, "4321", s, budget())),
+    op("getRepositoryIdentity", true, [R], (w, _f, s) => w.client.getRepositoryIdentity(w.repositoryUrl, s)),
+    op("checkRepository", true, [], (w, _f, s) => w.client.checkRepository({ credentialRef: w.credentialRef, url: w.repositoryUrl }, s), true, false),
+    op("getRepositoryStanding", true, ["contents:read,pull_requests:read"], (w, _f, s) => w.client.getRepositoryStanding(w.repositoryUrl, "priya", s, budget())),
+    op("resolveWithExpiry:clone", true, [R], (w, _f, s) => w.client.resolveWithExpiry(w.credentialRef, w.repositoryUrl, "clone", s)),
+    op("resolveWithExpiry:push", false, ["contents:write"], (w, _f, s) => w.client.resolveWithExpiry(w.credentialRef, w.repositoryUrl, "push", s)),
+    op("getFileAtCommit", true, [R], (w, f, s) => w.client.getFileAtCommit(w.repositoryUrl, "src/a.ts", f.headSha, s)),
+    op("getPathKindAtCommit", true, [R], (w, f, s) => w.client.getPathKindAtCommit?.(w.repositoryUrl, "src/a.ts", f.headSha, s) ?? Promise.resolve("none")),
+    op("getCommitTree", true, [R], (w, f, s) => w.client.getCommitTree(w.repositoryUrl, f.headSha, s)),
+    op("getBranchHead", true, [R], (w, _f, s) => w.client.getBranchHead(w.repositoryUrl, WORKING_BRANCH, s)),
+    op("listWorkingBranches", true, [R], (w, _f, s) => w.client.listWorkingBranches(w.repositoryUrl, { installationId: w.installationId, repositoryId: w.repositoryId }, s, 1)),
+    op("getCommitParents", true, [R], (w, f, s) => w.client.getCommitParents(w.repositoryUrl, f.headSha, s)),
+    op("getDefaultBranchHead", true, [R], (w, _f, s) => w.client.getDefaultBranchHead(w.repositoryUrl, "main", s)),
+    op("getPullRequestMergeObservation", true, ["contents:read,pull_requests:read"], (w, f, s) => w.client.getPullRequestMergeObservation(w.repositoryUrl, f.number, budget(), s)),
+    op("readCodeOwners", true, [R], (w, _f, s) => w.client.readCodeOwners(w.repositoryUrl, "main", s)),
+    op("reconcilePullRequest:found", false, ["contents:read,pull_requests:write"], (w, _f, s) => w.client.reconcilePullRequest({ repositoryUrl: w.repositoryUrl, headBranch: WORKING_BRANCH, baseBranch: "main", title: "Add a" }, s)),
+    // The create request is a different request from the lookup: it runs only on a branch with no pull request.
+    op("reconcilePullRequest:create", false, ["contents:read,pull_requests:write"], (w, f, s) => w.client.reconcilePullRequest({ repositoryUrl: w.repositoryUrl, headBranch: f.freshBranch(), baseBranch: "main", title: "Add b" }, s)),
+    op("getPullRequest", true, ["contents:read,pull_requests:read"], (w, f, s) => w.client.getPullRequest(w.repositoryUrl, f.number, s)),
+    op("updatePullRequest", false, ["contents:read,pull_requests:write"], (w, f, s) => w.client.updatePullRequest(w.repositoryUrl, f.number, { title: "Add a (edited)" }, s)),
+    op("getPullRequestStatus", true, ["checks:read,contents:read,pull_requests:read,statuses:read"], (w, f, s) => w.client.getPullRequestStatus(w.repositoryUrl, f.number, s, budget())),
+    op("listPullRequestFiles", true, ["contents:read,pull_requests:read"], (w, f, s) => w.client.listPullRequestFiles(w.repositoryUrl, f.number, { page: 1 }, s)),
+    op("getPullRequestFeedback", true, ["contents:read,issues:read,pull_requests:read"], (w, f, s) => w.client.getPullRequestFeedback(w.repositoryUrl, f.number, s)),
+    op("replyToReviewThread", false, ["contents:read,pull_requests:write"], (w, f, s) => w.client.replyToReviewThread(w.repositoryUrl, f.number, f.commentId, "Fixed in the latest push.", s, budget())),
+    op("markPullRequestReady", false, ["contents:read,pull_requests:write"], (w, f, s) => w.client.markPullRequestReady(w.repositoryUrl, f.number, s, budget())),
+    op("requestReviewers", false, ["contents:read,pull_requests:write"], (w, f, s) => w.client.requestReviewers(w.repositoryUrl, f.number, ["priya"], s, budget())),
+    op("mergePullRequest", false, ["contents:write,pull_requests:write"], (w, f, s) => w.client.mergePullRequest(w.repositoryUrl, f.number, { sha: f.headSha, method: "squash" }, s)),
+    op("getJobLogTail", true, ["actions:read"], (w, _f, s) => w.client.getJobLogTail(w.repositoryUrl, "4321", s, budget())),
     // No tenant: the lookup reads no organization's binding; its callers hand the answer to the hook.
-    op("installationForRepository", true, (w) => w.client.installationForRepository("acme", "app", { fresh: true }), false),
+    op("installationForRepository", true, [], (w) => w.client.installationForRepository("acme", "app", { fresh: true }), false, false),
   ];
 }
+
+/** For a probe of what each operation mints (a scratch test, never run in the suite). */
+export const operationsForProbe = operations;
 
 const WORKING_BRANCH = "agentx/00000000-0000-4000-8000-000000000001";
 
@@ -282,8 +299,11 @@ export const githubClientChecks: readonly GitHubClientConformanceCheck[] = [
         for (const mint of world.net.tokenRequests()) {
           expect(mint.repositories, `${operation.name} minted a token that is not for the one repository`).toEqual(["app"]);
           if (operation.readOnly) expect(writes(mint.permissions), `${operation.name} is a read and minted ${JSON.stringify(mint.permissions)}`).toEqual([]);
-          expect(Object.keys(mint.permissions).length, `${operation.name} minted a token with no permission`).toBeGreaterThan(0);
+          const minted = Object.entries(mint.permissions).map(([name, level]) => `${name}:${level}`).sort().join(",");
+          expect(operation.mints, `${operation.name} minted ${minted}, which is not one of its permission sets`).toContain(minted);
         }
+        // An operation that never reaches the repository is not tested at all: a path the suite cannot reach must fail loudly, not pass.
+        if (operation.reachesRepository) expect(world.net.repositoryReads().length, `${operation.name} made no request to the repository`).toBeGreaterThan(0);
       }
     },
   },
@@ -294,7 +314,9 @@ export const githubClientChecks: readonly GitHubClientConformanceCheck[] = [
       world.net.clear();
       for (const operation of operations()) await attempt(() => operation.run(world, fixture, world.scope));
       expect(world.net.requests.length).toBeGreaterThan(0);
-      const followsRedirects = world.net.requests.filter((request) => request.redirect !== "error" && request.redirect !== "manual").map((request) => `${request.method} ${request.url.pathname}`);
+      // Only the job-log locate request handles a redirect itself (GitHub answers it with one, to an address checked against an allow-list).
+      const mayHandleRedirect = (request: RecordedRequest): boolean => request.redirect === "manual" && /\/actions\/jobs\/[0-9]+\/logs$/u.test(request.url.pathname);
+      const followsRedirects = world.net.requests.filter((request) => request.redirect !== "error" && !mayHandleRedirect(request)).map((request) => `${request.method} ${request.url.pathname}`);
       expect(followsRedirects, "requests that would follow a redirect").toEqual([]);
       const withoutTimeout = world.net.requests.filter((request) => !request.hasSignal).map((request) => `${request.method} ${request.url.pathname}`);
       expect(withoutTimeout, "requests with no timeout or abort signal").toEqual([]);
@@ -350,6 +372,17 @@ export const githubClientChecks: readonly GitHubClientConformanceCheck[] = [
       }
       expect((await attempt(() => world.client.getFileAtCommit(world.repositoryUrl, "src/a.ts", "not-a-sha", world.scope))).ok).toBe(false);
       expect(world.net.repositoryReads().map((request) => request.url.pathname), "a request was made for an unsafe input").toEqual([]);
+    },
+  },
+  {
+    name: "bodies: a file larger than the caller's cap is refused, never cut and never read whole",
+    async run(world) {
+      const fixture = await world.prepare();
+      const refused = await attempt(() => world.client.getFileAtCommit(world.repositoryUrl, fixture.largeFile, fixture.headSha, world.scope, { maxBytes: 1_000 }));
+      expect(refused.ok, "a file over maxBytes was returned").toBe(false);
+      if (!refused.ok) expect((refused.error as { code?: string }).code).toBe("CONFIG_INVALID");
+      const read = await attempt(() => world.client.getFileAtCommit(world.repositoryUrl, fixture.largeFile, fixture.headSha, world.scope, { maxBytes: 100_000 }));
+      expect(read.ok && typeof read.value === "string" && read.value.length > 1_000).toBe(true);
     },
   },
   {

@@ -1,7 +1,7 @@
 import { createHash, createSign } from "node:crypto";
 import { GitBranchNameSchema, HostRateLimitError, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
-import type { GithubMergeReadBudget } from "../../../aws/workflow-merge-recovery.js";
+import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
 import { checkAgentTokenPermissions, type GitHubAgentTokenPermissions } from "../../../agents/github-agent-tools.js";
 import {
