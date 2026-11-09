@@ -33,6 +33,12 @@ export interface DocumentStoreUnderTest {
   /** Runs the background sweep of expired documents (only for stores with a `ttlAttribute`), and waits for it. */
   sweepExpired?: () => Promise<void>;
   dispose?: () => Promise<void>;
+  /**
+   * Only for a store that keeps its data: shuts this store down cleanly and opens a new one over the same data, as a restart of the
+   * process does. This store must not be used afterwards. `dispose` on any generation cleans up all of them. Absent: the store
+   * keeps nothing across a restart (the in-memory fake), and the restart cases are skipped.
+   */
+  reopen?: () => Promise<DocumentStoreUnderTest>;
 }
 
 export interface DocumentStoreHarness {
@@ -636,6 +642,101 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         expect(attempts).toBeGreaterThanOrEqual(2);
         expect(delivered.map((entry) => entry.kind)).toEqual(["insert"]);
       }));
+
+      const waitFor = async (condition: () => boolean, ms = 15_000): Promise<void> => {
+        for (let waited = 0; !condition() && waited < ms; waited += 5) await new Promise((resolve) => setTimeout(resolve, 5));
+        expect(condition()).toBe(true);
+      };
+
+      it("starts a consumer at the present: what was committed before its first subscription is not delivered", () => withStore(harness, async (under) => {
+        if (under.store.changes === undefined) return;
+        await under.store.put({ item: doc(A, "BEFORE") });
+        const handled: string[] = [];
+        const subscription = await under.store.changes.subscribe("latecomer", async (batch) => void handled.push(...batch.map((entry) => entry.key.sk)));
+        await under.store.put({ item: doc(A, "AFTER") });
+        await waitFor(() => handled.length > 0);
+        await subscription.stop();
+        expect(handled).toEqual(["AFTER"]);
+      }));
+
+      it("gives up on a batch whose handler keeps failing, reports it to onPoison, and goes on with later changes", () => withStore(harness, async (under) => {
+        if (under.store.changes === undefined) return;
+        const poisoned: string[][] = [];
+        const handled: string[] = [];
+        const subscription = await under.store.changes.subscribe("stubborn", async (batch) => {
+          if (batch.some((entry) => entry.key.sk === "BAD")) throw new Error("this batch can never be handled");
+          handled.push(...batch.map((entry) => entry.key.sk));
+        }, { onPoison: (batch) => void poisoned.push(batch.map((entry) => entry.key.sk)) });
+        await under.store.put({ item: doc(A, "BAD") });
+        await waitFor(() => poisoned.length > 0);
+        await under.store.put({ item: doc(A, "GOOD") });
+        await waitFor(() => handled.includes("GOOD"));
+        await subscription.stop();
+        expect(poisoned[0]).toContain("BAD");
+        expect(handled).not.toContain("BAD");
+      }));
+
+      it("marks the removal of an expired document as expired, and an ordinary delete as a write", () => withStore(harness, async (under) => {
+        const { store } = under;
+        if (store.changes === undefined || store.ttlAttribute === undefined || under.sweepExpired === undefined) return;
+        const seen = await collect(under, 3);
+        await store.put({ item: doc(A, "OLD", { [store.ttlAttribute]: Math.floor(Date.now() / 1_000) - 3_600 }) });
+        await store.put({ item: doc(A, "GONE") });
+        await store.delete({ key: { pk: A, sk: "GONE" } });
+        await under.sweepExpired();
+        await seen.done();
+        const removals = seen.changes.filter((entry) => entry.kind === "remove");
+        expect(removals.map((entry) => [entry.key.sk, entry.cause]).sort()).toEqual([["GONE", "write"], ["OLD", "expired"]]);
+        expect(seen.changes.filter((entry) => entry.kind === "insert").every((entry) => entry.cause === "write")).toBe(true);
+      }));
+
+      describe("across a restart (stores that keep their data)", () => {
+        it("resumes a named consumer after the last change it handled, losing none and skipping none", () => withStore(harness, async (first) => {
+          if (first.store.changes === undefined || first.reopen === undefined) return;
+          const handled: string[] = [];
+          const subscription = await first.store.changes.subscribe("durable", async (batch) => void handled.push(...batch.map((entry) => entry.key.sk)));
+          await first.store.put({ item: doc(A, "1") });
+          await waitFor(() => handled.length === 1);
+          await subscription.stop();
+          // Committed while no one is subscribed, and then a restart: the consumer still owes these.
+          await first.store.put({ item: doc(A, "2") });
+          await first.store.update({ key: { pk: A, sk: "2" }, ops: [change.set("v", 2)] });
+          await first.store.put({ item: doc(A, "3") });
+          const second = await first.reopen();
+          try {
+            const again: DocumentChange[] = [];
+            const resumed = await second.store.changes!.subscribe("durable", async (batch) => void again.push(...batch));
+            await waitFor(() => again.length >= 3);
+            await second.store.put({ item: doc(A, "4") });
+            await waitFor(() => again.some((entry) => entry.key.sk === "4"));
+            await resumed.stop();
+            // At least once allows a repeat; it never allows a miss, and the change handled before the restart is not owed again.
+            expect([...new Set(again.map((entry) => `${entry.kind}:${entry.key.sk}`))]).toEqual(["insert:2", "modify:2", "insert:3", "insert:4"]);
+            const sequences = again.map((entry) => entry.sequence);
+            expect(sequences).toEqual([...sequences].sort());
+          } finally {
+            await second.dispose?.();
+          }
+        }));
+
+        it("starts a name that never subscribed at the present, also after a restart", () => withStore(harness, async (first) => {
+          if (first.store.changes === undefined || first.reopen === undefined) return;
+          await first.store.changes.subscribe("old-hand", async () => {});
+          await first.store.put({ item: doc(A, "EARLY") });
+          const second = await first.reopen();
+          try {
+            await second.store.put({ item: doc(A, "MIDDLE") });
+            const handled: string[] = [];
+            const fresh = await second.store.changes!.subscribe("newcomer", async (batch) => void handled.push(...batch.map((entry) => entry.key.sk)));
+            await second.store.put({ item: doc(A, "LATE") });
+            await waitFor(() => handled.length > 0);
+            await fresh.stop();
+            expect(handled).toEqual(["LATE"]);
+          } finally {
+            await second.dispose?.();
+          }
+        }));
+      });
 
       it("gives each named consumer every change", () => withStore(harness, async (under) => {
         if (under.store.changes === undefined) return;
