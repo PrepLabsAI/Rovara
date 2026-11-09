@@ -88,6 +88,13 @@ describe("recordRunCost", () => {
     expect(await recordRunCost({ store }, { ...input, costUsd: 2 })).toBe("already_recorded");
   });
 
+  it("the task flow's record (it names `companyId`, not `orgId`) takes the mark", async () => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "META", companyId: ORG } });
+    expect(await recordRunCost({ store }, { ...input, costUsd: 2 })).toBe("recorded");
+    expect((await store.get({ pk: `DEVTASK#${TASK}`, sk: "META" }))!["runCostRecordedAt"]).toBe(input.endedAt);
+  });
+
   it("the mark is written only on a task of the company", async () => {
     const store = new MemoryDocumentStore();
     await store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "META", orgId: "org_11111111111111111111" } });

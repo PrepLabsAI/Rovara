@@ -111,7 +111,7 @@ export async function recordRunCost(deps: { store: Pick<DocumentStore, "transact
   const agentId = input.agentId ?? ROVARA_CODE_AGENT_ID;
   const mark: TransactItem = {
     kind: "update", key: taskKey, ops: [{ op: "set", path: ["runCostRecordedAt"], value: input.endedAt }],
-    condition: when.and(when.present(), when.eq("orgId", input.orgId), when.notExists("runCostRecordedAt")),
+    condition: when.and(when.present(), when.or(when.eq("companyId", input.orgId), when.eq("orgId", input.orgId)), when.notExists("runCostRecordedAt")),
   };
   const item: TransactItem = {
     kind: "put",
