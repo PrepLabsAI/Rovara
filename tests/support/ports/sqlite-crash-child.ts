@@ -2,7 +2,7 @@
 // at a point it announces on stdout, so nothing here ever closes the file cleanly.
 //   usage: node --import tsx sqlite-crash-child.ts <mode> <database path> [clock ms]
 import { writeSync } from "node:fs";
-import { OUTBOX_PENDING_INDEX, change, type DocumentChange } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX, change, when, type DocumentChange } from "@agentx/contracts";
 import { SqliteDatabase, SqliteDocumentStore, SqliteQueueService } from "../../../packages/local-adapters/src/index.js";
 
 const [mode, path, clock] = process.argv.slice(2);
@@ -26,6 +26,34 @@ async function main(): Promise<void> {
       if (round === 50) say("READY");
       if (round % 10 === 0) await new Promise((resolve) => setImmediate(resolve));
     }
+  } else if (mode === "contend") {
+    // One of several processes on one file: race for 40 claims, then add to a shared counter. Exits normally and says what it won.
+    const store = SqliteDocumentStore.open({ path, changeFeed: false, busyTimeoutMs: 30_000 });
+    let wins = 0;
+    for (let key = 0; key < 40; key += 1) {
+      const result = await store.put({ item: { pk: PK, sk: `CLAIM#${String(key).padStart(2, "0")}`, by: process.pid }, condition: when.absent() });
+      if (result.applied) wins += 1;
+    }
+    for (let round = 0; round < 150; round += 1) await store.update({ key: { pk: PK, sk: "COUNTER" }, ops: [change.add("n", 1)] });
+    say(`WINS ${wins}`);
+    await store.close();
+    process.exit(0);
+  } else if (mode === "consume") {
+    // One of several consumers of one queue file: take and acknowledge until the queue is empty, and say which messages it had.
+    const service = SqliteQueueService.open({ path, busyTimeoutMs: 30_000 });
+    const queue = await service.queue("jobs", { visibilityTimeoutSeconds: 600 });
+    const mine: unknown[] = [];
+    for (;;) {
+      const batch = await queue.receive({ maxMessages: 3 });
+      if (batch.length === 0) break;
+      for (const message of batch) {
+        mine.push(message.body);
+        await queue.ack(message.receiptHandle);
+      }
+    }
+    say(`GOT ${JSON.stringify(mine)}`);
+    await service.close();
+    process.exit(0);
   } else if (mode === "uncommitted") {
     const store = SqliteDocumentStore.open({ path, changeFeed: false });
     await store.put({ item: { pk: PK, sk: "COMMITTED", v: 1 } });

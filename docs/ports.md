@@ -122,8 +122,8 @@ SQLite `Queue`. They are plug-ins for the registry and are not wired into the br
 { "point": "queue", "name": "sqlite", "module": "@agentx/local-adapters/queue", "settings": { "path": ".rovara/state.db" } }
 ```
 
-The store plug-in always keeps `OUTBOX_PENDING_INDEX`, and `ttlAttribute` is `expiresAt` unless set; `indexes` adds the core's other
-indexes. The queue may share the store's file (two connections) or use its own. Both plug-ins refuse a setting they do not know, and a
+The store plug-in always keeps `OUTBOX_PENDING_INDEX`, and `ttlAttribute` is `expiresAt` unless set (`null` turns expiry off); `indexes`
+adds the core's other indexes. The queue may share the store's file (two connections) or use its own. Both plug-ins refuse a setting they do not know, and a
 `:memory:` path. `SqliteDocumentStore` and `SqliteQueueService` have `close()`, which the port does not: the process that loads them closes them.
 
 **The library is `node:sqlite`**, which is inside Node (the repository pins `>=22.19 <23`; SQLite 3.51 with WAL). Nothing is downloaded or
@@ -137,9 +137,10 @@ index tables, the time-to-live table and the change log in that one transaction.
 code point order the port promises. The suites in `tests/support/ports/` run unchanged against it (`tests/unit/local-adapters-*.test.ts`), and a
 crash test kills a child process with SIGKILL and reopens the file.
 
-**Change feed.** Changes are written to a log table in the writing transaction, only while some consumer name is registered. A name that
+**Change feed.** Changes are written to a log table in the writing transaction by every connection (also one opened with `changeFeed: false`, which only
+means it does not subscribe), only while some consumer name is registered in the file. A name that
 subscribes for the first time starts at the present; after that it resumes after its stored checkpoint, which is saved after the handler
-returns (a crash in between delivers the batch again). A handler that throws is retried with a doubling delay (8 tries by default), then
+returns (a crash in between delivers the batch again). A handler that throws is retried with a doubling delay (10 tries by default), then
 `onPoison` is called, the checkpoint moves on and `droppedBatches` counts it. `sequence` is the log's row number, padded to 20 digits. The log
 is trimmed to the slowest registered consumer, so a consumer that is registered but never subscribes again holds the log forever: retire it
 with `removeConsumer(name)`.
@@ -162,12 +163,17 @@ with `removeConsumer(name)`.
   Numbers are JavaScript doubles; an index on a number sorts them as doubles.
 - **Paging.** A page is cut at `limit` before the filter, so a filtered page can be short with a cursor, as on DynamoDB. A cursor names the
   last item, so a deleted item does not break it.
-- **Indexes.** The set is fixed for one open. Opening the file with another set rebuilds the changed index tables from the documents (time grows
-  with the number of documents); a document that does not fit a changed index (wrong sort type) is left out of it, not refused.
-- **Expiry.** The sweep runs every 60 s (`sweepIntervalMs`; 0 for none) and its removals carry `cause: "expired"`. A document is readable until then.
+- **Indexes.** The file remembers its index set and time-to-live attribute, because every connection must maintain the same tables.
+  Opening it with a different set is refused (`invalid_request`) unless the opener passes `migrate: true`; the storage plug-in always does, so a
+  changed config takes effect at the next start. A migration builds the new index tables from the documents (time grows with their number),
+  leaves out a document that does not fit a changed index (wrong sort type), and drops the tables of indexes no longer named. Connections still
+  open on the old layout then refuse to write or query an index (`unavailable`) until they are reopened.
+- **Expiry.** The sweep runs every 60 s (`sweepIntervalMs`; 0 for none), in pages of 100 documents, at most 50 ms at a time, and its removals
+  carry `cause: "expired"`. A document is readable until then.
 - **Queue.** Options (visibility, `maxReceiveCount`, `ordered`) belong to the process's declaration and are not stored; the messages, dead
   letters and the 5 minute dedupe window are. `receive` is a poll (an idle poll reads only); `waitSeconds` polls until the time is up.
-- **Files.** The folder is created `0700` and the file `0600`; the `-wal` and `-shm` files take the file's mode.
+- **Files.** A folder the store creates is `0700`; the file, and any `-wal` and `-shm` beside it, are set to `0600` at open. A folder that already
+  existed keeps its mode.
 - **Size.** The port's limits hold (400 KB a document, 4 MiB a transaction, 256 KB a message). Nothing is tuned for a database past a few GB.
 
 ## Worker machines

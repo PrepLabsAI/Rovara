@@ -39,8 +39,9 @@ export const plugin: PluginModule<"storage"> = {
   create(context) {
     const settings = context.settings;
     allowOnly(settings, SETTINGS);
-    const ttl = settings.ttlAttribute ?? "expiresAt";
-    if (typeof ttl !== "string") throw new SettingsError("ttlAttribute is text");
+    // Absent: `expiresAt`. `null`: no expiry at all.
+    const ttl = settings.ttlAttribute === undefined ? "expiresAt" : settings.ttlAttribute;
+    if (ttl !== null && typeof ttl !== "string") throw new SettingsError("ttlAttribute is text, or null for no expiry");
     const busyTimeoutMs = optionalNumber(settings, "busyTimeoutMs", 0, 600_000);
     const synchronous = synchronousSetting(settings);
     const sweepIntervalMs = optionalNumber(settings, "sweepIntervalMs", 0, 86_400_000);
@@ -64,7 +65,10 @@ export const plugin: PluginModule<"storage"> = {
     return SqliteDocumentStore.open({
       path: databasePath(settings),
       indexes: indexesOf(settings.indexes),
-      ttlAttribute: ttl,
+      ...(ttl === null ? {} : { ttlAttribute: ttl }),
+      // The plug-in's config owns the file's layout: a new index in the config is built at the next start.
+      migrate: true,
+      nowSeconds: () => Math.floor(context.now().getTime() / 1_000),
       ...(busyTimeoutMs === undefined ? {} : { busyTimeoutMs }),
       ...(synchronous === undefined ? {} : { synchronous }),
       ...(sweepIntervalMs === undefined ? {} : { sweepIntervalMs }),

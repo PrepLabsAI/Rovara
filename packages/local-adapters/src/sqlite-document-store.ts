@@ -20,7 +20,6 @@ import {
   assertValidTransaction,
   evaluateCondition,
   indexPlacement,
-  when,
   type Condition,
   type DeleteRequest,
   type DocumentChangeFeed,
@@ -38,16 +37,26 @@ import {
   type UpdateRequest,
   type WriteResult,
 } from "@agentx/contracts";
-import { SqliteChangeFeed, CHANGE_FEED_SCHEMA, type LoggedChange, type SqliteChangeFeedOptions } from "./sqlite-change-feed.js";
-import { SqliteDatabase, SqliteFailure, storableText, type SqliteDatabaseOptions, type SqliteValue } from "./sqlite-database.js";
+import { CHANGE_FEED_SCHEMA, SqliteChangeFeed, consumersRegistered, logChanges, translateFailure, type LoggedChange, type SqliteChangeFeedOptions } from "./sqlite-change-feed.js";
+import { SqliteDatabase, storableText, type SqliteDatabaseOptions, type SqliteValue } from "./sqlite-database.js";
 
 const SCHEMA_VERSION = "1";
+const SWEEP_PAGE = 100;
 
 export interface SqliteDocumentStoreOptions {
   /** The connection to use. The store does not close a connection it was given. */
   database: SqliteDatabase;
-  /** The sparse secondary indexes, fixed for this open. Changing them between opens rebuilds the affected index tables. */
+  /**
+   * The sparse secondary indexes, fixed for this open. The file remembers its indexes and time-to-live attribute: opening it with a
+   * different set is refused unless `migrate` is true, because every connection to the file must maintain the same tables.
+   */
   indexes?: readonly IndexDefinition[];
+  /**
+   * Allow this open to change the file's indexes and time-to-live attribute to the ones given (new index tables are built from the
+   * documents, tables of indexes no longer named are dropped). Other connections that were open with the old set refuse to write after
+   * that, and must be reopened. Default false.
+   */
+  migrate?: boolean;
   /** The top-level number attribute (seconds since the epoch) after which a document may be swept. */
   ttlAttribute?: string;
   /** Seconds since the epoch, for the sweep. Default: the real clock. */
@@ -83,8 +92,11 @@ export class SqliteDocumentStore implements DocumentStore {
   readonly #nowSeconds: () => number;
   readonly #feed: SqliteChangeFeed | undefined;
   #sweepTimer: NodeJS.Timeout | undefined;
+  #sweepFollowUp: NodeJS.Timeout | undefined;
   #sweeping = false;
   #closed = false;
+  /** The layout generation of the file this store was opened on; a change by another connection makes writes refuse. */
+  #generation = "";
 
   /** Opens (and creates) the database file and a store over it. `close()` closes the file. */
   static open(options: SqliteDocumentStoreOpenOptions): SqliteDocumentStore {
@@ -117,20 +129,14 @@ export class SqliteDocumentStore implements DocumentStore {
       if (options.ttlAttribute === "" || options.ttlAttribute === "pk" || options.ttlAttribute === "sk") throw new Error("ttlAttribute names a top-level attribute other than the key");
       this.ttlAttribute = options.ttlAttribute;
     }
-    this.#translate(() => this.#initialise());
+    this.#translate(() => this.#initialise(options.migrate === true));
     if (options.changeFeed !== false) {
       this.#feed = new SqliteChangeFeed(this.#db, options.changeFeed ?? {});
       this.changes = this.#feed;
     }
     const sweepMs = options.sweepIntervalMs ?? 60_000;
     if (this.ttlAttribute !== undefined && sweepMs > 0) {
-      this.#sweepTimer = setInterval(() => {
-        try {
-          this.sweepExpired();
-        } catch {
-          // A busy or failing file is retried on the next tick.
-        }
-      }, sweepMs);
+      this.#sweepTimer = setInterval(() => this.#sweepTick(), sweepMs);
       this.#sweepTimer.unref();
     }
   }
@@ -140,7 +146,9 @@ export class SqliteDocumentStore implements DocumentStore {
     if (this.#closed) return;
     this.#closed = true;
     if (this.#sweepTimer !== undefined) clearInterval(this.#sweepTimer);
+    if (this.#sweepFollowUp !== undefined) clearTimeout(this.#sweepFollowUp);
     this.#sweepTimer = undefined;
+    this.#sweepFollowUp = undefined;
     await this.#feed?.close();
     if (this.#ownsDatabase) this.#db.close();
   }
@@ -217,7 +225,10 @@ export class SqliteDocumentStore implements DocumentStore {
     }
     const direction = descending ? "DESC" : "ASC";
     const sql = `SELECT t.ix_sort AS ix_sort, t.pk AS pk, t.sk AS sk, d.doc AS doc FROM ${plan.table} t JOIN rv_doc d ON d.pk = t.pk AND d.sk = t.sk WHERE ${clauses.join(" AND ")} ORDER BY t.ix_sort ${direction}, t.pk ${direction}, t.sk ${direction} LIMIT ?`;
-    const rows = this.#translate(() => this.#db.all(sql, ...params, limit + 1));
+    const rows = this.#translate(() => {
+      this.#assertLayout();
+      return this.#db.all(sql, ...params, limit + 1);
+    });
     return this.#page(
       rows.map((row) => ({ doc: parseDocument(row.doc), position: { pk: row.pk as string, sk: row.sk as string, ...(plan.sortType === "none" ? {} : { sort: row.ix_sort as string | number }) } })),
       limit,
@@ -262,31 +273,47 @@ export class SqliteDocumentStore implements DocumentStore {
 
   /**
    * Deletes the documents whose time-to-live attribute is in the past, as a store with a background sweep would, and tells the change
-   * feed `cause: "expired"`. Returns how many it removed. Runs by itself every `sweepIntervalMs`.
+   * feed `cause: "expired"`. Returns how many it removed. It works in pages of 100, one transaction each. Runs by itself every
+   * `sweepIntervalMs`, a little at a time so the event loop is not held.
    */
   sweepExpired(): number {
+    let removed = 0;
+    for (;;) {
+      const page = this.#sweepPage();
+      removed += page;
+      if (page < SWEEP_PAGE) return removed;
+    }
+  }
+
+  /** One page of expired documents: listed and deleted in one transaction, so a document renewed meanwhile is not removed. */
+  #sweepPage(): number {
     const ttl = this.ttlAttribute;
     if (ttl === undefined || this.#sweeping || this.#closed) return 0;
     this.#sweeping = true;
-    let removed = 0;
     try {
-      for (;;) {
-        const now = this.#nowSeconds();
-        const due = this.#translate(() => this.#db.all("SELECT pk, sk FROM rv_doc_ttl WHERE expires <= ? ORDER BY expires, pk, sk LIMIT 100", now));
-        if (due.length === 0) break;
-        let progress = 0;
-        for (const row of due) {
-          // The condition is read again inside the transaction: a document renewed since the list was read stays.
-          const result = this.#commit([{ kind: "delete", key: { pk: row.pk as string, sk: row.sk as string }, condition: when.lte(ttl, now) }], "expired");
-          if (result.applied) progress += 1;
-        }
-        removed += progress;
-        if (progress === 0) break;
-      }
+      const now = this.#nowSeconds();
+      const outcome = this.#commit(() => this.#db.all("SELECT pk, sk FROM rv_doc_ttl WHERE expires <= ? ORDER BY expires, pk, sk LIMIT ?", now, SWEEP_PAGE).map((row): TransactItem => ({ kind: "delete", key: { pk: row.pk as string, sk: row.sk as string } })), "expired");
+      return outcome.applied ? outcome.before.filter((item) => item !== undefined).length : 0;
     } finally {
       this.#sweeping = false;
     }
-    return removed;
+  }
+
+  /** The timer's work: pages for at most 50 ms, then, if more is due, another go after the event loop has had a turn. */
+  #sweepTick(): void {
+    if (this.#closed) return;
+    try {
+      const until = Date.now() + 50;
+      let page: number;
+      do page = this.#sweepPage();
+      while (page === SWEEP_PAGE && Date.now() < until);
+      if (page === SWEEP_PAGE) {
+        this.#sweepFollowUp = setTimeout(() => this.#sweepTick(), 20);
+        this.#sweepFollowUp.unref();
+      }
+    } catch {
+      // A busy or failing file is retried on the next tick.
+    }
   }
 
   // ---- Inside ----
@@ -314,15 +341,13 @@ export class SqliteDocumentStore implements DocumentStore {
   /** Maps the store's failures to the port's error codes. A busy file on a write is a lost race (`conflict`); on a read, `throttled`. */
   #translate<T>(body: () => T, mode: "read" | "write" = "read"): T {
     if (this.#closed) throw new DocumentStoreError("unavailable", "the store is closed");
-    try {
-      return body();
-    } catch (error) {
-      if (error instanceof SqliteFailure) {
-        if (error.busy) throw new DocumentStoreError(mode === "write" ? "conflict" : "throttled", "the database file is busy: another connection holds its lock");
-        throw new DocumentStoreError("unavailable", `the database failed (${error.message})`);
-      }
-      throw error;
-    }
+    return translateFailure(body, mode);
+  }
+
+  /** Refuses to go on if another connection changed the file's indexes or time-to-live attribute after this store was opened. Call inside the transaction or query. */
+  #assertLayout(): void {
+    const row = this.#db.get("SELECT value FROM rv_doc_meta WHERE key = 'generation'");
+    if (row?.value !== this.#generation) throw new DocumentStoreError("unavailable", "the database's indexes were changed by another connection since this store was opened; reopen the store");
   }
 
   #read(key: DocumentKey): StoredDocument | undefined {
@@ -391,8 +416,10 @@ export class SqliteDocumentStore implements DocumentStore {
   }
 
   /** Checks every condition, then applies every step, or none: one SQLite write transaction. */
-  #commit(steps: readonly TransactItem[], cause: "write" | "expired" = "write"): { applied: true; before: (StoredDocument | undefined)[]; after: (StoredDocument | undefined)[] } | { applied: false; failed: number[] } {
+  #commit(provided: readonly TransactItem[] | (() => TransactItem[]), cause: "write" | "expired" = "write"): { applied: true; before: (StoredDocument | undefined)[]; after: (StoredDocument | undefined)[] } | { applied: false; failed: number[] } {
     const outcome = this.#translate(() => this.#db.write(() => {
+      this.#assertLayout();
+      const steps = typeof provided === "function" ? provided() : provided;
       const before = steps.map((step) => this.#read(step.kind === "put" ? step.item : step.key));
       const failed: number[] = [];
       steps.forEach((step, index) => {
@@ -434,7 +461,8 @@ export class SqliteDocumentStore implements DocumentStore {
           ...(next === undefined ? {} : { after: next }),
         });
       });
-      if (logged.length > 0 && this.#feed !== undefined && this.#feed.hasConsumers()) this.#feed.log(logged);
+      // Every writer logs while any consumer is registered in the file, whether or not this store runs a feed itself.
+      if (logged.length > 0 && consumersRegistered(this.#db)) logChanges(this.#db, logged);
       return { applied: true as const, before, after };
     }), "write");
     if (outcome.applied) this.#feed?.kick();
@@ -462,7 +490,7 @@ export class SqliteDocumentStore implements DocumentStore {
 
   // ---- Schema ----
 
-  #initialise(): void {
+  #initialise(migrate: boolean): void {
     const db = this.#db;
     db.write(() => {
       db.exec(`
@@ -473,8 +501,24 @@ export class SqliteDocumentStore implements DocumentStore {
       const version = db.get("SELECT value FROM rv_doc_meta WHERE key = 'schema'");
       if (version === undefined) db.run("INSERT INTO rv_doc_meta (key, value) VALUES ('schema', ?)", SCHEMA_VERSION);
       else if (version.value !== SCHEMA_VERSION) throw new DocumentStoreError("unavailable", `the database file was written by a newer version of the store (schema ${String(version.value)})`);
-      this.#reconcileIndexes();
-      this.#reconcileTtl();
+      // The file remembers its layout. Every connection must maintain the same index and time-to-live tables, so a different request is
+      // refused unless the caller says it is migrating the file.
+      const storedIndexes = db.get("SELECT value FROM rv_doc_meta WHERE key = 'indexes'");
+      const storedTtl = db.get("SELECT value FROM rv_doc_meta WHERE key = 'ttl'");
+      const wantedIndexes = this.#plans.map(describeIndex).sort();
+      const wantedTtl = this.ttlAttribute ?? "";
+      const fresh = storedIndexes === undefined;
+      const differs = !fresh && (JSON.stringify((JSON.parse(storedIndexes.value as string) as string[]).slice().sort()) !== JSON.stringify(wantedIndexes) || (storedTtl?.value ?? "") !== wantedTtl);
+      if (differs && !migrate) {
+        throw new DocumentStoreError("invalid_request", "this database file was built with other indexes or another time-to-live attribute than the ones requested; open it with the same ones, or with migrate: true to change the file");
+      }
+      if (fresh || differs) {
+        this.#reconcileIndexes();
+        this.#reconcileTtl();
+        const generation = db.get("SELECT value FROM rv_doc_meta WHERE key = 'generation'");
+        db.run("INSERT OR REPLACE INTO rv_doc_meta (key, value) VALUES ('generation', ?)", String(Number(generation?.value ?? 0) + 1));
+      }
+      this.#generation = db.get("SELECT value FROM rv_doc_meta WHERE key = 'generation'")!.value as string;
     });
   }
 

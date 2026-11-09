@@ -71,6 +71,14 @@ function openConnection(options: SqliteDatabaseOptions): DatabaseSync {
       mkdirSync(dirname(options.path), { recursive: true, mode: 0o700 });
       closeSync(openSync(options.path, "a", 0o600));
       chmodSync(options.path, 0o600);
+      // Side files left by an earlier run keep the mode they were made with; make them private too.
+      for (const suffix of ["-wal", "-shm"]) {
+        try {
+          chmodSync(options.path + suffix, 0o600);
+        } catch {
+          // There is none yet; SQLite will make it with the main file's mode.
+        }
+      }
     }
     db = new DatabaseSync(options.path);
     db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);

@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { queryAll, type DocumentChange } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX, queryAll, type DocumentChange } from "@agentx/contracts";
 import { SqliteDatabase, SqliteDocumentStore, SqliteQueueService } from "../../packages/local-adapters/src/index.js";
 
 const CHILD = join(import.meta.dirname, "../support/ports/sqlite-crash-child.ts");
@@ -46,17 +46,58 @@ async function runAndKill(mode: string, path: string, marker: string, extra: str
   await exited;
 }
 
+/** Runs the child to its normal end and returns what it printed. */
+async function runToEnd(mode: string, path: string): Promise<string> {
+  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", "--import", "tsx", CHILD, mode, path], { stdio: ["ignore", "pipe", "pipe"] });
+  children.push(child);
+  let output = "";
+  let errors = "";
+  child.stdout.on("data", (chunk: Buffer) => void (output += chunk.toString()));
+  child.stderr.on("data", (chunk: Buffer) => void (errors += chunk.toString()));
+  const code = await new Promise<number | null>((resolve) => child.once("exit", resolve));
+  if (code !== 0) throw new Error(`the ${mode} child failed (${String(code)}): ${errors}`);
+  return output;
+}
+
 async function freshFile(): Promise<string> {
   const folder = await mkdtemp(join(tmpdir(), "local-crash-"));
   folders.push(folder);
   return join(folder, "state.db");
 }
 
+describe("the SQLite adapters under several processes", () => {
+  it("lets exactly one of three processes win each claim, and loses no add", async () => {
+    const path = await freshFile();
+    await SqliteDocumentStore.open({ path, changeFeed: false }).close();
+    const outputs = await Promise.all([runToEnd("contend", path), runToEnd("contend", path), runToEnd("contend", path)]);
+    const wins = outputs.map((output) => Number(/WINS (\d+)/.exec(output)![1]));
+    expect(wins.reduce((sum, count) => sum + count, 0)).toBe(40);
+    const store = SqliteDocumentStore.open({ path, changeFeed: false });
+    try {
+      expect((await store.get({ pk: PK, sk: "COUNTER" }))!.n).toBe(450);
+      expect(await queryAll(store, { pk: PK, sk: { op: "beginsWith", prefix: "CLAIM#" } })).toHaveLength(40);
+    } finally {
+      await store.close();
+    }
+  }, 120_000);
+
+  it("hands each message to exactly one of three consuming processes", async () => {
+    const path = await freshFile();
+    const service = SqliteQueueService.open({ path });
+    const queue = await service.queue("jobs", { visibilityTimeoutSeconds: 600 });
+    for (let index = 0; index < 150; index += 1) await queue.enqueue({ body: index });
+    await service.close();
+    const outputs = await Promise.all([runToEnd("consume", path), runToEnd("consume", path), runToEnd("consume", path)]);
+    const got = outputs.flatMap((output) => JSON.parse(/GOT (.*)/.exec(output)![1]!) as number[]);
+    expect([...got].sort((a, b) => a - b)).toEqual(Array.from({ length: 150 }, (_, index) => index));
+  }, 120_000);
+});
+
 describe("the SQLite adapters after a process is killed", () => {
   it.each([0, 7, 23, 61])("never shows half of a transaction, and keeps every one that was acknowledged (killed %i ms after round 50)", async (delayMs) => {
     const path = await freshFile();
     await runAndKill("counters", path, "READY", [], delayMs);
-    const store = SqliteDocumentStore.open({ path, changeFeed: false });
+    const store = SqliteDocumentStore.open({ path, indexes: [OUTBOX_PENDING_INDEX], changeFeed: false });
     try {
       const left = (await store.get({ pk: PK, sk: "L" }))!.n as number;
       const right = (await store.get({ pk: PK, sk: "R" }))!.n as number;

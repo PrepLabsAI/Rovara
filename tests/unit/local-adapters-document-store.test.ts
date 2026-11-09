@@ -93,16 +93,16 @@ describe("the SQLite store: a file that outlives the process", () => {
     await first.put({ item: { pk: PK, sk: "3", owner: "bob" } });
     await first.close();
     const indexes: IndexDefinition[] = [{ name: "byOwner", partitionAttribute: "owner", sortAttribute: "rank", sortType: "number" }];
-    const second = open(path, { indexes });
+    const second = open(path, { indexes, migrate: true });
     expect((await queryIndexAll(second, { index: "byOwner", partition: "ann" })).map((item) => item.sk)).toEqual(["2", "1"]);
     expect(await queryIndexAll(second, { index: "byOwner", partition: "bob" })).toEqual([]);
     await second.put({ item: { pk: PK, sk: "3", owner: "ann", rank: 0 } });
     await second.close();
     // The same index with another sort type is rebuilt; documents that do not fit it are left out rather than failing the open.
-    const third = open(path, { indexes: [{ name: "byOwner", partitionAttribute: "owner", sortAttribute: "owner" }] });
+    const third = open(path, { indexes: [{ name: "byOwner", partitionAttribute: "owner", sortAttribute: "owner" }], migrate: true });
     expect((await queryIndexAll(third, { index: "byOwner", partition: "ann" })).map((item) => item.sk)).toEqual(["1", "2", "3"]);
     await third.close();
-    const fourth = open(path);
+    const fourth = open(path, { migrate: true });
     await expect(fourth.queryIndex({ index: "byOwner", partition: "ann" })).rejects.toMatchObject({ code: "invalid_request" });
   });
 
@@ -113,7 +113,7 @@ describe("the SQLite store: a file that outlives the process", () => {
     await first.put({ item: { pk: PK, sk: "OLD", expiresAt: 500 } });
     await first.put({ item: { pk: PK, sk: "SOON", expiresAt: 1_500 } });
     await first.close();
-    const second = open(path, { ttlAttribute: "expiresAt", nowSeconds: () => now });
+    const second = open(path, { ttlAttribute: "expiresAt", nowSeconds: () => now, migrate: true });
     expect(second.sweepExpired()).toBe(1);
     expect(await second.get({ pk: PK, sk: "OLD" })).toBeUndefined();
     // A document renewed after it was listed is not swept.
@@ -122,6 +122,20 @@ describe("the SQLite store: a file that outlives the process", () => {
     expect(second.sweepExpired()).toBe(0);
     now = 9_000;
     expect(second.sweepExpired()).toBe(1);
+  });
+
+  it("sweeps a backlog in pages, and a dotted attribute name is one attribute name", async () => {
+    const store = open(join(await folder(), "s.db"), { ttlAttribute: "ttl.at", nowSeconds: () => 1_000 });
+    for (let index = 0; index < 250; index += 1) await store.put({ item: { pk: PK, sk: `E${String(index).padStart(3, "0")}`, "ttl.at": 10 } });
+    await store.put({ item: { pk: PK, sk: "KEEP", "ttl.at": 5_000 } });
+    const seen: DocumentChange[] = [];
+    await store.changes!.subscribe("c", async (batch) => void seen.push(...batch));
+    expect(store.sweepExpired()).toBe(250);
+    await store.settled();
+    expect(seen).toHaveLength(250);
+    expect(seen.every((entry) => entry.cause === "expired" && entry.kind === "remove")).toBe(true);
+    expect(await store.get({ pk: PK, sk: "KEEP" })).toBeDefined();
+    expect(store.sweepExpired()).toBe(0);
   });
 
   it("sweeps by itself on a timer", async () => {
@@ -142,7 +156,50 @@ describe("the SQLite store: a file that outlives the process", () => {
   });
 });
 
+describe("the SQLite store: one layout for every connection", () => {
+  const byOwner: IndexDefinition[] = [{ name: "byOwner", partitionAttribute: "owner" }];
+
+  it("refuses to open a file with other indexes or another expiry attribute unless asked to migrate", async () => {
+    const path = join(await folder(), "s.db");
+    const indexed = open(path, { indexes: byOwner, ttlAttribute: "expiresAt" });
+    await indexed.put({ item: { pk: PK, sk: "1", owner: "ann" } });
+    expect(() => SqliteDocumentStore.open({ path })).toThrow(/migrate: true/);
+    expect(() => SqliteDocumentStore.open({ path, indexes: byOwner })).toThrow(/migrate: true/);
+    // The refused opens changed nothing: the indexed store goes on, and a matching open is fine.
+    expect((await indexed.put({ item: { pk: PK, sk: "2", owner: "ann" } })).applied).toBe(true);
+    const same = open(path, { indexes: [...byOwner], ttlAttribute: "expiresAt" });
+    expect((await queryIndexAll(same, { index: "byOwner", partition: "ann" })).map((item) => item.sk)).toEqual(["1", "2"]);
+  });
+
+  it("makes a connection that was open on the old layout refuse to write after a migration, instead of corrupting an index", async () => {
+    const path = join(await folder(), "s.db");
+    const old = open(path, { indexes: byOwner });
+    await old.put({ item: { pk: PK, sk: "1", owner: "ann" } });
+    const migrated = open(path, { migrate: true });
+    await expect(old.put({ item: { pk: PK, sk: "2", owner: "bob" } })).rejects.toMatchObject({ code: "unavailable" });
+    await expect(old.queryIndex({ index: "byOwner", partition: "ann" })).rejects.toMatchObject({ code: "unavailable" });
+    expect(await migrated.get({ pk: PK, sk: "2" })).toBeUndefined();
+    await old.close();
+    // Reopened with the new layout it works again.
+    const again = open(path, { migrate: true });
+    expect((await again.put({ item: { pk: PK, sk: "2", owner: "bob" } })).applied).toBe(true);
+  });
+});
+
 describe("the SQLite store: two connections to one file", () => {
+  it("delivers the changes of a connection that runs no feed of its own, to a consumer registered on another", async () => {
+    const path = join(await folder(), "s.db");
+    const subscriber = open(path);
+    const quiet = open(path, { changeFeed: false });
+    const seen: DocumentChange[] = [];
+    await subscriber.changes!.subscribe("relay", async (batch) => void seen.push(...batch));
+    await subscriber.put({ item: { pk: PK, sk: "via-subscriber" } });
+    await quiet.put({ item: { pk: PK, sk: "via-quiet" } });
+    await quiet.transact([{ kind: "put", item: { pk: PK, sk: "via-quiet-2" } }]);
+    for (let waited = 0; seen.length < 3 && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen.map((entry) => entry.key.sk)).toEqual(["via-subscriber", "via-quiet", "via-quiet-2"]);
+  });
+
   it("lets exactly one of many racing creators win across two connections", async () => {
     const path = join(await folder(), "s.db");
     const one = open(path);
@@ -212,6 +269,23 @@ describe("the SQLite store: the change log", () => {
     raw.close();
   });
 
+  it("stops a consumer that another connection retired, and lets the name be taken again after stop() finishes", async () => {
+    const path = join(await folder(), "s.db");
+    const store = open(path);
+    const other = open(path);
+    const first = await store.changes!.subscribe("c", async () => {});
+    await first.stop();
+    const again = await store.changes!.subscribe("c", async () => {});
+    await again.stop();
+    // Retired from elsewhere while subscribed here: the consumer stops reading and the failure is counted.
+    await store.changes!.subscribe("gone", async () => {});
+    expect(other.removeConsumer("gone")).toBe(true);
+    await store.put({ item: { pk: PK, sk: "x" } });
+    for (let waited = 0; (store.changes as unknown as { readFailures: number }).readFailures === 0 && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect((store.changes as unknown as { readFailures: number }).readFailures).toBeGreaterThan(0);
+    await expect(store.changes!.subscribe("gone", async () => {})).resolves.toBeDefined();
+  });
+
   it("refuses a second subscription under one name, and works with the feed off", async () => {
     const store = open(join(await folder(), "s.db"));
     await store.changes!.subscribe("same", async () => {});
@@ -234,5 +308,23 @@ describe("the SQLite store: the change log", () => {
     expect(raw.get("SELECT COUNT(*) AS n FROM rv_doc_change")!.n).toBe(0);
     expect(await store.get({ pk: PK, sk: "3" })).toBeUndefined();
     raw.close();
+  });
+});
+
+describe("the SQLite connection", () => {
+  it("rolls back everything a transaction wrote when its body throws after the first write, and joins a nested one", async () => {
+    const path = join(await folder(), "raw.db");
+    const db = new SqliteDatabase({ path });
+    db.exec("CREATE TABLE t (a TEXT PRIMARY KEY, b TEXT)");
+    expect(() => db.write(() => {
+      db.run("INSERT INTO t VALUES ('one', 'x')");
+      db.write(() => db.run("INSERT INTO t VALUES ('two', 'y')"));
+      db.run("INSERT INTO t VALUES ('one', 'duplicate')");
+    })).toThrow();
+    expect(db.all("SELECT * FROM t")).toEqual([]);
+    expect(db.write(() => db.run("INSERT INTO t VALUES ('three', 'z')"))).toBe(1);
+    expect(db.all("SELECT a FROM t").map((row) => row.a)).toEqual(["three"]);
+    db.close();
+    expect(() => db.run("SELECT 1")).toThrow(/closed/);
   });
 });

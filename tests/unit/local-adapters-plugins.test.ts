@@ -61,6 +61,23 @@ describe("the SQLite plug-ins", () => {
     await store.update({ key: { pk, sk: "META" }, ops: [change.add("rank", 1)] });
   });
 
+  it("run expiry on the injected clock, or not at all with ttlAttribute null", async () => {
+    const folder = await mkdtemp(join(tmpdir(), "local-plugin-"));
+    folders.push(folder);
+    const registry = createAdapterRegistry();
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "storage", name: "sqlite", module: "@agentx/local-adapters/storage", settings: { path: join(folder, "a.db"), sweepIntervalMs: 0 } }] }), { registry, importModule: importer, now: () => new Date(10_000_000) });
+    const store = registry.require("storage") as DocumentStore & SqliteDocumentStore;
+    closers.push(() => store.close());
+    await store.put({ item: { pk: "p", sk: "old", expiresAt: 9_999 } });
+    await store.put({ item: { pk: "p", sk: "new", expiresAt: 10_001 } });
+    expect(store.sweepExpired()).toBe(1);
+    const none = createAdapterRegistry();
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "storage", name: "sqlite", module: "@agentx/local-adapters/storage", settings: { path: join(folder, "b.db"), ttlAttribute: null } }] }), { registry: none, importModule: importer });
+    const plain = none.require("storage") as DocumentStore & SqliteDocumentStore;
+    closers.push(() => plain.close());
+    expect(plain.ttlAttribute).toBeUndefined();
+  });
+
   it("refuse settings they do not know, a missing path, an in-memory path and a bad index", async () => {
     const make = async (module: "storage" | "queue", settings: Record<string, unknown>) => {
       const registry = createAdapterRegistry();
