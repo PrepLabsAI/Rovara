@@ -29,6 +29,8 @@ import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/br
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { recordedHeadOf } from "../../packages/broker/src/core/build-step/head-check.js";
+import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
@@ -165,9 +167,9 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
 }
 
 /** Registers the project, starts a task and answers its preparation, Understand and Plan, so it waits for the owner's approval. */
-async function toPlanReview(h: Awaited<ReturnType<typeof launch>>, requestId = "11111111-1111-4111-8111-111111111111") {
+async function toPlanReview(h: Awaited<ReturnType<typeof launch>>, requestId = "11111111-1111-4111-8111-111111111111", instructions = "Add a /health endpoint") {
   await h.api("/v1/admin/projects", { method: "POST", body: h.project });
-  const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId, project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+  const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId, project: "payments", instructions, workflow: true } });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
   const taskId = started.body.task.taskId;
   const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
@@ -1164,6 +1166,31 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     expect((await h.callback(second, "pull-request", { ...{ repository: "demo", repositoryUrl: h.project.repositories[0]!.url, baseBranch: "main", commit, title: payload["title"], body: payload["body"] }, headBranch: branch2 })).body).toMatchObject({ number: 2 });
   });
 
+  it("leaves an earlier draft open when a person took it up (pushed to it, or marked it ready), and says why", async () => {
+    for (const how of ["pushed", "ready"] as const) {
+      const h = await launch({ host: true });
+      const { taskId, workspaceId, seen, coding } = await toCoding(h);
+      const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+      const tree = h.model.revision(commit).tree;
+      await h.callback(coding, "result", builtResult(tree, h.base, commit));
+      const review = await h.nextJob(workspaceId, seen);
+      await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+      const first = await h.nextJob(workspaceId, seen);
+      const payload = first.payload as Record<string, unknown>;
+      const branch = String(payload["headBranch"]);
+      h.model.branches.set(branch, commit);
+      await h.callback(first, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+      await h.callback(first, "result", { status: "FAILED", error: "the machine was lost" });
+      if (how === "pushed") h.model.commit(branch, { "README.md": "a person's change\n" }); else h.model.markReady("1");
+      await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "efefefef-efef-4fef-8fef-efefefefefef" } });
+      expect(h.model.getChangeRequest("1").state).toBe("open");
+      const record = await h.runtime.registry.require("storage").get(PR_RECORD(workspaceId));
+      expect(record?.["leftOpen"]).toContain(how === "pushed" ? "someone pushed" : "marked ready");
+      // The Retry still goes on with a new draft of its own.
+      expect((await h.nextJob(workspaceId, seen)).kind).toBe("publish");
+    }
+  });
+
   it("judges the opened draft's head as the first read shows it, and does not wait for a branch put back", async () => {
     const h = await launch({ host: true });
     const { workspaceId, seen, coding } = await toCoding(h);
@@ -1200,6 +1227,56 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
     await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: 7, url: h.model.crUrl("7"), headBranch: branch, baseBranch: "main", commit, checks: [], reconciled: false } });
     expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "PULL_REQUEST", state: "BLOCKED" });
+  });
+
+  it("grades the plan waiting for approval from the request text and the task's cost estimate, through the wiring", async () => {
+    const tier = async (instructions: string, estimate?: number) => {
+      const h = await launch();
+      const { taskId } = await toPlanReview(h, "11111111-1111-4111-8111-111111111111", instructions);
+      if (estimate !== undefined) await h.runtime.registry.require("storage").update({ key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [change.set("runEstimate", { lowUsd: 100, highUsd: estimate })] });
+      return (await h.runtime.app.gate.requirement(IMPLICIT_COMPANY_ID, WORKFLOW_DOCUMENT_KIND, taskId))?.risk;
+    };
+    // A Markdown plan is unread (medium) whatever it says; the request's words and the estimate raise it.
+    expect(await tier("Add a /health endpoint")).toBe("medium");
+    expect(await tier("Add a /health endpoint and change the IAM policy")).toBe("high");
+    expect(await tier("Add a /health endpoint", 150)).toBe("high");
+  });
+
+  it("says on the page that a pull request changed outside Rovara when its head is not the one Rovara recorded, and merge tracking is told the head is not Rovara's", async () => {
+    const h = await launch({ host: true });
+    const { taskId, workspaceId, headBranch, commit } = await toWaitForMerge(h);
+    const store = h.runtime.registry.require("storage");
+    const pageOf = async () => { const link = await h.browse(`/plan/${taskId}`); return (await raw(h.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } })).body; };
+    // The head is the one Rovara recorded: nothing is said.
+    expect(await pageOf()).not.toContain("changed outside Rovara");
+    expect(await recordedHeadOf(h.runtime.app.flow.deps)(workspaceId, "demo", 1)).toBe(commit);
+    // The worker (or anyone) pushes to the branch after its operation ended; the next read of the page, a little later, sees it.
+    h.model.commit(headBranch, { "README.md": "pushed after the result\n" });
+    h.runtime.app.flow.deps.now = () => new Date(Date.now() + 60_000);
+    const body = await pageOf();
+    expect(body).toContain("changed outside Rovara");
+    expect((await store.get(PR_RECORD(workspaceId)))?.["changedOutside"]).toContain("changed outside Rovara");
+    // Merge tracking is given no recorded head for it, so it never reads the head as Rovara's and never calls the pull request ready.
+    expect(await recordedHeadOf(h.runtime.app.flow.deps)(workspaceId, "demo", 1)).toBeUndefined();
+    // Put back, the mark goes.
+    h.model.branches.set(headBranch, commit);
+    h.runtime.app.flow.deps.now = () => new Date(Date.now() + 120_000);
+    expect(await pageOf()).not.toContain("changed outside Rovara");
+    expect(await recordedHeadOf(h.runtime.app.flow.deps)(workspaceId, "demo", 1)).toBe(commit);
+  });
+
+  it("keeps the newest post of checks.json, each under its own digest, and no more than eight posts in one operation", async () => {
+    const h = await launch();
+    const { coding } = await toCoding(h);
+    const post = (n: number) => h.callback(coding, "artifacts", { name: "checks.json", mediaType: "application/json", content: JSON.stringify({ round: n }) });
+    for (let n = 1; n <= 8; n += 1) expect((await post(n)).status).toBe(200);
+    expect((await post(9)).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    // The same bytes again are the same post, not another.
+    expect((await post(8)).status).toBe(200);
+    // Any other name is still kept once.
+    const once = (content: string) => h.callback(coding, "artifacts", { name: "notes.txt", mediaType: "text/plain", content });
+    expect((await once("a")).status).toBe(200);
+    expect((await once("b")).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
   });
 
   it("refuses an update whose tree is not the reviewed one or whose parents are not the recorded head, and keeps the pull request's record on the head it had", async () => {

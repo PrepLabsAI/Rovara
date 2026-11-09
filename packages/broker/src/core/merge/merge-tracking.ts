@@ -34,7 +34,6 @@ import {
 } from "../branch-sync/merge-action.js";
 import { noteBranchHead } from "../branch-sync/branch-writers.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
-import type { DispatchKind } from "../task-flow/records.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
@@ -45,7 +44,7 @@ import { prHeadItems, publicTrackingItem, readMergeTracking, readTrackingItem, r
 
 /** The default row for a decider's dispatch: the task-flow core's row. Its runner knows UNDERSTAND and PLAN today; IMPLEMENT and SYNC rows are written as the decider asked and wait for the runner that learns them. */
 function defaultDispatchRow(request: { companyId: OrgId; taskId: string; kind: MergeDispatchKind; workflowRevision: number; at: string }, now: string): TransactItem {
-  return dispatchRowItem({ companyId: request.companyId }, request.taskId, request.workflowRevision, request.kind as DispatchKind, now, request.at);
+  return dispatchRowItem({ companyId: request.companyId }, request.taskId, request.workflowRevision, request.kind, now, request.at);
 }
 
 export { MERGE_ACTION_ORDER };

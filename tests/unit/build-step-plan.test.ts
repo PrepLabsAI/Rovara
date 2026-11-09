@@ -30,6 +30,22 @@ describe("the tier of a plan", () => {
     expect(gradePlanRisk({ loaded: structured(planDocument({ claims: [{ id: "1", text: "Edit infra/iam/role.tf." }, { id: "2", text: "Never twice." }], checks: proved }), "Edit infra/iam/role.tf."), workflow })).toBe("high");
   });
 
+  it("reads what the text and the request say, not only paths with an extension: known files, directories without an extension, and words", () => {
+    expect(planRiskFloor({ texts: ["Add a stage to the Dockerfile"] })).toBe("high");
+    expect(planRiskFloor({ texts: ["Edit infra/iam/policy"] })).toBe("high");
+    expect(planRiskFloor({ texts: ["Change the IAM policy so the job can read the bucket"] })).toBe("high");
+    expect(planRiskFloor({ texts: ["Add a column; the migration runs at deploy"] })).toBe("high");
+    expect(planRiskFloor({ texts: ["Update the Jenkinsfile"] })).toBe("medium");
+    expect(planRiskFloor({ texts: ["Who owns this: CODEOWNERS"] })).toBe("medium");
+    expect(planRiskFloor({ texts: ["Add a target to the Makefile"] })).toBe("medium");
+    expect(planRiskFloor({ texts: ["Rotate the payment secrets and the password check"] })).toBe("medium");
+    // Words that only contain one are not it.
+    expect(planRiskFloor({ texts: ["The author of src/retry/backoff.ts wrote a diamond pattern"] })).toBe("low");
+    // The planner's own text is read the same way, and its claims of proof do not lower it.
+    expect(gradePlanRisk({ loaded: structured(planDocument({ claims, checks: proved }), "Retry in src/retry/backoff.ts and change the IAM policy"), workflow })).toBe("high");
+    expect(gradePlanRisk({ loaded: structured(planDocument({ claims, checks: proved }), "Retry in src/retry/backoff.ts"), workflow, requestText: "and add it to the Dockerfile" })).toBe("high");
+  });
+
   it("size and cost raise it: more than 25 files is at least medium, an estimate over $25 is medium and over $100 high", () => {
     const many = Array.from({ length: 26 }, (_, index) => `src/part${String(index)}/file.ts`).join(" ");
     expect(planRiskFloor({ texts: [many] })).toBe("medium");

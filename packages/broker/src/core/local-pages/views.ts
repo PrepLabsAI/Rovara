@@ -46,7 +46,7 @@ export interface PlanPageView {
   versions: PlanVersionView[];
   checks: Array<{ label: string; status: "passed" | "failed" | "not_run" | "proposed" }>;
   findings: Array<{ role: "code" | "security"; text: string; file?: string; line?: number }>;
-  pullRequests: Array<{ url: string; number: number; state: string }>;
+  pullRequests: Array<{ url: string; number: number; state: string; /** Said when the pull request is not what Rovara checked (changed outside Rovara). */ note?: string }>;
   comments: CommentView[];
   /** Present while the plan waits for the owner. */
   approval?: ApprovalOffer;

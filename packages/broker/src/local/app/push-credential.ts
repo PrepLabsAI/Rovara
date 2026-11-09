@@ -1,6 +1,6 @@
 // Lane L10 (review H1): what a worker is sent for the credential the code-host adapter gave (`CodeHost.issueGitCredential`). The adapter applies its own rules (registered repositories only, a
-// fine-grained token unless the owner opted in, push permission checked: lane L11); a push is never the owner's long-lived token. It must be usable now (expiring within the hour, a key only
-// for a service identity) and have a wire shape the worker takes. A broker-side git relay (the broker pushes, the worker never holds a push credential) is the later fix.
+// fine-grained token unless the owner opted in, push permission checked: lane L11). With the personal-token adapter the credential IS the owner's fine-grained token, handed out for 50 minutes by Rovara's reckoning (the token itself lives as long
+// as the owner made it). It must be usable now (expiring within the hour, a key only for a service identity) and have a wire shape the worker takes. A broker-side git relay (the broker pushes, the worker never holds a push credential) is the later fix.
 import { agentXError, workerGitCredentialUsable, type CodeHost, type GitCredential } from "@agentx/contracts";
 import type { RepositoryCredential } from "../../repository-access.js";
 

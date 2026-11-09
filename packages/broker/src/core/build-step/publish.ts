@@ -95,17 +95,27 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
 }
 
 /**
- * A publication that was interrupted after its draft was opened (the worker's result was lost) leaves a draft nobody tracks. Before the owner's Retry opens another from a new branch, a draft that an
- * earlier failed attempt of this very publication opened, and that the workflow never registered, is closed and recorded as closed.
+ * A publication that was interrupted after its draft was opened (the worker's result was lost) leaves a draft nobody tracks. Before the owner's Retry opens another from a new branch, the draft an
+ * earlier failed attempt of this very publication opened, and that the workflow never registered, is READ at the host first: it is closed only when it is still a draft, open, and at the commit
+ * Rovara recorded (so no person pushed to it and nobody marked it ready). Any other is left as it is, with the reason on its record and in the log: a person has taken it up.
  */
 async function closeOrphanedDrafts(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, host: CodeHost, repositoryUrl: string, failedOperationIds: ReadonlySet<string>, repositoryId: string): Promise<void> {
   const page = await deps.store.query({ pk: `WORKSPACE#${task.workspaceId}`, sk: { op: "beginsWith", prefix: `PULL_REQUEST#${repositoryId}#` }, limit: 50 });
   for (const item of page.items) {
     const record = fromDocument<PullRequestRecord>(item);
     if (record === undefined || record.state !== "open" || !failedOperationIds.has(record.createdByOperationId) || (workflow.pullRequests ?? []).some((entry) => entry.number === record.number && entry.repositoryId === repositoryId)) continue;
+    const ref: ChangeRequestRef = { repository: { url: repositoryUrl }, id: String(record.number), url: record.url };
+    const key = pullRequestRecordKey(task.workspaceId, repositoryId, record.number);
     try {
-      await host.updateChangeRequest({ repository: { url: repositoryUrl }, id: String(record.number), url: record.url }, { state: "closed" }, scopeOf(deps));
-      await deps.store.update({ key: pullRequestRecordKey(task.workspaceId, repositoryId, record.number), ops: [change.set("state", "closed"), change.set("updatedAt", iso(deps))], condition: when.present() });
+      const status = await host.changeRequestStatus(ref, scopeOf(deps));
+      if (status.state !== "open" || !status.draft || status.headRevision !== record.expectedHeadCommit || status.reviews.length > 0) {
+        const why = status.state !== "open" ? `it is ${status.state}` : !status.draft ? "it was marked ready" : status.headRevision !== record.expectedHeadCommit ? "someone pushed to it" : "it has reviews";
+        await deps.store.update({ key, ops: [change.set("leftOpen", `Rovara did not close this earlier draft: ${why}.`), change.set("updatedAt", iso(deps))], condition: when.present() });
+        log(deps, { event: "build_step.orphaned_draft_left", taskId: task.taskId, number: record.number, why });
+        continue;
+      }
+      await host.updateChangeRequest(ref, { state: "closed" }, scopeOf(deps));
+      await deps.store.update({ key, ops: [change.set("state", "closed"), change.set("updatedAt", iso(deps))], condition: when.present() });
     } catch (error) {
       log(deps, { event: "build_step.orphaned_draft_not_closed", taskId: task.taskId, number: record.number, error: error instanceof Error ? error.name : "unknown" });
     }

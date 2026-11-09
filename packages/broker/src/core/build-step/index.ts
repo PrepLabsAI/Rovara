@@ -10,6 +10,7 @@ import { startImplementation, startReview } from "./start.js";
 
 export * from "./autofix.js";
 export * from "./check-results.js";
+export * from "./head-check.js";
 export * from "./maintain.js";
 export * from "./plan-input.js";
 export * from "./publish.js";

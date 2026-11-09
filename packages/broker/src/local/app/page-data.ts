@@ -8,6 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   queryAll, when, type OrgId, type Principal, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { CHANGED_OUTSIDE_NOTE, checkPullRequestHeads } from "../../core/build-step/head-check.js";
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { ApprovalOffer, CommentView, LocalActionResult, LocalPageActions, LocalPageData, PendingItemView, PlanPageView, PlanVersionView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
@@ -96,11 +97,13 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         });
       }
       const approval = approvalOfferOf(taskId, workflow);
+      // A pull request whose head is no longer the one Rovara checked says so here (the stop-gap until merge tracking runs on a timer).
+      const outside = new Map((await checkPullRequestHeads(deps.flow, task).catch(() => [])).filter((entry) => entry.changedOutside).map((entry) => [`${entry.repository}#${String(entry.number)}`, true]));
       return {
         taskId, title: task.title, status: stepOf(workflow.stage, workflow.state) ?? (workflow.state === "COMPLETE" ? "Finished" : "In progress"), revision: workflow.revision, versions,
         checks: (workflow.checkPolicy?.proposed ?? []).map((check) => ({ label: check.label, status: "proposed" as const })),
         findings: [],
-        pullRequests: (workflow.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state.toLowerCase() })),
+        pullRequests: (workflow.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state.toLowerCase(), ...(outside.has(`${pullRequest.repositoryId}#${String(pullRequest.number)}`) ? { note: CHANGED_OUTSIDE_NOTE } : {}) })),
         comments: await commentsOf(taskId), ...(approval === undefined ? {} : { approval }),
       };
     },
