@@ -4,7 +4,7 @@
 // defaults and the built-in adapters are registered; the config's adapters are loaded (a configured storage or queue replaces the
 // in-memory default); the registry is sealed; then the server starts. Nothing in the registry changes after that except channels.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { open, readFile, realpath, rm, stat } from "node:fs/promises";
+import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
@@ -204,37 +204,59 @@ function json(statusCode: number, value: unknown): BrokerResponse {
 }
 
 /**
- * One `rovara up` per state folder. A second would rewrite the session token and the server file, and either one's Ctrl-C would stop the other's workers. The lock is a file made with
- * O_EXCL holding the pid; a lock whose process is gone is taken over.
+ * One `rovara up` per state folder. A second would rewrite the session token and the server file, and either one's Ctrl-C would stop the other's workers. The lock is a file holding
+ * `<pid>:<nonce>`, put in place whole and at once (written under another name, then `link()`ed: a reader never sees it empty). A lock whose process is gone is taken over by an atomic
+ * `rename`, after which what was moved is read again: if it is not the stale lock that was judged, it is put back and the start is refused.
  */
+const LOCK_YOUNG_MS = 5_000;
 async function acquireStateLock(stateDirectory: string): Promise<() => Promise<void>> {
   const path = join(stateDirectory, STATE_LOCK_FILE_NAME);
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  const mine = `${String(process.pid)}:${randomBytes(8).toString("hex")}`;
+  const held = (pid: number | string) => new LocalStateError(`another rovara up (process ${String(pid)}) holds ${path} for ${stateDirectory}; stop it first, or use another --state-dir (if no rovara up is running, delete ${path})`);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const staged = `${path}.${randomBytes(6).toString("hex")}`;
+    await writeFile(staged, `${mine}\n`, { flag: "wx", mode: 0o600 });
     try {
-      const handle = await open(path, "wx", 0o600);
-      const mine = `${String(process.pid)}:${randomBytes(8).toString("hex")}`;
-      await handle.writeFile(`${mine}\n`);
-      await handle.close();
+      await link(staged, path);
       let released = false;
       return async () => {
         // Only our own lock is removed, and only once (a second runtime in this process has a lock of its own).
         if (released) return;
         released = true;
-        const held = await readFile(path, "utf8").catch(() => undefined);
-        if (held?.trim() === mine) await rm(path, { force: true });
+        const text = await readFile(path, "utf8").catch(() => undefined);
+        if (text?.trim() === mine) await rm(path, { force: true });
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const pid = Number((await readFile(path, "utf8").catch(() => "")).trim().split(":")[0]);
-      let alive = false;
-      if (Number.isInteger(pid) && pid > 0) {
-        try { process.kill(pid, 0); alive = true; } catch (killError) { alive = (killError as NodeJS.ErrnoException).code === "EPERM"; }
-      }
-      if (alive) throw new LocalStateError(`another rovara up (process ${String(pid)}) is using ${stateDirectory}; stop it first, or use another --state-dir`);
-      await rm(path, { force: true });
+    } finally {
+      await rm(staged, { force: true });
     }
+    // Someone holds it. Is that holder alive?
+    const text = await readFile(path, "utf8").catch(() => undefined);
+    if (text === undefined) continue; // released between our link and our read
+    const pid = Number(text.trim().split(":")[0]);
+    const age = Date.now() - ((await stat(path).catch(() => undefined))?.mtimeMs ?? 0);
+    // An empty or unreadable lock that is young is a holder still writing; it is never judged stale.
+    if (!Number.isInteger(pid) || pid <= 0) {
+      if (age < LOCK_YOUNG_MS) throw held("?");
+    } else {
+      let alive = false;
+      try { process.kill(pid, 0); alive = true; } catch (killError) { alive = (killError as NodeJS.ErrnoException).code === "EPERM"; }
+      if (alive) throw held(pid);
+    }
+    // Stale: move it aside atomically, and check that what was moved is the lock that was judged.
+    const aside = `${path}.stale.${randomBytes(6).toString("hex")}`;
+    try { await rename(path, aside); } catch { continue; }
+    const moved = await readFile(aside, "utf8").catch(() => undefined);
+    if (moved !== text) {
+      // Another starter put a fresh lock there between our read and our rename: give it back (if the name is free) and refuse.
+      await link(aside, path).catch(() => undefined);
+      await rm(aside, { force: true });
+      throw held("another process");
+    }
+    await rm(aside, { force: true });
   }
-  throw new LocalStateError(`could not take the lock on ${stateDirectory}`);
+  throw new LocalStateError(`could not take the lock ${path}`);
 }
 
 export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<LocalRuntime> {

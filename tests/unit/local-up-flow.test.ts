@@ -2,7 +2,7 @@
 // the fake worker answers the preparation, Understand and Plan through the REAL callback listener and the capability the flow issued; the plan appears on the local page and the owner approves
 // it there. Docker is simulated (the worker machines are the W0 fake), so nothing here needs Docker.
 import { request as httpRequest } from "node:http";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink } from "@agentx/contracts";
@@ -523,6 +523,24 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     await chmod(join(first.stateDirectory, "callback-key"), 0o600);
     const third = await launch({ root: first.root });
     expect((await third.api("/v1/dev/tasks")).status).toBe(200);
+  });
+
+  it("never judges a lock stale while it is empty and young, and names the lock file when it refuses (N4)", async () => {
+    const h = await launch();
+    await h.runtime.stop();
+    const lock = join(h.stateDirectory, "up.lock");
+    // A starter that has made the file and not yet written it: held, not stale.
+    await writeFile(lock, "", { mode: 0o600 });
+    await expect(launch({ root: h.root })).rejects.toThrow(new RegExp(lock.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    expect(await readFile(lock, "utf8")).toBe("");
+    // Old enough, it is a leftover and is replaced.
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lock, old, old);
+    const again = await launch({ root: h.root });
+    expect((await again.api("/v1/dev/tasks")).status).toBe(200);
+    // A live holder is named by pid and path; no stray stage files are left in the folder.
+    await expect(launch({ root: h.root })).rejects.toThrow(/another rovara up \(process \d+\) holds .*up\.lock/);
+    expect((await readdir(h.stateDirectory)).filter((name) => name.startsWith("up.lock."))).toEqual([]);
   });
 
   it("keeps the callback key in a 0600 file and refuses to start on one others can read", async () => {
