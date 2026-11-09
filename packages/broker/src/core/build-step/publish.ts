@@ -276,7 +276,7 @@ export async function recordPublished(deps: TaskFlowDeps, task: TaskRecord, oper
       // The head, for the check and status events that name only a commit.
       ...prHeadItems({ orgId: deps.companyId, repositoryKey, headSha: recorded.expectedHeadCommit, taskId: task.taskId, repositoryId: published.data.repository, number: published.data.number, branch: recorded.headBranch }, Date.parse(now)),
       // The task's tracking row: merge tracking reads it back (kind `tracking`); the first pull request enrols the task.
-      ...((workflow.pullRequests ?? []).length === 0 ? [{ kind: "put" as const, item: toDocument({ ...recoveryRowKey(task.taskId), entityType: "WORKFLOW_MERGE_RECOVERY", taskId: task.taskId, kind: "tracking", createdAt: now, updatedAt: now, attempts: 0, nextAttemptAt: now }) }] : []),
+      ...((workflow.pullRequests ?? []).length === 0 ? [{ kind: "put" as const, item: toDocument({ ...recoveryRowKey(task.taskId), entityType: "WORKFLOW_MERGE_RECOVERY", taskId: task.taskId, kind: "tracking", createdAt: now, updatedAt: now, attempts: 0, nextAttemptAt: Date.parse(now) }) }] : []),
     ];
     if (!(await commitWorkflow(deps, task, next, items))) return;
     // Rovara created this branch and opened its pull request: from now on a pass may tell whether anyone else wrote to it. Created once, so a repeat leaves it as it is.

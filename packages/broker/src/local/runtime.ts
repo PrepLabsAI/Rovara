@@ -145,6 +145,8 @@ export interface LocalRuntimeOptions {
   fetch?: typeof fetch | undefined;
   /** The fetch the Docker adapter uses to reach its workers (tests give the simulated Docker's). */
   workerFetch?: typeof fetch;
+  /** The app's clock (the flow's records, the sessions and the tracking timer's schedule). Default: the real time. A test moves it. */
+  now?: () => Date;
   /** Run the dispatch, sweep and session timers. Default true; tests call `runtime.tick()`. */
   timers?: boolean;
   /**
@@ -393,6 +395,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       return usableWorkerCredential(codeHostForKind(registry, "github"), credential);
     },
     ...(options.timers === undefined ? {} : { timers: options.timers }),
+    ...(options.now === undefined ? {} : { now: options.now }),
   });
 
   const workspaces = new InMemoryRegistry();

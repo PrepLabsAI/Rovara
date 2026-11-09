@@ -212,6 +212,7 @@ ports and not each other, and this is the only place that knows all of them.
 | Decisions | lane L6b's approval gate over the task's workflow document; a plan is approved only with a proof a local page signs for that one request, revision and digest |
 | Pages | lane L8's server on its own port (`runtime.pagesUrl`); a page address carries the owner's page session and can approve, so it never leaves the server process: `rovara open [task]` asks the running server to open the page in your browser (`POST /v1/local/pages/open`, which answers `{ opened: true }` and nothing else), and `rovara up` prints only the pages' origin |
 | Worker callbacks | `app/callbacks.ts` on the callback listener: events, artifacts, the terminal result, and the repository credential exchange |
+| Merge tracking | lane L12 (`app/tracking.ts`): a timer polls the due tracking rows and calls the core's `reconcileTrackingTask`; see "Merge tracking by polling" below |
 | Owner routes | `/v1/dev/projects`, `/v1/admin/projects`, `/v1/dev/tasks...` and `/v1/app/sessions...`, behind the session token (the routes the MCP tools and the CLI's `session` commands call) |
 
 **One `rovara up` per state folder** (a lock file, `up.lock`, holds the pid; a lock whose process is gone is replaced). **Worker output** is taken only while an operation runs: an artifact is kept once (the same bytes again are the same artifact, other bytes are refused), nothing but a repeat of the result is taken after the operation ends, and a plan is shown only if its bytes match the digest the approval binds. An artifact name is kept once per operation (Understand and Plan post each name once; a name a later step may post again must be listed as replaceable in `app/callbacks.ts` when that step is wired). The two kinds of signed token (callback capabilities, repository grants) use different keys derived from `callback-key`.
@@ -247,13 +248,22 @@ rovara open <task-id>             # read the plan, approve it
 
 Today the journey runs to a pull request that waits for its merge (see "Not wired yet"). 
 
+## Merge tracking by polling (lane L12)
+
+After the draft pull request is opened, the publish step enrols the task (`WORKFLOW_MERGE_RECOVERY`, `kind: "tracking"`). A laptop has no public address for webhooks (the GitHub adapter reports `events.mode: "poll"`), so `rovara up` **polls**: a
+second timer (5 s) looks for tracking rows that are due and calls the merge core's pass (`reconcileTrackingTask`) for each. The pass reads the pull request through the code-host port, keeps one tracking item for it (CI, reviews, draft, branch), takes a draft
+**out of draft** and asks the project's reviewers once its counted checks pass (only while the task waits for its merge, nothing being fixed), and asks the deciders: failing CI becomes a coding run (three rounds), a conflict or a branch that is behind becomes a
+merge of the base. **It never merges**: a person does, on the code host. A pull request the host shows merged (or closed) is recorded in the workflow, with the `merged` milestone and the task's session line, when the head the host merged is the head Rovara recorded.
+
+- **Milestones and the session.** `fixing`, `stuck`, `pr_ready`, `approved` and `merged` are a row in the task's partition and a line on the task's session, written in the transaction of the change that caused them. There is no one else to tell on a laptop.
+- **Cadence and limits.** A row is first due when the pull request opens, then every 60 s; each pass in which nothing changed doubles the wait up to 5 minutes, and a change starts again at 60 s. A pass has a request allowance (32 plus 20 for each further pull
+  request); a sweep reads at most 10 rows, 256 requests and 20 s. A failing pass waits 60 s times its failures, up to 15 minutes. A code host that says "slow down" (`HostRateLimitError`) pauses every row until the time it names.
+- **The clock** is the app's (`LocalRuntimeOptions.now`), so a test moves it and a restart picks the schedule up from the rows.
+
 ## Not wired yet
 
-- **Merge tracking's sweep, merge and proof from `rovara up`.** After the plan is approved the task is coded, checked, reviewed and published by the build step (`core/build-step/`, lane
-  L10; see docs/ports.md), and `installCiFixDecider` and `installBranchSyncDeciders` are installed, so a tracking pass that decides a CI fix, a conflict or a sync gets its coding run or
-  merge. What nothing runs yet is the pass itself: the publish step enrols the task (`WORKFLOW_MERGE_RECOVERY`, `kind: "tracking"`), but no timer reads due tracking rows and calls
-  `reconcileTrackingTask`, and `MergeTrackingDependencies` (settings, people, links, scope) has no wiring. So the merge, proof and pull request comment commands (L7a, L7b, L8) are not reachable from
-  `rovara up`, and the milestone hook (`CodeMilestones`, `deps.milestones`) and the session timeline are not filled, so a "fixing" or "stuck" line is not recorded.
+- **Merge from `rovara up`.** A person merges a draft pull request on the code host (or with their proof); merge tracking never presses Merge (owner decision 1). The owner's own Merge button on the local page is not built;
+  a merge made on the host is seen by the next tracking pass and recorded (see "Merge tracking by polling").
 - **A GitHub client for the laptop.** No `GitHubCodeHostProvider` exists for a personal token or `gh` (L7A-4): Cloud's client is a GitHub App client. Until one passes
   `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself, given only for a repository on github.com over https and only to clone (no push credential is given yet; lane L11 brings a scoped one).
 - **A budget on the model proxy.** The task flow grants a step the install's model (the first of Anthropic and OpenAI with a key) and no budget: the flow has no run limit before a price table exists, and Code's price table is empty. See "Model calls" below; `operationEnded` is called when an operation settles.

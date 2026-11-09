@@ -44,6 +44,7 @@ import { RepositoryGrantService, type RepositoryCredential } from "../../reposit
 import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { createCallbackHandler } from "./callbacks.js";
+import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
 import { createTaskFactsSource } from "./facts.js";
 import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
@@ -86,13 +87,15 @@ export interface LocalApp {
   readonly pages: LocalPagesServer;
   readonly gate: DecisionGate;
   readonly blobs: ObjectStorage;
+  /** Merge tracking on this laptop: the timer's pass over the tracked pull requests (lane L12). */
+  readonly tracking: LocalTracking;
   /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
   readonly modelGrants: ModelGrantSource;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
   routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
   /** The worker's callbacks (`/v1/internal/...`). */
   callbacks(request: BrokerRequest): Promise<BrokerResponse>;
-  /** One pass of everything the timers do: relay the outbox, dispatch, sweep the dispatch rows, refresh the sessions. */
+  /** One pass of everything the timers do: relay the outbox, dispatch, sweep the dispatch rows, refresh the sessions, and read the pull requests that are due (merge tracking). */
   tick(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -137,6 +140,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
   const modelRoute = async () => { const choice = await chosen(); return choice === undefined ? undefined : localRoute(choice.provider, choice.model).workerRoute; };
 
+  const clock = (): Date => options.now?.() ?? new Date();
+  // Lane L12: the milestones ("fixing", "stuck", "ready") are rows and lines on the task's session, written in the transaction of the change that caused them.
+  const timeline = sessionTimeline();
+  const milestones = createLocalMilestones(timeline);
+
   const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
 
   const flow = createTaskFlowFromRegistry(registry, {
@@ -151,12 +159,16 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     modelAccess: { route: modelRoute },
     ...(options.operationEnded === undefined ? {} : { onOperationEnded: options.operationEnded }),
     startExtras: createSessionStartExtras(companyId),
+    milestones,
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
   });
+
+  // Lane L12: merge tracking by polling. The publish step enrols a task's tracking row; a timer reads the due rows and calls the core's pass for each (pull request status, CI fix, branch sync, ready for review).
+  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log });
 
   // Merge tracking's action slots (L7A-3): a failing CI, a conflict and a branch that is behind are decided by the deciders of the code, which ask for a coding run (an IMPLEMENT row) or a merge of the
   // base (a SYNC row). They are installed only here, where the dispatch runner knows both kinds (the build step), and once per process.
@@ -231,30 +243,43 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
-  const tick = async (): Promise<void> => {
-    await flow.relayOnce().catch((error: unknown) => log({ event: "local_app.relay_failed", error: error instanceof Error ? error.name : "unknown" }));
-    await flow.dispatchOnce({ maxMessages: 10 }).catch((error: unknown) => log({ event: "local_app.dispatch_failed", error: error instanceof Error ? error.name : "unknown" }));
-    await flow.sweepOnce().catch((error: unknown) => log({ event: "local_app.sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
-    await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch((error: unknown) => log({ event: "local_app.session_sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
+  const logFailure = (event: string) => (error: unknown) => log({ event, error: error instanceof Error ? error.name : "unknown" });
+  const tickCore = async (): Promise<void> => {
+    await flow.relayOnce().catch(logFailure("local_app.relay_failed"));
+    await flow.dispatchOnce({ maxMessages: 10 }).catch(logFailure("local_app.dispatch_failed"));
+    await flow.sweepOnce().catch(logFailure("local_app.sweep_failed"));
+    await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
   };
-  let timer: NodeJS.Timeout | undefined;
-  let running = false;
+  // Reading pull requests asks the code host over the network and may take seconds, so the timer runs it apart from the dispatch (a slow host never holds a step back); a test's `tick()` runs both in order.
+  const tickTracking = async (): Promise<void> => { await tracking.sweep().catch(logFailure("local_app.tracking_failed")); };
+  const tick = async (): Promise<void> => {
+    await tickCore();
+    await tickTracking();
+  };
+  const timers: NodeJS.Timeout[] = [];
   if (options.timers !== false) {
-    timer = setInterval(() => {
-      if (running) return;
-      running = true;
-      void tick().finally(() => { running = false; });
-    }, 2_000);
-    timer.unref();
+    const every = (ms: number, work: () => Promise<void>): void => {
+      let running = false;
+      const timer = setInterval(() => {
+        if (running) return;
+        running = true;
+        void work().finally(() => { running = false; });
+      }, ms);
+      timer.unref();
+      timers.push(timer);
+    };
+    every(2_000, tickCore);
+    every(5_000, tickTracking);
   }
 
   return {
-    flow, pages, gate, blobs, modelGrants,
+    flow, pages, gate, blobs, tracking, modelGrants,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,
     async stop() {
-      if (timer !== undefined) clearInterval(timer);
+      for (const timer of timers) clearInterval(timer);
+      await tracking.idle();
       await projector?.stop();
       await pages.close();
     },

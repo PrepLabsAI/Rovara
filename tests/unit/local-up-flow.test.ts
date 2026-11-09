@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
-  change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, when, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
+  change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, when, type Check, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
@@ -73,7 +73,7 @@ const classicToken = (seed: string): string => ["gh", "p_"].join("") + seed.repe
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean } = {}) {
+async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -102,7 +102,7 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
   };
   const runtime: LocalRuntime = await startLocalRuntime({
     stateDirectory, cwd: join(root, "project"), environment: extra.environment ?? {}, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false,
-    registerAdapters, openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }),
+    registerAdapters, openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }), ...(extra.now === undefined ? {} : { now: extra.now }),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
@@ -945,25 +945,26 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
   });
 });
 
-describe("rovara up: an open pull request is fixed and kept up to date, against a fake worker and a fake code host", () => {
-  /** A task through publication: the pull request is open on the host and the task waits for the merge. */
-  async function toWaitForMerge(h: Awaited<ReturnType<typeof launch>>) {
-    const { taskId, workspaceId, seen, coding } = await toCoding(h);
-    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
-    const tree = h.model.revision(commit).tree;
-    await h.callback(coding, "result", builtResult(tree, h.base, commit));
-    const review = await h.nextJob(workspaceId, seen);
-    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
-    const publish = await h.nextJob(workspaceId, seen);
-    const payload = publish.payload as Record<string, unknown>;
-    const headBranch = String(payload["headBranch"]);
-    h.model.branches.set(headBranch, commit);
-    await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
-    await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: 1, url: h.model.crUrl("1"), headBranch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true } });
-    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
-    return { taskId, workspaceId, seen, headBranch, commit, tree };
-  }
+/** A task through publication: the pull request is open on the host and the task waits for the merge. */
+async function toWaitForMerge(h: Awaited<ReturnType<typeof launch>>) {
+  const { taskId, workspaceId, seen, coding } = await toCoding(h);
+  const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+  const tree = h.model.revision(commit).tree;
+  await h.callback(coding, "result", builtResult(tree, h.base, commit));
+  const review = await h.nextJob(workspaceId, seen);
+  await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+  const publish = await h.nextJob(workspaceId, seen);
+  const payload = publish.payload as Record<string, unknown>;
+  const headBranch = String(payload["headBranch"]);
+  h.model.branches.set(headBranch, commit);
+  await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+  await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: 1, url: h.model.crUrl("1"), headBranch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true } });
+  expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+  return { taskId, workspaceId, seen, headBranch, commit, tree };
+}
 
+
+describe("rovara up: an open pull request is fixed and kept up to date, against a fake worker and a fake code host", () => {
   /** What merge tracking's deciders commit for a round: the next workflow, the rows it owns, and the row of the step the new state is due for (the pass commits them together). */
   async function commitRound(h: Awaited<ReturnType<typeof launch>>, taskId: string, next: (workflow: WorkflowSnapshot) => WorkflowSnapshot, kind: "IMPLEMENT" | "SYNC", rows: (after: WorkflowSnapshot) => TransactItem[] = () => []): Promise<WorkflowSnapshot> {
     const store = h.runtime.registry.require("storage");
@@ -1410,6 +1411,170 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     const unpriced = await toReview(g);
     await g.callback(unpriced.review, "result", reviewsOf(unpriced.review, "d".repeat(40), "findings"));
     expect((await taskRecord(g, unpriced.taskId)).workflow.decisions.filter((decision) => decision.source === "AUTO_FIX")).toHaveLength(1);
+  });
+});
+
+// ---- lane L12: merge tracking by polling
+
+/** A clock a test moves; the app reads it for the records, the sessions and the tracking timer's schedule. */
+function movingClock() {
+  const clock = { at: Date.now(), now: (): Date => new Date(clock.at), advance: (ms: number): void => { clock.at += ms; } };
+  return clock;
+}
+const passingCheck = (name = "unit-tests", runId = "run-1"): Check => ({ name, state: "completed", conclusion: "success", required: false, url: "", runId });
+const failingCheck = (name = "unit-tests", runId = "run-1"): Check => ({ name, state: "completed", conclusion: "failure", required: false, url: "", runId });
+
+describe("rovara up: merge tracking by polling, against a fake code host and a moving clock (lane L12 slice 1)", () => {
+  const MINUTE = 60_000;
+  type Harness = Awaited<ReturnType<typeof launch>>;
+  const store = (h: Harness) => h.runtime.registry.require("storage");
+  const trackingRow = async (h: Harness, taskId: string) => (await store(h).get({ pk: "WORKFLOW_MERGE_RECOVERY", sk: `TASK#${taskId}` }))!;
+  const trackingItem = async (h: Harness, taskId: string) => (await store(h).get({ pk: `DEVTASK#${taskId}`, sk: "MERGE_TRACKING#demo#000000000001" }))
+    ?? (await store(h).query({ pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "MERGE_TRACKING#" } })).items[0];
+  const sessionLines = async (h: Harness, taskId: string): Promise<string[]> => {
+    const sessionId = (await store(h).get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["sessionId"] as string;
+    return (await readSessionEvents(store(h), IMPLICIT_COMPANY_ID, sessionId as never)).events.map((event) => event.text ?? "");
+  };
+  /** Counts the pull request reads the host was asked for. */
+  const countReads = (h: Harness) => {
+    let reads = 0;
+    const original = h.host.changeRequestStatus.bind(h.host);
+    h.host.changeRequestStatus = async (...args) => { reads += 1; return original(...args); };
+    return () => reads;
+  };
+
+  it("reads a due pull request, takes a draft out of draft when its checks pass, tells the session, and waits longer while nothing changes", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const waiting = await toWaitForMerge(h);
+    const reads = countReads(h);
+    const cr = h.model.changeRequests[0]!;
+    expect(cr.draft).toBe(true);
+    // The publish step enrolled the task: a numeric due time, and no pass yet.
+    expect(typeof (await trackingRow(h, waiting.taskId))["nextAttemptAt"]).toBe("number");
+    // Checks still running: the first pass reads the pull request, writes its item, and leaves the draft alone.
+    h.model.setChecks(waiting.commit, [{ name: "unit-tests", state: "pending", required: false, url: "", runId: "run-1" }]);
+    await h.runtime.tick();
+    expect(reads()).toBe(1);
+    expect(cr.draft).toBe(true);
+    expect(await trackingItem(h, waiting.taskId)).toMatchObject({ ci: "pending", draft: true, state: "open", headByRovara: true });
+    // Not due again yet: a tick a few seconds later asks the host nothing.
+    clock.advance(10_000);
+    await h.runtime.tick();
+    expect(reads()).toBe(1);
+    // The checks pass; the next pass is due after a minute and takes the pull request out of draft. Merge tracking never merges.
+    h.model.setChecks(waiting.commit, [passingCheck()]);
+    clock.advance(MINUTE);
+    await h.runtime.tick();
+    expect(reads()).toBe(2);
+    expect(cr.draft).toBe(false);
+    expect(cr.state).toBe("open");
+    expect(await trackingItem(h, waiting.taskId)).toMatchObject({ ci: "passing", draft: false, readyAt: expect.stringMatching(/^2/) as unknown });
+    expect(await sessionLines(h, waiting.taskId)).toContain("Rovara marked demo pull request 1 ready for review.");
+    // Nothing changes: each quiet pass waits longer (60 s, then 2 minutes, then 4, up to 5), so the host is asked less and less.
+    const waits: number[] = [];
+    for (let pass = 0; pass < 4; pass += 1) {
+      clock.advance(5 * MINUTE);
+      await h.runtime.tick();
+      waits.push(((await trackingRow(h, waiting.taskId))["nextAttemptAt"] as number) - clock.at);
+    }
+    expect(waits).toEqual([2 * MINUTE, 4 * MINUTE, 5 * MINUTE, 5 * MINUTE]);
+    expect(cr.state).toBe("open");
+    // The session reads "ready to merge" for a task that waits for it.
+    expect(await h.runtime.app.flow.deps.store.get({ pk: `DEVTASK#${waiting.taskId}`, sk: "META" })).toMatchObject({ workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING" } });
+  });
+
+  it("fixes failing CI by itself when the timer sees it, pushes the reviewed fix, and announces the approval that makes the pull request ready to merge", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const waiting = await toWaitForMerge(h);
+    const { taskId, workspaceId, seen, commit } = waiting;
+    const cr = h.model.changeRequests[0]!;
+    h.model.setChecks(commit, [passingCheck()]);
+    await h.runtime.tick();
+    expect(cr.draft).toBe(false);
+    // CI goes red on Rovara's own head: the next pass decides a round, records "fixing" on the session, and the coding run starts without anyone asking.
+    h.model.setChecks(commit, [failingCheck()]);
+    clock.advance(2 * MINUTE);
+    await h.runtime.tick();
+    expect(await taskRecord(h, taskId)).toMatchObject({ workflow: { stage: "IMPLEMENT" } });
+    expect(await sessionLines(h, taskId)).toContainEqual(expect.stringMatching(/^CI is failing on unit-tests, so Rovara is fixing it \(round 1 of 3\)\.$/));
+    const fix = await h.nextJob(workspaceId, seen);
+    expect(fix).toMatchObject({ payload: { workflowMode: "IMPLEMENT", workflowFix: { source: "ci", startFrom: commit } } });
+    h.model.branches.set("fix", commit);
+    const fixCommit = h.model.commit("fix", { "src/health.ts": "export const health = 200; // CI fixed\n" });
+    const fixTree = h.model.revision(fixCommit).tree;
+    await h.callback(fix, "result", builtResult(fixTree, h.base, fixCommit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, fixTree, "pass", h.base, fixCommit));
+    const update = await h.nextJob(workspaceId, seen);
+    h.model.branches.set(waiting.headBranch, fixCommit);
+    const call = { repository: "demo", pullRequestNumber: 1, action: "append", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: commit, commit: fixCommit };
+    expect((await h.callback(update, "pull-request-update", call)).status).toBe(200);
+    expect((await h.callback(update, "result", { status: "SUCCEEDED", result: { action: "append", repository: "demo", number: 1, url: h.model.crUrl("1"), state: "open", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: commit, commit: fixCommit, treeSha: fixTree, checks: [], reconciled: false } })).status).toBe(200);
+    expect(await taskRecord(h, taskId)).toMatchObject({ workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING" } });
+    // The new head passes; a writer approves it. Tracking reads both and says, once, that the pull request is ready to merge.
+    h.model.setChecks(fixCommit, [passingCheck()]);
+    h.model.setAccount("dana", "write");
+    h.model.addReview(cr.id, { login: "dana", state: "APPROVED", revision: fixCommit });
+    clock.advance(2 * MINUTE);
+    await h.runtime.tick();
+    expect(await trackingItem(h, taskId)).toMatchObject({ ci: "passing", review: "approved", headSha: fixCommit, headByRovara: true });
+    const lines = await sessionLines(h, taskId);
+    expect(lines.filter((line) => line.startsWith("Approved by dana. Ready to merge"))).toHaveLength(1);
+    // A further pass says nothing twice, and presses nothing: the pull request is still open.
+    clock.advance(5 * MINUTE);
+    await h.runtime.tick();
+    expect((await sessionLines(h, taskId)).filter((line) => line.startsWith("Approved by dana"))).toHaveLength(1);
+    expect(cr.state).toBe("open");
+    await h.runtime.tick();
+    const listed = await listSessions(store(h), IMPLICIT_COMPANY_ID, developerIdOf(localOwnerPrincipal()));
+    expect(listed.sessions[0]).toMatchObject({ summary: { display: { state: "ready_to_merge" } } });
+  });
+
+  it("records a merge made on the code host: the task is merged, the session says so, and the pull request is not read again", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const { taskId, commit } = await toWaitForMerge(h);
+    const cr = h.model.changeRequests[0]!;
+    h.model.setChecks(commit, [passingCheck()]);
+    await h.runtime.tick();
+    expect(cr.draft).toBe(false);
+    // A person merges it on the code host. Rovara did not press anything.
+    expect(h.model.merge(cr.id, { revision: commit, method: "squash" })).toMatchObject({ outcome: "merged" });
+    clock.advance(2 * MINUTE);
+    await h.runtime.tick();
+    expect(await taskRecord(h, taskId)).toMatchObject({ workflow: { stage: "MERGED", state: "COMPLETE", pullRequests: [{ state: "MERGED" }] } });
+    expect(await sessionLines(h, taskId)).toEqual(expect.arrayContaining(["Merged on the code host by rovara-user; no approval was recorded.", "Merged."]));
+    // The task is over: its tracking row is gone and no further pass reads it.
+    expect(await store(h).get({ pk: "WORKFLOW_MERGE_RECOVERY", sk: `TASK#${taskId}` })).toBeUndefined();
+    const reads = countReads(h);
+    clock.advance(20 * MINUTE);
+    await h.runtime.tick();
+    expect(reads()).toBe(0);
+  });
+
+  it("backs off when the code host says slow down, pauses every row until the time it names, and goes on after", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const waiting = await toWaitForMerge(h);
+    const reads = countReads(h);
+    h.model.rateLimitedUntil = clock.at + 10 * MINUTE;
+    await h.runtime.tick();
+    expect(reads()).toBe(1);
+    expect(h.runtime.app.tracking.pausedUntil()).toBe(clock.at + 10 * MINUTE);
+    // The row waits for the host's time at least, and a tick inside it asks nothing.
+    expect((await trackingRow(h, waiting.taskId))["nextAttemptAt"]).toBeGreaterThanOrEqual(clock.at + 10 * MINUTE);
+    clock.advance(5 * MINUTE);
+    await h.runtime.tick();
+    expect(reads()).toBe(1);
+    // The host is open again and the time has passed: the pass reads and records the pull request.
+    h.model.rateLimitedUntil = undefined;
+    clock.advance(6 * MINUTE);
+    await h.runtime.tick();
+    expect(reads()).toBe(2);
+    expect(h.runtime.app.tracking.pausedUntil()).toBeUndefined();
+    expect(await trackingItem(h, waiting.taskId)).toMatchObject({ state: "open" });
   });
 });
 
