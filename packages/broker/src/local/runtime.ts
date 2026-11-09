@@ -305,7 +305,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const closers: Array<() => Promise<void> | void> = [];
   const configured = (point: PluginPoint): boolean => config.plugins.some((entry) => entry.point === point);
   if (options.storage === "memory") {
-    registry.register("storage", "memory", new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }), { isDefault: true });
+    registry.register("storage", "memory", new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, ttlAttribute: INDEX_EXPIRY_ATTRIBUTE }), { isDefault: true });
     registry.register("queue", "memory", new MemoryQueueService(), { isDefault: true });
   } else {
     const databasePath = join(stateDirectory, STATE_DB_FILE_NAME);
@@ -342,6 +342,12 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
 
   options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
+  // Every record the core writes expires by `indexExpiresAt`. A store that sweeps another attribute (the SQLite plug-in's own default is `expiresAt`) would keep them for ever without a word,
+  // so such a store is refused here, saying what to set.
+  const storeTtl = registry.require("storage").ttlAttribute;
+  if (storeTtl !== INDEX_EXPIRY_ATTRIBUTE) {
+    throw new LocalStateError(`the storage plug-in expires records by ${storeTtl === undefined ? "nothing" : `"${storeTtl}"`}, and Rovara's records expire by "${INDEX_EXPIRY_ATTRIBUTE}"; set "ttlAttribute": "${INDEX_EXPIRY_ATTRIBUTE}" in its settings`);
+  }
   // Lane L9a (S1): objects are kept as documents unless a plug-in names another object storage (the folder adapter).
   if (registry.names("object-storage").length === 0) {
     registry.register("object-storage", "document", createDocumentObjectStorage(registry.require("storage"), { companyId: config.companyId ?? IMPLICIT_COMPANY_ID }), { isDefault: true });

@@ -103,6 +103,15 @@ describe("rovara up runtime", () => {
     expect(() => runtime.registry.unregister("identity", "local-owner")).toThrow(PluginRegistryError);
   });
 
+  it("refuses a configured storage plug-in that expires records by another attribute, saying what to set (N5)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rovara-l4-db-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const indexes = TASK_FLOW_INDEXES.map(({ name, partitionAttribute, sortAttribute, sortType }) => ({ name, partitionAttribute, ...(sortAttribute === undefined ? {} : { sortAttribute }), ...(sortType === undefined ? {} : { sortType }) }));
+    // The plug-in's own default is "expiresAt", which no record the core writes uses.
+    await expect(launch({ config: { version: 1, plugins: [{ point: "storage", name: "sqlite", module: "@agentx/local-adapters/storage", settings: { path: join(root, "a.db"), indexes } }] } })).rejects.toThrow(/"expiresAt".*set "ttlAttribute": "indexExpiresAt"/);
+    await expect(launch({ config: { version: 1, plugins: [{ point: "storage", name: "sqlite", module: "@agentx/local-adapters/storage", settings: { path: join(root, "b.db"), indexes, ttlAttribute: null } }] } })).rejects.toThrow(/expires records by nothing/);
+  });
+
   it("refuses a plug-in module under the task workspaces, and a state folder inside the project folder", async () => {
     const plugin = `export const plugin = { point: "storage", name: "custom", create: () => ({}) };\n`;
     const root = await mkdtemp(join(tmpdir(), "rovara-l4-run-"));
