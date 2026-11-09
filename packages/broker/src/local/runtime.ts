@@ -28,14 +28,14 @@ import { MemoryQueueService } from "../ports/memory-queue.js";
 import { SqliteDocumentStore, SqliteQueueService } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
-import { createLocalApp, type LocalApp } from "./app/app.js";
+import { createLocalApp, type LocalApp, type ModelProxyEndpoint } from "./app/app.js";
 import { configurationAnswer } from "./app/routes.js";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
-import { resolveGithubAccess } from "./github-access.js";
+import { resolveGithubAccess, type GhRunner } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
 import {
@@ -126,6 +126,12 @@ export interface LocalRuntimeOptions {
   machines?: WorkerMachines;
   /** Called with the registry after Code's defaults and before the config's adapters, to register more (an embedding product, tests). */
   registerAdapters?: (registry: AdapterRegistry) => void;
+  /** TODO(L9a): the local model proxy's address (lane K1). Absent: workers have no model access yet. */
+  modelProxyEndpoint?: ModelProxyEndpoint;
+  /** How `gh` is run to find the owner's GitHub token (tests give a stub, so a real login on the machine is never used). */
+  gh?: GhRunner;
+  /** The fetch the Docker adapter uses to reach its workers (tests give the simulated Docker's). */
+  workerFetch?: typeof fetch;
   /** Run the dispatch, sweep and session timers. Default true; tests call `runtime.tick()`. */
   timers?: boolean;
 }
@@ -241,6 +247,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
     ...(options.allowedDomains === undefined ? {} : { allowedDomains: options.allowedDomains }),
     signer: await loadInvokeSigner(stateDirectory),
     docker: options.docker ?? createDockerRunner(options.environment),
+    ...(options.workerFetch === undefined ? {} : { fetch: options.workerFetch }),
   });
   registry.register("worker-machines", DOCKER_ADAPTER_NAME, docker);
   if (options.machines !== undefined) registry.register("worker-machines", INJECTED_ADAPTER_NAME, options.machines);
@@ -255,10 +262,11 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   const serverUrl = { current: "http://127.0.0.1" };
   const app = await createLocalApp({
     origin: () => serverUrl.current,
+    ...(options.modelProxyEndpoint === undefined ? {} : { modelProxyEndpoint: options.modelProxyEndpoint }),
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
     resolveRepositoryCredential: async () => {
-      const access = await resolveGithubAccess({ companyId: config.companyId ?? IMPLICIT_COMPANY_ID, keyFile: githubKeys, environment: options.environment });
+      const access = await resolveGithubAccess({ companyId: config.companyId ?? IMPLICIT_COMPANY_ID, keyFile: githubKeys, environment: options.environment, ...(options.gh === undefined ? {} : { gh: options.gh }) });
       if (access === undefined) throw new Error("no GitHub access is set up: run `gh auth login`, set GH_TOKEN, or put a github token in keys.json");
       return { token: access.token.reveal() };
     },

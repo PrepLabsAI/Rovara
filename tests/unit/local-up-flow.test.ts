@@ -11,6 +11,7 @@ import { listSessions, sessionSnapshot } from "../../packages/broker/src/core/se
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
+import { MESSAGES_PER_HOUR, MESSAGE_NOT_PASSED_ON, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/local/app/host.js";
 import { registerOpenCommand } from "../../packages/cli/src/up/cli.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
@@ -276,7 +277,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const printed: string[] = [];
     const run = async (stateDir: string, ...args: string[]) => {
       const program = new Command().exitOverride().option("--json");
-      registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } as never });
+      registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
       await program.parseAsync(["node", "rovara", "open", "--state-dir", stateDir, ...args]);
     };
     await run(h.stateDirectory, taskId);
@@ -287,5 +288,57 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     await h.runtime.stop();
     await expect(run(h.stateDirectory, taskId)).rejects.toThrow(/not running/);
     await expect(run(h.stateDirectory, "not-a-task")).rejects.toThrow(/UUID/);
+  });
+
+  it("hands the job to the Docker adapter's worker (simulated Docker) with a token the real worker accepts, and its callbacks reach the flow", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rovara-l9-docker-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const stateDirectory = join(root, "state");
+    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+    const docker = new FakeDocker();
+    docker.features = ["task.workflowMode"];
+    // A key-shaped value is built at runtime (the public repository refuses one in a file).
+    const githubToken = ["gh", "p_"].join("") + "a1".repeat(18);
+    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: githubToken }, gh: async () => undefined, modelProxyEndpoint: { url: "http://model-proxy.examplehost:4321" }, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false });
+    cleanup.push(() => runtime.stop());
+    const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
+    const call = async (path: string, body?: unknown) => (await fetch(`${runtime.url}${path}`, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })).json() as Promise<ApiBody>;
+    await call("/v1/admin/projects", PROJECT);
+    const started = await call("/v1/dev/tasks", { requestId: "12121212-1212-4212-8212-121212121212", project: "payments", instructions: "Add a /health endpoint", workflow: true });
+    for (let attempt = 0; attempt < 8 && docker.invocations.length === 0; attempt += 1) {
+      await runtime.tick();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(docker.invocations[0]).toMatchObject({ kind: "prepare" });
+    const worker = [...docker.containers.values()].find((container) => container.kind === "worker");
+    expect(worker).toBeDefined();
+    // TODO(L9a): the model proxy's address reaches the worker as the environment the worker reads; the proxy itself is lane K1's.
+    expect(worker?.environment["AGENTX_MODEL_PROXY_URL"]).toBe("http://model-proxy.examplehost:4321");
+    // The worker clones with the grant it was given: the exchange answers with the owner's token while the job is live, and never for a grant that names other repositories.
+    const prepare = docker.invocations[0] as WorkerInvocation & { payload: { repositoryGrant: string } };
+    const exchange = (body: unknown) => runtime.app.callbacks({
+      method: "POST", path: `/v1/internal/workspaces/${prepare.workspaceId}/operations/${prepare.operationId}/repository-credentials`,
+      headers: { "x-agentx-repository-grant": prepare.payload.repositoryGrant }, body: JSON.stringify(body),
+    });
+    const given = await exchange({ credentialRef: "host-app", repositoryUrl: PROJECT.repositories[0]!.url, access: "clone" });
+    expect(given.statusCode).toBe(200);
+    expect(JSON.parse(given.body)).toEqual({ credential: { token: githubToken } });
+    expect((await exchange({ credentialRef: "host-app", repositoryUrl: PROJECT.repositories[0]!.url, access: "push" })).statusCode).toBe(403);
+    expect((await exchange({ credentialRef: "host-app", repositoryUrl: "https://examplehost/example/other.git", access: "clone" })).statusCode).toBe(403);
+    expect(started.task.workflow.stage).toBe("UNDERSTAND");
+  });
+
+  it("limits how often the owner can message a session in an hour, and says so", async () => {
+    const h = await launch();
+    const { taskId } = await toPlanReview(h);
+    const sessionId = (await h.api(`/v1/dev/tasks/${taskId}`)).body.task.sessionId!;
+    const send = async (index: number) => {
+      const id = `${index.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
+      return (await h.api(`/v1/app/sessions/${sessionId}/messages`, { method: "POST", body: { requestId: id, kind: "steer", text: `note ${index}` } })).body as unknown as { delivery: { state: string; reason?: string } };
+    };
+    for (let index = 1; index <= MESSAGES_PER_HOUR; index += 1) expect((await send(index)).delivery.reason).toBe(MESSAGE_NOT_PASSED_ON);
+    expect((await send(MESSAGES_PER_HOUR + 1)).delivery).toMatchObject({ state: "not_delivered", reason: MESSAGE_RATE_LIMITED });
+    // A repeat of a request already answered is answered again, not counted.
+    expect((await send(1)).delivery.reason).toBe(MESSAGE_NOT_PASSED_ON);
   });
 });

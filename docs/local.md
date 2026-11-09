@@ -2,8 +2,8 @@
 
 `rovara up` runs Rovara as ONE local Node process: an HTTP server on `127.0.0.1`, the plug-in registry behind it, and a Docker
 container for each task's worker. There is no cloud account, no Slack and no GitHub App. This page is the skeleton (lane L4): the
-process, the registry wiring, the Docker worker machines and the doctor. The task flow, the pages and the SQLite store come from
-later lanes and plug into what is here.
+process, the registry wiring, the Docker worker machines and the doctor. Lane L9-wire (below) joins the SQLite store, the task flow, the
+sessions, the decisions and the review pages onto it.
 
 ## Quick start
 
@@ -53,8 +53,8 @@ guessed). The company id can be set in the config (`companyId`).
 Start-up order, and why it matters:
 
 1. The state folder is checked; the config is read from the state folder (or from the path you typed with `--config`).
-2. Code's defaults and the built-in adapters are registered: in-memory `storage` and `queue` (defaults), and on `worker-machines`:
-   `docker` and `this-machine`.
+2. Code's defaults and the built-in adapters are registered: SQLite `storage` and `queue` in `~/.rovara/state.db` (defaults; a test can pass `storage: "memory"`), and on
+   `worker-machines`: `docker` and `this-machine`.
 3. The config's plug-ins are loaded in order. A configured `storage` or `queue` **replaces** the in-memory default; that is how the
    SQLite lane plugs in:
    ```json
@@ -77,10 +77,9 @@ or an absolute path.
 - Accepts only a loopback peer, a `Host` of `127.0.0.1:<port>` or `localhost:<port>` (DNS rebinding), and no foreign `Origin`.
 - `GET` and `POST` only; bodies up to 1 MiB; no CORS.
 - `GET /healthz` is open and says only `ok` and the version. `GET /v1/local/status` (login required) lists the company and which
-  adapter is registered at each plug-in point. Every other `/v1/...` route is the public broker handler (`createBrokerHandler`) over
-  in-memory registries, behind the same login (the owner counts as an administrator, so `POST /v1/admin/projects` works; the state is
-  in memory only). Its per-project memberships are empty, so the other project routes answer "not found" until the task-flow lane
-  gives the owner membership.
+  adapter is registered at each plug-in point. The owner's task, project and session routes are lane L9-wire's (below); any other
+  `/v1/...` route is still the older public broker handler (`createBrokerHandler`) over in-memory registries, behind the same login,
+  and its per-project memberships are empty.
 - A worker's callbacks do not come here. They arrive with `Host: host.docker.internal:<port>`, which this server's Host check
   refuses on purpose. They have a listener of their own (see "The callback listener").
 
@@ -200,15 +199,70 @@ your home are shared with the VM, which is where the state folder is.
 A stub. Running the worker beside the broker with no container gives task commands your files and accounts, so it is refused unless
 you start with `rovara up --this-machine`; even then it is not built, and every call says so.
 
-## Not in this lane
+## The task flow on `rovara up` (lane L9-wire)
 
-See the report of lane L4 for the list with file and line. In short: how the model key reaches the worker (the adapter takes a
-non-secret `environment` only), the published worker image, the SQLite store and queue, and the task flow and pages. Devcontainers,
-test services and the setup run need Docker calls the guard refuses; they are not available locally until each is given a place in
-the guard's rules.
+`rovara up` now runs the wave-1 lanes as one process. Everything below is `packages/broker/src/local/app/`; the lanes it joins know the
+ports and not each other, and this is the only place that knows all of them.
+
+| What | Where it comes from |
+| --- | --- |
+| Records and queue | one SQLite file, `~/.rovara/state.db` (lane L3's adapters, registered as the `storage` and `queue` defaults; a configured plug-in replaces them and must keep the task flow's indexes, `TASK_FLOW_INDEXES`) |
+| Task flow | lane L6a over the registry's `storage`, `queue`, `worker-machines`, `admission` and `audit-sink`; a timer (2 s) relays the outbox, dispatches to the worker machine, and sweeps the dispatch rows |
+| Sessions | lane L6b; the session is created in the task's own start transaction (`startExtras`), kept current by the store's change feed, and swept on the same timer |
+| Decisions | lane L6b's approval gate over the task's workflow document; a plan is approved only with a proof a local page signs for that one request, revision and digest |
+| Pages | lane L8's server on its own port (`runtime.pagesUrl`); a page address carries the owner's page session and is printed by `rovara up` and by `rovara open [task]` |
+| Worker callbacks | `app/callbacks.ts` on the callback listener: events, artifacts, the terminal result, and the repository credential exchange |
+| Owner routes | `/v1/dev/projects`, `/v1/admin/projects`, `/v1/dev/tasks...` and `/v1/app/sessions...`, behind the session token (the routes the MCP tools and the CLI's `session` commands call) |
+
+**Projects.** `POST /v1/admin/projects` (the owner) registers a project definition on the store; a repeat of the latest revision is a 200, a change is the next
+revision. A code host adapter is not needed to start a task: with none registered a start does not check the repository's host (and no pull request can be opened yet).
+
+**What a worker's result means.** The callback layer reads what the worker saved, never its word: Understand's `intent.json` (checked by `readIntentArtifact`) and the
+plan's `plan.md` (kept as a Markdown plan). An unreadable answer blocks the step with a plain reason and the owner can Retry it (`POST /v1/dev/tasks/<id>/workflow/retry`,
+`rovara session retry`). A `questions` answer waits for the owner (`POST /v1/app/sessions/<id>/answers`) and Understand runs again with the answers; a plan sent back with
+changes is planned again with the owner's words in the prompt.
+
+**Approving.** The session token that logs a tool in is not an approval. `POST /v1/dev/tasks/<id>/workflow/decision` answers that a plan is approved on its page; the owner
+runs `rovara open <task>` (or opens the link `rovara up` printed) and decides there. Keep that address out of chats and pull requests: whoever holds it can approve.
+
+**The 10-minute laptop test.** `tests/unit/local-up-flow.test.ts` is the journey with the worker simulated: project, task, preparation, Understand, Plan, the plan on the page,
+approval, a restart in the middle, a failed step and its Retry, questions and their answers, Stop, a message, the page address from `rovara open`, and the real Docker adapter
+(simulated Docker) accepting the job with the real worker's token check. With real Docker it is:
+
+```sh
+docker build -f environments/base/Dockerfile -t rovara-worker:local .
+export ANTHROPIC_API_KEY=...      # or keys.json; the worker will not hold it once the model proxy (lane L9a) lands
+rovara up --check && rovara up    # prints the review pages address
+curl -s -H "Authorization: Bearer $(cat ~/.rovara/session-token)" -X POST <url>/v1/admin/projects -d @project.json
+curl -s -H "Authorization: Bearer $(cat ~/.rovara/session-token)" -X POST <url>/v1/dev/tasks -d '{"requestId":"<uuid>","project":"<name>","instructions":"...","workflow":true}'
+rovara open <task-id>             # read the plan, approve it
+```
+
+Today this stops at the approved plan (see "Not wired yet"). The model proxy is lane L9a's: `modelProxyEndpoint` in `createLocalApp` is the seam, marked `TODO(L9a)`.
+
+## Not wired yet
+
+- **Coding, checks, send-backs, publishing, merge, proof.** After approval the workflow is at `IMPLEMENT`. L6a's dispatch knows `UNDERSTAND` and `PLAN` only (`DispatchKind`),
+  and Cloud's coding step, its candidate export, verification, review, publish and merge-tracking hooks (`workflow-items.ts`, `terminal-result.ts`, about 2,000 lines)
+  are not ported. So `installCiFixDecider` and `installBranchSyncDeciders` are NOT installed (L7A-3), `openBranchWriters` has no publish path to sit on, and the merge, proof and
+  pull request comment commands (L7a, L7b, L8) are not reachable from `rovara up`.
+- **A GitHub client for the laptop.** No `GitHubCodeHostProvider` exists for a personal token or `gh` (L7A-4): Cloud's client is a GitHub App client. Until one passes
+  `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself (clone and push are the same token).
+- **A model for the worker.** `modelProxyEndpoint` (lane L9a). The worker's `GET /v1/internal/model-access` is refused by the callback listener (POST only) and by the egress
+  gateway (it relays only `/v1/internal/workspaces/<id>/operations/<id>/<action>`).
+- **Lessons**, **design review** and the **proof report** page answer "nothing there"; **notifications** need a `channel` adapter (none on a laptop).
+- **A CLI sign-in to the local runtime.** The CLI and the MCP server sign in the way a hosted install does (an environment and refresh tokens); a local profile for them is not
+  written. The routes work with `Authorization: Bearer <session token>`.
+- **A message to a running step** is saved and reported as not delivered; the step does not take it.
+
+## Not in this lane (L4)
+
+See the report of lane L4 for the list with file and line. In short: the published worker image. Devcontainers, test services and the setup run need Docker calls the
+guard refuses; they are not available locally until each is given a place in the guard's rules.
 
 ## Tests
 
+- `tests/unit/local-up-flow.test.ts`: the whole `rovara up` journey on SQLite with a fake worker (see "The 10-minute laptop test" above).
 - `tests/unit/local-*.test.ts`, `tests/unit/up-cli.test.ts`: simulated Docker and worker (`tests/support/local/fake-docker.ts`). The
   simulated worker checks tokens with the real `invoke-auth.ts`.
 - `tests/integration/local-docker-worker-machines.test.ts`: the same conformance suite against real Docker and a real worker image.

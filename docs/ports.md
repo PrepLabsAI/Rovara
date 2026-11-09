@@ -115,7 +115,7 @@ once over the two ports; the store must keep `OUTBOX_PENDING_INDEX`.
 ## Local adapters (SQLite)
 
 `packages/local-adapters` holds the adapters for the laptop path (decision 44): a SQLite `DocumentStore` with its change feed, and a
-SQLite `Queue`. They are plug-ins for the registry and are not wired into the broker yet (lane L4 loads them):
+SQLite `Queue`. They are plug-ins for the registry. `rovara up` registers them as the `storage` and `queue` defaults in `~/.rovara/state.db` with the task flow's indexes (lane L9-wire); a config entry like these replaces them, and then must keep `TASK_FLOW_INDEXES`:
 
 ```json
 { "point": "storage", "name": "sqlite", "module": "@agentx/local-adapters/storage", "settings": { "path": ".rovara/state.db", "indexes": [] } },

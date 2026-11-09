@@ -3,7 +3,7 @@
 // (packages/worker/src/invoke-auth.ts), using the public key, workspace id and generation the adapter put in the container's
 // environment file, so a token the real worker would refuse fails here too.
 import { readFileSync } from "node:fs";
-import { WorkerInvocationSchema } from "@agentx/contracts";
+import { WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
 import type { DockerResult, DockerRunner } from "../../../packages/broker/src/local/docker-runner.js";
 import { invocationMatchesClaims, invokeAuthenticationFromEnvironment, verifyInvokeAuthorization } from "../../../packages/worker/src/invoke-auth.js";
 
@@ -56,6 +56,10 @@ export class FakeDocker implements DockerRunner {
   reachable = true;
   /** Make the simulated worker not answer /ping (still starting). */
   silent = false;
+  /** The features the simulated worker lists on /ping (the real worker lists `task.workflowMode`). */
+  features: string[] = ["fake-feature"];
+  /** Every invocation a simulated worker accepted, in order (lane L9-wire: a test answers its callbacks). */
+  readonly invocations: WorkerInvocation[] = [];
   /** Removing a container whose name is not one of ours fails, as a stuck sandbox does. */
   failSandboxRemoval = false;
   /** Creating a network fails, as when Docker has run out of address ranges. */
@@ -220,7 +224,7 @@ export class FakeDocker implements DockerRunner {
     if (container === undefined || container.status !== "running" || url.hostname !== "127.0.0.1") throw new TypeError("connection refused");
     if (url.pathname === "/ping") {
       if (this.silent) throw new TypeError("connection refused");
-      return Response.json({ status: container.accepted.size === 0 ? "Healthy" : "HealthyBusy", activeOperations: container.accepted.size, invocationFeatures: ["fake-feature"] });
+      return Response.json({ status: container.accepted.size === 0 ? "Healthy" : "HealthyBusy", activeOperations: container.accepted.size, invocationFeatures: this.features });
     }
     if (url.pathname === "/invocations" && init?.method === "POST") {
       const authentication = invokeAuthenticationFromEnvironment(container.environment);
@@ -232,6 +236,7 @@ export class FakeDocker implements DockerRunner {
       if (!invocationMatchesClaims(parsed.data, verified.claims)) return Response.json({ error: "invocation is not authorized", reason: "invocation_mismatch" }, { status: 401 });
       const duplicate = container.accepted.has(parsed.data.operationId);
       container.accepted.add(parsed.data.operationId);
+      if (!duplicate) this.invocations.push(parsed.data);
       return Response.json({ accepted: true, operationId: parsed.data.operationId, status: "ACCEPTED", duplicate });
     }
     return Response.json({ error: "not found" }, { status: 404 });
