@@ -37,6 +37,8 @@ export const PLAN_ARTIFACT_NAME = "plan.md";
  * check report from the run's result, not from this file. Every other name is kept once (see `recordArtifact`).
  */
 export const REPLACEABLE_ARTIFACT_NAMES: ReadonlySet<string> = new Set(["checks.json"]);
+/** The most posts of a replaceable name one operation may make (each is kept under its own digest). */
+export const REPLACEABLE_POSTS_MAX = 8;
 export const PLAN_MAX_BYTES = 200_000;
 const ARTIFACT_NAME = /^[A-Za-z0-9._-]{1,120}$/u;
 const EVENTS_MAX = 500;
@@ -89,7 +91,10 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
   if (REPLACEABLE_ARTIFACT_NAMES.has(name)) {
     // The newest post of a replaceable name stands; its bytes live under their own digest, so an earlier post is never rewritten.
     const replaceableKey = `${objectKey}/${sha256}`;
-    await deps.flow.store.put({ item: { ...key, entityType: "ARTIFACT", id, workspaceId: operation.workspaceId, operationId: operation.id, name, mediaType, objectKey: replaceableKey, sha256, bytes: bytes.byteLength, createdAt: iso(deps.flow) } });
+    const earlier = await deps.flow.store.get(key);
+    const posts = (typeof earlier?.["posts"] === "number" ? earlier["posts"] : 0) + 1;
+    if (posts > REPLACEABLE_POSTS_MAX && earlier?.["sha256"] !== sha256) throw agentXError("CALLBACK_FORBIDDEN", "this file was saved too many times in one operation");
+    await deps.flow.store.put({ item: { ...key, entityType: "ARTIFACT", id, workspaceId: operation.workspaceId, operationId: operation.id, name, mediaType, objectKey: replaceableKey, sha256, bytes: bytes.byteLength, posts: Math.min(posts, REPLACEABLE_POSTS_MAX + 1), createdAt: iso(deps.flow) } });
     try {
       await deps.blobs.put(replaceableKey, bytes, { contentType: mediaType, metadata: { sha256, name }, retention: PLAN_RETENTION });
     } catch (error) {

@@ -1201,6 +1201,20 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "PULL_REQUEST", state: "BLOCKED" });
   });
 
+  it("keeps the newest post of checks.json, each under its own digest, and no more than eight posts in one operation", async () => {
+    const h = await launch();
+    const { coding } = await toCoding(h);
+    const post = (n: number) => h.callback(coding, "artifacts", { name: "checks.json", mediaType: "application/json", content: JSON.stringify({ round: n }) });
+    for (let n = 1; n <= 8; n += 1) expect((await post(n)).status).toBe(200);
+    expect((await post(9)).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    // The same bytes again are the same post, not another.
+    expect((await post(8)).status).toBe(200);
+    // Any other name is still kept once.
+    const once = (content: string) => h.callback(coding, "artifacts", { name: "notes.txt", mediaType: "text/plain", content });
+    expect((await once("a")).status).toBe(200);
+    expect((await once("b")).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+  });
+
   it("refuses an update whose tree is not the reviewed one or whose parents are not the recorded head, and keeps the pull request's record on the head it had", async () => {
     const h = await launch({ host: true });
     const t = await toAppend(h);
