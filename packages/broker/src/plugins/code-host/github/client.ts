@@ -79,7 +79,8 @@ export interface GitHubAppCredentialProviderOptions {
   /**
    * Port lane L11 (a laptop signed in with the owner's own token, `token-client.ts`): the hooks of a client that has no App identity. Absent for an App client, and then nothing here applies.
    *  - `ownComment`: how Rovara's own replies are told from other comments. An App's replies carry its `<slug>[bot]` login; the owner's token writes as the owner, so every reply carries `marker`
-   *    (an HTML comment, hidden on the page) and a comment counts as Rovara's own only when its author is `login()` AND it carries the marker. Anyone else's comment with the marker stays feedback.
+   *    (an HTML comment, hidden on the page) and a comment counts as Rovara's own only when its author is `login()` AND it has Rovara's exact reply shape (a line, a blank line, the marker). Anyone else's comment with the marker stays feedback.
+   *    If `login()` cannot say who the owner is, the feedback read FAILS (no comments are returned): Rovara's own replies could not be told from the owner's feedback.
    *  - `notReachable`: the sentence for a repository the credential cannot reach (the App wording is wrong for a token).
    */
   personalToken?: {
@@ -1396,7 +1397,7 @@ export class GitHubAppCredentialProvider {
     return { pullRequest: { ...final, headTreeSha }, comments, threads, edits };
   }
 
-  /** The ids of Rovara's own comments among `comments`: the App's (its `<slug>[bot]` login), or with the owner's token (L11) the owner's login plus the reply marker. A login that cannot be read leaves every comment as it is. */
+  /** The ids of Rovara's own comments among `comments`: the App's (its `<slug>[bot]` login), or with the owner's token (L11) the owner's login plus the exact reply shape. An App slug that cannot be read leaves every comment as it is; an owner login that cannot be read fails the read. */
   private async ownCommentIds(comments: readonly GitHubFeedbackComment[]): Promise<Set<string>> {
     const personal = this.options.personalToken?.ownComment;
     if (personal !== undefined) {

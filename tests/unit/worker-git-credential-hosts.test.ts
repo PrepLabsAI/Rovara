@@ -55,4 +55,29 @@ describe("the worker's credentialed git (L5)", () => {
     ]);
     expect(answers).toEqual(["pw-for-the-test", undefined]);
   });
+
+  it("matches the host however git spells it (case) and with an explicit port for an address it was given (N1)", async () => {
+    const answers = await askpassAnswers(["clone", "https://GitHub.com/acme/app.git", "dest"], [
+      "Username for 'https://GitHub.com': ",
+      "Password for 'https://x-access-token@GITHUB.COM': ",
+    ]);
+    expect(answers).toEqual(["x-access-token", "pw-for-the-test"]);
+    const withPort = await askpassAnswers(["fetch", "https://Git.ExampleHost.test:8443/team/app.git"], [
+      "Password for 'https://x-access-token@Git.ExampleHost.test:8443': ",
+      "Password for 'https://x-access-token@git.examplehost.test:8443abc': ",
+      "Password for 'https://x-access-token@git.examplehost.test:': ",
+    ]);
+    expect(withPort).toEqual(["pw-for-the-test", undefined, undefined]);
+  });
+
+  it("matches the whole prompt, not a piece of it (N4)", async () => {
+    const answers = await askpassAnswers(["clone", "https://github.com/acme/app.git", "dest"], [
+      "Password for 'https://a%40github.com%27@evil.example': ",
+      "Password for 'https://other-user@github.com': ",
+      "Username for 'https://evil.example/https://github.com': ",
+      "Username for 'https://github.com' and more: ",
+      "xPassword for 'https://x-access-token@github.com': ",
+    ]);
+    expect(answers).toEqual([undefined, undefined, undefined, undefined, undefined]);
+  });
 });
