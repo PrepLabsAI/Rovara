@@ -1,6 +1,7 @@
 // Port lane W0: Code's model key stores. They read keys from the environment or from a local file; Cloud adapts the port to its
 // secret store and model proxy. A key is a `SecretValue`, so it cannot be logged by accident.
-import { readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { SecretValue, type ModelKeyStore } from "@agentx/contracts";
 
 const PROVIDER = /^[a-z][a-z0-9-]{0,63}$/;
@@ -12,7 +13,7 @@ export function environmentVariableFor(provider: string): string {
 
 export function createEnvironmentModelKeyStore(environment: Readonly<Record<string, string | undefined>>, knownProviders: readonly string[]): ModelKeyStore {
   return {
-    async get(provider) {
+    async get(_companyId, provider) {
       if (!PROVIDER.test(provider)) return undefined;
       const value = environment[environmentVariableFor(provider)];
       return value === undefined || value.trim() === "" ? undefined : new SecretValue(value.trim());
@@ -28,23 +29,37 @@ export function createEnvironmentModelKeyStore(environment: Readonly<Record<stri
 
 /**
  * A JSON file of `{"<provider>": "<key>"}`. The file must not be readable by other users (mode 0600 or tighter) on systems that
- * have modes, or it is refused. It is read on every call, so editing the file takes effect at once.
+ * have modes, and must not be a link, or it is refused. It is opened once and checked and read through that one handle, so the file
+ * cannot be swapped between the check and the read. It is read on every call, so editing the file takes effect at once. Errors say
+ * nothing about the content: a parse error's text can quote the key.
  */
 export function createFileModelKeyStore(path: string): ModelKeyStore {
   async function read(): Promise<Record<string, string>> {
-    let details;
+    let handle;
     try {
-      details = await stat(path);
-    } catch {
-      return {};
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+      throw new Error("the model key file could not be opened (it must be a plain file, not a link)", { cause: error });
     }
-    if (process.platform !== "win32" && (details.mode & 0o077) !== 0) throw new Error("the model key file must not be readable by other users (chmod 600)");
-    const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("the model key file must hold a JSON object");
-    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim() !== "" && PROVIDER.test(entry[0])).map(([provider, key]) => [provider, key.trim()]));
+    try {
+      const details = await handle.stat();
+      if (!details.isFile()) throw new Error("the model key file must be a plain file");
+      if (process.platform !== "win32" && (details.mode & 0o077) !== 0) throw new Error("the model key file must not be readable by other users (chmod 600)");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await handle.readFile("utf8"));
+      } catch {
+        throw new Error("the model key file is not valid JSON");
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("the model key file must hold a JSON object");
+      return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim() !== "" && PROVIDER.test(entry[0])).map(([provider, key]) => [provider, key.trim()]));
+    } finally {
+      await handle.close();
+    }
   }
   return {
-    async get(provider) {
+    async get(_companyId, provider) {
       const key = (await read())[provider];
       return key === undefined ? undefined : new SecretValue(key);
     },
@@ -57,15 +72,15 @@ export function createFileModelKeyStore(path: string): ModelKeyStore {
 /** Tries each store in order: a key in the environment wins over one in the file, or the other way, as the caller orders them. */
 export function createLayeredModelKeyStore(stores: readonly ModelKeyStore[]): ModelKeyStore {
   return {
-    async get(provider) {
+    async get(companyId, provider) {
       for (const store of stores) {
-        const key = await store.get(provider);
+        const key = await store.get(companyId, provider);
         if (key !== undefined) return key;
       }
       return undefined;
     },
-    async providers() {
-      return [...new Set((await Promise.all(stores.map((store) => store.providers()))).flat())].sort();
+    async providers(companyId) {
+      return [...new Set((await Promise.all(stores.map((store) => store.providers(companyId)))).flat())].sort();
     },
   };
 }
@@ -73,7 +88,7 @@ export function createLayeredModelKeyStore(stores: readonly ModelKeyStore[]): Mo
 /** A store held in memory, for tests and for callers that already have the keys. */
 export function createMemoryModelKeyStore(keys: Readonly<Record<string, string>>): ModelKeyStore {
   return {
-    async get(provider) {
+    async get(_companyId, provider) {
       const key = keys[provider];
       return key === undefined ? undefined : new SecretValue(key);
     },

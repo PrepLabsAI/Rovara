@@ -26,6 +26,8 @@ interface Machine {
   spec: MachineSpec;
   startingChecks: number;
   operations: Map<string, WorkerInvocation>;
+  /** Every operation id ever accepted, so a job that finished is not run again by a re-delivery. */
+  accepted: Set<string>;
 }
 
 export class FakeWorkerMachines implements WorkerMachines {
@@ -53,7 +55,8 @@ export class FakeWorkerMachines implements WorkerMachines {
   }
 
   async start(spec: MachineSpec): Promise<MachineHandle> {
-    const existingId = this.#byKey.get(spec.machineKey);
+    const keyOf = `${spec.companyId}\u0000${spec.machineKey}`;
+    const existingId = this.#byKey.get(keyOf);
     const existing = existingId === undefined ? undefined : this.#machines.get(existingId);
     if (existing !== undefined && existing.handle.state !== "terminated") {
       if (existing.handle.state === "stopped" || existing.handle.state === "stopping") this.#set(existing, "starting", this.#options.startingChecks);
@@ -68,9 +71,10 @@ export class FakeWorkerMachines implements WorkerMachines {
       spec: structuredClone(spec),
       startingChecks: this.#options.startingChecks,
       operations: new Map(),
+      accepted: new Set(),
     };
     this.#machines.set(machine.handle.machineId, machine);
-    this.#byKey.set(spec.machineKey, machine.handle.machineId);
+    this.#byKey.set(keyOf, machine.handle.machineId);
     return { ...machine.handle };
   }
 
@@ -102,7 +106,8 @@ export class FakeWorkerMachines implements WorkerMachines {
     const machine = this.#machines.get(machineId);
     if (machine === undefined || machine.handle.state === "terminated") throw new MachineError("not_found", "no such machine");
     if (machine.handle.state !== "ready" && machine.handle.state !== "busy") throw new MachineError("not_ready", `the machine is ${machine.handle.state}`);
-    if (machine.operations.has(invocation.operationId)) return { duplicate: true };
+    if (machine.accepted.has(invocation.operationId)) return { duplicate: true };
+    machine.accepted.add(invocation.operationId);
     machine.operations.set(invocation.operationId, structuredClone(invocation));
     machine.handle.state = "busy";
     return { duplicate: false };

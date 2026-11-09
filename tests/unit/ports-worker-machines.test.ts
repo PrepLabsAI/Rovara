@@ -29,6 +29,23 @@ runWorkerMachinesConformance("fake", {
 });
 
 describe("fake worker machines", () => {
+  it("keeps two companies' machines with the same key apart", async () => {
+    const machines = new FakeWorkerMachines();
+    const one = await machines.start({ machineKey: "ws", companyId: "org_aaaaaaaaaaaaaaaaaaaa" });
+    const two = await machines.start({ machineKey: "ws", companyId: "org_bbbbbbbbbbbbbbbbbbbb" });
+    expect(one.machineId).not.toBe(two.machineId);
+  });
+
+  it("does not run a job again when it is delivered again after it finished", async () => {
+    const machines = new FakeWorkerMachines({ startingChecks: 0 });
+    const { machineId } = await machines.start({ machineKey: "a", companyId: "c" });
+    await machines.health(machineId);
+    const job = invocation("11111111-1111-4111-8111-111111111111");
+    expect(await machines.deliver(machineId, job)).toEqual({ duplicate: false });
+    machines.finish(machineId, job.operationId);
+    expect(await machines.deliver(machineId, job)).toEqual({ duplicate: true });
+  });
+
   it("refuses a machine beyond its capacity", async () => {
     const machines = new FakeWorkerMachines({ capabilities: { maxConcurrentMachines: 1 } });
     await machines.start({ machineKey: "a", companyId: "c" });

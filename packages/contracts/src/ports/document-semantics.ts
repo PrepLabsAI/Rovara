@@ -155,6 +155,8 @@ function assertValidJson(value: unknown, depth: number, where: string): void {
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw invalid(`${where} is not a finite number`);
+    // DynamoDB's number range; a store with wider numbers still refuses what the narrowest one does.
+    if (value !== 0 && (Math.abs(value) > 9.99e125 || Math.abs(value) < 1e-130)) throw invalid(`${where} is outside the number range every store holds`);
     return;
   }
   if (Array.isArray(value)) {
@@ -182,9 +184,17 @@ function assertValidPath(path: AttributePath): void {
   if (!Array.isArray(path) || path.length === 0 || path.some((part) => typeof part !== "string" || part === "")) throw invalid("an attribute path has one or more non-empty parts");
 }
 
+const overlaps = (a: AttributePath, b: AttributePath): boolean => {
+  const shared = Math.min(a.length, b.length);
+  return a.slice(0, shared).every((part, index) => part === b[index]);
+};
+
 export function assertValidOps(ops: readonly UpdateOp[]): void {
   if (ops.length === 0) throw invalid("an update has at least one change");
-  for (const op of ops) {
+  for (const [index, op] of ops.entries()) {
+    for (const earlier of ops.slice(0, index)) {
+      if (overlaps(earlier.path, op.path)) throw invalid("two changes of one update touch the same path, or one inside the other");
+    }
     assertValidPath(op.path);
     if (op.path[0] === "pk" || op.path[0] === "sk") throw invalid("the key attributes cannot be changed");
     if (op.op === "set" || op.op === "setIfAbsent") assertValidJson(op.value, 1, "the new value");
@@ -197,13 +207,43 @@ export function assertValidTransaction(items: readonly TransactItem[]): void {
   if (items.length === 0) throw invalid("a transaction has at least one step");
   if (items.length > DOCUMENT_STORE_LIMITS.maxTransactItems) throw invalid(`a transaction has at most ${DOCUMENT_STORE_LIMITS.maxTransactItems} steps`);
   const seen = new Set<string>();
+  let bytes = 0;
   for (const item of items) {
     const key = item.kind === "put" ? item.item : item.key;
-    if (item.kind === "put") assertValidDocument(item.item);
+    if (item.kind === "put") {
+      assertValidDocument(item.item);
+      bytes += utf8Length(JSON.stringify(item.item));
+    }
     else assertValidKey(item.key);
     if (item.kind === "update") assertValidOps(item.ops);
     const id = `${key.pk}\u0000${key.sk}`;
     if (seen.has(id)) throw invalid("two steps of one transaction name the same key");
+    seen.add(id);
+  }
+  if (bytes > DOCUMENT_STORE_LIMITS.maxTransactBytes) throw invalid(`a transaction writes at most ${DOCUMENT_STORE_LIMITS.maxTransactBytes} bytes`);
+}
+
+/** Checks the keys of the document's indexes: right type, and no empty text. A document that lacks an attribute is simply not in that index. */
+export function assertValidIndexAttributes(indexes: readonly IndexDefinition[], document: StoredDocument): void {
+  for (const index of indexes) {
+    const partition = document[index.partitionAttribute];
+    if (partition !== undefined && (typeof partition !== "string" || partition === "")) throw invalid(`${index.partitionAttribute} is an index key and must be non-empty text`);
+    if (index.sortAttribute === undefined) continue;
+    const sort = document[index.sortAttribute];
+    if (sort === undefined) continue;
+    if ((index.sortType ?? "string") === "number" ? typeof sort !== "number" : typeof sort !== "string" || sort === "") {
+      throw invalid(`${index.sortAttribute} is an index key and must be ${(index.sortType ?? "string") === "number" ? "a number" : "non-empty text"}`);
+    }
+  }
+}
+
+/** The ids of the keys in a list, refusing a repeat (a `getMany` rule). */
+export function assertDistinctKeys(keys: readonly DocumentKey[]): void {
+  const seen = new Set<string>();
+  for (const key of keys) {
+    assertValidKey(key);
+    const id = `${key.pk}\u0000${key.sk}`;
+    if (seen.has(id)) throw invalid("the keys of one getMany must differ");
     seen.add(id);
   }
 }

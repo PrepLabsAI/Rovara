@@ -7,7 +7,8 @@
 //
 // Rules for the words used here:
 //  - A document is flat JSON with its key written in it (`pk`, `sk`), as the table's items are today.
-//  - Keys keep the company scope (decision 45.6): `pk` starts with `ORG#<company>#` (see company-scope.ts).
+//  - Keys keep the company scope (decision 45.6): company-owned data has a `pk` that starts with `ORG#<company>#` (see company-scope.ts).
+//    A few partitions are install-wide and unscoped today; they are listed in docs/ports.md.
 //  - A condition is data (a small expression tree), never a provider's expression string.
 //  - Single reads are strongly consistent. Index reads may lag behind writes (DynamoDB's secondary indexes do); a caller never
 //    relies on reading its own write through an index.
@@ -22,7 +23,9 @@ export const DOCUMENT_STORE_LIMITS = {
   maxDocumentBytes: 400 * 1_024,
   /** Items in one transaction. */
   maxTransactItems: 100,
-  /** Keys in one `getMany`. */
+  /** All the documents a transaction writes, added up as compact JSON bytes. */
+  maxTransactBytes: 4 * 1_024 * 1_024,
+  /** Keys in one `getMany`. The keys must be different from each other. */
   maxGetMany: 100,
   /** Items in one query page. */
   maxPageSize: 1_000,
@@ -92,8 +95,12 @@ export const when = {
 
 /**
  * One change to a document. The key attributes `pk` and `sk` cannot be changed. A nested path needs its parent map to exist
- * (otherwise the update is `invalid_request`). Updating an absent item creates it, holding only its key and the changes,
- * unless the request's condition says otherwise.
+ * (otherwise the update is `invalid_request`; `remove` through a missing parent does nothing). Updating an absent item creates it,
+ * holding only its key and the changes, unless the request's condition says otherwise.
+ *
+ * The steps of one update must not overlap: no path may be the same as, or inside, another step's path (`invalid_request`). Every
+ * step reads the document as it was before the update, so the order of the steps does not matter. (DynamoDB refuses overlapping
+ * paths in one update and reads the old item for each action; the port takes the same rule so that every adapter agrees.)
  */
 export type UpdateOp =
   | { op: "set"; path: AttributePath; value: JsonValue }
@@ -157,8 +164,9 @@ export type SortKeyRange =
 
 /**
  * One page of a partition, in sort-key order (`descending` reverses it).
- * `limit` is the most items a page holds (at most `DOCUMENT_STORE_LIMITS.maxPageSize`; default: that). With a `filter` a page may
- * hold fewer items than `limit`, even none, and still carry a cursor: keep asking until `cursor` is absent. The cursor is opaque
+ * `limit` is the most items a page holds (at most `DOCUMENT_STORE_LIMITS.maxPageSize`; default: that). A page may hold fewer
+ * items than `limit`, even none, and still carry a cursor (a filter drops items; a store may also end a page at a size limit): keep
+ * asking until `cursor` is absent. The cursor is opaque
  * and good only for the same request.
  */
 export interface QueryRequest {
@@ -177,12 +185,18 @@ export interface QueryPage {
 /**
  * A sparse secondary index over one partition attribute (a string) and, optionally, one sort attribute (a string or a number).
  * A document is in the index only if it holds the partition attribute (and the sort attribute, when the index has one).
- * Items come in sort-attribute order, ties by `pk` then `sk`.
+ * Items come in sort-attribute order; the order of items with equal sort values is not defined.
+ *
+ * Index attributes have a fixed type, as DynamoDB's index keys do. A write that gives the partition attribute anything but a
+ * non-empty string, or the sort attribute anything but a value of `sortType` (a non-empty string, if text), is `invalid_request`.
+ * To leave a document out of an index, leave the attribute out.
  */
 export interface IndexDefinition {
   name: string;
   partitionAttribute: string;
   sortAttribute?: string;
+  /** The type of the sort attribute. Default `string`. */
+  sortType?: "string" | "number";
 }
 export type IndexSortRange =
   | { op: "eq"; value: string | number }
@@ -202,9 +216,11 @@ export interface IndexQueryRequest {
 
 /** One committed change. `before` is absent for an insert, `after` for a remove. */
 export interface DocumentChange {
-  /** A 20-digit zero-padded decimal number that grows with commit order within one store, so plain text comparison orders changes. */
+  /** Opaque. Changes to one key arrive in commit order; the sequence says nothing about order between keys. */
   sequence: string;
   kind: "insert" | "modify" | "remove";
+  /** `expired` for a removal by the time-to-live sweep, so a consumer can tell it from a delete; `write` for everything else. */
+  cause: "write" | "expired";
   key: DocumentKey;
   before?: StoredDocument;
   after?: StoredDocument;
@@ -216,9 +232,20 @@ export interface ChangeSubscription {
  * What the DynamoDB stream does today: every committed change reaches each named consumer at least once, in commit order for
  * one key. A handler that throws is called again with the same changes. A rejected conditional write produces no change.
  * This is the way indexers, notifiers and the outbox relay learn what happened.
+ *
+ * Consumers are named and the names are fixed: a store may require them to be declared when it is built (DynamoDB's readers are
+ * declared in the deployment, and at most two can read one stream), and `subscribe` then attaches to a declared name. A consumer
+ * sees the changes committed after the first time its name subscribed, and, after a restart, the ones it had not yet handled
+ * (the adapter keeps a durable checkpoint per name). Retries are bounded: after the adapter's limit it stops retrying that batch,
+ * calls `onPoison` if given, and goes on, so one bad batch cannot block a consumer for ever. A handler must therefore be safe to
+ * run twice on the same change.
  */
 export interface DocumentChangeFeed {
-  subscribe(consumer: string, handler: (changes: readonly DocumentChange[]) => Promise<void>): Promise<ChangeSubscription>;
+  subscribe(
+    consumer: string,
+    handler: (changes: readonly DocumentChange[]) => Promise<void>,
+    options?: { onPoison?: (changes: readonly DocumentChange[], error: unknown) => void },
+  ): Promise<ChangeSubscription>;
 }
 
 // ---- The port ----
@@ -252,7 +279,12 @@ export type DocumentStoreErrorCode =
   /** The store asked the caller to slow down. Retry later. */
   | "throttled"
   /** The store could not be reached or failed. Retry later. */
-  | "unavailable";
+  | "unavailable"
+  /**
+   * A transaction lost a race with another writer (DynamoDB's `TransactionConflict`). Not a failed condition. An adapter retries a
+   * bounded number of times itself and throws this only when the retries are used up; the caller may retry the whole operation.
+   */
+  | "conflict";
 
 export class DocumentStoreError extends Error {
   constructor(readonly code: DocumentStoreErrorCode, message: string) {

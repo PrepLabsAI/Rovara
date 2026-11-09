@@ -1,11 +1,13 @@
 // Port lane W0: a fake in-process channel adapter for the `channel` point (Pratik's spec 062 types). It records what Rovara sends
 // and lets a test play a person speaking.
-import type { ChannelAdapter, ChannelCapabilities, ChannelEvent, ChannelInboundSink } from "@agentx/contracts";
+import type { ChannelAdapter, ChannelCapabilities, ChannelEvent, ChannelInboundSink, StepUpKind } from "@agentx/contracts";
 
 export const FAKE_CHANNEL_CAPABILITIES: ChannelCapabilities = { threads: true, buttons: 3, edits: false, maxTextLength: 4_000, proactive: true };
 
 export class FakeChannelAdapter implements ChannelAdapter {
   readonly capabilities: ChannelCapabilities;
+  readonly projects: readonly string[] = ["web"];
+  readonly stepUp: readonly StepUpKind[] = ["plan_approval", "admin"];
   readonly delivered: ChannelEvent[] = [];
   sink: ChannelInboundSink | undefined;
   stopped = false;

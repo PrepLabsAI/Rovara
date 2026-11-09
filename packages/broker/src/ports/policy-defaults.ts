@@ -18,6 +18,7 @@ import {
   type MeterEntry,
   type MeterResult,
   type Metering,
+  type ModelKeyStore,
   type ModelUsage,
   type Principal,
   type PriceTable,
@@ -29,6 +30,9 @@ export function createAllowAllAdmission(): Admission {
   return {
     async admit() {
       return { allowed: true };
+    },
+    async stage() {
+      return { decision: { allowed: true }, items: [] };
     },
     async settle() {},
     async release() {},
@@ -81,11 +85,12 @@ export function createLocalOwnerIdentity(options: LocalOwnerIdentityOptions = {}
       if (credential.scheme !== LOCAL_SESSION_SCHEME || options.isValidSession === undefined) return { ok: false, reason: "refused" };
       return (await options.isValidSession(credential.value, credential.remoteAddress)) ? { ok: true, principal: owner } : { ok: false, reason: "unknown" };
     },
-    async resolveExternalAccount(account: ExternalAccountRef) {
+    async resolveExternalAccount(companyId: string, account: ExternalAccountRef) {
+      if (companyId !== owner.companyId) return undefined;
       return linked.some((entry) => entry.provider === account.provider && entry.tenant === account.tenant && entry.accountId === account.accountId) ? owner : undefined;
     },
-    async getPrincipal(personId: string) {
-      return personId === owner.personId ? owner : undefined;
+    async getPrincipal(companyId: string, personId: string) {
+      return companyId === owner.companyId && personId === owner.personId ? owner : undefined;
     },
   };
 }
@@ -93,49 +98,80 @@ export function createLocalOwnerIdentity(options: LocalOwnerIdentityOptions = {}
 export const LOCAL_SESSION_METHOD = "local-session";
 export const CODE_HOST_COMMENT_METHOD = "code-host-comment";
 
+/** What the code host adapter found when it looked a comment up by id. */
+export interface VerifiedComment {
+  /** Who wrote it, as the host reports it (not as the proof claims). */
+  author: ExternalAccountRef;
+  /** The author's permission on the repository. A read-only collaborator may not approve. */
+  permission: "none" | "read" | "write" | "admin";
+  /** The comment is on this request's change request, was posted after the revision it approves, and says approve. */
+  approves: boolean;
+}
+
 export interface LocalOwnerApproversOptions {
   /** The local owner, for the `local-session` proof. */
   owner?: Principal;
+  /** Checks a local session secret with its issuer (the same check the identity adapter uses). Absent: `local-session` proofs are refused. */
+  verifySession?: (token: string) => boolean | Promise<boolean>;
   /**
-   * Whether the account that wrote a comment on the change request may approve it: the repository's owner or a collaborator. The code
-   * host adapter answers this; the core knows nothing about GitHub. Absent: comment proofs are refused.
+   * Looks a comment up by id at the code host and says who wrote it and what they may do. The code host adapter provides it; the core
+   * knows nothing about GitHub. Absent: comment proofs are refused.
    */
-  isCollaborator?: (account: ExternalAccountRef, request: ApprovalRequest) => boolean | Promise<boolean>;
-  /** Turns a verified comment account into a principal (the owner's linked account, or a collaborator). Default: a principal built from the account. */
+  verifyComment?: (commentId: string, request: ApprovalRequest) => VerifiedComment | undefined | Promise<VerifiedComment | undefined>;
+  /** Turns a verified comment author into a principal. Default: a principal built from the account, vouched for by its own provider. */
   principalForAccount?: (account: ExternalAccountRef) => Principal;
+  now?: () => Date;
 }
 
 /**
- * Decision 45.3: in Code a person's approval is proved by the local machine owner (their local session), or by a comment from the
- * repository owner or a collaborator on the change request. One approver is enough, and the person who asked may approve.
+ * Decision 45.3: in Code a person's approval is proved by the local machine owner (their local session), or by a comment from a
+ * repository collaborator with write permission on the change request. One approver is enough, and the person who asked may approve.
+ * A proof is good for the one request, revision and digest it names, until the request expires, and once (in this process).
  */
 export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = {}): Approvers {
   const owner = options.owner ?? localOwnerPrincipal();
+  const now = options.now ?? (() => new Date());
+  const used = new Set<string>();
   return {
     async requirement(): Promise<ApprovalRequirement> {
-      return { methods: options.isCollaborator === undefined ? [LOCAL_SESSION_METHOD] : [LOCAL_SESSION_METHOD, CODE_HOST_COMMENT_METHOD], minApprovers: 1, selfApprovalAllowed: true };
+      const methods = [...(options.verifySession === undefined ? [] : [LOCAL_SESSION_METHOD]), ...(options.verifyComment === undefined ? [] : [CODE_HOST_COMMENT_METHOD])];
+      return { methods, minApprovers: 1, selfApprovalAllowed: true };
     },
     async verify(request: ApprovalRequest, proof: ApprovalProof): Promise<ApprovalVerdict> {
-      if (request.companyId !== owner.companyId) return { approved: false, reason: "wrong_company" };
+      const refuse = (reason: string): ApprovalVerdict => ({ approved: false, reason });
+      if (request.companyId !== owner.companyId) return refuse("wrong_company");
+      if (proof.requestId !== request.requestId) return refuse("other_request");
+      if (proof.revision !== request.revision) return refuse("other_revision");
+      if (proof.artifactDigest !== request.artifactDigest) return refuse("other_content");
+      if (request.expiresAt !== undefined && now().getTime() >= Date.parse(request.expiresAt)) return refuse("expired");
+      if (used.has(proof.proofId)) return refuse("proof_already_used");
+      let verdict: ApprovalVerdict;
       if (proof.method === LOCAL_SESSION_METHOD) {
-        return proof.principal !== undefined && proof.principal.provider === LOCAL_OWNER_PROVIDER && proof.principal.personId === owner.personId
-          ? { approved: true, approver: owner, method: proof.method }
-          : { approved: false, reason: "not_the_local_owner" };
+        verdict = options.verifySession !== undefined && (await options.verifySession(proof.token))
+          ? { approved: true, approver: owner, method: proof.method, proofId: proof.proofId }
+          : refuse("not_the_local_owner");
+      } else if (proof.method === CODE_HOST_COMMENT_METHOD) {
+        if (options.verifyComment === undefined) return refuse("method_not_available");
+        const comment = await options.verifyComment(proof.token, request);
+        if (comment === undefined || !comment.approves) return refuse("no_approving_comment");
+        if (comment.permission !== "write" && comment.permission !== "admin") return refuse("not_a_collaborator");
+        const claimed = proof.claimedAccount;
+        if (claimed !== undefined && (claimed.provider !== comment.author.provider || claimed.tenant !== comment.author.tenant || claimed.accountId !== comment.author.accountId)) return refuse("account_mismatch");
+        const account = comment.author;
+        const approver = options.principalForAccount?.(account) ?? { companyId: owner.companyId, personId: `${account.provider}:${account.tenant}:${account.accountId}`, displayName: account.accountId, roles: ["collaborator"], provider: account.provider };
+        verdict = { approved: true, approver, method: proof.method, proofId: proof.proofId };
+      } else {
+        return refuse("unknown_method");
       }
-      if (proof.method === CODE_HOST_COMMENT_METHOD) {
-        if (options.isCollaborator === undefined || proof.account === undefined) return { approved: false, reason: "method_not_available" };
-        if (!(await options.isCollaborator(proof.account, request))) return { approved: false, reason: "not_a_collaborator" };
-        const account = proof.account;
-        const approver = options.principalForAccount?.(account) ?? { ...owner, personId: `${account.provider}:${account.tenant}:${account.accountId}`, displayName: account.accountId, roles: ["collaborator"] };
-        return { approved: true, approver, method: proof.method };
-      }
-      return { approved: false, reason: "unknown_method" };
+      if (verdict.approved) used.add(proof.proofId);
+      return verdict;
     },
   };
 }
 
-/** Metering that multiplies tokens by a price table. A model not in the table is priced `null` and recorded as `unknown`. */
+/** Metering that multiplies tokens by a price table. A model not in the table is priced `null` and recorded as `unknown`. A repeated `entryId` is counted once. */
 export function createPriceTableMetering(table: PriceTable, onRecord?: (entry: MeterEntry, result: MeterResult) => void | Promise<void>): Metering {
+  const recorded = new Map<string, MeterResult>();
   const price = (usage: ModelUsage): Cost | null => {
     const model = table.models[`${usage.provider}/${usage.modelId}`];
     if (model === undefined) return null;
@@ -151,8 +187,12 @@ export function createPriceTableMetering(table: PriceTable, onRecord?: (entry: M
       return price(usage);
     },
     async record(entry) {
+      const key = `${entry.companyId}\u0000${entry.entryId}`;
+      const earlier = recorded.get(key);
+      if (earlier !== undefined) return earlier;
       const cost = price(entry.usage);
       const result: MeterResult = cost === null ? { cost: null, source: "unknown" } : { cost, source: "price-table" };
+      recorded.set(key, result);
       await onRecord?.(entry, result);
       return result;
     },
@@ -163,6 +203,8 @@ export interface CodeDefaultsOptions extends LocalOwnerIdentityOptions {
   priceTable: PriceTable;
   approvers?: LocalOwnerApproversOptions;
   onMeter?: (entry: MeterEntry, result: MeterResult) => void | Promise<void>;
+  /** Code's model keys (environment, file). Absent: none is registered and the caller must configure one. */
+  modelKeys?: ModelKeyStore;
 }
 
 /** Registers Code's policy defaults. Config-named adapters replace them. */
@@ -173,4 +215,5 @@ export function registerCodeDefaults(registry: AdapterRegistry, options: CodeDef
   registry.register("approvers", "local-owner", createLocalOwnerApprovers({ ...options.approvers, owner }), { isDefault: true });
   registry.register("identity", LOCAL_OWNER_PROVIDER, createLocalOwnerIdentity(options), { isDefault: true });
   registry.register("metering", "price-table", createPriceTableMetering(options.priceTable, options.onMeter), { isDefault: true });
+  if (options.modelKeys !== undefined) registry.register("model-keys", "local", options.modelKeys, { isDefault: true });
 }

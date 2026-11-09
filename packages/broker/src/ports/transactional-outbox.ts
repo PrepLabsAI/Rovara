@@ -10,6 +10,7 @@ import {
   type OutboxMessage,
   type OutboxRelayReport,
   type QueueService,
+  type StoredDocument,
   type TransactionalOutbox,
 } from "@agentx/contracts";
 
@@ -17,8 +18,11 @@ export interface TransactionalOutboxDependencies {
   /** The store must keep `OUTBOX_PENDING_INDEX`. */
   store: Pick<DocumentStore, "update" | "queryIndex" | "get" | "indexes">;
   queues: QueueService;
-  companyId: string;
   now?: () => Date;
+  /** After this many failed hand-overs a message is set aside as DEAD. Default 10. */
+  maxAttempts?: number;
+  /** How long a handed-over row stays before a store with a time-to-live attribute may remove it, in seconds. Default 7 days. */
+  retainSeconds?: number;
 }
 
 const text = (value: unknown): string => {
@@ -27,13 +31,18 @@ const text = (value: unknown): string => {
 };
 
 const outboxKey = (companyId: string, id: string) => ({ pk: companyScoped(companyId, `OUTBOX#${id}`), sk: "OUTBOX" });
+const pendingPartition = (companyId: string) => `PENDING#${companyId}`;
 
 export function createTransactionalOutbox(dependencies: TransactionalOutboxDependencies): TransactionalOutbox {
-  const { store, queues, companyId } = dependencies;
+  const { store, queues } = dependencies;
   const now = dependencies.now ?? (() => new Date());
-  if (!store.indexes.some((index) => index.name === OUTBOX_PENDING_INDEX.name && index.partitionAttribute === OUTBOX_PENDING_INDEX.partitionAttribute && index.sortAttribute === OUTBOX_PENDING_INDEX.sortAttribute)) {
+  const maxAttempts = dependencies.maxAttempts ?? 10;
+  const retainSeconds = dependencies.retainSeconds ?? 7 * 24 * 3_600;
+  const index = store.indexes.find((candidate) => candidate.name === OUTBOX_PENDING_INDEX.name);
+  if (index === undefined || index.partitionAttribute !== OUTBOX_PENDING_INDEX.partitionAttribute || index.sortAttribute !== OUTBOX_PENDING_INDEX.sortAttribute) {
     throw new Error(`the document store must keep the ${OUTBOX_PENDING_INDEX.name} index`);
   }
+  const leaveIndex = [change.remove(OUTBOX_PENDING_INDEX.partitionAttribute), change.remove(OUTBOX_PENDING_INDEX.sortAttribute!)];
 
   return {
     stage(message: OutboxMessage) {
@@ -41,15 +50,17 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
       return {
         kind: "put",
         item: {
-          ...outboxKey(companyId, message.id),
+          ...outboxKey(message.companyId, message.id),
           entityType: "OUTBOX",
+          companyId: message.companyId,
           id: message.id,
           queue: message.queue,
           body: message.body,
           attributes: message.attributes ?? {},
           ...(message.groupId === undefined ? {} : { groupId: message.groupId }),
           status: "PENDING",
-          [OUTBOX_PENDING_INDEX.partitionAttribute]: "PENDING",
+          attempts: 0,
+          [OUTBOX_PENDING_INDEX.partitionAttribute]: pendingPartition(message.companyId),
           [OUTBOX_PENDING_INDEX.sortAttribute!]: stagedAt,
         },
         // Staging one id twice is a conflict, so a retried request cannot send twice.
@@ -57,36 +68,49 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
       };
     },
 
-    async relay(options = {}): Promise<OutboxRelayReport> {
-      const report: OutboxRelayReport = { delivered: 0, failed: 0 };
+    async relay(options): Promise<OutboxRelayReport> {
+      const report: OutboxRelayReport = { delivered: 0, failed: 0, dead: 0 };
       const limit = options.limit ?? 100;
-      let pending = await queryIndexAll(store, { index: OUTBOX_PENDING_INDEX.name, partition: "PENDING" });
+      let pending: StoredDocument[];
       if (options.ids !== undefined) {
-        const wanted = new Set(options.ids.map((id) => outboxKey(companyId, id).pk));
-        pending = pending.filter((item) => wanted.has(item.pk));
+        const found = await Promise.all(options.ids.map((id) => store.get(outboxKey(options.companyId, id))));
+        pending = found.filter((item): item is StoredDocument => item !== undefined && item.status === "PENDING");
       } else {
-        // The index lists every company's messages; this relay serves its own company only.
-        pending = pending.filter((item) => item.pk === companyScoped(companyId, `OUTBOX#${text(item.id)}`));
+        pending = await queryIndexAll(store, { index: OUTBOX_PENDING_INDEX.name, partition: pendingPartition(options.companyId), limit: Math.min(limit, 1_000) });
       }
       for (const item of pending.slice(0, limit)) {
+        const key = { pk: item.pk, sk: item.sk };
         try {
           const queue = await queues.queue(text(item.queue));
-          const attributes = item.attributes as Record<string, string>;
           await queue.enqueue({
             body: item.body!,
-            attributes,
-            // The outbox id is the duplicate-suppression id, so a second hand-over after a crash is dropped by the queue.
-            dedupeId: text(item.id),
+            // The outbox id travels with the message: a queue without duplicate suppression may deliver twice, and the consumer drops the repeat by it.
+            attributes: { ...(item.attributes as Record<string, string>), outboxId: text(item.id) },
+            // Scoped by company: two companies may stage the same id.
+            dedupeId: companyScoped(options.companyId, `OUTBOX#${text(item.id)}`),
             ...(typeof item.groupId === "string" ? { groupId: item.groupId } : {}),
           });
-          await store.update({
-            key: { pk: item.pk, sk: item.sk },
-            ops: [change.set("status", "QUEUED"), change.set("queuedAt", now().toISOString()), change.remove(OUTBOX_PENDING_INDEX.partitionAttribute), change.remove(OUTBOX_PENDING_INDEX.sortAttribute!)],
+          const marked = await store.update({
+            key,
+            ops: [change.set("status", "QUEUED"), change.set("queuedAt", now().toISOString()), change.set("expiresAt", Math.floor(now().getTime() / 1_000) + retainSeconds), ...leaveIndex],
             condition: when.eq("status", "PENDING"),
           });
-          report.delivered += 1;
+          // Another relay may have marked it first: then the copy this call sent was a duplicate the queue or the consumer drops.
+          if (marked.applied) report.delivered += 1;
         } catch {
-          report.failed += 1;
+          const attempts = (typeof item.attempts === "number" ? item.attempts : 0) + 1;
+          const dead = attempts >= maxAttempts;
+          try {
+            await store.update({
+              key,
+              ops: [change.set("attempts", attempts), ...(dead ? [change.set("status", "DEAD"), ...leaveIndex] : [])],
+              condition: when.eq("status", "PENDING"),
+            });
+          } catch {
+            // The failure is reported below; the count is retried by the next run.
+          }
+          if (dead) report.dead += 1;
+          else report.failed += 1;
         }
       }
       return report;

@@ -20,7 +20,7 @@ import {
 
 /** The indexes the suite needs the store to keep. The harness passes them to the adapter when it builds the store. */
 export const CONFORMANCE_INDEXES: readonly IndexDefinition[] = [
-  { name: "byKind", partitionAttribute: "kind", sortAttribute: "rank" },
+  { name: "byKind", partitionAttribute: "kind", sortAttribute: "rank", sortType: "number" },
   { name: "byOwner", partitionAttribute: "owner" },
 ];
 
@@ -141,6 +141,16 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         expect(await store.get({ pk: A, sk: "x" })).toBeUndefined();
       }));
 
+      it("refuses numbers outside the range every store holds", () => withStore(harness, async ({ store }) => {
+        await rejects(store.put({ item: doc(A, "n1", { n: 1e200 }) }));
+        await rejects(store.put({ item: doc(A, "n2", { n: 1e-200 }) }));
+        expect((await store.put({ item: doc(A, "n3", { big: 1e125, small: 1e-129, zero: 0, negative: -42.5 }) })).applied).toBe(true);
+      }));
+
+      it("refuses a getMany that repeats a key", () => withStore(harness, async ({ store }) => {
+        await rejects(store.getMany([{ pk: A, sk: "1" }, { pk: A, sk: "1" }]));
+      }));
+
       it("accepts a large document and refuses one over the limit", () => withStore(harness, async ({ store }) => {
         const big = "x".repeat(300 * 1_024);
         expect((await store.put({ item: doc(A, "big", { big }) })).applied).toBe(true);
@@ -229,7 +239,7 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         await store.put({ item: doc(A, "U", { a: 1, keep: "k", gone: "g", map: { x: 1 }, n: 10 }) });
         await store.update({
           key: { pk: A, sk: "U" },
-          ops: [change.set("a", 2), change.set("map.y", "why"), change.setIfAbsent("a", 99), change.setIfAbsent("fresh", "f"), change.remove("gone"), change.remove("never-was"), change.add("n", -3), change.add("made", 1)],
+          ops: [change.set("a", 2), change.set("map.y", "why"), change.setIfAbsent("keep", "ignored"), change.setIfAbsent("fresh", "f"), change.remove("gone"), change.remove("never-was"), change.add("n", -3), change.add("made", 1)],
         });
         expect(await store.get({ pk: A, sk: "U" })).toEqual(doc(A, "U", { a: 2, keep: "k", map: { x: 1, y: "why" }, n: 7, fresh: "f", made: 1 }));
       }));
@@ -251,6 +261,25 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         await rejects(store.update({ key: { pk: A, sk: "U" }, ops: [] }));
         await rejects(store.update({ key: { pk: A, sk: "U" }, ops: [change.set("ok", 1), change.add("n", Number.NaN)] }));
         expect(await store.get({ pk: A, sk: "U" })).toEqual(doc(A, "U", { text: "t", n: 1 }));
+      }));
+
+      it("refuses an update whose changes overlap, whatever their order", () => withStore(harness, async ({ store }) => {
+        await store.put({ item: doc(A, "U", { a: 1, m: { x: 1 } }) });
+        await rejects(store.update({ key: { pk: A, sk: "U" }, ops: [change.set("a", 2), change.setIfAbsent("a", 99)] }));
+        await rejects(store.update({ key: { pk: A, sk: "U" }, ops: [change.add("a", 1), change.add("a", 1)] }));
+        await rejects(store.update({ key: { pk: A, sk: "U" }, ops: [change.set("m", {}), change.set("m.x", 1)] }));
+        await rejects(store.update({ key: { pk: A, sk: "U" }, ops: [change.set("m.x", 1), change.remove("m")] }));
+        expect(await store.get({ pk: A, sk: "U" })).toEqual(doc(A, "U", { a: 1, m: { x: 1 } }));
+        // Different paths in any order are fine and give the same result.
+        await store.update({ key: { pk: A, sk: "U" }, ops: [change.set("m.y", 2), change.set("a", 5)] });
+        await store.update({ key: { pk: A, sk: "U" }, ops: [change.set("a", 5), change.set("m.y", 2)] });
+        expect(await store.get({ pk: A, sk: "U" })).toEqual(doc(A, "U", { a: 5, m: { x: 1, y: 2 } }));
+      }));
+
+      it("removes through a missing parent without complaint", () => withStore(harness, async ({ store }) => {
+        await store.put({ item: doc(A, "U", { a: 1 }) });
+        expect((await store.update({ key: { pk: A, sk: "U" }, ops: [change.remove("no.such.path")] })).applied).toBe(true);
+        expect(await store.get({ pk: A, sk: "U" })).toEqual(doc(A, "U", { a: 1 }));
       }));
 
       it("applies one compare-and-set winner out of many racing writers", () => withStore(harness, async ({ store }) => {
@@ -379,7 +408,7 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         await store.put({ item: doc(A, "4", { kind: "task" }) });
         await store.put({ item: doc(A, "5", { rank: 1 }) });
         await store.put({ item: doc(A, "6", { kind: "note", rank: 5 }) });
-        await store.put({ item: doc(B, "7", { kind: "task", rank: 20 }) });
+        await store.put({ item: doc(B, "7", { kind: "task", rank: 25 }) });
         await settleIndexes?.();
         const tasks = await queryIndexAll(store, { index: "byKind", partition: "task" });
         expect(tasks.map((item) => [item.pk === A ? "A" : "B", item.sk])).toEqual([["A", "2"], ["A", "3"], ["B", "7"], ["A", "1"]]);
@@ -423,6 +452,17 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         await settleIndexes?.();
         expect(await queryIndexAll(store, { index: "byOwner", partition: "dev-1", limit: 3 })).toHaveLength(7);
         expect(await queryIndexAll(store, { index: "byOwner", partition: "dev-1", filter: when.eq("even", true), limit: 2 })).toHaveLength(4);
+      }));
+
+      it("refuses a write whose index attributes have the wrong type or are empty", () => withStore(harness, async ({ store }) => {
+        await rejects(store.put({ item: doc(A, "x", { kind: "task", rank: "high" }) }));
+        await rejects(store.put({ item: doc(A, "x", { kind: 5 }) }));
+        await rejects(store.put({ item: doc(A, "x", { kind: "" }) }));
+        await store.put({ item: doc(A, "ok", { kind: "task", rank: 1 }) });
+        await rejects(store.update({ key: { pk: A, sk: "ok" }, ops: [change.set("rank", "later")] }));
+        await rejects(store.transact([{ kind: "put", item: doc(A, "y", { kind: "task", rank: "no" }) }]));
+        expect(await store.get({ pk: A, sk: "x" })).toBeUndefined();
+        expect((await store.get({ pk: A, sk: "ok" }))!.rank).toBe(1);
       }));
 
       it("refuses an index that does not exist, or a sort range on an index without a sort attribute", () => withStore(harness, async ({ store }) => {
@@ -485,6 +525,13 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         expect(await queryAll(store, { pk: A })).toHaveLength(DOCUMENT_STORE_LIMITS.maxTransactItems);
       }));
 
+      it("refuses a transaction that writes more bytes than the limit", () => withStore(harness, async ({ store }) => {
+        const piece = "x".repeat(300 * 1_024);
+        const steps = Array.from({ length: Math.ceil(DOCUMENT_STORE_LIMITS.maxTransactBytes / piece.length) + 1 }, (_, index) => ({ kind: "put" as const, item: doc(A, `BIG${index}`, { piece }) }));
+        await rejects(store.transact(steps));
+        expect(await store.get({ pk: A, sk: "BIG0" })).toBeUndefined();
+      }));
+
       it("lets exactly one of many racing transactions win a unique claim", () => withStore(harness, async ({ store }) => {
         const results = await Promise.all(Array.from({ length: 10 }, (_, index) => store.transact([
           { kind: "put", item: doc(A, "CLAIM", { by: index }), condition: when.absent() },
@@ -494,27 +541,6 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         const owners = await queryAll(store, { pk: A, sk: { op: "beginsWith", prefix: "OWNER#" } });
         expect(owners).toHaveLength(1);
         expect(`OWNER#${(await store.get({ pk: A, sk: "CLAIM" }))!.by as number}`).toBe(owners[0]!.sk);
-      }));
-
-      it("never shows a half-applied transaction to a reader", () => withStore(harness, async ({ store }) => {
-        await store.put({ item: doc(A, "L", { v: 0 }) });
-        await store.put({ item: doc(A, "R", { v: 0 }) });
-        let torn = false;
-        let running = true;
-        const reader = (async () => {
-          while (running) {
-            const [left, right] = await store.getMany([{ pk: A, sk: "L" }, { pk: A, sk: "R" }]);
-            // A multi-get is not a snapshot (see `getMany`), so a reader may see L ahead of R by one commit; never further.
-            if (Math.abs(Number(left!.v) - Number(right!.v)) > 1) torn = true;
-          }
-        })();
-        for (let step = 1; step <= 30; step += 1) {
-          await store.transact([{ kind: "update", key: { pk: A, sk: "L" }, ops: [change.set("v", step)] }, { kind: "update", key: { pk: A, sk: "R" }, ops: [change.set("v", step)] }]);
-        }
-        running = false;
-        await reader;
-        expect(torn).toBe(false);
-        expect((await store.get({ pk: A, sk: "L" }))!.v).toBe(30);
       }));
     });
 

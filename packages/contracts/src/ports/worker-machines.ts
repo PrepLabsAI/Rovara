@@ -20,7 +20,7 @@ export type MachineState =
 
 export interface MachineSpec {
   /**
-   * Names the machine for good, for example a workspace id. Starting twice with one key returns the same machine and, if it was
+   * Names the machine for good within its company, for example a workspace id. Starting twice with one key returns the same machine and, if it was
    * stopped, wakes it (with its volume, when the adapter has one).
    */
   machineKey: string;
@@ -93,7 +93,10 @@ export interface WorkerMachines {
   readonly capabilities: MachineCapabilities;
   /** Idempotent on `machineKey`. Returns without waiting for the machine to be ready; ask `health`. */
   start(spec: MachineSpec): Promise<MachineHandle>;
-  /** Stops a machine and keeps its volume if the adapter has one. Idempotent; stopping a stopped or unknown machine is not an error. */
+  /**
+   * Stops a machine and keeps its volume if the adapter has one. Idempotent; stopping a stopped or unknown machine is not an error.
+   * An adapter with `canStop: false` throws `MachineError` `rejected`: terminate instead.
+   */
   stop(machineId: string): Promise<void>;
   /** Destroys a machine and its volume. Idempotent. */
   terminate(machineId: string): Promise<void>;

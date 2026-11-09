@@ -4,7 +4,9 @@ import {
   DOCUMENT_STORE_LIMITS,
   DocumentStoreError,
   applyUpdateOps,
+  assertDistinctKeys,
   assertValidDocument,
+  assertValidIndexAttributes,
   assertValidKey,
   assertValidOps,
   assertValidTransaction,
@@ -50,6 +52,8 @@ export class MemoryDocumentStore implements DocumentStore {
   readonly changes?: DocumentChangeFeed;
   readonly #items = new Map<string, StoredDocument>();
   readonly #nowSeconds: () => number;
+  readonly #faults: DocumentStoreError[] = [];
+  #expiring = false;
   readonly #feed?: MemoryChangeFeed;
 
   constructor(options: MemoryDocumentStoreOptions = {}) {
@@ -62,23 +66,43 @@ export class MemoryDocumentStore implements DocumentStore {
     }
   }
 
+  /** Makes the next `count` calls to any method fail with this error, as a throttled or unreachable store does. */
+  injectFault(error: DocumentStoreError, count = 1): void {
+    this.#faults.push(...Array.from({ length: count }, () => error));
+  }
+
+  /** How many change batches the feed gave up on after its retries, for tests that must notice. */
+  get droppedBatches(): number {
+    return this.#feed?.dropped ?? 0;
+  }
+
   get size(): number {
     return this.#items.size;
   }
 
+  #fault(): void {
+    const error = this.#faults.shift();
+    if (error !== undefined) throw error;
+  }
+
   async get(key: DocumentKey): Promise<StoredDocument | undefined> {
     assertValidKey(key);
+    this.#fault();
     const found = this.#items.get(idOf(key));
     return found === undefined ? undefined : structuredClone(found);
   }
 
   async getMany(keys: readonly DocumentKey[]): Promise<(StoredDocument | undefined)[]> {
     if (keys.length > DOCUMENT_STORE_LIMITS.maxGetMany) throw new DocumentStoreError("invalid_request", `getMany takes at most ${DOCUMENT_STORE_LIMITS.maxGetMany} keys`);
+    assertDistinctKeys(keys);
+    this.#fault();
     return Promise.all(keys.map((key) => this.get(key)));
   }
 
   async put(request: PutRequest): Promise<WriteResult> {
     assertValidDocument(request.item);
+    assertValidIndexAttributes(this.indexes, request.item);
+    this.#fault();
     const result = this.#commit([{ kind: "put", item: request.item, ...(request.condition === undefined ? {} : { condition: request.condition }) }]);
     if (!result.applied) return { applied: false, reason: "condition_failed" };
     return request.return === "old" && result.before[0] !== undefined ? { applied: true, item: result.before[0] } : { applied: true };
@@ -87,6 +111,7 @@ export class MemoryDocumentStore implements DocumentStore {
   async update(request: UpdateRequest): Promise<WriteResult> {
     assertValidKey(request.key);
     assertValidOps(request.ops);
+    this.#fault();
     const result = this.#commit([{ kind: "update", key: request.key, ops: request.ops, ...(request.condition === undefined ? {} : { condition: request.condition }) }]);
     if (!result.applied) return { applied: false, reason: "condition_failed" };
     if (request.return === "old") return result.before[0] === undefined ? { applied: true } : { applied: true, item: result.before[0] };
@@ -96,6 +121,7 @@ export class MemoryDocumentStore implements DocumentStore {
 
   async delete(request: DeleteRequest): Promise<WriteResult> {
     assertValidKey(request.key);
+    this.#fault();
     const result = this.#commit([{ kind: "delete", key: request.key, ...(request.condition === undefined ? {} : { condition: request.condition }) }]);
     if (!result.applied) return { applied: false, reason: "condition_failed" };
     return request.return === "old" && result.before[0] !== undefined ? { applied: true, item: result.before[0] } : { applied: true };
@@ -103,11 +129,13 @@ export class MemoryDocumentStore implements DocumentStore {
 
   async transact(items: readonly TransactItem[]): Promise<TransactResult> {
     assertValidTransaction(items);
+    this.#fault();
     const result = this.#commit(items);
     return result.applied ? { applied: true } : { applied: false, reason: "condition_failed", failed: result.failed };
   }
 
   async query(request: QueryRequest): Promise<QueryPage> {
+    this.#fault();
     if (typeof request.pk !== "string" || request.pk === "") throw new DocumentStoreError("invalid_request", "pk must be a non-empty string");
     const candidates = [...this.#items.values()]
       .filter((item) => item.pk === request.pk && sortKeyInRange(item.sk, request.sk))
@@ -117,6 +145,7 @@ export class MemoryDocumentStore implements DocumentStore {
   }
 
   async queryIndex(request: IndexQueryRequest): Promise<QueryPage> {
+    this.#fault();
     const index = this.indexes.find((candidate) => candidate.name === request.index);
     if (index === undefined) throw new DocumentStoreError("invalid_request", `no index named ${request.index}`);
     if (request.sort !== undefined && index.sortAttribute === undefined) throw new DocumentStoreError("invalid_request", "that index has no sort attribute");
@@ -141,7 +170,12 @@ export class MemoryDocumentStore implements DocumentStore {
     for (const item of [...this.#items.values()]) {
       const expires = item[this.ttlAttribute];
       if (typeof expires === "number" && expires <= now) {
-        this.#commit([{ kind: "delete", key: item }]);
+        this.#expiring = true;
+        try {
+          this.#commit([{ kind: "delete", key: item }]);
+        } finally {
+          this.#expiring = false;
+        }
         removed += 1;
       }
     }
@@ -187,6 +221,7 @@ export class MemoryDocumentStore implements DocumentStore {
         case "check": return before[index];
       }
     });
+    for (const next of after) if (next !== undefined) assertValidIndexAttributes(this.indexes, next);
     const changes: Omit<DocumentChange, "sequence">[] = [];
     steps.forEach((step, index) => {
       if (step.kind === "check") return;
@@ -198,6 +233,7 @@ export class MemoryDocumentStore implements DocumentStore {
       if (old === undefined && next === undefined) return;
       changes.push({
         kind: old === undefined ? "insert" : next === undefined ? "remove" : "modify",
+        cause: this.#expiring ? "expired" : "write",
         key: { pk: key.pk, sk: key.sk },
         ...(old === undefined ? {} : { before: structuredClone(old) }),
         ...(next === undefined ? {} : { after: structuredClone(next) }),
@@ -235,6 +271,7 @@ interface Consumer {
   queue: DocumentChange[];
   running: boolean;
   stopped: boolean;
+  onPoison?: (changes: readonly DocumentChange[], error: unknown) => void;
 }
 
 /** At-least-once delivery to named consumers, in commit order. A handler that throws gets the same changes again (up to 10 times, then they are dropped). */
@@ -242,9 +279,11 @@ class MemoryChangeFeed implements DocumentChangeFeed {
   readonly #consumers = new Map<string, Consumer>();
   #sequence = 0;
 
-  async subscribe(consumer: string, handler: (changes: readonly DocumentChange[]) => Promise<void>): Promise<ChangeSubscription> {
+  dropped = 0;
+
+  async subscribe(consumer: string, handler: (changes: readonly DocumentChange[]) => Promise<void>, options: { onPoison?: (changes: readonly DocumentChange[], error: unknown) => void } = {}): Promise<ChangeSubscription> {
     if (this.#consumers.has(consumer)) throw new DocumentStoreError("invalid_request", "that consumer name is already subscribed");
-    const entry: Consumer = { handler, queue: [], running: false, stopped: false };
+    const entry: Consumer = { handler, queue: [], running: false, stopped: false, ...(options.onPoison === undefined ? {} : { onPoison: options.onPoison }) };
     this.#consumers.set(consumer, entry);
     return {
       stop: async () => {
@@ -279,8 +318,11 @@ class MemoryChangeFeed implements DocumentChangeFeed {
           try {
             await consumer.handler(batch);
             break;
-          } catch {
-            await new Promise((resolve) => setTimeout(resolve, 1));
+          } catch (error) {
+            if (attempt === 10) {
+              this.dropped += 1;
+              consumer.onPoison?.(batch, error);
+            } else await new Promise((resolve) => setTimeout(resolve, 1));
           }
         }
       }

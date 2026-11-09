@@ -1,8 +1,8 @@
 // Port lane W0: Code's defaults for the policy seams and the model key stores pass the shared conformance suites.
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import type { MeterEntry, ModelUsage, PriceTable } from "@agentx/contracts";
 import {
   CODE_HOST_COMMENT_METHOD,
@@ -19,36 +19,43 @@ import { createEnvironmentModelKeyStore, createFileModelKeyStore, createLayeredM
 import { runAdmissionConformance, runApproversConformance, runAuditSinkConformance, runIdentityConformance, runMeteringConformance, runModelKeyStoreConformance } from "../support/ports/policy-conformance.js";
 
 const owner = localOwnerPrincipal();
-const SESSION = ["session", "value", "for", "tests"].join("-");
 
 runAdmissionConformance("Code default (allow all)", {
   create: async () => createAllowAllAdmission(),
-  admissible: { companyId: owner.companyId, action: "task.start", projectName: "web" },
+  admissible: { companyId: owner.companyId, idempotencyKey: "k", action: "task.start", projectName: "web" },
 });
 
 runAuditSinkConformance("Code default (writes nothing)", { create: async () => createNoopAuditSink() });
 
-runApproversConformance("Code default (local owner)", {
-  create: async () => createLocalOwnerApprovers({ owner }),
-  request: { companyId: owner.companyId, kind: "plan", subject: { type: "task", id: "t1" }, revision: 2, artifactDigest: "a".repeat(64) },
-  acceptable: { method: LOCAL_SESSION_METHOD, principal: owner, evidence: { session: "s1" } },
+const SESSION_TOKEN = ["session", "value", "for", "tests"].join("-");
+const COMMENT_ID = "comment-77";
+const REQUEST = { companyId: owner.companyId, requestId: "req-1", kind: "plan", subject: { type: "task", id: "t1" }, projectName: "web", revision: 2, artifactDigest: "a".repeat(64) };
+const COLLABORATOR = { provider: "any-code-host", tenant: "", accountId: "collab" };
+
+runApproversConformance("Code default (local owner session)", {
+  create: async () => createLocalOwnerApprovers({ owner, verifySession: (token) => token === SESSION_TOKEN }),
+  request: REQUEST,
+  acceptable: { proofId: "p", method: LOCAL_SESSION_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: SESSION_TOKEN },
+  forgedToken: "guessed-session",
 });
 
+const lookUpComment = (commentId: string) => (commentId === COMMENT_ID ? { author: COLLABORATOR, permission: "write" as const, approves: true } : undefined);
 runApproversConformance("Code default (repository collaborator by comment)", {
-  create: async () => createLocalOwnerApprovers({ owner, isCollaborator: (account) => account.accountId === "collab" }),
-  request: { companyId: owner.companyId, kind: "design", subject: { type: "task", id: "t1" } },
-  acceptable: { method: CODE_HOST_COMMENT_METHOD, account: { provider: "any-code-host", tenant: "", accountId: "collab" }, evidence: { commentId: "c1" } },
+  create: async () => createLocalOwnerApprovers({ owner, verifyComment: lookUpComment }),
+  request: REQUEST,
+  acceptable: { proofId: "p", method: CODE_HOST_COMMENT_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: COMMENT_ID, claimedAccount: COLLABORATOR },
+  forgedToken: "comment-that-does-not-exist",
 });
 
 runIdentityConformance("Code default (local owner)", {
-  create: async () => createLocalOwnerIdentity({ isValidSession: (value) => value === SESSION, linkedAccounts: [{ provider: "any-tracker", tenant: "ws", accountId: "owner-account" }] }),
-  valid: { credential: { scheme: LOCAL_SESSION_SCHEME, value: SESSION }, principal: { companyId: owner.companyId, personId: owner.personId } },
+  create: async () => createLocalOwnerIdentity({ isValidSession: (value) => value === SESSION_TOKEN, linkedAccounts: [{ provider: "any-tracker", tenant: "ws", accountId: "owner-account" }] }),
+  valid: { credential: { scheme: LOCAL_SESSION_SCHEME, value: SESSION_TOKEN }, principal: { companyId: owner.companyId, personId: owner.personId } },
   linkedAccount: { provider: "any-tracker", tenant: "ws", accountId: "owner-account" },
 });
 
 const table: PriceTable = { currency: "USD", models: { "anthropic/model-a": { inputMicrosPerMillionTokens: 3_000_000, outputMicrosPerMillionTokens: 15_000_000, cacheReadMicrosPerMillionTokens: 300_000 } } };
 const known: ModelUsage = { provider: "anthropic", modelId: "model-a", tokens: { input: 1_000, output: 500, cacheRead: 2_000, cacheWrite: 0 } };
-const entryOf = (usage: ModelUsage): MeterEntry => ({ companyId: owner.companyId, at: "2026-11-09T10:00:00.000Z", usage, taskId: "t1" });
+const entryOf = (usage: ModelUsage): MeterEntry => ({ companyId: owner.companyId, entryId: "e1", at: "2026-11-09T10:00:00.000Z", usage, taskId: "t1" });
 
 runMeteringConformance("Code default (tokens times a price table)", {
   create: async () => createPriceTableMetering(table),
@@ -61,9 +68,15 @@ runModelKeyStoreConformance("memory", { create: async (keys) => createMemoryMode
 runModelKeyStoreConformance("environment", {
   create: async (keys) => createEnvironmentModelKeyStore(Object.fromEntries(Object.entries(keys).map(([provider, key]) => [environmentVariableFor(provider), key])), Object.keys(keys)),
 });
+const directories: string[] = [];
+afterAll(async () => {
+  await Promise.all(directories.map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
 runModelKeyStoreConformance("local file", {
   async create(keys) {
     const directory = await mkdtemp(join(tmpdir(), "model-keys-"));
+    directories.push(directory);
     const path = join(directory, "keys.json");
     await writeFile(path, JSON.stringify(keys));
     await chmod(path, 0o600);
@@ -84,50 +97,76 @@ describe("Code defaults", () => {
   });
 
   it("lets the owner approve on their own request, and a stranger not at all", async () => {
-    const approvers = createLocalOwnerApprovers({ owner });
-    const request = { companyId: owner.companyId, kind: "merge", subject: { type: "task", id: "t" }, requestedBy: owner };
+    const approvers = createLocalOwnerApprovers({ owner, verifySession: (token) => token === SESSION_TOKEN });
+    const request = { ...REQUEST, requestedBy: owner };
+    const proof = { proofId: "p1", method: LOCAL_SESSION_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: SESSION_TOKEN };
     expect((await approvers.requirement(request)).selfApprovalAllowed).toBe(true);
-    expect((await approvers.verify(request, { method: LOCAL_SESSION_METHOD, principal: { ...owner, personId: "someone-else" }, evidence: {} })).approved).toBe(false);
-    expect((await approvers.verify(request, { method: CODE_HOST_COMMENT_METHOD, account: { provider: "p", tenant: "", accountId: "x" }, evidence: {} })).approved).toBe(false);
+    expect((await approvers.verify(request, { ...proof, token: "someone-else" })).approved).toBe(false);
+    expect((await approvers.verify(request, { ...proof, method: CODE_HOST_COMMENT_METHOD })).approved).toBe(false);
+    expect((await approvers.verify(request, proof)).approved).toBe(true);
   });
 
-  it("refuses a comment from someone who is not a collaborator", async () => {
-    const approvers = createLocalOwnerApprovers({ owner, isCollaborator: () => false });
-    const verdict = await approvers.verify({ companyId: owner.companyId, kind: "design", subject: { type: "task", id: "t" } }, { method: CODE_HOST_COMMENT_METHOD, account: { provider: "p", tenant: "", accountId: "x" }, evidence: {} });
-    expect(verdict).toEqual({ approved: false, reason: "not_a_collaborator" });
+  it("refuses a comment from a read-only collaborator, a comment that does not approve, and a mismatched account", async () => {
+    const proof = { proofId: "p", method: CODE_HOST_COMMENT_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: "c" };
+    const lookup = (permission: "read" | "write", approves = true) => createLocalOwnerApprovers({ owner, verifyComment: () => ({ author: COLLABORATOR, permission, approves }) });
+    expect(await lookup("read").verify(REQUEST, proof)).toEqual({ approved: false, reason: "not_a_collaborator" });
+    expect(await lookup("write", false).verify(REQUEST, { ...proof, proofId: "q" })).toEqual({ approved: false, reason: "no_approving_comment" });
+    expect(await lookup("write").verify(REQUEST, { ...proof, proofId: "r", claimedAccount: { ...COLLABORATOR, accountId: "someone-else" } })).toEqual({ approved: false, reason: "account_mismatch" });
+  });
+
+  it("names the approving collaborator under their own provider, not the local owner's", async () => {
+    const verdict = await createLocalOwnerApprovers({ owner, verifyComment: lookUpComment }).verify(REQUEST, { proofId: "p", method: CODE_HOST_COMMENT_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: COMMENT_ID });
+    expect(verdict.approved && verdict.approver.provider).toBe("any-code-host");
   });
 
   it("refuses a local session when no session check is configured", async () => {
-    expect((await createLocalOwnerIdentity().authenticate({ scheme: LOCAL_SESSION_SCHEME, value: SESSION })).ok).toBe(false);
+    expect((await createLocalOwnerIdentity().authenticate({ scheme: LOCAL_SESSION_SCHEME, value: SESSION_TOKEN })).ok).toBe(false);
   });
 });
+
+const CO = "org_aaaaaaaaaaaaaaaaaaaa";
 
 describe("model key stores", () => {
   it("reads the key from an environment variable named for the provider", async () => {
     expect(environmentVariableFor("open-router")).toBe("OPEN_ROUTER_API_KEY");
     const store = createEnvironmentModelKeyStore({ ANTHROPIC_API_KEY: "  spaced  ", OPENAI_API_KEY: "" }, ["anthropic", "openai"]);
-    expect((await store.get("anthropic"))?.reveal()).toBe("spaced");
-    expect(await store.get("openai")).toBeUndefined();
-    expect(await store.providers()).toEqual(["anthropic"]);
+    expect((await store.get(CO, "anthropic"))?.reveal()).toBe("spaced");
+    expect(await store.get(CO, "openai")).toBeUndefined();
+    expect(await store.providers(CO)).toEqual(["anthropic"]);
   });
 
   it("refuses a key file other users can read, and treats a missing file as no keys", async () => {
     const directory = await mkdtemp(join(tmpdir(), "model-keys-"));
     try {
       const path = join(directory, "keys.json");
-      expect(await createFileModelKeyStore(path).providers()).toEqual([]);
+      expect(await createFileModelKeyStore(path).providers(CO)).toEqual([]);
       await writeFile(path, JSON.stringify({ anthropic: "k" }));
       await chmod(path, 0o644);
-      await expect(createFileModelKeyStore(path).get("anthropic")).rejects.toThrow(/readable by other users/);
+      await expect(createFileModelKeyStore(path).get(CO, "anthropic")).rejects.toThrow(/readable by other users/);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
 
+  it("says nothing about a malformed key file's content, and refuses a link", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "model-keys-"));
+    directories.push(directory);
+    const path = join(directory, "keys.json");
+    const leaky = ["sk", "ant", "SECRET"].join("-");
+    await writeFile(path, `{"anthropic": ${leaky}`);
+    await chmod(path, 0o600);
+    const error = await createFileModelKeyStore(path).get(CO, "anthropic").catch((caught: unknown) => caught);
+    expect((error as Error).message).toBe("the model key file is not valid JSON");
+    expect((error as Error).message).not.toContain(leaky);
+    const link = join(directory, "link.json");
+    await symlink(path, link);
+    await expect(createFileModelKeyStore(link).get(CO, "anthropic")).rejects.toThrow(/plain file/);
+  });
+
   it("tries the environment before the file when layered in that order", async () => {
     const store = createLayeredModelKeyStore([createMemoryModelKeyStore({ anthropic: "from-env" }), createMemoryModelKeyStore({ anthropic: "from-file", openai: "o" })]);
-    expect((await store.get("anthropic"))?.reveal()).toBe("from-env");
-    expect((await store.get("openai"))?.reveal()).toBe("o");
-    expect(await store.providers()).toEqual(["anthropic", "openai"]);
+    expect((await store.get(CO, "anthropic"))?.reveal()).toBe("from-env");
+    expect((await store.get(CO, "openai"))?.reveal()).toBe("o");
+    expect(await store.providers(CO)).toEqual(["anthropic", "openai"]);
   });
 });

@@ -4,8 +4,8 @@
 // registry) with "load the adapters the config file names", and it drops the edition gate: there is no Enterprise-only plug-in
 // in Code. Pratik's channel adapters (spec 062 phase 3) are its `channel` point; an adapter an administrator registers over HTTP
 // is registered here under its channel id when it is created, and unregistered when it is deleted.
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { dirname, relative, resolve, isAbsolute, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   IMPLICIT_COMPANY_ID,
@@ -19,6 +19,7 @@ import {
   type PluginContext,
   type PluginModule,
   type PluginPoint,
+  type RegistryView,
 } from "@agentx/contracts";
 
 interface Entry {
@@ -28,6 +29,10 @@ interface Entry {
 
 export function createAdapterRegistry(): AdapterRegistry {
   const points = new Map<PluginPoint, Map<string, Entry>>();
+  let sealed = false;
+  const mayChange = (point: PluginPoint): void => {
+    if (sealed && point !== "channel") throw new PluginRegistryError("already_registered", `the registry is sealed; only channel adapters can change (${point})`);
+  };
   const entriesOf = (point: PluginPoint): Map<string, Entry> => {
     let entries = points.get(point);
     if (entries === undefined) {
@@ -39,6 +44,7 @@ export function createAdapterRegistry(): AdapterRegistry {
 
   return {
     register(point, name, adapter, registration: AdapterRegistration = {}) {
+      mayChange(point);
       const entries = entriesOf(point);
       const isDefault = registration.isDefault === true;
       const existing = entries.get(name);
@@ -59,7 +65,11 @@ export function createAdapterRegistry(): AdapterRegistry {
       }
       entries.set(name, { adapter, isDefault });
     },
+    seal() {
+      sealed = true;
+    },
     unregister(point, name) {
+      mayChange(point);
       return entriesOf(point).delete(name);
     },
     get<P extends PluginPoint>(point: P, name: string): AdapterOf<P> | undefined {
@@ -111,9 +121,21 @@ export async function readPluginConfigFile(path: string): Promise<PluginConfig> 
 /** Loads a module by the specifier the config gave. Injectable, so tests and other loaders need no files. */
 export type ModuleImporter = (specifier: string) => Promise<unknown>;
 
-/** The default importer: a package name through Node's resolution, a relative path against the config file's folder. */
+/**
+ * The default importer: a package name through Node's resolution, a `./` path against the config file's folder. The path is resolved
+ * to its real location (links followed) and must lie inside that folder, so a link cannot lead out of it.
+ */
 export function createModuleImporter(configDirectory: string): ModuleImporter {
-  return (specifier) => import(specifier.startsWith(".") ? pathToFileURL(resolve(configDirectory, specifier)).href : specifier);
+  return async (specifier) => {
+    if (!specifier.startsWith("./")) return (await import(specifier)) as unknown;
+    const root = await realpath(resolve(configDirectory));
+    const target = await realpath(resolve(root, specifier));
+    const inside = relative(root, target);
+    if (inside === "" || inside.startsWith("..") || isAbsolute(inside) || inside.split(sep).some((part) => part.startsWith("."))) {
+      throw new Error("a plug-in module must lie inside the config folder");
+    }
+    return (await import(pathToFileURL(target).href)) as unknown;
+  };
 }
 
 function pluginOf(loaded: unknown): PluginModule | undefined {
@@ -135,7 +157,7 @@ export interface LoadAdaptersOptions {
  * and stops the load; adapters created before it stay registered, so a caller that cannot continue should discard the registry.
  */
 export async function loadAdapters(config: PluginConfig, options: LoadAdaptersOptions): Promise<void> {
-  const companyId = config.companyId ?? IMPLICIT_COMPANY_ID;
+  const defaultCompanyId = config.companyId ?? IMPLICIT_COMPANY_ID;
   for (const entry of config.plugins) {
     if (!entry.enabled) continue;
     const label = `${entry.point}/${entry.name}`;
@@ -148,19 +170,21 @@ export async function loadAdapters(config: PluginConfig, options: LoadAdaptersOp
     const module = pluginOf(loaded);
     if (module === undefined) throw new PluginRegistryError("bad_module", `the module for ${label} does not export a plug-in`);
     if (module.point !== entry.point || module.name !== entry.name) throw new PluginRegistryError("bad_module", `the module for ${label} is a plug-in for a different point or name`);
-    const context: PluginContext = { companyId, settings: entry.settings, registry: options.registry, now: options.now ?? (() => new Date()) };
+    const view: RegistryView = { get: (point, name) => options.registry.get(point, name), require: (point, name) => options.registry.require(point, name), names: (point) => options.registry.names(point) };
+    const context: PluginContext = { defaultCompanyId, settings: entry.settings, registry: view, now: options.now ?? (() => new Date()) };
     let adapter: unknown;
     try {
       adapter = await module.create(context);
     } catch (error) {
       if (error instanceof PluginRegistryError) throw error;
-      throw new PluginRegistryError("create_failed", `${label} could not be created`);
+      // The adapter's own message may quote its settings; the operator gets the error's class only.
+      throw new PluginRegistryError("create_failed", `${label} could not be created (${error instanceof Error ? error.name : "unknown error"})`);
     }
     options.registry.register(entry.point, entry.name, adapter as never);
   }
 }
 
-/** Convenience for a process start-up: defaults first, then the file's adapters on top. */
+/** Convenience for a process start-up: register the defaults first, call this, then `registry.seal()`. */
 export async function loadAdaptersFromFile(path: string, options: Omit<LoadAdaptersOptions, "importModule"> & { importModule?: ModuleImporter }): Promise<PluginConfig> {
   const config = await readPluginConfigFile(path);
   await loadAdapters(config, { ...options, importModule: options.importModule ?? createModuleImporter(dirname(resolve(path))) });

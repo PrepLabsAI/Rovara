@@ -6,6 +6,7 @@ import {
   type DeadLetter,
   type EnqueueResult,
   type Queue,
+  type QueueCapabilities,
   type QueueMessageInput,
   type QueueOptions,
   type QueueService,
@@ -49,12 +50,18 @@ export class MemoryQueueService implements QueueService {
     if (queue === undefined) {
       queue = new MemoryQueue(name, options, this.#now);
       this.#queues.set(name, queue);
+    } else if (Object.keys(options).length > 0 && JSON.stringify(sorted(options)) !== JSON.stringify(sorted(queue.options))) {
+      // Options belong to where the queue is declared, not to whoever asks first.
+      throw new Error("that queue is already declared with different options");
     }
     return queue;
   }
 }
 
+const sorted = (options: QueueOptions): Record<string, unknown> => Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)));
+
 class MemoryQueue implements Queue {
+  readonly capabilities: QueueCapabilities = { ordered: true, dedupe: true, maxDelaySeconds: QUEUE_LIMITS.maxSeconds, detectsStaleHandle: true, deadLettersById: true };
   readonly #messages: Stored[] = [];
   readonly #dead: DeadStored[] = [];
   readonly #dedupe = new Map<string, { messageId: string; at: number }>();
@@ -70,7 +77,7 @@ class MemoryQueue implements Queue {
     const bytes = new TextEncoder().encode(JSON.stringify(input.body)).length;
     if (bytes > QUEUE_LIMITS.maxBodyBytes) throw new Error(`a message body is at most ${QUEUE_LIMITS.maxBodyBytes} bytes`);
     const delay = input.delaySeconds ?? 0;
-    if (!Number.isFinite(delay) || delay < 0 || delay > QUEUE_LIMITS.maxSeconds) throw new Error("delaySeconds is out of range");
+    if (!Number.isFinite(delay) || delay < 0 || delay > this.capabilities.maxDelaySeconds) throw new Error("delaySeconds is out of range");
     const now = this.now();
     if (input.dedupeId !== undefined) {
       for (const [id, seen] of this.#dedupe) if (now - seen.at > QUEUE_LIMITS.dedupeWindowSeconds * 1_000) this.#dedupe.delete(id);

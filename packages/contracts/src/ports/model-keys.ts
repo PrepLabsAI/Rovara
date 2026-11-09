@@ -25,8 +25,8 @@ export class SecretValue {
 }
 
 export interface ModelKeyStore {
-  /** The key for a model provider (`anthropic`, `openai`, and so on), or undefined when none is set. */
-  get(provider: string): Promise<SecretValue | undefined>;
-  /** The providers that have a key. Never the keys. */
-  providers(): Promise<string[]>;
+  /** The key a company uses for a model provider (`anthropic`, `openai`, and so on), or undefined when none is set. Code's stores ignore the company. */
+  get(companyId: string, provider: string): Promise<SecretValue | undefined>;
+  /** The providers that have a key for this company. Never the keys. */
+  providers(companyId: string): Promise<string[]>;
 }

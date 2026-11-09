@@ -6,8 +6,9 @@
 // adapter is named in the config file. A "plug-in point" is what decision 40 calls a plug-in kind; it is named a point here so
 // it cannot be mixed up with an adapter's own kind (`github`, `linear`), which the code-host, tracker and check-runner
 // contracts call `PluginKind`.
+import { isBuiltin } from "node:module";
 import { z } from "zod";
-import type { ChannelCapabilities, ChannelDecision, ChannelEvent } from "../channel-adapter.js";
+import type { ChannelCapabilities, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
 import type { InboundMessage } from "../conversation.js";
 import type { DocumentStore } from "./document-store.js";
 import type { JsonObject } from "./json.js";
@@ -55,7 +56,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   monitoring: "many",
   learning: "many",
   "team-record-source": "many",
-  identity: "many",
+  identity: "one",
   "build-system": "many",
   admission: "one",
   "audit-sink": "one",
@@ -65,11 +66,16 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
 };
 
 /** What a plug-in is called: lower-case words and digits with hyphens, the same shape as an adapter's kind. */
-export const PluginNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/);
+export const PluginNameSchema = z.string().regex(/^[a-z][a-z0-9-]{1,31}$/);
 
 // ---- The channel point: Pratik's channel adapters, in-process ----
 
-/** Where an in-process channel adapter hands what it heard. The adapter is trusted by the config that named it (no signature). */
+/**
+ * Where an in-process channel adapter hands what it heard. The adapter is trusted by the config that named it (no signature), but
+ * not for who is speaking: the sink applies the same checks as the channel API does for a signed adapter (the space is bound to one
+ * of the adapter's projects, the actor is linked to a developer, a decision matches its request, revision and digest, and a stepped-up
+ * kind is refused). An in-process adapter gets no shortcut around them.
+ */
 export interface ChannelInboundSink {
   message(message: InboundMessage): Promise<void>;
   decision(decision: ChannelDecision): Promise<void>;
@@ -81,6 +87,10 @@ export interface ChannelInboundSink {
  */
 export interface ChannelAdapter {
   readonly capabilities: ChannelCapabilities;
+  /** The projects the adapter serves (Pratik's `ChannelAdapterRecord.projects`). */
+  readonly projects: readonly string[];
+  /** Decision kinds that must be made on the task page, not through this adapter (`ChannelAdapterRecord.stepUp`). */
+  readonly stepUp: readonly StepUpKind[];
   /** Rovara to the channel. At least once: `event.id` is stable across retries, so an adapter drops a repeat. */
   deliver(event: ChannelEvent): Promise<void>;
   /** In-process adapters begin listening here. Webhook adapters need no listener: they post to the channel API. */
@@ -125,10 +135,16 @@ export interface AdapterRegistration {
   isDefault?: boolean;
 }
 
+/** What an adapter's `create` may do with the registry: look, not change. */
+export type RegistryView = Pick<AdapterRegistry, "get" | "require" | "names">;
+
 export interface AdapterRegistry {
   /** Adds an adapter. Throws when the name is taken, or when a `one` point already holds an adapter that is not a default. */
   register<P extends PluginPoint>(point: P, name: string, adapter: AdapterOf<P>, registration?: AdapterRegistration): void;
-  /** Removes an adapter (a channel adapter an administrator deleted). Returns whether there was one. */
+  /**
+   * Removes an adapter (a channel adapter an administrator deleted). Returns whether there was one. Only the `channel` point may be
+   * changed once the registry is sealed.
+   */
   unregister(point: PluginPoint, name: string): boolean;
   get<P extends PluginPoint>(point: P, name: string): AdapterOf<P> | undefined;
   /**
@@ -137,6 +153,11 @@ export interface AdapterRegistry {
    */
   require<P extends PluginPoint>(point: P, name?: string): AdapterOf<P>;
   names(point: PluginPoint): string[];
+  /**
+   * Ends set-up. Afterwards `register` and `unregister` work only on the `channel` point (administrators add and remove channel
+   * adapters while the process runs); a plug-in can no longer replace the approvers, the identity or the admission rule.
+   */
+  seal(): void;
 }
 
 export type PluginRegistryErrorCode =
@@ -165,31 +186,34 @@ export interface PluginModule<P extends PluginPoint = PluginPoint> {
 }
 
 export interface PluginContext {
-  companyId: string;
+  /** The company Code runs as. Cloud serves many companies, so an adapter takes the company from each call, not from here. */
+  defaultCompanyId: string;
   /** This adapter's block of the config file. Never holds a secret in clear: name where to read it (a file, an environment variable). */
   settings: JsonObject;
-  registry: AdapterRegistry;
+  registry: RegistryView;
   now: () => Date;
 }
 
 export const PLUGIN_CONFIG_VERSION = 1;
 
 /**
- * Where a module comes from: a package name (`@rovara/plugin-github`) or a path inside the project that starts with `./` or `../`
- * (resolved against the config file). Never a URL, an absolute path, or a path with `..` in the middle.
+ * Where a module comes from: a package name (`@rovara/plugin-github`) or a path that starts with `./` and stays inside the config
+ * file's folder (the loader resolves it and checks the real path). Never a URL, an absolute path, `..`, a hidden folder or a Node
+ * built-in. The config file is owner-controlled: it must never be read from repository content an agent works on, because naming a
+ * module runs its code in the broker.
  */
 export function isAllowedModuleSpecifier(value: string): boolean {
-  const relative = /^(\.\/|\.\.\/)([A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(value);
+  if (isBuiltin(value)) return false;
+  const relative = /^\.\/([A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(value);
   const packageName = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(\/[A-Za-z0-9._-]+)*$/.test(value);
   if (!relative && !packageName) return false;
-  // Leading `./` and `../` steps are the relative form; any `.` or `..` after them walks around and is refused.
-  const segments = value.split("/");
-  while (relative && (segments[0] === "." || segments[0] === "..")) segments.shift();
-  return segments.every((segment) => segment !== "." && segment !== "..");
+  // Nothing may walk around (`.`, `..`) or reach into a hidden folder (`.git`, `.ssh`) after the leading `./`.
+  const segments = value.split("/").slice(relative ? 1 : 0);
+  return segments.every((segment) => !segment.startsWith("."));
 }
 export const PluginModuleSpecifierSchema = z.string().min(1).max(256).refine(
   isAllowedModuleSpecifier,
-  "a package name, or a relative path that starts with ./ or ../ (no URL, no absolute path)",
+  "a package name, or a path inside the config's folder that starts with ./ (no URL, no absolute path, no .., no Node built-in)",
 );
 
 const JsonSettingSchema: z.ZodType<JsonObject> = z.record(z.string(), z.json());

@@ -26,7 +26,7 @@ import {
 
 export interface AdmissionHarness {
   create(): Promise<Admission>;
-  /** A request this adapter admits (in Code, any). */
+  /** A request this adapter admits (in Code, any). Its `idempotencyKey` is replaced by the suite. */
   admissible: AdmissionRequest;
   /** A request this adapter refuses, or undefined when it refuses nothing (Code's default). */
   refused?: AdmissionRequest;
@@ -47,6 +47,27 @@ export function runAdmissionConformance(name: string, harness: AdmissionHarness)
         expect(decision.code).toMatch(/^[a-z][a-z0-9_]*$/);
         expect(decision.message.length).toBeGreaterThan(0);
         if (decision.retryAfterSeconds !== undefined) expect(decision.retryAfterSeconds).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it("answers a repeated request key with the same decision and takes the allowance once", async () => {
+      const admission = await harness.create();
+      const request = { ...harness.admissible, idempotencyKey: "same-key" };
+      const first = await admission.admit(request);
+      const second = await admission.admit(request);
+      expect(second.allowed).toBe(first.allowed);
+      if (first.allowed && second.allowed) expect(second.reservationId).toBe(first.reservationId);
+    });
+
+    it("stages the allowance for the caller's transaction, valid steps or none, and a refusal stages nothing", async () => {
+      const admission = await harness.create();
+      const staged = await admission.stage({ ...harness.admissible, idempotencyKey: "staged-key" });
+      expect(staged.decision.allowed).toBe(true);
+      if (staged.items.length > 0) assertValidTransaction(staged.items);
+      if (harness.refused !== undefined) {
+        const refused = await admission.stage({ ...harness.refused, idempotencyKey: "refused-key" });
+        expect(refused.decision.allowed).toBe(false);
+        expect(refused.items).toEqual([]);
       }
     });
 
@@ -108,11 +129,15 @@ export function runAuditSinkConformance(name: string, harness: AuditSinkHarness)
 export interface ApproversHarness {
   create(): Promise<Approvers>;
   request: ApprovalRequest;
-  /** A proof this adapter accepts for `request`. */
+  /** A proof this adapter accepts for `request`. The suite gives each use a new `proofId`. */
   acceptable: ApprovalProof;
+  /** The same proof with a token the issuer does not know. */
+  forgedToken: string;
 }
 
 export function runApproversConformance(name: string, harness: ApproversHarness): void {
+  let counter = 0;
+  const fresh = (overrides: Partial<ApprovalProof> = {}): ApprovalProof => ({ ...harness.acceptable, proofId: `proof-${++counter}`, ...overrides });
   describe(`approvers conformance: ${name}`, () => {
     it("says how a person may approve and how many must", async () => {
       const requirement = await (await harness.create()).requirement(harness.request);
@@ -122,30 +147,54 @@ export function runApproversConformance(name: string, harness: ApproversHarness)
       expect(requirement.methods).toContain(harness.acceptable.method);
     });
 
-    it("accepts an acceptable proof and names the approver", async () => {
-      const verdict = await (await harness.create()).verify(harness.request, harness.acceptable);
+    it("accepts an acceptable proof and names the approver and the proof", async () => {
+      const proof = fresh();
+      const verdict = await (await harness.create()).verify(harness.request, proof);
       expect(verdict.approved).toBe(true);
       if (verdict.approved) {
-        expect(verdict.method).toBe(harness.acceptable.method);
+        expect(verdict.method).toBe(proof.method);
+        expect(verdict.proofId).toBe(proof.proofId);
         expect(verdict.approver.personId.length).toBeGreaterThan(0);
         expect(verdict.approver.companyId).toBe(harness.request.companyId);
       }
     });
 
     it("refuses a method it does not know, with a reason", async () => {
-      const verdict = await (await harness.create()).verify(harness.request, { method: "no-such-method", evidence: {} });
+      const verdict = await (await harness.create()).verify(harness.request, fresh({ method: "no-such-method" }));
       expect(verdict.approved).toBe(false);
       if (!verdict.approved) expect(verdict.reason.length).toBeGreaterThan(0);
     });
 
     it("refuses a proof for another company's request", async () => {
-      const verdict = await (await harness.create()).verify({ ...harness.request, companyId: "org_zzzzzzzzzzzzzzzzzzzz" }, harness.acceptable);
+      const verdict = await (await harness.create()).verify({ ...harness.request, companyId: "org_zzzzzzzzzzzzzzzzzzzz" }, fresh());
       expect(verdict.approved).toBe(false);
     });
 
-    it("refuses a proof with a known method but no person behind it", async () => {
-      const verdict = await (await harness.create()).verify(harness.request, { method: harness.acceptable.method, evidence: {} });
+    it("refuses a forged token, and a person that is only claimed", async () => {
+      const approvers = await harness.create();
+      expect((await approvers.verify(harness.request, fresh({ token: harness.forgedToken }))).approved).toBe(false);
+      expect((await approvers.verify(harness.request, fresh({ token: "" }))).approved).toBe(false);
+    });
+
+    it("refuses a proof made for another request, another revision or other content", async () => {
+      const approvers = await harness.create();
+      expect((await approvers.verify(harness.request, fresh({ requestId: `${harness.request.requestId}-other` }))).approved).toBe(false);
+      expect((await approvers.verify(harness.request, fresh({ revision: harness.request.revision + 1 }))).approved).toBe(false);
+      expect((await approvers.verify(harness.request, fresh({ artifactDigest: "f".repeat(64) }))).approved).toBe(false);
+      // The same proof, later, for a newer revision of the same subject.
+      expect((await approvers.verify({ ...harness.request, revision: harness.request.revision + 1 }, fresh())).approved).toBe(false);
+    });
+
+    it("refuses a proof after the request has expired", async () => {
+      const verdict = await (await harness.create()).verify({ ...harness.request, expiresAt: "2000-01-01T00:00:00.000Z" }, fresh());
       expect(verdict.approved).toBe(false);
+    });
+
+    it("accepts a proof once and refuses its replay", async () => {
+      const approvers = await harness.create();
+      const proof = fresh();
+      expect((await approvers.verify(harness.request, proof)).approved).toBe(true);
+      expect((await approvers.verify(harness.request, proof)).approved).toBe(false);
     });
   });
 }
@@ -157,7 +206,7 @@ export interface IdentityHarness {
   /** A credential this adapter accepts, and the principal it must give. */
   valid: { credential: PresentedCredential; principal: Pick<Principal, "companyId" | "personId"> };
   /** An outside account the adapter has linked to `valid.principal`, when it links any. */
-  linkedAccount?: Parameters<IdentityProvider["resolveExternalAccount"]>[0];
+  linkedAccount?: Parameters<IdentityProvider["resolveExternalAccount"]>[1];
 }
 
 export function runIdentityConformance(name: string, harness: IdentityHarness): void {
@@ -181,17 +230,21 @@ export function runIdentityConformance(name: string, harness: IdentityHarness): 
       if (!other.ok) expect(["unknown", "expired", "refused"]).toContain(other.reason);
     });
 
-    it("finds a person by id, and nobody for an unknown id", async () => {
+    it("finds a person by id in their company, and nobody for an unknown id or another company", async () => {
       const identity = await harness.create();
-      expect((await identity.getPrincipal(harness.valid.principal.personId))?.personId).toBe(harness.valid.principal.personId);
-      expect(await identity.getPrincipal("no-such-person")).toBeUndefined();
+      const { companyId, personId } = harness.valid.principal;
+      expect((await identity.getPrincipal(companyId, personId))?.personId).toBe(personId);
+      expect(await identity.getPrincipal(companyId, "no-such-person")).toBeUndefined();
+      expect(await identity.getPrincipal("org_zzzzzzzzzzzzzzzzzzzz", personId)).toBeUndefined();
     });
 
     it("resolves a linked outside account to its person, and an unlinked one to nobody", async () => {
       const identity = await harness.create();
-      expect(await identity.resolveExternalAccount({ provider: "no-such-provider", tenant: "t", accountId: "nobody" })).toBeUndefined();
+      const { companyId, personId } = harness.valid.principal;
+      expect(await identity.resolveExternalAccount(companyId, { provider: "no-such-provider", tenant: "t", accountId: "nobody" })).toBeUndefined();
       if (harness.linkedAccount !== undefined) {
-        expect((await identity.resolveExternalAccount(harness.linkedAccount))?.personId).toBe(harness.valid.principal.personId);
+        expect((await identity.resolveExternalAccount(companyId, harness.linkedAccount))?.personId).toBe(personId);
+        expect(await identity.resolveExternalAccount("org_zzzzzzzzzzzzzzzzzzzz", harness.linkedAccount)).toBeUndefined();
       }
     });
   });
@@ -233,6 +286,14 @@ export function runMeteringConformance(name: string, harness: MeteringHarness): 
       expect(["price-table", "provider-reported"]).toContain(result.source);
     });
 
+    it("counts an entry once however often it is recorded", async () => {
+      const metering = await harness.create();
+      const entry = harness.entry(harness.known);
+      const first = await metering.record(entry);
+      const again = await metering.record(entry);
+      expect(again).toEqual(first);
+    });
+
     it("answers a model it cannot price with no cost and the source unknown, and does not throw", async () => {
       const metering = await harness.create();
       expect(await metering.price(harness.unknown)).toBeNull();
@@ -249,26 +310,27 @@ export interface ModelKeyStoreHarness {
 }
 
 export function runModelKeyStoreConformance(name: string, harness: ModelKeyStoreHarness): void {
+  const COMPANY = "org_aaaaaaaaaaaaaaaaaaaa";
   const keys = { anthropic: ["test", "key", "one"].join("-"), openai: ["test", "key", "two"].join("-") };
   describe(`model key store conformance: ${name}`, () => {
     it("gives the key for a provider that has one, and nothing for one that has none", async () => {
       const store = await harness.create(keys);
-      const key = await store.get("anthropic");
+      const key = await store.get(COMPANY, "anthropic");
       expect(key).toBeInstanceOf(SecretValue);
       expect(key!.reveal()).toBe(keys.anthropic);
-      expect(await store.get("no-such-provider")).toBeUndefined();
-      expect(await store.get("../etc/passwd")).toBeUndefined();
+      expect(await store.get(COMPANY, "no-such-provider")).toBeUndefined();
+      expect(await store.get(COMPANY, "../etc/passwd")).toBeUndefined();
     });
 
     it("lists the providers that have a key, and never the keys", async () => {
       const store = await harness.create(keys);
-      const providers = await store.providers();
+      const providers = await store.providers(COMPANY);
       expect(providers).toEqual(expect.arrayContaining(["anthropic", "openai"]));
       expect(JSON.stringify(providers)).not.toContain(keys.anthropic);
     });
 
     it("keeps a key out of text, JSON and console output", async () => {
-      const key = (await (await harness.create(keys)).get("anthropic"))!;
+      const key = (await (await harness.create(keys)).get(COMPANY, "anthropic"))!;
       for (const shown of [String(key), `${key.toString()}`, JSON.stringify({ key }), inspect(key), inspect({ nested: { key } })]) {
         expect(shown).not.toContain(keys.anthropic);
       }
