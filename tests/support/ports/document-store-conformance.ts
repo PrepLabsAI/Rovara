@@ -276,10 +276,11 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         expect(await store.get({ pk: A, sk: "U" })).toEqual(doc(A, "U", { a: 5, m: { x: 1, y: 2 } }));
       }));
 
-      it("removes through a missing parent without complaint", () => withStore(harness, async ({ store }) => {
-        await store.put({ item: doc(A, "U", { a: 1 }) });
-        expect((await store.update({ key: { pk: A, sk: "U" }, ops: [change.remove("no.such.path")] })).applied).toBe(true);
-        expect(await store.get({ pk: A, sk: "U" })).toEqual(doc(A, "U", { a: 1 }));
+      it("refuses a remove through a missing parent, and removes a missing attribute whose parent exists", () => withStore(harness, async ({ store }) => {
+        await store.put({ item: doc(A, "U", { a: 1, m: { x: 1 } }) });
+        await rejects(store.update({ key: { pk: A, sk: "U" }, ops: [change.remove("no.such.path")] }));
+        expect((await store.update({ key: { pk: A, sk: "U" }, ops: [change.remove("m.absent"), change.remove("absent")] })).applied).toBe(true);
+        expect(await store.get({ pk: A, sk: "U" })).toEqual(doc(A, "U", { a: 1, m: { x: 1 } }));
       }));
 
       it("applies one compare-and-set winner out of many racing writers", () => withStore(harness, async ({ store }) => {

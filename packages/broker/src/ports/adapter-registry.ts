@@ -2,8 +2,9 @@
 //
 // One registry for every plug-in point (decisions 40, 45.5, 51). It replaces "nothing is loaded from outside" (the old build-time
 // registry) with "load the adapters the config file names", and it drops the edition gate: there is no Enterprise-only plug-in
-// in Code. Pratik's channel adapters (spec 062 phase 3) are its `channel` point; an adapter an administrator registers over HTTP
-// is registered here under its channel id when it is created, and unregistered when it is deleted.
+// in Code. Pratik's channel adapters (spec 062 phase 3) are its `channel` point. An adapter an administrator registers over HTTP is
+// meant to be registered here under its channel id when it is created and unregistered when it is deleted; that wiring (a record-backed
+// source, because the records live in the state table and this registry is per process) is not done yet. See docs/ports.md.
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, relative, resolve, isAbsolute, sep } from "node:path";
 import { pathToFileURL } from "node:url";

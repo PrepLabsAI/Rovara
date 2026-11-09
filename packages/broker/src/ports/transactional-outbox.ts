@@ -4,7 +4,6 @@ import {
   OUTBOX_PENDING_INDEX,
   change,
   companyScoped,
-  queryIndexAll,
   when,
   type DocumentStore,
   type OutboxMessage,
@@ -16,7 +15,7 @@ import {
 
 export interface TransactionalOutboxDependencies {
   /** The store must keep `OUTBOX_PENDING_INDEX`. */
-  store: Pick<DocumentStore, "update" | "queryIndex" | "get" | "indexes">;
+  store: Pick<DocumentStore, "update" | "queryIndex" | "get" | "indexes" | "ttlAttribute">;
   queues: QueueService;
   now?: () => Date;
   /** After this many failed hand-overs a message is set aside as DEAD. Default 10. */
@@ -76,10 +75,11 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
         const found = await Promise.all(options.ids.map((id) => store.get(outboxKey(options.companyId, id))));
         pending = found.filter((item): item is StoredDocument => item !== undefined && item.status === "PENDING");
       } else {
-        pending = await queryIndexAll(store, { index: OUTBOX_PENDING_INDEX.name, partition: pendingPartition(options.companyId), limit: Math.min(limit, 1_000) });
+        pending = (await store.queryIndex({ index: OUTBOX_PENDING_INDEX.name, partition: pendingPartition(options.companyId), limit: Math.min(limit, 1_000) })).items;
       }
       for (const item of pending.slice(0, limit)) {
         const key = { pk: item.pk, sk: item.sk };
+        let handedOver = false;
         try {
           const queue = await queues.queue(text(item.queue));
           await queue.enqueue({
@@ -90,20 +90,26 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
             dedupeId: companyScoped(options.companyId, `OUTBOX#${text(item.id)}`),
             ...(typeof item.groupId === "string" ? { groupId: item.groupId } : {}),
           });
+          handedOver = true;
           const marked = await store.update({
             key,
-            ops: [change.set("status", "QUEUED"), change.set("queuedAt", now().toISOString()), change.set("expiresAt", Math.floor(now().getTime() / 1_000) + retainSeconds), ...leaveIndex],
+            ops: [change.set("status", "QUEUED"), change.set("queuedAt", now().toISOString()), change.set(store.ttlAttribute ?? "expiresAt", Math.floor(now().getTime() / 1_000) + retainSeconds), ...leaveIndex],
             condition: when.eq("status", "PENDING"),
           });
           // Another relay may have marked it first: then the copy this call sent was a duplicate the queue or the consumer drops.
           if (marked.applied) report.delivered += 1;
         } catch {
+          if (handedOver) {
+            // The message is on its queue; only the mark failed. It stays pending and is handed over again (and dropped as a repeat); it is not a failed delivery.
+            report.failed += 1;
+            continue;
+          }
           const attempts = (typeof item.attempts === "number" ? item.attempts : 0) + 1;
           const dead = attempts >= maxAttempts;
           try {
             await store.update({
               key,
-              ops: [change.set("attempts", attempts), ...(dead ? [change.set("status", "DEAD"), ...leaveIndex] : [])],
+              ops: [change.set("attempts", attempts), ...(dead ? [change.set("status", "DEAD"), change.set(store.ttlAttribute ?? "expiresAt", Math.floor(now().getTime() / 1_000) + retainSeconds), ...leaveIndex] : [])],
               condition: when.eq("status", "PENDING"),
             });
           } catch {

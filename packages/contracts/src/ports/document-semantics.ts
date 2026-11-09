@@ -215,7 +215,10 @@ export function assertValidTransaction(items: readonly TransactItem[]): void {
       bytes += utf8Length(JSON.stringify(item.item));
     }
     else assertValidKey(item.key);
-    if (item.kind === "update") assertValidOps(item.ops);
+    if (item.kind === "update") {
+      assertValidOps(item.ops);
+      for (const op of item.ops) if (op.op === "set" || op.op === "setIfAbsent") bytes += utf8Length(JSON.stringify(op.value));
+    }
     const id = `${key.pk}\u0000${key.sk}`;
     if (seen.has(id)) throw invalid("two steps of one transaction name the same key");
     seen.add(id);
@@ -261,10 +264,7 @@ export function applyUpdateOps(document: StoredDocument | undefined, key: Docume
     for (const part of parents) {
       holder = isMap(holder) && Object.hasOwn(holder, part) ? holder[part] : undefined;
     }
-    if (!isMap(holder)) {
-      if (op.op === "remove") continue;
-      throw invalid("the parent of that path does not exist or is not a map");
-    }
+    if (!isMap(holder)) throw invalid("the parent of that path does not exist or is not a map");
     const current = Object.hasOwn(holder, last) ? holder[last] : undefined;
     switch (op.op) {
       case "set": holder[last] = structuredClone(op.value); break;

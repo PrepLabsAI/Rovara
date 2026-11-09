@@ -10,6 +10,7 @@ import {
   type ApprovalRequirement,
   type ApprovalVerdict,
   type Approvers,
+  approvalProofKey,
   type AuditSink,
   type AuthResult,
   type Cost,
@@ -144,7 +145,7 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
       if (proof.revision !== request.revision) return refuse("other_revision");
       if (proof.artifactDigest !== request.artifactDigest) return refuse("other_content");
       if (request.expiresAt !== undefined && now().getTime() >= Date.parse(request.expiresAt)) return refuse("expired");
-      if (used.has(proof.proofId)) return refuse("proof_already_used");
+      if (used.has(approvalProofKey(proof))) return refuse("proof_already_used");
       let verdict: ApprovalVerdict;
       if (proof.method === LOCAL_SESSION_METHOD) {
         verdict = options.verifySession !== undefined && (await options.verifySession(proof.token))
@@ -163,7 +164,11 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
       } else {
         return refuse("unknown_method");
       }
-      if (verdict.approved) used.add(proof.proofId);
+      if (verdict.approved) {
+        used.add(approvalProofKey(proof));
+        // Bounded: a long-running process forgets the oldest; the caller's transaction is the real guarantee.
+        if (used.size > 10_000) used.delete(used.values().next().value as string);
+      }
       return verdict;
     },
   };
@@ -212,7 +217,8 @@ export function registerCodeDefaults(registry: AdapterRegistry, options: CodeDef
   const owner = localOwnerPrincipal(options);
   registry.register("admission", "allow-all", createAllowAllAdmission(), { isDefault: true });
   registry.register("audit-sink", "none", createNoopAuditSink(), { isDefault: true });
-  registry.register("approvers", "local-owner", createLocalOwnerApprovers({ ...options.approvers, owner }), { isDefault: true });
+  const verifySession = options.approvers?.verifySession ?? (options.isValidSession === undefined ? undefined : (token: string) => options.isValidSession!(token, undefined));
+  registry.register("approvers", "local-owner", createLocalOwnerApprovers({ ...options.approvers, owner, ...(verifySession === undefined ? {} : { verifySession }) }), { isDefault: true });
   registry.register("identity", LOCAL_OWNER_PROVIDER, createLocalOwnerIdentity(options), { isDefault: true });
   registry.register("metering", "price-table", createPriceTableMetering(options.priceTable, options.onMeter), { isDefault: true });
   if (options.modelKeys !== undefined) registry.register("model-keys", "local", options.modelKeys, { isDefault: true });

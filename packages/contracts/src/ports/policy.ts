@@ -4,6 +4,7 @@
 //
 // Decision 51: nothing here names a sign-in provider, a chat tool or a code host. A person's outside accounts are
 // `ExternalAccountRef`s (a provider id and an opaque account id); a provider is an adapter.
+import { createHash } from "node:crypto";
 import type { TransactItem } from "./document-store.js";
 import type { Cost } from "./json.js";
 
@@ -114,7 +115,7 @@ export interface ApprovalRequirement {
  * evidence by itself: `verify` never believes a principal or an account that the proof only claims.
  */
 export interface ApprovalProof {
-  /** Names this proof, for single use: the caller stores it with `when.absent()` in the decision's transaction, so a replay fails. */
+  /** Names this proof for the caller's records. Single use is keyed on `approvalProofKey(proof)`, which the caller stores with `when.absent()` in the decision's transaction. */
   proofId: string;
   method: string;
   requestId: string;
@@ -124,6 +125,14 @@ export interface ApprovalProof {
   token: string;
   /** The account the surface says answered. Checked against the token's issuer, never taken as given. */
   claimedAccount?: ExternalAccountRef;
+}
+
+/**
+ * The key a proof is used up under: the same session or comment token cannot be used again for the same request under a fresh
+ * `proofId`. The caller stores this key (not `proofId`) with `when.absent()` in the decision transaction.
+ */
+export function approvalProofKey(proof: Pick<ApprovalProof, "method" | "token" | "requestId">): string {
+  return createHash("sha256").update(JSON.stringify([proof.method, proof.token, proof.requestId])).digest("hex");
 }
 
 export type ApprovalVerdict = { approved: true; approver: Principal; method: string; proofId: string } | { approved: false; reason: string };

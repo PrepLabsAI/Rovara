@@ -95,7 +95,7 @@ export const when = {
 
 /**
  * One change to a document. The key attributes `pk` and `sk` cannot be changed. A nested path needs its parent map to exist
- * (otherwise the update is `invalid_request`; `remove` through a missing parent does nothing). Updating an absent item creates it,
+ * (otherwise the update is `invalid_request`, for `remove` too, as DynamoDB refuses it; not yet checked against DynamoDB Local). Updating an absent item creates it,
  * holding only its key and the changes, unless the request's condition says otherwise.
  *
  * The steps of one update must not overlap: no path may be the same as, or inside, another step's path (`invalid_request`). Every
