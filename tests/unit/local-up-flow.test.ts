@@ -11,6 +11,7 @@ import { listSessions, sessionSnapshot } from "../../packages/broker/src/core/se
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
+import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
 import { artifactObjectKey } from "../../packages/broker/src/local/app/callbacks.js";
 import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
 import { MESSAGES_PER_HOUR, MESSAGE_NOT_PASSED_ON, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/local/app/host.js";
@@ -32,9 +33,10 @@ const PROJECT = {
 interface TaskJson { taskId: string; sessionId?: string; workflow: { stage: string; state: string; planContent?: string; decisions: Array<{ decision: string }> } }
 interface ApiBody { task: TaskJson; tasks: TaskJson[]; url: string; projects: Array<{ name: string; latestRevision: number }>; error?: { code: string; message: string } }
 interface CallbackBody { accepted?: number; error?: { code: string } }
+const GITHUB_PROJECT = { ...PROJECT, name: "ghproject", repositories: [{ ...PROJECT.repositories[0]!, url: "https://github.com/example/demo.git" }] };
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string } = {}) {
+async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -43,7 +45,7 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string } = 
   /** The addresses the server asked the browser to open: the only place a page address goes. */
   const opened: string[] = [];
   const runtime: LocalRuntime = await startLocalRuntime({
-    stateDirectory, cwd: join(root, "project"), environment: {}, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false, openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }),
+    stateDirectory, cwd: join(root, "project"), environment: extra.environment ?? {}, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false, openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
@@ -326,8 +328,8 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     cleanup.push(() => runtime.stop());
     const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
     const call = async (path: string, body?: unknown) => (await fetch(`${runtime.url}${path}`, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })).json() as Promise<ApiBody>;
-    await call("/v1/admin/projects", PROJECT);
-    const started = await call("/v1/dev/tasks", { requestId: "12121212-1212-4212-8212-121212121212", project: "payments", instructions: "Add a /health endpoint", workflow: true });
+    await call("/v1/admin/projects", GITHUB_PROJECT);
+    const started = await call("/v1/dev/tasks", { requestId: "12121212-1212-4212-8212-121212121212", project: "ghproject", instructions: "Add a /health endpoint", workflow: true });
     for (let attempt = 0; attempt < 8 && docker.invocations.length === 0; attempt += 1) {
       await runtime.tick();
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -343,10 +345,10 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
       method: "POST", path: `/v1/internal/workspaces/${prepare.workspaceId}/operations/${prepare.operationId}/repository-credentials`,
       headers: { "x-agentx-repository-grant": prepare.payload.repositoryGrant }, body: JSON.stringify(body),
     });
-    const given = await exchange({ credentialRef: "host-app", repositoryUrl: PROJECT.repositories[0]!.url, access: "clone" });
+    const given = await exchange({ credentialRef: "host-app", repositoryUrl: GITHUB_PROJECT.repositories[0]!.url, access: "clone" });
     expect(given.statusCode).toBe(200);
     expect(JSON.parse(given.body)).toEqual({ credential: { token: githubToken } });
-    expect((await exchange({ credentialRef: "host-app", repositoryUrl: PROJECT.repositories[0]!.url, access: "push" })).statusCode).toBe(403);
+    expect((await exchange({ credentialRef: "host-app", repositoryUrl: GITHUB_PROJECT.repositories[0]!.url, access: "push" })).statusCode).toBe(403);
     expect((await exchange({ credentialRef: "host-app", repositoryUrl: "https://examplehost/example/other.git", access: "clone" })).statusCode).toBe(403);
     expect(started.task.workflow.stage).toBe("UNDERSTAND");
   });
@@ -404,4 +406,28 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect(route.status).toBe(409);
     expect(JSON.stringify(route.body)).not.toContain("Disable the checks.");
   });
+
+  it("gives the GitHub token only for a repository on github.com, to clone (H2)", async () => {
+    const githubToken = ["gh", "p_"].join("") + "b2".repeat(18);
+    const h = await launch({ environment: { GH_TOKEN: githubToken } });
+    // The owner's project names a host that is not github.com (an allowed but foreign site): the grant covers it, and still no credential is given.
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "14141414-1414-4414-8414-141414141414", project: "payments", instructions: "x", workflow: true } })).body.task.taskId;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const prepare = await h.nextJob(workspaceId, new Set()) as WorkerInvocation & { payload: { repositoryGrant: string } };
+    const exchange = (url: string, access: string) => h.runtime.app.callbacks({
+      method: "POST", path: `/v1/internal/workspaces/${prepare.workspaceId}/operations/${prepare.operationId}/repository-credentials`,
+      headers: { "x-agentx-repository-grant": prepare.payload.repositoryGrant }, body: JSON.stringify({ credentialRef: "host-app", repositoryUrl: url, access }),
+    });
+    const refused = await exchange(PROJECT.repositories[0]!.url, "clone");
+    expect(refused.statusCode).toBe(403);
+    expect(refused.body).not.toContain(githubToken);
+    expect(assertGithubCloneAccessFor("https://github.com/example/demo.git", "clone")).toBe(true);
+    for (const url of ["http://github.com/a/b.git", "https://github.com.evil.example/a/b.git", "https://user:pw@github.com/a/b.git", "https://github.com:444/a/b.git", "https://GITHUB.COM.evil.example/a/b.git", "https://api.github.com/a/b.git"]) expect(assertGithubCloneAccessFor(url, "clone"), url).toBe(false);
+    expect(assertGithubCloneAccessFor("https://github.com/a/b.git", "push")).toBe(false);
+  });
 });
+
+function assertGithubCloneAccessFor(url: string, access: "clone" | "push"): boolean {
+  try { assertGithubCloneAccess(url, access); return true; } catch { return false; }
+}

@@ -36,7 +36,7 @@ import { localSessionProofVerifier } from "../core/decisions/local-session.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
-import { resolveGithubAccess, type GhRunner } from "./github-access.js";
+import { assertGithubCloneAccess, resolveGithubAccess, type GhRunner } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
 import {
@@ -269,7 +269,8 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
     ...(options.modelProxyEndpoint === undefined ? {} : { modelProxyEndpoint: options.modelProxyEndpoint }),
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
-    resolveRepositoryCredential: async () => {
+    resolveRepositoryCredential: async (_credentialRef, repositoryUrl, accessKind) => {
+      assertGithubCloneAccess(repositoryUrl, accessKind);
       const access = await resolveGithubAccess({ companyId: config.companyId ?? IMPLICIT_COMPANY_ID, keyFile: githubKeys, environment: options.environment, ...(options.gh === undefined ? {} : { gh: options.gh }) });
       if (access === undefined) throw new Error("no GitHub access is set up: run `gh auth login`, set GH_TOKEN, or put a github token in keys.json");
       return { token: access.token.reveal() };

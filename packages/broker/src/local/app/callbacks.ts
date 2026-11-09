@@ -79,7 +79,7 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
     item: { ...key, entityType: "ARTIFACT", id, workspaceId: operation.workspaceId, operationId: operation.id, name, mediaType, objectKey, sha256, bytes: bytes.byteLength, createdAt: iso(deps.flow) },
     condition: when.absent(),
   });
-  let artifactId = id;
+  let artifactId: string = id;
   if (!claimed.applied) {
     const earlier = await deps.flow.store.get(key);
     if (earlier === undefined || earlier["sha256"] !== sha256 || typeof earlier["id"] !== "string") throw agentXError("CALLBACK_FORBIDDEN", "this artifact was already saved and cannot be replaced");
