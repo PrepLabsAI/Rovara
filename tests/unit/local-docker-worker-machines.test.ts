@@ -17,14 +17,14 @@ afterEach(async () => {
   while (cleanup.length > 0) await rm(cleanup.pop()!, { recursive: true, force: true });
 });
 
-async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null; stateDirectory?: string; controlPlaneUrl?: string; signer?: ReturnType<typeof createEphemeralInvokeSigner> } = {}) {
+async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null; stateDirectory?: string; callbackPort?: number; signer?: ReturnType<typeof createEphemeralInvokeSigner> } = {}) {
   const stateDirectory = options.stateDirectory ?? (await mkdtemp(join(tmpdir(), "rovara-l4-")));
   cleanup.push(stateDirectory);
   const docker = options.docker ?? new FakeDocker();
   const machines = new DockerWorkerMachines({
     image: "worker:test",
     stateDirectory,
-    controlPlaneUrl: options.controlPlaneUrl ?? "http://host.docker.internal:1234",
+    callback: () => ({ tcpPort: options.callbackPort ?? 1234 }),
     signer: options.signer ?? createEphemeralInvokeSigner(),
     docker,
     fetch: docker.fetch,
@@ -68,28 +68,96 @@ runWorkerMachinesConformance("local docker (simulated docker)", {
 });
 
 describe("local docker worker machines", () => {
-  it("creates the container with the sandbox flags, loopback-only publishing and the environment in a file", async () => {
+  it("creates the worker on its internal network only, with no socket, no published port and the environment in a file", async () => {
     const { machines, docker, stateDirectory } = await build();
     const handle = await machines.start({ machineKey: "ws-flags", companyId: COMPANY, resources: { cpu: 2, memoryMiB: 4096 }, environment: { ANTHROPIC_API_KEY: "never-in-arguments" } });
-    const create = docker.calls.find((call) => call[0] === "create")!;
+    const create = docker.calls.find((call) => call[0] === "create" && call.includes(handle.machineId))!;
     const text = create.join(" ");
-    for (const flag of ["--cap-drop ALL", "--security-opt no-new-privileges", "--pids-limit 4096", "--user 1000:1000", "--publish 127.0.0.1::8080", "--memory 4096m", "--cpus 2", "--group-add 999"]) expect(text).toContain(flag);
-    expect(text).not.toContain("--network host");
-    expect(text).not.toContain("--privileged");
+    for (const flag of ["--cap-drop ALL", "--security-opt no-new-privileges", "--pids-limit 4096", "--user 1000:1000", "--memory 4096m", "--cpus 2"]) expect(text).toContain(flag);
+    const hash = handle.machineId.slice("rovara-worker-".length);
+    expect(text).toContain(`--network rovara-wnet-${hash}`);
+    expect(create.filter((entry) => entry === "--network")).toHaveLength(1);
+    for (const never of ["--network host", "--privileged", "--publish", "--add-host", "--group-add", "docker.sock", "--publish-all", "--env "]) expect(text, never).not.toContain(never);
     expect(text).not.toContain("never-in-arguments");
-    expect(create).not.toContain("--env");
-    expect(create).not.toContain("--publish-all");
-    const workspace = join(stateDirectory, "workspaces", handle.machineId.slice("rovara-worker-".length));
+    const workspace = join(stateDirectory, "workspaces", hash);
     expect(create).toContain(`${workspace}:${workspace}`);
-    expect(create).toContain("/var/run/docker.sock:/var/run/docker.sock");
-    expect(create.filter((entry) => entry === "--volume")).toHaveLength(2);
+    expect(create.filter((entry) => entry === "--volume")).toHaveLength(1);
     const container = docker.containers.get(handle.machineId)!;
     expect(container.environment.ANTHROPIC_API_KEY).toBe("never-in-arguments");
     expect(container.environment.AGENTX_SANDBOX_IMAGE).toBe("worker:test");
     expect(container.environment.AGENTX_TASK_SHELL).toBeUndefined();
-    expect(container.environment.AGENTX_CONTROL_PLANE_URL).toBe("http://host.docker.internal:1234");
+    // The worker is told addresses on its own network, never the computer's.
+    expect(container.environment.AGENTX_CONTROL_PLANE_URL).toBe("http://rovara-broker:8081");
+    expect(container.environment.DOCKER_HOST).toBe("tcp://rovara-sock:2375");
+    expect(container.environment.AGENTX_SANDBOX_NETWORK).toBe(`rovara-snet-${hash}`);
     // The environment file is gone after the container is created.
     expect(readdirSync(join(stateDirectory, "workspaces")).filter((entry) => entry.startsWith(".env-"))).toEqual([]);
+  });
+
+  it("walls the machine: two internal networks without a host address, one plain bridge, a gateway on all three and a guard on the worker's", async () => {
+    const { machines, docker } = await build();
+    const handle = await machines.start({ machineKey: "ws-walls", companyId: COMPANY });
+    const hash = handle.machineId.slice("rovara-worker-".length);
+    const networks = [...docker.networks.values()];
+    expect(networks.map((network) => network.name).sort()).toEqual([`rovara-snet-${hash}`, `rovara-wnet-${hash}`, `rovara-xnet-${hash}`]);
+    for (const inner of networks.filter((network) => !network.name.includes("xnet"))) {
+      expect(inner.internal).toBe(true);
+      expect(inner.options["com.docker.network.bridge.inhibit_ipv4"]).toBe("true");
+    }
+    expect(networks.find((network) => network.name.includes("xnet"))!.internal).toBe(false);
+    const gateway = docker.containers.get(`rovara-gw-${hash}`)!;
+    const guard = docker.containers.get(`rovara-sock-${hash}`)!;
+    expect([...gateway.networks.keys()].sort()).toEqual(networks.map((network) => network.name).sort());
+    expect([...guard.networks.keys()]).toEqual([`rovara-wnet-${hash}`]);
+    const gatewayText = gateway.args.join(" ");
+    expect(gatewayText).toContain("--publish 127.0.0.1::8080");
+    expect(gatewayText).toContain("--cap-drop ALL");
+    expect(gatewayText).toContain("--read-only");
+    expect(gatewayText).not.toContain("docker.sock");
+    const guardText = guard.args.join(" ");
+    expect(guardText).toContain("/var/run/docker.sock:/var/run/docker.sock");
+    expect(guardText).toContain("--group-add 999");
+    expect(guardText).not.toContain("--publish");
+    // The guard hands sandboxes the gateway's address on the sandbox network as their name server.
+    const policy = JSON.parse(guard.environment.ROVARA_SOCK_POLICY!) as { dns: string[]; network: string; image: string; owner: string };
+    expect(policy).toMatchObject({ network: `rovara-snet-${hash}`, image: "worker:test", owner: hash });
+    expect(policy.dns).toEqual([gateway.networks.get(`rovara-snet-${hash}`)]);
+    expect(docker.containers.get(handle.machineId)!.args).toContain(gateway.networks.get(`rovara-wnet-${hash}`));
+    // The gateway's list is the default list plus the owner's.
+    const config = JSON.parse(gateway.environment.ROVARA_GW_CONFIG!) as { allowed: string[]; callback: { workspaceId: string; hostHeader: string } };
+    expect(config.allowed).toContain("api.anthropic.com");
+    expect(config.callback.workspaceId).toBe(workspaceIdFor(COMPANY, "ws-walls"));
+    expect(config.callback.hostHeader).toBe("host.docker.internal:1234");
+  });
+
+  it("refuses to start, and leaves nothing behind, when a network cannot be made or an existing one is not as it should be", async () => {
+    const docker = new FakeDocker();
+    docker.failNetworkCreate = "could not find an available, non-overlapping IPv4 address pool among the defaults";
+    const { machines } = await build({ docker });
+    await expect(machines.start({ machineKey: "ws-pool", companyId: COMPANY })).rejects.toThrow(/network address ranges/);
+    expect(docker.containers.size).toBe(0);
+
+    // A network of the right name that is an ordinary bridge (a host address, not internal) is not trusted: it is replaced.
+    const other = new FakeDocker();
+    const { machines: second } = await build({ docker: other });
+    const first = await second.start({ machineKey: "ws-trust", companyId: COMPANY });
+    const hash = first.machineId.slice("rovara-worker-".length);
+    await second.terminate(first.machineId);
+    other.networks.set(`rovara-wnet-${hash}`, { name: `rovara-wnet-${hash}`, internal: false, options: {}, subnet: "172.99.0.0/16", labels: {} });
+    await second.start({ machineKey: "ws-trust", companyId: COMPANY });
+    expect(other.networks.get(`rovara-wnet-${hash}`)).toMatchObject({ internal: true, options: { "com.docker.network.bridge.inhibit_ipv4": "true" } });
+  });
+
+  it("removes the whole machine when its start fails halfway, so a retry starts clean", async () => {
+    const docker = new FakeDocker();
+    const { machines } = await build({ docker });
+    const realRun = docker.run.bind(docker);
+    docker.run = async (args) => (args[0] === "start" && args.some((entry) => entry.startsWith("rovara-sock-")) ? { exitCode: 1, stdout: "", stderr: "boom" } : realRun(args));
+    await expect(machines.start({ machineKey: "ws-half", companyId: COMPANY })).rejects.toMatchObject({ code: "unavailable" });
+    expect(docker.containers.size).toBe(0);
+    docker.run = realRun;
+    await machines.start({ machineKey: "ws-half", companyId: COMPANY });
+    expect(docker.containers.size).toBe(3);
   });
 
   it("does not let a spec override the names the worker sets itself (no local shell, no other key or workspace)", async () => {
@@ -123,7 +191,7 @@ describe("local docker worker machines", () => {
     const { machines } = await build({ docker });
     const { machineId } = await machines.start({ machineKey: "ws-b", companyId: COMPANY });
     // Another process's key: the machine was booted with a different public key.
-    const other = new DockerWorkerMachines({ image: "worker:test", stateDirectory: "/unused", controlPlaneUrl: "x", signer: createEphemeralInvokeSigner(), docker, fetch: docker.fetch });
+    const other = new DockerWorkerMachines({ image: "worker:test", stateDirectory: "/unused", callback: () => ({ tcpPort: 1 }), signer: createEphemeralInvokeSigner(), docker, fetch: docker.fetch });
     await expect(other.deliver(machineId, invocationFor(workspaceIdFor(COMPANY, "ws-b"), randomUUID()))).rejects.toMatchObject({ code: "unauthorized" });
   });
 
@@ -148,7 +216,7 @@ describe("local docker worker machines", () => {
     let now = Date.now();
     const stateDirectory = await mkdtemp(join(tmpdir(), "rovara-l4-"));
     cleanup.push(stateDirectory);
-    const machines = new DockerWorkerMachines({ image: "worker:test", stateDirectory, controlPlaneUrl: "x", signer: createEphemeralInvokeSigner(), docker, fetch: docker.fetch, now: () => now, startupGraceMs: 1_000 });
+    const machines = new DockerWorkerMachines({ image: "worker:test", stateDirectory, callback: () => ({ tcpPort: 1 }), signer: createEphemeralInvokeSigner(), docker, fetch: docker.fetch, now: () => now, startupGraceMs: 1_000 });
     docker.silent = true;
     const { machineId } = await machines.start({ machineKey: "slow", companyId: COMPANY });
     expect((await machines.health(machineId)).state).toBe("starting");
@@ -199,7 +267,7 @@ describe("local docker worker machines", () => {
   it("re-creates a stopped worker whose broker address changed, with a new session generation, and keeps its workspace", async () => {
     const docker = new FakeDocker();
     const signer = createEphemeralInvokeSigner(); // the key is kept in the state folder, so a restart has the same one
-    const first = await build({ docker, signer, controlPlaneUrl: "http://host.docker.internal:1111" });
+    const first = await build({ docker, signer, callbackPort: 1111 });
     const { machineId } = await first.machines.start({ machineKey: "ws-port", companyId: COMPANY });
     const before = docker.containers.get(machineId)!;
     const generation = before.labels["rovara.local.generation"];
@@ -208,17 +276,18 @@ describe("local docker worker machines", () => {
     expect(existsSync(folder)).toBe(true);
 
     // `rovara up` restarted on another port.
-    const second = await build({ docker, signer, stateDirectory: first.stateDirectory, controlPlaneUrl: "http://host.docker.internal:2222" });
+    const second = await build({ docker, signer, stateDirectory: first.stateDirectory, callbackPort: 2222 });
     const again = await second.machines.start({ machineKey: "ws-port", companyId: COMPANY });
     expect(again.machineId).toBe(machineId);
     const after = docker.containers.get(machineId)!;
     expect(after).not.toBe(before);
-    expect(after.environment.AGENTX_CONTROL_PLANE_URL).toBe("http://host.docker.internal:2222");
+    const gatewayAfter = JSON.parse(docker.containers.get(`rovara-gw-${machineId.slice("rovara-worker-".length)}`)!.environment.ROVARA_GW_CONFIG!) as { callback: { hostHeader: string } };
+    expect(gatewayAfter.callback.hostHeader).toBe("host.docker.internal:2222");
     expect(after.labels["rovara.local.generation"]).not.toBe(generation);
     expect(existsSync(folder)).toBe(true);
     // Unchanged address: the same container is woken, not replaced.
     await second.machines.stop(machineId);
-    const third = await build({ docker, signer, stateDirectory: first.stateDirectory, controlPlaneUrl: "http://host.docker.internal:2222" });
+    const third = await build({ docker, signer, stateDirectory: first.stateDirectory, callbackPort: 2222 });
     await third.machines.start({ machineKey: "ws-port", companyId: COMPANY });
     expect(docker.containers.get(machineId)).toBe(after);
   });
@@ -228,14 +297,14 @@ describe("local docker worker machines", () => {
     const signer = createEphemeralInvokeSigner();
     const stateDirectory = await mkdtemp(join(tmpdir(), "rovara-l4-"));
     cleanup.push(stateDirectory);
-    const make = (url: string) => new DockerWorkerMachines({ image: "worker:test", stateDirectory, controlPlaneUrl: url, signer, docker, fetch: docker.fetch });
-    const old = make("http://a");
+    const make = (port: number) => new DockerWorkerMachines({ image: "worker:test", stateDirectory, callback: () => ({ tcpPort: port }), signer, docker, fetch: docker.fetch });
+    const old = make(1);
     const { machineId } = await old.start({ machineKey: "ws-gen", companyId: COMPANY });
     const job = invocationFor(workspaceIdFor(COMPANY, "ws-gen"), randomUUID());
     const token = signer.authorization(job, Date.now(), Number(docker.containers.get(machineId)!.labels["rovara.local.generation"]));
-    await make("http://b").start({ machineKey: "ws-gen", companyId: COMPANY });
+    await make(2).start({ machineKey: "ws-gen", companyId: COMPANY });
     // The replacement worker verifies against its own generation.
-    const response = await docker.fetch(`http://127.0.0.1:${docker.containers.get(machineId)!.hostPort}/invocations`, { method: "POST", headers: { authorization: token }, body: JSON.stringify(job) });
+    const response = await docker.fetch(`http://127.0.0.1:${docker.portOf(machineId)}/invocations`, { method: "POST", headers: { authorization: token }, body: JSON.stringify(job) });
     expect(response.status).toBe(401);
   });
 
@@ -268,7 +337,7 @@ describe("local docker worker machines", () => {
     let now = Date.now();
     const stateDirectory = await mkdtemp(join(tmpdir(), "rovara-l4-"));
     cleanup.push(stateDirectory);
-    const machines = new DockerWorkerMachines({ image: "worker:test", stateDirectory, controlPlaneUrl: "x", signer: createEphemeralInvokeSigner(), docker, fetch: docker.fetch, now: () => now, startupGraceMs: 1_000 });
+    const machines = new DockerWorkerMachines({ image: "worker:test", stateDirectory, callback: () => ({ tcpPort: 1 }), signer: createEphemeralInvokeSigner(), docker, fetch: docker.fetch, now: () => now, startupGraceMs: 1_000 });
     const { machineId } = await machines.start({ machineKey: "oom", companyId: COMPANY });
     const container = docker.containers.get(machineId)!;
     container.status = "exited";
@@ -289,7 +358,7 @@ describe("local docker worker machines", () => {
     const folder = join(stateDirectory, "workspaces", machineId.slice("rovara-worker-".length));
     const { createHash } = await import("node:crypto");
     const key = createHash("sha256").update(folder).digest("hex").slice(0, 16);
-    docker.containers.set("abcdef012345", { name: "abcdef012345", args: [], labels: { "agentx.workspace": key }, environment: {}, status: "running", exitCode: 0, oomKilled: false, createdAt: 0, startedAt: 0, hostPort: 0, accepted: new Set() });
+    docker.containers.set("abcdef012345", { name: "abcdef012345", kind: "other", args: [], labels: { "agentx.workspace": key, "rovara.local.owner": machineId.slice("rovara-worker-".length) }, environment: {}, networks: new Map(), status: "running", exitCode: 0, oomKilled: false, createdAt: 0, startedAt: 0, hostPort: 0, accepted: new Set() });
     docker.failSandboxRemoval = true;
     await expect(machines.terminate(machineId)).rejects.toMatchObject({ code: "unavailable" });
     expect(existsSync(folder)).toBe(true);
@@ -302,10 +371,10 @@ describe("local docker worker machines", () => {
   it("does not replace a running worker that is in the middle of a job", async () => {
     const docker = new FakeDocker();
     const signer = createEphemeralInvokeSigner();
-    const first = await build({ docker, signer, controlPlaneUrl: "http://host.docker.internal:1111" });
+    const first = await build({ docker, signer, callbackPort: 1111 });
     const { machineId } = await first.machines.start({ machineKey: "ws-busy", companyId: COMPANY });
     await first.machines.deliver(machineId, invocationFor(workspaceIdFor(COMPANY, "ws-busy"), randomUUID()));
-    const second = await build({ docker, signer, stateDirectory: first.stateDirectory, controlPlaneUrl: "http://host.docker.internal:2222" });
+    const second = await build({ docker, signer, stateDirectory: first.stateDirectory, callbackPort: 2222 });
     await expect(second.machines.start({ machineKey: "ws-busy", companyId: COMPANY })).rejects.toMatchObject({ code: "unavailable" });
     expect(docker.containers.get(machineId)!.status).toBe("running");
   });

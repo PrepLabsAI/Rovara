@@ -11,9 +11,19 @@
 //     through the socket see the same path.
 // Invocations go over HTTP with a signed `AgentX-Invoke` token (the worker rejects anything else), and the job's answer comes
 // back through the broker's callback API, not through this adapter.
+//
+// Lane L4b changes the picture above, because the worker and its sandboxes must not reach the owner's computer (isolation/stack.ts):
+//   - the worker is on an internal Docker network with no route out. Its published port, its internet and its callbacks to the broker
+//     all go through the gateway container of its machine; its Docker calls go to a socket guard that holds the socket instead of it.
+//   - the worker no longer mounts the Docker socket, and its sandboxes join a second internal network with the gateway as their name server.
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { chmod, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { localAllowedDomains } from "./isolation/allow-list.js";
+import {
+  BROKER_ALIAS, CALLBACK_RELAY_PORT, GATEWAY_INGRESS_PORT, ISOLATION_CONFIG_LABEL, ISOLATION_VERSION, OWNER_LABEL, SOCKET_GUARD_ALIAS, SOCKET_GUARD_PORT, WORKER_ALIAS,
+  createGateway, createGuard, dockerRun, ensureNetworks, gatewayAddresses, isolationNames, type IsolationNames, type Run,
+} from "./isolation/stack.js";
 import {
   MachineError,
   WORKER_PING_FEATURES_FIELD,
@@ -31,7 +41,7 @@ import type { InvokeSigner } from "./invoke-signer.js";
 import { WORKSPACES_DIRECTORY_NAME, ensurePrivateDirectory } from "./state-directory.js";
 
 /** The worker's port inside its container (environments/base/Dockerfile). */
-export const WORKER_CONTAINER_PORT = 8080;
+export const WORKER_CONTAINER_PORT = GATEWAY_INGRESS_PORT;
 export const MACHINE_LABEL = "rovara.local.machine";
 export const WORKSPACE_ID_LABEL = "rovara.local.workspace";
 export const COMPANY_LABEL = "rovara.local.company";
@@ -41,6 +51,8 @@ export const STATE_LABEL = "rovara.local.state";
 export const CONFIG_LABEL = "rovara.local.config";
 /** A random number given to each container as its session generation, so a token for an earlier container is refused by a later one. */
 export const GENERATION_LABEL = "rovara.local.generation";
+/** The addresses the gateway had when the worker (and the guard) were made: `<worker network>,<sandbox network>`. A different pair means the worker's name server is stale. */
+export const GATEWAY_ADDRESS_LABEL = "rovara.local.gwaddr";
 /** The label the worker puts on the sandboxes it starts (`TASK_SANDBOX_WORKSPACE_LABEL`). */
 const SANDBOX_WORKSPACE_LABEL = "agentx.workspace";
 const MACHINE_NAME = /^rovara-worker-[0-9a-f]{24}$/;
@@ -58,10 +70,12 @@ const RESERVED_ENVIRONMENT = new Set([
   "AGENTX_CONTROL_PLANE_URL",
   "AGENTX_SANDBOX_IMAGE",
   "AGENTX_TASK_SHELL",
+  "AGENTX_SANDBOX_NETWORK",
   "AGENTX_RUNTIME",
   "AGENTX_WORKER_PROCESS_SCOPE",
   "PORT",
   "TMPDIR",
+  "DOCKER_HOST",
   "PATH",
   "HOME",
   "USER",
@@ -77,8 +91,14 @@ export interface DockerWorkerMachinesOptions {
   image: string;
   /** The state folder; workspaces live in `<stateDirectory>/workspaces/<id>`. */
   stateDirectory: string;
-  /** Where the worker calls the broker back, as the container sees it (`http://host.docker.internal:<port>`). */
-  controlPlaneUrl: string | (() => string);
+  /**
+   * Where the broker's callback listener is (callback-server.ts): its loopback port, and on Linux the folder holding its Unix socket.
+   * Read when a machine starts, because the port is not known until the broker listens. The worker itself is only ever told
+   * `http://rovara-broker:8081`, an address on its own network that the gateway answers.
+   */
+  callback: () => { tcpPort: number; socketDirectory?: string | undefined };
+  /** Websites the sandboxes and the worker may reach beyond the default list (the cloud's, without its own network's names). */
+  allowedDomains?: readonly string[];
   signer: InvokeSigner;
   docker: DockerRunner;
   /** Most machines running at once. Default 4. */
@@ -123,6 +143,7 @@ export class DockerWorkerMachines implements WorkerMachines {
   readonly #workspacesRoot: string;
   readonly #socket: string;
   readonly #stateKey: string;
+  readonly #allowed: string[];
   #socketGroup: Promise<string> | undefined;
   #queue: Promise<unknown> = Promise.resolve();
 
@@ -131,6 +152,7 @@ export class DockerWorkerMachines implements WorkerMachines {
     this.#workspacesRoot = resolve(options.stateDirectory, WORKSPACES_DIRECTORY_NAME);
     this.#socket = options.dockerSocketPath ?? "/var/run/docker.sock";
     this.#stateKey = createHash("sha256").update(resolve(options.stateDirectory)).digest("hex").slice(0, 16);
+    this.#allowed = localAllowedDomains(options.allowedDomains);
     this.capabilities = { isolation: "container", persistentVolume: true, canStop: true, maxConcurrentMachines: options.maxConcurrentMachines === undefined ? 4 : options.maxConcurrentMachines };
   }
 
@@ -151,27 +173,30 @@ export class DockerWorkerMachines implements WorkerMachines {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$/.test(image)) throw new MachineError("rejected", "the worker image reference is not valid");
     const workspaceId = workspaceIdFor(spec.companyId, spec.machineKey);
     const workspaceDirectory = join(this.#workspacesRoot, hash);
-    const environment = this.#environment(spec, workspaceDirectory, image);
-    const digest = createHash("sha256").update(JSON.stringify([image, Object.entries(environment).sort(([a], [b]) => (a < b ? -1 : 1))])).digest("hex");
+    const names = isolationNames(hash);
+    const callback = this.#options.callback();
+    const environment = this.#environment(spec, workspaceDirectory, image, names);
+    const digest = createHash("sha256").update(JSON.stringify([image, Object.entries(environment).sort(([a], [b]) => (a < b ? -1 : 1)), ISOLATION_VERSION, this.#allowed, callback.tcpPort, callback.socketDirectory ?? null])).digest("hex");
+    const run: Run = dockerRun(this.#options.docker);
 
     const existing = await this.#inspect(name);
     if (existing !== undefined && existing.config === digest) {
-      if (existing.status === "running" || existing.status === "restarting") return handle("starting");
-      await this.#requireCapacity();
-      const started = await this.#docker(["start", name]);
-      if (started.exitCode !== 0) throw new MachineError("unavailable", `Docker could not start the worker: ${this.#reason(started.stderr)}`);
-      return handle("starting");
+      if ((existing.status === "running" || existing.status === "restarting") && (await this.#helpersRunning(names))) return handle("starting");
+      if (existing.status !== "running" && existing.status !== "restarting") await this.#requireCapacity();
+      if (await this.#wake(names, digest)) return handle("starting");
     }
     if (existing !== undefined) {
       // A worker in the middle of a job is not replaced: the caller retries when it is idle.
       if (existing.status === "running" && existing.hostPort !== undefined && ((await this.#ping(existing.hostPort))?.activeOperations ?? 0) > 0) {
-        throw new MachineError("unavailable", "the worker is running a job and was created with another image, environment or broker address; try again when it is idle");
+        throw new MachineError("unavailable", "the worker is running a job and was created with another image, environment, website list or broker address; try again when it is idle");
       }
       // It was created for another image, environment or broker address (a restart on a new port): its callbacks would go to the old
       // address. The workspace folder is a bind mount and survives.
-      const removed = await this.#docker(["rm", "--force", name]);
-      if (removed.exitCode !== 0 && !/no such (object|container)/i.test(removed.stderr)) throw new MachineError("unavailable", `Docker could not replace the worker: ${this.#reason(removed.stderr)}`);
+      await this.#removeStack(names);
       await this.#removeSandboxes(name);
+    } else {
+      // Helpers a failed start left behind would block the names.
+      await this.#removeStack(names);
     }
     await this.#requireCapacity();
 
@@ -186,62 +211,121 @@ export class DockerWorkerMachines implements WorkerMachines {
 
     const group = await this.#dockerGroup(image);
     const generation = 1 + randomInt(999_999_998);
-    const envFile = join(this.#workspacesRoot, `.env-${randomBytes(8).toString("hex")}`);
-    await writeFile(envFile, `${Object.entries({ ...environment, AGENTX_SESSION_GENERATION: String(generation) }).map(([key, value]) => `${key}=${value}`).join("\n")}\n`, { mode: 0o600, flag: "wx" });
+    const baseLabels = [`${OWNER_LABEL}=${hash}`, `${STATE_LABEL}=${this.#stateKey}`, `${ISOLATION_CONFIG_LABEL}=${digest}`];
     try {
-      const resources = spec.resources ?? {};
-      const created = await this.#docker([
-        "create",
-        "--name", name,
-        "--label", `${MACHINE_LABEL}=1`,
-        "--label", `${STATE_LABEL}=${this.#stateKey}`,
-        "--label", `${WORKSPACE_ID_LABEL}=${workspaceId}`,
-        "--label", `${CONFIG_LABEL}=${digest}`,
-        "--label", `${GENERATION_LABEL}=${generation}`,
-        "--label", `${COMPANY_LABEL}=${spec.companyId}`,
-        ...Object.entries(spec.labels ?? {}).flatMap(([key, value]) => (/^[a-z][a-z0-9.-]{0,62}$/.test(key) && !RESERVED_LABEL_PREFIXES.some((prefix) => key.startsWith(prefix)) && /^[ -~]{0,200}$/.test(value) ? ["--label", `${key}=${value}`] : [])),
-        "--user", "1000:1000",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
-        "--pids-limit", "4096",
-        ...(resources.memoryMiB === undefined ? [] : ["--memory", `${Math.floor(resources.memoryMiB)}m`]),
-        ...(resources.cpu === undefined ? [] : ["--cpus", String(resources.cpu)]),
-        "--publish", `127.0.0.1::${WORKER_CONTAINER_PORT}`,
-        "--add-host", "host.docker.internal:host-gateway",
-        "--env-file", envFile,
-        "--volume", `${workspaceDirectory}:${workspaceDirectory}`,
-        "--volume", `${this.#socket}:${this.#socket}`,
-        "--group-add", group,
-        "--log-opt", "max-size=10m",
-        "--log-opt", "max-file=3",
-        image,
-      ]);
-      if (created.exitCode !== 0 && !/already in use/i.test(created.stderr)) throw new MachineError("unavailable", `Docker could not create the worker: ${this.#reason(created.stderr)}`);
-    } finally {
-      await rm(envFile, { force: true });
-    }
-    const started = await this.#docker(["start", name]);
-    if (started.exitCode !== 0) {
-      await this.#docker(["rm", "--force", name]);
-      throw new MachineError("unavailable", `Docker could not start the worker: ${this.#reason(started.stderr)}`);
+      const nets = await ensureNetworks(run, names, [`${OWNER_LABEL}=${hash}`, `${STATE_LABEL}=${this.#stateKey}`]);
+      const useSocket = callback.socketDirectory !== undefined;
+      await createGateway(run, {
+        image, labels: baseLabels, names, nets, allowed: this.#allowed, workspaceId, callback,
+        user: useSocket && typeof process.getuid === "function" && typeof process.getgid === "function" ? `${process.getuid()}:${process.getgid()}` : "1000:1000",
+      });
+      const gatewayStarted = await this.#docker(["start", names.gateway]);
+      if (gatewayStarted.exitCode !== 0) throw new MachineError("unavailable", `Docker could not start the egress gateway: ${this.#reason(gatewayStarted.stderr)}`);
+      const addresses = await gatewayAddresses(run, names);
+      if (addresses === undefined) throw new MachineError("unavailable", "the egress gateway has no address on the worker networks");
+      const gatewayLabel = `${GATEWAY_ADDRESS_LABEL}=${addresses.worker},${addresses.sandbox}`;
+      await createGuard(run, {
+        image, labels: [...baseLabels, gatewayLabel], names, socketPath: this.#socket, socketGroup: group, workspaceDirectory,
+        workspaceKey: createHash("sha256").update(resolve(workspaceDirectory)).digest("hex").slice(0, 16), owner: hash, sandboxDns: addresses.sandbox,
+      });
+      const guardStarted = await this.#docker(["start", names.guard]);
+      if (guardStarted.exitCode !== 0) throw new MachineError("unavailable", `Docker could not start the Docker socket guard: ${this.#reason(guardStarted.stderr)}`);
+
+      const envFile = join(this.#workspacesRoot, `.env-${randomBytes(8).toString("hex")}`);
+      await writeFile(envFile, `${Object.entries({ ...environment, AGENTX_SESSION_GENERATION: String(generation) }).map(([key, value]) => `${key}=${value}`).join("\n")}\n`, { mode: 0o600, flag: "wx" });
+      try {
+        const resources = spec.resources ?? {};
+        const created = await this.#docker([
+          "create",
+          "--name", name,
+          "--label", `${MACHINE_LABEL}=1`,
+          "--label", `${STATE_LABEL}=${this.#stateKey}`,
+          "--label", `${OWNER_LABEL}=${hash}`,
+          "--label", `${WORKSPACE_ID_LABEL}=${workspaceId}`,
+          "--label", `${CONFIG_LABEL}=${digest}`,
+          "--label", `${GENERATION_LABEL}=${generation}`,
+          "--label", gatewayLabel,
+          "--label", `${COMPANY_LABEL}=${spec.companyId}`,
+          ...Object.entries(spec.labels ?? {}).flatMap(([key, value]) => (/^[a-z][a-z0-9.-]{0,62}$/.test(key) && !RESERVED_LABEL_PREFIXES.some((prefix) => key.startsWith(prefix)) && /^[ -~]{0,200}$/.test(value) ? ["--label", `${key}=${value}`] : [])),
+          "--user", "1000:1000",
+          "--cap-drop", "ALL",
+          "--security-opt", "no-new-privileges",
+          "--pids-limit", "4096",
+          ...(resources.memoryMiB === undefined ? [] : ["--memory", `${Math.floor(resources.memoryMiB)}m`]),
+          ...(resources.cpu === undefined ? [] : ["--cpus", String(resources.cpu)]),
+          // No published port, no Docker socket, no group: the worker is on the internal worker network only. The gateway publishes its port.
+          "--network", names.workerNet, "--network-alias", WORKER_ALIAS,
+          "--dns", addresses.worker,
+          "--env-file", envFile,
+          "--volume", `${workspaceDirectory}:${workspaceDirectory}`,
+          "--log-opt", "max-size=10m",
+          "--log-opt", "max-file=3",
+          image,
+        ]);
+        if (created.exitCode !== 0 && !/already in use/i.test(created.stderr)) throw new MachineError("unavailable", `Docker could not create the worker: ${this.#reason(created.stderr)}`);
+      } finally {
+        await rm(envFile, { force: true });
+      }
+      const started = await this.#docker(["start", name]);
+      if (started.exitCode !== 0) throw new MachineError("unavailable", `Docker could not start the worker: ${this.#reason(started.stderr)}`);
+    } catch (error) {
+      await this.#removeStack(names).catch(() => undefined);
+      throw error;
     }
     return handle("starting");
+  }
+
+  /** Starts a stopped machine again (guard, gateway, worker). False when the helpers are gone or the gateway came back on other addresses, so the machine must be rebuilt. */
+  async #wake(names: IsolationNames, digest: string): Promise<boolean> {
+    const listed = await this.#docker(["inspect", "--type", "container", "--format", `{{.Name}}|{{index .Config.Labels "${ISOLATION_CONFIG_LABEL}"}}|{{index .Config.Labels "${GATEWAY_ADDRESS_LABEL}"}}`, names.gateway, names.guard, names.worker]);
+    if (listed.exitCode !== 0) return false;
+    const rows = listed.stdout.trim().split("\n").map((line) => line.split("|"));
+    if (rows.length !== 3 || rows[0]?.[1] !== digest || rows[1]?.[1] !== digest) return false;
+    const started = await this.#docker(["start", names.gateway]);
+    if (started.exitCode !== 0) return false;
+    const addresses = await gatewayAddresses(dockerRun(this.#options.docker), names);
+    const recorded = rows[1]?.[2];
+    if (addresses === undefined || recorded !== `${addresses.worker},${addresses.sandbox}` || rows[2]?.[2] !== recorded) return false;
+    for (const target of [names.guard, names.worker]) {
+      const result = await this.#docker(["start", target]);
+      if (result.exitCode !== 0) throw new MachineError("unavailable", `Docker could not start the worker: ${this.#reason(result.stderr)}`);
+    }
+    return true;
+  }
+
+  /** Whether the guard and the gateway of a machine are both running. */
+  async #helpersRunning(names: IsolationNames): Promise<boolean> {
+    const found = await this.#docker(["inspect", "--type", "container", "--format", "{{.State.Status}}", names.gateway, names.guard]);
+    return found.exitCode === 0 && found.stdout.trim().split("\n").every((line) => line.trim() === "running") && found.stdout.trim().split("\n").length === 2;
+  }
+
+  /** Removes the worker, the gateway and the guard of a machine (a missing one is fine). Networks stay: they are reused by the rebuild. */
+  async #removeStack(names: IsolationNames): Promise<void> {
+    const removed = await this.#docker(["rm", "--force", "--volumes", names.worker, names.gateway, names.guard]);
+    if (removed.exitCode !== 0 && !/no such (object|container)/i.test(removed.stderr)) throw new MachineError("unavailable", `Docker could not replace the worker: ${this.#reason(removed.stderr)}`);
   }
 
   async stop(machineId: string): Promise<void> {
     if (!MACHINE_NAME.test(machineId)) return;
     if ((await this.#inspect(machineId)) === undefined) return;
+    const names = isolationNames(machineId.slice("rovara-worker-".length));
     await this.#docker(["stop", "--time", "20", machineId], 60_000);
+    // The helpers go after the worker, which may still be answering a callback or a Docker call.
+    await this.#docker(["stop", "--time", "5", names.guard, names.gateway], 30_000);
     // After the worker, so a sandbox it started meanwhile goes too.
     await this.#removeSandboxes(machineId).catch(() => undefined);
   }
 
   async terminate(machineId: string): Promise<void> {
     if (!MACHINE_NAME.test(machineId)) return;
-    const removed = await this.#docker(["rm", "--force", "--volumes", machineId]);
-    // Keep the folder while a container might still hold it: only a removed (or never existing) container lets it go.
-    if (removed.exitCode !== 0 && !/no such (object|container)/i.test(removed.stderr)) throw new MachineError("unavailable", `Docker could not remove the worker: ${this.#reason(removed.stderr)}`);
+    const names = isolationNames(machineId.slice("rovara-worker-".length));
+    await this.#removeStack(names);
     await this.#removeSandboxes(machineId);
+    for (const network of [names.workerNet, names.sandboxNet, names.externalNet]) {
+      const removed = await this.#docker(["network", "rm", network]);
+      // A network that is still in use means a container is still on it; keep the folder, as for a sandbox that stays.
+      if (removed.exitCode !== 0 && !/no such (object|network)|not found/i.test(removed.stderr)) throw new MachineError("unavailable", `Docker could not remove the machine's network: ${this.#reason(removed.stderr)}`);
+    }
     try {
       await rm(this.#workspaceDirectory(machineId), { recursive: true, force: true });
     } catch {
@@ -274,6 +358,8 @@ export class DockerWorkerMachines implements WorkerMachines {
         if (found.oomKilled) return idle("unhealthy", "the worker ran out of memory");
         return [0, 137, 143].includes(found.exitCode) ? idle("stopped") : idle("unhealthy", `the worker exited with code ${found.exitCode}`);
       case "running":
+        // The worker is useless without its gateway and guard; a stopped one is a crash.
+        if (!(await this.#helpersRunning(isolationNames(machineId.slice("rovara-worker-".length))).catch(() => false))) return idle("unhealthy", "a helper container of the worker is not running");
         break;
       default:
         return idle("unhealthy", "the container is paused or in an unknown state");
@@ -344,8 +430,7 @@ export class DockerWorkerMachines implements WorkerMachines {
     return join(this.#workspacesRoot, machineId.slice("rovara-worker-".length));
   }
 
-  #environment(spec: MachineSpec, workspaceDirectory: string, image: string): Record<string, string> {
-    const controlPlaneUrl = typeof this.#options.controlPlaneUrl === "function" ? this.#options.controlPlaneUrl() : this.#options.controlPlaneUrl;
+  #environment(spec: MachineSpec, workspaceDirectory: string, image: string, names: IsolationNames): Record<string, string> {
     const environment: Record<string, string> = {};
     for (const [key, value] of Object.entries(spec.environment ?? {})) {
       if (!ENVIRONMENT_NAME.test(key) || RESERVED_ENVIRONMENT.has(key) || RESERVED_ENVIRONMENT_PREFIXES.some((prefix) => key.startsWith(prefix))) throw new MachineError("rejected", `the environment name ${key.slice(0, 40)} is not allowed`);
@@ -357,7 +442,11 @@ export class DockerWorkerMachines implements WorkerMachines {
       AGENTX_WORKSPACE_ROOT: workspaceDirectory,
       AGENTX_WORKSPACE_ID: workspaceIdFor(spec.companyId, spec.machineKey),
       AGENTX_INVOKE_PUBLIC_KEY: this.#options.signer.publicKey(),
-      AGENTX_CONTROL_PLANE_URL: controlPlaneUrl,
+      // The gateway answers this name on the worker's network and relays the worker's own callbacks (and no other request) to the broker.
+      AGENTX_CONTROL_PLANE_URL: `http://${BROKER_ALIAS}:${CALLBACK_RELAY_PORT}`,
+      // The Docker calls go to the guard, which holds the socket; the sandboxes join the sandbox network, which the worker does not make itself.
+      DOCKER_HOST: `tcp://${SOCKET_GUARD_ALIAS}:${SOCKET_GUARD_PORT}`,
+      AGENTX_SANDBOX_NETWORK: names.sandboxNet,
       // The sandbox image is the worker's own image (task-sandbox.ts). AGENTX_TASK_SHELL is never set: a task's commands run in a sandbox.
       AGENTX_SANDBOX_IMAGE: image,
       PORT: String(WORKER_CONTAINER_PORT),
@@ -369,7 +458,7 @@ export class DockerWorkerMachines implements WorkerMachines {
     const label = (key: string): string => `{{index .Config.Labels "${key}"}}`;
     const format = [
       "{{.State.Status}}", "{{.State.ExitCode}}", "{{.State.OOMKilled}}", "{{.State.StartedAt}}", "{{.Created}}",
-      `{{with index .NetworkSettings.Ports "${WORKER_CONTAINER_PORT}/tcp"}}{{(index . 0).HostPort}}{{end}}`,
+      "",
       label(WORKSPACE_ID_LABEL), label(CONFIG_LABEL), label(GENERATION_LABEL),
     ].join("|");
     const result = await this.#docker(["inspect", "--type", "container", "--format", format, name]);
@@ -378,7 +467,8 @@ export class DockerWorkerMachines implements WorkerMachines {
       throw new MachineError("unavailable", `Docker did not answer: ${this.#reason(result.stderr)}`);
     }
     const [status = "", exitCode = "0", oom = "false", startedAt = "", createdAt = "", hostPort = "", workspaceId = "", config = "", generation = "0"] = result.stdout.trim().split("|");
-    const port = Number.parseInt(hostPort, 10);
+    // The worker publishes nothing: its port is the gateway's.
+    const port = status === "running" ? (await gatewayAddresses(dockerRun(this.#options.docker), isolationNames(name.slice("rovara-worker-".length))).catch(() => undefined))?.hostPort ?? 0 : Number.parseInt(hostPort, 10);
     return {
       status, exitCode: Number.parseInt(exitCode, 10) || 0, oomKilled: oom === "true", startedAt: Date.parse(startedAt) || 0, createdAt: Date.parse(createdAt) || 0,
       hostPort: Number.isInteger(port) && port > 0 ? port : undefined, workspaceId, config, generation: Number.parseInt(generation, 10) || 1,
@@ -423,9 +513,8 @@ export class DockerWorkerMachines implements WorkerMachines {
 
   /** Removes the task sandboxes a worker started (they carry the workspace label) so no container keeps the workspace folder mounted. */
   async #removeSandboxes(machineId: string): Promise<void> {
-    const directory = this.#workspaceDirectory(machineId);
-    const key = createHash("sha256").update(resolve(directory)).digest("hex").slice(0, 16);
-    const listed = await this.#docker(["ps", "--all", "--quiet", "--filter", `label=${SANDBOX_WORKSPACE_LABEL}=${key}`]);
+    // The guard puts its owner label on every sandbox it creates; the worker cannot set or remove it.
+    const listed = await this.#docker(["ps", "--all", "--quiet", "--filter", `label=${OWNER_LABEL}=${machineId.slice("rovara-worker-".length)}`, "--filter", `label=${SANDBOX_WORKSPACE_LABEL}`]);
     if (listed.exitCode !== 0) throw new MachineError("unavailable", `Docker did not answer: ${this.#reason(listed.stderr)}`);
     const ids = listed.stdout.split("\n").map((line) => line.trim()).filter((line) => /^[0-9a-f]{12,64}$/.test(line));
     if (ids.length === 0) return;

@@ -151,8 +151,15 @@ describe("rovara up runtime", () => {
     const dockerMachines = runtime.registry.require("worker-machines", "docker");
     const handle = await dockerMachines.start({ machineKey: "ws-up", companyId: IMPLICIT_COMPANY_ID });
     expect(docker.containers.get(handle.machineId)!.status).toBe("running");
-    // The callback address names this server's port.
-    expect(docker.containers.get(handle.machineId)!.environment.AGENTX_CONTROL_PLANE_URL).toBe(`http://host.docker.internal:${runtime.port}`);
+    // The worker calls back on the callback listener, a port of its own that is not the owner's server.
+    const hash = handle.machineId.slice("rovara-worker-".length);
+    const gateway = JSON.parse(docker.containers.get(`rovara-gw-${hash}`)!.environment.ROVARA_GW_CONFIG!) as { callback: { hostHeader: string } };
+    const callbackPort = Number(gateway.callback.hostHeader.split(":")[1]);
+    expect(callbackPort).toBeGreaterThan(0);
+    expect(callbackPort).not.toBe(runtime.port);
+    expect(docker.containers.get(handle.machineId)!.environment.AGENTX_CONTROL_PLANE_URL).toBe("http://rovara-broker:8081");
+    // Not the owner's host name, so it is turned away; the owner's own routes are not served there at all (callback-server.ts).
+    await expect(fetch(`http://127.0.0.1:${callbackPort}/v1/local/status`, { method: "POST" })).resolves.toMatchObject({ status: 403 });
     await runtime.stop();
     expect(docker.containers.get(handle.machineId)!.status).toBe("exited");
     await expect(fetch(`${runtime.url}/healthz`)).rejects.toThrow();
