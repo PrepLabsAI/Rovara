@@ -140,6 +140,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/task-flow/dispatch-rows.ts", "packages/broker/src/core/task-flow/records.ts",
       // L7a: the pull request head and branch index rows (90 days). L7b: the merge commit index (MERGE_COMMIT_INDEX_KEPT_DAYS), the proof evidence blobs (their retention class) and the CI fix record (EVIDENCE_RETENTION_SECONDS).
       "packages/broker/src/core/merge/store.ts", "packages/broker/src/core/proof/revert/merge-commit-index.ts", "packages/broker/src/core/proof/evidence-blob-store.ts", "packages/broker/src/core/ci-fix/ci-fix.ts",
+      // L9-wire: a worker's event rows (14 days), the message bucket (2 hours) and the saved message rows (30 days), and the store's own `ttlAttribute`, which must be this attribute for any of them to expire.
+      "packages/broker/src/local/app/callbacks.ts", "packages/broker/src/local/app/host.ts", "packages/broker/src/local/runtime.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
