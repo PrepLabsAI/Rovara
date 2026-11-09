@@ -9,6 +9,7 @@
 // risky. The backstop is the merge card, whose tier comes from the pull request's actual changed files and the checks that really ran.
 import type { DecisionRisk, PlanDocument, WorkflowSnapshot } from "@agentx/contracts";
 import type { LoadedDocument } from "../../developer/plan-document-reader.js";
+import { raiseRisk } from "@agentx/contracts";
 import { pathsIn, planFiles, planUntestedClaims } from "./plan-facts.js";
 import { riskTierOf } from "./risk-tier.js";
 
@@ -56,4 +57,20 @@ export function planRiskOf(facts: PlanFacts, costHighUsd: number | undefined): D
 export function planDecidedOnCard(loaded: LoadedDocument | undefined, workflow: Pick<WorkflowSnapshot, "designReview"> | undefined, costHighUsd: number | undefined): "medium" | "high" | undefined {
   const risk = planRiskOf(planFactsOf(loaded, workflow), costHighUsd);
   return risk === "low" ? undefined : risk;
+}
+
+/**
+ * The floor the core computes itself (owner decision c): the paths ANY of the plan's text or the request names (not only the ones the planner cites as evidence), their count, and the cost
+ * estimate where there is one, with Cloud's rules for sensitive paths and size. It reads nothing the planner claims about proof, so a plan cannot lower it.
+ */
+export function planRiskFloor(input: { texts: readonly string[]; costHighUsd?: number | undefined }): DecisionRisk {
+  const files = [...new Set(input.texts.flatMap((text) => pathsIn(text)))];
+  return riskTierOf("approve_plan", { plan: { files, untestedClaims: 0, unread: false, ...(input.costHighUsd === undefined ? {} : { costHighUsd: input.costHighUsd }) } }).risk;
+}
+
+/** The tier of the plan waiting for approval: what the planner's own document says, raised (never lowered) to the core's floor. */
+export function gradePlanRisk(input: { loaded: LoadedDocument | undefined; workflow: Pick<WorkflowSnapshot, "designReview">; requestText?: string | undefined; costHighUsd?: number | undefined }): DecisionRisk {
+  const planner = planRiskOf(planFactsOf(input.loaded, input.workflow), input.costHighUsd);
+  const floor = planRiskFloor({ texts: [...(input.loaded === undefined ? [] : [input.loaded.markdown]), ...(input.requestText === undefined ? [] : [input.requestText])], costHighUsd: input.costHighUsd });
+  return raiseRisk(planner, floor);
 }

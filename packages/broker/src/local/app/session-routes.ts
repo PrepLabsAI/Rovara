@@ -1,16 +1,16 @@
 // Lane L9-wire: the session routes the MCP tools and the CLI's `session` commands call (`/v1/app/sessions...`), over L6b's session store, summary and control. A session here is a
 // task's session; the read is L6b's `sessionSnapshot` and the task flow's view of the same task. Comments between people are not here (one owner): a comment is refused, a message
 // to the agent goes through the control host (L9-wire's `host.ts`), which says plainly that a running step does not take it yet.
+import type { ObjectStorage } from "@agentx/contracts";
 import {
   AgentXError, IntentAnswerRefusal, SESSION_ACTIONS, SessionIdSchema, WorkflowTransitionError, agentXError, answerIntentQuestions,
   type AgentSessionRecord, type OrgId,
 } from "@agentx/contracts";
 import { AGENT_SESSION_CONTRACT_VERSION } from "@agentx/contracts";
-import { createSessionControl, type ControlResult } from "../../core/sessions/control.js";
+import type { ControlResult } from "../../core/sessions/control.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import { listSessions, sessionSnapshot } from "../../core/sessions/read.js";
 import { SessionStore } from "../../core/sessions/store.js";
-import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
@@ -18,7 +18,7 @@ import { readTask, taskViewOf } from "../../core/task-flow/reads.js";
 import { commitWorkflow, runDispatchRow } from "../../core/task-flow/stage-machine.js";
 import { iso } from "../../core/task-flow/support.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
-import { createSessionControlHost } from "./host.js";
+import { createLocalSessionControl } from "./host.js";
 import { developerTaskView } from "./task-view.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -28,7 +28,7 @@ const STATUS_OF_REFUSAL: Record<string, number> = { not_found: 404, forbidden: 4
 
 export interface SessionRoutesDeps {
   flow: TaskFlow;
-  blobs: EvidenceBlobStore;
+  blobs: ObjectStorage;
   companyId: OrgId;
   /** The URL clients reach this install at: the session's `link` is its own address. */
   origin: () => string;
@@ -46,10 +46,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   const { flow } = deps;
   const store = flow.deps.store;
   const sessions = new SessionStore(store);
-  const control = createSessionControl({
-    store, audit: flow.deps.audit, host: createSessionControlHost(flow.deps), now: flow.deps.now ?? (() => new Date()),
-    // The sessions module checks the caller is the owner (a Code install has one); the identity adapter authenticated them before the route ran.
-  });
+  const control = createLocalSessionControl(flow.deps);
   const tile = (session: AgentSessionRecord): Record<string, unknown> => JSON.parse(JSON.stringify({
     contractVersion: AGENT_SESSION_CONTRACT_VERSION, sessionId: session.sessionId, kind: session.kind, title: session.title, project: session.project, agent: session.agent, owner: session.owner,
     where: session.where, level: "edit", revision: session.revision, summary: session.summary, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
@@ -129,6 +126,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
     const task = taskId === undefined ? undefined : await readTask(flow.deps, taskId);
     const workflow = task?.workflow;
     if (task === undefined || workflow === undefined) throw agentXError("NOT_FOUND", "There is no such session.");
+    if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", "This task is closed, so it takes no more answers.");
     const round = typeof body["round"] === "number" ? body["round"] : -1;
     const now = iso(flow.deps);
     const next = answerIntentQuestions(workflow, {

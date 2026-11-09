@@ -159,6 +159,7 @@ describe("rovara up", () => {
       pagesUrl: "http://127.0.0.1:0",
       app: {} as LocalRuntime["app"],
       async tick() { /* nothing to do */ },
+      modelProxy: {} as LocalRuntime["modelProxy"],
       wiring: () => ({ storage: ["memory"] }),
       stopped: false,
       async stop() { value.stopped = true; },

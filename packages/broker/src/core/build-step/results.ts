@@ -29,6 +29,9 @@ export function runEndedReason(mode: "IMPLEMENT" | "CHECKS" | "REVIEW", status: 
   return `${step} operation ended ${status.toLowerCase()}`;
 }
 
+/** A rerun of the checks that ran on other code than the code the task holds. */
+export const CHECKED_OTHER_CODE_REASON = "The checks ran on other code than the code on the pull request. Send the task back to coding, or close it.";
+
 /** A blocked VERIFY or REVIEW is looked at by Rovara's own fixing right away (a row, committed with the block); anything else is for the owner. */
 export function autofixRowFor(deps: TaskFlowDeps, taskId: string, next: WorkflowSnapshot, now: string): TransactItem[] {
   return next.state === "BLOCKED" && (next.stage === "VERIFY" || next.stage === "REVIEW") ? [dispatchRowItem(deps, taskId, next.revision, "AUTOFIX", now)] : [];
@@ -121,6 +124,8 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     const candidate = createCandidateManifest((Array.isArray(reported["workflowCandidateRepositories"]) ? reported["workflowCandidateRepositories"] : []) as CandidateRepository[]);
     const checkedCandidate = createCandidateManifest((Array.isArray(reported["workflowCheckCandidateRepositories"]) ? reported["workflowCheckCandidateRepositories"] : []) as CandidateRepository[]);
     if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositories.join("\n")) { failure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete; throw new Error("candidate repositories are incomplete"); }
+    // A rerun of the checks is of the code the task already has: other code under the same checks (the merge of the base the host shows is not the code the worker's workspace holds, say) is not it.
+    if (mode === "CHECKS" && workflow.candidate !== undefined && candidate.digest !== workflow.candidate.digest) { failure = CHECKED_OTHER_CODE_REASON; throw new Error("the checks ran on other code than the candidate"); }
     // An approved fix to an open pull request that leaves every repository's code as the pull request holds it changed nothing: there is nothing to check again or push.
     const pullRequestTrees = workflowPullRequestTrees(workflow);
     if (mode === "IMPLEMENT" && pullRequestTrees !== undefined && candidate.repositories.every((repository) => pullRequestTrees.get(repository.repositoryId) === repository.treeSha)) {

@@ -9,7 +9,7 @@
 // also settle (merge tracking finds a merge on its own pass), and Cloud's autonomy re-read before a paid conflict round (the decider already read it when it asked for the merge).
 import {
   PullRequestLifecycleResultSchema, WORKFLOW_FIX_DROPS_BASE_CHANGES, WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED, agentXError, blockWorkflowPullRequestUpdate, change, endWorkflowBranchSync,
-  nextWorkflowPullRequestUpdate, observeWorkflowPullRequestMergedWithFix, recordWorkflowBranchSync, recordWorkflowPullRequestUpdate, startWorkflowBranchSyncRun, startWorkflowPullRequestUpdate, when,
+  WorkflowSnapshotSchema, nextWorkflowPullRequestUpdate, observeWorkflowPullRequestMergedWithFix, recordWorkflowBranchSync, recordWorkflowPullRequestUpdate, startWorkflowBranchSyncRun, startWorkflowPullRequestUpdate, when,
   workflowRequestId, CONFLICT_ROUNDS_MAX,
   type TransactItem, type WorkflowPullRequestUpdateCause, type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -24,7 +24,7 @@ import { dispatchRowItem, resolveRowItem } from "../task-flow/dispatch-rows.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
 import { acceptStep, commitWorkflow, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
-import { jsonOf, locate, settled, type Located, type RowRef } from "./start.js";
+import { jsonOf, locate, settled, startChecksRerun, type Located, type RowRef } from "./start.js";
 import { pullRequestRecordKey, pullRequestRecordOf, taskOfOperation } from "./records.js";
 import type { Ended } from "./results.js";
 
@@ -45,7 +45,18 @@ export async function startPullRequestUpdate(deps: TaskFlowDeps, row: RowRef, lo
   const pullRequest = nextWorkflowPullRequestUpdate(workflow);
   const repository = workflow.candidate.repositories.find((entry) => entry.repositoryId === pullRequest?.repositoryId);
   const baseCommitSha = workflow.reviewBase?.find((entry) => entry.repositoryId === repository?.repositoryId)?.baseCommitSha;
-  if (pullRequest === undefined || repository === undefined || workflow.state !== "READY") return settled(deps, row, "STALE");
+  if (workflow.state !== "READY") return settled(deps, row, "STALE");
+  if (pullRequest === undefined) {
+    // Every open pull request already holds the candidate (a merge of the base that was checked and reviewed again, or a fix whose push landed before its result): there is nothing to push, and
+    // the task waits for the merge.
+    const holds = (workflow.pullRequests ?? []).every((entry) => (entry.state !== "OPEN" && entry.state !== "UNKNOWN") || (entry.candidateDigest === workflow.candidate.digest && entry.headTreeSha === workflow.candidate.repositories.find((r) => r.repositoryId === entry.repositoryId)?.treeSha));
+    if (!holds) return settled(deps, row, "STALE");
+    const { blockReason: _blockReason, ...rest } = workflow;
+    void _blockReason;
+    await commitWorkflow(deps, task, WorkflowSnapshotSchema.parse({ ...rest, revision: workflow.revision + 1, stage: "WAIT_FOR_MERGE", state: "WAITING", updatedAt: iso(deps) }), [resolveRowItem(deps, task.taskId, row.workflowRevision)]);
+    return "STARTED";
+  }
+  if (repository === undefined) return settled(deps, row, "STALE");
   const block = async (cause?: WorkflowPullRequestUpdateCause): Promise<StepStart> => {
     await commitWorkflow(deps, task, blockWorkflowPullRequestUpdate(workflow, { numbers: [pullRequest.number], ...(cause === undefined ? {} : { cause }), now: iso(deps) }), [resolveRowItem(deps, task.taskId, row.workflowRevision)]);
     return "STALE";
@@ -163,6 +174,14 @@ export async function updatePullRequest(deps: TaskFlowDeps, operation: Operation
   if (remote.state !== "open" || remote.sourceBranch !== record.headBranch || remote.targetBranch !== record.baseBranch || (remote.headRevision !== commit && !await branchHoldsUpdate())) {
     throw agentXError("STALE_FENCE", "the pull request state does not match the worker update");
   }
+  // The record says whose head this is, and merge tracking reads it as Rovara's: so it learns a head only after the host shows that head is what this operation was asked to push (review M2).
+  // A fix: exactly the reviewed tree, as a fast-forward of the recorded head (a conflict round's: the recorded head first and the base commit it merged second). A merge of the base: a commit of
+  // exactly the recorded head and the base commit it was asked for (what its tree holds is checked again by the checks and reviews that follow it).
+  const parents = await host.commitParents(repositoryRef, commit, scopeOf(deps));
+  const wanted = expected.action === "sync" ? [expected.expectedHeadCommit, expected.workflowSync?.baseCommit ?? ""]
+    : expected.workflowCandidate?.mergeBaseCommit === undefined ? [expected.expectedHeadCommit] : [expected.expectedHeadCommit, expected.workflowCandidate.mergeBaseCommit];
+  if (JSON.stringify(parents) !== JSON.stringify(wanted)) throw agentXError("STALE_FENCE", "the pushed commit is not built on the head and base this operation was asked for");
+  if (expected.action === "append" && await host.tree(repositoryRef, commit, scopeOf(deps)) !== expected.workflowCandidate?.treeSha) throw agentXError("STALE_FENCE", "the pushed tree is not the reviewed tree");
   const written = await deps.store.update({
     key: pullRequestRecordKey(operation.workspaceId, expected.repository, expected.pullRequestNumber),
     ops: [change.set("expectedHeadCommit", commit), change.set("state", remote.state), change.set("updatedAt", iso(deps))], condition: when.eq("expectedHeadCommit", expected.expectedHeadCommit),
@@ -171,6 +190,26 @@ export async function updatePullRequest(deps: TaskFlowDeps, operation: Operation
 }
 
 // ---- the end of a maintain operation
+
+/**
+ * A push the update callback took but the end of the operation refused (its tree was not the reviewed one, the run failed, the merge was not recorded): the pull request's record goes back to the head
+ * Rovara had, so a head Rovara never accepted is never read as Rovara's. Only when the workflow still holds the old head (a push that was recorded is not undone).
+ */
+async function restoreRecordHead(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord): Promise<void> {
+  const maintenance = operation.maintenance;
+  const workflow = task.workflow;
+  if (maintenance === undefined || workflow === undefined) return;
+  const held = workflow.pullRequests?.find((entry) => entry.repositoryId === maintenance.repository && entry.number === maintenance.pullRequestNumber)?.headSha;
+  const record = await pullRequestRecordOf(deps, task.workspaceId, maintenance.repository, maintenance.pullRequestNumber);
+  if (record === undefined || held !== maintenance.expectedHeadCommit || record.expectedHeadCommit === maintenance.expectedHeadCommit) return;
+  await deps.store.update({
+    key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber),
+    ops: [change.set("expectedHeadCommit", maintenance.expectedHeadCommit), change.set("updatedAt", iso(deps))], condition: when.eq("expectedHeadCommit", record.expectedHeadCommit),
+  }).catch(() => undefined);
+}
+
+/** Why a task that was waiting for the merge is being checked again: the base was merged into its branch, and a merge is not trusted on its parents alone. */
+export const SYNC_RECHECK_REASON = "The base branch was merged into this pull request. Rovara is checking the merged code again before it is called ready.";
 
 /** The link of a pull request to its task names the candidate it holds; a fix or a merge gives a new one. Conditional on the digest read, so a link that moved meanwhile is the newer writer's. */
 function rekeyItems(host: { kind: string }, definitionUrl: string, task: TaskRecord, before: WorkflowSnapshot, after: WorkflowSnapshot): TransactItem[] {
@@ -205,7 +244,10 @@ async function recordAppended(deps: TaskFlowDeps, task: TaskRecord, workflow: Wo
   const pullRequest = workflow.pullRequests?.find((entry) => entry.repositoryId === maintenance.repository && entry.number === maintenance.pullRequestNumber);
   if (pullRequest === undefined) return;
   const now = iso(deps);
-  const fail = (cause?: WorkflowPullRequestUpdateCause) => commitWorkflow(deps, task, blockWorkflowPullRequestUpdate(workflow, { numbers: [pullRequest.number], ...(cause === undefined ? {} : { cause }), now }));
+  const fail = async (cause?: WorkflowPullRequestUpdateCause): Promise<void> => {
+    await commitWorkflow(deps, task, blockWorkflowPullRequestUpdate(workflow, { numbers: [pullRequest.number], ...(cause === undefined ? {} : { cause }), now }));
+    await restoreRecordHead(deps, task, operation);
+  };
   // Why the push failed, by the worker's own error: it could not take a reviewed fix; the head moved or the push was not a fast-forward; or anything else on the way stopped it.
   const cause: WorkflowPullRequestUpdateCause = ended.status === "SUCCEEDED" ? "PUSH_REFUSED"
     : ended.error?.includes(WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED) === true ? "WORKER_OUTDATED"
@@ -316,8 +358,15 @@ async function recordSynced(deps: TaskFlowDeps, task: TaskRecord, workflow: Work
     pullRequests: [{ repository: marker.repositoryId, number: marker.number, url: pullRequest.url }],
   }, n);
   let committed: boolean;
-  if (outcome.kind === "unchanged") committed = await commitWorkflow(deps, task, outcome.workflow);
-  else if (outcome.kind === "stopped" || outcome.kind === "asked" || outcome.kind === "gave_up") committed = await commitWorkflow(deps, task, outcome.workflow, milestone("stuck", outcome.message, outcome.workflow.revision));
+  // A merge from a run that did not succeed is not recorded (owner decision b): nothing proves the checks passed on it, so the task waits for the merge as it did, and a head that is not the one
+  // recorded is read by merge tracking as someone else's.
+  if (outcome.kind === "synced" && ended.status !== "SUCCEEDED") {
+    await commitWorkflow(deps, task, endWorkflowBranchSync(workflow, now));
+    await restoreRecordHead(deps, task, operation);
+    return;
+  }
+  if (outcome.kind === "unchanged") { committed = await commitWorkflow(deps, task, outcome.workflow); await restoreRecordHead(deps, task, operation); }
+  else if (outcome.kind === "stopped" || outcome.kind === "asked" || outcome.kind === "gave_up") { committed = await commitWorkflow(deps, task, outcome.workflow, milestone("stuck", outcome.message, outcome.workflow.revision)); await restoreRecordHead(deps, task, operation); }
   else if (outcome.kind === "conflict") {
     const round = outcome.workflow.fixRounds?.conflict ?? 1;
     committed = await commitWorkflow(deps, task, outcome.workflow, [
@@ -325,15 +374,24 @@ async function recordSynced(deps: TaskFlowDeps, task: TaskRecord, workflow: Work
       ...milestone("fixing", `The branch conflicts with ${maintenance.baseBranch}, so Rovara is resolving it (try ${String(round)} of ${String(CONFLICT_ROUNDS_MAX)}).`, outcome.workflow.revision),
     ]);
   } else {
-    // A clean merge, at the host: the pull request's record learns its head, the link follows the new candidate, and the new head is indexed for check events.
+    // A clean merge, at the host, from a run that succeeded. It is a NEW CANDIDATE, not a trusted one (owner decision b): the host shows the right parents, but not what the merge's tree holds beyond
+    // them, so the checks and the reviews run again on it before the task may wait for the merge and the pull request may be called ready. The record learns the head (it is Rovara's), the link
+    // follows the new candidate, and the new head is indexed; the earlier checks and reviews are not carried over.
     if (host === undefined || definition === undefined) return;
     const record = await pullRequestRecordOf(deps, task.workspaceId, maintenance.repository, maintenance.pullRequestNumber);
-    committed = await commitWorkflow(deps, task, outcome.workflow, [
+    const { verification: _verification, reviews: _reviews, acceptedFindings: _accepted, ...merged } = outcome.workflow;
+    void _verification; void _reviews; void _accepted;
+    const recheck = WorkflowSnapshotSchema.parse({ ...merged, stage: "VERIFY", state: "BLOCKED", blockReason: SYNC_RECHECK_REASON, updatedAt: now });
+    committed = await commitWorkflow(deps, task, recheck, [
       ...rekeyItems(host, definition.url, task, workflow, outcome.workflow),
       ...(record !== undefined && record.expectedHeadCommit !== outcome.headSha
         ? [{ kind: "update" as const, key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", outcome.headSha), change.set("state", "open"), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
       ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(host.kind, definition.url), headSha: outcome.headSha, taskId: task.taskId, repositoryId: marker.repositoryId, number: marker.number, branch: maintenance.headBranch }, Date.parse(now)),
     ]);
+    if (committed) {
+      await startChecksRerun(deps, { taskId: task.taskId, workflowRevision: recheck.revision }, { requestId: `sync-recheck-${task.taskId}-${String(recheck.revision)}`, actorId: workflow.ownerId })
+        .catch((error: unknown) => log(deps, { event: "build_step.start_failed", taskId: task.taskId, kind: "SYNC_RECHECK", error: error instanceof Error ? error.name : "unknown" }));
+    }
   }
   if (committed && outcome.kind === "conflict") await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: outcome.workflow.revision, kind: "IMPLEMENT" }).catch((error: unknown) => log(deps, { event: "build_step.start_failed", taskId: task.taskId, kind: "IMPLEMENT", error: error instanceof Error ? error.name : "unknown" }));
 }

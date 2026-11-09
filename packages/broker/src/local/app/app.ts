@@ -6,10 +6,13 @@
 //   the callback endpoints a worker posts to, and the timers that keep the dispatch, the recovery sweep and the outbox relay going.
 //
 // Decision 51: nothing here names a provider; it asks the registry for `storage`, `queue`, `worker-machines`, `admission`, `audit-sink`, `approvers`, `identity` and `metering`.
-// Decision 53: the object (artifact) store is the one port W0 lacks; lane L9a builds it. TODO(L9a): replace `createDocumentEvidenceBlobStore` below with the registry's `object-storage` adapter.
-import { randomBytes } from "node:crypto";
+// Decision 53: artifacts live in the registry's `object-storage` adapter (lane L9a); a worker's model calls go through the model proxy (lane L9a), which the task flow grants per operation.
+import { createHmac, randomBytes } from "node:crypto";
+import { DEFAULT_DIRECT_MODELS } from "@agentx/model-runtime/config";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, type AdapterRegistry, type OrgId, type Principal } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
+import { CallbackCapabilities } from "../../callbacks.js";
+import { capabilityModelGrants, localRoute, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../../core/decisions/local-actions.js";
@@ -18,7 +21,7 @@ import type { LocalPageSessions } from "../../core/local-pages/guard.js";
 import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-pages/server.js";
 import { createDocumentEvidenceBlobStore, type EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
-import { planFactsOf, planRiskOf } from "../../core/decisions/plan-risk.js";
+import { gradePlanRisk } from "../../core/decisions/plan-risk.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { WorkflowArtifactSchema } from "@agentx/contracts";
 import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js";
@@ -30,13 +33,19 @@ import type { SummaryDependencies } from "../../core/sessions/summary.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import { createTaskFlowFromRegistry, TASK_FLOW_INDEXES, type TaskFlow } from "../../core/task-flow/flow.js";
+import { operationKey, taskPointerKey, workspaceKey } from "../../core/task-flow/keys.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
+import { readTask } from "../../core/task-flow/reads.js";
+import { fromDocument, type TaskPointerRecord } from "../../core/task-flow/records.js";
+import { isTerminalStatus } from "../../core/task-flow/results.js";
 import { planFeedbackKey } from "../../core/task-flow/stage-machine.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { localOwnerPrincipal } from "../../ports/policy-defaults.js";
 import { RepositoryGrantService, type RepositoryCredential } from "../../repository-access.js";
+import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { createCallbackHandler } from "./callbacks.js";
+import { withCodeHostPush } from "./push-credential.js";
 import { createTaskFactsSource } from "./facts.js";
 import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
@@ -48,20 +57,11 @@ export { TASK_FLOW_INDEXES };
 /** The id the default identity adapter gives the machine's owner (`localOwnerPrincipal`). */
 const LOCAL_OWNER_PERSON_ID = "local-owner";
 
-/**
- * Where the worker's model calls go (lane L9a, K1: a local model proxy, so the worker never holds a model key). This is the narrow seam L9-wire codes against; the proxy is not built here.
- * TODO(L9a): K1 fills it. Two things it must settle, found while wiring: the worker asks the broker for a short-lived key with `GET /v1/internal/model-access`, which the callback
- * listener (POST only) and the egress gateway (relays only `/v1/internal/workspaces/<id>/operations/<id>/<action>`) both refuse, so K1 either moves that call under the operation's
- * prefix as a POST or opens one more path in both; and the key it issues must be the proxy's own, never the owner's provider key.
- */
-export interface ModelProxyEndpoint {
-  /** The proxy's address as a worker sees it (`AGENTX_MODEL_PROXY_URL`). */
-  url: string;
-}
-
 export interface LocalAppOptions {
-  /** TODO(L9a): the local model proxy. Absent: a worker has no model access and its Understand and Plan steps fail with a plain reason. */
-  modelProxyEndpoint?: ModelProxyEndpoint;
+  /** Tells the model proxy an operation ended (it frees the operation's tokens and spend record). Set by the runtime, which makes the proxy after the servers. */
+  operationEnded?: (operationId: string) => void;
+  /** The model a task step calls: absent, the first of Anthropic and OpenAI that has a key. Tests and a later settings file say otherwise. */
+  modelChoice?: { provider: "anthropic" | "openai"; model: string };
   registry: AdapterRegistry;
   stateDirectory: string;
   pageSessions: LocalPageSessions;
@@ -73,6 +73,8 @@ export interface LocalAppOptions {
   resolveRepositoryCredential?: (credentialRef: string, repositoryUrl: string, access: "clone" | "push") => Promise<RepositoryCredential>;
   /** The address clients reach the owner's routes at (a session's `link` is its own address). Read when asked, so the server may start after the app. */
   origin?: () => string;
+  /** Opens an address in the owner's browser (default: the system browser). Tests give a recorder, which then stands for the browser. */
+  openBrowser?: BrowserOpener;
   /** Port of the review pages (0: a free one). */
   pagesPort?: number;
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
@@ -85,7 +87,9 @@ export interface LocalApp {
   readonly flow: TaskFlow;
   readonly pages: LocalPagesServer;
   readonly gate: DecisionGate;
-  readonly blobs: EvidenceBlobStore;
+  readonly blobs: ObjectStorage;
+  /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
+  readonly modelGrants: ModelGrantSource;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
   routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
   /** The worker's callbacks (`/v1/internal/...`). */
@@ -106,17 +110,37 @@ async function loadCallbackKey(stateDirectory: string): Promise<Buffer> {
   return Buffer.from(written.text.trim(), "base64url");
 }
 
+/** A purpose-bound key from the root key: HMAC-SHA256(root, purpose), 32 bytes. */
+export function deriveKey(root: Buffer, purpose: string): Buffer {
+  return createHmac("sha256", root).update(`rovara-local\0${purpose}`).digest();
+}
+
 export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp> {
   const { registry } = options;
   const companyId = options.companyId ?? IMPLICIT_COMPANY_ID;
   const store = registry.require("storage");
   const log = options.log ?? (() => undefined);
   const owner: Principal = (await registry.require("identity").getPrincipal(companyId, LOCAL_OWNER_PERSON_ID).catch(() => undefined)) ?? localOwnerPrincipal({ companyId });
-  // TODO(L9a): the `object-storage` plug-in point. Until it lands, artifacts are kept as documents (the evidence store's own adapter); a plan is small.
-  const blobs = createDocumentEvidenceBlobStore(store, { companyId, ...(options.now === undefined ? {} : { now: () => options.now!().getTime() }), retentionDays: { "evidence-std": 180 } });
+  // Lane L9a's `object-storage` point: the folder adapter if the config names one, else objects kept as documents.
+  const blobs = registry.require("object-storage");
 
-  const signingKey = await loadCallbackKey(options.stateDirectory);
-  const grants = new RepositoryGrantService(signingKey, options.resolveRepositoryCredential ?? (async () => { throw new Error("no GitHub access is set up: run `gh auth login` or set GH_TOKEN"); }));
+  const rootKey = await loadCallbackKey(options.stateDirectory);
+  // Two kinds of token, two keys: a repository grant is not good as a callback capability, nor the other way round (the signature fails first, so a mix-up is a 403).
+  const signingKey = deriveKey(rootKey, "callback-capability");
+  // A clone is the owner's token by the rules of the runtime; a push comes from the code-host adapter registered for the repository, never from the owner's token (review H1).
+  const grants = new RepositoryGrantService(deriveKey(rootKey, "repository-grant"), withCodeHostPush({
+    registry, companyId, clone: options.resolveRepositoryCredential ?? (async () => { throw new Error("no GitHub access is set up: run `gh auth login` or set GH_TOKEN"); }),
+  }));
+
+  // The model a task step calls: the owner's choice, else the first provider (Anthropic, then OpenAI) that has a key. No key: no route, and the worker has no model access.
+  const keys = registry.require("model-keys");
+  const chosen = async (): Promise<{ provider: "anthropic" | "openai"; model: string } | undefined> => {
+    if (options.modelChoice !== undefined) return options.modelChoice;
+    const have = await keys.providers(companyId);
+    const provider = (["anthropic", "openai"] as const).find((candidate) => have.includes(candidate));
+    return provider === undefined ? undefined : { provider, model: DEFAULT_DIRECT_MODELS[provider].worker };
+  };
+  const modelRoute = async () => { const choice = await chosen(); return choice === undefined ? undefined : localRoute(choice.provider, choice.model).workerRoute; };
 
   const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
 
@@ -129,7 +153,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.machinesName === undefined ? {} : { machinesName: options.machinesName }),
     // No code host adapter registered (none is set up on a fresh laptop): a start is not refused for a host nobody knows, and publishing a pull request is simply not offered.
     checkCodeHosts: registry.names("code-host").length > 0,
-    ...(options.modelProxyEndpoint === undefined ? {} : { machineEnvironment: { AGENTX_MODEL_PROXY_URL: options.modelProxyEndpoint.url } }),
+    modelAccess: { route: modelRoute },
+    ...(options.operationEnded === undefined ? {} : { onOperationEnded: options.operationEnded }),
     startExtras: createSessionStartExtras(companyId),
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
@@ -142,6 +167,22 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // base (a SYNC row). They are installed only here, where the dispatch runner knows both kinds (the build step), and once per process.
   installCiFixDecider(registerMergeActionDecider);
   installBranchSyncDeciders(registerMergeActionDecider);
+  // The model proxy asks, per call, what this operation's capability entitles it to. The models are the install's own choice, never the worker's; no budget is held yet (the flow has no
+  // run limit before a price table exists, and Code's price table is empty), and the proxy keeps no spend record without one.
+  const modelGrants = capabilityModelGrants({
+    capabilities: new CallbackCapabilities(signingKey),
+    async describe(operation) {
+      const choice = await chosen();
+      if (choice === undefined) return undefined;
+      const pointer = fromDocument<TaskPointerRecord>(await store.get(taskPointerKey(operation.workspaceId)));
+      const task = pointer === undefined ? undefined : await readTask(flow.deps, pointer.taskId);
+      return { routes: [localRoute(choice.provider, choice.model).route], ...(task === undefined ? {} : { taskId: task.taskId, projectName: task.project }) };
+    },
+    async holds(operation) {
+      const [record, workspace] = await Promise.all([store.get(operationKey(operation.workspaceId, operation.operationId)), store.get(workspaceKey(operation.workspaceId))]);
+      return record !== undefined && typeof record["status"] === "string" && !isTerminalStatus(record["status"]) && record["fence"] === operation.fence && workspace?.["activeOperationId"] === operation.operationId && workspace["fence"] === operation.fence;
+    },
+  });
 
   // Sessions: facts over the task records, the cost ledger over the metering seam.
   const summaryDeps: SummaryDependencies = {
@@ -159,11 +200,12 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       store,
       // The tier of the plan waiting now, read from the plan itself (the files it names, the claims nothing proves): a plan nobody could grade is never graded low, but a plan that names its files
       // and its proof is not high just for being a plan.
-      riskOf: async (_task, workflow) => {
+      riskOf: async (task, workflow) => {
         const artifact = workflow.artifacts.filter((entry) => entry.type === currentDocumentType(workflow)).at(-1);
         const parsed = artifact === undefined ? undefined : WorkflowArtifactSchema.safeParse(artifact);
         const loaded = parsed?.success === true ? await loadWorkflowDocument(textReaderOf(blobs), parsed.data, {}).catch(() => undefined) : undefined;
-        return planRiskOf(planFactsOf(loaded, workflow), undefined);
+        const estimate = (task["runEstimate"] as { highUsd?: unknown } | undefined)?.highUsd;
+        return gradePlanRisk({ loaded, workflow, requestText: typeof task["requestText"] === "string" ? task["requestText"] : undefined, ...(typeof estimate === "number" ? { costHighUsd: estimate } : {}) });
       },
       onDecided: ({ taskId, before, after, attempt, at }) => {
         // The plan was approved: coding starts with no one asking, as a row like every automatic step.
@@ -188,7 +230,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, pages: () => pages, version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser" })), version: options.version });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, origin: options.origin ?? (() => "http://127.0.0.1") });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? ownerRoutes(request, caller);
 
@@ -212,7 +254,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs,
+    flow, pages, gate, blobs, modelGrants,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

@@ -4,10 +4,10 @@
 // defaults and the built-in adapters are registered; the config's adapters are loaded (a configured storage or queue replaces the
 // in-memory default); the registry is sealed; then the server starts. Nothing in the registry changes after that except channels.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { realpath, rm, stat } from "node:fs/promises";
+import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
@@ -24,23 +24,29 @@ import {
   registerCodeDefaults,
 } from "../ports/index.js";
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
+import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
 import { SqliteDocumentStore, SqliteQueueService } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
-import { createLocalApp, type LocalApp, type ModelProxyEndpoint } from "./app/app.js";
+import type { BrowserOpener } from "./open-browser.js";
+import { createLocalApp, type LocalApp } from "./app/app.js";
 import { configurationAnswer } from "./app/routes.js";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
-import { resolveGithubAccess, type GhRunner } from "./github-access.js";
+import { assertGithubCloneAccess, resolveGithubAccess, type GhRunner } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
+import { createLocalModelProxy, type LocalModelProxy, type ModelGrantSource, type ProviderEndpoints } from "./model-proxy/index.js";
+import { modelProxyWorkerUrl } from "./docker-worker-machines.js";
 import {
   KEYS_FILE_NAME,
   SERVER_FILE_NAME,
+  STATE_LOCK_FILE_NAME,
+  LocalStateError,
   SESSION_TOKEN_FILE_NAME,
   STATE_DB_FILE_NAME,
   WORKSPACES_DIRECTORY_NAME,
@@ -126,14 +132,21 @@ export interface LocalRuntimeOptions {
   machines?: WorkerMachines;
   /** Called with the registry after Code's defaults and before the config's adapters, to register more (an embedding product, tests). */
   registerAdapters?: (registry: AdapterRegistry) => void;
-  /** TODO(L9a): the local model proxy's address (lane K1). Absent: workers have no model access yet. */
-  modelProxyEndpoint?: ModelProxyEndpoint;
+  /** Opens a review page in the owner's browser (default: the system browser). A test gives a recorder, which stands for the browser. */
+  openBrowser?: BrowserOpener;
   /** How `gh` is run to find the owner's GitHub token (tests give a stub, so a real login on the machine is never used). */
   gh?: GhRunner;
   /** The fetch the Docker adapter uses to reach its workers (tests give the simulated Docker's). */
   workerFetch?: typeof fetch;
   /** Run the dispatch, sweep and session timers. Default true; tests call `runtime.tick()`. */
   timers?: boolean;
+  /**
+   * Lane L9a (K1): what a worker's callback capability entitles it to in the model proxy. The task flow supplies it (`capabilityModelGrants`); until
+   * it is wired nothing is granted, and a worker asking for model access is refused.
+   */
+  modelGrants?: ModelGrantSource | undefined;
+  /** Where the model proxy calls each provider (tests point these at a fake). Absent: the providers' own addresses. */
+  modelProviderEndpoints?: Partial<ProviderEndpoints> | undefined;
 }
 
 export interface LocalRuntime {
@@ -147,14 +160,16 @@ export interface LocalRuntime {
   readonly sessionTokenPath: string;
   /** The local review pages' sessions: pass them to `createLocalPagesServer({ sessions })` so the proofs the pages sign are the ones the approvers accept. */
   readonly pageSessions: LocalPageSessions;
-  /** The review pages' address: `http://127.0.0.1:<port>` (the page links themselves carry a session token and come from `POST /v1/local/pages/link`). */
+  /** The review pages' address: `http://127.0.0.1:<port>` (a page link carries a session that can approve: it stays in this process and reaches a browser only through `POST /v1/local/pages/open`). */
   readonly pagesUrl: string;
-  /** The address of a review page in the owner's session (the token is in it: for the owner's terminal only). */
+  /** The address of a review page in the owner's session. It can approve: for the code that embeds the runtime, never to be sent to a client, a file or a log. */
   pageLink(path?: string): string;
   /** The wired task flow, sessions, decisions and pages (lane L9-wire). */
   readonly app: LocalApp;
   /** One pass of what the timers do (tests). */
   tick(): Promise<void>;
+  /** Lane L9a (K1): the model proxy workers call. Its `tokens` end a finished operation's tokens (`revokeOperation`). */
+  readonly modelProxy: LocalModelProxy;
   /** The adapters registered at each plug-in point, by name. */
   wiring(): Record<string, string[]>;
   stop(): Promise<void>;
@@ -175,7 +190,10 @@ function ownerName(): string {
   }
 }
 
-/** The surface the request came from, for the session's origin: the MCP tools and the CLI name themselves. */
+/**
+ * The surface the request came from, for the session's origin and the answer's source: the MCP tools and the CLI name themselves. The header is self-declared by whoever holds the
+ * session token, so it is a LABEL only. Nothing may decide who is allowed to do what from it.
+ */
 function clientOf(request: BrokerRequest): string {
   const named = request.headers["x-agentx-client"];
   return named === "mcp" || named === "cli" ? named : "app";
@@ -185,8 +203,76 @@ function json(statusCode: number, value: unknown): BrokerResponse {
   return { statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) };
 }
 
+/**
+ * One `rovara up` per state folder. A second would rewrite the session token and the server file, and either one's Ctrl-C would stop the other's workers. The lock is a file holding
+ * `<pid>:<nonce>`, put in place whole and at once (written under another name, then `link()`ed: a reader never sees it empty). A lock whose process is gone is taken over by an atomic
+ * `rename`, after which what was moved is read again: if it is not the stale lock that was judged, it is put back and the start is refused.
+ */
+const LOCK_YOUNG_MS = 5_000;
+async function acquireStateLock(stateDirectory: string): Promise<() => Promise<void>> {
+  const path = join(stateDirectory, STATE_LOCK_FILE_NAME);
+  const mine = `${String(process.pid)}:${randomBytes(8).toString("hex")}`;
+  const held = (pid: number | string) => new LocalStateError(`another rovara up (process ${String(pid)}) holds ${path} for ${stateDirectory}; stop it first, or use another --state-dir (if no rovara up is running, delete ${path})`);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const staged = `${path}.${randomBytes(6).toString("hex")}`;
+    await writeFile(staged, `${mine}\n`, { flag: "wx", mode: 0o600 });
+    try {
+      await link(staged, path);
+      let released = false;
+      return async () => {
+        // Only our own lock is removed, and only once (a second runtime in this process has a lock of its own).
+        if (released) return;
+        released = true;
+        const text = await readFile(path, "utf8").catch(() => undefined);
+        if (text?.trim() === mine) await rm(path, { force: true });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    } finally {
+      await rm(staged, { force: true });
+    }
+    // Someone holds it. Is that holder alive?
+    const text = await readFile(path, "utf8").catch(() => undefined);
+    if (text === undefined) continue; // released between our link and our read
+    const pid = Number(text.trim().split(":")[0]);
+    const age = Date.now() - ((await stat(path).catch(() => undefined))?.mtimeMs ?? 0);
+    // An empty or unreadable lock that is young is a holder still writing; it is never judged stale.
+    if (!Number.isInteger(pid) || pid <= 0) {
+      if (age < LOCK_YOUNG_MS) throw held("?");
+    } else {
+      let alive: boolean;
+      try { process.kill(pid, 0); alive = true; } catch (killError) { alive = (killError as NodeJS.ErrnoException).code === "EPERM"; }
+      if (alive) throw held(pid);
+    }
+    // Stale: move it aside atomically, and check that what was moved is the lock that was judged.
+    const aside = `${path}.stale.${randomBytes(6).toString("hex")}`;
+    try { await rename(path, aside); } catch { continue; }
+    const moved = await readFile(aside, "utf8").catch(() => undefined);
+    if (moved !== text) {
+      // Another starter put a fresh lock there between our read and our rename: give it back (if the name is free) and refuse.
+      await link(aside, path).catch(() => undefined);
+      await rm(aside, { force: true });
+      throw held("another process");
+    }
+    await rm(aside, { force: true });
+  }
+  throw new LocalStateError(`could not take the lock ${path}`);
+}
+
 export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<LocalRuntime> {
   const stateDirectory = await ensureStateDirectory(options.stateDirectory, { cwd: options.cwd });
+  const release = await acquireStateLock(stateDirectory);
+  try {
+    const runtime = await startLocked(options, stateDirectory);
+    const stop = runtime.stop.bind(runtime);
+    return Object.assign(runtime, { async stop() { await stop(); await release(); } });
+  } catch (error) {
+    await release();
+    throw error;
+  }
+}
+
+async function startLocked(options: LocalRuntimeOptions, stateDirectory: string): Promise<LocalRuntime> {
   const location = resolveConfigLocation({ stateDirectory, configPath: options.configPath, cwd: options.cwd });
   let configText: string;
   try {
@@ -219,12 +305,12 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   const closers: Array<() => Promise<void> | void> = [];
   const configured = (point: PluginPoint): boolean => config.plugins.some((entry) => entry.point === point);
   if (options.storage === "memory") {
-    registry.register("storage", "memory", new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }), { isDefault: true });
+    registry.register("storage", "memory", new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, ttlAttribute: INDEX_EXPIRY_ATTRIBUTE }), { isDefault: true });
     registry.register("queue", "memory", new MemoryQueueService(), { isDefault: true });
   } else {
     const databasePath = join(stateDirectory, STATE_DB_FILE_NAME);
     if (!configured("storage")) {
-      const store = SqliteDocumentStore.open({ path: databasePath, indexes: TASK_FLOW_INDEXES, migrate: true });
+      const store = SqliteDocumentStore.open({ path: databasePath, indexes: TASK_FLOW_INDEXES, ttlAttribute: INDEX_EXPIRY_ATTRIBUTE, migrate: true });
       closers.push(() => store.close());
       registry.register("storage", "sqlite", store, { isDefault: true });
     }
@@ -245,6 +331,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
       return { tcpPort: callbackServer.current.tcpPort, socketDirectory: callbackServer.current.socketDirectory };
     },
     ...(options.allowedDomains === undefined ? {} : { allowedDomains: options.allowedDomains }),
+    modelProxy: true,
     signer: await loadInvokeSigner(stateDirectory),
     docker: options.docker ?? createDockerRunner(options.environment),
     ...(options.workerFetch === undefined ? {} : { fetch: options.workerFetch }),
@@ -255,17 +342,31 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
 
   options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
+  // Every record the core writes expires by `indexExpiresAt`. A store that sweeps another attribute (the SQLite plug-in's own default is `expiresAt`) would keep them for ever without a word,
+  // so such a store is refused here, saying what to set.
+  const storeTtl = registry.require("storage").ttlAttribute;
+  if (storeTtl !== INDEX_EXPIRY_ATTRIBUTE) {
+    throw new LocalStateError(`the storage plug-in expires records by ${storeTtl === undefined ? "nothing" : `"${storeTtl}"`}, and Rovara's records expire by "${INDEX_EXPIRY_ATTRIBUTE}"; set "ttlAttribute": "${INDEX_EXPIRY_ATTRIBUTE}" in its settings`);
+  }
+  // Lane L9a (S1): objects are kept as documents unless a plug-in names another object storage (the folder adapter).
+  if (registry.names("object-storage").length === 0) {
+    registry.register("object-storage", "document", createDocumentObjectStorage(registry.require("storage"), { companyId: config.companyId ?? IMPLICIT_COMPANY_ID }), { isDefault: true });
+  }
   registry.seal();
 
   const identity = registry.require("identity");
   const githubKeys = createLocalGithubKeyStore(stateDirectory);
   const serverUrl = { current: "http://127.0.0.1" };
+  const modelProxyHolder: { current?: LocalModelProxy } = {};
   const app = await createLocalApp({
     origin: () => serverUrl.current,
-    ...(options.modelProxyEndpoint === undefined ? {} : { modelProxyEndpoint: options.modelProxyEndpoint }),
+    ...(options.openBrowser === undefined ? {} : { openBrowser: options.openBrowser }),
+    // The model proxy is made after the servers (it is served on the callback listener); the app asks it, late, to forget an operation that ended.
+    operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
-    resolveRepositoryCredential: async () => {
+    resolveRepositoryCredential: async (_credentialRef, repositoryUrl, accessKind) => {
+      assertGithubCloneAccess(repositoryUrl, accessKind);
       const access = await resolveGithubAccess({ companyId: config.companyId ?? IMPLICIT_COMPANY_ID, keyFile: githubKeys, environment: options.environment, ...(options.gh === undefined ? {} : { gh: options.gh }) });
       if (access === undefined) throw new Error("no GitHub access is set up: run `gh auth login`, set GH_TOKEN, or put a github token in keys.json");
       return { token: access.token.reveal() };
@@ -331,7 +432,18 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   const serverFile = join(stateDirectory, SERVER_FILE_NAME);
   await writeOwnerFile(serverFile, `${JSON.stringify({ url: server.url, pid: process.pid })}\n`).catch(() => undefined);
   // Workers call back on a listener of their own, not on the owner's server (callback-server.ts).
-  callbackServer.current = await startCallbackServer({ handler: callbackHandler, stateDirectory }).catch(async (error: unknown) => {
+  // Lane L9a (K1): the model proxy is served on that same listener, so a worker reaches it only through its own egress gateway.
+  const modelProxy = createLocalModelProxy({
+    keys: registry.require("model-keys"),
+    metering: registry.require("metering"),
+    companyId: config.companyId ?? IMPLICIT_COMPANY_ID,
+    // What a worker may call is the task flow's decision (the grants over the flow's operations); a caller's own source (tests) replaces it.
+    grants: options.modelGrants ?? app.modelGrants,
+    workerUrl: modelProxyWorkerUrl(),
+    ...(options.modelProviderEndpoints === undefined ? {} : { endpoints: options.modelProviderEndpoints }),
+  });
+  modelProxyHolder.current = modelProxy;
+  callbackServer.current = await startCallbackServer({ handler: callbackHandler, stateDirectory, modelProxy }).catch(async (error: unknown) => {
     await server.close();
     await app.stop();
     for (const close of closers) await close();
@@ -352,6 +464,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
     pageLink: (path) => app.pages.link(path, { label: "terminal" }),
     app,
     tick: () => app.tick(),
+    modelProxy,
     wiring,
     async stop() {
       if (stopped) return;

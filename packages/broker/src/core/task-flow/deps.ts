@@ -6,6 +6,7 @@ import type {
   AuditSink,
   DocumentStore,
   OrgId,
+  InvocationModelRoute,
   Principal,
   ProjectDefinition,
   QueueService,
@@ -141,6 +142,13 @@ export interface TaskFlowDeps {
   milestones?: CodeMilestones;
   /** Lane L10: the steps after the plan is approved. `createTaskFlow` fills it with the build step when absent. */
   buildSteps?: BuildSteps;
+  /**
+   * Lane L9a / L9-wire: the model a task step calls, through the install's model proxy (the worker holds no key). The route is what the worker is told (`modelRoute`); the capability it
+   * gets lists the `model-access` action. Undefined from `route()`: no provider key is set up, and the step gets neither (the worker then has no model access and fails with its own reason).
+   */
+  modelAccess?: { route(): Promise<InvocationModelRoute | undefined> };
+  /** Called once an operation reached a terminal status (the model proxy frees its tokens and spend record). Never throws into the flow. */
+  onOperationEnded?: (operationId: string) => void;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
 }

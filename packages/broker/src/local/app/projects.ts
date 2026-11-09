@@ -4,6 +4,7 @@ import {
   ProjectDefinitionSchema, agentXError, canonicalJson, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, when,
   type DocumentStore, type JsonValue, type OrgId, type ProjectDefinition,
 } from "@agentx/contracts";
+import { isPlainRepositoryUrl } from "../github-access.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
 
 export async function registerProject(store: DocumentStore, companyId: OrgId, value: unknown): Promise<{ project: string; revision: number; duplicate: boolean }> {
@@ -12,6 +13,10 @@ export async function registerProject(store: DocumentStore, companyId: OrgId, va
     const issue = parsed.error.issues[0];
     throw agentXError("CONFIG_INVALID", `project: ${issue?.path.join(".") || "body"}: ${issue?.message ?? "invalid"}`);
   }
+  // The addresses as they were SENT: the schema may trim them, and a trimmed address is not the one a worker would have been given by a parser that does not.
+  const sent = (value as { repositories?: Array<{ name?: unknown; url?: unknown }> }).repositories ?? [];
+  const odd = sent.find((repository) => typeof repository.url !== "string" || !isPlainRepositoryUrl(repository.url));
+  if (odd !== undefined) throw agentXError("CONFIG_INVALID", `project: repository ${typeof odd.name === "string" ? odd.name.slice(0, 63) : "?"}: the address has a backslash, a space, a control or non-ASCII character; write it as a plain https address`);
   const source = createStoreProjectSource(store, companyId);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const latest = await source.latest(parsed.data.name);

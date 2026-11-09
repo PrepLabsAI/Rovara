@@ -121,7 +121,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
 
   let startedMachineId: string | undefined;
   try {
-    const handle = await deps.machines.start({ machineKey: workspace.id, companyId: deps.companyId, projectName: workspace.projectName, labels: { workspaceId: workspace.id }, ...(deps.machineEnvironment === undefined ? {} : { environment: { ...deps.machineEnvironment } }) });
+    const handle = await deps.machines.start({ machineKey: workspace.id, companyId: deps.companyId, projectName: workspace.projectName, labels: { workspaceId: workspace.id } });
     startedMachineId = handle.machineId;
     // The adapter gave a different machine than the one the workspace knew (the old one was reaped and the key started a new one): that is a new machine,
     // admitted on its own like any other. Refused, it is stopped again at once.
@@ -145,7 +145,9 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     }
     if (health.state !== "ready" && health.state !== "busy") return retryLater(); // starting, stopping, stopped (the start above wakes it) or unhealthy
     // A step whose tool boundary the worker cannot enforce is refused, never sent without it: a read-only step must stay read-only.
-    const missing = (operation.dispatch.requires ?? []).filter((feature) => !health.features.includes(feature));
+    // A model route is never dropped: a worker that cannot take one is refused the step rather than sent it without.
+    const routed = operation.dispatch.kind === "task" && (await deps.modelAccess?.route()) !== undefined;
+    const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : [])].filter((feature) => !health.features.includes(feature));
     if (missing.length > 0) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
     // The claim: in one transaction, the workspace is still held by this operation at its fence and is not closing, and the operation is handed over.
     // Nothing is issued to the worker (no grant, no capability) before it applies.
@@ -207,11 +209,12 @@ async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessag
 async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord): Promise<WorkerInvocation | string> {
   const spec = operation.dispatch;
   const secret = Buffer.from(deps.callbackSigningKey);
+  const modelRoute = spec.kind === "task" ? await deps.modelAccess?.route() : undefined;
   const capability = new CallbackCapabilities(secret).issue({
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
-    actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? [])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
+    actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
-  let payload: Record<string, unknown> = { ...spec.payload };
+  let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }) };
   if (spec.kind === "prepare") {
     const project = await deps.projects.revision(workspace.projectName, workspace.projectRevision);
     if (project === undefined) return "the project revision this task was started on is gone";

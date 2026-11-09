@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`. A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, and `object-storage` (provisional, below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -211,6 +211,38 @@ adapter answers "who wrote this comment and what may they do" through `verifyCom
 store (`ANTHROPIC_API_KEY`), a file store (JSON, refused unless only the owner can read it), a layered store and a memory store. Cloud
 adapts the port to its secret store and proxy.
 
+## Object storage (lane L9a, PROVISIONAL: owner decision 58, until Pratik agrees)
+
+The `object-storage` point (one adapter) is where files live that are too big or too plain for the document store: proof evidence, plan documents, a
+worker's results. It is lane L7b's `EvidenceBlobStore` promoted to the registry: `ObjectStorage` in `packages/contracts/src/ports/object-storage.ts`
+has `put`, `get` (with a size cap; an object over it is `undefined`, never cut), `stat`, `delete` and `deletePrefix`. Keys are paths of letters, digits and
+`. _ = : @ + , ~ -` (`isValidObjectKey`), at most 1024 characters and at most 128 per part (the evidence erase's plain-id rule), no `.` or `..` part, so no adapter can turn a key into a place outside its store. An
+object carries a content type, a few small text facts and a retention class (the caller's word, such as `evidence-std`; the adapter maps it to days).
+- **Immutable by default (L9-wire review).** A `put` on a key that holds an object refuses with `ObjectConflictError` and changes nothing; of two writers racing for a key exactly one wins (a
+  conditional write in the document adapter, a hard link in the folder adapter). `put(..., { overwrite: true })` replaces on purpose. The proof evidence callers that rewrite a key
+  pass it: `storeEvidenceArtifacts` (the key is the content's SHA-256, so a retried capture rewrites the same bytes) and `keepEvidence` (one pack per task and candidate digest, rewritten by a re-check).
+  An object that has expired does not hold its key. The folder adapter keeps a part as one file name of at most 255 bytes, so a 128-character part that is mostly capitals is refused (`ObjectKeyError`). It publishes a new object with a hard link (the one step that fails if the name is taken), so its folder must be on a file system that has them; on EPERM, ENOTSUP or EXDEV it throws `FolderHardLinksUnsupportedError` and never falls back to a write two writers could both win.
+- **Adapters in Code.** The document-store adapter (`createDocumentObjectStorage`, `core/proof/evidence-blob-store.ts`) is the default `rovara up` registers
+  and holds only what fits a document. The folder adapter (`@agentx/local-adapters/object-storage`, `FolderObjectStorage`) keeps one file per object
+  under a folder (default `~/.rovara/objects`), written by one rename after a sync, read through O_NOFOLLOW, with every folder checked to lie under the
+  real root; capital letters and punctuation are spelled so keys that differ only in case stay apart on a case-insensitive disk.
+- **Conformance.** `tests/support/ports/object-storage-conformance.ts` (`runObjectStorageConformance`) is the suite every adapter passes; the two
+  adapters above run it in `tests/unit/ports-object-storage.test.ts`.
+- **Proof code.** `EvidenceBlobStore`, `EvidenceBlobMeta` and `EvidenceObjectTooBigError` stay as names over the port, so the proof code needs no change; the
+  wiring lane takes the store from `registry.require("object-storage")`.
+- **Not here (decision 51).** The S3 adapter is Cloud's, with its lifecycle rule for retention; a signed download address (lane L8); a sweep of expired files in
+  the folder adapter (an expired object is reported absent and removed when it is next read).
+
+## Local model proxy (lane L9a, PROVISIONAL: owner decision 58, until Pratik agrees)
+
+The worker never holds a model key. `packages/broker/src/local/model-proxy/` is a small proxy served on the callback listener: a worker asks for a
+token with its callback capability (`GET /v1/internal/model-access`, action `model-access`) and sends model calls with it to `/v1/internal/model-proxy/v1/...`;
+the proxy reads the real key through the `model-keys` port, forwards to the provider, meters through the `metering` port and holds the task budget. It
+mirrors Cloud's proxy (packages/model-proxy in Cloud is LiteLLM plus a Python guard, which Code does not carry): the guard's per-route field allow-lists,
+header bans, `anthropic-beta` allow-list and no-redirect rule are carried over field for field (`providers.ts`). Details and limits are in `docs/local.md`.
+Interfaces added: the `model-access` callback action, `ModelGrantSource` (what a capability entitles an operation to), the `x-rovara-workspace` stamp the
+egress gateway puts on worker calls, and `AGENTX_MODEL_PROXY_URL` in a worker machine's environment.
+
 ## Code host, tracker and check runner
 
 These three points hold Cloud's ports (`packages/contracts/src/plugins/`), which use neutral words only: change request, revision, check,
@@ -310,7 +342,7 @@ The pure transitions stay in `@agentx/contracts` (`task-workflow-node.ts`); this
 - **Workspace limits** use a counter and one marker item per charged task (`TASK#<id>` beside the member counter) in place of Cloud's string set.
 - **Seams the flow brings:** `TaskAccess` (the owner by default; `checkStart` at a start, `checkStep` before every step the system starts, with items for the step's transaction), `ProjectSource` (`createStoreProjectSource` reads Cloud's project keys), `StepPrompts`
   (simple defaults; Cloud's prompt builders are not ported), and `OperationResult`/`StepOutcome` (the callback layer reads the worker's artifacts and hands over
-  the outcome; object storage has no port yet).
+  the outcome; object storage is the `object-storage` point, provisional).
 - **Gaps the flow states rather than hides:** no sweep reaps an operation nobody holds or a closed workspace that still has a machine; no watchdog ends a step whose worker
   died (a waiting dispatch row is given up on after an hour, a running step is not); `Admission.settle` has no machine-time unit, so a closed task's reservations are
   released; a plain task (no workflow) whose first run `checkStep` refuses stays "starting" with nothing retrying it; a task charged in Cloud's older form (a `tasks` set) closes without freeing a slot it has no marker for.
@@ -343,16 +375,15 @@ and the build step reads it against the contracts' schemas and the task's own re
 
 ## What is not here
 
-- **Artifact (object) storage.** Cloud keeps proofs, plan documents and evidence in an object store. No port is defined yet; the lanes
-  that move proof and evidence (L4, L6, L7) need one.
+- **Artifact (object) storage** now has a provisional port (`object-storage`, above). Cloud's S3 adapter is not in Code.
 - **Snapshot reads** (`TransactGet`, 10 uses in Cloud). `getMany` is not a snapshot; use `transact` with `check` steps.
 - **Scan** (2 uses). Use `query` on a partition or an index. **Projections** (16 uses) are not offered; read the document.
 - **Sets with `contains`, list append with `size`, `attribute_type`, binary attributes.** Cloud's limit and budget code uses them
   (`developer/limits.ts`, `org/budget.ts`, `spend/admission.ts`, `aws/sessions.ts`, `lessons/dynamo-vectors.ts`). They must be
   rewritten before that code sits on this port: one marker item per charged task with `when.absent()` instead of a set, a counter
   instead of a list length, base64 text instead of bytes. That changes the stored format, so it is a decision for both owners.
-- **Secrets, object (artifact) storage, a scheduler, realtime push and email notices.** Each is a provider dependency of the core
-  today and has no port yet. The relay "from a timer" is the caller's timer.
+- **Secrets, a scheduler, realtime push and email notices.** Each is a provider dependency of the core
+  today and has no port yet (object storage has a provisional one). The relay "from a timer" is the caller's timer.
 - **Sign-in flows.** `IdentityProvider` answers who a credential is; begin/complete/sign-out, authentication freshness and member
   listing for single sign-on are interface additions for the lane that needs them.
 - A SQLite adapter must use UTF-8 text with BINARY collation for the code-point order and refuse lone surrogates in keys.

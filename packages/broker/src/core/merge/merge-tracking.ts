@@ -534,7 +534,10 @@ async function trackOne(
   // Ready for review (question 8): a draft whose counted checks pass (or that has none to wait for), on a head that is Rovara's, is taken out of draft, and the project's
   // reviewers are asked unless GitHub already lists some. A pull request that was never a draft is treated alike: the reviewers are asked and `readyAt` says when.
   // GitHub refusing one of the two (a missing permission, an error) leaves that step undone and the item still written; a rate limit or a spent allowance goes on up.
-  const wantsReady = status.state === "open" && early.readyAt === undefined && early.headByRovara && (ci.ci === "passing" || ci.ci === "none");
+  // Only while the task waits for the merge with nothing being changed or checked: a pull request whose code is being fixed, or merged with its base and not yet checked and reviewed again (lane L10, owner
+  // decision b), is not called ready, whatever its CI says.
+  const wantsReady = status.state === "open" && early.readyAt === undefined && early.headByRovara && (ci.ci === "passing" || ci.ci === "none")
+    && task.workflow.stage === "WAIT_FOR_MERGE" && task.workflow.state === "WAITING";
   let readyNow = false;
   let asked = false;
   let markedReady = false;

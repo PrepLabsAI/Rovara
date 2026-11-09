@@ -1,6 +1,6 @@
 // Lane L9-wire: the task flow's side of a session's stop, retry and message (L6b's `SessionControlHost`). Each runs only after the sessions module checked who is asking.
-import { change, when } from "@agentx/contracts";
-import type { SessionControlHost } from "../../core/sessions/control.js";
+import { INDEX_EXPIRY_ATTRIBUTE, change, when } from "@agentx/contracts";
+import { createSessionControl, type SessionControlHost } from "../../core/sessions/control.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { operationKey, workspaceKey } from "../../core/task-flow/keys.js";
 import { readTask } from "../../core/task-flow/reads.js";
@@ -10,7 +10,7 @@ import { blockTaskWorkflow } from "../../core/task-flow/stage-machine.js";
 import { iso } from "../../core/task-flow/support.js";
 import { retryBlockedStep } from "./retry.js";
 
-/** A person may message a session this many times an hour, and a task keeps this many messages: a live message can mean paid model work. */
+/** A person may message a session this many times an hour (a token bucket), and a task keeps this many messages: a live message can mean paid model work. */
 export const MESSAGES_PER_HOUR = 20;
 export const MESSAGES_PER_TASK = 200;
 
@@ -45,23 +45,37 @@ export function createSessionControlHost(deps: TaskFlowDeps): SessionControlHost
     },
 
     async deliverMessage(taskId, message) {
-      const at = iso(deps);
-      const hour = at.slice(0, 13);
-      const counter = { pk: `DEVTASK#${taskId}`, sk: `MESSAGE_RATE#${hour}` };
-      // The count and the message are one write, so two messages racing cannot both pass the last slot.
-      const total = { pk: `DEVTASK#${taskId}`, sk: "MESSAGE_TOTAL" };
-      const counted = await deps.store.transact([
-        { kind: "update", key: counter, ops: [change.add("count", 1), change.setIfAbsent("expiresAt", Math.floor(Date.parse(at) / 1000) + 7_200)], condition: when.or(when.notExists("count"), when.lt("count", MESSAGES_PER_HOUR)) },
-        { kind: "update", key: total, ops: [change.add("count", 1)], condition: when.or(when.notExists("count"), when.lt("count", MESSAGES_PER_TASK)) },
-        { kind: "put", item: { pk: `DEVTASK#${taskId}`, sk: `MESSAGE#${at}#${message.messageId}`, entityType: "TASK_MESSAGE", messageId: message.messageId, text: message.text, createdAt: at }, condition: when.absent() },
-      ]);
-      if (!counted.applied) {
-        // A repeat of a message already saved is not a new message.
-        const saved = await deps.store.get({ pk: `DEVTASK#${taskId}`, sk: `MESSAGE#${at}#${message.messageId}` });
-        if (saved === undefined) return { state: "not_delivered" as const, reason: MESSAGE_RATE_LIMITED };
+      const pk = `DEVTASK#${taskId}`;
+      const messageKey = { pk, sk: `MESSAGE#${message.messageId}` };
+      const answer = { state: "not_delivered" as const, reason: MESSAGE_NOT_PASSED_ON };
+      // A repeat of a message already saved is answered again and not counted.
+      if ((await deps.store.get(messageKey)) !== undefined) return answer;
+      const bucketKey = { pk, sk: "MESSAGE_BUCKET" };
+      const totalKey = { pk, sk: "MESSAGE_TOTAL" };
+      // A token bucket: MESSAGES_PER_HOUR messages at most, refilled evenly over the hour (so no burst of twice the limit across an hour boundary). The write is conditioned on the
+      // bucket as it was read, so two messages racing cannot both take the last token.
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const now = (deps.now?.() ?? new Date()).getTime();
+        const bucket = await deps.store.get(bucketKey);
+        const tokens = bucket === undefined ? MESSAGES_PER_HOUR : Math.min(MESSAGES_PER_HOUR, Number(bucket["tokens"]) + ((now - Number(bucket["at"])) * MESSAGES_PER_HOUR) / 3_600_000);
+        if (!(tokens >= 1)) return { state: "not_delivered" as const, reason: MESSAGE_RATE_LIMITED };
+        const counted = await deps.store.transact([
+          { kind: "put", item: { ...bucketKey, entityType: "MESSAGE_BUCKET", tokens: tokens - 1, at: now, version: bucket === undefined ? 1 : Number(bucket["version"]) + 1, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(now / 1000) + 2 * 3_600 }, condition: bucket === undefined ? when.absent() : when.eq("version", Number(bucket["version"])) },
+          { kind: "update", key: totalKey, ops: [change.add("count", 1)], condition: when.or(when.notExists("count"), when.lt("count", MESSAGES_PER_TASK)) },
+          // The saved message expires with the rest of a task's short-lived records.
+          { kind: "put", item: { ...messageKey, entityType: "TASK_MESSAGE", messageId: message.messageId, text: message.text, createdAt: iso(deps), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(now / 1000) + MESSAGE_KEEP_SECONDS }, condition: when.absent() },
+        ]);
+        if (counted.applied) return answer;
+        if ((await deps.store.get(messageKey)) !== undefined) return answer;
       }
-      return { state: "not_delivered" as const, reason: MESSAGE_NOT_PASSED_ON };
+      return { state: "not_delivered" as const, reason: MESSAGE_RATE_LIMITED };
     },
   };
 }
 
+const MESSAGE_KEEP_SECONDS = 30 * 86_400;
+
+/** The session control (who may stop, retry or message; the request recorded once under its id, with the event and the audit step) over this install's flow. Every route that stops or retries uses this one. */
+export function createLocalSessionControl(deps: TaskFlowDeps) {
+  return createSessionControl({ store: deps.store, audit: deps.audit, host: createSessionControlHost(deps), now: deps.now ?? (() => new Date()) });
+}

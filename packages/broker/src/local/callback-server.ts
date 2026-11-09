@@ -3,7 +3,9 @@
 // The main server (http-server.ts) answers the owner: it binds 127.0.0.1, accepts a Host of 127.0.0.1 or localhost and every
 // route. A worker cannot call it, and must not be able to: a worker is code that may be driven by a repository. This second
 // listener answers workers and nothing else:
-//   - only `POST /v1/internal/...`, the routes the worker calls back (callback-client.ts), so none of the owner's routes
+//   - only `POST /v1/internal/...`, the routes the worker calls back (callback-client.ts), so none of the owner's routes; and, when a
+//     model proxy is given (lane L9a), `GET /v1/internal/model-access` and `POST /v1/internal/model-proxy/...`, which it answers itself
+//     (a model call is streamed, so it does not go through the buffered handler)
 //   - a Host of `host.docker.internal:<port>`, the name the egress gateway of a worker machine gives it (isolation/stack.ts),
 //     which is why the main server's Host check refuses these requests
 //   - never a browser (no Origin header), a body up to 8 MiB
@@ -17,6 +19,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import type { BrokerResponse } from "../handler.js";
 import { LOCAL_HOST, type LocalRequestHandler } from "./http-server.js";
+import { MODEL_ACCESS_PATH, MODEL_PROXY_PREFIX, type LocalModelProxy } from "./model-proxy/proxy.js";
 import { ensurePrivateDirectory } from "./state-directory.js";
 
 export const CALLBACK_MAX_BYTES = 8 * 1_048_576;
@@ -37,6 +40,8 @@ export interface CallbackServerOptions {
   stateDirectory: string;
   /** Serve a Unix socket too. Default: on Linux. */
   unixSocket?: boolean;
+  /** The local model proxy (K1). Absent: a worker's model calls are refused like any other route that is not a callback. */
+  modelProxy?: Pick<LocalModelProxy, "access" | "handle"> | undefined;
 }
 
 const isLoopback = (address: string | undefined): boolean => address === "127.0.0.1" || address === "::ffff:127.0.0.1";
@@ -58,14 +63,25 @@ async function readBody(request: IncomingMessage): Promise<string | undefined> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function makeServer(handler: LocalRequestHandler, allowedHost: () => string, peerMustBeLoopback: boolean): Server {
+function makeServer(handler: LocalRequestHandler, allowedHost: () => string, peerMustBeLoopback: boolean, modelProxy: CallbackServerOptions["modelProxy"]): Server {
   const server = createServer({ maxHeaderSize: 16_384 }, (request, response) => {
     void (async () => {
       if (peerMustBeLoopback && !isLoopback(request.socket.remoteAddress)) return request.socket.destroy();
       if (request.headers.host?.toLowerCase() !== allowedHost()) return refuse(response, 403, "host_not_allowed");
       if (request.headers.origin !== undefined) return refuse(response, 403, "origin_not_allowed");
-      if (request.method !== "POST") return refuse(response, 405, "method_not_allowed");
       const path = request.url ?? "/";
+      if (modelProxy !== undefined && path.startsWith(INTERNAL_PREFIX) && !path.includes("..") && !path.includes("//")) {
+        const bare = path.split("?")[0] ?? path;
+        if (request.method === "GET" && bare === MODEL_ACCESS_PATH) {
+          const headers: Record<string, string | undefined> = {};
+          for (const [name, value] of Object.entries(request.headers)) headers[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : value;
+          const answer = await modelProxy.access({ path, headers });
+          response.writeHead(answer.statusCode, { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff", ...answer.headers });
+          return void response.end(answer.body);
+        }
+        if (bare.startsWith(`${MODEL_PROXY_PREFIX}/`)) return await modelProxy.handle(request, response);
+      }
+      if (request.method !== "POST") return refuse(response, 405, "method_not_allowed");
       if (!path.startsWith(INTERNAL_PREFIX) || path.includes("..") || path.includes("//")) return refuse(response, 404, "not_found");
       const body = await readBody(request);
       if (body === undefined) return refuse(response, 413, "request_too_large");
@@ -91,7 +107,7 @@ function makeServer(handler: LocalRequestHandler, allowedHost: () => string, pee
 
 export async function startCallbackServer(options: CallbackServerOptions): Promise<CallbackServer> {
   let tcpPort = 0;
-  const tcp = makeServer(options.handler, () => `host.docker.internal:${tcpPort}`, true);
+  const tcp = makeServer(options.handler, () => `host.docker.internal:${tcpPort}`, true, options.modelProxy);
   await new Promise<void>((resolve, reject) => {
     tcp.once("error", reject);
     tcp.listen({ host: LOCAL_HOST, port: 0, exclusive: true }, () => {
@@ -117,7 +133,7 @@ export async function startCallbackServer(options: CallbackServerOptions): Promi
         // A socket left by a crashed run; anything else at that name is not ours to delete.
         const found = await lstat(socketPath).catch(() => undefined);
         if (found?.isSocket() === true) await rm(socketPath, { force: true });
-        const server = makeServer(options.handler, () => `host.docker.internal:${tcpPort}`, false);
+        const server = makeServer(options.handler, () => `host.docker.internal:${tcpPort}`, false, options.modelProxy);
         await new Promise<void>((resolve, reject) => {
           server.once("error", reject);
           server.listen(socketPath, () => {

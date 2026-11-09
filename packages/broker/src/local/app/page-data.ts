@@ -3,17 +3,18 @@
 //
 // Not wired yet (each answers "nothing there" so the page says so, rather than inventing a view): design reviews (the design review stage is not ported), lessons (the lessons store is
 // lane L11's) and the proof report (slice 3: it reads the verification and the pull request the publish step records).
+import type { ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   queryAll, when, type OrgId, type Principal, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
-import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import type { ApprovalOffer, CommentView, LocalActionResult, LocalPageActions, LocalPageData, PendingItemView, PlanPageView, PlanVersionView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { listTasks, readTask } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
+import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
 import { stepOf } from "./facts.js";
 
 const PLAN_READ_MAX_BYTES = 200_000;
@@ -40,7 +41,7 @@ const KIND: Record<WorkflowArtifact["type"], PlanVersionView["kind"] | undefined
 
 export interface PageDataDeps {
   flow: TaskFlowDeps;
-  blobs: EvidenceBlobStore;
+  blobs: ObjectStorage;
   /** The owner of the install: the pages are the owner's. */
   owner: Principal;
   companyId: OrgId;
@@ -52,8 +53,8 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
     return task !== undefined && task.companyId === deps.companyId ? task : undefined;
   };
   const markdownOf = async (artifact: WorkflowArtifact): Promise<string> => {
-    const bytes = await deps.blobs.get(artifact.objectKey, PLAN_READ_MAX_BYTES);
-    return bytes === undefined ? "This document is no longer kept." : new TextDecoder().decode(bytes);
+    const read = await readVerifiedText(deps.blobs, artifact, PLAN_READ_MAX_BYTES);
+    return "text" in read ? read.text : "changed" in read ? DOCUMENT_CHANGED : "This document is no longer kept.";
   };
   const commentsOf = async (taskId: string): Promise<CommentView[]> => {
     const items = await queryAll(deps.flow.store, { pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "PAGE_COMMENT#" }, limit: COMMENTS_MAX });

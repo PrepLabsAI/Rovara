@@ -5,12 +5,12 @@
 //
 // What the result reader does NOT do yet (the Cloud reader, `terminal-result.ts` and `workflow-items.ts`, is about 2,000 lines of AWS-shaped code): a structured plan document, plan
 // evidence, the plan self-check and critique, and everything after the plan is approved. A plan the worker saves as `plan.md` is kept as a Markdown plan.
+import type { ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  AgentXError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
+  AgentXError, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
 } from "@agentx/contracts";
 import { CallbackCapabilities, type CallbackAction } from "../../callbacks.js";
-import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { currentDocumentType } from "../../core/decisions/workflow-subject.js";
 import { operationKey, taskPointerKey } from "../../core/task-flow/keys.js";
@@ -20,14 +20,23 @@ import { updatePullRequest } from "../../core/build-step/maintain.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import type { StepOutcome } from "../../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
-import { recordOperationResult } from "../../core/task-flow/results.js";
+import { isTerminalStatus, recordOperationResult } from "../../core/task-flow/results.js";
 import { iso } from "../../core/task-flow/support.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
+import { readVerifiedText } from "./documents.js";
 import type { RepositoryCredential, RepositoryGrantService } from "../../repository-access.js";
 
 const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z-]+)$/u;
 export const CAPABILITY_HEADER = "x-agentx-callback-capability";
+/** A retention class the object-storage adapters do not know, so a task's documents are kept until deleted (a plan can wait for its owner for longer than evidence is kept). */
+export const PLAN_RETENTION = "task-document";
 export const PLAN_ARTIFACT_NAME = "plan.md";
+/**
+ * Names a step of the build step may post more than once in one operation, each time with other bytes (the worker saves `checks.json` again after the one extra turn it gives a coding run whose first
+ * rerun found a regression). The last post stands, kept under its own digest so no earlier post is overwritten; nothing in the workflow's digests names such a file, and the build step reads the
+ * check report from the run's result, not from this file. Every other name is kept once (see `recordArtifact`).
+ */
+export const REPLACEABLE_ARTIFACT_NAMES: ReadonlySet<string> = new Set(["checks.json"]);
 export const PLAN_MAX_BYTES = 200_000;
 const ARTIFACT_NAME = /^[A-Za-z0-9._-]{1,120}$/u;
 const EVENTS_MAX = 500;
@@ -38,7 +47,7 @@ export const artifactKey = (workspaceId: string, operationId: string, name: stri
 
 export interface CallbackDeps {
   flow: TaskFlowDeps;
-  blobs: EvidenceBlobStore;
+  blobs: ObjectStorage;
   /** The repository grants this process issued; a worker exchanges one for a clone or push credential. */
   grants: Pick<RepositoryGrantService, "exchange">;
 }
@@ -58,6 +67,14 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
   return operation;
 }
 
+/** The actions this install answers; any other the worker can make is "not available". */
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "pull-request", "pull-request-update"]);
+export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
+
+/**
+ * A worker's artifact, kept once. The first save of a name by an operation fixes its bytes: the same bytes again are the same artifact (a retried post), other bytes are refused. So what
+ * the workflow's digest names cannot be rewritten by a later post, even though the worker's capability is still good.
+ */
 async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ artifactId: string }> {
   const { name, mediaType, content } = body;
   if (typeof name !== "string" || !ARTIFACT_NAME.test(name) || typeof mediaType !== "string" || mediaType.length > 120 || typeof content !== "string") {
@@ -68,10 +85,37 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
   const id = randomUUID();
   const objectKey = artifactObjectKey(operation.workspaceId, operation.id, name);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  await deps.blobs.put(objectKey, bytes, { contentType: mediaType, metadata: { sha256, name }, retention: "evidence-std" });
-  // The latest artifact of a name wins: a worker that saves the same file twice (a plan written again) leaves the second.
-  await deps.flow.store.put({ item: { ...artifactKey(operation.workspaceId, operation.id, name), entityType: "ARTIFACT", id, workspaceId: operation.workspaceId, operationId: operation.id, name, mediaType, objectKey, sha256, bytes: bytes.byteLength, createdAt: iso(deps.flow) } });
-  return { artifactId: id };
+  const key = artifactKey(operation.workspaceId, operation.id, name);
+  if (REPLACEABLE_ARTIFACT_NAMES.has(name)) {
+    // The newest post of a replaceable name stands; its bytes live under their own digest, so an earlier post is never rewritten.
+    const replaceableKey = `${objectKey}/${sha256}`;
+    await deps.flow.store.put({ item: { ...key, entityType: "ARTIFACT", id, workspaceId: operation.workspaceId, operationId: operation.id, name, mediaType, objectKey: replaceableKey, sha256, bytes: bytes.byteLength, createdAt: iso(deps.flow) } });
+    try {
+      await deps.blobs.put(replaceableKey, bytes, { contentType: mediaType, metadata: { sha256, name }, retention: PLAN_RETENTION });
+    } catch (error) {
+      if (!(error instanceof ObjectConflictError)) throw error;
+    }
+    return { artifactId: id };
+  }
+  // The row is the claim on the name (written only if absent); the bytes follow it.
+  const claimed = await deps.flow.store.put({
+    item: { ...key, entityType: "ARTIFACT", id, workspaceId: operation.workspaceId, operationId: operation.id, name, mediaType, objectKey, sha256, bytes: bytes.byteLength, createdAt: iso(deps.flow) },
+    condition: when.absent(),
+  });
+  let artifactId: string = id;
+  if (!claimed.applied) {
+    const earlier = await deps.flow.store.get(key);
+    if (earlier === undefined || earlier["sha256"] !== sha256 || typeof earlier["id"] !== "string") throw agentXError("CALLBACK_FORBIDDEN", "this artifact was already saved and cannot be replaced");
+    artifactId = earlier["id"];
+  }
+  // A repeat of the same bytes (or a crash between the row and the bytes) puts the same bytes where they belong; an object already there is kept (objects are immutable, and readers
+  // check the bytes against the digest, so only these bytes are ever shown).
+  try {
+    await deps.blobs.put(objectKey, bytes, { contentType: mediaType, metadata: { sha256, name }, retention: PLAN_RETENTION });
+  } catch (error) {
+    if (!(error instanceof ObjectConflictError)) throw error;
+  }
+  return { artifactId };
 }
 
 async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number }> {
@@ -88,7 +132,7 @@ async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body
   const last = typeof item?.["eventSequence"] === "number" ? item["eventSequence"] : parsed.length;
   const expiresAt = Math.floor((deps.flow.now?.() ?? new Date()).getTime() / 1000) + EVENT_KEEP_SECONDS;
   await Promise.all(parsed.map((event, index) => deps.flow.store.put({
-    item: { pk: `WORKSPACE#${operation.workspaceId}`, sk: `EVENT#${operation.id}#${String(last - parsed.length + index + 1).padStart(10, "0")}`, entityType: "OPERATION_EVENT", operationId: operation.id, sequence: last - parsed.length + index + 1, expiresAt, ...JSON.parse(JSON.stringify(event)) as Record<string, never> },
+    item: { pk: `WORKSPACE#${operation.workspaceId}`, sk: `EVENT#${operation.id}#${String(last - parsed.length + index + 1).padStart(10, "0")}`, entityType: "OPERATION_EVENT", operationId: operation.id, sequence: last - parsed.length + index + 1, [INDEX_EXPIRY_ATTRIBUTE]: expiresAt, ...JSON.parse(JSON.stringify(event)) as Record<string, never> },
   })));
   return { accepted: parsed.length };
 }
@@ -96,9 +140,9 @@ async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body
 async function readArtifactText(deps: CallbackDeps, operation: OperationRecord, name: string, maxBytes: number): Promise<{ text: string; artifact: { id: string; objectKey: string; createdAt: string; sha256: string } } | undefined> {
   const found = await deps.flow.store.get(artifactKey(operation.workspaceId, operation.id, name));
   if (found === undefined || typeof found["objectKey"] !== "string" || typeof found["id"] !== "string" || typeof found["createdAt"] !== "string" || typeof found["sha256"] !== "string") return undefined;
-  const bytes = await deps.blobs.get(found["objectKey"], maxBytes);
-  if (bytes === undefined) return undefined;
-  return { text: new TextDecoder().decode(bytes), artifact: { id: found["id"], objectKey: found["objectKey"], createdAt: found["createdAt"], sha256: found["sha256"] } };
+  const read = await readVerifiedText(deps.blobs, { objectKey: found["objectKey"], sha256: found["sha256"] }, maxBytes);
+  if (!("text" in read)) return undefined;
+  return { text: read.text, artifact: { id: found["id"], objectKey: found["objectKey"], createdAt: found["createdAt"], sha256: found["sha256"] } };
 }
 
 /**
@@ -163,36 +207,21 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "repository-credentials") return json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) });
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-      if (action === "candidate-export" || action === "candidate-build-source" || action === "baseline-source") {
-        const capability = capabilities.verify(token, action);
-        if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
-        const operation = await operationOf(deps, workspaceId, operationId);
-        if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
-        return json(200, acknowledgeUpload(bodyOf(request), { allowUnavailable: action !== "candidate-export" }));
-      }
-      if (action === "pull-request") {
-        const capability = capabilities.verify(token, action);
-        if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
-        const operation = await operationOf(deps, workspaceId, operationId);
-        if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
-        return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
-      }
-      if (action === "pull-request-update") {
-        const capability = capabilities.verify(token, action);
-        if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
-        const operation = await operationOf(deps, workspaceId, operationId);
-        if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
-        return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
-      }
-      if (action !== "events" && action !== "artifacts" && action !== "result") {
+      if (!SERVED_ACTIONS.has(action)) {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.
         capabilities.verify(token, action as CallbackAction);
         throw agentXError("NOT_FOUND", "this callback is not available on this install");
       }
-      const capability = capabilities.verify(token, action);
+      // One path for every action the worker can make: the capability (HMAC, action, expiry), the ids it names, the fence, and, for everything but a repeat of the result, that the operation has not
+      // ended. Cloud's rule: once an operation has ended, only its result is taken; late output (a pull request opened from an interrupted publication, a rewritten record) could undo what the workflow read.
+      const capability = capabilities.verify(token, action as CallbackAction);
       if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
+      if (action !== "result" && isTerminalStatus(operation.status)) throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+      if (action === "candidate-export" || action === "candidate-build-source" || action === "baseline-source") return json(200, acknowledgeUpload(bodyOf(request), { allowUnavailable: action !== "candidate-export" }));
+      if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
+      if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
       const body = bodyOf(request);
       if (action === "events") return json(200, await recordEvents(deps, operation, body));
       if (action === "artifacts") return json(200, await recordArtifact(deps, operation, body));
