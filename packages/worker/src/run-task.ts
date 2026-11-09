@@ -32,6 +32,7 @@ import {
   createWorkspacePiSession,
   openRegisteredWorkspacePiSession,
   type PiSessionAdapter,
+  type PiWorkflowMode,
   type PiSessionHandle,
   type WorkspaceModelConfiguration,
 } from "./pi-session.js";
@@ -58,6 +59,16 @@ import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies }
 import { executeWorkflowE2EChecks, workflowE2EAdmissionIsApplication } from "./workflow-e2e-checks.js";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 import { localBashOperations, taskSandboxFor, taskShellSelection, type TaskSandbox, type TaskShellSelection } from "./task-sandbox.js";
+
+/**
+ * The contracts name more workflow modes than this worker runs (the engine port brings them). A mode this worker has no session for is refused, as a
+ * mode it does not know always was; today's broker only sends the three it runs.
+ */
+function piWorkflowModeOf(mode: string | undefined): PiWorkflowMode {
+  if (mode === undefined) return "IMPLEMENT";
+  if (mode === "PLAN" || mode === "IMPLEMENT" || mode === "REVIEW") return mode;
+  throw agentXError("CONFIG_INVALID", `this worker has no session for workflow mode ${mode}`);
+}
 
 export interface TaskInvocationResult {
   /** The broker-issued conversation ID, which stays the same for every turn of one conversation. */
@@ -553,7 +564,7 @@ async function runTask(
       {
         rootPath: dependencies.rootPath,
         model: dependencies.model,
-        workflowMode: invocation.payload.workflowMode ?? "IMPLEMENT",
+        workflowMode: piWorkflowModeOf(invocation.payload.workflowMode),
         conversationId,
         sessionFile: registered.sessionFile,
         onDiagnostic,
@@ -568,7 +579,7 @@ async function runTask(
   } else {
     session = await createWorkspacePiSession(
       {
-        rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: invocation.payload.workflowMode ?? "IMPLEMENT", conversationId, onDiagnostic,
+        rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: piWorkflowModeOf(invocation.payload.workflowMode), conversationId, onDiagnostic,
         extensionFactories: planning || reviewing ? [] : [verification],
         ...(reviewing ? reviewerRuleBases : {}),
         ...(agentShell === undefined ? {} : { bashOperations: agentShell }),

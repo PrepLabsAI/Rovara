@@ -1,7 +1,7 @@
 // Pins the thread workspace behaviour that phase 14b must keep for threads that have compute.
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
-import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
+import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
 import {
   GITHUB_LIST_ISSUES, SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, fakeGitHubMcp, finishOperation,
   loadSlackBroker, registerSlackProject, serviceCall,

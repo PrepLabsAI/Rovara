@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DISPLAY_NAME_MAX_CODE_POINTS, DISPLAY_NAME_MAX_ENCODED_LENGTH, cleanDisplayName } from "../../packages/contracts/src/display-name.js";
+import { DISPLAY_NAME_MAX_CODE_POINTS, cleanDisplayName } from "../../packages/contracts/src/display-name.js";
+import { DISPLAY_NAME_MAX_ENCODED_LENGTH } from "../../packages/contracts/src/display-name.js";
 
 describe("Slack display names shared by the Slack service and the broker", () => {
   it("never cuts a character cluster in half at the length cap", () => {

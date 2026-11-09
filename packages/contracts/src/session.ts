@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { gzipSync } from "node:zlib";
 import { z } from "zod";
+import { SSM_GET_PARAMETERS_MAX_NAMES } from "./ssm-parameters.js";
 import { KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN } from "./model-providers.js";
 
 // Contracts for ec2-ebs workspaces, whose compute the Session Manager provisions on self-managed
@@ -46,6 +47,10 @@ export const WorkspaceSessionStateSchema = z.enum([
   "DELETED",
 ]);
 
+/** The most features, and the longest name, a session records for its worker (a worker lists a few dozen; the bounds only keep a damaged answer out of the table). */
+export const WORKER_FEATURES_MAX = 300;
+export const WORKER_FEATURE_MAX_CHARS = 100;
+
 /**
  * The compute state of one ec2-ebs workspace, stored at `workspaceSessionKey(workspaceId)` in the
  * same partition as the workspace's OPERATION# items. `generation` counts provisioning attempts and
@@ -60,6 +65,8 @@ export const WorkspaceSessionSchema = z
     availabilityZone: AvailabilityZoneSchema.optional(),
     subnetId: SubnetIdSchema.optional(),
     instanceId: z.string().regex(/^i-[0-9a-f]{8,17}$/, "invalid instance ID").optional(),
+    /** The type the instance launched as (`m7g.large`); kept, like `launchedAt`, once the instance is gone, for the machine time it used. */
+    instanceType: z.string().regex(/^[a-z][a-z0-9-]*\.[a-z0-9]+$/, "invalid instance type").optional(),
     privateIp: z.ipv4().optional(),
     launchedAt: z.string().datetime().optional(),
     readyAt: z.string().datetime().optional(),
@@ -70,6 +77,11 @@ export const WorkspaceSessionSchema = z
      * PENDING; markFailed fails their operations. Stored as a DynamoDB string set.
      */
     waitingOutboxIds: z.array(z.string().uuid()).optional(),
+    /**
+     * What the worker listed on /ping when the session manager found it healthy (`markReady`), kept for the READY generation so the broker can ask "does this worker support X?" without a network path
+     * to the worker (LR-1). Absent on a session that became READY before this was recorded, or whose worker listed nothing: readers treat absent as unknown and fail closed.
+     */
+    workerFeatures: z.array(z.string().min(1).max(WORKER_FEATURE_MAX_CHARS)).max(WORKER_FEATURES_MAX).optional(),
     /** Consecutive failed health probes of a READY worker, counted by the reconciler (#86). */
     pingFailures: z.number().int().positive().optional(),
   })
@@ -212,6 +224,9 @@ export const WORKSPACE_SESSION_STATE_INDEX = {
   sortKey: "workspaceId",
 } as const;
 
+/** The longest an instance runs before the idle reaper replaces it (14 days); also the most a running instance is ever counted for. */
+export const SESSION_MAX_LIFETIME_MS = 14 * 24 * 60 * 60_000;
+
 export function workspaceSessionKey(workspaceId: string): { pk: string; sk: "SESSION" } {
   return { pk: `WORKSPACE#${workspaceId}`, sk: "SESSION" };
 }
@@ -252,15 +267,30 @@ export const WORKER_SETTING_PARAMETERS = {
   modelFallback: "worker-model-fallback",
 } as const;
 
-/** SSM GetParameters takes at most this many names in one call. */
-export const SSM_GET_PARAMETERS_MAX_NAMES = 10;
-
 /** Splits parameter names into calls of at most SSM_GET_PARAMETERS_MAX_NAMES, in order. */
 export function chunkParameterNames(names: readonly string[], size: number = SSM_GET_PARAMETERS_MAX_NAMES): string[][] {
   const chunks: string[][] = [];
   for (let index = 0; index < names.length; index += size) chunks.push(names.slice(index, index + size));
   return chunks;
 }
+
+/**
+ * The setting, under the same SSM prefix, where a named environment publishes its model proxy's URL (Task 10). A
+ * worker in such an environment calls models through the proxy and holds no provider secret reference or Bedrock access.
+ */
+export const MODEL_PROXY_URL_PARAMETER = "model-proxy-url";
+
+/**
+ * The setting, under the same SSM prefix, where a named environment publishes the SHA-256 of `packages/worker/ec2/boot-stage2.sh` in the release
+ * source its worker image was built from (Task 10). Stage 2 of the boot ships in that image, so this is the hash that checks it: the runtime stack
+ * writes it with `worker-image` in one deploy, and the Steps function reads the two together. "none" or absent means a release before the split.
+ */
+export const BOOT_STAGE2_SHA256_PARAMETER = "worker-boot-stage2-sha256";
+
+/** The variable boot.sh reads that hash from (`bootStage2Sha256` of the boot configuration). */
+export const AGENTX_BOOT_STAGE2_SHA256 = "AGENTX_BOOT_STAGE2_SHA256";
+/** What a SHA-256 setting looks like: 64 lower-case hex digits. */
+export const BOOT_STAGE2_SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 /**
  * Foundation outputs the control plane takes as stack parameters of the same name, for the EC2
@@ -275,6 +305,19 @@ export const CONTROL_PLANE_FOUNDATION_PARAMETERS = [
   "Ec2WorkerInstanceRoleArn",
   "Ec2WorkerLaunchTemplateId",
 ] as const;
+
+/**
+ * More foundation outputs a named environment's control plane takes, for the model proxy: the VPC it
+ * runs in and the worker security group it admits. The legacy control plane has no proxy and takes
+ * neither, so these are kept apart from CONTROL_PLANE_FOUNDATION_PARAMETERS, which the release passes to it.
+ */
+export const MODEL_PROXY_FOUNDATION_PARAMETERS = ["VpcId", "Ec2WorkerSecurityGroupId"] as const;
+
+/**
+ * One more foundation output a named environment's control plane takes: the EC2 worker subnets (availabilityZone=subnetId pairs),
+ * which the broker binds a cloud org's new project to (ruling R55). Kept apart for the same reason as the model proxy's.
+ */
+export const CLOUD_PROJECT_FOUNDATION_PARAMETERS = ["Ec2WorkerSubnets"] as const;
 
 /** The deleter execution for a workspace; a workspace is deleted once. */
 export function sessionDeletionName(workspaceId: string): string {
@@ -394,6 +437,18 @@ export const Ec2WorkerBootConfigSchema = z
     openRouterProviders: z.string().max(512).regex(/^[a-z0-9][a-z0-9_/-]{0,79}(?:,[a-z0-9][a-z0-9_/-]{0,79})*$/).optional(),
     anthropicSecretArn: z.string().max(SECRET_ARN_MAX_LENGTH).regex(SECRET_ARN_PATTERN).optional(),
     openaiSecretArn: z.string().max(SECRET_ARN_MAX_LENGTH).regex(SECRET_ARN_PATTERN).optional(),
+    /** AGENTX_MODEL_PROXY_URL: the internal model proxy a named environment's workers call models through. */
+    modelProxyUrl: z.string().url().max(512).regex(/^https?:\/\//).regex(SHELL_SAFE, "model proxy URL has unsafe characters").optional(),
+    /** AGENTX_ENVIRONMENT_KIND: set for a named environment's worker, whose launcher keeps it off the host network and away from the metadata service. Absent for the legacy deployment. */
+    environmentKind: z.literal("named").optional(),
+    /** AGENTX_TEST_SERVICES=1: test services (`tx`) are on for this install, so the boot pre-pulls the catalog images. Absent when they are off (no list read, no registry login, no pull). Named environments only. */
+    testServices: z.literal(true).optional(),
+    /**
+     * AGENTX_BOOT_STAGE2_SHA256: the SHA-256 of the stage 2 boot script (`boot-stage2.sh`) that the worker image carries at /opt/agentx/boot/stage2.sh.
+     * boot.sh reads it out of the image it pulled by digest and runs it only if its hash is this. Required for a named environment, whose boot is
+     * two stages; absent for the legacy deployment, whose single-file boot has no stage 2.
+     */
+    bootStage2Sha256: z.string().regex(BOOT_STAGE2_SHA256_PATTERN, "boot stage 2 hash must be 64 lower-case hex digits").optional(),
     /** PI_CACHE_RETENTION */
     promptCacheRetention: z.enum(["short", "long"]),
     /** AGENTX_MODEL_FALLBACK: the chosen Bedrock fallback model when a provider's key secret is missing; absent when none was chosen. */
@@ -401,7 +456,12 @@ export const Ec2WorkerBootConfigSchema = z
     /** AGENTX_LOG_GROUP: the CloudWatch Logs group the worker container writes to. */
     logGroupName: z.string().regex(/^[A-Za-z0-9._/-]{1,512}$/, "invalid log group name"),
   })
-  .strict();
+  .strict()
+  .superRefine((config, context) => {
+    if (config.environmentKind === "named" && config.bootStage2Sha256 === undefined) {
+      context.addIssue({ code: "custom", path: ["bootStage2Sha256"], message: "a named environment's worker boots stage 2 from its image, so bootStage2Sha256 is required" });
+    }
+  });
 
 /**
  * The script cloud-init runs on a worker: a validated configuration block, then the boot script.
@@ -426,6 +486,10 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   if (parsed.openRouterProviders) variables.push(["AGENTX_OPENROUTER_PROVIDERS", parsed.openRouterProviders]);
   if (parsed.anthropicSecretArn) variables.push([KEYED_MODEL_PROVIDERS.anthropic.secretArnVariable, parsed.anthropicSecretArn]);
   if (parsed.openaiSecretArn) variables.push([KEYED_MODEL_PROVIDERS.openai.secretArnVariable, parsed.openaiSecretArn]);
+  if (parsed.modelProxyUrl) variables.push(["AGENTX_MODEL_PROXY_URL", parsed.modelProxyUrl]);
+  if (parsed.environmentKind) variables.push(["AGENTX_ENVIRONMENT_KIND", parsed.environmentKind]);
+  if (parsed.testServices && parsed.environmentKind === "named") variables.push(["AGENTX_TEST_SERVICES", "1"]);
+  if (parsed.bootStage2Sha256) variables.push([AGENTX_BOOT_STAGE2_SHA256, parsed.bootStage2Sha256]);
   if (parsed.executorImage) variables.push(["EXECUTOR_IMAGE", parsed.executorImage]);
   if (parsed.modelFallback) variables.push(["AGENTX_MODEL_FALLBACK", parsed.modelFallback]);
   if (parsed.e2eQualification) {

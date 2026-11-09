@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import * as barrel from "../../packages/contracts/src/index.js";
-import { E2E_DEFAULT_LIMITS } from "../../packages/contracts/src/e2e.js";
+import { E2E_DEFAULT_LIMITS } from "../../packages/contracts/src/e2e-node.js";
 import {
   E2E_AGENT_TOOL_NAMES,
   E2E_MODEL_CHANNEL_SOCKET_PATH,

@@ -4,7 +4,7 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationPlanIntentSchema, Pl
   type E2EApplicationApprovalBinding, type E2EApplicationPlanIntent, type SourceRef } from "./e2e-application.js";
 import { e2eApplicationMetadataSourcePaths, e2eApplicationMetadataSourceRefs } from "./e2e-application-metadata.js";
 import { e2eTargetSourceIdentity, inspectE2EApplicationRepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, withE2EAnonymousTargets } from "./e2e-catalog.js";
-import { E2EAppRecipeSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ESetupProposal } from "./e2e.js";
+import { E2EAppRecipeSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ESetupProposal } from "./e2e-node.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");

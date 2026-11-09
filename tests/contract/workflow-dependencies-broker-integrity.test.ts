@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { createCandidateManifest, workflowFindingFingerprint } from "../../packages/contracts/src/task-workflow.js";
-import { taskGraphDigest, type WorkItemProgressV1 } from "../../packages/contracts/src/workflow-dependencies.js";
+import { workflowFindingFingerprint } from "../../packages/contracts/src/task-workflow.js";
+import { createCandidateManifest } from "../../packages/contracts/src/task-workflow-node.js";
+import { taskGraphDigest, type WorkItemProgressV1 } from "../../packages/contracts/src/workflow-dependencies-node.js";
 import { executeSerialWorkflowDependencies } from "../../packages/worker/src/workflow-dependencies.js";
 import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";

@@ -1,13 +1,9 @@
 import { createHash } from "node:crypto";
-import {
-  E2EExecutionPlanSchema, E2EPolicySchema, E2EScenarioSchema, e2eExecutionPlanDigest,
-  type E2EExecutionPlan, type E2EPolicy, type E2ERuntimeAvailability, type E2EScenario,
-  type E2EExpectedCase, type E2EMockSpec, E2EApiMockFixtureSchema,
-} from "./e2e.js";
+import { E2EExecutionPlanSchema, E2EPolicySchema, E2EScenarioSchema, e2eExecutionPlanDigest, type E2EExecutionPlan, type E2EPolicy, type E2ERuntimeAvailability, type E2EScenario, type E2EExpectedCase, type E2EMockSpec, E2EApiMockFixtureSchema } from "./e2e-node.js";
 import { canonicalJson } from "./canonical-json.js";
 import { copyBoundedE2EJsonData } from "./e2e-safe-data.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
-import type { CandidateManifest } from "./task-workflow.js";
+import type { CandidateManifest } from "./task-workflow-node.js";
 import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } from "./e2e-openapi-fixture.js";
 import { E2EPortableApprovalBindingSchema, e2EDefaultSyntheticAccountDefinition, e2ePortableOperationDescriptorDigest, e2ePortableRegistrationKey, e2eSourceInterfaceAssertion, resolveE2EPortableRegistration, type E2EPortableApprovalBinding } from "./e2e-portable.js";
 import { E2E_CANDIDATE_ADAPTER_IDENTITY } from "./e2e-portable.js";
@@ -63,7 +59,6 @@ const validPortableSemantics = (scenario: E2EScenario, operation: PortableOperat
     && scenario.assertions.length === 1 && canonicalJson(scenario.assertions[0]) === canonicalJson(e2eSourceInterfaceAssertion(registration));
   return false;
 };
-
 
 export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecutionPlan {
   const policy = E2EPolicySchema.parse(input.policy);

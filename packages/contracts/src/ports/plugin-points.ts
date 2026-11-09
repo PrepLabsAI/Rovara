@@ -8,6 +8,7 @@
 // contracts call `PluginKind`.
 import { isBuiltin } from "node:module";
 import { z } from "zod";
+import { PluginKindSchema } from "../plugins/common.js";
 import type { ChannelCapabilities, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
 import type { InboundMessage } from "../conversation.js";
 import type { DocumentStore } from "./document-store.js";
@@ -65,8 +66,11 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   "model-keys": "one",
 };
 
-/** What a plug-in is called: lower-case words and digits with hyphens, the same shape as an adapter's kind. */
-export const PluginNameSchema = z.string().regex(/^[a-z][a-z0-9-]{1,31}$/);
+/**
+ * What a plug-in is called: lower-case words and digits with hyphens, the same shape as an adapter's kind. This IS the plug-in contracts' `PluginKindSchema` (lane L1 keeps
+ * one definition and this name for new code); it accepts a one-letter name where W0's first draft asked for two.
+ */
+export const PluginNameSchema = PluginKindSchema;
 
 // ---- The channel point: Pratik's channel adapters, in-process ----
 

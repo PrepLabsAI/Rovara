@@ -6,7 +6,7 @@
 import { z } from "zod";
 import { DeveloperTaskFailureCategorySchema } from "./developer-tasks.js";
 import { looseCopy } from "./loose.js";
-import { DeveloperTaskPolicySchema } from "./project.js";
+import { DeveloperTaskPolicySchema } from "./project-node.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 
 /** A1 (25d Q1) and E18 (25e Q11): 1.1 adds the change routes and GET /v1/admin/changes. */
@@ -33,7 +33,7 @@ const Hex64 = z.string().regex(/^[a-f0-9]{64}$/);
  * precision the caller used. Refuses a time that only looks like ISO, such as month 13 or 30
  * February (Date would roll it over, so the date and time must round-trip unchanged).
  */
-function canonicalInstant(at: string): string {
+export function canonicalInstant(at: string): string {
   const refuse = (): never => {
     throw new Error("an index key needs an ISO time such as 2026-09-30T08:15:00.000Z");
   };
@@ -49,6 +49,7 @@ function canonicalInstant(at: string): string {
 export function indexDay(at: string): string {
   return canonicalInstant(at).slice(0, 10);
 }
+// Public's own unscoped index keys, kept beside Cloud's company-scoped ones in org-scoped-keys.ts (port lane L1; Cloud moved these there).
 export function failureIndexKey(endedAt: string, operationId: string): { pk: string; sk: string } {
   const at = canonicalInstant(endedAt);
   return { pk: `FAILURE#${indexDay(at)}`, sk: `${at}#${operationId}` };
@@ -65,6 +66,7 @@ export const INDEX_EXPIRY_ATTRIBUTE = "indexExpiresAt";
 export function indexExpiresAt(at: string): number {
   return Math.floor(Date.parse(canonicalInstant(at)) / 1000) + ADMIN_INDEX_RETENTION_DAYS * 86_400;
 }
+
 /** A3: one row per registered project, written with each registration from 25d on. */
 export function projectCatalogKey(name: string): { pk: string; sk: string } {
   return { pk: PROJECT_CATALOG_PK, sk: `PROJECT#${name}` };
@@ -74,7 +76,7 @@ export const AdminOriginSchema = z.enum(["slack", "ai_tool"]);
 export type AdminOrigin = z.infer<typeof AdminOriginSchema>;
 
 const RequesterSlackShape = { kind: z.literal("slack"), teamId: SlackTeamIdSchema, userId: SlackUserIdSchema };
-const RequesterDeveloperShape = { kind: z.literal("developer"), developerId: Hex64, provider: z.enum(["slack", "oidc"]), name: z.string().min(1).max(200).optional() };
+const RequesterDeveloperShape = { kind: z.literal("developer"), developerId: Hex64, provider: z.enum(["slack", "oidc", "cloud", "github", "saml"]), name: z.string().min(1).max(200).optional() };
 const RequesterNoneShape = { kind: z.literal("none") };
 
 /** A5: who asked for the operation, as the operation record says. Strict: the index side. */

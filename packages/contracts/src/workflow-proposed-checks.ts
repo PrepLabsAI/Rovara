@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
+import { WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, type WorkflowCheck } from "./task-workflow.js";
+import { type WorkflowCheckProposal } from "./task-workflow-node.js";
 import {
   WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowBuiltinCheckInputSchema, WorkflowCheckExpectOnBaseSchema, WorkflowProposedCheckInputSchema as ProposedCheckInputSchema, builtinFileCheckCommand,
   hasControlCharacter, type WorkflowCheckExpectOnBase,

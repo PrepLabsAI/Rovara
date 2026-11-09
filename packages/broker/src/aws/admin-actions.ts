@@ -3,7 +3,7 @@
 // is called only by a confirmed change (Task 7) or by the CLI's own change path (Tasks 14, 15).
 import { randomUUID } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { SLACK_OIDC_ISSUER, SlackUserIdSchema, agentXError, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse } from "@agentx/contracts";
+import { type DeveloperSignInMethod, SLACK_OIDC_ISSUER, SlackUserIdSchema, agentXError, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse } from "@agentx/contracts";
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, WORKSPACE_LIMITS_KEY, isWholeLimit } from "../developer/limits.js";
 import { emailIndexKey } from "../developer/store.js";
 import { ownerKeyForSubject } from "./lambda.js";
@@ -22,7 +22,7 @@ export interface ResolvedDeveloper {
   developerId: string;
   via: "id" | "slack" | "email";
   slackUserId?: string;
-  profile?: { displayName: string; provider: "slack" | "oidc"; slackUserId?: string; sessionsEndedAt?: string };
+  profile?: { displayName: string; provider: DeveloperSignInMethod; slackUserId?: string; sessionsEndedAt?: string };
 }
 
 const HEX64 = /^[a-f0-9]{64}$/;

@@ -1,14 +1,12 @@
 import { createHash } from "node:crypto";
 import * as ts from "typescript";
-import {
-  E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ERepositoryInspection, type E2ESetupProposal, type E2ETarget,
-} from "./e2e.js";
+import { E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ERepositoryInspection, type E2ESetupProposal, type E2ETarget } from "./e2e-node.js";
 import { canonicalJson } from "./canonical-json.js";
 import { bindE2EApplicationAccountTargets, e2eAnonymousVariantOf, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 import { WEB_API_RUNTIME_PROFILE_ID } from "./e2e-web-api-qualification.js";
 import { e2ePackageManifests, e2eRunnerUnsafePath, parseE2EPackageManifest } from "./e2e-package-manifests.js";
-import type { CandidateManifest } from "./task-workflow.js";
+import type { CandidateManifest } from "./task-workflow-node.js";
 
 const MAX_SOURCE_FILES = 512;
 const MAX_SOURCE_FILE_BYTES = 512 * 1024;

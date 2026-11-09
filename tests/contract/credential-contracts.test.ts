@@ -4,7 +4,7 @@ import {
 } from "../../packages/contracts/src/credentials.js";
 import {
   IN_HOUSE_TOOL_COUNT, approvedToolCount, presentedNameProblems, toolBudget,
-} from "../../packages/contracts/src/connectors.js";
+} from "../../packages/contracts/src/connectors-node.js";
 
 describe("credential registration input", () => {
   it("accepts the two registrable types with a connector secret name", () => {

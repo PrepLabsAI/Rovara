@@ -21,6 +21,10 @@ export const WORKFLOW_STEP_STAGE: Readonly<Record<WorkflowMode, WorkflowSnapshot
   PLAN: "PLAN", IMPLEMENT: "IMPLEMENT", CHECKS: "VERIFY", REVIEW: "REVIEW", FEEDBACK_REVIEW: "WAIT_FOR_MERGE",
 };
 
+/** The workflow stage a run of `mode` is the step of, or undefined for a mode this broker runs no step for. */
+export const workflowStepStage = (mode: string | undefined): WorkflowSnapshot["stage"] | undefined => (isStepMode(mode) ? WORKFLOW_STEP_STAGE[mode] : undefined);
+const isStepMode = (mode: string | undefined): mode is WorkflowMode => mode !== undefined && Object.hasOwn(WORKFLOW_STEP_STAGE, mode);
+
 /** The operation fields these rules read; an `OperationRecord` and the public `Operation` both fit. */
 export interface StoppedRunOperation {
   id: string;
@@ -29,7 +33,8 @@ export interface StoppedRunOperation {
   status: string;
   fence: number;
   createdAt: string;
-  workflowMode?: WorkflowMode | undefined;
+  /** Any mode the contracts name (more than this broker runs); only the five in `WORKFLOW_STEP_STAGE` ever block a step here. */
+  workflowMode?: string | undefined;
   workflowDependencies?: unknown;
   workflowE2EAdmission?: { purpose?: "baseline" | "replay" | "grounding" | undefined } | undefined;
   workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
@@ -59,7 +64,7 @@ export function stopBlocksWorkflowStep(task: StoppedRunTask, run: StoppedRunOper
 function runsRunningStep(task: StoppedRunTask, run: StoppedRunOperation): boolean {
   const workflow = task.workflow;
   const mode = run.workflowMode;
-  if (workflow === undefined || mode === undefined || run.kind !== "task") return false;
+  if (workflow === undefined || !isStepMode(mode) || run.kind !== "task") return false;
   if (task.closedAt !== undefined || task.workspaceId !== run.workspaceId) return false;
   if (workflow.state !== "RUNNING" || workflow.stage !== WORKFLOW_STEP_STAGE[mode]) return false;
   if (run.workflowDependencies !== undefined) return false;
@@ -83,7 +88,7 @@ export async function blockStoppedWorkflowRun(client: Client, tableName: string,
     if (task === undefined || !parsed.success) return false;
     const workflow = parsed.data;
     const mode = run.workflowMode;
-    if (mode === undefined || !runsRunningStep({ closedAt: task.closedAt, workspaceId: task.workspaceId, workflow }, run)) return false;
+    if (!isStepMode(mode) || !runsRunningStep({ closedAt: task.closedAt, workspaceId: task.workspaceId, workflow }, run)) return false;
     if (mode === "FEEDBACK_REVIEW") {
       const binding = run.workflowFeedbackReview;
       if (binding === undefined || workflow.revision !== binding.workflowRevision || workflow.taskId !== binding.taskId

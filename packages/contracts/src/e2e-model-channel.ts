@@ -1,8 +1,11 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
-import type { E2ELimits } from "./e2e.js";
+import type { E2ELimits } from "./e2e-node.js";
+import { E2E_MODEL_FAILURE_CLASSES, type E2EModelFailureClass } from "./e2e-model-failure-classes.js";
 import { MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN } from "./model-providers.js";
+
+export { E2E_MODEL_FAILURE_CLASSES, type E2EModelFailureClass };
 
 /**
  * The governed model channel for e2e `agent` steps (M1.4).
@@ -49,7 +52,6 @@ export const E2E_AGENT_STOP_CODES = [
   "AUTOMATION_UNSUPPORTED", "POLICY_DENIED", "STEP_BUDGET_EXHAUSTED", "STEP_TIMEOUT", "STEP_NO_CONCLUSION", "ASSERTION_FAILED",
   "ASSERTION_INCONCLUSIVE", "REPLAY_STALE", "CANCELLED",
 ] as const;
-
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Route definition
@@ -359,14 +361,6 @@ export type E2EModelChannelResponse = z.infer<typeof E2EModelChannelResponseSche
 // Receipt
 // ---------------------------------------------------------------------------------------------------------------------
 
-/**
- * M1.4 Task 4.10B: why a provider call failed, in words that do not depend on the provider. `limit-or-rate-limited` is a quota or a rate limit, `key-rejected` an API key, role or
- * model access the provider did not accept, `model-not-found` a model the provider does not have for this account, `unreachable` no answer at
- * all (DNS, connection, TLS), `request-rejected` a request the provider refused as malformed or too large, `provider-outage` the provider's own fault or a timeout, `unknown` anything else. Two classes come from before any request is sent (Task 4.10C): `secret-unreadable` (the key's secret could
- * not be read) and `not-in-catalog` (Rovara's catalog does not know how to call the model).
- */
-export const E2E_MODEL_FAILURE_CLASSES = ["limit-or-rate-limited", "key-rejected", "model-not-found", "unreachable", "request-rejected", "provider-outage", "unknown", "secret-unreadable", "not-in-catalog"] as const;
-export type E2EModelFailureClass = (typeof E2E_MODEL_FAILURE_CLASSES)[number];
 
 /**
  * The most a failure's `signal` can be: the error's own name or code, never its message. It is one token of the shapes the producers emit (a Bedrock error type such as

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import { canonicalJson, DeveloperTaskResponseSchema, type DeveloperTaskView } from "@agentx/contracts";
+import { canonicalJson, DeveloperTaskResponseSchema, knownTaskView, type DeveloperTaskView } from "@agentx/contracts";
 
 const ShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -229,9 +229,10 @@ export function importNativeTaskEvidence(input: {
   join: Extract<PublicationJoinResponse, { status: "READY" }>; now: Date; maxEvidenceAgeMs?: number; maxJoinAgeMs?: number;
 }): NativeTaskEvidenceReceipt {
   const response = DeveloperTaskResponseSchema.parse(input.rawTask);
-  const task: DeveloperTaskView = response.task;
-  const workflow = task.workflow;
   const hold = (reason: string): never => { throw new Error(`native task evidence ${reason}`); };
+  // A stage or outcome this build does not know is not evidence it can check (before, the strict schema refused such an answer at the parse above).
+  const task: DeveloperTaskView = knownTaskView(response.task) ?? hold("is at a workflow step this version does not know");
+  const workflow = task.workflow;
   const checkedAt = Date.parse(input.join.checkedAt);
   const receivedAt = input.now.getTime();
   if (!Number.isFinite(checkedAt) || !Number.isFinite(receivedAt) || checkedAt > receivedAt || receivedAt - checkedAt > (input.maxJoinAgeMs ?? 60_000)) return hold("join_observation_stale");

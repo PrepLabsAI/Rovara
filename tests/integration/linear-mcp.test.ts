@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
+import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
 import { CHARTERARC_TEAM_ID } from "../support/fake-linear-mcp.js";
 import { LINEAR_KEY, LINEAR_THREAD, LINEAR_MEMBER, setupLinearBroker } from "../support/linear-broker.js";
 import { call, loadSlackBroker, orchestratorPrincipal } from "../support/slack-broker.js";

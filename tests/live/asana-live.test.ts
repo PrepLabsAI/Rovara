@@ -20,7 +20,7 @@ import { ASANA_MCP_ENDPOINT, ASANA_TOKEN_ENDPOINT, connectMcp, resultText } from
 import { asanaConnectorType } from "../../packages/broker/src/aws/asana-connector-type.js";
 import { githubConnectorType } from "../../packages/broker/src/aws/connector-types.js";
 import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
-import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
+import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { memorySecretStore } from "../support/refresh-token-fakes.js";
 import { call, createBroker, ensureWorkspace, loadSlackBroker, markReady, orchestratorPrincipal, type Handler } from "../support/slack-broker.js";

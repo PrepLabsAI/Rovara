@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildE2ESharedView } from "../../packages/contracts/src/e2e-view.js";
+import { buildE2ESharedView } from "../../packages/contracts/src/e2e-view-node.js";
 
 describe("complete shared E2E view", () => {
   it("keeps absent setup and current-round evidence visibly unavailable", () => {

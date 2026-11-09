@@ -1,6 +1,8 @@
 // Spec 043: SWE-bench runs started from Slack. One run scores the coding agent on one SWE-bench
 // task instance, on its own x86 instance, outside any workspace.
 import { z } from "zod";
+import { TaskStopAdmissionInputSchema, TaskStopMicrousdSchema } from "./task-stop.js";
+import { OrgIdSchema } from "./browser-ids.js";
 import { ModelSelectionSchema } from "./models.js";
 import { SECRET_ARN_PATTERN } from "./model-providers.js";
 import { SlackRequesterSchema, SlackThreadSchema, SlackChannelIdSchema, SlackTeamIdSchema } from "./slack.js";
@@ -152,7 +154,20 @@ export const SwebenchStartRequestSchema = z.object({
   model: ModelSelectionSchema.optional(),
 }).strict();
 
+const evalStopSnapshot = z.object({
+  kind: z.literal("captured"), schemaVersion: z.literal(2), agentScope: z.literal("none_eval"), orgId: OrgIdSchema,
+  project: z.string().min(1).max(256), capturedAt: z.string().datetime(), policyDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  effectiveStopMicrousd: TaskStopMicrousdSchema, approvalCapMicrousd: TaskStopMicrousdSchema,
+  bindingScopes: z.array(z.enum(["company_ceiling", "company_default", "project", "agent", "path", "approved_run", "approved_max_per_run", "committed_max_per_run", "requested", "chain", "testing"])).min(1),
+  calculationInput: TaskStopAdmissionInputSchema,
+  sourceRevisions: z.object({ company: z.number().int().positive(), ceiling: z.number().int().positive(), projectCatalog: z.number().int().positive(), project: z.number().int().positive(), agent: z.null() }).strict(),
+}).strict();
 export const SwebenchRunSchema = z.object({
+  spendingStop: evalStopSnapshot.optional(),
+  /** M47 authenticated scope; absent only on historical rows. */
+  orgId: OrgIdSchema.optional(),
+  projectName: z.string().min(1).max(256).optional(),
+  developerId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   runId: z.string().uuid(),
   dataset: SwebenchDatasetSchema,
   instanceId: SwebenchInstanceIdSchema,

@@ -1,15 +1,6 @@
 import { z } from "zod";
 import { E2E_MODEL_CHANNEL_SCHEMA_VERSION } from "./e2e-model-channel.js";
-import {
-  E2EEvidenceScopeSchema,
-  E2ERuntimeAvailabilitySchema,
-  E2ETargetSchema,
-  type E2EAssertion,
-  type E2EEvidenceScope,
-  type E2ERuntimeAvailability,
-  type E2EStep,
-  type E2ETarget,
-} from "./e2e.js";
+import { E2EEvidenceScopeSchema, E2ERuntimeAvailabilitySchema, E2ETargetSchema, type E2EAssertion, type E2EEvidenceScope, type E2ERuntimeAvailability, type E2EStep, type E2ETarget } from "./e2e-node.js";
 
 const id = (max = 120) => z.string().trim().min(1).max(max);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);

@@ -110,6 +110,8 @@ describe("the health route's grants (A13)", () => {
       // The workflow dispatch row's one definition, shared by the broker and the developer task routes.
       "packages/broker/src/aws/broker-shared.ts",
       "packages/contracts/src/admin-changes.ts", "packages/broker/src/aws/admin-changes.ts",
+      // Learning loop contracts (lane L1): a project's learning records expire on it.
+      "packages/contracts/src/project-learning.ts",
       // The plan evidence job row (spec 061) expires on it too.
       "packages/broker/src/developer/plan-evidence-jobs.ts",
       // Retired and quarantined recovery rows only; active retries remove the due/lease fields without TTL.

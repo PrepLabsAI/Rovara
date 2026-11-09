@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { githubConnectorType } from "../../packages/broker/src/aws/connector-types.js";
 import { jiraConnectorType } from "../../packages/broker/src/aws/jira-connector-type.js";
-import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
+import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
 import { call, createBroker, ensureWorkspace, loadSlackBroker, markReady, orchestratorPrincipal, type Handler } from "../support/slack-broker.js";
 
 const TOKEN = process.env.AGENTX_LIVE_JIRA_TOKEN;

@@ -38,9 +38,14 @@ export function safeFindingFile(file: string): string | undefined {
   return trimmed;
 }
 
+/** The code reviewer's own level for a change (Rovara Code v2): one of three words, never free text. */
+export type WorkflowReviewerRisk = "low" | "medium" | "high";
+const REVIEWER_RISKS: readonly string[] = ["low", "medium", "high"];
+
 export type WorkflowReviewerResponse = {
   status: "PASS" | "FINDINGS" | "UNKNOWN";
   findings: WorkflowReviewFinding[];
+  risk?: WorkflowReviewerRisk;
   failureReason?: "RESPONSE_TOO_LARGE" | "INVALID_JSON" | "INVALID_SHAPE";
 };
 
@@ -91,16 +96,22 @@ function readEntry(entry: unknown): WorkflowReviewFinding | "SKIP" | undefined {
  */
 export function parseWorkflowReviewerResponse(
   value: string,
-  options: { classify?: (finding: WorkflowReviewFinding) => WorkflowReviewFinding; role?: "CRITIC" | "SECURITY" } = {},
+  options: { classify?: (finding: WorkflowReviewFinding) => WorkflowReviewFinding; role?: "CRITIC" | "SECURITY"; risk?: boolean } = {},
 ): WorkflowReviewerResponse {
   if (Buffer.byteLength(value, "utf8") > REVIEW_RESPONSE_MAX_BYTES) return { status: "UNKNOWN", findings: [], failureReason: "RESPONSE_TOO_LARGE" };
   let parsed: unknown;
   try { parsed = JSON.parse(unfence(value)) as unknown; } catch { return { status: "UNKNOWN", findings: [], failureReason: "INVALID_JSON" }; }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return { status: "UNKNOWN", findings: [], failureReason: "INVALID_SHAPE" };
   const record = parsed as Record<string, unknown>;
-  if (Object.keys(record).length !== 1 || !Array.isArray(record.findings) || record.findings.length > REVIEW_RESPONSE_MAX_ENTRIES) {
+  // The code review of a version 2 task may state a risk level beside its findings; no other answer may carry a second key.
+  const asksRisk = options.risk === true && options.role === "CRITIC";
+  const keys = Object.keys(record);
+  const riskGiven = asksRisk && keys.includes("risk");
+  if (keys.length !== (riskGiven ? 2 : 1) || !Array.isArray(record.findings) || record.findings.length > REVIEW_RESPONSE_MAX_ENTRIES
+    || (riskGiven && (typeof record.risk !== "string" || !REVIEWER_RISKS.includes(record.risk)))) {
     return { status: "UNKNOWN", findings: [], failureReason: "INVALID_SHAPE" };
   }
+  const risk = riskGiven ? (record.risk as WorkflowReviewerRisk) : undefined;
   const findings: WorkflowReviewFinding[] = [];
   for (const entry of record.findings as unknown[]) {
     const finding = readEntry(entry);
@@ -115,7 +126,7 @@ export function parseWorkflowReviewerResponse(
   }
   // Array.prototype.sort is stable, so equal-rank findings keep the reviewer's order.
   const kept = findings.sort((a, b) => rank(a) - rank(b)).slice(0, REVIEW_REPORT_MAX_FINDINGS);
-  return { status: kept.some((finding) => finding.origin === "INTRODUCED" && finding.advisory !== true) ? "FINDINGS" : "PASS", findings: kept };
+  return { status: kept.some((finding) => finding.origin === "INTRODUCED" && finding.advisory !== true) ? "FINDINGS" : "PASS", findings: kept, ...(risk === undefined ? {} : { risk }) };
 }
 
 const REVIEW_JSON_BASE = 'Return only JSON: {"findings":[{"text":"one short sentence","origin":"INTRODUCED"|"PRE_EXISTING","severity":"HIGH"|"MEDIUM"|"LOW","file":"path","line":12%FIELD%}]}. Use {"findings":[]} when you found nothing.';
@@ -127,13 +138,19 @@ const REVIEW_JSON_BASE = 'Return only JSON: {"findings":[{"text":"one short sent
 const ADVISORY_RULE = 'Set "advisory": true only for (1) a remark about something the approved plan explicitly asks for, or (2) a remark about check coverage. A mistake in carrying out the plan, a bug, and every other finding must not be advisory: leave "advisory" out.';
 
 /**
+ * What a code reviewer of a version 2 task says about the change's risk: one word, judged on what the change can break if it is wrong. Rovara combines it with the paths, the size and the checks; it can raise the
+ * level, never lower it.
+ */
+const RISK_RULE = 'Also state "risk", the risk of this change if it is wrong: "high" when it could lose or expose data, break sign-in, payments or deployment, or cause an outage; "medium" when it changes behaviour that people or other systems depend on, including a public API route or the shape of a response that existing callers read; otherwise "low". A change to a public API route or response shape is at least "medium" even when the plan did not mention it.';
+
+/**
  * The JSON answer each reviewer is asked for. The security reviewer has no "advisory" field: a security finding is never
  * advisory (only the owner's accept waives one), and the gate ignores the flag on it.
  */
-export function reviewJsonShape(role: "CRITIC" | "SECURITY"): string {
-  return role === "CRITIC"
-    ? `${REVIEW_JSON_BASE.replace("%FIELD%", ',"advisory":boolean')} ${ADVISORY_RULE}`
-    : REVIEW_JSON_BASE.replace("%FIELD%", "");
+export function reviewJsonShape(role: "CRITIC" | "SECURITY", options: { risk?: boolean } = {}): string {
+  if (role !== "CRITIC") return REVIEW_JSON_BASE.replace("%FIELD%", "");
+  const shape = `${REVIEW_JSON_BASE.replace("%FIELD%", ',"advisory":boolean')} ${ADVISORY_RULE}`;
+  return options.risk === true ? `${shape.replace('{"findings":[', '{"risk":"low"|"medium"|"high","findings":[')} ${RISK_RULE}` : shape;
 }
 
 /** What each reviewer looks at: the code reviewer the change's correctness, the security reviewer its security only. */

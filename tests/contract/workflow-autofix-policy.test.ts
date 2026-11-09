@@ -183,6 +183,21 @@ describe("AUTOFIX policy: reviews", () => {
     expect(decide(blocked("REVIEW", WORKFLOW_BLOCK_REASONS.ruleFilesUnverified))).toEqual({ action: "ASK", reason: "needs-a-person", codes: ["rule-files-unverified"] });
   });
 
+  it("asks, and never retries by itself, when a review stopped because the programs earlier work left running could not be stopped", () => {
+    expect(decide(blocked("REVIEW", WORKFLOW_BLOCK_REASONS.leftoverProcesses))).toEqual({ action: "ASK", reason: "needs-a-person", codes: ["leftover-processes"] });
+  });
+
+  it("asks, and never sends back or retries by itself, when the checks stopped because the programs earlier work left running could not be stopped", () => {
+    expect(decide(blocked("VERIFY", WORKFLOW_BLOCK_REASONS.leftoverProcesses))).toEqual({ action: "ASK", reason: "needs-a-person", codes: ["leftover-processes"] });
+  });
+
+  it("asks, and never sends back or retries by itself, when the dev container's setup changed the project's files before the checks", () => {
+    expect(decide(blocked("VERIFY", WORKFLOW_BLOCK_REASONS.setupChangedFiles))).toEqual({ action: "ASK", reason: "needs-a-person", codes: ["setup-changed-files"] });
+    const stuck = blocked("VERIFY", WORKFLOW_BLOCK_REASONS.setupChangedFiles);
+    expect(() => returnWorkflowToImplementationAutomatically(stuck, { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW })).toThrow(/new code does not fix it/);
+    expect(() => workflowAutomaticRetryDecision(stuck, { expectedRevision: 7, stage: "VERIFY", reason: "r", spend: SPEND, now: NOW })).toThrow(/a retry does not fix it/);
+  });
+
   it("sends back when findings and a stopped run come together", () => {
     expect(decide(blocked("REVIEW", undefined, { reviews: [review("CRITIC", "FINDINGS", [finding("bug")]), review("SECURITY", "INTERRUPTED", [], { failureReason: "INTERRUPTED" })] })))
       .toEqual({ action: "SEND_BACK", codes: ["review-findings", "review-run-failed"] });
@@ -251,6 +266,12 @@ describe("AUTOFIX policy: the money and counts are required inputs", () => {
     expect(autoFixDecision(verify(incomplete("g1: executor-failed")), {}, { ...budget(), spend: undefined } as unknown as AutoFixBudget)).toMatchObject({ action: "ASK", reason: "inputs-missing" });
     expect(autoFixDecision(verify(`${WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX} (floor)`), {}, { ...budget(), spend: undefined } as unknown as AutoFixBudget)).toMatchObject({ action: "ASK", reason: "inputs-missing" });
     expect(autoFixDecision(verify(incomplete("g1: login-failed")), {}, { ...budget(), spend: undefined } as unknown as AutoFixBudget)).toMatchObject({ action: "ASK", reason: "needs-a-person" });
+  });
+
+  it("is held by the guard functions too for a block only a person can resolve: the programs earlier work left running could not be stopped", () => {
+    const stuck = blocked("VERIFY", WORKFLOW_BLOCK_REASONS.leftoverProcesses);
+    expect(() => returnWorkflowToImplementationAutomatically(stuck, { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW })).toThrow(/new code does not fix it/);
+    expect(() => workflowAutomaticRetryDecision(stuck, { expectedRevision: 7, stage: "VERIFY", reason: "r", spend: SPEND, now: NOW })).toThrow(/a retry does not fix it/);
   });
 
   it("is held by the guard functions too: over the cap, unreadable or missing spend is refused there", () => {

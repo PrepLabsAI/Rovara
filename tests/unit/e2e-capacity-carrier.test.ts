@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "../../packages/contracts/src/e2e-case-identity.js";
-import { aggregateE2EVerification, E2EExecutionPlanSchema, E2ERoundSchema, E2ERunBindingSchema, E2EQualifiedResultSchema } from "../../packages/contracts/src/e2e.js";
-import { buildE2ESharedView } from "../../packages/contracts/src/e2e-view.js";
+import { aggregateE2EVerification, E2EExecutionPlanSchema, E2ERoundSchema, E2ERunBindingSchema, E2EQualifiedResultSchema } from "../../packages/contracts/src/e2e-node.js";
+import { buildE2ESharedView } from "../../packages/contracts/src/e2e-view-node.js";
 
 const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const d = (char: string) => char.repeat(64);

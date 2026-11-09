@@ -1,16 +1,19 @@
+import {ModelFallbacksSchema} from "./stage-model-shared.js";
 import { Buffer } from "node:buffer";
 import { z } from "zod";
+import { StepIdSchema } from "./agent-recipe.js";
+import { OrgIdSchema } from "./company-scope.js";
 import { WorkflowFeedbackApprovalBindingSchema } from "./task-workflow.js";
-import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies.js";
+import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies-node.js";
 import { SlackRequesterSchema } from "./slack.js";
-import { E2EWorkflowAdmissionRefSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema } from "./e2e.js";
+import { E2EWorkflowAdmissionRefSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema } from "./e2e-node.js";
 
 /** Spec 025 FR-022: an operation a developer started from an AI tool. */
 export const DeveloperRequesterSchema = z
   .object({
     kind: z.literal("developer"),
     developerId: z.string().regex(/^[a-f0-9]{64}$/),
-    provider: z.enum(["slack", "oidc"]),
+    provider: z.enum(["slack", "oidc", "cloud", "github", "saml"]),
   })
   .strict();
 export const OperationRequesterSchema = z.union([SlackRequesterSchema, DeveloperRequesterSchema]);
@@ -194,6 +197,8 @@ export const PullRequestLifecycleResultSchema = z
     commit: z.string().regex(/^[a-f0-9]{40,64}$/),
     /** The pushed commit's tree: set by a workflow task's pull request update. An older worker omits it. */
     treeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+    /** A workflow task's merge of the base branch that conflicted (Plan 6 Task 17): the conflicting files (at most 100). Nothing was pushed; `commit` is the head the pull request has. */
+    conflicts: z.array(z.string().min(1).max(1024)).min(1).max(100).optional(),
     checks: z.array(PublicationCheckResultSchema).max(64),
     codeBuildChecks: z.array(CodeBuildCheckResultSchema).max(8).default([]),
     reconciled: z.boolean(),
@@ -206,12 +211,16 @@ export const OperationSchema = z
   .object({
     id: z.string().uuid(),
     workspaceId: z.string().uuid(),
+    /** The org the operation belongs to (its workspace's); written on every operation this release creates. */
+    orgId: OrgIdSchema.optional(),
     conversationId: z.string().uuid().optional(),
     kind: OperationKindSchema,
+    /** Visible fallback provenance for an ordinary project coding turn. */
+    modelFallbacks: ModelFallbacksSchema.optional(),
     /** Explicit owner authorization to delete unpublished state during a close operation. */
     discardUnpublished: z.boolean().optional(),
     /** Server-selected task mode; absent on legacy operations and non-task operations. */
-    workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW"]).optional(),
+    workflowMode: z.enum(["PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW", "UNDERSTAND", "SETUP_DRAFT", "SETUP_AGENT", "SPEC_WRITE"]).optional(),
     workflowE2EAdmission: E2EWorkflowAdmissionRefSchema.optional(),
     workflowE2EEvidenceRef: E2EWorkflowEvidenceRefSchema.optional(),
     /** Immutable evidence objects accepted for individual admitted groups; never a qualification signal by itself. */
@@ -220,6 +229,8 @@ export const OperationSchema = z
     workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
     workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
     workflowDependencies: WorkflowDependencyInvocationSchema.optional(),
+    /** The step of the task's workflow program this operation runs; absent without a program. Per-step settings read it. */
+    programStepId: StepIdSchema.optional(),
     requestId: z.string().uuid(),
     payloadHash: z.string().regex(/^[a-f0-9]{64}$/),
     status: OperationStatusSchema,

@@ -62,7 +62,7 @@ import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntim
 import { readWorkflowE2ENotifierProjection } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
 import { renderE2ENotifierSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
-import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies.js";
+import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies-node.js";
 import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import { observeInstalledRuntimeManifestForHost } from "@agentx/verifier";

@@ -1,87 +1,34 @@
-// Spec 025 phase 25b: the developer task API's names and wire shapes. Requests are strict; the MCP
-// server parses responses with the non-strict schemas here, so a newer control plane can add fields.
-import { Buffer } from "node:buffer";
 import { z } from "zod";
-import { cleanDisplayName } from "./display-name.js";
-import { OperationStatusSchema } from "./operation.js";
+import { TaskStatusSchema } from "./task-status.js";
+import {ModelFallbacksSchema} from "./stage-model-shared.js";
 import { DeveloperShareModeSchema } from "./project.js";
-import { sharedNoticeKey, slackThreadSubject, type SlackThread } from "./slack.js";
-import { WORKFLOW_PLAN_MAX_BYTES, WorkflowSnapshotViewSchema } from "./task-workflow.js";
-import { WorkflowPathSchema } from "./task-workflow.js";
+import { AGENT_RUN_STATES, AGENT_RUN_STEP_STATUSES, AgentStepToolsSchema } from "./agent-run.js";
+import { StepIdSchema } from "./agent-recipe.js";
+import { ApprovalIdSchema, AgentIdSchema, SpendRequestIdSchema } from "./agent.js";
+import { WorkflowSnapshotViewSchema, WORKFLOW_PLAN_MAX_BYTES, WorkflowSnapshotReaderShape, type WorkflowSnapshotReader } from "./task-workflow.js";
 import { E2ESharedViewSchema } from "./e2e-view.js";
+import { RunEstimateSchema } from "./run-estimate.js";
+import { SessionIdSchema } from "./agent-sessions.js";
+import { TestingViewSchema } from "./verification-result.js";
+import { EvidenceViewSchema } from "./evidence.js";
+import { PlanOneScreenSchema } from "./plan-one-screen.js";
+import { MergeTrackingItemSchema, MergeViewSchema, ProofTableViewSchema, VerificationReportSchema } from "./rovara-code.js";
+import { readsAsUnknown } from "./forward-reader-unknown.js";
+import { ErrorRefSchema } from "./live-interaction.js";
+import { EarlyRiskSignalReadSchema } from "./early-risk-signal.js";
+import { DesignActionsViewSchema } from "./design-review-words.js";
 
-export const DEVELOPER_TASK_OWNER_ISSUER = "agentx-developer-task";
-export const DEVELOPER_INSTRUCTIONS_MAX_BYTES = 65_536;
-export const DEVELOPER_TASK_TITLE_MAX = 120;
-export const DEVELOPER_CLIENT_NAME_MAX = 40;
 export const DEVELOPER_TASK_SUMMARY_MAX = 4_000;
+
 export const DEVELOPER_FAILURE_MESSAGE_MAX = 1_000;
+
 export const DEVELOPER_EVENT_TEXT_MAX = 300;
+
 export const DEVELOPER_EVENTS_MAX = 50;
-export const DEVELOPER_EVENTS_DEFAULT = 10;
-export const DEVELOPER_TASK_LIST_MAX = 50;
-export const DEVELOPER_TASK_LIST_DEFAULT = 20;
-export const DEVELOPER_WAIT_MAX_SECONDS = 600;
-export const UNKNOWN_CLIENT_NAME = "an AI tool";
 
-/** Spec 025 phase 25c: sharing a task to its Slack channel (FR-031 to FR-035, FR-054). */
-export const DEVELOPER_SHARE_SUMMARY_MAX = 1_500;
-export const SHARED_THREAD_NOTICE_INTERVAL_SECONDS = 3_600;
-export const CHANNEL_TURN_WAIT_MS = 30 * 60_000;
-export const SHARE_DELIVERY_WINDOW_MS = 60 * 60_000;
 export const CHANNEL_TURNS_MAX = 20;
+
 export const CHANNEL_TURN_REQUEST_MAX = 300;
-/** FR-031: the reasons a result gives when the project's policy changed what was asked. */
-export const SHARED_BY_POLICY = "required by project";
-export const VIEW_ONLY_BY_POLICY = "continue not allowed by project";
-/**
- * Q10 and its fail-closed rule: the two share refusals whose next step is their own, not their
- * code's generic one (final review M6). The broker sends the message; the MCP server matches it.
- */
-export const PRIVATE_CHANNEL_NOT_A_MEMBER = "you are not a member of that private channel; join it first, or share to one of the project's public channels";
-export const PRIVATE_CHANNEL_NOT_A_MEMBER_STEP = "join that private channel in Slack, or send channel with one of the project's public channels";
-export const CHANNEL_PRIVACY_NOT_SET_UP = "AgentX cannot tell whether that channel is private; ask your AgentX admin to finish the Slack setup, or share to a channel you are a member of";
-export const CHANNEL_PRIVACY_NOT_SET_UP_STEP = "ask your AgentX admin to finish the Slack setup, or send channel with a channel you are a member of";
-/** FR-035 and US3 scenario 4: the fixed notices in a shared thread (Q1, Q3). */
-export const VIEW_ONLY_NOTICE =
-  "This thread follows a task that a developer is driving from their AI tool, so I don't act on messages here. To ask AgentX for something, post a new message in the channel; it starts its own thread workspace.";
-export const CLOSED_SHARED_NOTICE =
-  "The task this thread followed is closed, so I don't act on messages here. To ask AgentX for something, post a new message in the channel; it starts its own thread workspace.";
-
-/** Which fixed notice a claim is for: the view-only one, or a closed task's (Q3). */
-export type SharedNoticeKind = "view" | "closed";
-
-/**
- * C10, F13: the conditional Update that claims a shared thread's hourly notice. The Slack ingress
- * and the Slack service both send it, so "one notice an hour" is the same claim in both. It succeeds
- * for at most one caller per thread per interval and notice kind; a later caller gets
- * ConditionalCheckFailedException. Each kind has its own time on the one item (the live check found
- * a closed notice swallowed by a view-only one sent 18 minutes before), so a thread whose task
- * closes still hears so once. A marker from before the kinds holds `noticedAt` only, which is the
- * view-only time. A closed claim, however old, refuses every later view-only claim (closed wins).
- * The marker expires after two intervals.
- */
-export function sharedNoticeClaim(subject: string, nowSeconds: number, kind: SharedNoticeKind): {
-  Key: { pk: string; sk: "SHARED_NOTICE" };
-  UpdateExpression: string;
-  ConditionExpression: string;
-  ExpressionAttributeValues: { ":now": number; ":expires": number; ":cutoff": number };
-} {
-  const at = kind === "closed" ? "closedNoticedAt" : "noticedAt";
-  return {
-    Key: sharedNoticeKey(subject),
-    UpdateExpression: `SET ${at} = :now, expiresAt = :expires`,
-    // Closed wins: once a closed notice was claimed, the view-only notice is never claimed again.
-    ConditionExpression: kind === "closed"
-      ? "attribute_not_exists(closedNoticedAt) OR closedNoticedAt <= :cutoff"
-      : "attribute_not_exists(closedNoticedAt) AND (attribute_not_exists(noticedAt) OR noticedAt <= :cutoff)",
-    ExpressionAttributeValues: {
-      ":now": nowSeconds,
-      ":expires": nowSeconds + 2 * SHARED_THREAD_NOTICE_INTERVAL_SECONDS,
-      ":cutoff": nowSeconds - SHARED_THREAD_NOTICE_INTERVAL_SECONDS,
-    },
-  };
-}
 
 export const DeveloperTaskShareSchema = z.object({
   mode: DeveloperShareModeSchema,
@@ -95,7 +42,6 @@ export const DeveloperTaskShareSchema = z.object({
   /** The start message could not be posted within an hour (C9). */
   postFailed: z.boolean().optional(),
 });
-export type DeveloperTaskShare = z.infer<typeof DeveloperTaskShareSchema>;
 
 /** C15: one Slack turn a teammate ran on the task in its shared thread. */
 export const ChannelTurnSchema = z.object({
@@ -104,185 +50,86 @@ export const ChannelTurnSchema = z.object({
   request: z.string().max(CHANNEL_TURN_REQUEST_MAX),
   outcome: z.string(),
 });
-export type ChannelTurn = z.infer<typeof ChannelTurnSchema>;
-
-export const ShareDeveloperTaskRequestSchema = z
-  .object({ requestId: z.string().uuid(), shareMode: DeveloperShareModeSchema.optional(), channel: z.string().min(1).max(80).optional() })
-  .strict();
-export type ShareDeveloperTaskRequest = z.infer<typeof ShareDeveloperTaskRequestSchema>;
-
-/** C25: an AgentX admin switches a shared task's mode; no channel, no first share. */
-export const AdminShareModeRequestSchema = z.object({ requestId: z.string().uuid(), shareMode: DeveloperShareModeSchema }).strict();
-export type AdminShareModeRequest = z.infer<typeof AdminShareModeRequestSchema>;
-
-/** C2: the shared thread record, read by the Slack ingress and the broker's service identity. */
-export function sharedTaskKey(thread: SlackThread): { pk: string; sk: "META" } {
-  return { pk: `SHARED_TASK#${slackThreadSubject(thread)}`, sk: "META" };
-}
-export const SharedTaskRecordSchema = z.object({
-  taskId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  ownerKey: z.string().regex(/^[a-f0-9]{64}$/),
-  developerId: z.string().regex(/^[a-f0-9]{64}$/),
-  developerName: z.string().min(1).max(200),
-  project: z.string().min(1).max(63),
-  mode: DeveloperShareModeSchema,
-  sharedAt: z.string().datetime(),
-  closedAt: z.string().datetime().optional(),
-  /** Set only for a task started in Slack: its thread is where its owner drives it, not a view-only share. */
-  workflowThread: z.literal(true).optional(),
-});
-export type SharedTaskRecord = z.infer<typeof SharedTaskRecordSchema>;
 
 export const DeveloperTaskStatusSchema = z.enum(["STARTING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED", "CLOSED"]);
-export type DeveloperTaskStatus = z.infer<typeof DeveloperTaskStatusSchema>;
-export const ENDED_TASK_STATUSES: ReadonlySet<DeveloperTaskStatus> = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED", "CLOSED"]);
 
-export const DeveloperTaskFailureCategorySchema = z.enum(["setup_failed", "worker_unavailable", "task_failed", "timed_out", "interrupted", "publication_failed"]);
-export type DeveloperTaskFailureCategory = z.infer<typeof DeveloperTaskFailureCategorySchema>;
+export const DeveloperTaskFailureCategorySchema = z.enum(["setup_failed", "worker_unavailable", "task_failed", "timed_out", "interrupted", "publication_failed", "budget_exhausted"]);
+
 /** #154: where a failure happened. "setup" means the workspace was never set up, so the task
  * cannot be continued. Optional (a control plane that predates it sends none), and a stage this
  * release does not know is dropped rather than refusing the view. */
 export const DeveloperTaskFailureStageSchema = z.enum(["setup"]);
-export type DeveloperTaskFailureStage = z.infer<typeof DeveloperTaskFailureStageSchema>;
+
 export const DeveloperTaskFailureSchema = z.object({
   category: DeveloperTaskFailureCategorySchema,
   stage: DeveloperTaskFailureStageSchema.optional().catch(undefined),
   message: z.string().max(DEVELOPER_FAILURE_MESSAGE_MAX),
 });
-export type DeveloperTaskFailure = z.infer<typeof DeveloperTaskFailureSchema>;
-
-export const DeveloperInstructionsSchema = z
-  .string()
-  .min(1, "instructions are empty")
-  .refine((value) => Buffer.byteLength(value, "utf8") <= DEVELOPER_INSTRUCTIONS_MAX_BYTES, `instructions exceed ${DEVELOPER_INSTRUCTIONS_MAX_BYTES} UTF-8 bytes`);
-
-const RequestIdSchema = z.string().uuid();
-const hasControlCharacter = (value: string) => [...value].some((character) => {
-  const code = character.codePointAt(0) ?? 0;
-  return code < 32 || code === 127;
-});
-
-export const StartDeveloperTaskRequestSchema = z
-  .object({
-    requestId: RequestIdSchema,
-    project: z.string().min(1).max(200),
-    instructions: DeveloperInstructionsSchema,
-    title: z.string().max(DEVELOPER_TASK_TITLE_MAX).optional(),
-    client: z.string().max(200).optional(),
-    // FR-031: sharing. share_to_channel, or a project whose share is required, shares the task.
-    shareToChannel: z.boolean().optional(),
-    shareMode: DeveloperShareModeSchema.optional(),
-    channel: z.string().min(1).max(80).optional(),
-    /** Opts this task into the native human-gated task-to-PR workflow. */
-    workflow: z.literal(true).optional(),
-    /** Selects the required approval sequence for a native workflow. */
-    workflowPath: WorkflowPathSchema.optional(),
-  })
-  .strict().superRefine((request, context) => {
-    if (request.workflowPath !== undefined && request.workflow !== true) context.addIssue({ code: "custom", path: ["workflowPath"], message: "workflowPath requires workflow: true" });
-    if (request.workflow === true && request.workflowPath === undefined) context.addIssue({ code: "custom", path: ["workflowPath"], message: "workflow requests require an explicit Quick or Full path" });
-  });
-export type StartDeveloperTaskRequest = z.infer<typeof StartDeveloperTaskRequestSchema>;
-
-export const ContinueDeveloperTaskRequestSchema = z.object({
-  requestId: RequestIdSchema,
-  instructions: DeveloperInstructionsSchema,
-  /** Optional revision fence for a retry initiated from a staleable UI action. */
-  expectedRevision: z.number().int().positive().optional(),
-  /** Candidate fence for an independent-review retry. */
-  candidateDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-  /** Owner-selected, project-approved optional checks for a blocked verification retry. */
-  selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
-  /** The approved plan's proposed checks the owner keeps for a blocked verification retry; the rest are removed. */
-  selectedProposedCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(8).optional(),
-}).strict().superRefine((request, context) => {
-  if (request.selectedOptionalCheckIds !== undefined && new Set(request.selectedOptionalCheckIds).size !== request.selectedOptionalCheckIds.length) {
-    context.addIssue({ code: "custom", path: ["selectedOptionalCheckIds"], message: "selected optional checks must be unique" });
-  }
-  if (request.selectedProposedCheckIds !== undefined && new Set(request.selectedProposedCheckIds).size !== request.selectedProposedCheckIds.length) {
-    context.addIssue({ code: "custom", path: ["selectedProposedCheckIds"], message: "kept proposed checks must be unique" });
-  }
-});
-export type ContinueDeveloperTaskRequest = z.infer<typeof ContinueDeveloperTaskRequestSchema>;
-
-export const DeveloperTaskActionRequestSchema = z.object({ requestId: RequestIdSchema }).strict();
-export type DeveloperTaskActionRequest = z.infer<typeof DeveloperTaskActionRequestSchema>;
-export const DeveloperTaskCloseRequestSchema = z.object({ requestId: RequestIdSchema, discard_unpublished: z.boolean().optional() }).strict();
-export type DeveloperTaskCloseRequest = z.infer<typeof DeveloperTaskCloseRequestSchema>;
-
-export const CanvasCloseoutRetryRequestSchema = z.object({ requestId: RequestIdSchema, workflowRevision: z.number().int().positive(), manifestDigest: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
-export type CanvasCloseoutRetryRequest = z.infer<typeof CanvasCloseoutRetryRequestSchema>;
-
-/** The owner asks AgentX to open the task's draft pull request again, at the workflow revision they saw. */
-export const WorkflowPublishRetryRequestSchema = z.object({ requestId: RequestIdSchema, expectedRevision: z.number().int().positive() }).strict();
-export type WorkflowPublishRetryRequest = z.infer<typeof WorkflowPublishRetryRequestSchema>;
-/**
- * The owner's decision on a pending PR feedback proposal from an AI tool: the same fields the feedback page sends. APPROVE
- * names the findings to fix; REQUEST_CHANGES and DISMISS carry the owner's note and select nothing.
- */
-export const WorkflowFeedbackFindingsDecisionRequestSchema = z.object({
-  requestId: RequestIdSchema,
-  expectedRevision: z.number().int().positive(),
-  reviewDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  proposalDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  bundleDigests: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(32),
-  decision: z.enum(["APPROVE", "REQUEST_CHANGES", "DISMISS"]),
-  selectedFindingIds: z.array(z.string().min(1).max(160)).max(128),
-  ownerNote: z.string().trim().min(1).max(2000).optional(),
-}).strict().superRefine((value, context) => {
-  if (new Set(value.bundleDigests).size !== value.bundleDigests.length || new Set(value.selectedFindingIds).size !== value.selectedFindingIds.length) {
-    context.addIssue({ code: "custom", message: "each finding and comment set can be named only once" });
-  }
-  if (value.decision === "APPROVE" && value.selectedFindingIds.length === 0) context.addIssue({ code: "custom", path: ["selectedFindingIds"], message: "name at least one finding to approve" });
-  if (value.decision !== "APPROVE" && value.ownerNote === undefined) context.addIssue({ code: "custom", path: ["ownerNote"], message: "add a short note saying what to change or why" });
-  if (value.decision !== "APPROVE" && value.selectedFindingIds.length > 0) context.addIssue({ code: "custom", path: ["selectedFindingIds"], message: "only an approval names findings" });
-});
-export type WorkflowFeedbackFindingsDecisionRequest = z.infer<typeof WorkflowFeedbackFindingsDecisionRequestSchema>;
-/** The owner's retry of a PR feedback review that could not finish, naming the failed review. */
-export const WorkflowFeedbackReviewRetryRequestSchema = z.object({ reviewDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
-export type WorkflowFeedbackReviewRetryRequest = z.infer<typeof WorkflowFeedbackReviewRetryRequestSchema>;
-
-export const DeveloperPullRequestRequestSchema = z
-  .object({
-    requestId: RequestIdSchema,
-    title: z.string().trim().min(1).max(256).refine((value) => !hasControlCharacter(value), "title contains control characters"),
-    body: z
-      .string()
-      .refine((value) => !value.includes("\0"), "body contains a NUL character")
-      .refine((value) => Buffer.byteLength(value, "utf8") <= 30_000, "body exceeds 30000 UTF-8 bytes")
-      .optional(),
-    repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/).optional(),
-    draft: z.boolean().default(true),
-  })
-  .strict();
-export type DeveloperPullRequestRequest = z.infer<typeof DeveloperPullRequestRequestSchema>;
 
 export const DeveloperTaskEventSchema = z.object({
   at: z.string(),
   kind: z.enum(["status", "progress", "tool", "message", "error"]),
   text: z.string().max(DEVELOPER_EVENT_TEXT_MAX),
 });
-export type DeveloperTaskEvent = z.infer<typeof DeveloperTaskEventSchema>;
 
-const PullRequestSummarySchema = z.object({
+export const PullRequestSummarySchema = z.object({
   repository: z.string(),
   number: z.number().int().positive(),
   url: z.string().url(),
   state: z.enum(["open", "closed", "merged"]),
 });
 
+/**
+ * Plan 3, Task 22: where an agent-step run is. `currentStep` is the step the run is at (the one that runs or waits); a step's `report` is its
+ * latest one; `pendingApprovals` are the actions and approval steps waiting for a person, each with the page where it is decided; `finalReport` is
+ * the last step's report once the run is COMPLETE, `branch` the result the worker chose, `endReason` why a FAILED or CANCELLED run ended ("Unverified, needs a person: ..." when the report was not backed by the agent's tool calls; the report is then the `finalReport`).
+ */
+export const DeveloperTaskRunViewSchema = z.object({
+  state: z.enum(AGENT_RUN_STATES),
+  currentStep: z.object({ id: StepIdSchema, name: z.string() }).strict().optional(),
+  // A step is read tolerantly (an unknown field is dropped, not refused): the broker may show a client more about a step than this build knows, and `tools` and `unverified` are optional.
+  steps: z.array(z.object({
+    id: StepIdSchema, name: z.string(), status: z.enum(AGENT_RUN_STEP_STATUSES), report: z.string().optional(),
+    /** The tool calls the step made and the ones that failed (shown when one failed or the report was unverified). */
+    tools: AgentStepToolsSchema.optional(),
+    /** Why the step's report was not backed by what the agent did: the run ended FAILED with these words, "Unverified, needs a person". */
+    unverified: z.array(z.string().max(300)).max(10).optional(),
+  })),
+  pendingApprovals: z.array(z.object({ approvalId: ApprovalIdSchema, kind: z.enum(["write", "step"]), text: z.string(), confirmUrl: z.string().optional() }).strict()),
+  finalReport: z.string().optional(),
+  branch: z.string().optional(),
+  endReason: z.string().optional(),
+}).strict();
+
 export const DeveloperTaskViewSchema = z.object({
+  /** Actual audited fallback history; absent only on older servers. Current broker emits [] when none. */
+  modelFallbacks:ModelFallbacksSchema.optional(),
   taskId: z.string().uuid(),
   title: z.string(),
   project: z.string(),
   status: DeveloperTaskStatusSchema,
+  /** UX2 slice 2: where the task stands in the one status model (state, reason, next step), the words every surface shows instead of `status`. Absent from older servers. */
+  statusView: TaskStatusSchema.optional(),
+  /**
+   * UX2 slice 2 item 3: a blocked task's review findings and the two ways on that the task page offers (Resolve findings, Send back to coding), as Slack and the MCP tools offer them. The findings are the
+   * blocking ones of the current code not yet accepted (reviewer words, redacted and capped; plain text every reader escapes). The routes re-check who may. Absent unless the task is blocked with one to offer.
+   */
+  reviewFindings: z.object({
+    findings: z.array(z.object({ findingId: z.string().regex(/^[a-f0-9]{64}$/), role: z.enum(["CRITIC", "SECURITY"]), text: z.string().min(1).max(1000), file: z.string().max(500).optional(), line: z.number().int().positive().optional() }).strict()).max(50),
+    resolve: z.boolean(),
+    sendBack: z.boolean(),
+  }).strict().optional(),
   workflow: WorkflowSnapshotViewSchema.extend({
     planContent: z.string().max(WORKFLOW_PLAN_MAX_BYTES).optional(),
     workBreakdownDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }).optional(),
   e2ePresentation: z.object({ shared: E2ESharedViewSchema, slackBlocks: z.array(z.unknown()).max(16), pageHtml: z.string().max(65_536), mcp: z.object({ scope: z.string().max(2_000), view: E2ESharedViewSchema }).strict() }).strict().optional(),
   failure: DeveloperTaskFailureSchema.optional(),
+  /** Live interaction F1: what the "Fix with agent" button is about, when the task shows an error (a blocked step or a failed run). Fixed codes and ids only, never text; absent when there is no error to fix. */
+  errorRef: ErrorRefSchema.optional(),
+  /** Ruling R60: set when the task's creator was removed from the org; the task has ended (status CANCELLED) and `outcomeReason` says why. */
+  outcome: z.literal("creator_removed").optional(),
+  outcomeReason: z.string().max(1000).optional(),
   startingRevision: z.number().int().positive(),
   client: z.string(),
   shared: z.boolean(),
@@ -300,135 +147,112 @@ export const DeveloperTaskViewSchema = z.object({
   share: DeveloperTaskShareSchema.optional(),
   /** C15: the shared thread's channel turns on this task, newest first. */
   channelTurns: z.array(ChannelTurnSchema).max(CHANNEL_TURNS_MAX).optional(),
+  /** Plan 3, Task 15: the agent and version the task runs; absent on a task from before agents. */
+  agent: z.object({ agentId: AgentIdSchema, name: z.string(), version: z.union([z.number().int().min(1), z.literal("draft")]), builtin: z.boolean() }).strict().optional(),
+  /** Plan 3, Task 22: an agent-step run's progress; absent on every other task. */
+  run: DeveloperTaskRunViewSchema.optional(),
+  /** Plan 3, Task 32: the task is waiting for money: the limit it reached (`PauseScope`) and, when one was made, the request that asks for more. */
+  paused: z.object({ reason: z.literal("budget"), spendRequestId: SpendRequestIdSchema.optional(), scope: z.record(z.string(), z.string()), message: z.string().max(300).optional() }).strict().optional(),
+  /** Plan 3, Task 32: what a planning run found before it reached its limit (its last answer), at most 4,096 characters. */
+  planningSoFar: z.string().max(4096).optional(),
+  /** Plan 3, Task 32: a test run that reached its cap may go on as a normal task (`POST /v1/app/tasks/{id}/continue-as-task`). */
+  testOffer: z.object({ capUsd: z.number().nonnegative() }).strict().optional(),
+  /** Plan 3, Task 34: what the coding plan under review is expected to cost and the run limit approving it accepts. */
+  runEstimate: RunEstimateSchema.optional(),
+  /**
+   * 0.5.11 (QA6-12b): while the coding plan waits for approval, what approving does to the run limit: the limit now, the one approving sets and whether that raises it. A raise is approved only with `proposedUsd`
+   * acknowledged (the tool's `acknowledged_run_limit_usd`, the API's `acknowledgedRunLimitUsd`). Absent unless the coding plan waits and the task carries an estimate.
+   */
+  planRunLimit: z.object({ currentUsd: z.number().nonnegative(), proposedUsd: z.number().nonnegative(), raises: z.boolean() }).strict().optional(),
+  /** Plan 5, Task 2: the task's session and its link (`<origin>/s/<sessionId>`); absent on a task with no session (before sessions, a chain step, an install without agents). */
+  sessionId: SessionIdSchema.optional(),
+  sessionUrl: z.string().url().optional(),
+  /**
+   * Setup and test health (SH28, switch `nh`): present on a task start and a task read ONLY while the project's setup needs repair. The task still starts and runs; this says its testing may be blocked.
+   * Fixed words from the broker. Absent with the switch off, and for every project that is not in that state.
+   */
+  testingNotice: z.object({ state: z.literal("needs_repair"), text: z.string().min(1).max(200) }).strict().optional(),
+  /**
+   * Plan 3, Task 35b: a plan blocked on its run limit: the limit it waits for, the request that asks for it while one is open, and whether its owner may ask
+   * again (`POST /v1/app/tasks/{id}/run-limit-request`, once the last request was denied or ran out, not while its start is pending, and at most once per ten
+   * minutes: `askAgainAfter` is when). Absent unless the plan is blocked on its run limit.
+   */
+  runLimit: z.object({ limitUsd: z.number().nonnegative(), spendRequestId: SpendRequestIdSchema.optional(), canAskAgain: z.boolean(), askAgainAfter: z.string().max(40).optional() }).strict().optional(),
+  /**
+   * Plan 6, Task 12 (Rovara Code version 2 only; the broker leaves it out of a version 1 task's view, and out of a client that does not send `x-agentx-task-view: 2`):
+   * what passed, what failed, what could not be checked and which tests the change added, for the code the checks ran on. Worker output, redacted and bounded; plain
+   * text that every reader escapes for its own markup.
+   */
+  verificationReport: VerificationReportSchema.optional(),
+  /** Playbook P3 (version 2 only, full reads only, like `verificationReport`): the proof table of the approved plan's requirements, as the pull request's Proof section has it. Absent when there is no approved plan with claims. */
+  proofTable: ProofTableViewSchema.optional(),
+  /** Proof and evidence P1 (version 2 only, full reads only, like `proofTable`): the evidence of the code now on the task, with every artifact as a link behind sign-in. Absent until the broker has built one for the current candidate. */
+  evidence: EvidenceViewSchema.optional(),
+  /** Setup and test health SH19 (version 2 only, full reads only, only while the four-results switch is on): one of Verified, Code failed, Partially verified or Blocked by environment for the code now on the task, with one row per check. Absent while the switch is off or the result is not decided yet. */
+  testing: TestingViewSchema.optional(),
+  /** Design review (DR11, version 2 only): the Design first and Skip buttons for the person reading, decided by the broker. Absent when design review is not offered for the task. */
+  designActions: DesignActionsViewSchema.optional().catch(undefined),
+  /**
+   * OWNER DECISION 7 (version 2 only, full reads only): what the old review page offered on a task that stopped, now on the task page: Retry the browser and API checks (a blocked round a retry can fix),
+   * Revise the plan (coding stopped for the owner's live message) and a held spec's choices. Each says whether THIS reader may press it; the routes check again. Fixed words from the broker only.
+   */
+  pageActions: z.object({
+    checksRetry: z.object({ canRetry: z.boolean() }).strict().optional(),
+    revisePlan: z.object({ canRevise: z.boolean() }).strict().optional(),
+    specHold: z.object({ title: z.string().min(1).max(120), message: z.string().min(1).max(600), choices: z.array(z.enum(["retry", "continue", "keep", "replan"])).max(4), canChoose: z.boolean() }).strict().optional(),
+  }).strict().optional().catch(undefined),
+  /** Decisions D5 (version 2 only): the coding plan under review on one screen (about 1,500 characters), derived from the plan document with no model call. Absent when there is no readable plan. */
+  planOneScreen: PlanOneScreenSchema.optional(),
+  /**
+   * Playbook P2 (version 2 only, like `verificationReport`): which model reviewed the code now on the task, and, when it was the build's own, the note that says so. These are the lines the pull request's Reviews section has
+   * (Trust fix A2's `reviewModelLines`), passed on word for word; absent before any review of the current code. Plain text that every reader escapes for its own markup.
+   */
+  reviewModelLines: z.array(z.string().min(1).max(300)).min(1).max(4).optional(),
+  /**
+   * SH34 (version 2 only, only while the install switch `cr` is on): the second review by another AI company, for the code now on the task. `lines` are plain text (an answer's findings, or "Second review did not run: <reason>");
+   * `needsAcknowledgement` is true for an `on` review that did not run until the task owner acknowledges it, and `acknowledged` says they have. Absent when there is nothing to show (shadow that did not run is silent).
+   */
+  secondReview: z.object({ lines: z.array(z.string().min(1).max(320)).min(1).max(7), needsAcknowledgement: z.boolean(), acknowledged: z.boolean(), /** True for the task's owner while an acknowledgement is asked for: the page offers "I've seen it". */ canAcknowledge: z.boolean().optional() }).strict().optional(),
+  /** Plan 6, Task 12 (version 2 only, like `verificationReport`): the review round whose problems are being fixed, with the sentence the thread says. */
+  reviewRound: z.object({ round: z.number().int().min(1).max(100), max: z.number().int().min(1).max(5), message: z.string().min(1).max(200) }).strict().optional(),
+  /**
+   * Plan 6, Task 14 (version 2 only, full reads only, and only for a client that sends `x-agentx-task-view: 2`): what GitHub says about each pull request of the task,
+   * as merge tracking last read it. The merge claim is the broker's own and is never part of the view.
+   */
+  mergeTracking: z.array(MergeTrackingItemSchema.omit({ mergeClaim: true })).max(32).optional(),
+  /**
+   * Plan 6, Task 19 (version 2 only, full reads only, and only for a client that sends `x-agentx-task-view: 2`): whether the viewer pressing Merge now would be allowed to, from what merge
+   * tracking last read. Advisory: the press re-reads GitHub.
+   */
+  merge: MergeViewSchema.optional(),
+  /**
+   * v1.2 track record (version 2 only, full reads only, like `mergeTracking`): how the pull requests this project rated low risk went in the last 30 days, for the task's own owner and only when this task's
+   * pull request was published with risk low. Private: it is left out for every other viewer, and it is never on the shared card, in a Slack thread or on the pull request.
+   */
+  earlyRiskSignal: EarlyRiskSignalReadSchema.optional(),
 });
-export type DeveloperTaskView = z.infer<typeof DeveloperTaskViewSchema>;
-
-export const DeveloperTaskListItemSchema = DeveloperTaskViewSchema.pick({ taskId: true, title: true, project: true, status: true, shared: true, createdAt: true, updatedAt: true });
-export type DeveloperTaskListItem = z.infer<typeof DeveloperTaskListItemSchema>;
-/** `nextCursor` is opaque: pass it back as `cursor` for the next page; it is absent on the last page. */
-export const DeveloperTaskListResponseSchema = z.object({ tasks: z.array(DeveloperTaskListItemSchema), nextCursor: z.string().optional() });
-export const DeveloperTaskResponseSchema = z.object({ task: DeveloperTaskViewSchema });
-export const DeveloperCloseResponseSchema = z.object({
-  task: DeveloperTaskViewSchema,
-  closed: z.boolean(),
-  discardedUnpublished: z.boolean().optional(),
-  unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
-  /** Present whenever `closed` is false: why the task is not closed yet, and what to do next. */
-  message: z.string().optional(),
-});
-export type DeveloperCloseResponse = z.infer<typeof DeveloperCloseResponseSchema>;
-export const DeveloperPullRequestResponseSchema = z.object({
-  task: DeveloperTaskViewSchema,
-  operationId: z.string().uuid(),
-  operationStatus: OperationStatusSchema,
-  pullRequest: PullRequestSummarySchema.optional(),
-});
-export type DeveloperPullRequestResponse = z.infer<typeof DeveloperPullRequestResponseSchema>;
-export const DeveloperTaskEventsResponseSchema = z.object({ events: z.array(DeveloperTaskEventSchema) });
-
-const KNOWN_CLIENTS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/^claude[-_ ]?code\b/i, "Claude Code"],
-  [/codex/i, "Codex"],
-  [/cursor/i, "Cursor"],
-];
 
 /**
- * FR-033: the MCP client's clientInfo.name, cleaned like a Slack display name, then mapped to
- * "Claude Code", "Codex" or "Cursor", and otherwise "an AI tool". Only these four strings ever
- * reach a PR footer or a turn record, so a client cannot choose that text (R25).
+ * The task as a client that sends `x-agentx-task-view: 2` reads it: the same view, with the workflow read tolerantly (`WorkflowSnapshotReaderShape`), so a stage or
+ * outcome a newer control plane added reads as "unknown" instead of failing the whole answer. The type says what the reader does: `stage` and `outcome` may be
+ * "unknown", so a caller has to decide what to do with a stage it does not know.
  */
-export function cleanClientName(value: string | undefined): string {
-  const cleaned = value === undefined ? undefined : cleanDisplayName(value);
-  if (cleaned === undefined) return UNKNOWN_CLIENT_NAME;
-  const known = KNOWN_CLIENTS.find(([pattern]) => pattern.test(cleaned))?.[1] ?? UNKNOWN_CLIENT_NAME;
-  return known.slice(0, DEVELOPER_CLIENT_NAME_MAX);
-}
-
-// Control, format and separator characters that must not reach a title.
-// eslint-disable-next-line no-control-regex
-const TITLE_NOISE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/gu;
-
-/** FR-030: the given title, else the first non-empty line of the instructions, at most 120 characters. */
-export function taskTitle(instructions: string, title?: string): string {
-  const firstLine = instructions.split(/\r\n|\r|\n/).find((line) => line.trim() !== "") ?? "";
-  const source = title !== undefined && title.trim() !== "" ? title : firstLine;
-  const clean = source.replace(TITLE_NOISE, " ").replace(/\s+/g, " ").trim();
-  const cut = Array.from(clean).slice(0, DEVELOPER_TASK_TITLE_MAX).join("").trimEnd();
-  return cut === "" ? "Untitled task" : cut;
-}
-
-/** The text of the last assistant message among a worker's events (pi's message_end), without thinking blocks. */
-export function lastAssistantResponse(events: ReadonlyArray<{ payload: unknown }>): string | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const payload = events[index]?.payload;
-    if (!payload || typeof payload !== "object") continue;
-    const event = payload as Record<string, unknown>;
-    if (event.type !== "message_end" || !event.message || typeof event.message !== "object") continue;
-    const message = event.message as Record<string, unknown>;
-    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-    const text = message.content
-      .flatMap((block) => {
-        if (!block || typeof block !== "object") return [];
-        const content = block as Record<string, unknown>;
-        return content.type === "text" && typeof content.text === "string" ? [content.text] : [];
-      })
-      .join("\n")
-      .replace(/<thinking>[\s\S]*?<\/thinking>\s*/gi, "")
-      .trim();
-    if (text.length > 0) return text;
-  }
-  return undefined;
-}
-
-export interface ChangedFile { repository: string; path: string; added: number; removed: number }
-
+export type DeveloperTaskClientView = Omit<z.infer<typeof DeveloperTaskViewSchema>, "workflow"> & {
+  workflow?: (WorkflowSnapshotReader & { planContent?: string | undefined; workBreakdownDigest?: string | undefined }) | undefined;
+};
+export const DeveloperTaskClientViewSchema = DeveloperTaskViewSchema.extend({
+  workflow: z.looseObject({
+    ...WorkflowSnapshotReaderShape,
+    planContent: z.string().max(WORKFLOW_PLAN_MAX_BYTES).optional(),
+    workBreakdownDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  }).optional(),
+}) as unknown as z.ZodType<DeveloperTaskClientView>;
 /**
- * Changed files from the worker's workspace.diff artifact: per repository a "## <name>" section
- * with "### status" (git status --short) and "### diff" (git diff against the commit the workspace
- * was prepared at, or HEAD with a note when that commit is gone, #208). Lines are counted only
- * inside hunks, so a removed line that starts with "--" is not taken for a file header.
- * Untracked files (status "??") are listed with no line counts, since git diff omits them.
+ * The task as the strict view, or undefined when the control plane named a stage, outcome or other value this build does not know (a newer server), which the
+ * reader gave as "unknown". The reader differs from the strict view only by those markers and by keeping fields it does not know, so a task with no marker
+ * is the strict view. Code that decides what to do from a stage reads the task through this, and tells the person when it is undefined. Only the places the
+ * reader can write the marker count (`readsAsUnknown` walks the strict schema), so free text that is the word "unknown" does not.
  */
-export function diffStat(diff: string, limit = 200): ChangedFile[] {
-  const files: ChangedFile[] = [];
-  const untracked: ChangedFile[] = [];
-  let repository = "";
-  let section: "none" | "status" | "diff" = "none";
-  let current: ChangedFile | undefined;
-  let inHunk = false;
-  for (const line of diff.split("\n")) {
-    const heading = /^## (\S+)$/.exec(line);
-    if (heading) {
-      repository = heading[1]!;
-      section = "none";
-      current = undefined;
-      inHunk = false;
-      continue;
-    }
-    if (line === "### status") { section = "status"; continue; }
-    if (line === "### diff") { section = "diff"; continue; }
-    if (section === "status") {
-      const entry = /^\?\? (.+)$/.exec(line);
-      if (entry) untracked.push({ repository, path: entry[1]!, added: 0, removed: 0 });
-      continue;
-    }
-    if (section !== "diff") continue;
-    const header = /^diff --git a\/.+ b\/(.+)$/.exec(line);
-    if (header) {
-      current = { repository, path: header[1]!, added: 0, removed: 0 };
-      files.push(current);
-      inHunk = false;
-      continue;
-    }
-    if (current === undefined) continue;
-    if (line.startsWith("@@")) { inHunk = true; continue; }
-    if (!inHunk) continue;
-    if (line.startsWith("+")) current.added += 1;
-    else if (line.startsWith("-")) current.removed += 1;
-  }
-  const byRepository = new Map<string, ChangedFile[]>();
-  for (const file of [...files, ...untracked.filter((entry) => !files.some((file) => file.repository === entry.repository && file.path === entry.path))]) {
-    byRepository.set(file.repository, [...(byRepository.get(file.repository) ?? []), file]);
-  }
-  return [...byRepository.values()].flat().slice(0, limit);
+export function knownTaskView(view: DeveloperTaskClientView): z.infer<typeof DeveloperTaskViewSchema> | undefined {
+  return readsAsUnknown(DeveloperTaskViewSchema.shape.workflow, view.workflow) ? undefined : (view as z.infer<typeof DeveloperTaskViewSchema>);
 }

@@ -29,6 +29,7 @@ import {
   type Operation,
   type WorkflowSnapshot,
   type WorkflowReviewBase,
+  type DeveloperSignInMethod,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { isHeartbeat, modelCallView } from "./model-call-view.js";
@@ -54,7 +55,7 @@ export interface DeveloperTaskRecord {
   entityType: "DEVELOPER_TASK";
   taskId: string;
   developerId: string;
-  provider: "slack" | "oidc";
+  provider: DeveloperSignInMethod;
   developerName: string;
   slackUserId?: string;
   client: string;
@@ -365,7 +366,7 @@ export function recentTaskEvents(newestFirst: readonly StoredEvent[], count: num
 export interface TurnParty {
   taskId: string;
   developerId: string;
-  provider: "slack" | "oidc";
+  provider: DeveloperSignInMethod;
   developerName: string;
   slackUserId?: string | undefined;
   client: string;
