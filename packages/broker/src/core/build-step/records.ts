@@ -13,6 +13,8 @@ export interface PullRequestRecord {
   workspaceId: string; repository: string; repositoryUrl: string; number: number; url: string; state: "open" | "closed" | "merged";
   headBranch: string; baseBranch: string; expectedHeadCommit: string; title: string; body: string;
   createdByOperationId: string; updatedAt: string;
+  /** Why an earlier draft of a failed attempt was left open by a Retry (a person took it up). */
+  leftOpen?: string;
 }
 
 export async function pullRequestRecordOf(deps: Pick<TaskFlowDeps, "store">, workspaceId: string, repository: string, number: number): Promise<PullRequestRecord | undefined> {

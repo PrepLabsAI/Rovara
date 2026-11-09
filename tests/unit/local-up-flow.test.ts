@@ -1164,6 +1164,31 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     expect((await h.callback(second, "pull-request", { ...{ repository: "demo", repositoryUrl: h.project.repositories[0]!.url, baseBranch: "main", commit, title: payload["title"], body: payload["body"] }, headBranch: branch2 })).body).toMatchObject({ number: 2 });
   });
 
+  it("leaves an earlier draft open when a person took it up (pushed to it, or marked it ready), and says why", async () => {
+    for (const how of ["pushed", "ready"] as const) {
+      const h = await launch({ host: true });
+      const { taskId, workspaceId, seen, coding } = await toCoding(h);
+      const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+      const tree = h.model.revision(commit).tree;
+      await h.callback(coding, "result", builtResult(tree, h.base, commit));
+      const review = await h.nextJob(workspaceId, seen);
+      await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+      const first = await h.nextJob(workspaceId, seen);
+      const payload = first.payload as Record<string, unknown>;
+      const branch = String(payload["headBranch"]);
+      h.model.branches.set(branch, commit);
+      await h.callback(first, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+      await h.callback(first, "result", { status: "FAILED", error: "the machine was lost" });
+      if (how === "pushed") h.model.commit(branch, { "README.md": "a person's change\n" }); else h.model.markReady("1");
+      await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "efefefef-efef-4fef-8fef-efefefefefef" } });
+      expect(h.model.getChangeRequest("1").state).toBe("open");
+      const record = await h.runtime.registry.require("storage").get(PR_RECORD(workspaceId));
+      expect(record?.["leftOpen"]).toContain(how === "pushed" ? "someone pushed" : "marked ready");
+      // The Retry still goes on with a new draft of its own.
+      expect((await h.nextJob(workspaceId, seen)).kind).toBe("publish");
+    }
+  });
+
   it("judges the opened draft's head as the first read shows it, and does not wait for a branch put back", async () => {
     const h = await launch({ host: true });
     const { workspaceId, seen, coding } = await toCoding(h);
