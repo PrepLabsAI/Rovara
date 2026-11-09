@@ -71,8 +71,11 @@ FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63
 # processes a command leaves behind: commands run in their own process group (#170).
 # This image is also the task sandbox a project without a devcontainer runs in, so it carries
 # the tools such a project's commands reach for: curl, git, python3, bash and a POSIX shell (dash).
+# iptables (TS-SEAL-5): the sealed check round starts one short-lived helper container of this image, with NET_ADMIN alone, joined to the check sandbox's network namespace, to drop its traffic to Docker's embedded
+# resolver (127.0.0.11) before any command runs (packages/worker/src/check-sandbox.ts `resolverGuardRunArgs`). It is run as `iptables-nft`, which talks netlink and needs no other capability. The sandbox itself has
+# no capability, so the binary does nothing there.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl git openssh-client python3 python3-pip python3-venv tini=0.19.0-1+b3 \
+    && apt-get install --yes --no-install-recommends ca-certificates curl git iptables openssh-client python3 python3-pip python3-venv tini=0.19.0-1+b3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
