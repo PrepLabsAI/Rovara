@@ -337,6 +337,46 @@ describe("rovara up runtime", () => {
     expect(answer.body).not.toContain("sk-ant");
   });
 
+  it("wires the model providers: the three built-ins, plus a model-provider plug-in whose prices reach the metering port (item K2)", async () => {
+    const module = `export const plugin = { point: "model-provider", name: "company-gateway", create(context) { return { kind: "company-gateway", name: "Company gateway", address: "https://models.example.test/v1", signIn: { kind: "bearer-key" },
+      defaultModel: "house-model", prices: { currency: "USD", models: { "house-model": { inputMicrosPerMillionTokens: 1000000, outputMicrosPerMillionTokens: 2000000 } } },
+      formats: [{ format: "openai-completions", pathOverride: "/chat/completions", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "none", reasoningReturned: false, promptCaching: false, streamUsage: true } }] }; } };\n`;
+    const { runtime } = await launch({
+      config: { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }] },
+      files: { "gateway.mjs": module },
+      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real", COMPANY_GATEWAY_API_KEY: "must-not-be-read" },
+    });
+    expect(runtime.wiring()["model-provider"]).toEqual(["anthropic", "company-gateway", "openai", "openrouter"]);
+    const price = await runtime.registry.require("metering").price({ provider: "company-gateway", modelId: "house-model", tokens: { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 } });
+    expect(price).toEqual({ micros: 3_000_000, currency: "USD" });
+    // Unpriced models stay unpriced, never guessed.
+    expect(await runtime.registry.require("metering").price({ provider: "anthropic", modelId: "claude-x", tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } })).toBeNull();
+    // A plug-in provider's key is looked for in a namespaced variable (review L4), so it can never read another component's: COMPANY_GATEWAY_API_KEY is not read.
+    expect(await runtime.registry.require("model-keys").providers(IMPLICIT_COMPANY_ID)).toEqual(["company-gateway"]);
+  });
+
+  it("refuses a plug-in that takes a built-in provider's id for another address, but lets it add prices to that provider (review L4)", async () => {
+    const row = (address: string) => `export const plugin = { point: "model-provider", name: "anthropic", create() { return { kind: "anthropic", name: "Anthropic, priced", address: "${address}", signIn: { kind: "named-header", header: "x-api-key" },
+      prices: { currency: "USD", models: { "claude-x": { inputMicrosPerMillionTokens: 3000000, outputMicrosPerMillionTokens: 15000000 } } },
+      formats: [{ format: "anthropic-messages", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "thinking", reasoningReturned: true, promptCaching: true, streamUsage: true } }] }; } };\n`;
+    const config = { version: 1, plugins: [{ point: "model-provider", name: "anthropic", module: "./a.mjs" }] };
+    await expect(launch({ config, files: { "a.mjs": row("https://elsewhere.example.test") } })).rejects.toThrow(/anthropic.*another address/u);
+    const { runtime } = await launch({ config, files: { "a.mjs": row("https://api.anthropic.com") } });
+    expect(await runtime.registry.require("metering").price({ provider: "anthropic", modelId: "claude-x", tokens: { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 } })).toEqual({ micros: 3_000_000, currency: "USD" });
+  });
+
+  it("refuses a model provider whose id is another component's (linear) and reads no LINEAR_API_KEY for it", async () => {
+    const module = `export const plugin = { point: "model-provider", name: "linear", create() { return { kind: "linear", name: "L", address: "https://models.example.test", signIn: { kind: "bearer-key" },
+      formats: [{ format: "openai-completions", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "none", reasoningReturned: false, promptCaching: false, streamUsage: true } }] }; } };\n`;
+    await expect(launch({ environment: { LINEAR_API_KEY: "tracker-secret-never-real" }, config: { version: 1, plugins: [{ point: "model-provider", name: "linear", module: "./l.mjs" }] }, files: { "l.mjs": module } })).rejects.toThrow(/another part of Rovara/u);
+  });
+
+  it("refuses to start with a model provider whose address is plain http to another machine, naming the provider and the rule", async () => {
+    const module = `export const plugin = { point: "model-provider", name: "bad-gateway", create() { return { kind: "bad-gateway", name: "Bad", address: "http://models.example.test", signIn: { kind: "bearer-key" },
+      formats: [{ format: "openai-completions", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "none", reasoningReturned: false, promptCaching: false, streamUsage: true } }] }; } };\n`;
+    await expect(launch({ config: { version: 1, plugins: [{ point: "model-provider", name: "bad-gateway", module: "./bad.mjs" }] }, files: { "bad.mjs": module } })).rejects.toThrow(/bad-gateway.*https/u);
+  });
+
   it("keeps objects as documents by default", async () => {
     const { runtime } = await launch();
     const objects = runtime.registry.require("object-storage");

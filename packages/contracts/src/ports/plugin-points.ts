@@ -16,6 +16,7 @@ import type { Tracker } from "../plugins/tracker.js";
 import type { DocumentStore } from "./document-store.js";
 import type { JsonObject } from "./json.js";
 import type { ModelKeyStore } from "./model-keys.js";
+import { MODEL_PROVIDER_ID_PATTERN, MODEL_REQUEST_FORMATS, type ModelProviderAdapter } from "./model-provider.js";
 import type { ObjectStorage } from "./object-storage.js";
 import type { OutboundEventsAdapter } from "./outbound-events.js";
 import type { SecretStore } from "./secrets.js";
@@ -52,6 +53,8 @@ export const PLUGIN_POINTS = [
   "company-instructions",
   /** Owner decisions 40 and 61 (item R3): signed events out, in the format of Pratik's channel events. */
   "outbound-events",
+  /** Item K2 (owner decisions 60 and 61): where a model is, how to sign in to it, the request format it speaks and its prices. */
+  "model-provider",
   /** Owner decision 60 (R2): where an adapter's secrets are read (`read(ref)` returns a `SecretValue`). */
   "secrets",
 ] as const;
@@ -83,6 +86,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   "object-storage": "one",
   "company-instructions": "one",
   "outbound-events": "many",
+  "model-provider": "many",
   secrets: "one",
 };
 
@@ -151,6 +155,7 @@ export interface PluginPointTypes {
   "object-storage": ObjectStorage;
   "company-instructions": CompanyInstructionsSource;
   "outbound-events": OutboundEventsAdapter;
+  "model-provider": ModelProviderAdapter;
   secrets: SecretStore;
 }
 
@@ -268,12 +273,14 @@ export const PluginConfigSchema = z.object({
    */
   allowBroadTokenForWorker: z.boolean().optional(),
   /**
-   * Port lane L13 (laptop only, owner-set): the model a task step calls, e.g. `{ "provider": "openrouter", "id": "anthropic/claude-sonnet-4.6" }`. Absent: the install's first provider with a key
+   * Port lane L13 (laptop only, owner-set): the model a task step calls, e.g. `{ "provider": "openrouter", "id": "anthropic/claude-sonnet-4.6" }`; the provider is any registered `model-provider` (item K2). Absent: the install's first provider with a key
    * (Anthropic, then OpenAI, then OpenRouter) and that provider's default model. Read only from the owner's own config; a project or a task cannot set it.
    */
   model: z.object({
-    provider: z.enum(["anthropic", "openai", "openrouter"]),
-    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/~-]{0,199}$/u, "a model id is plain characters, as the provider lists it (for OpenRouter, vendor/model)"),
+    provider: z.string().regex(MODEL_PROVIDER_ID_PATTERN, "a provider id is lower-case letters, digits and hyphens (anthropic, openai, openrouter, or a `model-provider` plug-in's id)"),
+    /** The request format, when the provider speaks several and the owner wants one other than its first (Bedrock: Claude through anthropic-messages, an open model through openai-completions). */
+    api: z.enum(MODEL_REQUEST_FORMATS).optional(),
+    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@~-]{0,199}$/u, "a model id is plain characters, as the provider lists it (for OpenRouter, vendor/model)"),
   }).strict().optional(),
   plugins: z.array(PluginConfigEntrySchema).max(64),
 }).strict().superRefine((config, context) => {

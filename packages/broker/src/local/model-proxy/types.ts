@@ -2,11 +2,12 @@
 //
 // The worker never holds a model key. It holds a short-lived token that only this proxy accepts, bound to one workspace and one
 // operation, and the proxy adds the real key (read from the `model-keys` port) when it forwards the call to the provider.
-import type { Cost, InvocationModelRoute } from "@agentx/contracts";
+import type { Cost, InvocationModelRoute, ModelProviderAdapter } from "@agentx/contracts";
 
-/** The providers Code's key store serves (`LOCAL_MODEL_PROVIDERS` in runtime.ts). Bedrock is not here: it needs the computer's AWS sign-in, see docs/local.md. */
+/** The providers Code knows without a plug-in (`BUILTIN_MODEL_PROVIDERS`). Others are `model-provider` plug-ins (item K2). */
 export const PROXY_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
-export type ProxyProvider = (typeof PROXY_PROVIDERS)[number];
+/** A provider id: open text (a `model-provider` plug-in brings a new one). */
+export type ProxyProvider = string;
 
 /** The wire shape a call speaks; the same three the worker's model library speaks to a routed model. */
 export type ProxyApi = InvocationModelRoute["api"];
@@ -51,4 +52,10 @@ export interface ModelProxyEvent {
   operationId?: string | undefined;
   provider?: ProxyProvider | undefined;
   status?: number | undefined;
+}
+
+/** The providers the proxy may call: the `model-provider` plug-ins that are registered (item K2). Looked up per call, so a provider added at start-up is seen. */
+export interface ModelProviderBook {
+  get(id: string): ModelProviderAdapter | undefined;
+  ids(): readonly string[];
 }

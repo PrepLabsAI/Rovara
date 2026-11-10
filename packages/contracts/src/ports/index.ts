@@ -10,6 +10,7 @@ export * from "./audit-sink.js";
 export * from "./build-system.js";
 export * from "./company-instructions.js";
 export * from "./model-keys.js";
+export * from "./model-provider.js";
 export * from "./secrets.js";
 export * from "./object-storage.js";
 export * from "./outbound-events.js";

@@ -9,10 +9,10 @@
 // Decision 53: artifacts live in the registry's `object-storage` adapter (lane L9a); a worker's model calls go through the model proxy (lane L9a), which the task flow grants per operation.
 import { createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
-import { chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
-import { capabilityModelGrants, localRoute, type ModelGrantSource } from "../model-proxy/index.js";
+import { LOCAL_MODEL_PROVIDER_ORDER, chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
+import { capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../../core/decisions/local-actions.js";
@@ -144,14 +144,24 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // The model a task step calls: the owner's `model` setting, else the first provider (Anthropic, OpenAI, then OpenRouter) that has a key (`chooseLocalModel`, which `rovara up --check` also asks).
   // No key: no route, and the worker has no model access.
   const keys = registry.require("model-keys");
+  // The providers are the `model-provider` plug-ins (item K2); a provider that needs no key or brings its own sign-in (an AWS role) counts as ready without an entry in the key file.
+  const providers = registryModelProviderBook(registry);
   const chosen = async (): Promise<LocalModelChoice | undefined> => {
     if (options.modelChoice !== undefined) return options.modelChoice;
+    // Only the providers that could be chosen are asked for a credential: the setting's provider, else the default order. A provider that is installed but not chosen (Bedrock, with Anthropic chosen) is never asked.
+    const candidates = options.modelSetting === undefined ? LOCAL_MODEL_PROVIDER_ORDER : [options.modelSetting.provider];
     // A `secrets` plug-in's error text is never passed on: Code's own fixed sentences are, anything else becomes a sentence naming the plug-in.
-    const providers = await keys.providers(companyId).catch((error: unknown) => { throw modelKeyReadError(error, secretsPluginWords(registry)); });
-    const picked = chooseLocalModel(providers, options.modelSetting);
-    return picked.ok ? { provider: picked.provider, model: picked.model } : undefined;
+    const ready = await readyProviders(providers, keys, companyId, candidates).catch((error: unknown) => { throw modelKeyReadError(error, secretsPluginWords(registry)); });
+    const picked = chooseLocalModel(ready, options.modelSetting, providers);
+    return picked.ok ? { provider: picked.provider, model: picked.model, ...(picked.api === undefined ? {} : { api: picked.api }) } : undefined;
   };
-  const modelRoute = async () => { const choice = await chosen(); return choice === undefined ? undefined : localRoute(choice.provider, choice.model).workerRoute; };
+  /** The route of the chosen model: the request format the owner named, else the provider's first. */
+  const routeOf = (choice: LocalModelChoice) => {
+    const row = providers.get(choice.provider);
+    const format = row === undefined ? undefined : providerFormat(row, choice.api);
+    return localRoute(choice.provider, choice.model, format?.format ?? choice.api);
+  };
+  const modelRoute = async () => { const choice = await chosen(); return choice === undefined ? undefined : routeOf(choice).workerRoute; };
 
   const clock = (): Date => options.now?.() ?? new Date();
   // Lane L12: the milestones ("fixing", "stuck", "ready") are rows and lines on the task's session, written in the transaction of the change that caused them.
@@ -199,7 +209,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       if (choice === undefined) return undefined;
       const pointer = fromDocument<TaskPointerRecord>(await store.get(taskPointerKey(operation.workspaceId)));
       const task = pointer === undefined ? undefined : await readTask(flow.deps, pointer.taskId);
-      return { routes: [localRoute(choice.provider, choice.model).route], ...(task === undefined ? {} : { taskId: task.taskId, projectName: task.project }) };
+      return { routes: [routeOf(choice).route], ...(task === undefined ? {} : { taskId: task.taskId, projectName: task.project }) };
     },
     async holds(operation) {
       const [record, workspace] = await Promise.all([store.get(operationKey(operation.workspaceId, operation.operationId)), store.get(workspaceKey(operation.workspaceId))]);

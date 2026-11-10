@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below). A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -323,6 +323,18 @@ mirrors Cloud's proxy (packages/model-proxy in Cloud is LiteLLM plus a Python gu
 header bans, `anthropic-beta` allow-list and no-redirect rule are carried over field for field (`providers.ts`). Details and limits are in `docs/local.md`.
 Interfaces added: the `model-access` callback action, `ModelGrantSource` (what a capability entitles an operation to), the `x-rovara-workspace` stamp the
 egress gateway puts on worker calls, and `AGENTX_MODEL_PROXY_URL` in a worker machine's environment.
+
+### Model providers (lane P5, item K2; owner decisions 60 and 61, 63)
+
+A new plug-in point, `model-provider` (many adapters, registered by provider id; the adapter's `kind` is the id, as for a code host). `ModelProviderAdapter` (`contracts/src/ports/model-provider.ts`) states the provider's name, `address`,
+`signIn` kind, request `formats` (each with an optional path override, the `vertex` variant of messages, and capability flags), an optional `defaultModel` and `prices`, and an optional `credential()` for a role or a refreshed token.
+The provider id is open text (the key store's `provider` always was). The three formats are `anthropic-messages`, `openai-completions` (chat) and `openai-responses`, the worker's `InvocationModelRoute.api` values. Code registers
+`anthropic`, `openai` and `openrouter` as default rows; Bedrock is a normal provider with SigV4 sign-in (`bedrockModelProvider`). The local model proxy looks providers up per call: keys and tokens still never reach a worker, the
+guard's allow-lists are untouched, and the task budget reads the provider's price table through `metering`. Details and limits: `docs/local.md`, "Model providers".
+
+- **The older closed list stays** (`MODEL_PROVIDERS` in `contracts/src/model-providers.ts`): it is Cloud's list of providers an administrator can configure for a role, and Cloud moves to the plug-in point later (Code first).
+- **Cloud rule, for later (documentation only).** A custom provider address in Cloud must be an administrator-approved HTTPS address; Cloud refuses `http`, an address with sign-in data, and an address not on the approved list, and
+  the provider's `prices` and `address` are never taken from a project or a task. Code's rule is the laptop one: `https`, or `http` for this computer only.
 
 ## Code host, tracker and check runner
 

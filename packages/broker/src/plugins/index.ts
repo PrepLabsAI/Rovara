@@ -12,3 +12,5 @@ export { codeBuildPlugin, type CodeBuildPluginOptions } from "./check-runner/cod
 export { linearTracker, LINEAR_TRACKER_KIND, type LinearTrackerAccess, type LinearIssueRead, type LinearReplyPort } from "./tracker/linear/index.js";
 export { linearTrackerPlugin, type LinearTrackerPluginOptions } from "./tracker/linear/plugin.js";
 // The fakes are not exported here: their webhook secrets are public constants, so a production build must not be able to enable one by accident. Tests import `./fake/` by path.
+// Port lane P5 (item K2): the model-provider plug-in point (built-in rows, the helper that makes a module, Bedrock).
+export * from "./model-provider/index.js";
