@@ -155,6 +155,8 @@ export interface LoadAdaptersOptions {
   registry: AdapterRegistry;
   importModule: ModuleImporter;
   now?: () => Date;
+  /** The install's own folder, handed to every plug-in as `PluginContext.stateDirectory`. */
+  stateDirectory?: string;
 }
 
 /**
@@ -177,7 +179,7 @@ export async function loadAdapters(config: PluginConfig, options: LoadAdaptersOp
     if (module === undefined) throw new PluginRegistryError("bad_module", `the module for ${label} does not export a plug-in`);
     if (module.point !== entry.point || module.name !== entry.name) throw new PluginRegistryError("bad_module", `the module for ${label} is a plug-in for a different point or name`);
     const view: RegistryView = { get: (point, name) => options.registry.get(point, name), require: (point, name) => options.registry.require(point, name), names: (point) => options.registry.names(point) };
-    const context: PluginContext = { defaultCompanyId, settings: entry.settings, registry: view, now: options.now ?? (() => new Date()) };
+    const context: PluginContext = { defaultCompanyId, settings: entry.settings, registry: view, now: options.now ?? (() => new Date()), ...(options.stateDirectory === undefined ? {} : { stateDirectory: options.stateDirectory }) };
     let adapter: unknown;
     try {
       adapter = await module.create(context);

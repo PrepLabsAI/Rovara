@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   BUILD_SYSTEM_PROFILES_ENV,
   BUILD_SYSTEM_PROFILES_MAX_CHARS,
+  BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED,
+  BuildSystemGlobSchema,
   BuildSystemProfileSchema,
   PLUGIN_POINT_CARDINALITY,
   PrepareSavedEnvBuildSchema,
@@ -19,7 +21,9 @@ import {
 } from "@agentx/contracts";
 import { collectBuildSystemProfiles, createAdapterRegistry, detectorGlobsWithBuildSystems } from "../../packages/broker/src/ports/index.js";
 
-const profile = (extra: Partial<BuildSystemProfile> = {}): BuildSystemProfile => BuildSystemProfileSchema.parse({ name: "examplebuild", detectorModule: "@example/detect-examplebuild", setupPrograms: ["examplebuild", "./exb.sh"], keyFileGlobs: ["**/EXAMPLE_BUILD", "tools/pins/*.lock"], ...extra });
+const profile = (extra: Partial<BuildSystemProfile> = {}): BuildSystemProfile => BuildSystemProfileSchema.parse({ name: "examplebuild", detectorModule: "@example/detect-examplebuild", setupPrograms: ["examplebuild", "./exb.sh"], ...extra });
+/** A profile with key-file globs, built by hand: the schema refuses them until the saved-environment lane is ported (the helpers below are ready for that day). */
+const withKeyFiles = (base: BuildSystemProfile, keyFileGlobs: string[]): BuildSystemProfile => ({ ...base, keyFileGlobs });
 
 describe("a build-system profile", () => {
   it("is a name with optional detector module, setup programs and key-file globs (the last two default to none)", () => {
@@ -41,20 +45,34 @@ describe("a build-system profile", () => {
   });
 
   it("takes key-file globs relative to the repository", () => {
-    for (const value of ["**/BUILD", "gradle/*.lockfile", "{a,b}/pins.txt", "pins.lock"]) expect(BuildSystemProfileSchema.safeParse({ name: "b", keyFileGlobs: [value] }).success, value).toBe(true);
-    for (const value of ["", "/etc/passwd", "../x", "a/../b", "a\\b", "bad\nglob", "x".repeat(257)]) expect(BuildSystemProfileSchema.safeParse({ name: "b", keyFileGlobs: [value] }).success, JSON.stringify(value)).toBe(false);
+    for (const value of ["**/BUILD", "gradle/*.lockfile", "{a,b}/pins.txt", "pins.lock"]) expect(BuildSystemGlobSchema.safeParse(value).success, value).toBe(true);
+    for (const value of ["", "/etc/passwd", "../x", "a/../b", "a\\b", "bad\nglob", "x".repeat(257)]) expect(BuildSystemGlobSchema.safeParse(value).success, JSON.stringify(value)).toBe(false);
   });
 
   it("refuses an unknown field and an over-long list", () => {
     expect(BuildSystemProfileSchema.safeParse({ name: "b", command: "rm -rf /" }).success).toBe(false);
     expect(BuildSystemProfileSchema.safeParse({ name: "b", setupPrograms: Array.from({ length: 65 }, (_, i) => `p${String(i)}`) }).success).toBe(false);
-    expect(BuildSystemProfileSchema.safeParse({ name: "b", keyFileGlobs: Array.from({ length: 101 }, (_, i) => `f${String(i)}`) }).success).toBe(false);
+  });
+
+  it("refuses a non-empty keyFileGlobs for now, with a clear message (no caller uses it yet)", () => {
+    expect(BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED).toBe(false);
+    const refused = BuildSystemProfileSchema.safeParse({ name: "b", keyFileGlobs: ["WORKSPACE"] });
+    expect(refused.success).toBe(false);
+    expect(refused.success ? "" : refused.error.issues[0]?.message).toMatch(/not used yet.*Leave it empty/);
+    expect(() => serializeBuildSystemProfiles([{ name: "b", keyFileGlobs: ["WORKSPACE"] }])).toThrow();
+    expect(() => parseBuildSystemProfiles('[{"name":"b","keyFileGlobs":["WORKSPACE"]}]')).toThrow(/not used yet/);
+    expect(BuildSystemProfileSchema.safeParse({ name: "b", keyFileGlobs: [] }).success).toBe(true);
+  });
+
+  it("refuses a shell, or a program that runs other programs, as a setup program (each command would become a step of its own)", () => {
+    for (const value of ["sh", "bash", "zsh", "dash", "env", "xargs", "sudo", "./sh", "BASH", "bash.exe", "sh.sh", "powershell"]) expect(BuildSystemProfileSchema.safeParse({ name: "b", setupPrograms: [value] }).success, value).toBe(false);
+    for (const value of ["bazel", "shellcheck", "./build.sh", "bashate", "cmake"]) expect(BuildSystemProfileSchema.safeParse({ name: "b", setupPrograms: [value] }).success, value).toBe(true);
   });
 });
 
 describe("the profiles in the worker's environment", () => {
   it("round-trips, and an absent or empty variable is no build system", () => {
-    const profiles = [profile(), profile({ name: "otherbuild", detectorModule: undefined, setupPrograms: [], keyFileGlobs: ["x.lock"] })];
+    const profiles = [profile(), profile({ name: "otherbuild", detectorModule: undefined, setupPrograms: [] })];
     expect(parseBuildSystemProfiles(serializeBuildSystemProfiles(profiles))).toEqual(profiles);
     expect(parseBuildSystemProfiles(undefined)).toEqual([]);
     expect(parseBuildSystemProfiles("  ")).toEqual([]);
@@ -79,7 +97,7 @@ describe("the profiles in the worker's environment", () => {
   });
 
   it("flattens the lists of several profiles without repeats", () => {
-    const profiles = [profile(), profile({ name: "otherbuild", detectorModule: "@example/other", setupPrograms: ["examplebuild", "other"], keyFileGlobs: ["tools/pins/*.lock", "x.lock"] })];
+    const profiles = [withKeyFiles(profile(), ["**/EXAMPLE_BUILD", "tools/pins/*.lock"]), withKeyFiles(profile({ name: "otherbuild", detectorModule: "@example/other", setupPrograms: ["examplebuild", "other"] }), ["tools/pins/*.lock", "x.lock"])];
     expect(buildSystemSetupPrograms(profiles)).toEqual(["examplebuild", "./exb.sh", "other"]);
     expect(buildSystemKeyFileGlobs(profiles)).toEqual(["**/EXAMPLE_BUILD", "tools/pins/*.lock", "x.lock"]);
     expect(buildSystemDetectorModules(profiles)).toEqual(["@example/detect-examplebuild", "@example/other"]);
@@ -91,12 +109,12 @@ describe("the key files", () => {
   it("make a build system's own files part of the key, through the job's detectorGlobs", () => {
     const paths = ["package.json", "tools/pins/a.lock", "src/EXAMPLE_BUILD", "src/main.ts"];
     expect(keyFilePaths(paths, [])).toEqual(["package.json"]);
-    const globs = detectorGlobsWithBuildSystems([], [profile()]);
+    const globs = detectorGlobsWithBuildSystems([], [withKeyFiles(profile(), ["**/EXAMPLE_BUILD", "tools/pins/*.lock"])]);
     expect(keyFilePaths(paths, globs)).toEqual(["package.json", "src/EXAMPLE_BUILD", "tools/pins/a.lock"]);
   });
 
   it("keeps the detectors' own globs, adds none twice, and still fits the job's schema", () => {
-    const merged = detectorGlobsWithBuildSystems(["a.lock", "tools/pins/*.lock"], [profile()]);
+    const merged = detectorGlobsWithBuildSystems(["a.lock", "tools/pins/*.lock"], [withKeyFiles(profile(), ["**/EXAMPLE_BUILD", "tools/pins/*.lock"])]);
     expect(merged).toEqual(["a.lock", "tools/pins/*.lock", "**/EXAMPLE_BUILD"]);
     const job = PrepareSavedEnvBuildSchema.shape.detectorGlobs.parse(merged);
     expect(job).toEqual(merged);
@@ -104,7 +122,7 @@ describe("the key files", () => {
 
   it("fails closed when the globs would not fit in a job (a key over fewer files is a wrong key)", () => {
     const many = Array.from({ length: 150 }, (_, i) => `d${String(i)}.lock`);
-    const profiles = [profile({ keyFileGlobs: Array.from({ length: 100 }, (_, i) => `k${String(i)}.lock`) })];
+    const profiles = [withKeyFiles(profile(), Array.from({ length: 100 }, (_, i) => `k${String(i)}.lock`))];
     expect(() => detectorGlobsWithBuildSystems(many, profiles)).toThrow(PluginRegistryError);
   });
 });

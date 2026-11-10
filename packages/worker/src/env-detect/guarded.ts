@@ -11,8 +11,8 @@ import { existsSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { consoleWorkerLog, logEnvDetectGuardUnavailable, type WorkerLogSink } from "../worker-log.js";
-import { BUILT_IN_DETECTOR_NAMES, runDetectors } from "./index.js";
-import { loadPluginDetectors, vetDetectorModules } from "./plugin-detectors.js";
+import { runDetectors } from "./index.js";
+import { PLUGIN_NOT_LOADED_NOTE, vetDetectorModules } from "./plugin-detectors.js";
 import { installedDetectorModules } from "../build-systems.js";
 import { emptyDetection, type Detection, type RepositoryReader } from "./types.js";
 
@@ -102,8 +102,8 @@ export async function runDetectorsGuarded(reader: RepositoryReader, cwd: string,
   if (full.kind === "done") return vetted.notes.length === 0 ? full.detection : { ...full.detection, notes: [...new Set([...vetted.notes, ...full.detection.notes])] };
   if (full.kind === "unavailable") {
     logEnvDetectGuardUnavailable(options.log ?? consoleWorkerLog, full.code);
-    const plugin = await loadPluginDetectors(vetted.modules, BUILT_IN_DETECTOR_NAMES);
-    return runDetectors(reader, cwd, { ...(options.only === undefined ? {} : { only: options.only }), extraDetectors: plugin.detectors, extraNotes: [...vetted.notes, ...plugin.notes] });
+    // No thread to hold a plug-in detector to its clock and memory limit: only the built-in detectors run here, in this thread, and a missing plug-in is said so. Plug-in code is never imported into the main thread.
+    return runDetectors(reader, cwd, { ...(options.only === undefined ? {} : { only: options.only }), extraNotes: [...vetted.notes, ...(vetted.modules.length > 0 ? [PLUGIN_NOT_LOADED_NOTE] : [])] });
   }
   const legacy = await attempt(reader, cwd, true, Math.min(ENV_DETECT_FALLBACK_TIMEOUT_MS, timeoutMs), entry, options.only, vetted.modules);
   const base = legacy.kind === "done" ? legacy.detection : emptyDetection();

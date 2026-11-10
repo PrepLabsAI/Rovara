@@ -133,6 +133,22 @@ describe("the detector pass with a build system's module", () => {
     expect(guarded.notes).toContain("A build-system detector could not be loaded, so its findings are missing.");
   });
 
+  it("never imports a plug-in into the main thread when no detector thread can be started: built-in detectors only, and a note", async () => {
+    const outside = await folder();
+    const module = join(outside, "side-effect-detector.mjs");
+    await writeFile(module, `globalThis.__p6Imported = true;\n${MODULE_TEXT}`);
+    const files = { "package.json": '{"scripts":{"test":"vitest"}}', EXAMPLE_BUILD: "" };
+    const direct = await runDetectors(reader(files), "svc");
+    const detection = await runDetectorsGuarded(reader(files), "svc", {
+      timeoutMs: 5_000, log: () => undefined, detectorModules: [module],
+      entry: { url: new URL("../support/no-such-thread.ts", import.meta.url), execArgv: ["--import", "tsx"] },
+    });
+    expect((globalThis as { __p6Imported?: boolean }).__p6Imported).toBeUndefined();
+    expect(detection.checks.map((check) => check.value.id)).toEqual(direct.checks.map((check) => check.value.id));
+    expect(detection.checks.map((check) => check.value.id)).not.toContain("example-test");
+    expect(detection.notes).toContain("A build-system detector could not be loaded, so its findings are missing.");
+  });
+
   it("uses the installed profiles' modules by default, and none when nothing is installed", async () => {
     const outside = await folder();
     const module = join(outside, "example-detector.mjs");

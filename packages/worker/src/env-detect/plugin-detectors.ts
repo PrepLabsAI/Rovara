@@ -1,9 +1,15 @@
 // Port lane P6 (item B1): detectors that a `build-system` plug-in supplies. The worker's built-in detectors (`index.ts` `DETECTORS`) are a fixed list; a build-system profile names a module, installed in
-// the worker's image, that exports more. The worker runs them AFTER the built-in ones, in the same thread and under the same limits (the bounded reader, the wall clock of `guarded.ts`).
+// the worker's image, that exports more. The worker runs them AFTER the built-in ones, in the detector thread, under the thread's wall clock and memory limit (`guarded.ts`).
+//
+// TRUST: a plug-in detector is TRUSTED OPERATOR CODE that runs with the worker's own powers. The bounded reader limits only what the built-in detectors are handed; an imported module has `fs`, `child_process`
+// and the network like any other code in the worker image, and it parses text from the repository, so a bug in it is worker code execution. Install only a detector you would install into the worker itself.
+// The module comes from the OPERATOR's profile (`ROVARA_BUILD_SYSTEMS`), never from a job or a repository. When no detector thread can be started, plug-in detectors are NOT run (see `guarded.ts`): they are
+// never imported into the worker's main thread. Owner note (decision 65): this is worker-side execution of operator-installed plug-in code during detection.
 //
 // The module exports `detectors` (or a default export of the same shape): `[{ name, run }]`, where `run` is a `Detector` (`types.ts`). A name is lower-case words with hyphens, unique, and never one of
-// the built-in names (a plug-in adds findings; it cannot take the place of the python or node detector). The module comes from the OPERATOR's profile (`ROVARA_BUILD_SYSTEMS`), never from a job or a
-// repository: `vetDetectorModules` also refuses an absolute path that lies inside the workspace, where repositories are checked out.
+// the built-in names (a plug-in adds findings; it cannot take the place of the python or node detector). `vetDetectorModules` also refuses an absolute path that lies inside the workspace, where repositories
+// are checked out. It checks the real path; the import follows in the detector thread, so a file the OPERATOR swaps in between is imported. That window is the operator's own to close and no repository,
+// task or job can reach it.
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -22,7 +28,7 @@ export interface LoadedPluginDetectors {
   notes: string[];
 }
 
-const NOT_LOADED_NOTE = "A build-system detector could not be loaded, so its findings are missing.";
+export const PLUGIN_NOT_LOADED_NOTE = "A build-system detector could not be loaded, so its findings are missing.";
 
 /** True when `path` is `parent` or lies inside it. */
 const within = (parent: string, path: string): boolean => {
@@ -48,7 +54,7 @@ export async function vetDetectorModules(modules: readonly string[], workspaceRo
       if (!(await stat(real)).isFile() || (root !== undefined && within(root, real))) throw new Error("not usable");
       kept.push(real);
     } catch {
-      notes.push(NOT_LOADED_NOTE);
+      notes.push(PLUGIN_NOT_LOADED_NOTE);
     }
   }
   return { modules: kept, notes: [...new Set(notes)] };
@@ -79,11 +85,11 @@ export async function loadPluginDetectors(
     try {
       list = detectorsOf(await importModule(specifier));
     } catch {
-      notes.push(NOT_LOADED_NOTE);
+      notes.push(PLUGIN_NOT_LOADED_NOTE);
       continue;
     }
     if (!Array.isArray(list) || list.length > PLUGIN_DETECTORS_PER_MODULE) {
-      notes.push(NOT_LOADED_NOTE);
+      notes.push(PLUGIN_NOT_LOADED_NOTE);
       continue;
     }
     const fromModule: PluginDetector[] = [];
@@ -97,7 +103,7 @@ export async function loadPluginDetectors(
       fromModule.push({ name: candidate.name, run: candidate.run as Detector });
     }
     if (!valid || detectors.length + fromModule.length > PLUGIN_DETECTORS_MAX) {
-      notes.push(NOT_LOADED_NOTE);
+      notes.push(PLUGIN_NOT_LOADED_NOTE);
       continue;
     }
     for (const detector of fromModule) {

@@ -16,7 +16,8 @@
 // because dropping it silently would drop a rule. The size limits are the shared ones (30 rules, 600 characters each, 12,000 in all); over them the call fails and nothing is cut.
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
   COMPANY_RULE_LIMITS,
   agentXError,
@@ -99,12 +100,31 @@ export interface FileCompanyInstructionsOptions {
 export class FileCompanyInstructions implements CompanyInstructionsSource {
   readonly #path: string;
 
+  /**
+   * The folder holding the file must be a real folder (not a link), belong to this user and not be writable by group or others: anyone who can write there can swap the file for another. A missing
+   * folder is "no rules" (the file is missing too).
+   */
+  async #checkParentFolder(): Promise<void> {
+    let details;
+    try {
+      details = await lstat(dirname(this.#path));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw agentXError("CONFIG_INVALID", "The folder of the company rules file could not be checked.");
+    }
+    if (details.isSymbolicLink() || !details.isDirectory()) throw agentXError("CONFIG_INVALID", "The folder of the company rules file must be a plain folder, not a link.");
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (hasModes && uid !== undefined && details.uid !== uid) throw agentXError("CONFIG_INVALID", "The folder of the company rules file must belong to you.");
+    if (hasModes && (details.mode & 0o022) !== 0) throw agentXError("CONFIG_INVALID", "The folder of the company rules file must not be writable by other users (chmod 700).");
+  }
+
   constructor(options: FileCompanyInstructionsOptions) {
     this.#path = options.path;
   }
 
   async current(company: string): Promise<CompanyInstructionsSnapshot | undefined> {
     void company; // one implicit company: the key is not needed
+    await this.#checkParentFolder();
     let handle;
     try {
       handle = await open(this.#path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -120,7 +140,16 @@ export class FileCompanyInstructions implements CompanyInstructionsSource {
       // Anyone who can write the file can change the rules every task runs under.
       if (hasModes && (details.mode & 0o022) !== 0) throw agentXError("CONFIG_INVALID", "The company rules file must not be writable by other users (chmod 600).");
       if (details.size > COMPANY_INSTRUCTIONS_FILE_MAX_BYTES) throw agentXError("CONFIG_INVALID", `The company rules file is larger than ${String(COMPANY_INSTRUCTIONS_FILE_MAX_BYTES)} bytes; the rules are at most ${String(COMPANY_RULE_LIMITS.maxTotalCharacters)} characters.`);
-      const bytes = await handle.readFile();
+      // Read at most one byte past the limit from the open file: the file may have grown since `stat`, and what is read is what is hashed and obeyed.
+      const buffer = Buffer.alloc(COMPANY_INSTRUCTIONS_FILE_MAX_BYTES + 1);
+      let filled = 0;
+      for (;;) {
+        const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, filled);
+        if (bytesRead === 0) break;
+        filled += bytesRead;
+        if (filled > COMPANY_INSTRUCTIONS_FILE_MAX_BYTES) throw agentXError("CONFIG_INVALID", `The company rules file is larger than ${String(COMPANY_INSTRUCTIONS_FILE_MAX_BYTES)} bytes; the rules are at most ${String(COMPANY_RULE_LIMITS.maxTotalCharacters)} characters.`);
+      }
+      const bytes = buffer.subarray(0, filled);
       try {
         return companyInstructionsSnapshot(bytes);
       } catch (error) {

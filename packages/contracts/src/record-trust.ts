@@ -77,11 +77,10 @@ export function unknownSourceAudience(input: { source: string; scope?: string | 
 
 /**
  * The audience a row is given. A source that is registered (`knownSources`: the ids of the registered `team-record-source` adapters and of the recorders built in) keeps the audience it declared. A source
- * that is not registered NEVER gives the whole project: a declared `project` audience becomes the narrowest one (`unknownSourceAudience`), because nothing vouches for what that source's permissions mean.
- * A declared restricted audience is already no wider than that, so it is kept (never widened, and its source-native principals are not re-read as anyone else).
+ * that is not registered gets `unknownSourceAudience`, whatever it declared: its declared audience is ignored entirely, because a declared restricted audience can still name any `acl.source` (so its
+ * principals would be read as another system's accounts), a broad group, or any principal ids. Nothing vouches for what an unknown source's permissions mean.
  */
 export function audienceForSource(input: { source: string; declared: Audience; capturedAt: string }, knownSources: Iterable<string>): Audience {
   if (RecordSourceIdSchema.safeParse(input.source).success && new Set(knownSources).has(input.source)) return input.declared;
-  if (input.declared.kind === "restricted") return input.declared;
   return unknownSourceAudience({ source: input.source, capturedAt: input.capturedAt });
 }

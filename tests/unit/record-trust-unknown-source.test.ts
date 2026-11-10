@@ -40,7 +40,16 @@ describe("audienceForSource", () => {
     expect(audienceForSource({ source: "Not Valid", declared: PROJECT, capturedAt: AT }, ["Not Valid"]).kind).toBe("restricted");
   });
 
-  it("never widens: an unknown source with a restricted audience keeps it, and is never given the project", () => {
-    expect(audienceForSource({ source: "unregistered", declared: restricted("unregistered"), capturedAt: AT }, [])).toEqual(restricted("unregistered"));
+  it("ignores EVERYTHING an unknown source declared, including a restricted ACL that names another source, a broad group and arbitrary principals", () => {
+    const hostile: Audience = { kind: "restricted", acl: { source: "slack", scope: "C-everyone", groups: ["project:members", "company:all"], principals: ["U1", "U2", "U3"], capturedAt: AT, liveCheck: "none" } };
+    const audience = audienceForSource({ source: "evil-src", declared: hostile, capturedAt: AT }, ["slack"]);
+    expect(audience).toEqual({ kind: "restricted", acl: { source: "evil-src", scope: "unknown-source", groups: [MAINTAINERS_GROUP], capturedAt: AT, liveCheck: "none" } });
+    expect(audience.kind === "restricted" && audience.acl.principals).toBeUndefined();
+    expect(JSON.stringify(audience)).not.toContain("slack");
+    expect(JSON.stringify(audience)).not.toContain("project:members");
+  });
+
+  it("gives the narrowest audience for an unknown source that declared a restricted audience under its own name too", () => {
+    expect(audienceForSource({ source: "unregistered", declared: restricted("unregistered"), capturedAt: AT }, [])).toEqual(unknownSourceAudience({ source: "unregistered", capturedAt: AT }));
   });
 });

@@ -14,7 +14,7 @@ afterEach(async () => {
   while (cleanup.length > 0) await rm(cleanup.pop()!, { recursive: true, force: true });
 });
 
-const profile = (extra: Record<string, unknown> = {}): BuildSystemProfile => BuildSystemProfileSchema.parse({ name: "examplebuild", detectorModule: "@example/detect-examplebuild", setupPrograms: ["examplebuild"], keyFileGlobs: ["**/EXAMPLE_BUILD"], ...extra });
+const profile = (extra: Record<string, unknown> = {}): BuildSystemProfile => BuildSystemProfileSchema.parse({ name: "examplebuild", detectorModule: "@example/detect-examplebuild", setupPrograms: ["examplebuild"], ...extra });
 
 async function build(buildSystems?: () => Promise<readonly BuildSystemProfile[]> | readonly BuildSystemProfile[]) {
   const stateDirectory = await mkdtemp(join(tmpdir(), "rovara-p6-"));
@@ -55,10 +55,10 @@ describe("build systems on the local worker machine", () => {
     const { machines, docker } = await build(() => current);
     const first = await machines.start({ machineKey: "ws-change", companyId: COMPANY });
     const before = docker.containers.get(first.machineId)!.labels["rovara.local.config"];
-    current = [profile({ keyFileGlobs: ["**/EXAMPLE_BUILD", "more.lock"] })];
+    current = [profile({ setupPrograms: ["examplebuild", "more"] })];
     const second = await machines.start({ machineKey: "ws-change", companyId: COMPANY });
     const after = docker.containers.get(second.machineId)!.labels["rovara.local.config"];
     expect(after).not.toBe(before);
-    expect(parseBuildSystemProfiles(docker.containers.get(second.machineId)!.environment[BUILD_SYSTEM_PROFILES_ENV])[0]?.keyFileGlobs).toContain("more.lock");
+    expect(parseBuildSystemProfiles(docker.containers.get(second.machineId)!.environment[BUILD_SYSTEM_PROFILES_ENV])[0]?.setupPrograms).toContain("more");
   });
 });

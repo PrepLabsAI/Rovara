@@ -31,7 +31,7 @@ import {
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
 import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
-import { FileCompanyInstructions, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService } from "@agentx/local-adapters";
+import { DocumentAuditSink, FileCompanyInstructions, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService, startAuditCopy, verifyAuditCopy } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import type { BrowserOpener } from "./open-browser.js";
@@ -359,15 +359,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment, registrySecrets);
   const closers: Array<() => Promise<void> | void> = [];
   const configured = (point: PluginPoint): boolean => config.plugins.some((entry) => entry.point === point);
-  // Port lane P6 (item L2): a local append-only audit log, so "audit before add" holds on a laptop. A test that keeps its records in memory has none; a configured `audit-sink` plug-in replaces it.
-  let auditLog: SqliteAuditLog | undefined;
-  if (options.storage !== "memory" && !configured("audit-sink")) {
-    auditLog = SqliteAuditLog.open({ path: join(stateDirectory, AUDIT_DB_FILE_NAME) });
-    const log = auditLog;
-    closers.push(() => log.close());
-  }
   registerCodeDefaults(registry, {
-    ...(auditLog === undefined ? {} : { auditSink: { name: "sqlite", sink: auditLog } }),
+    // Port lane P6 (item L2): the audit record commits with the change, as a row in the same store; a configured `audit-sink` plug-in replaces it.
+    ...(configured("audit-sink") ? {} : { auditSink: { name: "document", sink: new DocumentAuditSink({ store: () => registry.require("storage") }) } }),
     secrets: createLocalSecrets(stateDirectory, options.environment),
     ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     displayName: ownerName(),
@@ -436,7 +430,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   registry.register("company-instructions", "file", new FileCompanyInstructions({ path: join(stateDirectory, COMPANY_INSTRUCTIONS_FILE_NAME) }), { isDefault: true });
 
   options.registerAdapters?.(registry);
-  await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
+  await loadAdapters(config, { registry, stateDirectory, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
   // Owner decision 60 (M1): a configured `secrets` plug-in is the source of truth, so this runs AFTER the config's adapters are loaded: a host is registered when the registry's `secrets` adapter (the plug-in, else
   // Code's) says there is a sign-in, and a host a plug-in or `registerAdapters` already registered under that kind is left alone.
   for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, secrets: registrySecrets, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
@@ -454,6 +448,18 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     registry.register("object-storage", "document", createDocumentObjectStorage(registry.require("storage"), { companyId: config.companyId ?? IMPLICIT_COMPANY_ID }), { isDefault: true });
   }
   registry.seal();
+  // Port lane P6 (item L2): an append-only, hash-chained copy of the committed audit rows (audit.db), fed through the store's change feed. It is never the primary record. Its chain and anchor are checked now.
+  if (options.storage !== "memory" && !configured("audit-sink")) {
+    const copy = SqliteAuditLog.open({ path: join(stateDirectory, AUDIT_DB_FILE_NAME) });
+    const store = registry.require("storage");
+    const copyCompany = config.companyId ?? IMPLICIT_COMPANY_ID;
+    const verification = await verifyAuditCopy({ store, log: copy, companyId: copyCompany });
+    if (!verification.ok) console.error(JSON.stringify({ component: "broker", event: "audit-copy.verify_failed", ...verification }));
+    const feeding = await startAuditCopy({ store, log: copy, companyId: copyCompany, onError: (error) => { console.error(JSON.stringify({ component: "broker", event: "audit-copy.append_failed", error: error instanceof Error ? error.name : "error" })); } });
+    // The feed stops first, then the copy closes, both before the store does.
+    closers.unshift(() => copy.close());
+    if (feeding !== undefined) closers.unshift(() => feeding.stop());
+  }
   // A `secrets` plug-in lets go of what it holds when the process stops.
   closers.push(() => registry.require("secrets").close?.());
 

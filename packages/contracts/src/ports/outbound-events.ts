@@ -62,8 +62,8 @@ export const OutboundEventSchema = z.object({
   /** What the event is about, in the sender's words: usually `{ kind: "task", id }`. */
   subject: z.object({ kind: z.string().regex(/^[a-z][a-z0-9_.-]{0,39}$/u), id: ChannelOpaqueIdSchema }).strict().optional(),
   createdAt: z.string().datetime(),
-  /** Facts for the receiver, as flat JSON. Never a secret, a token or a document. */
-  data: z.record(z.string(), z.json()).refine((data) => dataSize(data) <= OUTBOUND_EVENT_DATA_MAX_BYTES, `data is at most ${String(OUTBOUND_EVENT_DATA_MAX_BYTES)} bytes`).default({}),
+  /** Facts for the receiver, as FLAT JSON: names with a text, number, true/false or null value, no nesting. Never a secret, a token or a document. */
+  data: z.record(z.string().min(1).max(100), z.union([z.string(), z.number().finite(), z.boolean(), z.null()])).refine((data) => dataSize(data) <= OUTBOUND_EVENT_DATA_MAX_BYTES, `data is at most ${String(OUTBOUND_EVENT_DATA_MAX_BYTES)} bytes`).default({}),
   artifacts: z.array(OutboundArtifactRefSchema).max(OUTBOUND_EVENT_ARTIFACTS_MAX).default([]),
 }).strict();
 export type OutboundEvent = z.infer<typeof OutboundEventSchema>;

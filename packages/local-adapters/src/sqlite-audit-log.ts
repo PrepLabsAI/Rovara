@@ -1,40 +1,31 @@
-// Port lane P6 (item L2, owner decision 60): Code's `audit-sink` adapter, a small local append-only audit log on SQLite. It makes the rule "audit before add" (lessons design M6) hold in Code
-// as it does in Cloud: a change that is audited is written to the log, durably, before the change is made. Code's default sink writes nothing, so without this the rule is either
-// impossible or silently skipped.
+// Port lane P6 (item L2, owner decision 60): the append-only, hash-chained COPY of Code's audit trail, in its own SQLite file (audit.db). It is not the audit sink: the record that commits with a change is
+// the `AUDIT#` row `DocumentAuditSink` stages into the caller's transaction. This copy is fed from COMMITTED rows only (`startAuditCopy`, through the store's change feed), so it never holds a record of a
+// change that did not happen.
 //
-// What it is: one table, `audit_events`, that only grows. SQLite triggers refuse every UPDATE and DELETE (the log cannot be changed through this connection or any other that opens the
-// file with these triggers present; a person with the file and a SQLite shell can still drop them, which is why each row also holds a hash of the one before it and `verify()` checks the
-// chain). It is a local record for the machine's owner, not a tamper-proof ledger: Cloud's ledger, its verifier and its outbox stay Cloud only (decision 41).
-//
-// How it meets the port: `record` writes the event and resolves when it is durable (default `synchronous = FULL`). `stage` writes the event too, BEFORE the caller's transaction is made
-// (the audit comes first), and returns no transaction steps, because this sink writes somewhere else. So a change that is later refused still leaves its record: an attempt is audited
-// as well as a success. Recording an `eventId` twice records it once. A write that fails throws, and the change is not made.
+// What it is: one table, `audit_events`, that only grows. SQLite triggers refuse every UPDATE and DELETE (the log cannot be changed through this connection or any other that opens the file with these
+// triggers present; a person with the file and a SQLite shell can still drop them). Each row holds a hash of the one before it, and `verify()` checks the chain and, given the anchor the feeder keeps in the
+// document store (the row count and newest hash), that no newer rows were cut off. It is a local record for the machine's owner, not a tamper-proof ledger: Cloud's ledger, its verifier and its outbox stay
+// Cloud only (decision 41).
 import { createHash } from "node:crypto";
-import {
-  canonicalJson,
-  type AuditEvent,
-  type AuditSink,
-  type TransactItem,
-} from "@agentx/contracts";
-import { SqliteDatabase, storableText, type SqliteDatabaseOptions, type SqliteRow } from "./sqlite-database.js";
+import { canonicalJson, type AuditEvent } from "@agentx/contracts";
+import { AuditLogError, auditDigest, checkAuditEvent, storedAuditEvent } from "./audit-event.js";
+import { SqliteDatabase, type SqliteDatabaseOptions, type SqliteRow } from "./sqlite-database.js";
 
-const SCHEMA_VERSION = "1";
+export { AUDIT_DETAILS_MAX_BYTES, AuditLogError } from "./audit-event.js";
+
+const SCHEMA_VERSION = "2";
 const GENESIS_HASH = "0".repeat(64);
-const ACTION = /^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$/;
-/** The most bytes of an event's details. A record is facts for a reader, not a document store. */
-export const AUDIT_DETAILS_MAX_BYTES = 16 * 1_024;
-
-/** The log could not take the event (a bad event, or a failed write). The change it was to record must not be made. */
-export class AuditLogError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
-    super(message, options);
-    this.name = "AuditLogError";
-  }
-}
 
 export interface StoredAuditEvent extends AuditEvent {
   /** Its place in the log, from 1. */
   seq: number;
+  hash: string;
+}
+
+export interface AuditAnchor {
+  /** How many rows the feeder had appended. */
+  count: number;
+  /** The hash of the newest of them. */
   hash: string;
 }
 
@@ -44,10 +35,8 @@ export interface AuditVerification {
   checked: number;
   /** The first row whose hash or link does not match, when not ok. */
   brokenAt?: number;
-}
-
-export interface SqliteAuditLogOptions {
-  database: SqliteDatabase;
+  /** Set when the chain is intact but does not agree with the anchor: rows were cut off, or the anchored row differs. */
+  anchor?: "behind" | "mismatch";
 }
 
 export interface OpenSqliteAuditLogOptions extends Omit<SqliteDatabaseOptions, "path"> {
@@ -73,39 +62,17 @@ function rowEvent(row: SqliteRow): StoredAuditEvent {
   return event;
 }
 
-function checked(event: AuditEvent): void {
-  const text = (value: unknown, label: string, max: number): void => {
-    if (typeof value !== "string" || value.length === 0 || value.length > max || !storableText(value)) throw new AuditLogError(`the audit event's ${label} is not usable`);
-  };
-  text(event.eventId, "eventId", 256);
-  text(event.companyId, "companyId", 128);
-  text(event.at, "time", 64);
-  if (Number.isNaN(Date.parse(event.at))) throw new AuditLogError("the audit event's time is not a time");
-  text(event.actor?.id, "actor", 256);
-  if (event.actor.type !== "person" && event.actor.type !== "agent" && event.actor.type !== "system") throw new AuditLogError("the audit event's actor type is not known");
-  text(event.action, "action", 128);
-  if (!ACTION.test(event.action)) throw new AuditLogError("the audit event's action is dotted lower-case words");
-  if (event.details !== undefined && Buffer.byteLength(JSON.stringify(event.details)) > AUDIT_DETAILS_MAX_BYTES) throw new AuditLogError(`the audit event's details are over ${String(AUDIT_DETAILS_MAX_BYTES)} bytes`);
-}
-
-export class SqliteAuditLog implements AuditSink {
+export class SqliteAuditLog {
   readonly #db: SqliteDatabase;
-  readonly #owned: boolean;
 
-  private constructor(database: SqliteDatabase, owned: boolean) {
+  private constructor(database: SqliteDatabase) {
     this.#db = database;
-    this.#owned = owned;
     this.#migrate();
   }
 
-  /** Opens (and creates) the log's own database file. */
+  /** Opens (and creates) the copy's own database file. */
   static open(options: OpenSqliteAuditLogOptions): SqliteAuditLog {
-    return new SqliteAuditLog(new SqliteDatabase(options), true);
-  }
-
-  /** Uses a connection the caller owns; `close()` leaves it open. */
-  static over(options: SqliteAuditLogOptions): SqliteAuditLog {
-    return new SqliteAuditLog(options.database, false);
+    return new SqliteAuditLog(new SqliteDatabase(options));
   }
 
   #migrate(): void {
@@ -121,6 +88,7 @@ export class SqliteAuditLog implements AuditSink {
           action TEXT NOT NULL,
           subject TEXT,
           details TEXT,
+          digest TEXT NOT NULL,
           prev_hash TEXT NOT NULL,
           hash TEXT NOT NULL
         );
@@ -134,29 +102,28 @@ export class SqliteAuditLog implements AuditSink {
     });
   }
 
-  /** Appends the event; a second call with the same `eventId` appends nothing. Resolves (returns) when the row is committed. */
-  #append(event: AuditEvent): void {
-    checked(event);
-    // The stored form is exactly what the hash covers: keys in a fixed order, no undefined.
-    const stored: AuditEvent = {
-      eventId: event.eventId,
-      companyId: event.companyId,
-      at: event.at,
-      actor: { type: event.actor.type, id: event.actor.id },
-      action: event.action,
-      ...(event.subject === undefined ? {} : { subject: event.subject }),
-      ...(event.details === undefined ? {} : { details: event.details }),
-    };
+  /**
+   * Appends a committed event. An event id seen before with the same facts appends nothing (the feed delivers at least once); the same id with other facts throws, because the primary refuses that and a
+   * copy that disagrees has been tampered with.
+   */
+  append(event: AuditEvent): void {
+    checkAuditEvent(event);
+    const stored = storedAuditEvent(event);
+    const digest = auditDigest(stored);
     try {
       this.#db.write(() => {
-        if (this.#db.get("SELECT 1 AS present FROM audit_events WHERE event_id = ?", stored.eventId) !== undefined) return;
+        const existing = this.#db.get("SELECT digest FROM audit_events WHERE event_id = ?", stored.eventId);
+        if (existing !== undefined) {
+          if (existing.digest !== digest) throw new AuditLogError("the audit copy already holds this event id for other facts");
+          return;
+        }
         const last = this.#db.get("SELECT hash FROM audit_events ORDER BY seq DESC LIMIT 1");
         const previous = last === undefined ? GENESIS_HASH : String(last.hash);
         this.#db.run(
-          "INSERT INTO audit_events (event_id, company_id, at, actor, action, subject, details, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO audit_events (event_id, company_id, at, actor, action, subject, details, digest, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           stored.eventId, stored.companyId, stored.at, JSON.stringify(stored.actor), stored.action,
           stored.subject === undefined ? null : JSON.stringify(stored.subject), stored.details === undefined ? null : JSON.stringify(stored.details),
-          previous, eventHash(previous, stored),
+          digest, previous, eventHash(previous, stored),
         );
       });
     } catch (error) {
@@ -164,18 +131,11 @@ export class SqliteAuditLog implements AuditSink {
     }
   }
 
-  stage(event: AuditEvent): readonly TransactItem[] {
-    this.#append(event);
-    return [];
-  }
-
-  record(event: AuditEvent): Promise<void> {
-    try {
-      this.#append(event);
-      return Promise.resolve();
-    } catch (error) {
-      return Promise.reject(error instanceof Error ? error : new AuditLogError("the audit log could not be written"));
-    }
+  /** The number of rows and the newest hash: what the feeder anchors. */
+  head(): AuditAnchor {
+    const count = this.#db.get("SELECT COUNT(*) AS n FROM audit_events");
+    const last = this.#db.get("SELECT hash FROM audit_events ORDER BY seq DESC LIMIT 1");
+    return { count: Number(count?.n ?? 0), hash: last === undefined ? GENESIS_HASH : String(last.hash) };
   }
 
   /** A company's events, oldest first, after `afterSeq` (default: from the start). */
@@ -184,20 +144,29 @@ export class SqliteAuditLog implements AuditSink {
     return this.#db.all("SELECT * FROM audit_events WHERE company_id = ? AND seq > ? ORDER BY seq LIMIT ?", options.companyId, options.afterSeq ?? 0, limit).map(rowEvent);
   }
 
-  /** Checks every row's hash and its link to the row before. */
-  verify(): AuditVerification {
+  /**
+   * Checks every row's hash and its link to the row before. With an `anchor`, also that the log is not shorter than the anchor says and that the row the anchor names has the hash it recorded. A log that
+   * is LONGER than the anchor is fine: the feeder writes the anchor after the rows.
+   */
+  verify(anchor?: AuditAnchor): AuditVerification {
     let previous = GENESIS_HASH;
     let count = 0;
+    let anchored: string | undefined;
     for (const row of this.#db.all("SELECT * FROM audit_events ORDER BY seq")) {
       const { seq, hash, ...event } = rowEvent(row);
       count += 1;
       if (row.prev_hash !== previous || hash !== eventHash(previous, event)) return { ok: false, checked: count, brokenAt: seq };
       previous = hash;
+      if (anchor !== undefined && count === anchor.count) anchored = hash;
+    }
+    if (anchor !== undefined && anchor.count > 0) {
+      if (count < anchor.count) return { ok: false, checked: count, anchor: "behind" };
+      if (anchored !== anchor.hash) return { ok: false, checked: count, anchor: "mismatch" };
     }
     return { ok: true, checked: count };
   }
 
   close(): void {
-    if (this.#owned) this.#db.close();
+    this.#db.close();
   }
 }

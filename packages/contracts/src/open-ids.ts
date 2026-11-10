@@ -31,30 +31,46 @@ export function isBuiltInEventSource(source: string): boolean {
   return (EVENT_SOURCES as readonly string[]).includes(source);
 }
 
+export interface SkippedEventSource {
+  source: string;
+  /** `built_in_id`: the id belongs to a built-in source (a Linear or Jira tracker's natural kind), so its registration is not used; `duplicate`: another registration has it; `invalid`: the id or its types are not well formed. */
+  reason: "built_in_id" | "duplicate" | "invalid";
+}
+
 /**
- * The event sources a trigger may name: the built-in ones and the registered ones. A registration that reuses a built-in id, or another registration's, throws (a plug-in adds a source; it cannot take over
- * `github`). The result is a map from source id to its event types and their filter keys.
+ * The event sources a trigger may name: the built-in ones and the registered ones. One registration that cannot be used is SKIPPED and reported, it never fails the others (a tracker whose kind is `jira`
+ * must not make every trigger check fail): a plug-in adds a source, it cannot take over `github`, and the built-in entry of that name stays the one in force. Returns a map from source id to its event types
+ * and their filter keys, and the registrations that were skipped (for a log line or the admin page).
  */
-export function eventSourceCatalog(registered: readonly RegisteredEventSource[]): ReadonlyMap<string, Readonly<Record<string, readonly string[]>>> {
-  const catalog = new Map<string, Readonly<Record<string, readonly string[]>>>();
+export function eventSourceCatalog(registered: readonly RegisteredEventSource[]): { sources: ReadonlyMap<string, Readonly<Record<string, readonly string[]>>>; skipped: SkippedEventSource[] } {
+  const sources = new Map<string, Readonly<Record<string, readonly string[]>>>();
+  const skipped: SkippedEventSource[] = [];
   for (const source of EVENT_SOURCES) {
     const types: Record<string, readonly string[]> = {};
     for (const type of EVENT_TYPES[source]) types[type] = Object.hasOwn(EVENT_FILTER_KEYS, `${source}:${type}`) ? EVENT_FILTER_KEYS[`${source}:${type}`]! : [];
-    catalog.set(source, types);
+    sources.set(source, types);
   }
   for (const entry of registered) {
-    const source = OpenSourceIdSchema.parse(entry.source);
-    if (catalog.has(source)) throw new Error(`the event source ${source} is already taken`);
-    catalog.set(source, EventSourceRegistrationSchema.parse({ types: entry.types }).types);
+    const id = OpenSourceIdSchema.safeParse(entry.source);
+    const types = EventSourceRegistrationSchema.safeParse({ types: entry.types });
+    if (!id.success || !types.success) {
+      skipped.push({ source: id.success ? id.data : "invalid", reason: "invalid" });
+      continue;
+    }
+    if (sources.has(id.data)) {
+      skipped.push({ source: id.data, reason: isBuiltInEventSource(id.data) ? "built_in_id" : "duplicate" });
+      continue;
+    }
+    sources.set(id.data, types.data.types);
   }
-  return catalog;
+  return { sources, skipped };
 }
 
 /**
  * Why a trigger's event spec is not allowed, in plain words; `[]` when it is. An unknown source, an unknown type, a filter key the type does not take and a filter with too many values are refused.
  */
 export function checkEventTrigger(spec: { source: string; type: string; filter?: Readonly<Record<string, readonly string[]>> | undefined }, registered: readonly RegisteredEventSource[]): string[] {
-  const types = eventSourceCatalog(registered).get(spec.source);
+  const types = eventSourceCatalog(registered).sources.get(spec.source);
   if (types === undefined) return [`there is no event source called ${spec.source}`];
   const keys = Object.hasOwn(types, spec.type) ? types[spec.type] : undefined;
   if (keys === undefined) return [`${spec.source} has no ${spec.type} event; it has ${Object.keys(types).join(", ")}`];

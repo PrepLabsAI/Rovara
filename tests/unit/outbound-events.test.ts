@@ -59,6 +59,10 @@ describe("an outbound event", () => {
     expect(OutboundEventSchema.safeParse(event({ type: "PlanReady" })).success).toBe(false);
     expect(OutboundEventSchema.safeParse(event({ id: "not-an-id" })).success).toBe(false);
     expect(OutboundEventSchema.safeParse(event({ data: { text: "x".repeat(OUTBOUND_EVENT_DATA_MAX_BYTES) } })).success).toBe(false);
+    // data is FLAT: a nested object or a list is not a value.
+    expect(OutboundEventSchema.safeParse(event({ data: { nested: { a: 1 } } as never })).success).toBe(false);
+    expect(OutboundEventSchema.safeParse(event({ data: { list: [1, 2] } as never })).success).toBe(false);
+    expect(OutboundEventSchema.safeParse(event({ data: { s: "x", n: 1, b: true, z: null } })).success).toBe(true);
     expect(OutboundEventSchema.safeParse(event({ artifacts: [{ kind: "plan", id: "p", url: "https://user:pw@example.test/x" }] })).success).toBe(false);
     expect(OutboundEventSchema.safeParse(event({ artifacts: [{ kind: "plan", id: "p", url: "http://example.test/x" }] })).success).toBe(false);
     expect(OutboundEventSchema.safeParse(event({ artifacts: Array.from({ length: 51 }, (_, i) => ({ kind: "plan", id: `p${String(i)}` })) })).success).toBe(false);
@@ -146,7 +150,7 @@ describe("publishing to the registered adapters", () => {
     const result = await publishOutboundEvent(registry, event());
     expect(result.delivered).toEqual(["all"]);
     expect(result.skipped).toEqual(["merged-only"]);
-    expect(result.failed).toEqual([{ adapter: "broken", error: "TypeError" }]);
+    expect(result.failed).toEqual([{ adapter: "broken", error: "delivery_failed" }]);
     expect(JSON.stringify(result.failed)).not.toContain("secret-path");
     expect(all.received).toHaveLength(1);
     expect(merged.received).toHaveLength(0);
@@ -173,11 +177,34 @@ describe("publishing to the registered adapters", () => {
     expect(result.failed).toEqual([]);
   });
 
-  it("an adapter whose accepts throws is skipped, not failed", async () => {
+  it("an adapter whose accepts throws is a failure, not a skip, and its deliver is never called", async () => {
     const registry = createAdapterRegistry();
     registry.register("outbound-events", "odd", { accepts: () => { throw new Error("x"); }, deliver: async () => { throw new Error("never called"); } });
     const result = await publishOutboundEvent(registry, event());
-    expect(result.skipped).toEqual(["odd"]);
+    expect(result.skipped).toEqual([]);
+    expect(result.failed).toEqual([{ adapter: "odd", error: "accepts_failed" }]);
+  });
+
+  it("an adapter that hangs is cut off at the time limit and reported as a timeout, and the others still deliver", async () => {
+    const registry = createAdapterRegistry();
+    const fine = recorder();
+    registry.register("outbound-events", "a-hangs", { deliver: () => new Promise<void>(() => undefined) });
+    registry.register("outbound-events", "b-fine", fine);
+    const started = Date.now();
+    const result = await publishOutboundEvent(registry, event(), { timeoutMs: 50 });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result.failed).toEqual([{ adapter: "a-hangs", error: "timeout" }]);
+    expect(result.delivered).toEqual(["b-fine"]);
+  });
+
+  it("reports a fixed kind, never the adapter's own error name or text, even when the adapter names its error after a secret", async () => {
+    const registry = createAdapterRegistry();
+    const sneaky = Object.assign(new Error("token=abc"), { name: "https://user:pw@hook.example.test/secret" });
+    registry.register("outbound-events", "sneaky", { deliver: async () => { throw sneaky; } });
+    registry.register("outbound-events", "sync-throw", { deliver: () => { throw sneaky; } });
+    const result = await publishOutboundEvent(registry, event());
+    expect(result.failed).toEqual([{ adapter: "sneaky", error: "delivery_failed" }, { adapter: "sync-throw", error: "delivery_failed" }]);
+    expect(JSON.stringify(result.failed)).not.toContain("secret");
   });
 
   it("loads from a config entry like any other point", async () => {

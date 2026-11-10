@@ -14,7 +14,7 @@ import {
   type CompanyInstructionsSource,
 } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
-import { FileCompanyInstructions, companyInstructionsSnapshot, parseCompanyInstructionsText } from "../../packages/local-adapters/src/company-instructions-file.js";
+import { COMPANY_INSTRUCTIONS_FILE_MAX_BYTES, FileCompanyInstructions, companyInstructionsSnapshot, parseCompanyInstructionsText } from "../../packages/local-adapters/src/company-instructions-file.js";
 import * as pluginModule from "../../packages/local-adapters/src/company-instructions-plugin.js";
 import { fakeCompanyInstructionsSource } from "../support/company-instructions-fake.js";
 
@@ -132,6 +132,36 @@ describe("FileCompanyInstructions", () => {
   });
 });
 
+describe("FileCompanyInstructions: bounds and the folder it sits in", () => {
+  it("reads a file of exactly the largest size, and refuses one byte more", async () => {
+    const dir = await folder();
+    const limit = COMPANY_INSTRUCTIONS_FILE_MAX_BYTES;
+    const exact = join(dir, "exact.md");
+    await writeFile(exact, `# ${"t".repeat(limit - 3)}\n`.slice(0, limit), { mode: 0o600 });
+    expect(await new FileCompanyInstructions({ path: exact }).current(IMPLICIT_COMPANY_ID)).toBeUndefined();
+    const over = join(dir, "over.md");
+    await writeFile(over, `# ${"t".repeat(limit - 2)}\n`.slice(0, limit + 1), { mode: 0o600 });
+    await expect(new FileCompanyInstructions({ path: over }).current(IMPLICIT_COMPANY_ID)).rejects.toThrow(/larger than/);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a file whose folder others can write, or that is a link (anyone who can write there can swap the file)", async () => {
+    const dir = await folder();
+    const path = join(dir, COMPANY_INSTRUCTIONS_FILE_NAME);
+    await writeFile(path, "- Rule.\n", { mode: 0o600 });
+    await chmod(dir, 0o777);
+    await expect(new FileCompanyInstructions({ path }).current(IMPLICIT_COMPANY_ID)).rejects.toThrow(/folder .* not be writable/);
+    await chmod(dir, 0o775);
+    await expect(new FileCompanyInstructions({ path }).current(IMPLICIT_COMPANY_ID)).rejects.toThrow(/folder .* not be writable/);
+    await chmod(dir, 0o700);
+    expect((await new FileCompanyInstructions({ path }).current(IMPLICIT_COMPANY_ID))?.rules).toHaveLength(1);
+    const real = await folder();
+    await writeFile(join(real, COMPANY_INSTRUCTIONS_FILE_NAME), "- Rule.\n", { mode: 0o600 });
+    const linked = join(dir, "linked");
+    await symlink(real, linked);
+    await expect(new FileCompanyInstructions({ path: join(linked, COMPANY_INSTRUCTIONS_FILE_NAME) }).current(IMPLICIT_COMPANY_ID)).rejects.toThrow(/plain folder/);
+  });
+});
+
 describe("the file plug-in", () => {
   const importer: ModuleImporter = async (specifier) => {
     if (specifier !== "@agentx/local-adapters/company-instructions") throw new Error("no such module");
@@ -146,6 +176,14 @@ describe("the file plug-in", () => {
     await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "company-instructions", name: "file", module: "@agentx/local-adapters/company-instructions", settings: { path } }] }), { registry, importModule: importer });
     const source = registry.require("company-instructions");
     expect((await source.current(IMPLICIT_COMPANY_ID))?.rules[0]?.text).toBe("From the plug-in.");
+  });
+
+  it("defaults to the state folder the install runs from, not the home folder", async () => {
+    const dir = await folder();
+    await writeFile(join(dir, COMPANY_INSTRUCTIONS_FILE_NAME), "- From the state folder.\n", { mode: 0o600 });
+    const registry = createAdapterRegistry();
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "company-instructions", name: "file", module: "@agentx/local-adapters/company-instructions" }] }), { registry, importModule: importer, stateDirectory: dir });
+    expect((await registry.require("company-instructions").current(IMPLICIT_COMPANY_ID))?.rules[0]?.text).toBe("From the state folder.");
   });
 
   it("refuses a setting it does not know", async () => {

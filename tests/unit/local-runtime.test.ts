@@ -57,7 +57,7 @@ describe("rovara up runtime", () => {
       admission: ["allow-all"],
       "model-keys": ["local"],
       // Port lane P6: the local audit log and the company rules file are the defaults.
-      "audit-sink": ["sqlite"],
+      "audit-sink": ["document"],
       "company-instructions": ["file"],
       secrets: ["local"],
     });
@@ -76,6 +76,8 @@ describe("rovara up runtime", () => {
     expect(second?.version).not.toBe(first?.version);
     const audit = runtime.registry.require("audit-sink");
     await audit.record({ eventId: "evt-1", companyId: IMPLICIT_COMPANY_ID, at: "2026-11-10T00:00:00.000Z", actor: { type: "system", id: "test" }, action: "lessons.added" });
+    // The record is a row in the store (it commits with a change); audit.db is the append-only copy of committed rows, fed through the change feed.
+    expect((await runtime.registry.require("storage").get({ pk: `ORG#${IMPLICIT_COMPANY_ID}#AUDIT`, sk: "EVENT#evt-1" }))?.action).toBe("lessons.added");
     expect((await lstat(join(stateDirectory, "audit.db"))).mode & 0o777).toBe(0o600);
   });
 

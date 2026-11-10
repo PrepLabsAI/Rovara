@@ -197,7 +197,7 @@ Each has a Code default (`policy-defaults.ts`) and a suite in `policy-conformanc
 | Seam | Code default | Cloud fills it with |
 | --- | --- | --- |
 | `Admission` (`admit`, `stage`, `settle`, `release`; every request has an `idempotencyKey`) | allow everything, hold nothing | budgets and money limits, taken inside the caller's transaction (`stage`) |
-| `AuditSink` (`stage` steps for the caller's transaction, `record`) | `rovara up`: a local append-only log on SQLite (`audit.db`, lane P6); the bare registry default writes nothing | the audit ledger's outbox |
+| `AuditSink` (`stage` steps for the caller's transaction, `record`) | `rovara up`: `DocumentAuditSink`, an `AUDIT#` row in the same store (lane P6); the bare registry default writes nothing | the audit ledger's outbox |
 | `Approvers` (`requirement`, `verify` a proof) | the local machine owner by session, or a repository collaborator with write permission by comment (decision 45.3); one approver, self-approval allowed | a second person, the browser rule |
 | `IdentityProvider` (`authenticate`, `resolveExternalAccount`, `getPrincipal`; optional `beginSignIn`, `completeSignIn`, `signOut`, `listMembers`, `accountsOf`) | the local owner (lists itself, its linked accounts), plus outside accounts the owner linked in config | members and single sign-on |
 | `Metering` (`price`, `record`; every entry has an `entryId`, recorded once) | tokens times a price table | proxy key spend |
@@ -215,27 +215,33 @@ transaction, keyed on `approvalProofKey(proof)` (a hash of method, token and req
 An outside account is an `ExternalAccountRef` (`provider`, `tenant`, `accountId`; `ExternalAccountRefSchema`); no core type names Slack or GitHub. This is the one shape for every new surface (lane P3, item I2): `externalAccountOfActor` / `actorOfExternalAccount` convert a chat `ActorRef`, `externalAccountOfHostAccount` converts a code host login that has a stable id, and `readExternalAccount` reads the legacy `slackUserId` field as an account of the `slack` provider (the neutral `account` wins; two that disagree give no answer, and `DeveloperSummarySchema` refuses such a pair). A sign-in method is an open id (`SignInMethodIdSchema`); `DeveloperSignInMethodSchema` stays as the closed list of `BUILT_IN_SIGN_IN_METHODS` for the hosted sign-in server. The code host
 adapter only FETCHES a comment (`CodeHost.comments`: text, author, times, the change request it is on; the author's permission comes from `standing`). Code's default approvers read it through `fetchComment` and the request's thread through `commentContext`, and the checks are Rovara's (owner decision 66, `core/pr-commands/comment-checks.ts`): the right thread, written after the version was posted, never edited, `/rovara approve <version>` naming the version that waits, not a bot (`isBot`) or Rovara's own reply, a writer.
 
-### Audit log and "audit before add" (lane P6, item L2)
+### Audit trail and "audit before add" (lane P6, item L2)
 
-`rovara up` registers `SqliteAuditLog` (`packages/local-adapters/src/sqlite-audit-log.ts`, plug-in `@agentx/local-adapters/audit-sink`) as the `audit-sink` default, in `~/.rovara/audit.db` (mode 0600, its own file). It
-is one table that only grows: SQLite triggers refuse every UPDATE and DELETE, and each row holds the hash of the row before it, so `verify()` finds a row that was changed or removed by someone who dropped the triggers. It is a
-local record for the machine's owner, not a tamper-proof ledger (Cloud's ledger, its verifier and its outbox stay Cloud only, decision 41). **The rule for callers:** a change that must be audited calls `stage(event)` (or `record(event)`) and
-only then makes the change. The local log writes the row inside `stage`, durably, before the caller's transaction exists, and returns no transaction steps; so an attempt that is later refused still leaves a record, and a write that fails
-throws, so the change is not made. Recording an `eventId` twice records it once. A caller must not assume the audit row commits in its transaction: that holds for Cloud's sink only. A test that keeps its records in memory (`storage: "memory"`) gets no log; a configured `audit-sink` plug-in replaces it.
+**The audit record commits with the change.** `rovara up` registers `DocumentAuditSink` (`packages/local-adapters/src/document-audit-sink.ts`, plug-in `@agentx/local-adapters/audit-sink`) as the `audit-sink` default. `stage(event)` returns ONE `put`
+step for the caller's own `DocumentStore.transact`: an `AUDIT#` row (key: the company and the event id) in the same store as the change (state.db). So a change that is refused, lost to a competing writer (a losing approval, a lost merge claim),
+or interrupted before its transaction commits leaves **no** row, and a change that commits always leaves one; the rule "audit before add" holds because the record and the add are one atomic step. The step's condition is "absent, or the same
+facts" (who, what, on what, with which details; the time is not part of it): a retry of a committed event is harmless, and an event id reused for **different** facts makes the step fail, so the caller's transaction is refused rather than the
+new facts being silently dropped. `record(event)` is the same single write for a caller with no transaction, and it rejects a reused id. A bad event throws before anything is written.
+
+**The copy.** `audit.db` (mode 0600, its own file) is an append-only, hash-chained COPY (`SqliteAuditLog`), fed from COMMITTED `AUDIT#` rows only, through the store's change feed (`startAuditCopy`); it is never the primary record. SQLite
+triggers refuse every UPDATE and DELETE, each row holds the hash of the one before it, and after each batch the feeder writes an anchor (row count and newest hash) into the store, apart from audit.db. `rovara up` checks the chain and the anchor at
+start (`verifyAuditCopy`) and writes a `audit-copy.verify_failed` line to stderr if rows were changed, removed or cut off. It is a local record for the machine's owner, not a tamper-proof ledger (Cloud's ledger, its verifier and its outbox stay Cloud
+only, decision 41). A test that keeps its records in memory (`storage: "memory"`) has the `AUDIT#` rows and no copy; a configured `audit-sink` plug-in replaces both.
 
 ### Company instructions (lane P6, item L1)
 
 `company-instructions` is a read-only point that holds one adapter: `current(company)` returns the company's latest approved rules as `{ version, rules: [{ text, priority }] }` (priority `required` or `preferred`), or `undefined` for none. It is
 the shape of Cloud's `CompanyInstructionsSource` (lane I2) so Cloud's port is a copy of this one; the sizes (30 rules, 600 characters each, 12,000 in all) and the snapshot schema are in `standing-instructions.ts`. There is no write method.
-Code's adapter (`FileCompanyInstructions`, plug-in `@agentx/local-adapters/company-instructions`, the default of `rovara up`) reads `~/.rovara/company-instructions.md` at every call: bullets under `## Required` and `## Preferred`, a bullet with no
-heading is Required, a line it cannot place is refused (naming the line) instead of being dropped, and the file must be a plain file owned by the user and not writable by others. The version is the SHA-256 of the file's bytes, so it is also the hash a task records.
+Code's adapter (`FileCompanyInstructions`, plug-in `@agentx/local-adapters/company-instructions`, the default of `rovara up`) reads `company-instructions.md` in the state folder (`~/.rovara` by default; a plug-in's default is the state folder the install runs from) at every call: bullets under `## Required` and `## Preferred`, a bullet with no
+heading is Required, a line it cannot place is refused (naming the line) instead of being dropped, and the file must be a plain file owned by the user and not writable by others, in a folder that is a real folder owned by the user and not writable by group or others. At most 64 KiB are read from the open file. The version is the SHA-256 of the file's bytes, so it is also the hash a task records.
 The file is outside every repository on purpose: a repository's writers cannot edit the company's rules.
 
 ### Team-record sources: the unknown-source rule (lane P6, item T1)
 
 The `team-record-source` point is still a name only; its interface is defined when the team record moves to the plug-in. The rule it must keep is already shared (`record-trust.ts`): a source id that nothing registered is never read as
-"everyone in the project". `audienceForSource(row, knownSources)` keeps the audience a registered source declared; for an unregistered source a declared `project` audience becomes `unknownSourceAudience` (restricted to the project's
-maintainers, `MAINTAINERS_GROUP`), and a declared restricted audience is kept, never widened. `knownSources` is the ids of the registered `team-record-source` adapters and of the recorders built in.
+"everyone in the project". `audienceForSource(row, knownSources)` keeps the audience a registered source declared. For ANY unregistered source it returns `unknownSourceAudience` (restricted to the project's maintainers,
+`MAINTAINERS_GROUP`) and ignores what the source declared, even a restricted audience: a declared ACL can name any `acl.source` (so its principals would be read as another system's accounts), a broad group or any principal ids.
+`knownSources` is the ids of the registered `team-record-source` adapters and of the recorders built in.
 
 ## Model key store
 
@@ -433,14 +439,18 @@ A `build-system` adapter is a way of building code that the built-in detectors d
 
 | Field | What it is for | Where it ends up |
 | --- | --- | --- |
-| `detectorModule` | A package name the worker image installs, or an absolute `.js`/`.mjs` path inside the image. It exports `detectors: [{ name, run }]` (`run` is the worker's `Detector`). | The worker runs them after the built-in detectors, in the same thread and under the same limits. A name may not be a built-in's. A module that cannot be loaded adds a fixed-words note and nothing else. |
-| `setupPrograms` | Program names the setup governor groups into steps by subcommand (`examplebuild build //a:b` is its own step, as `npm ci` is). | `setup-agent-journal.ts`, set once at worker boot. |
-| `keyFileGlobs` | Files whose content decides what a saved environment holds. | The job's existing `detectorGlobs` and the broker's own key (`detectorGlobsWithBuildSystems`), so both sides hash the same files. The worker holds no copy. |
+| `detectorModule` | A package name the worker image installs, or an absolute `.js`/`.mjs` path inside the image. It exports `detectors: [{ name, run }]` (`run` is the worker's `Detector`). | The worker runs them after the built-in detectors, in the detector thread under its wall clock and memory limit. A name may not be a built-in's. A module that cannot be loaded adds a fixed-words note and nothing else. |
+| `setupPrograms` | Program names (never a shell such as `sh` or `bash`, or `env`, `xargs`, `sudo`) the setup governor groups into steps by subcommand (`examplebuild build //a:b` is its own step, as `npm ci` is). | `setup-agent-journal.ts`, set once at worker boot. |
+| `keyFileGlobs` | Files whose content decides what a saved environment holds. | **Not used yet, and refused when non-empty** (`BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED` is false): Code has no saved-environment job builder or environment key yet. When it does, `detectorGlobsWithBuildSystems` puts them in the job's `detectorGlobs` and in the broker's own key, so both sides hash the same files (register: DEFERRED-CHECKS, BUILD-SYSTEM-KEYFILE-GLOBS). |
 
 **It does not travel in a job.** A module path in a job would let every job name code for the worker to load. The profile is the operator's, like the worker image: the machine launcher (`DockerWorkerMachines`, option `buildSystems`,
 read from the registry with `collectBuildSystemProfiles`) puts the profiles into the worker's start-up environment as `ROVARA_BUILD_SYSTEMS`, a name a machine spec cannot set. The worker reads it once at boot and refuses to start on a value it cannot
 read. The worker also refuses an absolute module path that lies inside its workspace, where repositories are checked out. No line of the worker job (`operation.ts`, `protocol.ts`) is added or changed (decision 65). A profile that is not valid,
-or that carries a name other than the adapter's, stops the machine from starting. The internal build-system detector stays an optional plug-in package outside the core (decision 45.11).
+or that carries a name other than the adapter's, stops the machine from starting.
+
+**Trust (for the owner, decision 65).** A plug-in detector is trusted, owner-configured code that runs **with the worker's own powers**: the bounded reader limits only what the built-in detectors are handed, and an imported module has `fs`, `child_process` and the network like any other code in the worker image. It parses text from the repository, so a bug in it is worker code execution. Install only a detector you would install into the worker itself. When no detector thread can be started, plug-in detectors are **not** run (and a fixed-words note says so); they are never imported into the worker's main thread. The real-path check of an absolute module path and the later import are two steps; a file the operator swaps in between is imported, and no repository, task or job can reach that window.
+
+The internal build-system detector stays an optional plug-in package outside the core (decision 45.11).
 
 ## Open ids for trackers and events, and the comment seam (lane P6, item E1)
 
@@ -448,7 +458,7 @@ Event sources, event types, intake channels and connection types were fixed list
 (owner decision 62): they keep the entries they have, a test (`tests/unit/open-ids.test.ts`) holds them, and a new tracker or monitoring source does not add to them. It registers itself instead:
 
 - A tracker declares `eventSource: { types: { "item.created": ["label"], ... } }` (event types, with the keys a trigger may filter each on). The source id is the tracker's `kind`. `open-ids.ts` has the open id shapes (`OpenSourceIdSchema`,
-  `OpenEventTypeSchema`), `eventSourceCatalog(registered)` (the built-in sources plus the registered ones; a registration cannot take a built-in id) and `checkEventTrigger(spec, registered)` (an unknown source, type or filter key is refused,
+  `OpenEventTypeSchema`), `eventSourceCatalog(registered)` (the built-in sources plus the registered ones; a registration that takes a built-in id, another one's id, or is not well formed is SKIPPED and reported in `skipped`, so one tracker whose kind is `jira` never fails the others) and `checkEventTrigger(spec, registered)` (an unknown source, type or filter key is refused,
   never read as "any"). Chains and triggers are not switched on in Code (decision 45.10), so nothing reads the fixed lists through these yet; whoever switches them on uses `checkEventTrigger`.
 - The intake side already had an open way in: the `tracker` channel names its own `system` (`IntakeSystemSchema`). Opening the connection-type union (a stored connection for a tracker that registers itself) is built with the triggers.
 - **Comment commands on an item (interface only).** `Tracker.comments?` mirrors `CodeHost.comments?` (fetch only, decision 66): `CommentSubject` is `{ kind: "change-request", ref }` or `{ kind: "item", ref }`, `SubjectComment` is a comment with its
@@ -458,13 +468,13 @@ Event sources, event types, intake channels and connection types were fixed list
 ## Outbound events (lane P6, item R3)
 
 `outbound-events` is a plug-in point that holds many adapters. Rovara emits an `OutboundEvent` for what happens to a task, with references to its artifacts (never their content), so a lightweight adapter (an internal issue tracker, a dashboard) needs no
-change to Rovara. **It is the same signed format as Pratik's channel events** (decision 61): Standard Webhooks, the `webhook-id` header is the event's `id`, `webhook-timestamp` is in seconds, `webhook-signature` is
+change to Rovara. **It is the same signed format as the channel events** (spec 062, phase 3) (decision 61): Standard Webhooks, the `webhook-id` header is the event's `id`, `webhook-timestamp` is in seconds, `webhook-signature` is
 `v1,<base64 HMAC-SHA256 of "<id>.<timestamp>.<body>">` with the adapter's `whsec_` secret, the envelope has the same `version`, `evt_` id (stable across retries) and `createdAt`. `signOutboundEvent` and `verifyOutboundEvent` are thin over
 `webhookHeaders` and `verifyWebhook`, so a receiver that checks a channel event checks this one with the same code.
 
-An event is `{ version: 1, id, type, company, project?, subject?, createdAt, data, artifacts }`. `type` is an open dotted lower-case id; the task milestones are `task.<milestone>` (`outboundEventTypeOfMilestone`). `data` is flat JSON up to 16 KiB; `artifacts` are
+An event is `{ version: 1, id, type, company, project?, subject?, createdAt, data, artifacts }`. `type` is an open dotted lower-case id; the task milestones are `task.<milestone>` (`outboundEventTypeOfMilestone`). `data` is flat JSON (a name with a text, number, true/false or null value, no nesting) up to 16 KiB; `artifacts` are
 references (`kind`, `id`, optional `digest`, optional https `url`), up to 50. An adapter implements `deliver(event)` (AT LEAST ONCE: a receiver drops a repeat of an `id`) and may implement `accepts(type)`. `publishOutboundEvent(registry, event)` sends one
-event to every adapter that wants it; a failing adapter is reported by name and error kind (no text) and never stops the others or the caller.
+event to every adapter that wants it; each adapter has a time limit (10 s); a failing adapter is reported by name and a FIXED kind (`timeout`, `accepts_failed`, `delivery_failed`), never the adapter's own error name or text, and never stops the others or the caller. An `accepts` that throws is a failure, not a skip.
 
 Not here yet: an HTTP sender (an adapter, with its own address and secret rules), retries and a dead-letter queue, who may register an adapter, and the visibility rule that events follow a task's live visibility. The scheduler (timers), realtime push and
 email notices stay names only (decision 61): they are not points until a lane needs them.

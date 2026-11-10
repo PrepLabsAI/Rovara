@@ -220,6 +220,8 @@ export interface PluginContext {
   settings: JsonObject;
   registry: RegistryView;
   now: () => Date;
+  /** Port lane P6: the folder the install keeps its own files in (Code: the state folder, `~/.rovara` by default). A plug-in that keeps a file puts its default there, not in the home folder. Absent for an install with no such folder (Cloud). */
+  stateDirectory?: string;
 }
 
 export const PLUGIN_CONFIG_VERSION = 1;

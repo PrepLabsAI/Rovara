@@ -61,19 +61,28 @@ describe("open ids", () => {
 
 describe("the catalog of event sources", () => {
   it("holds the built-in sources and the registered ones, with their filter keys", () => {
-    const catalog = eventSourceCatalog([EXAMPLE]);
-    expect([...catalog.keys()]).toEqual([...EVENT_SOURCES, "examplehost"]);
-    expect(catalog.get("github")?.["pull_request.opened"]).toEqual(["baseBranch", "label", "authorAssociation"]);
-    expect(catalog.get("examplehost")?.["item.created"]).toEqual(["label"]);
+    const { sources, skipped } = eventSourceCatalog([EXAMPLE]);
+    expect([...sources.keys()]).toEqual([...EVENT_SOURCES, "examplehost"]);
+    expect(sources.get("github")?.["pull_request.opened"]).toEqual(["baseBranch", "label", "authorAssociation"]);
+    expect(sources.get("examplehost")?.["item.created"]).toEqual(["label"]);
+    expect(skipped).toEqual([]);
   });
 
-  it("refuses a registration that takes a built-in id or another registration's, or is not well formed", () => {
-    expect(() => eventSourceCatalog([{ source: "github", types: { "a.b": [] } }])).toThrow(/already taken/);
-    expect(() => eventSourceCatalog([EXAMPLE, EXAMPLE])).toThrow(/already taken/);
-    expect(() => eventSourceCatalog([{ source: "Bad Id", types: { "a.b": [] } }])).toThrow();
-    expect(() => eventSourceCatalog([{ source: "okay", types: { "NOT A TYPE": [] } }])).toThrow();
+  it("skips (and reports) a registration that takes a built-in id, another registration's, or is not well formed, and keeps every other source working", () => {
+    const { sources, skipped } = eventSourceCatalog([
+      { source: "jira", types: { "item.created": [] } }, EXAMPLE, EXAMPLE, { source: "Bad Id", types: { "a.b": [] } }, { source: "okay", types: { "NOT A TYPE": [] } },
+      { source: "goodone", types: { "a.b": ["k"] } },
+    ]);
+    expect(skipped).toEqual([{ source: "jira", reason: "built_in_id" }, { source: "examplehost", reason: "duplicate" }, { source: "invalid", reason: "invalid" }, { source: "okay", reason: "invalid" }]);
+    expect([...sources.keys()]).toEqual([...EVENT_SOURCES, "examplehost", "goodone"]);
+    // The built-in entry of that name stays the one in force: a Jira tracker's own types did not replace it.
+    expect(Object.keys(sources.get("jira") ?? {})).toEqual(["issue.created", "issue.labeled", "issue.assigned"]);
     expect(isBuiltInEventSource("github")).toBe(true);
     expect(isBuiltInEventSource("examplehost")).toBe(false);
+  });
+
+  it("a tracker whose kind is a built-in id does not make a trigger check fail for the other sources", () => {
+    expect(checkEventTrigger({ source: "examplehost", type: "item.created" }, [{ source: "linear", types: { "x.y": [] } }, EXAMPLE])).toEqual([]);
   });
 });
 
