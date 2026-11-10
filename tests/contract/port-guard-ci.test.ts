@@ -33,6 +33,13 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     // on a pull request the base branch's copy of the guard judges, and a second strict run flags edits to the guard itself
     expect(run).toContain("git show origin/code/next:scripts/port-guard.ts");
     expect(run).toContain('node "$RUNNER_TEMP/port-guard.ts" --range origin/code/next..HEAD');
+    // the guard reads its boundary data from beside itself, so the base branch's copy of that file travels with it
+    expect(run).toContain('git show origin/code/next:scripts/boundary-allowlist.json > "$RUNNER_TEMP/boundary-allowlist.json"');
+    // and it fails closed: no `|| cp` falls back to the checkout's own copy of the data
+    expect(run).not.toMatch(/boundary-allowlist\.json[^\n]*\|\|/);
+    expect(run).not.toMatch(/cp scripts\/boundary-allowlist/);
+    expect(run).not.toMatch(/cp scripts\/port-guard/);
+    expect(run).not.toMatch(/port-guard\.ts"? *\|\|/);
     const checkout = job.steps.find((step) => step.uses?.startsWith("actions/checkout"));
     expect(checkout?.with?.["fetch-depth"]).toBe(0);
     expect(JSON.stringify(job)).not.toContain("secrets.");

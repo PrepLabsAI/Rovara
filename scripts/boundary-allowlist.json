@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "comment": "The public/private boundary, as data. Both the Code port guard (scripts/port-guard.ts) and the Cloud boundary check read this one file, and the two repositories keep it byte-identical (the Cloud check compares its copy with the vendored copy of this one). Changing it changes what may be public: a change needs both owners (decision 72, O2) and the controller's eyes.",
+  "cloudOnlyPackages": [
+    "@agentx/ui",
+    "@agentx/web",
+    "@rovara/audit-verifier",
+    "@agentx/model-proxy",
+    "@agentx/design-tokens"
+  ],
+  "cloudOnlyPackagePatterns": [
+    "^@(rovara|preplabsai|agentx)/cloud(-|$)"
+  ],
+  "publicAwsAdapters": {
+    "package": "@rovara/aws-adapters",
+    "dir": "packages/aws-adapters",
+    "adapters": [
+      {
+        "id": "dynamodb",
+        "port": "storage",
+        "sdk": [
+          "@aws-sdk/client-dynamodb",
+          "@aws-sdk/lib-dynamodb",
+          "@aws-sdk/util-dynamodb"
+        ]
+      },
+      {
+        "id": "sqs",
+        "port": "queue",
+        "sdk": [
+          "@aws-sdk/client-sqs"
+        ]
+      },
+      {
+        "id": "s3",
+        "port": "objects",
+        "sdk": [
+          "@aws-sdk/client-s3",
+          "@aws-sdk/lib-storage",
+          "@aws-sdk/s3-request-presigner"
+        ]
+      },
+      {
+        "id": "secrets-manager",
+        "port": "secrets",
+        "sdk": [
+          "@aws-sdk/client-secrets-manager"
+        ]
+      }
+    ]
+  },
+  "awsSdkPublicPaths": [
+    "packages/cli/src/"
+  ],
+  "awsSdkSanctioned": [
+    {
+      "id": "bedrock-model-provider",
+      "dir": "packages/broker/src/plugins/model-provider/bedrock/",
+      "sdk": [
+        "@aws-sdk/client-sts"
+      ],
+      "reason": "The Bedrock model-provider plug-in assumes a role in the customer's own account to call Bedrock; it is a sanctioned AWS adapter outside the four generic ones, limited to this one client and this one folder."
+    }
+  ],
+  "awsImportFixturePaths": [],
+  "knownHistory": [
+    {
+      "commit": "45eb9a7dd7c279e3a5002ab7d9c8909af3ffddf6",
+      "rule": "private-name",
+      "file": "packages/contracts/src/ports/company-instructions.ts",
+      "reason": "A comment naming an internal branch was in this commit on public code/next; the tip no longer has it and public history is not rewritten (the owner knows)."
+    }
+  ],
+  "publicNpmPackages": [
+    {
+      "name": "@preplabsai/rovara-code",
+      "source": "packages/cli"
+    }
+  ]
+}

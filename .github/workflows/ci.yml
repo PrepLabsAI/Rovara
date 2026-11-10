@@ -285,8 +285,11 @@ jobs:
       - name: Port guard over everything code/next holds beyond mainline
         run: |
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            # The base branch's copy judges the pull request; a pull request that rewrites the guard is judged by the old one.
-            git show origin/code/next:scripts/port-guard.ts > "$RUNNER_TEMP/port-guard.ts" || cp scripts/port-guard.ts "$RUNNER_TEMP/port-guard.ts"
+            # The base branch's copy judges the pull request; a pull request that rewrites the guard is judged by the old one. No fallback to the checkout's copy: code/next has the guard, so a failure here must stop the step.
+            git show origin/code/next:scripts/port-guard.ts > "$RUNNER_TEMP/port-guard.ts"
+            # The guard reads the boundary data (Cloud-only package names, the four public AWS adapters) from beside itself, never from the checkout.
+            # No fallback: if code/next has no such file this step fails, so a pull request's own copy of the data is never what judges it.
+            git show origin/code/next:scripts/boundary-allowlist.json > "$RUNNER_TEMP/boundary-allowlist.json"
             node "$RUNNER_TEMP/port-guard.ts" --range origin/mainline..HEAD --allow-guard-edits
           else
             npm run port:guard -- --range origin/mainline..HEAD --allow-guard-edits

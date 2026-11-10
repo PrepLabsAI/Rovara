@@ -3,12 +3,16 @@
 //
 //   cloud-path      a Cloud-only path (decision 41): org/, spend/, audit/, team-record/, devices/, the Cloud web app and audit verifier
 //                   packages, the Cloud upgrade command, the Cloud CDK stacks, the Cloud-only contracts files
-//   cloud-import    a TypeScript/JavaScript file (any name that carries a .ts/.js/... extension, or text that reads as such code) that imports one of those, or a package/CI file that names one of those packages
+//   cloud-aws       the AWS line (decision 72, O2): only four generic adapters (DynamoDB, SQS, S3, Secrets Manager) may be public, and they live in one
+//                   package. Refused: a NEW file under an aws/ directory, a NEW file under infra/ (Cloud's CDK), a private adapter inside the adapters
+//                   package, and an AWS SDK client or CDK import outside that list in the adapters package or in a new file.
+//                   The list is data (scripts/boundary-allowlist.json), read by this guard and by Cloud's boundary check
+//   cloud-import    a TypeScript/JavaScript file (any name that carries a .ts/.js/... extension, or text that reads as such code) that imports one of those (also a vendor/ folder, a `cloud-*` package or an AWS client off the list), or a package/CI file that names one of those packages
 //   stray-file      an editor, merge or sed backup/scratch file (`*-E`, `*.orig`, `*.rej`, `*.bak`, `*~`, `*.swp`, `*.tmp`, `.DS_Store` and kin): a stray
 //                   copy can hold raw Cloud source under a name no other rule reads (a lane once committed 27 `*.ts-E` files from `sed -i -E`)
 //   build-detector  the internal build-system detector (decision 45.11: an optional plug-in package, never core)
 //   private-name    a prospect or customer name (matched against a salted hash list, so no name is written in this file), the staging account id, an account id inside an ARN, an API Gateway host, a
-//                   host under the product's dev domain, or the private repository's name, on an added line
+//                   host under the product's dev domain, a private branch name (an integration or Cloud lane branch), or the private repository's name, on an added line
 //   link            a symlink or a submodule (a link can point at a Cloud-only file, and the scan reads blobs, not targets)
 //   scan-bypass     an inline allow comment for gitleaks, or a gitleaks config / ignore file (they would switch the secret scan off)
 //   guard-files     an edit to the guard itself, its tests, or the CI workflow that runs it (the controller reviews those by hand;
@@ -28,7 +32,8 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join as joinPath, posix } from "node:path";
+import { dirname, join as joinPath, posix } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface Finding {
   /** The rule's name, as in the list above. */
@@ -73,6 +78,112 @@ const CLOUD_PATH_ALLOWED = new Set<string>([
   "packages/cli/src/upgrade/target",
 ]);
 
+// ---------------------------------------------------------------------------------------------------------------------------------
+// The boundary data (scripts/boundary-allowlist.json): the Cloud-only package names and the four generic AWS adapters that may be public (decision 72, O2).
+// One file, read by this guard and by Cloud's boundary check. It is read from BESIDE this script (or from the file named by --boundary), never from the
+// checkout being judged: CI and the controller run a trusted copy of the guard, and a lane must not be able to widen the lists it is judged by. A file
+// that cannot be found, read or is malformed stops the guard (exit 2); there is no fallback and no empty default.
+
+export interface PublicAdapter { id: string; port: string; sdk: readonly string[] }
+export interface BoundaryData {
+  cloudOnlyPackages: readonly string[];
+  cloudOnlyPackagePatterns: readonly string[];
+  publicAwsAdapters: { package: string; dir: string; adapters: readonly PublicAdapter[] };
+  awsSdkPublicPaths: readonly string[];
+  /** AWS SDK clients that one named plug-in may import (a sanctioned AWS adapter that is not one of the four): only the listed clients, only in that folder. */
+  awsSdkSanctioned: ReadonlyArray<{ id: string; dir: string; sdk: readonly string[]; reason: string }>;
+  /** Paths whose files hold SDK and CDK names as text fixtures (env-detect tests); the AWS import rule does not read them. */
+  awsImportFixturePaths: readonly string[];
+  /** Findings on commits that are already public and cannot be rewritten, each keyed by the full commit sha, the rule and the file. */
+  knownHistory: ReadonlyArray<{ commit: string; rule: string; file: string; reason: string }>;
+  publicNpmPackages: ReadonlyArray<{ name: string; source: string }>;
+}
+
+export const BOUNDARY_FILE = "scripts/boundary-allowlist.json";
+
+const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
+
+/** Checks the shape of the boundary data; throws a GuardError that names what is wrong. */
+export function parseBoundary(text: string, from: string): BoundaryData {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new GuardError(`${from} is not valid JSON`);
+  }
+  const data = raw as Partial<BoundaryData> | null;
+  const adapters = data?.publicAwsAdapters;
+  const entries = (value: unknown): Array<Record<string, unknown>> | null =>
+    Array.isArray(value) && value.every((item) => typeof item === "object" && item !== null) ? (value as Array<Record<string, unknown>>) : null;
+  const npm = entries(data?.publicNpmPackages);
+  const list = entries(adapters?.adapters);
+  const sanctioned = entries(data?.awsSdkSanctioned);
+  const history = entries(data?.knownHistory);
+  const ok =
+    data !== null && typeof data === "object" &&
+    isStrings(data.cloudOnlyPackages) && isStrings(data.cloudOnlyPackagePatterns) && isStrings(data.awsSdkPublicPaths) &&
+    npm !== null && npm.every((entry) => typeof entry.name === "string" && typeof entry.source === "string") &&
+    adapters !== undefined && typeof adapters.package === "string" && typeof adapters.dir === "string" && list !== null && list.length > 0 &&
+    list.every((a) => typeof a.id === "string" && /^[a-z0-9-]+$/.test(a.id) && typeof a.port === "string" && isStrings(a.sdk)) &&
+    sanctioned !== null && sanctioned.every((e) => typeof e.id === "string" && typeof e.dir === "string" && e.dir.endsWith("/") && isStrings(e.sdk) && typeof e.reason === "string") &&
+    isStrings(data.awsImportFixturePaths) &&
+    history !== null && history.every((e) => typeof e.commit === "string" && /^[0-9a-f]{40}$/.test(e.commit) && typeof e.rule === "string" && typeof e.file === "string" && typeof e.reason === "string");
+  if (!ok) throw new GuardError(`${from} does not have the shape the guard reads (cloudOnlyPackages, cloudOnlyPackagePatterns, publicAwsAdapters, awsSdkPublicPaths, awsSdkSanctioned, awsImportFixturePaths, knownHistory, publicNpmPackages)`);
+  for (const pattern of data.cloudOnlyPackagePatterns!) {
+    try {
+      new RegExp(pattern);
+    } catch {
+      throw new GuardError(`${from} holds a package pattern that is not a regular expression`);
+    }
+  }
+  return data as BoundaryData;
+}
+
+let boundaryCache: BoundaryData | undefined;
+let boundaryFile: string | undefined;
+
+/** Reads and checks one boundary data file. */
+export function loadBoundary(file: string): BoundaryData {
+  if (!existsSync(file)) {
+    throw new GuardError(
+      `could not find the boundary data ${file}; the guard reads it from beside itself (or from --boundary <file>) and never from the checkout it judges, so a trusted copy of the guard needs the data file next to it`,
+    );
+  }
+  return parseBoundary(readFileSync(file, "utf8"), file);
+}
+
+/** Point the guard at a boundary data file (--boundary); the default is the file beside this script. */
+export function useBoundaryFile(file: string | undefined): void {
+  boundaryFile = file;
+  boundaryCache = undefined;
+}
+
+/** The boundary data: the file named by --boundary, else the one beside this script. Never the checkout's copy. */
+export function boundary(): BoundaryData {
+  if (boundaryCache !== undefined) return boundaryCache;
+  boundaryCache = loadBoundary(boundaryFile ?? joinPath(dirname(fileURLToPath(import.meta.url)), "boundary-allowlist.json"));
+  return boundaryCache;
+}
+
+/** Runs `fn` with other boundary data in force (for tests of the data-driven rules). */
+export function withBoundary<T>(data: BoundaryData, fn: () => T): T {
+  const previous = boundaryCache;
+  boundaryCache = data;
+  try {
+    return fn();
+  } finally {
+    boundaryCache = previous;
+  }
+}
+
+/** The service clients and helpers the four public adapters may import, from the boundary data. */
+function publicAwsSdk(data: BoundaryData): Set<string> {
+  return new Set(data.publicAwsAdapters.adapters.flatMap((adapter) => adapter.sdk));
+}
+
+/** The adapters package's directory with a trailing slash, lower-cased for comparing. */
+const adaptersDir = (data: BoundaryData): string => `${data.publicAwsAdapters.dir.replace(/\/+$/, "").toLowerCase()}/`;
+
 interface PathRule { label: string; pattern: RegExp }
 
 const CLOUD_PATH_RULES: readonly PathRule[] = [
@@ -81,7 +192,12 @@ const CLOUD_PATH_RULES: readonly PathRule[] = [
     label: "a Cloud-only contracts file (org*, spend*, audit*, team-record*)",
     pattern: /^packages\/contracts\/src\/(org|spend|audit|team-record)([-.].*)?$/i,
   },
-  { label: "a Cloud-only package (the web app, its UI or the audit verifier)", pattern: /^packages\/(ui|web|audit-verifier)(\/|$)/i },
+  { label: "a Cloud-only package (the web app, its UI, the model proxy, the design tokens or the audit verifier)", pattern: /^packages\/(ui|web|audit-verifier|model-proxy|design-tokens)(\/|$)/i },
+  { label: "a Cloud-only package (a `cloud` or `cloud-*` package)", pattern: /^packages\/cloud(-[^/]+)?(\/|$)/i },
+  {
+    label: "a vendor/ folder (Cloud keeps its pinned copy of Code in one; a vendor folder never goes into Code)",
+    pattern: /(^|\/)vendor\//i,
+  },
   { label: "the Cloud upgrade command", pattern: /^packages\/cli\/src\/upgrade(\/|\.|$)/i },
   {
     label: "a Cloud CDK stack",
@@ -94,17 +210,86 @@ const CLOUD_PATH_RULES: readonly PathRule[] = [
 const CODE_SOURCE = /\.[cm]?[jt]sx?$/i;
 
 /** The Cloud-only rule a repository path falls under, or null. A directory path may be given without its trailing slash. */
-export function cloudPathRule(path: string, names: NameSource = DEFAULT_NAMES): { rule: "cloud-path" | "build-detector"; detail: string } | null {
+export function cloudPathRule(path: string, names: NameSource = DEFAULT_NAMES): { rule: "cloud-path" | "cloud-aws" | "build-detector"; detail: string } | null {
   const normal = posix.normalize(path.replaceAll("\\", "/")).replace(/^\.\//, "");
   if (CLOUD_PATH_ALLOWED.has(normal.toLowerCase().replace(/\.[cm]?[jt]sx?$/, ""))) return null;
   for (const candidate of [normal, `${normal}/`]) {
     for (const { label, pattern } of CLOUD_PATH_RULES) if (pattern.test(candidate)) return { rule: "cloud-path", detail: label };
   }
+  const adapterHit = adaptersPackageRule(normal);
+  if (adapterHit !== null) return { rule: "cloud-aws", detail: adapterHit };
   const codeLike = CODE_SOURCE.test(normal) || !/\.[a-z0-9]+$/i.test(posix.basename(normal)) || /(^|\/)env-detect\//i.test(normal);
   if (codeLike && tokenViews(normal).some((tokens) => matchNames(tokens, matcherFor(names), "detectors").size > 0)) {
     return { rule: "build-detector", detail: "the internal build-system detector is an optional plug-in, not core (decision 45.11)" };
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Rule: cloud-aws (decision 72, O2). Only the four generic adapters (DynamoDB storage, SQS queue, S3 objects, Secrets Manager secrets) are public,
+// in one package; every other AWS piece (the handlers, the CDK, the EC2, Cognito, Slack and model-gateway adapters) stays in Cloud.
+
+/** Why a path inside the public adapters package is not allowed there (a private adapter among the four), or null. */
+export function adaptersPackageRule(path: string): string | null {
+  const data = boundary();
+  const lower = path.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
+  const prefix = `${adaptersDir(data)}src/`;
+  if (!lower.startsWith(prefix)) return null;
+  const first = lower.slice(prefix.length).split("/")[0] ?? "";
+  const stem = first.split(".")[0] ?? "";
+  if (stem === "index" || data.publicAwsAdapters.adapters.some((adapter) => adapter.id === stem)) return null;
+  return "a private adapter inside the public AWS adapters package (only the DynamoDB, SQS, S3 and Secrets Manager adapters may be public, decision 72)";
+}
+
+/**
+ * Rules for a file that a range or commit ADDS (existing public files that Cloud's history shares are not judged by their names): a new file under
+ * an aws/ directory is a Cloud handler, and a new file under infra/ is Cloud's CDK. The four public adapters live in the adapters package, whose
+ * directory is not called aws.
+ */
+export function addedFileRule(path: string): { rule: "cloud-aws"; detail: string } | null {
+  const normal = posix.normalize(path.replaceAll("\\", "/")).replace(/^\.\//, "");
+  if (/(^|\/)aws\//i.test(normal)) {
+    return { rule: "cloud-aws", detail: "a new file under an aws/ directory is a Cloud AWS handler; the four generic adapters live in the adapters package, everything else AWS stays private" };
+  }
+  if (/^infra\//i.test(normal)) {
+    return { rule: "cloud-aws", detail: "a new file under infra/ is Cloud's CDK; Code adds none (Cloud's infrastructure stays private)" };
+  }
+  return null;
+}
+
+/**
+ * Why importing `specifier` from `file` crosses the AWS line, or null. An AWS SDK service client or library off the adapters' list, or the CDK, is
+ * refused in the adapters package always and in a NEW file elsewhere (a file Code already had keeps what it imports; the install flow under
+ * awsSdkPublicPaths may use any client, since it talks to the customer's own account).
+ */
+export function awsImportReason(file: string, specifier: string, isNewFile: boolean): string | null {
+  const data = boundary();
+  const lower = file.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
+  const inAdapters = lower.startsWith(adaptersDir(data));
+  if (!inAdapters && !isNewFile) return null;
+  if (!inAdapters && data.awsSdkPublicPaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
+  if (!inAdapters && data.awsImportFixturePaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
+  const base = specifier.startsWith("@") ? specifier.split("/").slice(0, 2).join("/") : (specifier.split("/")[0] ?? "");
+  // A sanctioned AWS adapter (a plug-in, not one of the four): only the clients named for it, only in its own folder.
+  if (!inAdapters && data.awsSdkSanctioned.some((entry) => lower.startsWith(entry.dir.toLowerCase()) && entry.sdk.includes(base))) return null;
+  if (/^@aws-sdk\/(client|lib)-/.test(base) && !publicAwsSdk(data).has(base)) {
+    return "imports an AWS SDK client or library for a service that is not one of the four public adapters (DynamoDB, SQS, S3, Secrets Manager)";
+  }
+  if (base === "aws-cdk-lib" || base.startsWith("@aws-cdk/") || base === "constructs") return "imports the AWS CDK, which is Cloud's infrastructure code";
+  return null;
+}
+
+/** The AWS-line findings among the imports of a piece of source. */
+export function awsImportFindings(file: string, source: string, isNewFile: boolean): Finding[] {
+  const out: Finding[] = [];
+  const testFile = /^tests\//i.test(file.replaceAll("\\", "/")) || /\.test\.[cm]?[jt]sx?$/i.test(file);
+  for (const { specifier, line, inString } of moduleSpecifiers(withoutNul(source))) {
+    // A test that writes `import ... from "<module>"` inside a string is building a fixture (env-detect reads such text), not importing the module.
+    if (inString && testFile) continue;
+    const reason = awsImportReason(file, specifier, isNewFile);
+    if (reason !== null) out.push({ rule: "cloud-aws", file, line, detail: reason });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -166,9 +351,18 @@ export function isCodeFile(file: string): boolean {
 export function looksLikeCode(file: string, text: string): boolean {
   return isCodeFile(file) || moduleSpecifiers(withoutNul(text)).length > 0;
 }
-const CLOUD_PACKAGE = /^@(agentx|rovara)\/(ui|web|audit-verifier)(\/|$)/i;
-const CLOUD_PACKAGE_ANYWHERE = /@(agentx|rovara)\/(ui|web|audit-verifier)(?![a-z0-9-])|(^|[^a-z0-9-])packages\/(ui|web|audit-verifier)(?![a-z0-9-])/i;
-const SEGMENT = new RegExp(`(^|/)(${CLOUD_DIRS.join("|")})(/|$)`, "i");
+const CLOUD_PACKAGE = /^@(agentx|rovara|preplabsai)\/(ui|web|audit-verifier|model-proxy|design-tokens|cloud(?:-[a-z0-9-]+)?)(\/|$)/i;
+const CLOUD_PACKAGE_ANYWHERE =
+  /@(agentx|rovara|preplabsai)\/(ui|web|audit-verifier|model-proxy|design-tokens|cloud(?:-[a-z0-9-]+)?)(?![a-z0-9-])|(^|[^a-z0-9-])packages\/(ui|web|audit-verifier|model-proxy|design-tokens|cloud(?:-[a-z0-9-]+)?)(?![a-z0-9-])/i;
+const SEGMENT = new RegExp(`(^|/)(${[...CLOUD_DIRS, "vendor"].join("|")})(/|$)`, "i");
+
+/** The Cloud-only package a specifier names, from the boundary data (exact names and patterns), or null. */
+function boundaryPackageHit(specifier: string): boolean {
+  if (specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("node:")) return false;
+  const base = specifier.startsWith("@") ? specifier.split("/").slice(0, 2).join("/") : (specifier.split("/")[0] ?? "");
+  const data = boundary();
+  return data.cloudOnlyPackages.includes(base) || data.cloudOnlyPackagePatterns.some((pattern) => new RegExp(pattern, "i").test(base));
+}
 
 /**
  * Every module specifier a piece of source names: import/export ... from, import(), require(), require.resolve(), side-effect imports,
@@ -196,8 +390,13 @@ const SPECIFIER_PATTERNS: readonly RegExp[] = [
 /** `import.meta.glob("./a/*.ts")` and `import.meta.glob(["./a/*.ts", "!./b/*"])`: every string among its arguments. */
 const GLOB_CALL = /\b(?:import\.meta\.glob(?:Eager)?(?:<[^>]*>)?|importScripts)\s*\(([^)]*)\)/g;
 
-export function moduleSpecifiers(source: string): Array<{ specifier: string; line: number }> {
-  const found: Array<{ specifier: string; line: number }> = [];
+export function moduleSpecifiers(source: string): Array<{ specifier: string; line: number; inString: boolean }> {
+  const found: Array<{ specifier: string; line: number; inString: boolean }> = [];
+  /** True when an odd number of quote marks precede the match on its own line: the "import" is text inside a string literal. */
+  const insideString = (index: number): boolean => {
+    const before = source.slice(source.lastIndexOf("\n", index - 1) + 1, index);
+    return (before.match(/['"`]/g)?.length ?? 0) % 2 === 1;
+  };
   // Where each line starts, so that a match's line number costs a binary search and not a scan from the top of the file.
   const starts = [0];
   for (let i = source.indexOf("\n"); i !== -1; i = source.indexOf("\n", i + 1)) starts.push(i + 1);
@@ -213,13 +412,13 @@ export function moduleSpecifiers(source: string): Array<{ specifier: string; lin
   };
   for (const match of source.matchAll(GLOB_CALL)) {
     const line = lineAt(match.index);
-    for (const quoted of (match[1] ?? "").matchAll(/(['"`])([^'"`\n$]+)\1/g)) found.push({ specifier: quoted[2]!.replace(/^!/, ""), line });
+    for (const quoted of (match[1] ?? "").matchAll(/(['"`])([^'"`\n$]+)\1/g)) found.push({ specifier: quoted[2]!.replace(/^!/, ""), line, inString: false });
   }
   for (const pattern of SPECIFIER_PATTERNS) {
     for (const match of source.matchAll(pattern)) {
       const specifier = match[2];
       if (specifier === undefined) continue;
-      found.push({ specifier, line: lineAt(match.index) });
+      found.push({ specifier, line: lineAt(match.index), inString: insideString(match.index) });
     }
   }
   return found;
@@ -239,7 +438,7 @@ export function cloudImportReason(file: string, specifier: string, names: NameSo
     return hit === null ? null : `imports ${hit.detail}`;
   }
   if (specifier.startsWith("#") && SEGMENT.test(specifier.slice(1))) return "imports a Cloud-only package-imports alias";
-  if (CLOUD_PACKAGE.test(specifier)) return "imports a Cloud-only package (the web app, its UI or the audit verifier)";
+  if (CLOUD_PACKAGE.test(specifier) || boundaryPackageHit(specifier)) return "imports a Cloud-only package (the web app, its UI, the audit verifier or a cloud-* package)";
   if (SEGMENT.test(specifier)) return "imports a Cloud-only subpath of a package";
   return null;
 }
@@ -260,8 +459,11 @@ export function wiringPathReasons(file: string, text: string, names: NameSource 
 export function importFindings(file: string, source: string, names: NameSource = DEFAULT_NAMES, force = false): Finding[] {
   if (!force && !isCodeFile(file)) return [];
   const out: Finding[] = [];
-  for (const { specifier, line } of moduleSpecifiers(withoutNul(source))) {
-    const reason = cloudImportReason(file, specifier, names);
+  for (const { specifier, line, inString } of moduleSpecifiers(withoutNul(source))) {
+    // A path that climbs out of the repository lands inside Cloud's repository once this code is vendored there. Not read in tests (the vendored copy has none, and
+    // their fixtures write such paths inside multi-line strings) nor as text in a string.
+    const outside = specifier.startsWith(".") && !inString && !/^tests\//i.test(file) && !/\.test\.[cm]?[jt]sx?$/i.test(file) && posix.normalize(posix.join(posix.dirname(file), specifier)).startsWith("..");
+    const reason = outside ? "imports a path outside the repository (once vendored into Cloud it would reach Cloud's own code)" : cloudImportReason(file, specifier, names);
     if (reason !== null) out.push({ rule: "cloud-import", file, line, detail: reason });
   }
   return out;
@@ -458,6 +660,31 @@ function nameLabels(raw: string, names: NameSource): Set<string> {
   return found;
 }
 
+/**
+ * Private branch names: the integration branches (`prefix/` and four digits), the Cloud integration branch and the Cloud convergence lane branches
+ * (`prefix/word`). The words are assembled from pieces, so that this file does not carry them. The text is read as a branch name could be written
+ * in a URL, a Windows path or a loose sentence: `%2F` and `\` count as a slash, and spaces around the slash do not matter for the integration forms.
+ * Not branch names: a word that merely ends in a prefix (`acc/`), a `/cc/` path segment of a URL, the Creative Commons licence shorthand, and a folder called `integ/`
+ * (the integration form needs its digits). A slash may come before a lane name only after `heads/`, `origin/`, `private/`, `remotes/` or `upstream/`.
+ */
+const BRANCH_LABEL = "a private branch name (integration and Cloud lane branches are never public)";
+// A branch name may follow a ref prefix (`heads/`, `origin/`), a GitHub page path (`tree/`, `blob/`, `commits/`) or a compare range (`main...name`).
+const BRANCH_START = "(?:(?<![a-z0-9_.\\/-])|(?<=\\b(?:heads|origin|private|remotes|upstream|tree|blob|commits|commit)\\/)|(?<=\\.\\.))";
+const PRIVATE_BRANCHES: readonly RegExp[] = [
+  new RegExp(`(?:(?<![a-z0-9_.-])|(?<=\\.\\.))${join("in", "teg")}\\s*\\/\\s*\\d{3,4}(?!\\d)`, "i"),
+  new RegExp(`${BRANCH_START}${join("clo", "ud")}\\s*\\/\\s*${join("ne", "xt")}(?![a-z0-9_/-]|\\.[a-z])`, "i"),
+  new RegExp(`${BRANCH_START}${join("c", "c")}\\/(?!(?:by|bcc)(?![a-z0-9]))[a-z][a-z0-9-]*`, "i"),
+];
+
+/** True when a text names a private branch (see above). */
+export function hasPrivateBranch(raw: string): boolean {
+  // Read as a branch name could be written: HTML character references, percent-encoding (also encoded again), backslashes, doubled slashes.
+  let text = foldToAscii(raw).replace(/&#0*(?:47|92);|&#x0*(?:2f|5c);|&sol;|&bsol;/gi, "/");
+  for (let i = 0; i < 3; i += 1) text = text.replace(/%25/gi, "%");
+  text = text.replace(/%2f/gi, "/").replace(/%5c/gi, "/").replaceAll("\\", "/").replace(/\/{2,}/g, "/");
+  return PRIVATE_BRANCHES.some((pattern) => pattern.test(text));
+}
+
 /** Not names but shapes: a host under the product's dev domain. */
 const DEV_HOST = new RegExp(`rovara\\.${join("d", "ev")}(?![a-z0-9-])`, "i");
 
@@ -530,6 +757,8 @@ export function splitNameFindings(lines: readonly string[], names: NameSource = 
   const bare = lines.map((line) => line.replace(/^\s*(?:\/\/+|\/?\*+\/?|#+|--+|;+|>+|%+)?[ \t]?/, "").replace(/\s+$/, ""));
   const found = new Set<string>();
   for (const text of [bare.join("\n"), bare.join("")]) for (const label of nameLabels(text, names)) found.add(label);
+  // A branch name broken over lines reads in the joined text only.
+  if ([bare.join("\n"), bare.join("")].some(hasPrivateBranch) && !lines.some(hasPrivateBranch)) found.add(BRANCH_LABEL);
   if (found.size === 0) return [];
   for (const line of lines) for (const label of nameLabels(line, names)) found.delete(label);
   return [...found];
@@ -540,6 +769,7 @@ export function lineFindings(raw: string, names: NameSource = DEFAULT_NAMES): st
   const line = foldToAscii(raw);
   const out: string[] = [...nameLabels(raw, names)];
   if (DEV_HOST.test(line)) out.push("a host under the product's dev domain");
+  if (hasPrivateBranch(raw)) out.push(BRANCH_LABEL);
   for (const match of line.matchAll(ARN_ACCOUNT)) {
     if (!PLACEHOLDER_ACCOUNTS.has(match[1] ?? "")) out.push("an account id inside an ARN");
   }
@@ -691,7 +921,7 @@ export function parseRange(cwd: string, text: string): Range {
   return { base: resolve(left!), tip: resolve(right!), text };
 }
 
-interface RawEntry { path: string; newMode: string; newSha: string }
+interface RawEntry { path: string; newMode: string; newSha: string; /** git's one-letter status (A added, M modified, ...); empty for a merge's combined entries. */ status: string }
 
 /** The files a diff leaves in place (added, copied, modified, type-changed), with the new file mode. Renames are not followed. */
 function rawEntries(cwd: string, command: string[]): RawEntry[] {
@@ -702,7 +932,7 @@ function rawEntries(cwd: string, command: string[]): RawEntry[] {
     const meta = parts[i]!.split(/\s+/);
     const path = parts[i + 1]!;
     if (path === "") continue;
-    entries.push({ path, newMode: meta[1] ?? "", newSha: meta[3] ?? "" });
+    entries.push({ path, newMode: meta[1] ?? "", newSha: meta[3] ?? "", status: meta[4] ?? "" });
   }
   return entries;
 }
@@ -721,7 +951,7 @@ function combinedEntries(cwd: string, commit: string): RawEntry[] {
     const fields = meta.slice(parents).split(/\s+/);
     const newMode = fields[parents] ?? "";
     if (path === "" || newMode === "000000") continue;
-    entries.push({ path, newMode, newSha: fields[2 * parents + 1] ?? "" });
+    entries.push({ path, newMode, newSha: fields[2 * parents + 1] ?? "", status: "" });
   }
   return entries;
 }
@@ -734,6 +964,7 @@ const INLINE_ALLOW = new RegExp(join("gitleaks", ":", "allow"), "i");
 
 const GUARD_FILES = [
   /^scripts\/port-guard\.ts$/i,
+  /^scripts\/boundary-allowlist\.json$/i,
   /^tests\/[^/]+\/port-guard[^/]*$/i,
   /^\.github\/workflows\/ci\.yml$/i,
   /(^|\/)\.gitleaks[^/]*$/i,
@@ -772,7 +1003,12 @@ export interface ScanInput {
 function scanChange(collector: Collector, input: ScanInput): void {
   const { cwd, tip, allowGuardEdits } = input;
   const label = input.commit === undefined ? undefined : input.commit.slice(0, 8);
-  const add = (finding: Finding): void => collector.add(label === undefined ? finding : { ...finding, commit: label });
+  // A finding on a commit that is already public and cannot be rewritten is excused only by name: this commit, this rule, this file (the boundary data).
+  const known = (finding: Finding): boolean =>
+    input.commit !== undefined && boundary().knownHistory.some((e) => e.commit === input.commit && e.rule === finding.rule && e.file === finding.file);
+  const add = (finding: Finding): void => {
+    if (!known(finding)) collector.add(label === undefined ? finding : { ...finding, commit: label });
+  };
 
   let entries: RawEntry[];
   let patchCommand: string[];
@@ -796,9 +1032,16 @@ function scanChange(collector: Collector, input: ScanInput): void {
 
   /** Files checked as TypeScript/JavaScript: by name, or because the file (net diff) or its added text reads as such code. */
   const codeLike = new Set<string>();
-  for (const { path, newMode } of entries) {
+  /** Files this range or commit adds (a modified file is judged by its added lines only, an added one also by its name). */
+  const newFiles = new Set<string>();
+  for (const { path, newMode, status } of entries) {
     const pathHit = cloudPathRule(path, collector.names);
     if (pathHit !== null) add({ rule: pathHit.rule, file: path, line: null, detail: pathHit.detail });
+    if (status === "A") {
+      newFiles.add(path);
+      const addedHit = addedFileRule(path);
+      if (addedHit !== null) add({ rule: addedHit.rule, file: path, line: null, detail: addedHit.detail });
+    }
     // A file or directory named after a prospect or a private host is as public as its contents.
     for (const detail of lineFindings(path, collector.names)) add({ rule: "private-name", file: path, line: null, detail: `${detail} in a file name` });
     const strayHit = strayFileRule(path);
@@ -819,6 +1062,8 @@ function scanChange(collector: Collector, input: ScanInput): void {
       if (looksLikeCode(path, blob.length > SNIFF_LIMIT ? "" : blob)) {
         codeLike.add(path);
         for (const finding of importFindings(path, blob, collector.names, true)) add(finding);
+        // The AWS line: the adapters package is judged whole; elsewhere only a file the range adds (a file Code already had keeps its imports).
+        for (const finding of awsImportFindings(path, blob, newFiles.has(path))) add(finding);
       }
     }
   }
@@ -868,10 +1113,13 @@ function scanChange(collector: Collector, input: ScanInput): void {
     for (const detail of lineFindings(text, collector.names)) add({ rule: "private-name", file, line, detail });
     if (INLINE_ALLOW.test(text)) add({ rule: "scan-bypass", file, line, detail: "an inline allow comment for gitleaks" });
     // Every line of an import is checked in the added text too, so an import added and later removed is still caught.
-    if (codeLike.has(file)) for (const finding of importFindings(file, text, collector.names, true)) add({ ...finding, line });
+    if (codeLike.has(file)) {
+      for (const finding of importFindings(file, text, collector.names, true)) add({ ...finding, line });
+      for (const finding of awsImportFindings(file, text, newFiles.has(file))) add({ ...finding, line });
+    }
     if (WIRING_FILE.test(file)) {
       if (CLOUD_PACKAGE_ANYWHERE.test(text)) {
-        add({ rule: "cloud-import", file, line, detail: "names a Cloud-only package (the web app, its UI or the audit verifier)" });
+        add({ rule: "cloud-import", file, line, detail: "names a Cloud-only package (the web app, its UI, the audit verifier or a cloud-* package)" });
       }
       for (const detail of wiringPathReasons(file, text, collector.names)) add({ rule: "cloud-import", file, line, detail });
     }
@@ -1042,8 +1290,17 @@ export function main(argv: readonly string[]): number {
       i += 1;
     } else if (arg.startsWith("--range=")) range = arg.slice("--range=".length);
     else if (arg === "--allow-guard-edits") allowGuardEdits = true;
+    else if (arg === "--boundary") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        console.error("port-guard: --boundary needs the boundary data file");
+        return 2;
+      }
+      useBoundaryFile(value);
+      i += 1;
+    }
     else if (arg === "--help" || arg === "-h") {
-      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits]\n(default range: " + DEFAULT_RANGE + ")");
+      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--boundary <file>]\n(default range: " + DEFAULT_RANGE + ")");
       return 0;
     } else {
       console.error(`port-guard: unknown argument ${arg}`);
