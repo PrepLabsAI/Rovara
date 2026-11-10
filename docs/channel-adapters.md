@@ -64,6 +64,10 @@ agentx --env staging adapter unlink whatsapp --tenant +14155550100 --user +91987
 Workspaces from an adapter count against the linked person's workspace limit. If they also use Slack, it is the
 same limit.
 
+In an adapter conversation, `models` and `use <model>` work as in Slack. SWE-bench runs and eval batches start only
+from Slack, and ChatGPT connections are managed with `agentx chatgpt connect|status|disconnect`, since an adapter
+conversation may be a group.
+
 ## For adapter authors
 
 ### IDs

@@ -1,7 +1,7 @@
 // Spec 025 FR-054, C12: a continue-mode turn starts only once the task's workspace has no active
 // operation (the developer's own run, or the operation the previous channel turn started), waiting
 // at most 30 minutes. The consumer's heartbeat keeps the queue message invisible meanwhile.
-import { CHANNEL_TURN_WAIT_MS, type SlackThreadWorkspaceResult } from "@agentx/contracts";
+import { CHANNEL_TURN_WAIT_MS, type ThreadWorkspaceResult } from "@agentx/contracts";
 import { withDeadline } from "./lazy-worker.js";
 import type { ServiceLog, ThreadServiceApi } from "./processor.js";
 
@@ -10,7 +10,7 @@ export const TASK_STILL_BUSY_MESSAGE = "The task was still busy after 30 minutes
 export const SHARED_SETUP_FAILED_MESSAGE = "This task's workspace could not be set up, so I can't run requests in this thread. The developer who started the task can close it and start a new one from their AI tool.";
 export const SHARED_CLOSE_REFUSED_MESSAGE = "This thread follows a task started from an AI tool. Only the developer who started it can close it, from their AI tool.";
 
-type WorkspaceAnswer = Extract<SlackThreadWorkspaceResult, { outcome: "WORKSPACE" }>;
+type WorkspaceAnswer = Extract<ThreadWorkspaceResult, { outcome: "WORKSPACE" }>;
 const SAME_OPERATION_PAUSE_MS = 5_000;
 /**
  * The developer's own run is never named, so there is nothing to wait on but the next answer. Each
@@ -22,7 +22,7 @@ const HIDDEN_RUN_PAUSE_MS = 15_000;
  * C12: the task's workspace is taken. The broker names the running operation only when the channel
  * started it; the developer's own run comes as `activeOperation: "developer"` with no ID (D22).
  */
-export function taskBusy(answer: SlackThreadWorkspaceResult): answer is WorkspaceAnswer {
+export function taskBusy(answer: ThreadWorkspaceResult): answer is WorkspaceAnswer {
   return answer.outcome === "WORKSPACE" && (answer.operationId !== null || answer.activeOperation === "developer");
 }
 
@@ -43,12 +43,12 @@ export async function waitForIdleTask(input: {
    * start or the still-busy reply when the wait ends.
    */
   announce?: boolean;
-}): Promise<SlackThreadWorkspaceResult | "BUSY"> {
+}): Promise<ThreadWorkspaceResult | "BUSY"> {
   const until = input.now() + (input.deadlineMs ?? CHANNEL_TURN_WAIT_MS);
   const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   if (input.announce !== false) await input.post(TASK_BUSY_WAIT_MESSAGE);
   input.log("shared_task.waiting", { eventId: input.eventId });
-  let current: SlackThreadWorkspaceResult = input.first;
+  let current: ThreadWorkspaceResult = input.first;
   let waitedFor: string | undefined;
   while (taskBusy(current)) {
     const remaining = until - input.now();

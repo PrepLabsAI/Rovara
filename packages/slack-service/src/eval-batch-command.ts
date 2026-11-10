@@ -13,7 +13,7 @@ import type {
   ProjectModelOptions,
 } from "@agentx/contracts";
 import { matchApprovedModel, modelOptionsMessage } from "./model-command.js";
-import { escapeText } from "./slack-format.js";
+import { SLACK_FORMAT, escapeText } from "./slack-format.js";
 import { DATASET_NAMES } from "./swebench-command.js";
 
 export interface EvalBatchStartApi {
@@ -46,7 +46,7 @@ export async function runEvalBatchCommand(
       const reason = matches.length === 0
         ? `No approved coding model matches “${escapeText(selector)}”.`
         : `“${escapeText(selector)}” matches more than one approved coding model.`;
-      await options.post(modelOptionsMessage(approved, reason));
+      await options.post(modelOptionsMessage(approved, reason, SLACK_FORMAT));
       return;
     }
     models.push({ provider: matches[0]!.provider, modelId: matches[0]!.modelId });

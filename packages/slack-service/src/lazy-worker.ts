@@ -1,7 +1,7 @@
-import type { SlackWorkspaceLimit } from "@agentx/contracts";
+import type { WorkspaceLimit } from "@agentx/contracts";
 import type { WorkerAccess, WorkerRefusal } from "@agentx/orchestrator";
 import { deterministicUuid } from "./ids.js";
-import { SLACK_FORMAT, type ConversationFormat } from "./conversation-format.js";
+import type { ConversationFormat } from "./conversation-format.js";
 import {
   limitMessage,
   newWorkspaceMessage,
@@ -29,7 +29,7 @@ export const ORGANIZATION_LIMIT_REFUSAL: WorkerRefusal = {
   message: `No coding work can run in this thread because the workspace limit is reached. AgentX has told the member in the thread. ${CONTINUE}`,
 };
 
-function limitRefusal(limit: SlackWorkspaceLimit): WorkerRefusal {
+function limitRefusal(limit: WorkspaceLimit): WorkerRefusal {
   return limit === "ORGANIZATION" ? ORGANIZATION_LIMIT_REFUSAL : LIMIT_REFUSAL;
 }
 
@@ -49,10 +49,10 @@ export function createLazyWorker(input: {
   log: ServiceLog;
   eventId: string;
   waitDeadlineMilliseconds?: number;
-  /** Spec 062: how the posts are written; Slack's when absent. */
-  format?: ConversationFormat;
+  /** Spec 062: how the posts are written. */
+  format: ConversationFormat;
 }): WorkerAccess {
-  const format = input.format ?? SLACK_FORMAT;
+  const format = input.format;
   let ready = false;
   let attempt: Promise<WorkerRefusal | undefined> | undefined;
 

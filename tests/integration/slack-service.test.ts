@@ -6,7 +6,7 @@ import type {
   SlackWorkspaceCloseStartResult,
 } from "../../packages/contracts/src/index.js";
 import { inboundFromSlackRequest } from "../../packages/contracts/src/index.js";
-import { processGroup, runConsumer, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/consumer.js";
+import { processGroup, runConsumer, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/slack-consumer.js";
 import { deterministicUuid, requestIdSequence } from "../../packages/slack-service/src/ids.js";
 import {
   isCloseWorkspaceRequest,
@@ -15,7 +15,7 @@ import {
   type ProcessorDependencies,
   type ThreadState,
   type TurnInput,
-} from "../../packages/slack-service/src/processor.js";
+} from "../../packages/slack-service/src/slack-processor.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };

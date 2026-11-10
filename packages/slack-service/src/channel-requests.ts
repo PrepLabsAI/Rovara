@@ -1,6 +1,9 @@
 import {
   ChannelQueueItemSchema,
   adapterMayDecide,
+  parseChatGptCommand,
+  parseEvalBatchCommand,
+  parseSwebenchCommand,
   channelEventId,
   conversationSubject,
   type ChannelEvent,
@@ -11,7 +14,7 @@ import {
 import { confirmationApprovalKind, confirmationDigest, type ConfirmationAnswer } from "./confirmations.js";
 import { PLAIN_FORMAT } from "./conversation-format.js";
 import type { RequestHandler } from "./consumer.js";
-import { processSlackRequest, type ProcessorDependencies, type ProcessorMessage, type ServiceLog } from "./processor.js";
+import { processConversationRequest, type ProcessorDependencies, type ProcessorMessage, type ServiceLog, type SurfaceCommand } from "./processor.js";
 
 /**
  * Spec 062 Phase 4: runs what the channel API queued, through the same processor as a Slack thread. The conversation's
@@ -20,6 +23,12 @@ import { processSlackRequest, type ProcessorDependencies, type ProcessorMessage,
  */
 
 export const SLACK_ONLY_COMMAND_TEXT = "SWE-bench runs and eval batches can only be started from Slack.";
+
+/**
+ * FR-041: an adapter conversation may be a group, and ChatGPT's sign-in needs a private reply and a pasted address, so
+ * the commands are answered with where to run them. Nothing about the person's connection is said here.
+ */
+export const CHATGPT_ELSEWHERE_TEXT = "Your ChatGPT connection is private, so I don't manage it here. Use the Rovara CLI: `agentx chatgpt connect`, `agentx chatgpt status` or `agentx chatgpt disconnect`.";
 
 /** A queued item, or undefined for one this consumer cannot read (it is discarded). */
 export function readChannelQueueItem(value: unknown): ChannelQueueItem | undefined {
@@ -43,13 +52,24 @@ export function channelTurn(item: ChannelQueueItem): { message: ProcessorMessage
 
 export interface ChannelRequestDependencies {
   /** Everything the processor needs that is not about how replies reach the conversation. */
-  processor: Omit<ProcessorDependencies<ConversationRef>, "post" | "postConfirmation" | "postWithBlocks" | "postProgress" | "updateMessage"
-    | "subjectOf" | "plainReplies" | "format" | "slackOnlyCommandText" | "mayApprove" | "turnRecords">;
+  processor: Omit<ProcessorDependencies<ConversationRef>, "post" | "postConfirmation" | "postReplyEnd" | "postProgress" | "updateMessage"
+    | "subjectOf" | "plainReplies" | "format" | "commands" | "mayApprove" | "onFinished">;
   /** Queues an event for the adapter; the event sender signs and delivers it. */
   send(event: ChannelEvent): Promise<void>;
   now?: () => number;
   log: ServiceLog;
 }
+
+/** Spec 062 FR-038: eval batches and SWE-bench runs need a Slack thread, so an adapter conversation is told so. */
+const slackOnly: SurfaceCommand<ConversationRef> = (message) =>
+  parseEvalBatchCommand(message.text) === undefined && parseSwebenchCommand(message.text) === undefined
+    ? undefined
+    : { disposition: "abandoned", run: async (context) => { await context.post(SLACK_ONLY_COMMAND_TEXT); } };
+
+const chatGptElsewhere: SurfaceCommand<ConversationRef> = (message) =>
+  parseChatGptCommand(message.text) === undefined
+    ? undefined
+    : { disposition: "abandoned", run: async (context) => { await context.post(CHATGPT_ELSEWHERE_TEXT); } };
 
 /** The consumer's handler for the channel request queue. */
 export function channelRequestHandler(deps: ChannelRequestDependencies): RequestHandler<ChannelQueueItem> {
@@ -75,14 +95,14 @@ export function channelRequestHandler(deps: ChannelRequestDependencies): Request
         actions: [{ decision: "APPROVE", label: "Approve" }, { decision: "REJECT", label: "Cancel" }],
       }));
     };
-    await processSlackRequest(message, {
+    await processConversationRequest(message, {
       ...deps.processor,
       post,
       postConfirmation,
       subjectOf: conversationSubject,
       plainReplies: true,
       format: PLAIN_FORMAT,
-      slackOnlyCommandText: SLACK_ONLY_COMMAND_TEXT,
+      commands: [slackOnly, chatGptElsewhere],
       // FR-032: the step-up set the adapter had when the channel API accepted the item.
       mayApprove: (confirmation) => adapterMayDecide({ stepUp: item.stepUp }, confirmationApprovalKind(confirmation)),
     }, {

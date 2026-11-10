@@ -3,7 +3,7 @@
 // adds the Details button. The harness never passes postWithBlocks, so these hold afterwards too.
 import { describe, expect, it, vi } from "vitest";
 import { splitSlackMessage, type SlackRequestMessage, type SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
-import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { slackReplyText } from "../../packages/slack-service/src/slack-format.js";
 import { DynamoTurnRecordWriter } from "../../packages/slack-service/src/turn-records.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";

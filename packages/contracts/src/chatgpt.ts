@@ -61,3 +61,15 @@ export const ChatGptHealthSchema = z.object({
   reachable: z.object({ auth: z.boolean(), api: z.boolean() }).strict(),
 }).loose();
 export type ChatGptHealth = z.infer<typeof ChatGptHealthSchema>;
+
+/** #340, spec 062 FR-041: the three ChatGPT commands as a person types them in any conversation; anything else is an ordinary request. */
+export type ChatGptCommand = "connect" | "status" | "disconnect";
+
+export function parseChatGptCommand(text: string): ChatGptCommand | undefined {
+  const words = text.trim().toLowerCase().replace(/\s+/gu, " ").replace(/[.!]+$/u, "");
+  if (/^(?:connect|link) (?:my )?chatgpt$/u.test(words)) return "connect";
+  if (/^(?:disconnect|unlink) (?:my )?chatgpt$/u.test(words)) return "disconnect";
+  if (/^chatgpt status$/u.test(words)) return "status";
+  return undefined;
+}
+

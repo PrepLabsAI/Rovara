@@ -2,7 +2,7 @@
 
 **Feature Branch**: `claude/062-channel-adapters`
 **Created**: 2026-11-08
-**Status**: Phases 1–2 merged (#424), Phase 3 merged (#425), Phase 4a merged (#426), Phase 4b merged (#427); Phase 5a in progress
+**Status**: Phases 1–5b merged (#424–#427, #429); Phase 5a in #428
 **Issue**: #423
 **Input**: "We need a way to trigger Rovara through a third-party trigger, like Slack today. I should be able to
 do it through WhatsApp or anything, as long as it conforms to the protocol through a lightweight adapter."
@@ -145,15 +145,19 @@ phase. A thread started before the change resumes its workspace after it.
   style. The processor writes every text it posts through the conversation's format: Slack's keeps today's exact
   texts, and an adapter's is plain text the adapter formats.
 - **FR-041:** `models` and `use <model>` are core text commands, worded for each surface. `swebench` and eval
-  batches stay Slack-only (FR-038). `connect chatgpt`, `chatgpt status` and `disconnect chatgpt` are still answered
-  by Slack ingress for the Slack member; they move to the core with the Slack adapter split (Phase 5).
+  batches stay Slack-only (FR-038). `connect chatgpt`, `chatgpt status` and `disconnect chatgpt` are parsed by the
+  core (`parseChatGptCommand`): Slack ingress answers them privately for the Slack member, and an adapter
+  conversation, which may be a group, is pointed to `agentx chatgpt` and told nothing about the connection.
 - **FR-042:** In each package, Slack Web API calls go through one module: `slack-web.ts` in the broker and in the
   orchestrator service. (Sign-in's OpenID token exchange and the CLI's setup are not Web API messaging.)
 
 ### Slack and WhatsApp on the protocol (Phases 5–6)
 
-- **FR-050:** Slack's signature check and event parsing run in the Slack adapter, which reaches the core only
-  through the channel API.
+- **FR-050:** Slack is an in-process adapter (decided 2026-11-10): its signature check, event parsing and Slack-only
+  features stay in Slack's modules (`slack-*.ts`, and the orchestrator service's Slack modules), which reach the core
+  through the surface-neutral processor (`processConversationRequest`), its hooks and the neutral contract names.
+  Slack is not moved behind the HTTP channel API: the protocol would need private messages, edits, rich buttons,
+  task-workflow actions and canvases first.
 - **FR-051:** `agentx adapter add` registers or changes an adapter (and `--rotate` replaces its secret), `adapter bind`
   and `adapter unbind` bind a space to a project, `adapter unlink` removes an actor's link, and `adapter list` and
   `adapter remove` manage adapters. `agentx channel add` stays the Slack channel binding.
@@ -213,4 +217,6 @@ The amendment permits adapters; none exists until Phase 3, so no running behavio
 - **SC-002:** A WhatsApp message in a bound group starts a task and receives `done`, on a test install.
 - **SC-003:** An unlinked actor, an unbound space and a bad signature each run nothing (abuse tests).
 - **SC-004:** After Phase 4b, no module outside `slack-web.ts` calls the Slack Web API, and the orchestrator package's
-  prompts and gate texts name no surface. After Phase 5, no module outside the Slack adapter imports Slack schemas.
+  prompts and gate texts name no surface. After Phase 5b, the conversation core imports no Slack type or Slack module
+  (`tests/contract/slack-boundary.test.ts`), and Slack imports elsewhere, where Slack is a product feature, cannot
+  grow.
