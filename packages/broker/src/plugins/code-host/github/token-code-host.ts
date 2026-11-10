@@ -3,7 +3,7 @@
 //   - `resolveCredentials`: "find my sign-in": the key file, then `GH_TOKEN` / `GITHUB_TOKEN`, then the GitHub CLI (`token-access.ts`). It makes no network call and returns no secret.
 //   - `checkAccess`: "test my connection": one `GET /user` with the token, in plain words.
 // The token is read when it is used (kept for 30 seconds), so a new `gh auth login` or an edited key file is picked up without a restart.
-import { agentXError, type CodeHost, type CodeHostAccessCheck, type CodeHostSignInResult, type ModelKeyStore, type SecretValue } from "@agentx/contracts";
+import { agentXError, type CodeHost, type CodeHostAccessCheck, type CodeHostSignInResult, type SecretStore, type SecretValue } from "@agentx/contracts";
 import { githubCodeHost, GITHUB_CODE_HOST_CAPABILITIES } from "./index.js";
 import { resolveGithubAccess, type GhRunner, type GithubAccess, type GithubTokenSource } from "./token-access.js";
 import { boundToCompany, describeTokenAccount, githubTokenClient, githubTokenReach } from "./token-client.js";
@@ -15,8 +15,8 @@ const TOKEN_REUSE_MS = 30_000;
 export interface GitHubTokenCodeHostOptions {
   /** The one company this laptop serves (an organization id): every call is held to it. */
   companyId: string;
-  /** The key file ALONE, not the layered model-key store (see `resolveGithubAccess`). */
-  keyFile: ModelKeyStore;
+  /** Where the stored token is read (the `secrets` socket; see `resolveGithubAccess`). */
+  secrets: SecretStore;
   environment: NodeJS.ProcessEnv;
   /** Runs the GitHub CLI; injectable for tests. */
   gh?: GhRunner;
@@ -39,7 +39,7 @@ export function githubTokenCodeHost(options: GitHubTokenCodeHostOptions): CodeHo
   const fetchImplementation = options.fetch ?? fetch;
   const keyFileWords = options.keyFilePath ?? "keys.json";
   const resolve = (reveal: boolean): Promise<GithubAccess | undefined> => resolveGithubAccess({
-    companyId: options.companyId, keyFile: options.keyFile, environment: options.environment, reveal, ...(options.gh === undefined ? {} : { gh: options.gh }),
+    companyId: options.companyId, secrets: options.secrets, environment: options.environment, reveal, ...(options.gh === undefined ? {} : { gh: options.gh }),
   });
 
   let cached: { at: number; token: SecretValue } | undefined;

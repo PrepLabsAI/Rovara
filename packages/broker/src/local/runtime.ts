@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint, type SecretStore } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
@@ -17,7 +17,11 @@ import {
   createEnvironmentModelKeyStore,
   createFileModelKeyStore,
   createLayeredModelKeyStore,
+  createLocalSecretStore,
   createModuleImporter,
+  createRegistrySecretStore,
+  createSecretModelKeyStore,
+  environmentVariableFor,
   type ModuleImporter,
   loadAdapters,
   parsePluginConfig,
@@ -66,12 +70,24 @@ import { THIS_MACHINE_ADAPTER_NAME, ThisMachineWorkerMachines } from "./this-mac
 
 /** The model providers whose keys `rovara up` looks for (the environment variable is `<PROVIDER>_API_KEY`). */
 export const LOCAL_MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
-/** Where Code's model keys come from: the environment first, then `<state folder>/keys.json` (refused unless only the owner can read it). */
-export function createLocalModelKeyStore(stateDirectory: string, environment: NodeJS.ProcessEnv): ModelKeyStore {
-  return createLayeredModelKeyStore([
-    createEnvironmentModelKeyStore(environment, LOCAL_MODEL_PROVIDERS),
-    createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME)),
-  ]);
+/**
+ * Where Code's model keys come from: the environment first, then `<state folder>/keys.json` (refused unless only the owner can read it). The keys are READ through the `secrets` socket (owner
+ * decision 60: `{ env: "<PROVIDER>_API_KEY" }`, then `{ key: "<provider>" }`); `secrets` is Code's own adapter unless the caller hands another (`rovara up` hands the registry's, so a configured
+ * `secrets` plug-in is the one used). Which providers have a key is the environment's and the file's own listing, because the socket reads one reference at a time.
+ */
+export function createLocalModelKeyStore(stateDirectory: string, environment: NodeJS.ProcessEnv, secrets?: SecretStore): ModelKeyStore {
+  const keyFile = createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME));
+  const listing = createLayeredModelKeyStore([createEnvironmentModelKeyStore(environment, LOCAL_MODEL_PROVIDERS), keyFile]);
+  return createSecretModelKeyStore({
+    secrets: secrets ?? createLocalSecretStore({ environment, keyFile }),
+    refs: (provider) => [{ env: environmentVariableFor(provider) }, { key: provider }],
+    providers: (companyId) => listing.providers(companyId),
+  });
+}
+
+/** Code's `secrets` adapter for this laptop: `{ env }`, `{ file }` and `{ key }` (an entry of `<state folder>/keys.json`, the key file alone). */
+export function createLocalSecrets(stateDirectory: string, environment: NodeJS.ProcessEnv): SecretStore {
+  return createLocalSecretStore({ environment, keyFile: createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME)) });
 }
 
 /**
@@ -303,8 +319,11 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const registry = createAdapterRegistry();
   // The comment reads of the approvers (a comment proves an approval only after Rovara's own checks, `core/pr-commands/comment-checks.ts`) need the app, which is made after the registry is sealed.
   const comments: { current?: Pick<LocalComments, "fetchComment" | "contextOf" | "available"> } = {};
-  const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment);
+  // Owner decision 60 (R2): secrets are read through the `secrets` point. The model keys and the GitHub token ask the registry each time, so a configured `secrets` plug-in replaces Code's.
+  const registrySecrets = createRegistrySecretStore(registry);
+  const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment, registrySecrets);
   registerCodeDefaults(registry, {
+    secrets: createLocalSecrets(stateDirectory, options.environment),
     ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     displayName: ownerName(),
     isValidSession: (value) => constantTimeEqual(value, sessionToken),
@@ -368,7 +387,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     const latest = await Promise.all((await listProjects(store, companyOrg)).map((project) => source.latest(project.name)));
     return latest.flatMap((revision) => (revision === undefined || revision.archived === true ? [] : revision.definition.repositories.map((repository) => repository.url)));
   };
-  for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
+  for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, secrets: registrySecrets, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
     if ((await host.resolveCredentials?.())?.found === true) registry.register("code-host", host.kind, host, { isDefault: true });
   }
 

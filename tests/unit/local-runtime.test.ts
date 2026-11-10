@@ -2,7 +2,7 @@
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, PluginRegistryError } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PluginRegistryError, SecretValue, type AdapterRegistry } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
@@ -13,7 +13,7 @@ afterEach(async () => {
   while (cleanup.length > 0) await cleanup.pop()!();
 });
 
-async function launch(options: { environment?: NodeJS.ProcessEnv; config?: unknown; files?: Record<string, string>; thisMachine?: boolean; gh?: (args: readonly string[]) => Promise<string | undefined>; fetch?: typeof fetch } = {}) {
+async function launch(options: { environment?: NodeJS.ProcessEnv; config?: unknown; files?: Record<string, string>; thisMachine?: boolean; gh?: (args: readonly string[]) => Promise<string | undefined>; fetch?: typeof fetch; registerAdapters?: (registry: AdapterRegistry) => void } = {}) {
   const root = await mkdtemp(join(tmpdir(), "rovara-l4-run-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -32,6 +32,7 @@ async function launch(options: { environment?: NodeJS.ProcessEnv; config?: unkno
     // The GitHub CLI is never run for real: the machine this test runs on may be signed in to it.
     gh: options.gh ?? (async () => undefined),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    ...(options.registerAdapters === undefined ? {} : { registerAdapters: options.registerAdapters }),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
@@ -54,6 +55,7 @@ describe("rovara up runtime", () => {
       identity: ["local-owner"],
       admission: ["allow-all"],
       "model-keys": ["local"],
+      secrets: ["local"],
     });
   });
 
@@ -88,6 +90,22 @@ describe("rovara up runtime", () => {
     const loose = await launch({ files: { "keys.json": JSON.stringify({ openai: "x" }) } });
     await (await import("node:fs/promises")).chmod(join(loose.stateDirectory, "keys.json"), 0o644);
     await expect(loose.runtime.registry.require("model-keys").get(IMPLICIT_COMPANY_ID, "openai")).rejects.toThrow(/readable by other users/);
+  });
+
+  it("reads the model keys through the secrets point: a secrets adapter the install registers replaces Code's, and the worker still holds no key", async () => {
+    const asked: Array<Record<string, string>> = [];
+    const { runtime } = await launch({
+      environment: { ANTHROPIC_API_KEY: "from-env" },
+      registerAdapters: (registry) => registry.register("secrets", "service", {
+        async read(_company, ref) { asked.push({ ...ref }); return ref.key === "openai" ? new SecretValue("from-the-service") : undefined; },
+      }),
+    });
+    expect(runtime.wiring().secrets).toEqual(["service"]);
+    const keys = runtime.registry.require("model-keys");
+    expect((await keys.get(IMPLICIT_COMPANY_ID, "openai"))?.reveal()).toBe("from-the-service");
+    expect(await keys.get(IMPLICIT_COMPANY_ID, "anthropic")).toBeUndefined();
+    expect(asked).toContainEqual({ env: "ANTHROPIC_API_KEY" });
+    expect(asked).toContainEqual({ key: "openai" });
   });
 
   it("lets a configured storage plug-in replace the default, and seals the registry afterwards", async () => {
