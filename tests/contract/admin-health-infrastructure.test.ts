@@ -179,7 +179,7 @@ describe("the health route's grants (A13)", () => {
     const dispatchItem = shared.slice(shared.indexOf("export function workflowDispatchItem("));
     expect(dispatchItem).toContain('entityType: "WORKFLOW_DISPATCH"');
     expect(shared.split("\n").filter((line) => /indexExpiresAt|INDEX_EXPIRY_ATTRIBUTE/.test(line)).map((line) => line.trim())).toEqual([
-      'import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES, PLAN_DOCUMENT_INFO_STRING, type PlanDocumentKind } from "@agentx/contracts";',
+      'import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES } from "@agentx/contracts";',
       "indexExpiresAt: number;",
       "[INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + WORKFLOW_DISPATCH_RETENTION_SECONDS,",
     ]);
