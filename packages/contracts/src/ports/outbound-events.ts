@@ -1,7 +1,7 @@
 // Port lane P6 (item R3, owner decisions 40 and 61): the `outbound-events` plug-in point. Rovara emits an event for what happens to a task, with references to its artifacts, so that a lightweight adapter
 // (an internal issue tracker, a dashboard, a chat tool) can follow along WITHOUT a change to Rovara.
 //
-// ONE protocol, not two (decision 61): an outbound event is signed exactly like Pratik's channel events (spec 062 phase 3, `channel-adapter.ts`), with Standard Webhooks: the `webhook-id` header is the event's `id`,
+// ONE protocol, not two (decision 61): an outbound event is signed exactly like the channel events (spec 062 phase 3, `channel-adapter.ts`), with Standard Webhooks: the `webhook-id` header is the event's `id`,
 // `webhook-timestamp` is in seconds, and `webhook-signature` is `v1,<base64 HMAC-SHA256 of "<id>.<timestamp>.<body>">` made with the adapter's secret (`whsec_...`). The body is the event as JSON. An adapter that already
 // verifies a channel event verifies this one with the same code. The envelope has the same `version`, `id` (`evt_...`, stable across retries, so a receiver drops a repeat) and `createdAt`.
 //

@@ -1,6 +1,6 @@
-// Standing instructions (lanes I1 and I2, owner decision 57): the one block of text the people who run the work put in front of every step, in the SYSTEM prompt.
-// The broker builds it (packages/broker/src/instructions/); the worker only places it. Layer order, top to bottom:
-//   Rovara's fixed prompt and preamble > company rules (Required, then Preferred) > the project's "How we work" > per-task extras (lane I4) > repository files > skills and lessons.
+// Standing instructions (owner decision 57): the one block of text the people who run the work put in front of every step, in the SYSTEM prompt.
+// The core builds it; the worker only places it. Layer order, top to bottom:
+//   Rovara's fixed prompt and preamble > company rules (Required, then Preferred) > the project's "How we work" > per-task extras > repository files > skills and lessons.
 // Higher wins; a lower layer may add or narrow, never loosen. Provider-neutral (decision 51): nothing here names a store, a chat tool or a code host.
 import { z } from "zod";
 import { agentXError } from "./errors.js";

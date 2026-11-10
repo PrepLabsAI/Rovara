@@ -1,4 +1,4 @@
-// A test fake for the company-instructions socket (port lane P6; the shape of Cloud's fake from lane I2): answers the given snapshots in turn (the last one repeats; an Error among them fails that call), or fails every call when given an Error. Records the company key of each call.
+// A test fake for the company-instructions socket (port lane P6; the shape of Cloud's fake): answers the given snapshots in turn (the last one repeats; an Error among them fails that call), or fails every call when given an Error. Records the company key of each call.
 import type { CompanyInstructionsSnapshot, CompanyInstructionsSource } from "../../packages/contracts/src/index.js";
 
 export interface FakeCompanyInstructionsSource extends CompanyInstructionsSource {

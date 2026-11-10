@@ -2,7 +2,7 @@
 //
 // One company's rules, one version, read at every step (decision 57.5: a running task uses the newest approved version at its next step). Code reads them from a local file
 // (`~/.rovara/company-instructions.md`, hash as the version); Cloud reads its store (the approved version number as the version). The shape is Cloud's `CompanyInstructionsSource`
-// (private integ/0512, lane I2) so that Cloud's port is a copy of this one. Nothing here names a chat tool, a code host or a store.
+// so that Cloud's port is a copy of this one. Nothing here names a chat tool, a code host or a store.
 //
 // This is the whole interface. How a block of text is built from the snapshot (the order of the layers, the wording, the size budget the block is held to) is the core's
 // (`standing-instructions.ts`); an adapter only answers with what the company has approved. There is no write method: changing the rules is an approval in the edition that has

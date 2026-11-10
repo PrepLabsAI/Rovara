@@ -231,7 +231,7 @@ only, decision 41). A test that keeps its records in memory (`storage: "memory"`
 ### Company instructions (lane P6, item L1)
 
 `company-instructions` is a read-only point that holds one adapter: `current(company)` returns the company's latest approved rules as `{ version, rules: [{ text, priority }] }` (priority `required` or `preferred`), or `undefined` for none. It is
-the shape of Cloud's `CompanyInstructionsSource` (lane I2) so Cloud's port is a copy of this one; the sizes (30 rules, 600 characters each, 12,000 in all) and the snapshot schema are in `standing-instructions.ts`. There is no write method.
+the shape of Cloud's `CompanyInstructionsSource` so Cloud's port is a copy of this one; the sizes (30 rules, 600 characters each, 12,000 in all) and the snapshot schema are in `standing-instructions.ts`. There is no write method.
 Code's adapter (`FileCompanyInstructions`, plug-in `@agentx/local-adapters/company-instructions`, the default of `rovara up`) reads `company-instructions.md` in the state folder (`~/.rovara` by default; a plug-in's default is the state folder the install runs from) at every call: bullets under `## Required` and `## Preferred`, a bullet with no
 heading is Required, a line it cannot place is refused (naming the line) instead of being dropped, and the file must be a plain file owned by the user and not writable by others, in a folder that is a real folder owned by the user and not writable by group or others. At most 64 KiB are read from the open file. The version is the SHA-256 of the file's bytes, so it is also the hash a task records.
 The file is outside every repository on purpose: a repository's writers cannot edit the company's rules.

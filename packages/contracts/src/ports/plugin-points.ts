@@ -51,7 +51,7 @@ export const PLUGIN_POINTS = [
   "object-storage",
   /** Owner decisions 57 and 60 (item L1): the company's standing rules, read-only. Code: a local file; Cloud: its store. */
   "company-instructions",
-  /** Owner decisions 40 and 61 (item R3): signed events out, in the format of Pratik's channel events. */
+  /** Owner decisions 40 and 61 (item R3): signed events out, in the format of the channel events. */
   "outbound-events",
   /** Item K2 (owner decisions 60 and 61): where a model is, how to sign in to it, the request format it speaks and its prices. */
   "model-provider",
