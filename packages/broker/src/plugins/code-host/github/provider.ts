@@ -8,6 +8,7 @@
 // (same names, same fields); when a lane brings that client in, replace them with `export type { ... } from "../../../github-app.js"`.
 import type { HostScope, ReadBudget } from "@agentx/contracts";
 import type { PullRequestStatus } from "../../../github-pull-status.js";
+import type { CommitFilesRequest } from "./commit-files.js";
 
 export type { PullRequestCheck, PullRequestStatus } from "../../../github-pull-status.js";
 
@@ -44,6 +45,11 @@ export interface GitHubPullRequestDetails {
   mergedBy?: string;
   title: string;
   body: string;
+  /** The login of the account that created it, and the id of the repository it is against, when GitHub says. */
+  authorLogin?: string;
+  baseRepositoryId?: string;
+  /** Whether that account is this App's own bot (set by `getPullRequest` only; absent when the App's login cannot be read, and never a yes on a laptop's personal token). */
+  authoredByApp?: boolean;
 }
 
 export interface GitHubPullRequestUpdate {
@@ -129,7 +135,13 @@ export interface GitHubCodeHostProvider {
   resolveWithExpiry(credentialRef: string, repositoryUrl: string, access: "clone" | "push", scope: GitHubTokenScope): Promise<GitHubRepositoryCredential>;
   getFileAtCommit(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { untilLine?: number; timeoutMs?: number; maxBytes?: number }): Promise<string | undefined>;
   /** Optional: a client that cannot tell a file from a directory leaves it out, and the adapter then has no `pathKind`. */
-  getPathKindAtCommit?(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<"file" | "dir" | "none">;
+  getPathKindAtCommit?(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<"file" | "dir" | "symlink" | "none">;
+  /** Optional (item C1): puts text files on a Rovara lessons branch (see `commit-files.ts`). A client without it leaves the adapter without `commitFiles`. */
+  commitFilesToBranch?(repositoryUrl: string, request: CommitFilesRequest, scope: GitHubTokenScope): Promise<{ revision: string; changed: boolean }>;
+  /** Optional (item C1): the pull request (any state) made from one of Rovara's lessons branches. */
+  findLessonsPullRequest?(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<{ number: number; url: string } | undefined>;
+  /** Optional (item C1): deletes one of Rovara's lessons branches. */
+  deleteLessonsBranch?(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<"deleted" | "gone">;
   getCommitTree(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope): Promise<string>;
   getBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string>;
   listWorkingBranches(repositoryUrl: string, expected: { installationId: number; repositoryId: number }, scope: GitHubTokenScope, page?: number): Promise<WorkingBranchPage>;

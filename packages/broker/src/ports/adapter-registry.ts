@@ -8,6 +8,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, relative, resolve, isAbsolute, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { connectionProblems } from "../plugins/code-host/connections.js";
 import {
   IMPLICIT_COMPANY_ID,
   PLUGIN_POINT_CARDINALITY,
@@ -190,6 +191,9 @@ export async function loadAdapters(config: PluginConfig, options: LoadAdaptersOp
     }
     options.registry.register(entry.point, entry.name, adapter as never);
   }
+  // Item C2: several connections of one provider need exactly one default; a config that does not is refused when it loads, not when a repository first uses it.
+  const problems = connectionProblems(options.registry);
+  if (problems.length > 0) throw new PluginRegistryError("bad_config", `the code host connections are not valid: ${problems.join("; ")}`);
 }
 
 /** Convenience for a process start-up: register the defaults first, call this, then `registry.seal()`. */

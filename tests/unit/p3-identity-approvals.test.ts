@@ -551,15 +551,15 @@ describe("I1: the identity abilities", () => {
     expect(await people.hostAccountsOf!(COMPANY as never, requester.personId)).toEqual(["4711", "4712"]);
     expect(await people.hostAccountOf(COMPANY as never, requester.personId)).toBe("4711");
     // The presser rule in the readiness check: the only approver is the presser's SECOND account.
-    const approvals = new Map([["app#7", { approved: true as const, by: { githubUserId: "4712", login: "dana" }, commitId: "a".repeat(40), approvers: [{ githubUserId: "4712", login: "dana" }] }]]);
+    const approvals = new Map([["app#7", { approved: true as const, by: { hostUserId: "4712", login: "dana" }, commitId: "a".repeat(40), approvers: [{ hostUserId: "4712", login: "dana" }] }]]);
     const ready = mergeReadiness({
       pullRequests: [readinessFact()], approvals, workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING" }, recordedBases: new Map([["app#7", "main"]]),
-      presser: { githubUserId: "4711", otherGithubUserIds: ["4712"] }, requirePresserAccount: true, allowSelfApproval: false, requesterName: "Owner",
+      presser: { hostUserId: "4711", otherHostUserIds: ["4712"] }, requirePresserAccount: true, allowSelfApproval: false, requesterName: "Owner",
     });
     expect(ready).toMatchObject({ ready: false });
     const sameWithoutOthers = mergeReadiness({
       pullRequests: [readinessFact()], approvals, workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING" }, recordedBases: new Map([["app#7", "main"]]),
-      presser: { githubUserId: "4711" }, requirePresserAccount: true, allowSelfApproval: false, requesterName: "Owner",
+      presser: { hostUserId: "4711" }, requirePresserAccount: true, allowSelfApproval: false, requesterName: "Owner",
     });
     expect(sameWithoutOthers).toMatchObject({ ready: true });
   });

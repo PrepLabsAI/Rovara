@@ -7,7 +7,7 @@
 //  - `planRestackOutcome`: what a finished restack is, from what the host shows (never from the worker's word alone). A restack never carries a person's approval to the new head (the head's history was
 //    rewritten; decision 4's carry-over covers a clean merge only), so the outcome is recorded as unverified-for-carry-over and the pull request needs its review again.
 // Preconditions before anything may call `forcePushLease` are listed in the lane report (round 1 review). Needs both the contracts and the worker to carry the method (see the lane report): the workflow's branch-sync marker has no `method` yet, and the worker has no restack operation.
-import { recordWorkflowBranchSync, WorkflowTransitionError, endWorkflowBranchSync, type Autonomy, type CodeHost, type HostScope, type RepositoryRef, type WorkflowSnapshot } from "@agentx/contracts";
+import { recordWorkflowBranchSync, WorkflowTransitionError, endWorkflowBranchSync, type Autonomy, type CodeHost, type HostScope, type RepositoryRef, type WorkflowSnapshot, COMMIT_ID_PATTERN } from "@agentx/contracts";
 import type { BranchWriters } from "./branch-writers.js";
 import { isTransientSyncFailure, type BranchSyncGithub } from "./branch-sync.js";
 
@@ -42,7 +42,8 @@ export function decideBranchMethod(input: BranchMethodInput): { method: "restack
   return { method: "restack" };
 }
 
-const SHA = /^[a-f0-9]{40}$/u;
+/** A commit id of any hash length (item C4): the core never decides it is SHA-1. */
+const SHA = COMMIT_ID_PATTERN;
 /** A branch name safe to put in a git argument: no leading dash or slash, no control characters, spaces, `:`, `?`, `*`, `[`, `\`, `~`, `^`, `..`, `@{`, no `.lock` end. */
 const SAFE_BRANCH = /^(?!-)(?!\/)(?!.*\.\.)(?!.*@\{)(?!.*\/\/)(?!.*\.lock(?:\/|$))[A-Za-z0-9._/+-]{1,250}(?<![/.])$/u;
 

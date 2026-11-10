@@ -12,22 +12,29 @@ const GitHubCodeHostSettingsSchema = z.object({
   credentialRef: z.string().min(1).max(200),
   /** Where the webhook signing secret is read from. Absent: the adapter accepts no webhook delivery. */
   webhookSecret: SecretSourceSchema.optional(),
+  /** Item C2: this connection is the default GitHub connection (used by a repository that names no code host). At most one connection may say so. */
+  default: z.boolean().optional(),
 }).strict();
 
 export interface GitHubCodeHostPluginOptions {
+  /** Item C2: the connection's name, default `github`. A second connection (`github-company`) is a second module with its own name and its own `createProvider`. */
+  name?: string;
   createProvider(context: PluginContext): GitHubCodeHostProvider | Promise<GitHubCodeHostProvider>;
 }
 
 export function githubCodeHostPlugin(options: GitHubCodeHostPluginOptions): PluginModule<"code-host"> {
+  const name = options.name ?? GITHUB_HOST_KIND;
   return {
     point: "code-host",
-    name: GITHUB_HOST_KIND,
+    name,
     async create(context) {
-      const settings = readPluginSettings(GitHubCodeHostSettingsSchema, context.settings, `code-host/${GITHUB_HOST_KIND}`);
+      const settings = readPluginSettings(GitHubCodeHostSettingsSchema, context.settings, `code-host/${name}`);
       const provider = await options.createProvider(context);
       const missing = missingGitHubProviderMethods(provider);
       if (missing.length > 0) throw new PluginRegistryError("create_failed", `the GitHub client lacks methods the adapter needs: ${missing.join(", ")}`);
       return githubCodeHost(provider, {
+        name,
+        ...(settings.default === true ? { isDefault: true } : {}),
         credentialRef: settings.credentialRef,
         now: () => context.now().getTime(),
         ...(settings.webhookSecret === undefined ? {} : { webhookSecret: contextSecretReader(context, settings.webhookSecret) }),

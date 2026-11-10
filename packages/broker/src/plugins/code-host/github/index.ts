@@ -8,14 +8,15 @@
 //  - `events.normalise` (`events.ts`) exists only when the adapter is given the install's webhook secret; without one it verifies nothing and offers no normaliser.
 // The client holds the rest (see the rules on `GitHubCodeHostProvider`): tenant binding, least-privilege tokens, no redirects.
 import {
-  agentXError, ChangeRequestInputSchema, ChangeRequestUpdateSchema, HostScopeSchema,
-  type BranchPage, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
+  agentXError, ChangeRequestInputSchema, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
+  type BranchPage, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
   type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
   type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef,
 } from "@agentx/contracts";
 import { parseGitHubRepository } from "../../../github-app.js";
 import { githubCodeHostEvents } from "./events.js";
-import { detailsOf, feedbackOf, fileOf, mergeResultOf, pullRequestNumber, refOf, replyTargetOf, statusOf } from "./mapping.js";
+import { readCodeOwnersFile } from "../code-owners-file.js";
+import { accountKindOf, detailsOf, feedbackOf, fileOf, mergeResultOf, pullRequestNumber, refOf, replyTargetOf, statusOf } from "./mapping.js";
 import { type GitHubCodeHostProvider } from "./provider.js";
 
 export const GITHUB_HOST_KIND = "github";
@@ -39,6 +40,13 @@ export const GITHUB_CODE_HOST_CAPABILITIES: CodeHostCapabilities = {
 export type { GitHubCodeHostProvider } from "./provider.js";
 
 export interface GitHubCodeHostOptions {
+  /**
+   * Item C2: the name of this connection (`github`, `github-company`), which is also the adapter's `kind` and the name it is registered under. Default `github`. Every connection of this adapter is of provider `github`.
+   * Several connections can be registered; a repository record names one (`host.kind`), and one is the default for a repository that names none.
+   */
+  name?: string;
+  /** Item C2: this connection is the default of its provider (used when a repository names none). At most one connection of a provider may say so. */
+  isDefault?: boolean;
   /** The credential reference the provider was configured with; a repository registered under another one is refused by the provider. */
   credentialRef: string;
   /** The clock, in milliseconds. Default `Date.now`. */
@@ -55,13 +63,18 @@ function checkedScope(scope: HostScope): HostScope {
 
 export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHubCodeHostOptions): CodeHost {
   const pathKindOfProvider = typeof provider.getPathKindAtCommit === "function" ? provider.getPathKindAtCommit.bind(provider) : undefined;
+  const commitFilesOfProvider = typeof provider.commitFilesToBranch === "function" ? provider.commitFilesToBranch.bind(provider) : undefined;
+  const findPullRequestOfProvider = typeof provider.findLessonsPullRequest === "function" ? provider.findLessonsPullRequest.bind(provider) : undefined;
+  const deleteBranchOfProvider = typeof provider.deleteLessonsBranch === "function" ? provider.deleteLessonsBranch.bind(provider) : undefined;
   const listComments = typeof provider.listPullRequestComments === "function" ? provider.listPullRequestComments.bind(provider) : undefined;
   const postComment = typeof provider.postPullRequestComment === "function" ? provider.postPullRequestComment.bind(provider) : undefined;
   const host: CodeHost = {
-    kind: GITHUB_HOST_KIND,
+    kind: options.name ?? GITHUB_HOST_KIND,
+    provider: GITHUB_HOST_KIND,
+    ...(options.isDefault === true ? { defaultConnection: true } : {}),
     capabilities: GITHUB_CODE_HOST_CAPABILITIES,
     // P6: with a webhook secret the adapter verifies and maps GitHub's deliveries (events.ts); the broker's existing route keeps its own intake until the cut-over.
-    events: options.webhookSecret === undefined ? { mode: "webhook" } : githubCodeHostEvents(options.webhookSecret),
+    events: options.webhookSecret === undefined ? { mode: "webhook" } : githubCodeHostEvents(options.webhookSecret, options.name ?? GITHUB_HOST_KIND),
 
     async repositoryIdentity(repository: RepositoryRef, scope: HostScope): Promise<RepositoryIdentity | undefined> {
       const identity = await provider.getRepositoryIdentity(repository.url, checkedScope(scope));
@@ -74,7 +87,7 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
 
     async standing(repository: RepositoryRef, person: HostAccount, scope: HostScope, budget?: ReadBudget): Promise<HostStanding> {
       const standing = await provider.getRepositoryStanding(repository.url, person.login, checkedScope(scope), budget);
-      return { permission: standing.permission, ...(standing.userType === undefined ? {} : { accountType: standing.userType }) };
+      return { permission: standing.permission, ...(standing.userType === undefined ? {} : { accountType: accountKindOf(standing.userType) }) };
     },
 
     async issueGitCredential(repository: RepositoryRef, access: GitAccess, scope: HostScope): Promise<GitCredential> {
@@ -95,7 +108,7 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
 
     // Only where the provider can tell (a partial provider of a harness cannot): a host without `kind` leaves a directory unverified.
     ...(pathKindOfProvider === undefined ? {} : {
-      async pathKind(repository: RepositoryRef, path: string, revision: string, scope: HostScope, kindOptions?: { timeoutMs?: number }): Promise<"file" | "dir" | "none"> {
+      async pathKind(repository: RepositoryRef, path: string, revision: string, scope: HostScope, kindOptions?: { timeoutMs?: number }): Promise<PathKind> {
         return pathKindOfProvider(repository.url, path, revision, checkedScope(scope), kindOptions);
       },
     }),
@@ -131,9 +144,32 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
       return { branches: listed.branches, page: listed.page, mayHaveMore: listed.mayHaveMore, omittedUnsupported: listed.omittedUnsupported };
     },
 
-    async codeOwners(repository: RepositoryRef, branch: string, scope: HostScope): Promise<string | undefined> {
-      return provider.readCodeOwners(repository.url, branch, checkedScope(scope));
+    async codeOwners(repository: RepositoryRef, branch: string, scope: HostScope): Promise<CodeOwnersRead | undefined> {
+      const text = await provider.readCodeOwners(repository.url, branch, checkedScope(scope));
+      return text === undefined ? undefined : readCodeOwnersFile(text);
     },
+
+    // Item C1 (decision 59): only where the client can. A host without these simply has no lessons file.
+    ...(commitFilesOfProvider === undefined ? {} : {
+      async commitFiles(input: CommitFilesInput, scope: HostScope): Promise<CommitFilesResult> {
+        const parsed = CommitFilesInputSchema.parse(input);
+        return commitFilesOfProvider(parsed.repository.url, {
+          branch: parsed.branch, baseBranch: parsed.baseBranch, message: parsed.message, files: parsed.files, fromBase: parsed.fromBase,
+          baseRevision: parsed.baseRevision, expectedHead: parsed.expectedHead, previous: parsed.previous,
+        }, checkedScope(scope));
+      },
+    }),
+    ...(findPullRequestOfProvider === undefined ? {} : {
+      async changeRequestForBranch(repository: RepositoryRef, branch: string, scope: HostScope): Promise<ChangeRequestRef | undefined> {
+        const found = await findPullRequestOfProvider(repository.url, branch, checkedScope(scope));
+        return found === undefined ? undefined : refOf(repository.url, found.number, found.url);
+      },
+    }),
+    ...(deleteBranchOfProvider === undefined ? {} : {
+      async deleteBranch(repository: RepositoryRef, branch: string, scope: HostScope): Promise<"deleted" | "gone"> {
+        return deleteBranchOfProvider(repository.url, branch, checkedScope(scope));
+      },
+    }),
 
     async reconcileChangeRequest(input: ChangeRequestInput, scope: HostScope): Promise<ChangeRequestReconciled> {
       const parsed = ChangeRequestInputSchema.parse(input);

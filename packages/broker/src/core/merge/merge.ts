@@ -15,6 +15,7 @@
 //  - The audit fact commits with the claim through W0's `AuditSink.stage`, as Cloud's ledger row did.
 //  - Everything provider-specific is behind the `CodeHost` port; people, settings, the task record, the timeline and the milestones are seams (seams.ts).
 import { createHash } from "node:crypto";
+import { providerOf } from "../../plugins/routing.js";
 import {
   MERGE_CLAIM_SECONDS,
   MERGE_NOT_READY_MESSAGES as M,
@@ -99,8 +100,8 @@ export interface ReadinessInput {
   workflow: ReadinessWorkflow;
   /** The base branch each pull request was opened against, by `repositoryId#number`. */
   recordedBases: ReadonlyMap<string, string>;
-  /** `githubUserId` is the presser's account; `otherGithubUserIds` are the rest of the accounts the same person has linked (a person with two accounts cannot be the "other" approver by using the second). */
-  presser: { githubUserId: string | undefined; otherGithubUserIds?: readonly string[] };
+  /** `hostUserId` is the presser's account; `otherHostUserIds` are the rest of the accounts the same person has linked (a person with two accounts cannot be the "other" approver by using the second). */
+  presser: { hostUserId: string | undefined; otherHostUserIds?: readonly string[] };
   /**
    * Whether whoever presses Merge must have a linked code-host account (Cloud: always, controller ruling 2026-10-26, so the approval of the presser can be told from a reviewer's). Code has
    * one owner who proves themselves by a session or a collaborator's comment, so its install turns this off. Default true.
@@ -178,12 +179,12 @@ export function mergeReadiness(input: ReadinessInput): Readiness {
   }
   // Whoever presses Merge must have a linked GitHub account, whether the org allows self-approval or not (controller ruling 2026-10-26).
   // With self-approval off the presser must be known, whatever `requirePresserAccount` says: otherwise "the only approver cannot press" could not be checked.
-  if (input.presser.githubUserId === undefined && (input.requirePresserAccount !== false || !input.allowSelfApproval)) return notReady(M.linkGithub);
-  if (!input.allowSelfApproval && input.presser.githubUserId !== undefined) {
-    const presserAccounts = [input.presser.githubUserId, ...(input.presser.otherGithubUserIds ?? [])];
+  if (input.presser.hostUserId === undefined && (input.requirePresserAccount !== false || !input.allowSelfApproval)) return notReady(M.linkGithub);
+  if (!input.allowSelfApproval && input.presser.hostUserId !== undefined) {
+    const presserAccounts = [input.presser.hostUserId, ...(input.presser.otherHostUserIds ?? [])];
     for (const pr of open) {
       const approval = input.approvals.get(pullRequestKey(pr));
-      if (approval?.approved === true && approval.approvers.length === 1 && presserAccounts.includes(approval.approvers[0]!.githubUserId)) return notReady(M.presserApproved);
+      if (approval?.approved === true && approval.approvers.length === 1 && presserAccounts.includes(approval.approvers[0]!.hostUserId)) return notReady(M.presserApproved);
     }
   }
   return { ready: true };
@@ -254,12 +255,12 @@ async function approvalOfItem(
 ): Promise<HumanApproval> {
   if (item.review === "changes_requested") return { approved: false, reason: "changes_requested" };
   if (item.approval === undefined) return { approved: false, reason: "none" };
-  const { githubUserId, login, commitId } = item.approval;
+  const { hostUserId, login, commitId } = item.approval;
   return humanApprovalOf({
-    reviews: [{ githubUserId, login, userType: "User", state: "APPROVED", commitId, submittedAt: item.observedAt }],
+    reviews: [{ hostUserId, login, accountType: "person", state: "APPROVED", commitId, submittedAt: item.observedAt }],
     headSha: item.headSha, syncedFrom: pullRequest?.syncedFrom, ciPassingOnHead: item.ci === "passing" || item.ci === "none",
-    permissions: new Map([[login, "write" as const]]), requesterGithubUserIds: ctx.requesters, linkedGithubUserIds: await linkedAmong(deps.people, orgId, [githubUserId]),
-    excludedGithubUserIds: await nonWritersAmong(deps.people, orgId, [githubUserId]),
+    permissions: new Map([[login, "write" as const]]), requesterHostUserIds: ctx.requesters, linkedHostUserIds: await linkedAmong(deps.people, orgId, [hostUserId]),
+    excludedHostUserIds: await nonWritersAmong(deps.people, orgId, [hostUserId]),
     allowSelfApproval: ctx.allowSelfApproval,
   });
 }
@@ -273,7 +274,7 @@ async function presserAccountsOf(people: MergePeople, orgId: OrgId, personId: st
   return [...new Set([...(first === undefined ? [] : [first]), ...all])];
 }
 const presserOf = (accounts: readonly string[] | undefined): ReadinessInput["presser"] =>
-  accounts === undefined || accounts.length === 0 ? { githubUserId: undefined } : { githubUserId: accounts[0], otherGithubUserIds: accounts.slice(1) };
+  accounts === undefined || accounts.length === 0 ? { hostUserId: undefined } : { hostUserId: accounts[0], otherHostUserIds: accounts.slice(1) };
 
 async function readinessFromItems(
   deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, items: readonly MergeTrackingItem[], presserPersonId: string | undefined,
@@ -508,7 +509,7 @@ async function mergeableNow(
     if (home === undefined) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
     const { url } = home;
     // The pull request must be the one Rovara linked to this task: nothing a stored field says moves it to another.
-    const linked = await deps.links.find({ hostKind: home.codeHost.kind, repositoryAddress: url, id: String(entry.number) });
+    const linked = await deps.links.find({ hostKind: providerOf(home.codeHost), connectionKind: home.codeHost.kind, repositoryAddress: url, id: String(entry.number) });
     if (linked === undefined || linked.taskId !== task.taskId || linked.repositoryId !== entry.repositoryId || linked.url !== entry.url) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
     const status = await home.codeHost.changeRequestStatus(changeRequestRef(url, entry.number), scope);
     if (status.id !== String(entry.number)) throw agentXError("RUNTIME_UNAVAILABLE", "The code host answered for another pull request");
@@ -541,7 +542,7 @@ async function mergeableNow(
 
 /**
  * Whether a code owner approved, for one pull request: nothing is asked of the host when it does not read code owners or the repository has no CODEOWNERS file. Anything unreadable fails closed.
- * The CODEOWNERS file and the changed paths come from the code host's port; team membership is outside the port today (`ConsumerRepository.isTeamMember`), and a host that cannot tell is "unknown".
+ * The code owners (read by the host itself) and the changed paths come from the code host's port; team membership is outside the port today (`ConsumerRepository.isTeamMember`), and a host that cannot tell is "unknown".
  */
 async function codeOwnersOf(
   ctx: { home: ConsumerRepository; scope: HostScope; baseBranch: string; number: number; approval: Extract<HumanApproval, { approved: true }> },
@@ -549,13 +550,13 @@ async function codeOwnersOf(
   const { codeHost, url } = ctx.home;
   if (!codeHost.capabilities.codeOwners || codeHost.codeOwners === undefined) return { ok: true };
   try {
-    const text = await codeHost.codeOwners({ url }, ctx.baseBranch, ctx.scope);
-    if (text === undefined) return { ok: true };
+    const owners = await codeHost.codeOwners({ url }, ctx.baseBranch, ctx.scope);
+    if (owners === undefined) return { ok: true };
     const changed = await changedPathsOf(codeHost, changeRequestRef(url, ctx.number), ctx.scope);
     // A list cut short could hide a path a code owner owns.
     if (!changed.complete) return { ok: false, unreadable: true };
     return await codeOwnerVerdict({
-      codeOwnersText: text, paths: changed.paths, approverLogins: ctx.approval.approvers.map((approver) => approver.login),
+      codeOwners: owners, paths: changed.paths, approverLogins: ctx.approval.approvers.map((approver) => approver.login),
       teamMember: async (team, login) => (await ctx.home.isTeamMember?.(team, login, ctx.scope)) ?? "unknown",
     });
   } catch {
@@ -588,8 +589,8 @@ async function approvalFromStatus(
   }
   return humanApprovalOf({
     reviews, headSha: status.headRevision, syncedFrom: ctx.syncedFrom, ciPassingOnHead: ctx.ciPassing, permissions,
-    requesterGithubUserIds: ctx.requesters, linkedGithubUserIds: await linkedAmong(deps.people, ctx.orgId, reviewers.map((review) => review.githubUserId)),
-    excludedGithubUserIds: await nonWritersAmong(deps.people, ctx.orgId, reviewers.map((review) => review.githubUserId)), allowSelfApproval: ctx.allowSelfApproval,
+    requesterHostUserIds: ctx.requesters, linkedHostUserIds: await linkedAmong(deps.people, ctx.orgId, reviewers.map((review) => review.hostUserId)),
+    excludedHostUserIds: await nonWritersAmong(deps.people, ctx.orgId, reviewers.map((review) => review.hostUserId)), allowSelfApproval: ctx.allowSelfApproval,
   });
 }
 
@@ -679,7 +680,7 @@ async function mergeTask(
   for (const step of plan) {
     const { entry, url, headSha } = step;
     const claim = await claimMerge(
-      deps, tracked, { repositoryId: entry.repositoryId, number: entry.number, url, repositoryKey: requireRepositoryKey(step.codeHost.kind, url) }, headSha, who.decidedBy,
+      deps, tracked, { repositoryId: entry.repositoryId, number: entry.number, url, repositoryKey: requireRepositoryKey(providerOf(step.codeHost), url) }, headSha, who.decidedBy,
       { occurrence: who.occurrence, method: settings.mergeMethod, proofMethod: who.method, proof: who.proof, requestId: who.requestId }, !proofUsed,
     );
     if (!claim.claimed) {

@@ -29,6 +29,15 @@ export type RepositoryRef = z.infer<typeof RepositoryRefSchema>;
 export const RevisionSchema = z.string().min(1).max(200);
 export type Revision = z.infer<typeof RevisionSchema>;
 
+/**
+ * A commit id of the hash length the host uses, as lower-case hex: 40 digits for SHA-1 and 64 for SHA-256, and anything between up to 128 so a host's longer id is not refused by the core. The core never decides the length (item C4);
+ * an adapter that knows its host's exact length holds it itself.
+ */
+export const COMMIT_ID_SOURCE = "[a-f0-9]{40,128}";
+export const COMMIT_ID_PATTERN = new RegExp(`^${COMMIT_ID_SOURCE}$`, "u");
+export const CommitIdSchema = z.string().regex(COMMIT_ID_PATTERN, "a commit id");
+export const isCommitId = (value: unknown): value is string => typeof value === "string" && COMMIT_ID_PATTERN.test(value);
+
 /** A branch name as one short line. */
 export const BranchNameSchema = z.string().min(1).max(250).refine((value) => !/[\p{Cc}\p{Cf}]/u.test(value), "a branch name has no control characters");
 

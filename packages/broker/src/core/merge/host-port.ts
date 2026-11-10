@@ -8,7 +8,7 @@
 //   - `isTeamMember`: whether a person is in a team of the repository's organization (CODEOWNERS teams). GitHub-only today; absent means "unknown", which fails closed.
 //   - (P6 closed the rate-limit gap: a host's limit is the neutral `HostRateLimitError`, which GitHub's class extends.)
 import { hostRateLimitRetryAt, type ChangeRequestRef, type ChangeRequestStatus, type CheckRunner, type CodeHost, type HostScope, type OrgId, type Review } from "@agentx/contracts";
-import type { PullRequestReview } from "../../github-pull-status.js";
+import type { ApprovalReview } from "./approval.js";
 
 /** One repository of a task's project, as the consumers read it. */
 export interface ConsumerRepository {
@@ -28,8 +28,8 @@ export interface ConsumerRepository {
  */
 export type RepositoryResolver = (project: string, revision: number, repositoryId: string, orgId: OrgId) => Promise<ConsumerRepository | undefined>;
 
-/** The change request a number names at a repository (GitHub's pull request number is the id). */
-export const changeRequestRef = (repositoryUrl: string, number: number): ChangeRequestRef => ({ repository: { url: repositoryUrl }, id: String(number), url: "" });
+/** The change request an id names at a repository (a host that numbers its change requests gives the number; any other host its own string, item C4). */
+export const changeRequestRef = (repositoryUrl: string, id: number | string): ChangeRequestRef => ({ repository: { url: repositoryUrl }, id: String(id), url: "" });
 
 /**
  * The reviews of a change request in the shape the approval rules read (`approval.ts` is not edited: the Auditor filter and the write-access rules stay exactly as they are).
@@ -37,9 +37,9 @@ export const changeRequestRef = (repositoryUrl: string, number: number): ChangeR
  * told apart by `login:<name>`) but it never counts as an approval, with self-approval on or off. Dropping an approval can only leave an earlier review of the same person in
  * force, so it never turns a refusal into a pass.
  */
-export function approvalReviewsOf(reviews: ChangeRequestStatus["reviews"] | readonly Review[]): PullRequestReview[] {
+export function approvalReviewsOf(reviews: ChangeRequestStatus["reviews"] | readonly Review[]): ApprovalReview[] {
   return reviews.filter((review) => review.reviewer.hostUserId !== undefined || review.state !== "APPROVED").map((review) => ({
-    githubUserId: review.reviewer.hostUserId ?? `login:${review.reviewer.login.toLowerCase()}`, login: review.reviewer.login, userType: review.accountType, state: review.state,
+    hostUserId: review.reviewer.hostUserId ?? `login:${review.reviewer.login.toLowerCase()}`, login: review.reviewer.login, accountType: review.accountType, state: review.state,
     commitId: review.revision, submittedAt: review.submittedAt,
   }));
 }

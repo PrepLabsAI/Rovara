@@ -164,6 +164,7 @@ import {
   type ChannelTurn,
   type CodeBuildCheckResult,
   type CodeBuildGateDefinition,
+  codeBuildGatesOf,
   type ProjectDefinition,
   type ProjectCommand,
   type WorkflowFeedbackApprovalBinding,
@@ -4928,7 +4929,7 @@ async function acceptPullRequest(
     headBranch,
     baseBranch: repository.defaultBranch,
     title: request.title,
-    codeBuildGates: repository.codeBuildGates ?? [],
+    codeBuildGates: codeBuildGatesOf(repository),
     ...(body === undefined ? {} : { body }),
     ...(draft === undefined ? {} : { draft }),
     ...(candidate === undefined ? {} : { expectedTreeSha: candidate.treeSha, ...(candidate.commitSha === undefined ? {} : { expectedCommitSha: candidate.commitSha }), candidateDigest: candidate.candidateDigest, publicationMode: candidate.publicationMode,
@@ -5185,7 +5186,7 @@ async function acceptPullRequestLifecycle(
       baseBranch: record.baseBranch,
       title,
       body,
-      codeBuildGates: repository.codeBuildGates ?? [],
+      codeBuildGates: codeBuildGatesOf(repository),
       mode: request.action,
       targetPullRequestNumber: record.number,
       ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
@@ -5262,7 +5263,7 @@ async function acceptPullRequestLifecycle(
     headBranch: record.headBranch,
     baseBranch: record.baseBranch,
     expectedHeadCommit: record.expectedHeadCommit,
-    codeBuildGates: repository.codeBuildGates ?? [],
+    codeBuildGates: codeBuildGatesOf(repository),
     ...(candidate === undefined ? {} : { workflowCandidate: { candidateDigest: candidate.candidateDigest, treeSha: candidate.treeSha, baseCommitSha: candidate.baseCommitSha } }),
   };
   const invocation: WorkerInvocation = {
@@ -13772,7 +13773,8 @@ async function publicationProject(
       if (!latest) return repository;
       const withoutGates = { ...repository };
       delete withoutGates.codeBuildGates;
-      return { ...withoutGates, ...(latest.codeBuildGates === undefined ? {} : { codeBuildGates: latest.codeBuildGates }) };
+      delete withoutGates.externalChecks;
+      return { ...withoutGates, ...(latest.codeBuildGates === undefined ? {} : { codeBuildGates: latest.codeBuildGates }), ...(latest.externalChecks === undefined ? {} : { externalChecks: latest.externalChecks }) };
     }),
   };
   return { project: { ...pinned, definition }, settingsRevision: settings.definition.revision };

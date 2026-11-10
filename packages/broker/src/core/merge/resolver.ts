@@ -4,7 +4,7 @@
 // builds. The code host is chosen by the repository record's `host.kind` (`codeHostForRecord`), never by the address and never by a default but the legacy one: a kind with no registered
 // adapter is refused with a fixed sentence that does not name the kind, and nothing falls back to another adapter.
 import type { CheckRunner, OrgId, PluginKind, RegistryView } from "@agentx/contracts";
-import { codeHostForRecord } from "../../plugins/routing.js";
+import { codeHostForRecord, providerOf } from "../../plugins/routing.js";
 import type { ConsumerRepository, RepositoryResolver } from "./host-port.js";
 
 /** A repository as the task's project pins it: its address and the host its record names (a record without one is on the legacy kind). */
@@ -28,8 +28,11 @@ export function registryRepositoryResolver(registry: RegistryView, options: Regi
     const repository = await options.pinned(project, revision, repositoryId, orgId);
     if (repository === undefined) return undefined;
     const codeHost = codeHostForRecord(registry, repository);
-    const checkRunner = options.checkRunner?.(codeHost.kind, repository);
-    const isTeamMember = options.isTeamMember?.(codeHost.kind, repository);
+    // The runner and the team lookup of a repository are the ones registered under its CONNECTION's own name; only when there is none, the ones of the connection's provider (lane P2, review L2). A second
+    // GitHub connection therefore never reads job logs or team membership with another connection's credential unless the install registered the provider's for all of its connections.
+    const providerKind = providerOf(codeHost);
+    const checkRunner = options.checkRunner?.(codeHost.kind, repository) ?? (providerKind === codeHost.kind ? undefined : options.checkRunner?.(providerKind, repository));
+    const isTeamMember = options.isTeamMember?.(codeHost.kind, repository) ?? (providerKind === codeHost.kind ? undefined : options.isTeamMember?.(providerKind, repository));
     return { url: repository.url, codeHost, ...(checkRunner === undefined ? {} : { checkRunner }), ...(isTeamMember === undefined ? {} : { isTeamMember }) };
   };
 }

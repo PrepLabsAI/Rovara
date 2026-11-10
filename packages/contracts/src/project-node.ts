@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { redactText } from "./redaction.js";
+import { agentXError } from "./errors.js";
 import { AgentXNameSchema } from "./names.js";
 import { RelativeWorkspacePathSchema, ProjectCommandSchema, DeveloperShareModeSchema } from "./project.js";
 import { StoredAllowedDomainSchema, firstRefusedDomainIndex, ALLOWED_DOMAIN_MESSAGE } from "./app-projects.js";
@@ -100,6 +101,40 @@ export const CodeBuildGateDefinitionSchema = z
   })
   .strict();
 
+/** The check-runner provider whose checks a worker of this release runs: the provider name of the CodeBuild runner (`CODEBUILD_RUNNER_KIND`). */
+export const CODEBUILD_CHECK_PROVIDER = "codebuild";
+/** The providers whose external checks something in this release runs. A project that names another is refused when it is saved and when a task starts, never after a machine has started. */
+export const RUNNABLE_EXTERNAL_CHECK_PROVIDERS: readonly string[] = [CODEBUILD_CHECK_PROVIDER];
+export const UNRUNNABLE_EXTERNAL_CHECK_MESSAGE = "This project has an external check that nothing in this release runs, so a task cannot start. Remove that check, or use a build system this release runs.";
+
+/**
+ * Item C5: a gate that runs outside the worker, in a build system, as the project record states it: which provider runs it, the name it is reported under and the provider's own handle for what to run (`reference`: for
+ * CodeBuild its project name; opaque to everything but the provider's adapter). `codeBuildGates` is the same thing in CodeBuild's words and stays readable as an alias: the two lists are one list, with one set of names.
+ */
+export const ExternalCheckSchema = z
+  .object({
+    provider: PluginKindSchema,
+    name: AgentXNameSchema,
+    reference: z.string().min(1).max(255),
+    timeoutMinutes: z.number().int().min(5).max(420),
+  })
+  .strict();
+export type ExternalCheck = z.infer<typeof ExternalCheckSchema>;
+
+/** CodeBuild's gate as the generic external check it is. */
+export function externalCheckOfGate(gate: CodeBuildGateDefinition): ExternalCheck {
+  return { provider: CODEBUILD_CHECK_PROVIDER, name: gate.name, reference: gate.projectName, timeoutMinutes: gate.timeoutMinutes };
+}
+
+/**
+ * An external check as the CodeBuild gate the worker's job line carries. Throws (CONFIG_INVALID) for another provider's check: nothing in this release runs it, and a gate that is not run must never be skipped silently.
+ * This is the last line of defence. A project like that is already refused when it is saved (`ProjectDefinitionSchema`) and when a task starts (`unrunnableExternalCheck`), and the dispatcher turns this throw into a failed operation.
+ */
+export function gateOfExternalCheck(check: ExternalCheck): CodeBuildGateDefinition {
+  if (check.provider !== CODEBUILD_CHECK_PROVIDER) throw agentXError("CONFIG_INVALID", UNRUNNABLE_EXTERNAL_CHECK_MESSAGE);
+  return CodeBuildGateDefinitionSchema.parse({ name: check.name, projectName: check.reference, timeoutMinutes: check.timeoutMinutes });
+}
+
 /**
  * Plug-in foundations, task P7: where a repository lives, by plug-in kind. A GitHub host carries the installation and the immutable repository id that
  * `installationId` / `githubRepositoryId` carried at the top of the record (both stay readable for one release: see `repositoryHostOf`). Any other kind
@@ -107,7 +142,12 @@ export const CodeBuildGateDefinitionSchema = z
  */
 export const RepositoryHostSchema = z.union([
   z.object({ kind: z.literal("github"), installationId: z.number().int().positive().optional(), repositoryId: z.number().int().positive().optional() }).strict(),
-  z.object({ kind: PluginKindSchema.refine((kind) => kind !== "github", "github is the other variant"), ref: ExternalIdSchema.optional() }).strict(),
+  // Item C2/M3: a connection of another name (`github-company`) says which provider it is with `provider`, and a GitHub-provider connection carries the same pins as `github` does, so the check that a
+  // transferred repository cannot quietly change installation applies to it too. A connection of any other provider has no pins.
+  z.object({
+    kind: PluginKindSchema.refine((kind) => kind !== "github", "github is the other variant"), provider: PluginKindSchema.optional(), ref: ExternalIdSchema.optional(),
+    installationId: z.number().int().positive().optional(), repositoryId: z.number().int().positive().optional(),
+  }).strict().refine((host) => host.provider === "github" || (host.installationId === undefined && host.repositoryId === undefined), "only a GitHub connection has GitHub pins"),
 ]);
 export type RepositoryHost = z.infer<typeof RepositoryHostSchema>;
 
@@ -119,6 +159,8 @@ export const RepositoryDefinitionSchema = z
     defaultBranch: GitBranchNameSchema,
     credentialRef: AgentXNameSchema,
     codeBuildGates: z.array(CodeBuildGateDefinitionSchema).max(8).optional(),
+    /** Item C5: the generic form of `codeBuildGates` (see `ExternalCheckSchema`). Both may be present; together they are at most 8 checks with unique names. Control-plane only: a worker is sent the CodeBuild ones as `codeBuildGates`. */
+    externalChecks: z.array(ExternalCheckSchema).max(8).optional(),
     /**
      * a hosted install (Plan 2, Tasks 15 and 16): the GitHub installation, and the repository's immutable GitHub id, the project was registered
      * against. When set, a task start refuses the project if the repository is now reached through another installation, so a transferred
@@ -133,15 +175,15 @@ export const RepositoryDefinitionSchema = z
      */
     role: z.enum(["code", "meta"]).optional(),
     alsoCode: z.boolean().optional(),
-    /** P7: the code host this repository lives on. Absent means GitHub, as every repository that predates it (`repositoryHostOf`). */
+    /** P7, C2: the code host connection this repository lives on, by name. Absent means the default GitHub connection, as every repository that predates it (`repositoryHostOf`). */
     host: RepositoryHostSchema.optional(),
   })
   .strict()
   .superRefine((repository, context) => {
     // Dual read: while both spellings exist they must agree, so a record can never say two things about where its repository lives.
     if (repository.host !== undefined) {
-      const host: { kind: string; installationId?: number | undefined; repositoryId?: number | undefined } = repository.host;
-      if (host.kind !== "github") {
+      const host: { kind: string; provider?: string | undefined; installationId?: number | undefined; repositoryId?: number | undefined } = repository.host;
+      if (host.kind !== "github" && host.provider !== "github") {
         for (const field of ["installationId", "githubRepositoryId"] as const) {
           if (repository[field] !== undefined) context.addIssue({ code: "custom", path: [field], message: "a repository on another code host has no GitHub pins" });
         }
@@ -177,8 +219,24 @@ export const RepositoryDefinitionSchema = z
       names.add(gate.name);
       projects.add(gate.projectName);
     }
-    const totalTimeout = (repository.codeBuildGates ?? [])
-      .reduce((total, gate) => total + gate.timeoutMinutes, 0);
+    for (const [index, check] of (repository.externalChecks ?? []).entries()) {
+      if (names.has(check.name)) context.addIssue({ code: "custom", path: ["externalChecks", index, "name"], message: "external check names must be unique (also across codeBuildGates)" });
+      names.add(check.name);
+      if (check.provider === CODEBUILD_CHECK_PROVIDER) {
+        // The CodeBuild rules, held at registration as before: the project must begin with agentx- and be used once.
+        if (!CodeBuildGateDefinitionSchema.shape.projectName.safeParse(check.reference).success) {
+          context.addIssue({ code: "custom", path: ["externalChecks", index, "reference"], message: "CodeBuild projectName must begin with agentx-" });
+        } else if (projects.has(check.reference)) {
+          context.addIssue({ code: "custom", path: ["externalChecks", index, "reference"], message: "CodeBuild projects must be unique within a repository" });
+        }
+        projects.add(check.reference);
+      }
+    }
+    if ((repository.codeBuildGates?.length ?? 0) + (repository.externalChecks?.length ?? 0) > 8) {
+      context.addIssue({ code: "custom", path: ["externalChecks"], message: "a repository has at most 8 gates in codeBuildGates and externalChecks together" });
+    }
+    const totalTimeout = (repository.codeBuildGates ?? []).reduce((total, gate) => total + gate.timeoutMinutes, 0)
+      + (repository.externalChecks ?? []).reduce((total, check) => total + check.timeoutMinutes, 0);
     if (totalTimeout > 420) {
       context.addIssue({
         code: "custom",
@@ -394,12 +452,14 @@ export const ProjectDefinitionSchema = projectDefinitionObject(ConnectorsSchema)
       context.addIssue({ code: "custom", path: ["e2e", "targets"], message: "project-e2e is a reserved check identity, not a target ID" });
     }
   })
-  // P7 / Opus review I5: this release READS a repository's `host` (a record written by a later release, or by the lazy rewrite in a later release) but does not WRITE one. Two reasons:
-  // the release before this one parses a repository strictly and would refuse the whole project, so a rollback would take it dark; and nothing routes by `host` yet, so a save that
-  // said a repository lives elsewhere would still be cloned and pushed through GitHub. A later release turns writes on, for the kinds an install has registered.
+  // Item C2 (decision 60): a repository's `host` may be written. It names a code host CONNECTION (`github`, `github-company`) or a provider whose default connection serves it; whether this install has registered it is
+  // checked where it is used (a task start refuses a repository whose host is not registered, before any work is spent), because the schema cannot know what an install registered. Code has no older release to roll back to.
+  // Item C5 (review M2): an external check nothing in this release runs is refused when the project is saved, with the clear sentence.
   .superRefine((project, context) => {
-    project.repositories.forEach((repository, index) => {
-      if (repository.host !== undefined) context.addIssue({ code: "custom", path: ["repositories", index, "host"], message: "a repository's code host is not set by this release; leave host out" });
+    project.repositories.forEach((repository, repositoryIndex) => {
+      (repository.externalChecks ?? []).forEach((check, index) => {
+        if (!RUNNABLE_EXTERNAL_CHECK_PROVIDERS.includes(check.provider)) context.addIssue({ code: "custom", path: ["repositories", repositoryIndex, "externalChecks", index, "provider"], message: UNRUNNABLE_EXTERNAL_CHECK_MESSAGE });
+      });
     });
   })
   // Registration and settings saves: the Public Suffix List is consulted when a domain is written, never when a stored revision is read.
@@ -485,6 +545,12 @@ export function workerProjectDefinition<Definition extends object>(definition: D
         delete repository.host;
         delete repository.role;
         delete repository.alsoCode;
+        // Item C5: a worker's job line carries CodeBuild gates only (an earlier worker's strict schema does not know `externalChecks`): the generic checks come to them. A check no runner runs refuses the dispatch.
+        if (repository.externalChecks !== undefined) {
+          const gates = codeBuildGatesOf(repository);
+          delete repository.externalChecks;
+          if (gates.length > 0) repository.codeBuildGates = gates;
+        }
         return repository;
       });
   }
@@ -508,6 +574,28 @@ export type DevcontainerDefinition = z.infer<typeof DevcontainerDefinitionSchema
 export type CodeBuildGateDefinition = z.infer<typeof CodeBuildGateDefinitionSchema>;
 
 export type RepositoryDefinition = z.infer<typeof RepositoryDefinitionSchema>;
+
+/** Item C5: every external check of a repository, generic ones first, then the CodeBuild gates in their generic form. */
+export function repositoryExternalChecks(repository: Pick<RepositoryDefinition, "codeBuildGates" | "externalChecks">): ExternalCheck[] {
+  return [...(repository.externalChecks ?? []), ...(repository.codeBuildGates ?? []).map(externalCheckOfGate)];
+}
+
+/** The first external check of these repositories whose provider nothing in this release runs, or undefined. Asked when a project is saved and when a task starts. */
+export function unrunnableExternalCheck(repositories: ReadonlyArray<Pick<RepositoryDefinition, "externalChecks">>): ExternalCheck | undefined {
+  for (const repository of repositories) {
+    const found = (repository.externalChecks ?? []).find((check) => !RUNNABLE_EXTERNAL_CHECK_PROVIDERS.includes(check.provider));
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * Item C5: the CodeBuild gates a repository's checks come to, in the shape the worker's job line and the broker's publication scope carry (that line is unchanged), in the order of `repositoryExternalChecks`.
+ * It throws when a check names a provider no runner of this release runs (a project like that is refused when it is saved and when a task starts; this is the backstop, so a gate is never run without it).
+ */
+export function codeBuildGatesOf(repository: Pick<RepositoryDefinition, "codeBuildGates" | "externalChecks">): CodeBuildGateDefinition[] {
+  return [...(repository.externalChecks ?? []).map(gateOfExternalCheck), ...(repository.codeBuildGates ?? [])];
+}
 
 /**
  * P7 dual read: the host of a repository record. The explicit `host` wins; a record without one (every record written before P7) is a GitHub repository with

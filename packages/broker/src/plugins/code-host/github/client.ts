@@ -1,5 +1,6 @@
 import { createHash, createSign } from "node:crypto";
-import { GitBranchNameSchema, HostRateLimitError, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { commitFilesOn, deleteBranchOn, type CommitFilesRequest } from "./commit-files.js";
+import { GitBranchNameSchema, HostRateLimitError, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
@@ -226,6 +227,11 @@ export interface GitHubPullRequestDetails {
   mergedBy?: string;
   title: string;
   body: string;
+  /** The login of the account that created it, and the id of the repository it is against, when GitHub says. */
+  authorLogin?: string;
+  baseRepositoryId?: string;
+  /** Whether that account is this App's own bot (set by `getPullRequest` only; absent when the App's login cannot be read). */
+  authoredByApp?: boolean;
 }
 
 /** What a merge came to (Plan 6 Task 19): merged (by the method asked, or the other one when the repository does not allow it), merged already, or refused for a fixed reason. */
@@ -580,7 +586,11 @@ export class GitHubAppCredentialProvider {
       contents: "read",
       pull_requests: "read",
     }, scope);
-    return this.getPullRequestWithToken(repository, number, token);
+    const details = await this.getPullRequestWithToken(repository, number, token);
+    // Whose pull request it is: only asked when GitHub named an author (the App's own login is a lookup of its own).
+    if (details.authorLogin === undefined) return details;
+    const own = await this.ownBotLogin();
+    return own === undefined ? details : { ...details, authoredByApp: details.authorLogin.toLowerCase() === own };
   }
 
   /**
@@ -1647,13 +1657,46 @@ export class GitHubAppCredentialProvider {
     return new TextDecoder().decode(Buffer.concat(chunks));
   }
 
+  /** Lessons in the repo: puts text files on a `rovara/lessons-` working branch with the same `contents: write` scope a worker's push uses (`github-commit-files.ts`). */
+  async commitFilesToBranch(repositoryUrl: string, request: CommitFilesRequest, scope: GitHubTokenScope): Promise<{ revision: string; changed: boolean }> {
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.createInstallationToken(repository, { contents: "write" }, scope);
+    return commitFilesOn({ fetch: this.fetchImplementation, owner: repository.owner, name: repository.name, token }, request);
+  }
+
+  /** Lessons in the repo: the pull request (any state) made from one of Rovara's own `rovara/lessons-` branches, or undefined. No other branch name is looked up. */
+  async findLessonsPullRequest(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<{ number: number; url: string } | undefined> {
+    if (!LESSON_FILE_BRANCH_PATTERN.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.createInstallationToken(repository, { pull_requests: "read" }, scope);
+    const query = new URLSearchParams({ state: "all", head: `${repository.owner}:${branch}`, per_page: "1" });
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls?${query.toString()}`,
+      { headers: githubHeaders(token), redirect: "error", signal: AbortSignal.timeout(8_000) },
+    );
+    if (!response.ok) { await response.body?.cancel(); throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request lookup failed with HTTP ${response.status}`); }
+    const value: unknown = await response.json();
+    const first = Array.isArray(value) ? (value[0] as { number?: unknown; html_url?: unknown } | undefined) : undefined;
+    if (first === undefined) return undefined;
+    if (typeof first.number !== "number" || !Number.isSafeInteger(first.number)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
+    return { number: first.number, url: typeof first.html_url === "string" && first.html_url.startsWith("https://") ? first.html_url : "" };
+  }
+
+  /** Lessons in the repo: deletes one of Rovara's own `rovara/lessons-` branches (no other name is accepted). */
+  async deleteLessonsBranch(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<"deleted" | "gone"> {
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.createInstallationToken(repository, { contents: "write" }, scope);
+    return deleteBranchOn({ fetch: this.fetchImplementation, owner: repository.owner, name: repository.name, token }, branch);
+  }
+
   /**
-   * What a path is at a commit: "file", "dir" (a directory or a submodule) or "none" (GitHub's 404, a name its parent directory does not list, or a parent that is a plain file). Throws when GitHub cannot answer (never "none" for an error)
-   * and for a symbolic link, at the path or as its parent directory (what it points to is not known here). Same commit and path rules as `getFileAtCommit`.
+   * What a path is at a commit: "file", "dir" (a directory or a submodule), "symlink" (a symbolic link at the path itself; what it points to is not known here, so it is not claimed to be a file or a directory) or "none"
+   * (GitHub's 404, a name its parent directory does not list, or a parent that is a plain file). Throws when GitHub cannot answer (never "none" for an error), when a symbolic link or a submodule is the path's PARENT
+   * (the link may point at a directory that holds the name) and for a type it does not know. Same commit and path rules as `getFileAtCommit`.
    * L7: it lists the path's PARENT directory and reads the entry's type, so no file's bytes are fetched just to learn what it is (a listing is at most 1,000 entries; a listing that is full and does not name the
    * path cannot say "none").
    */
-  async getPathKindAtCommit(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<"file" | "dir" | "none"> {
+  async getPathKindAtCommit(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<"file" | "dir" | "symlink" | "none"> {
     if (!/^[a-f0-9]{40}$/u.test(commitSha)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
     const segments = path.split("/");
     if (path.length === 0 || path.length > 512 || path.includes("\\") || segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
@@ -1688,8 +1731,9 @@ export class GitHubAppCredentialProvider {
     }
     if (entry.type === "dir" || entry.type === "submodule") return "dir";
     if (entry.type === "file") return "file";
-    // A symbolic link may point at a file, a directory or nothing; it is not claimed to be any of them.
-    throw agentXError("RUNTIME_UNAVAILABLE", entry.type === "symlink" ? "GitHub reports a symbolic link at this path" : "GitHub returned an unexpected path answer");
+    // A symbolic link may point at a file, a directory or nothing; it is not claimed to be any of them. The reader says what it is, and each caller decides (a lesson reader cannot tell; the lessons pass never writes to it).
+    if (entry.type === "symlink") return "symlink";
+    throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an unexpected path answer");
   }
 
   /**
@@ -2677,6 +2721,17 @@ function mergedByLogin(value: unknown): string | undefined {
   return typeof login === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?$/u.test(login) ? login : undefined;
 }
 
+/** The login of the account in a pull request's `user`, when GitHub gives one. */
+function userLoginOf(user: unknown): string | undefined {
+  const login = user !== null && typeof user === "object" ? (user as Record<string, unknown>).login : undefined;
+  return typeof login === "string" && login.length > 0 && login.length <= 100 ? login : undefined;
+}
+/** The id of a repository object (`base.repo`), as text, when GitHub gives a whole number. */
+function repositoryIdOf(repo: unknown): string | undefined {
+  const id = repo !== null && typeof repo === "object" ? (repo as Record<string, unknown>).id : undefined;
+  return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? String(id) : undefined;
+}
+
 function parsePullRequestDetails(
   value: unknown,
   repository: InstalledRepository,
@@ -2718,6 +2773,8 @@ function parsePullRequestDetails(
     ...(candidate.merged === true && typeof mergedByLogin(candidate.merged_by) === "string" ? { mergedBy: mergedByLogin(candidate.merged_by)! } : {}),
     title: candidate.title,
     body: candidate.body ?? "",
+    ...(userLoginOf(candidate.user) === undefined ? {} : { authorLogin: userLoginOf(candidate.user)! }),
+    ...(repositoryIdOf((base as Record<string, unknown>).repo) === undefined ? {} : { baseRepositoryId: repositoryIdOf((base as Record<string, unknown>).repo)! }),
   };
 }
 

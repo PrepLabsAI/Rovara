@@ -217,12 +217,23 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
   let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }) };
+  // The worker's copy of the project can refuse (an external check nothing runs): that is a failed operation with its sentence, never an uncaught throw that redelivers until the attempts run out (review M2).
+  const toWorker = <D extends object>(definition: D): ReturnType<typeof workerProjectDefinition<D>> | string => {
+    try {
+      return workerProjectDefinition(definition);
+    } catch (error) {
+      if (error instanceof AgentXError && error.code === "CONFIG_INVALID") return error.message.replace(/^CONFIG_INVALID: /u, "");
+      throw error;
+    }
+  };
   if (spec.kind === "prepare") {
     const project = await deps.projects.revision(workspace.projectName, workspace.projectRevision);
     if (project === undefined) return "the project revision this task was started on is gone";
+    const forWorker = toWorker(project.definition);
+    if (typeof forWorker === "string") return forWorker;
     payload = {
       ...payload,
-      project: workerProjectDefinition(project.definition),
+      project: forWorker,
       repositoryGrant: deps.repositoryGrants.issue({
         ownerKey: workspace.ownerKey, projectName: workspace.projectName, workspaceId: workspace.id, operationId: operation.id,
         repositories: project.definition.repositories.map((repository) => ({ credentialRef: repository.credentialRef, repositoryUrl: repository.url, access: "clone" as const })),
@@ -235,9 +246,11 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     if (project === undefined) return "the project revision this task was started on is gone";
     const repository = project.definition.repositories.find((candidate) => candidate.name === payload["repository"]);
     if (repository === undefined) return "the repository to push is not part of the project";
+    const forWorker = toWorker(project.definition);
+    if (typeof forWorker === "string") return forWorker;
     payload = {
       ...payload,
-      project: workerProjectDefinition(project.definition),
+      project: forWorker,
       repositoryGrant: deps.repositoryGrants.issue({
         ownerKey: workspace.ownerKey, projectName: workspace.projectName, workspaceId: workspace.id, operationId: operation.id,
         repositories: [{ credentialRef: repository.credentialRef, repositoryUrl: repository.url, access: "push" as const }],

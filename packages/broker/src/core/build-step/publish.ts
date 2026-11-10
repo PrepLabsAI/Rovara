@@ -9,7 +9,7 @@ import {
   PullRequestResultSchema, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, agentXError, blockWorkflow, change, when, registerWorkflowPullRequest, unblockWorkflowPublication, workflowPublicationRetryable, workflowRequestId,
   type ChangeRequestRef, type CodeHost, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
-import { codeHostForRecord } from "../../plugins/routing.js";
+import { codeHostForRecord, providerOf } from "../../plugins/routing.js";
 import { NO_LESSONS_USED, riskFromFiles } from "./changed-files.js";
 import { openBranchWriters } from "../branch-sync/branch-writers.js";
 import { linkedChangeRequestStep } from "../proof/revert/linked-change-requests.js";
@@ -270,9 +270,9 @@ export async function recordPublished(deps: TaskFlowDeps, task: TaskRecord, oper
     if (details.state !== "open" || details.headRevision !== recorded.expectedHeadCommit || headTreeSha !== candidateRepository.treeSha) {
       throw agentXError("STALE_FENCE", "published pull request does not contain the exact checked candidate tree");
     }
-    const repositoryKey = requireRepositoryKey(host.kind, definition.url);
+    const repositoryKey = requireRepositoryKey(providerOf(host), definition.url);
     const link = linkedChangeRequestStep({
-      hostKind: host.kind, repositoryAddress: definition.url, changeRequestId: String(published.data.number), repositoryId: published.data.repository, number: published.data.number, url: published.data.url,
+      hostKind: providerOf(host), repositoryAddress: definition.url, changeRequestId: String(published.data.number), repositoryId: published.data.repository, number: published.data.number, url: published.data.url,
       taskId: task.taskId, workspaceId: task.workspaceId, candidateDigest: workflow.candidate.digest, createdAt: now,
     });
     if (link === undefined) throw agentXError("CONFIG_INVALID", "the code host's repository cannot be linked to this task");

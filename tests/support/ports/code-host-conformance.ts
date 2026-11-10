@@ -76,9 +76,9 @@ export const codeHostChecks: readonly ContractCheck<CodeHostWorld>[] = [
     name: "reports a person's standing: permission and account type, and none for a stranger",
     async run({ host, model, repository, scope }) {
       model.setAccount("priya", "write");
-      model.setAccount("ci-bot", "read", "Bot");
+      model.setAccount("ci-bot", "read", "bot");
       expect(await host.standing(repository, { login: "priya" }, scope)).toMatchObject({ permission: "write" });
-      expect((await host.standing(repository, { login: "ci-bot" }, scope)).accountType).toBe("Bot");
+      expect((await host.standing(repository, { login: "ci-bot" }, scope)).accountType).toBe("bot");
       expect(await host.standing(repository, { login: "nobody" }, scope)).toEqual({ permission: "none" });
     },
   },
@@ -153,8 +153,106 @@ export const codeHostChecks: readonly ContractCheck<CodeHostWorld>[] = [
     needs: ({ host }) => host.codeOwners !== undefined,
     async run({ host, model, repository, scope }) {
       expect(await host.codeOwners!(repository, "main", scope)).toBeUndefined();
-      model.commit("main", { ".github/CODEOWNERS": "* @max\n" });
-      expect(await host.codeOwners!(repository, "main", scope)).toBe("* @max\n");
+      model.commit("main", { ".github/CODEOWNERS": "* @max\n/docs/ @acme/writers a@example.com\n" });
+      // Item C4: the host reads its own owners file and answers in Rovara's words; the core never parses it.
+      const owners = (await host.codeOwners!(repository, "main", scope))!;
+      expect(owners.unsupported).toBe(false);
+      expect(owners.ownersOf("src/a.ts")).toEqual([{ kind: "person", login: "max" }]);
+      expect(owners.ownersOf("docs/guide.md")).toEqual([{ kind: "team", team: "acme/writers" }, { kind: "other", label: "a@example.com" }]);
+      // A file the host cannot read the way it does is flagged as a whole, not half read.
+      model.commit("main", { ".github/CODEOWNERS": "* @max\n!/secure/ @max\n" });
+      expect((await host.codeOwners!(repository, "main", scope))!.unsupported).toBe(true);
+    },
+  },
+  {
+    name: "says whether Rovara's own account made a change request, and which repository it is against",
+    async run(world) {
+      const { host, scope, model } = world;
+      const { ref } = await openChangeRequest(world);
+      const details = await host.getChangeRequest(ref, scope);
+      // True for a host that can tell its own account; absent for one that cannot (a laptop signed in with a person's own token): never false for Rovara's own, and never a guess.
+      expect(details.authoredByRovara === undefined || details.authoredByRovara === true).toBe(true);
+      expect(details.baseRepositoryId).toBe(model.id);
+      // A change request a person opened is not Rovara's, and an unknown author is never taken as a yes (absent or false).
+      model.commit(world.branch(2), { "src/b.ts": "export const b = 1;\n" });
+      const theirs = model.reconcile({ sourceBranch: world.branch(2), targetBranch: model.defaultBranch, title: "Theirs" }, "a-person").cr;
+      const mine = await host.getChangeRequest({ repository: world.repository, id: theirs.id, url: "" }, scope);
+      expect(mine.authoredByRovara === undefined || mine.authoredByRovara === false).toBe(true);
+      expect(mine.authoredByRovara).not.toBe(true);
+    },
+  },
+  {
+    name: "tells a symbolic link from a file, and never answers 'none' for a path below one",
+    needs: ({ host }) => host.pathKind !== undefined,
+    async run({ host, model, repository, scope }) {
+      model.commit("main", { "real.md": "x\n" });
+      const head = model.commitSymlink("main", "AGENTS.md");
+      expect(await host.pathKind!(repository, "AGENTS.md", head, scope)).toBe("symlink");
+      expect(await host.pathKind!(repository, "real.md", head, scope)).toBe("file");
+      expect(await host.pathKind!(repository, "nothing.md", head, scope)).toBe("none");
+      expect(await rejection(() => host.pathKind!(repository, "AGENTS.md/inner.md", head, scope))).toBeDefined();
+    },
+  },
+  {
+    name: "writes the lessons file on a branch Rovara owns: idempotent, never the base branch, never another path or branch name",
+    needs: ({ host }) => host.commitFiles !== undefined,
+    async run({ host, model, repository, scope }) {
+      const base = model.headOf("main");
+      const branch = "rovara/lessons-0123456789ab";
+      const input = { repository, branch, baseBranch: "main", message: "Add lessons", files: [{ path: ".rovara/lessons.md", content: "one\n" }], fromBase: true, baseRevision: base };
+      const first = await host.commitFiles!(input, scope);
+      expect(first.changed).toBe(true);
+      expect(model.headOf(branch)).toBe(first.revision);
+      expect(await host.fileAtRevision(repository, ".rovara/lessons.md", first.revision, scope)).toBe("one\n");
+      // The base branch was not touched.
+      expect(model.headOf("main")).toBe(base);
+      // A new change request needs a branch nobody has: the same branch again is a conflict and is left as it is.
+      const again = await rejection(() => host.commitFiles!(input, scope));
+      expect(again?.code).toBe("CONFIG_INVALID");
+      expect(model.headOf(branch)).toBe(first.revision);
+      // Updating the open branch: the same text changes nothing, new text is a commit on top.
+      const update = { ...input, fromBase: false, expectedHead: first.revision, previous: [{ path: ".rovara/lessons.md", content: "one\n" }] };
+      expect(await host.commitFiles!({ ...update, files: [{ path: ".rovara/lessons.md", content: "one\n" }] }, scope)).toEqual({ revision: first.revision, changed: false });
+      const second = await host.commitFiles!({ ...update, files: [{ path: ".rovara/lessons.md", content: "two\n" }] }, scope);
+      expect(second.changed).toBe(true);
+      expect(model.revision(second.revision).parents).toEqual([first.revision]);
+      // A push made since the head was read is never overwritten.
+      expect((await rejection(() => host.commitFiles!({ ...update, files: [{ path: ".rovara/lessons.md", content: "three\n" }] }, scope)))?.code).toBe("CONFIG_INVALID");
+      expect((await rejection(() => host.commitFiles!({ ...update, expectedHead: second.revision, files: [{ path: ".rovara/lessons.md", content: "three\n" }] }, scope)))?.code).toBe("CONFIG_INVALID");
+      // Another path, another branch name, and the base branch itself are refused.
+      expect((await rejection(() => host.commitFiles!({ ...input, branch: "rovara/lessons-aaaaaaaaaaaa", files: [{ path: "src/a.ts", content: "x" }] }, scope)))?.code).toBe("CONFIG_INVALID");
+      expect((await rejection(() => host.commitFiles!({ ...input, branch: "main" }, scope)))?.code).toBe("CONFIG_INVALID");
+      expect((await rejection(() => host.commitFiles!({ ...input, branch: "agentx/not-a-lessons-branch" }, scope)))?.code).toBe("CONFIG_INVALID");
+    },
+  },
+  {
+    name: "refuses to write over a symbolic link",
+    needs: ({ host }) => host.commitFiles !== undefined,
+    async run({ host, model, repository, scope }) {
+      const head = model.commitSymlink("main", "AGENTS.md");
+      const refused = await rejection(() => host.commitFiles!({
+        repository, branch: "rovara/lessons-0123456789ab", baseBranch: "main", message: "Add pointer", files: [{ path: "AGENTS.md", content: "see lessons\n" }], fromBase: true, baseRevision: head,
+      }, scope));
+      expect(refused?.code).toBe("CONFIG_INVALID");
+      expect(refused?.message).toContain("symbolic link");
+    },
+  },
+  {
+    name: "finds the change request of a lessons branch, and deleting the branch closes it",
+    needs: ({ host }) => host.commitFiles !== undefined && host.changeRequestForBranch !== undefined && host.deleteBranch !== undefined,
+    async run({ host, model, repository, scope }) {
+      const branch = "rovara/lessons-0123456789ab";
+      expect(await host.changeRequestForBranch!(repository, branch, scope)).toBeUndefined();
+      expect(await host.deleteBranch!(repository, branch, scope)).toBe("gone");
+      await host.commitFiles!({ repository, branch, baseBranch: "main", message: "Add lessons", files: [{ path: ".rovara/lessons.md", content: "one\n" }], fromBase: true }, scope);
+      const { ref } = await host.reconcileChangeRequest({ repository, sourceBranch: branch, targetBranch: "main", title: "Lessons" }, scope);
+      expect(await host.changeRequestForBranch!(repository, branch, scope)).toMatchObject({ id: ref.id });
+      expect(await host.deleteBranch!(repository, branch, scope)).toBe("deleted");
+      expect(model.branches.has(branch)).toBe(false);
+      expect((await host.getChangeRequest(ref, scope)).state).toBe("closed");
+      // Any other name is refused before the host is asked.
+      expect((await rejection(() => host.deleteBranch!(repository, "main", scope)))?.code).toBe("CONFIG_INVALID");
+      expect((await rejection(() => host.changeRequestForBranch!(repository, "agentx/x", scope)))?.code).toBe("CONFIG_INVALID");
     },
   },
   {

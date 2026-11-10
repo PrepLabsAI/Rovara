@@ -18,8 +18,9 @@ export interface RovaraPullRequest {
 }
 
 export interface RovaraPullRequestIndex {
-  byNumber(input: { host: string; repo: string; number: number }): Promise<RovaraPullRequest | undefined>;
-  byMergeCommit(input: { host: string; repo: string; sha: string }): Promise<RovaraPullRequest | undefined>;
+  /** `host` is the PROVIDER (`github`); `connection` is the code host connection's own name, read only to find a row an earlier build filed under it. */
+  byNumber(input: { host: string; connection?: string | undefined; repo: string; number: number }): Promise<RovaraPullRequest | undefined>;
+  byMergeCommit(input: { host: string; connection?: string | undefined; repo: string; sha: string }): Promise<RovaraPullRequest | undefined>;
   /**
    * The step that keeps a merge commit, to go in the transaction that records the merge (lane L7a): the merge commit is the default branch's commit, not the pull request's head. Holds no person.
    * Undefined when the repository or the commit cannot be keyed.
@@ -34,9 +35,9 @@ export interface RovaraPullRequestIndexDependencies {
 }
 
 export function createRovaraPullRequestIndex(deps: RovaraPullRequestIndexDependencies): RovaraPullRequestIndex {
-  async function byNumber({ host, repo, number }: { host: string; repo: string; number: number }): Promise<RovaraPullRequest | undefined> {
+  async function byNumber({ host, connection, repo, number }: { host: string; connection?: string | undefined; repo: string; number: number }): Promise<RovaraPullRequest | undefined> {
     if (host !== "github") return undefined;
-    const linked = await findLinkedChangeRequest(deps.store, { hostKind: "github", repositoryAddress: `https://github.com/${repo}`, id: String(number) });
+    const linked = await findLinkedChangeRequest(deps.store, { hostKind: "github", connectionKind: connection, repositoryAddress: `https://github.com/${repo}`, id: String(number) });
     // The link must belong to THIS company: a pull request number is only unique inside a repository, and a repository belongs to one company's installation.
     if (linked === undefined || linked.workspaceId === undefined) return undefined;
     const task = (await deps.store.get(taskKey(linked.taskId))) as unknown as DeveloperTaskRecord | undefined;
@@ -50,7 +51,7 @@ export function createRovaraPullRequestIndex(deps: RovaraPullRequestIndexDepende
     byNumber,
     // The pull request merged as this commit: the index row (repository + commit) names a pull request, which must then be that company's Rovara pull request, linked to the task the row
     // names, at the address the row names. Anything that does not agree is a miss: a revert is then not recorded, never recorded against the wrong task.
-    async byMergeCommit({ host, repo, sha }) {
+    async byMergeCommit({ host, connection, repo, sha }) {
       if (host !== "github") return undefined;
       const org = OrgIdSchema.safeParse(deps.companyId);
       if (!org.success) return undefined;
@@ -58,7 +59,7 @@ export function createRovaraPullRequestIndex(deps: RovaraPullRequestIndexDepende
       if (row === undefined || row.orgId !== deps.companyId) return undefined;
       const address = githubPullRequestAddress(row.url);
       if (address === undefined || address.number !== row.number || address.repositoryFullName.toLowerCase() !== repo.toLowerCase()) return undefined;
-      const found = await byNumber({ host, repo, number: row.number });
+      const found = await byNumber({ host, connection, repo, number: row.number });
       if (found === undefined || found.taskId !== row.taskId || found.url !== row.url) return undefined;
       return { ...found, mergeCommitSha: row.mergeCommit };
     },

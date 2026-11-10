@@ -5,7 +5,7 @@ import { request as httpRequest } from "node:http";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AdapterRegistry, AuditEvent, AuditSink } from "@agentx/contracts";
+import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
   change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, when, type Check, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
@@ -81,7 +81,7 @@ const classicToken = (seed: string): string => ["gh", "p_"].join("") + seed.repe
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string } } = {}) {
+async function launch(extra: { connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string } } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -92,11 +92,13 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
   // A fake code host that holds the repository (lane L10): the build step reads the pushed branch and opens the pull request through its port.
   const hostedUrl = "https://github.com/example/demo.git";
   const model = extra.model ?? new FakeHostModel({ url: hostedUrl, id: "1", fullName: "example/demo" });
-  const fakeHost = Object.defineProperty(new FakeCodeHost(model), "kind", { value: "github" });
+  // `connection`: the same GitHub host registered under another name (a second GitHub connection called `github-main`), which a repository record then names (lane P2, review N1/N3/L1).
+  const connection = extra.connection ?? "github";
+  const fakeHost = Object.defineProperties(new FakeCodeHost(model), { kind: { value: connection }, ...(connection === "github" ? {} : { provider: { value: "github" } }) });
   // A project cannot yet name another code host at registration (51 gap: the project contract refuses `repositories[].host`), so a repository is on the code host registered as `github`; the
   // test's host is the fake one under that name.
   const readiness = extra.readiness === true ? [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }] : [];
-  const project = extra.host === true ? { ...PROJECT, readiness, repositories: [{ ...PROJECT.repositories[0]!, url: hostedUrl }] } : PROJECT;
+  const project = extra.host === true ? { ...PROJECT, readiness, repositories: [{ ...PROJECT.repositories[0]!, url: hostedUrl, ...(connection === "github" ? {} : { host: { kind: connection } }) }] } : PROJECT;
   const base = extra.host === true ? model.headOf("main") : BASE_COMMIT;
   /** The addresses the server asked the browser to open: the only place a page address goes. */
   const opened: string[] = [];
@@ -107,7 +109,7 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
       // The fake's clock is its own (2026-10-30); a credential the worker is sent must expire in the real future.
       const issue = host.issueGitCredential.bind(host);
       host.issueGitCredential = async (repository, access, scope) => ({ ...(await issue(repository, access, scope)), expiresAt: new Date(Date.now() + 50 * 60_000).toISOString() });
-      registry.register("code-host", "github", host);
+      registry.register("code-host", connection, host);
     }
   };
   const runtime: LocalRuntime = await startLocalRuntime({
@@ -437,7 +439,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
   });
 
   /** A running `rovara up` with the Docker adapter (simulated), a GitHub token in the environment and a fake GitHub; the project is registered and a task started, and the worker's grant is at hand. */
-  async function githubFlow(input: { token: string; canPush?: boolean; config?: unknown }) {
+  async function githubFlow(input: { token: string; canPush?: boolean; config?: unknown; project?: typeof GITHUB_PROJECT; registerAdapters?: (registry: AdapterRegistry) => void }) {
     const root = await mkdtemp(join(tmpdir(), "rovara-l11-flow-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const stateDirectory = join(root, "state");
@@ -446,11 +448,11 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const docker = new FakeDocker();
     docker.features = ["task.workflowMode"];
     const github = fakeGithub(input.token, input.canPush === undefined ? {} : { canPush: input.canPush });
-    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: input.token }, gh: async () => undefined, fetch: github.fetch, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false });
+    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: input.token }, gh: async () => undefined, fetch: github.fetch, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false, ...(input.registerAdapters === undefined ? {} : { registerAdapters: input.registerAdapters }) });
     cleanup.push(() => runtime.stop());
     const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
     const call = async (path: string, body?: unknown) => (await fetch(`${runtime.url}${path}`, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })).json() as Promise<ApiBody>;
-    await call("/v1/admin/projects", GITHUB_PROJECT);
+    await call("/v1/admin/projects", input.project ?? GITHUB_PROJECT);
     await call("/v1/dev/tasks", { requestId: "13131313-1313-4313-8313-131313131313", project: "ghproject", instructions: "Add a /health endpoint", workflow: true });
     for (let attempt = 0; attempt < 8 && docker.invocations.length === 0; attempt += 1) {
       await runtime.tick();
@@ -476,6 +478,30 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const allowedToken = classicToken("d4");
     const allowed = await githubFlow({ token: allowedToken, config: { version: 1, allowBroadTokenForWorker: true, plugins: [] } });
     expect(JSON.parse((await allowed.exchange("clone")).body)).toEqual({ credential: { token: allowedToken } });
+  });
+
+  it("gives a worker the credential of the connection the repository's record resolves to, never a different default (P2 review M1)", async () => {
+    const owner = fineGrainedToken("f6");
+    const company = fineGrainedToken("g7");
+    // A second GitHub connection, the default one, with a credential of its own. The laptop's own token connection is `github`.
+    const companyHost = (): CodeHost => {
+      const fake = new FakeCodeHost(new FakeHostModel({ url: GITHUB_PROJECT.repositories[0]!.url, id: "77", fullName: "example/demo" }));
+      return Object.assign(Object.create(fake) as CodeHost, {
+        kind: "github-company", provider: "github", defaultConnection: true,
+        issueGitCredential: async () => ({ kind: "token" as const, username: "x-access-token", token: company, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() }),
+      });
+    };
+    const register = (registry: AdapterRegistry) => registry.register("code-host", "github-company", companyHost());
+    const withHost = (kind: string | undefined) => ({ ...GITHUB_PROJECT, repositories: [{ ...GITHUB_PROJECT.repositories[0]!, ...(kind === undefined ? {} : { host: { kind } }) }] });
+    // The record names the non-default connection `github`: the owner's token, although `github-company` is the default.
+    const named = await githubFlow({ token: owner, project: withHost("github"), registerAdapters: register });
+    expect(JSON.parse((await named.exchange("clone")).body)).toEqual({ credential: { token: owner } });
+    // The record names the company connection: its credential.
+    const company2 = await githubFlow({ token: owner, project: withHost("github-company"), registerAdapters: register });
+    expect(JSON.parse((await company2.exchange("clone")).body)).toEqual({ credential: { token: company } });
+    // A record that names none is on the default connection.
+    const none = await githubFlow({ token: owner, project: withHost(undefined), registerAdapters: register });
+    expect(JSON.parse((await none.exchange("clone")).body)).toEqual({ credential: { token: company } });
   });
 
   it("gives a worker a credential only for a registered project's repository, and stops when the project is archived (L11 M2)", async () => {
@@ -1189,11 +1215,66 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     await commitRound(h, waiting.taskId, (workflow) => startWorkflowBranchSync(workflow, { repositoryId: "demo", number: 1, reason: "behind", now: new Date().toISOString() }), "SYNC");
     const sync = await h.nextJob(waiting.workspaceId, waiting.seen);
     /** The worker's merge commit on the host's branch: the given parents, and a tree. */
-    const merge = (sha: string, tree: string, parents: string[]) => { h.model.revisions.set(sha, { sha, tree, parents, files: new Map() }); h.model.branches.set(waiting.headBranch, sha); return sha; };
+    const merge = (sha: string, tree: string, parents: string[]) => { h.model.revisions.set(sha, { sha, tree, parents, files: new Map(), symlinks: new Set() }); h.model.branches.set(waiting.headBranch, sha); return sha; };
     const call = (commit: string) => ({ repository: "demo", pullRequestNumber: 1, action: "sync", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: waiting.commit, commit });
     const lifecycle = (commit: string, treeSha: string) => ({ action: "sync", repository: "demo", number: 1, url: h.model.crUrl("1"), state: "open", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: waiting.commit, commit, treeSha, checks: [], reconciled: false });
     return { ...waiting, newBase, sync, merge, call, lifecycle };
   }
+
+  // ---- lane P2 review N1 / L1: a GitHub connection that is not called `github` (here `github-main`) is filed, linked and re-keyed by its PROVIDER.
+  const linkOf = async (h: Harness, name: string) => h.runtime.registry.require("storage").get({ pk: `CODEHOST_CR#${name}#example/demo`, sk: "CR#0000000001" });
+  const linkUnderConnection = async (h: Harness) => h.runtime.registry.require("storage").get({ pk: "CODEHOST_CR#github-main#github-main:https://github.com/example/demo", sk: "CR#0000000001" });
+
+  it("files the link of a pull request opened through a renamed GitHub connection under the provider, and nothing under the connection's own name (publish)", async () => {
+    const h = await launch({ host: true, connection: "github-main" });
+    const w = await toWaitForMerge(h);
+    expect(await linkOf(h, "github")).toMatchObject({ taskId: w.taskId, number: 1, repositoryId: "demo" });
+    expect(await linkUnderConnection(h)).toBeUndefined();
+  });
+
+  it("moves the link to the new candidate when a CI fix is pushed through a renamed GitHub connection, and the fix is recorded (maintain: append)", async () => {
+    const h = await launch({ host: true, connection: "github-main" });
+    const t = await toAppend(h);
+    const before = (await linkOf(h, "github"))!["candidateDigest"];
+    h.model.branches.set(t.headBranch, t.fixCommit);
+    expect((await h.callback(t.update, "pull-request-update", t.call)).status).toBe(200);
+    expect((await h.callback(t.update, "result", { status: "SUCCEEDED", result: t.lifecycle(t.fixCommit, t.fixTree) })).status).toBe(200);
+    const after = await taskRecord(h, t.taskId) as unknown as { workflow: { stage: string; state: string; pullRequests: Array<{ headSha: string; candidateDigest: string }> } };
+    // Without the provider-keyed re-key the link update finds no row, the transaction is refused and the fix is never recorded.
+    expect(after.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ headSha: t.fixCommit }] });
+    const moved = (await linkOf(h, "github"))!["candidateDigest"];
+    expect(moved).not.toBe(before);
+    expect(moved).toBe(after.workflow.pullRequests[0]!.candidateDigest);
+    expect(await linkUnderConnection(h)).toBeUndefined();
+  });
+
+  it("still moves a link an earlier build filed under the connection's own name (maintain: dual read)", async () => {
+    const h = await launch({ host: true, connection: "github-main" });
+    const t = await toAppend(h);
+    const store = h.runtime.registry.require("storage");
+    const row = (await linkOf(h, "github"))!;
+    const legacyKey = { pk: "CODEHOST_CR#github-main#github-main:https://github.com/example/demo", sk: "CR#0000000001" };
+    await store.delete({ key: { pk: String(row["pk"]), sk: String(row["sk"]) } });
+    await store.put({ item: { ...row, ...legacyKey, hostKind: "github-main", repositoryKey: "github-main:https://github.com/example/demo" } });
+    h.model.branches.set(t.headBranch, t.fixCommit);
+    await h.callback(t.update, "pull-request-update", t.call);
+    expect((await h.callback(t.update, "result", { status: "SUCCEEDED", result: t.lifecycle(t.fixCommit, t.fixTree) })).status).toBe(200);
+    const after = await taskRecord(h, t.taskId) as unknown as { workflow: { pullRequests: Array<{ candidateDigest: string }> } };
+    expect((await linkUnderConnection(h))!["candidateDigest"]).toBe(after.workflow.pullRequests[0]!.candidateDigest);
+  });
+
+  it("records a branch sync pushed through a renamed GitHub connection and moves the link (maintain: sync)", async () => {
+    const h = await launch({ host: true, connection: "github-main" });
+    const t = await toSync(h);
+    const before = (await linkOf(h, "github"))!["candidateDigest"];
+    const merged = t.merge("8".repeat(40), "9".repeat(40), [t.commit, t.newBase]);
+    await h.callback(t.sync, "pull-request-update", t.call(merged));
+    await h.callback(t.sync, "result", { status: "SUCCEEDED", result: t.lifecycle(merged, "9".repeat(40)) });
+    const after = await taskRecord(h, t.taskId) as unknown as { workflow: { stage: string; pullRequests: Array<{ candidateDigest: string }> } };
+    expect(after.workflow.stage).toBe("VERIFY");
+    expect((await linkOf(h, "github"))!["candidateDigest"]).toBe(after.workflow.pullRequests[0]!.candidateDigest);
+    expect((await linkOf(h, "github"))!["candidateDigest"]).not.toBe(before);
+  });
 
   it("gives a worker a push credential only from the code host, for a publication and for a push to an open pull request, and never after the operation ended or for a clone grant", async () => {
     const h = await launch({ host: true });
@@ -2483,7 +2564,7 @@ describe("rovara up: the L12 review's fixes (H1 to H3, M1 to M3, lows, decision 
     const planned = await toPlanReview(h);
     const shared = thread(h, "bots");
     await attachThreadOnPage(h, planned.taskId, Number(shared.id));
-    h.model.setAccount("ci-bot", "write", "Bot");
+    h.model.setAccount("ci-bot", "write", "bot");
     at(h, clock, 5_000);
     h.model.addDiscussionComment(shared.id, "ci-bot", "/rovara changes: change everything");
     await poll(h, clock);

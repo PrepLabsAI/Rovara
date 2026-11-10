@@ -333,7 +333,7 @@ describe("collecting evidence", () => {
   it("reads a log only for an Actions job, a name goes through redaction and one line", async () => {
     const read: string[] = [];
     const evidence = await collectCiEvidence(context([
-      { name: `unit ${GHP}\n\u202Ebad`, conclusion: "failure", url: "http://insecure.test/x", jobId: "1", source: "15368" },
+      { name: `unit ${GHP}\n\u202Ebad`, conclusion: "failure", url: "http://insecure.test/x", jobId: "1", source: "15368", logReadable: true },
       { name: "app", conclusion: "failure", url: "https://user:pw@ci.test/x", jobId: "2", source: "5" },
       { name: "no id", conclusion: "timed_out", url: JOB_URL },
     ], async (jobId) => { read.push(jobId); return `log ${jobId}`; }));
@@ -349,14 +349,14 @@ describe("collecting evidence", () => {
 
   it("is told nothing of a log it cannot read at all (no reader)", async () => {
     const [entry] = await collectCiEvidence(context([{ name: "t", conclusion: "failure", url: JOB_URL, jobId: "1" }], undefined));
-    expect(entry!.note).toContain("can't be read here");
+    expect(entry!.note).toContain("no log Rovara can read");
   });
 
   it("a log that cannot be read is said to be missing and never stops the round; the pass's own limits are not swallowed", async () => {
-    const [entry] = await collectCiEvidence(context([{ name: "t", conclusion: "failure", url: JOB_URL, jobId: "1", source: "15368" }], async () => { throw new Error("boom"); }));
+    const [entry] = await collectCiEvidence(context([{ name: "t", conclusion: "failure", url: JOB_URL, jobId: "1", source: "15368", logReadable: true }], async () => { throw new Error("boom"); }));
     expect(entry!.note).toBe("The log could not be read.");
     const cap = Object.assign(new Error("cap"), { name: "TrackingRequestCapError" });
-    await expect(collectCiEvidence(context([{ name: "t", conclusion: "failure", url: JOB_URL, jobId: "1", source: "15368" }], async () => { throw cap; }))).rejects.toBe(cap);
+    await expect(collectCiEvidence(context([{ name: "t", conclusion: "failure", url: JOB_URL, jobId: "1", source: "15368", logReadable: true }], async () => { throw cap; }))).rejects.toBe(cap);
   });
 
   it("keeps its key per task and revision", () => {

@@ -130,7 +130,7 @@ describe("the owner-token GitHub client", () => {
     for (const name of GITHUB_CODE_HOST_PROVIDER_METHODS) expect(typeof (client as unknown as Record<string, unknown>)[name], name).toBe("function");
     // The App client's other public methods (agent tokens, webhook history, installation lists) are not reachable through it.
     const surface = Object.keys(client).sort();
-    expect(surface).toEqual([...GITHUB_CODE_HOST_PROVIDER_METHODS, "getPathKindAtCommit", "listPullRequestComments", "postPullRequestComment"].sort());
+    expect(surface).toEqual([...GITHUB_CODE_HOST_PROVIDER_METHODS, "getPathKindAtCommit", "listPullRequestComments", "postPullRequestComment", "commitFilesToBranch", "findLessonsPullRequest", "deleteLessonsBranch"].sort());
     expect(Object.isFrozen(client)).toBe(true);
     for (const name of ["createAgentInstallationToken", "agentRepositoryReader", "appSlug", "oauthClient", "listWebhookDeliveries", "installation"]) expect(name in client).toBe(false);
   });
@@ -162,6 +162,25 @@ describe("the owner-token GitHub client", () => {
       expect(request.authorization).toBe(`Bearer ${built.token}`);
       expect(request.origin).toBe("https://api.github.com");
     }
+  });
+
+  it("writes the lessons file with the owner's token only for a registered repository, and on a laptop does not claim a change request is Rovara's own (item C1)", async () => {
+    const built = build();
+    const host = githubCodeHost(built.client, { credentialRef: "github", now: () => NOW });
+    const branch = "rovara/lessons-0123456789ab";
+    const input = { repository: { url: GITHUB_REPO_URL }, branch, baseBranch: "main", message: "Lessons", files: [{ path: ".rovara/lessons.md", content: "x\n" }], fromBase: true };
+    const written = await host.commitFiles!(input, GITHUB_ORG_SCOPE);
+    expect(written.changed).toBe(true);
+    expect(built.model.headOf(branch)).toBe(written.revision);
+    expect(built.api.appRequests).toEqual([]);
+    for (const request of built.seen) if (request.authorization !== null) expect(request.authorization).toBe(`Bearer ${built.token}`);
+    // The owner's account made it, and so did the owner by hand: the laptop cannot tell Rovara's from the owner's, so it does not say.
+    const { ref } = await host.reconcileChangeRequest({ repository: { url: GITHUB_REPO_URL }, sourceBranch: branch, targetBranch: "main", title: "Lessons" }, GITHUB_ORG_SCOPE);
+    expect((await host.getChangeRequest(ref, GITHUB_ORG_SCOPE)).authoredByRovara).toBeUndefined();
+    // A repository nobody registered is refused before any request that carries the token.
+    const before = built.seen.length;
+    await expect(host.commitFiles!({ ...input, repository: { url: GITHUB_OTHER_URL }, branch: "rovara/lessons-aaaaaaaaaaaa" }, GITHUB_ORG_SCOPE)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
+    expect(built.seen.slice(before).filter((request) => request.authorization !== null)).toEqual([]);
   });
 
   it("hands the owner's own token to the worker for clone and for push, with an expiry Rovara chose (inside the hour)", async () => {

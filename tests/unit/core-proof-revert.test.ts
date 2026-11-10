@@ -167,6 +167,13 @@ describe("finding Rovara's own pull requests", () => {
 describe("the words of a revert", () => {
   it("git's own revert shape is a subject that starts Revert and a body line that starts with the sentence; a mention is not a revert", () => {
     expect(gitRevertedCommits(`Revert "Add retry"\n\nThis reverts commit ${MERGE}.\n`)).toEqual([MERGE]);
+    // One length rule with the commit id pattern (review L4): a 64-digit id and one up to 128 are read; 39 digits are not an id.
+    const long = "ab".repeat(32);
+    const longest = "cd".repeat(64);
+    expect(gitRevertedCommits(`Revert "x"\n\nThis reverts commit ${long}.\n`)).toEqual([long]);
+    expect(gitRevertedCommits(`Revert "x"\n\nThis reverts commit ${longest}.\n`)).toEqual([longest]);
+    expect(gitRevertedCommits(`Revert "x"\n\nThis reverts commit ${"a".repeat(39)}.\n`)).toEqual([]);
+    expect(revertedCommits(`This reverts commit ${long}`)).toEqual([long]);
     expect(gitRevertedCommits(`Add retry\n\nThis reverts commit ${MERGE}.`)).toEqual([]);
     expect(gitRevertedCommits(`Revert "x"\n\n> This reverts commit ${MERGE}`)).toEqual([]);
     expect(gitRevertedCommits(`Revert "x"\n\nWe discussed that this reverts commit ${MERGE}`)).toEqual([]);
@@ -184,6 +191,10 @@ describe("the words of a revert", () => {
 interface HostState {
   writers: Record<string, "admin" | "write" | "read" | "none">;
   bots?: string[];
+  others?: string[];
+  /** The code host connection is called this (a GitHub connection under another name); absent: `github`. */
+  connection?: string;
+  provider?: string;
   defaultBranch?: string | undefined;
   details: Partial<ChangeRequestDetails>;
   standingFails?: boolean;
@@ -193,7 +204,8 @@ function detector(state: HostState, extra: Partial<RevertDetectorDependencies> =
   const logged: string[] = [];
   const standingCalls: string[] = [];
   const codeHost = {
-    kind: "github",
+    kind: state.connection ?? "github",
+    ...(state.connection === undefined ? {} : { provider: state.provider ?? "github" }),
     repositoryIdentity: async () => ({ id: "1", fullName: "acme/payments", ...("defaultBranch" in state ? (state.defaultBranch === undefined ? {} : { defaultBranch: state.defaultBranch }) : { defaultBranch: "main" }) }),
     getChangeRequest: async () => ({
       ref: { repository: REPO, id: "20", url: "https://github.com/acme/payments/pull/20" }, state: "merged", sourceBranch: "revert-7", targetBranch: "main", headRevision: "4".repeat(40), mergeRevision: "5".repeat(40),
@@ -202,7 +214,7 @@ function detector(state: HostState, extra: Partial<RevertDetectorDependencies> =
     standing: async (_repo: RepositoryRef, person: HostAccount) => {
       standingCalls.push(person.login);
       if (state.standingFails === true) throw new Error("host down");
-      return { permission: state.writers[person.login] ?? "none", ...(state.bots?.includes(person.login) === true ? { accountType: "Bot" } : {}) };
+      return { permission: state.writers[person.login] ?? "none", accountType: state.bots?.includes(person.login) === true ? "bot" : state.others?.includes(person.login) === true ? "other" : "person" };
     },
   } as unknown as RevertDetectorDependencies["codeHost"];
   const index = createRovaraPullRequestIndex({ store, companyId: ORG });
@@ -222,6 +234,20 @@ describe("a merged revert pull request", () => {
     expect(await detectRevertFromMergedChangeRequest(t.deps, REF, SCOPE)).toEqual([]);
   });
 
+  it("detects a revert through a GitHub connection that is not called github: the index is read by the provider (review N3)", async () => {
+    const t = detector({ writers: { maya: "write" }, details: {}, connection: "github-main" });
+    await rovaraPullRequest(t.store);
+    expect(await detectRevertFromMergedChangeRequest(t.deps, REF, SCOPE)).toEqual([{ taskId: TASK, project: "payments", number: 7, url: URL7, via: "5".repeat(40), reverter: "maya" }]);
+    // By the merge commit the body names, too.
+    const byCommit = detector({ writers: { maya: "write" }, details: { body: `This reverts commit ${MERGE}` }, connection: "github-main" });
+    await rovaraPullRequest(byCommit.store);
+    expect(await detectRevertFromMergedChangeRequest(byCommit.deps, REF, SCOPE)).toHaveLength(1);
+    // A connection of another provider is not GitHub: nothing is found.
+    const other = detector({ writers: { maya: "write" }, details: {}, connection: "github-main", provider: "examplehost" });
+    await rovaraPullRequest(other.store);
+    expect(await detectRevertFromMergedChangeRequest(other.deps, REF, SCOPE)).toEqual([]);
+  });
+
   it("finds the pull request by the merge commit the body names too, and records one revert per task however many ways name it", async () => {
     const t = detector({ writers: { maya: "admin" }, details: { body: `Reverts #7\n\nThis reverts commit ${MERGE}` } });
     await rovaraPullRequest(t.store);
@@ -231,8 +257,8 @@ describe("a merged revert pull request", () => {
     expect(await detectRevertFromMergedChangeRequest(byCommit.deps, REF, SCOPE)).toHaveLength(1);
   });
 
-  it("records nothing when the person who merged it cannot write, is a bot, or cannot be told", async () => {
-    for (const state of [{ writers: { maya: "read" as const } }, { writers: { maya: "none" as const } }, { writers: { maya: "write" as const }, bots: ["maya"] }, { writers: { maya: "write" as const }, standingFails: true }]) {
+  it("records nothing when the person who merged it cannot write, is a bot or another kind of account (an organization, an unknown kind), or cannot be told", async () => {
+    for (const state of [{ writers: { maya: "read" as const } }, { writers: { maya: "none" as const } }, { writers: { maya: "write" as const }, bots: ["maya"] }, { writers: { maya: "write" as const }, others: ["maya"] }, { writers: { maya: "write" as const }, standingFails: true }]) {
       const t = detector({ ...state, details: {} });
       await rovaraPullRequest(t.store);
       expect(await detectRevertFromMergedChangeRequest(t.deps, REF, SCOPE), JSON.stringify(state)).toEqual([]);

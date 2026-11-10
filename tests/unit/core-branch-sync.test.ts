@@ -275,7 +275,7 @@ describe("a conflict, recorded", () => {
 // ---- the day, the count, the decisions
 
 const itemOf = (overrides: Partial<MergeTrackingItem> = {}): Pick<MergeTrackingItem, "branch" | "review" | "approval" | "syncs" | "headByRovara" | "headSha"> => ({
-  headSha: HEAD_A, branch: "behind", review: "approved", approval: { githubUserId: "1", login: "maint", commitId: HEAD_A }, syncs: { day: "2026-10-25", count: 0 }, headByRovara: true, ...overrides,
+  headSha: HEAD_A, branch: "behind", review: "approved", approval: { hostUserId: "1", login: "maint", commitId: HEAD_A }, syncs: { day: "2026-10-25", count: 0 }, headByRovara: true, ...overrides,
 });
 const DAY = Date.parse("2026-10-25T12:00:00.000Z");
 

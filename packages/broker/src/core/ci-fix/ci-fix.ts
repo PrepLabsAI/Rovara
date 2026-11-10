@@ -9,7 +9,6 @@ import {
   CI_FIX_ROUNDS_MAX,
   CI_LOG_BYTES_MAX,
   CI_OUTPUT_BLOCK_HEADER,
-  GITHUB_ACTIONS_APP_ID,
   INDEX_EXPIRY_ATTRIBUTE,
   blockWorkflowCiFix,
   ciFixAskMessage,
@@ -98,7 +97,7 @@ export interface CiEvidenceCheck {
   url?: string;
   /** The end of the job's log, redacted. */
   log?: string;
-  /** Why there is no log (not a GitHub Actions job, or GitHub had none). */
+  /** Why there is no log (the host cannot hand out this run's log, or it had none). */
   note?: string;
 }
 
@@ -136,7 +135,7 @@ function isPassLimit(error: unknown): boolean {
 }
 
 /**
- * What the failing checks say: for up to `CI_FAILED_JOBS_MAX` of them its name, its conclusion and, for a GitHub Actions job, the end of its log (cleaned). Any other CI gives its address
+ * What the failing checks say: for up to `CI_FAILED_JOBS_MAX` of them its name, its conclusion and, for a run whose log the host can hand out, the end of its log (cleaned). Any other CI gives its address
  * only. A log that cannot be read is said to be missing; it never stops the round. The pass's own limits are not swallowed.
  */
 export async function collectCiEvidence(context: Pick<MergeActionContext, "taskId" | "failing" | "readJobLog" | "log">): Promise<CiEvidenceCheck[]> {
@@ -144,15 +143,15 @@ export async function collectCiEvidence(context: Pick<MergeActionContext, "taskI
   for (const check of context.failing.slice(0, CI_FAILED_JOBS_MAX)) {
     const url = cleanUrl(check.url);
     const base = { name: oneLine(check.name, 100) || "a check", conclusion: oneLine(check.conclusion, 40) || "failure", ...(url === undefined ? {} : { url }) };
-    const actions = check.jobId !== undefined && (check.source === undefined || check.source === String(GITHUB_ACTIONS_APP_ID));
-    if (!actions || context.readJobLog === undefined) {
-      found.push({ ...base, note: "This check is not a GitHub Actions job, so its log can't be read here." });
+    const readable = check.jobId !== undefined && check.logReadable === true;
+    if (!readable || context.readJobLog === undefined) {
+      found.push({ ...base, note: "This check has no log Rovara can read here." });
       continue;
     }
     try {
       const raw = await context.readJobLog(check.jobId!);
       const log = raw === undefined ? "" : cleanLog(raw).trim();
-      found.push(log === "" ? { ...base, note: "GitHub had no log for this job." } : { ...base, log: logTail(log) });
+      found.push(log === "" ? { ...base, note: "The host had no log for this job." } : { ...base, log: logTail(log) });
     } catch (error) {
       if (isPassLimit(error)) throw error;
       context.log?.("ci_fix.log_unreadable", { taskId: context.taskId, error: error instanceof Error ? error.name : "unknown" });

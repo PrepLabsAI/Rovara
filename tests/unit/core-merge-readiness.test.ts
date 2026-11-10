@@ -17,7 +17,7 @@ function status(overrides: Partial<ChangeRequestStatus> = {}): ChangeRequestStat
 }
 const check = (name: string, state: "pending" | "completed", conclusion?: ChangeRequestStatus["checks"][number]["conclusion"], extra: Record<string, unknown> = {}): ChangeRequestStatus["checks"][number] =>
   ({ name, state, ...(conclusion === undefined ? {} : { conclusion }), required: false, url: "", ...extra });
-const review = (login: string, state: ChangeRequestStatus["reviews"][number]["state"], at: string, revision = HEAD, type = "User"): ChangeRequestStatus["reviews"][number] =>
+const review = (login: string, state: ChangeRequestStatus["reviews"][number]["state"], at: string, revision = HEAD, type: "person" | "bot" | "other" = "person"): ChangeRequestStatus["reviews"][number] =>
   ({ reviewer: { login, hostUserId: `id-${login}` }, accountType: type, state, revision, submittedAt: at });
 
 describe("readCi", () => {
@@ -47,6 +47,15 @@ describe("readCi", () => {
     expect(readCi(status({ ...required, checks: [check("unit", "completed", "success", { source: "app-a" })] }), input).ci).toBe("passing");
     expect(readCi(status({ checks: [check("unit", "completed", "success")], checksUnavailable: true }), input).ci).toBe("pending");
   });
+  it("hands a failing check's run id and the host's word that its log can be read to the fix, and never reads the source for it (item C4)", () => {
+    const failing = check("unit", "completed", "failure", { source: "15368", runId: "77", logReadable: true });
+    const plain = check("lint", "completed", "failure", { source: "15368", runId: "78" });
+    const read = readCi(status({ checks: [failing, plain] }), input);
+    expect(read.failingDetails).toEqual([
+      expect.objectContaining({ name: "unit", jobId: "77", source: "15368", logReadable: true }),
+      expect.not.objectContaining({ logReadable: true }),
+    ]);
+  });
   it("reads 'no CI' only when nothing ever reported, the head defines no checks and Rovara's push is a full sweep interval old", () => {
     const bare = status({ headDefinesChecks: false });
     expect(readCi(bare, { checksEverSeen: false, lastRovaraPushAt: NOW - 1_000, now: NOW })).toMatchObject({ ci: "pending", recheckAt: NOW - 1_000 + NO_CI_GRACE_MS });
@@ -65,7 +74,7 @@ describe("readReviews", () => {
       .toMatchObject({ review: "approved", approval: { login: "ana", commitId: HEAD } });
   });
   it("does not count a bot, a reader, a dismissed review, or more reviewers than it looks up; a cut list reads as asked-for", async () => {
-    expect(await readReviews(status({ reviews: [review("bot", "APPROVED", "2026-11-09T08:00:00Z", HEAD, "Bot")] }), { requested: false, permission: permissions({ bot: "write" }) })).toEqual({ review: "not_requested" });
+    expect(await readReviews(status({ reviews: [review("bot", "APPROVED", "2026-11-09T08:00:00Z", HEAD, "bot")] }), { requested: false, permission: permissions({ bot: "write" }) })).toEqual({ review: "not_requested" });
     expect(await readReviews(status({ reviews: [review("ana", "APPROVED", "2026-11-09T08:00:00Z")] }), { requested: false, permission: permissions({ ana: "read" }) })).toEqual({ review: "requested" });
     expect(await readReviews(status({ reviews: [review("ana", "APPROVED", "2026-11-09T08:00:00Z"), review("ana", "DISMISSED", "2026-11-09T08:30:00Z")] }), { requested: true, permission: permissions({ ana: "write" }) })).toEqual({ review: "requested" });
     const crowd = Array.from({ length: PERMISSION_LOOKUPS_MAX + 1 }, (_, n) => review(`p${String(n)}`, "APPROVED", "2026-11-09T08:00:00Z"));
@@ -76,8 +85,8 @@ describe("readReviews", () => {
 
 describe("humanApprovalOf", () => {
   const base = (over: Partial<Parameters<typeof humanApprovalOf>[0]> = {}) => humanApprovalOf({
-    reviews: [{ githubUserId: "1", login: "ana", userType: "User", state: "APPROVED", commitId: HEAD, submittedAt: "2026-11-09T08:00:00Z" }], headSha: HEAD, syncedFrom: undefined, ciPassingOnHead: true,
-    permissions: new Map([["ana", "write" as const]]), requesterGithubUserIds: "unlinked", linkedGithubUserIds: new Set(), allowSelfApproval: true, ...over,
+    reviews: [{ hostUserId: "1", login: "ana", accountType: "person", state: "APPROVED", commitId: HEAD, submittedAt: "2026-11-09T08:00:00Z" }], headSha: HEAD, syncedFrom: undefined, ciPassingOnHead: true,
+    permissions: new Map([["ana", "write" as const]]), requesterHostUserIds: "unlinked", linkedHostUserIds: new Set(), allowSelfApproval: true, ...over,
   });
   it("counts a writer's approval of the head, with self-approval on, and names why not otherwise", () => {
     expect(base()).toMatchObject({ approved: true, by: { login: "ana" } });
@@ -91,20 +100,20 @@ describe("humanApprovalOf", () => {
   });
   it("with self-approval off needs a linked person who is not a requester", () => {
     expect(base({ allowSelfApproval: false })).toEqual({ approved: false, reason: "unlinked_requester" });
-    expect(base({ allowSelfApproval: false, requesterGithubUserIds: ["1"], linkedGithubUserIds: new Set(["1"]) })).toEqual({ approved: false, reason: "self_only" });
-    expect(base({ allowSelfApproval: false, requesterGithubUserIds: ["2"], linkedGithubUserIds: new Set(["1"]) })).toMatchObject({ approved: true });
+    expect(base({ allowSelfApproval: false, requesterHostUserIds: ["1"], linkedHostUserIds: new Set(["1"]) })).toEqual({ approved: false, reason: "self_only" });
+    expect(base({ allowSelfApproval: false, requesterHostUserIds: ["2"], linkedHostUserIds: new Set(["1"]) })).toMatchObject({ approved: true });
   });
   it("never counts an excluded account (the Auditor), and latestReviewers drops dismissals and bots' ids", () => {
-    expect(base({ excludedGithubUserIds: new Set(["1"]) })).toEqual({ approved: false, reason: "no_write" });
-    expect(latestReviewers([{ githubUserId: "1", login: "ana", userType: "User", state: "DISMISSED", commitId: HEAD, submittedAt: "2026-11-09T08:00:00Z" }])).toEqual([]);
+    expect(base({ excludedHostUserIds: new Set(["1"]) })).toEqual({ approved: false, reason: "no_write" });
+    expect(latestReviewers([{ hostUserId: "1", login: "ana", accountType: "person", state: "DISMISSED", commitId: HEAD, submittedAt: "2026-11-09T08:00:00Z" }])).toEqual([]);
   });
 });
 
 describe("mergeReadiness", () => {
   const fact = (over: Partial<MergePullRequestFacts> = {}): MergePullRequestFacts => ({ repositoryId: "app", number: 7, headSha: HEAD, state: "open", draft: false, baseBranch: "main", ci: "passing", branch: "up_to_date", behindRequired: false, ...over });
-  const approved = new Map([["app#7", { approved: true as const, by: { githubUserId: "1", login: "ana" }, commitId: HEAD, approvers: [{ githubUserId: "1", login: "ana" }] }]]);
+  const approved = new Map([["app#7", { approved: true as const, by: { hostUserId: "1", login: "ana" }, commitId: HEAD, approvers: [{ hostUserId: "1", login: "ana" }] }]]);
   const input = (over: Partial<ReadinessInput> = {}): ReadinessInput => ({
-    pullRequests: [fact()], approvals: approved, workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING" }, recordedBases: new Map([["app#7", "main"]]), presser: { githubUserId: "1" },
+    pullRequests: [fact()], approvals: approved, workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING" }, recordedBases: new Map([["app#7", "main"]]), presser: { hostUserId: "1" },
     allowSelfApproval: true, requesterName: "Priya", ...over,
   });
   const refused = (over: Partial<ReadinessInput>) => { const r = mergeReadiness(input(over)); return r.ready ? "ready" : r.message; };
@@ -139,12 +148,12 @@ describe("mergeReadiness", () => {
     expect(refused({ pullRequests: two, approvals, recordedBases: new Map([["app#7", "main"], ["docs#3", "main"]]) })).toBe(M.repository("docs", M.draft));
   });
   it("needs a linked account for whoever presses, unless the install turns that off; and the only approver cannot press when self-approval is off", () => {
-    expect(refused({ presser: { githubUserId: undefined } })).toBe(M.linkGithub);
-    expect(refused({ presser: { githubUserId: undefined }, requirePresserAccount: false })).toBe("ready");
+    expect(refused({ presser: { hostUserId: undefined } })).toBe(M.linkGithub);
+    expect(refused({ presser: { hostUserId: undefined }, requirePresserAccount: false })).toBe("ready");
     // With self-approval off the presser must be known whatever the flag says, or "the only approver cannot press" could not be checked.
-    expect(refused({ presser: { githubUserId: undefined }, requirePresserAccount: false, allowSelfApproval: false })).toBe(M.linkGithub);
-    expect(refused({ allowSelfApproval: false, requesterName: "Priya", approvals: new Map([["app#7", { ...approved.get("app#7")!, approvers: [{ githubUserId: "1", login: "ana" }] }]]), presser: { githubUserId: "1" } })).toBe(M.presserApproved);
-    expect(refused({ allowSelfApproval: false, presser: { githubUserId: "9" } })).toBe("ready");
+    expect(refused({ presser: { hostUserId: undefined }, requirePresserAccount: false, allowSelfApproval: false })).toBe(M.linkGithub);
+    expect(refused({ allowSelfApproval: false, requesterName: "Priya", approvals: new Map([["app#7", { ...approved.get("app#7")!, approvers: [{ hostUserId: "1", login: "ana" }] }]]), presser: { hostUserId: "1" } })).toBe(M.presserApproved);
+    expect(refused({ allowSelfApproval: false, presser: { hostUserId: "9" } })).toBe("ready");
   });
   it("needs a code owner where the repository names one", () => {
     expect(refused({ codeOwners: new Map([["app#7", { ok: false, owners: "@acme/pay" } as never]]) })).toBe(M.needsCodeOwner("@acme/pay"));
@@ -161,7 +170,7 @@ describe("mergeReadiness", () => {
 describe("the branch, the head and the risk", () => {
   it("reads conflicted, behind, up to date and unknown", () => {
     expect(readBranch(status({ mergeable: false }))).toBe("conflicted");
-    expect(readBranch(status({ mergeableState: "dirty" }))).toBe("conflicted");
+    expect(readBranch(status({ mergeableState: "conflicted" }))).toBe("conflicted");
     expect(readBranch(status({ mergeableState: "behind" }))).toBe("behind");
     expect(readBranch(status({ mergeableState: "unknown" }))).toBe("unknown");
     expect(readBranch(status({ behindBy: 2 }))).toBe("behind");

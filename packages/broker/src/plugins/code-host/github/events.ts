@@ -78,8 +78,8 @@ const repositoryUrlOf = (fullName: string): string => `https://github.com/${full
 const changeRequestRefOf = (fullName: string, number: number) => ({ repository: { url: repositoryUrlOf(fullName) }, id: String(number), url: `${repositoryUrlOf(fullName)}/pull/${number}` });
 
 /** The neutral events of a delivery whose signature has been verified. Pure: no I/O. `deliveryId` is GitHub's, from the header. */
-export function neutralEventsOfGithub(eventName: string | undefined, body: unknown, deliveryId: string): CodeHostEvent[] {
-  const base = { eventId: deliveryId, host: "github" } as const;
+export function neutralEventsOfGithub(eventName: string | undefined, body: unknown, deliveryId: string, connection: string = "github"): CodeHostEvent[] {
+  const base = { eventId: deliveryId, host: connection } as const;
   const actorOf = (sender: { login: string } | undefined) => (sender === undefined ? {} : { actor: sender.login });
   const finish = (event: unknown): CodeHostEvent[] => [CodeHostEventSchema.parse(event)];
   switch (eventName) {
@@ -149,7 +149,7 @@ export function neutralEventsOfGithub(eventName: string | undefined, body: unkno
  * The adapter's `events`: a delivery is verified against the webhook secret first and only then read. `secret` is read for each delivery (the install's secret can be
  * rotated); a secret that cannot be read refuses the delivery.
  */
-export function githubCodeHostEvents(secret: (options?: { refresh?: boolean }) => Promise<string>): CodeHostEvents {
+export function githubCodeHostEvents(secret: (options?: { refresh?: boolean }) => Promise<string>, connection: string = "github"): CodeHostEvents {
   return {
     mode: "webhook",
     async normalise(delivery: RawDelivery, scope: HostScope): Promise<CodeHostEvent[]> {
@@ -168,7 +168,7 @@ export function githubCodeHostEvents(secret: (options?: { refresh?: boolean }) =
       } catch {
         throw agentXError("CONFIG_INVALID", UNREADABLE_MESSAGE);
       }
-      return neutralEventsOfGithub(headers["x-github-event"], body, deliveryId.toLowerCase());
+      return neutralEventsOfGithub(headers["x-github-event"], body, deliveryId.toLowerCase(), connection);
     },
   };
 }

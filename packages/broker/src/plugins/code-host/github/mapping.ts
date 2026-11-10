@@ -1,6 +1,6 @@
 // Plug-in foundations, task P3: GitHub's words to the neutral ones, and back. Pure functions: no I/O, and `github-app.ts` is not edited. Every untrusted
 // text from GitHub is cut to the port's bounds here, so a long comment never fails a read that was otherwise fine.
-import { agentXError, type Check, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFile, type ChangeRequestRef, type ChangeRequestStatus, type HostScope, type MergeResult } from "@agentx/contracts";
+import { agentXError, GITHUB_ACTIONS_APP_ID, type Check, type HostAccountKind, type MergeableState, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFile, type ChangeRequestRef, type ChangeRequestStatus, type HostScope, type MergeResult } from "@agentx/contracts";
 import type {
   GitHubPullRequestChangedFile, GitHubPullRequestDetails, GitHubPullRequestFeedback, MergePullRequestResult, PullRequestCheck, PullRequestStatus,
 } from "./provider.js";
@@ -23,26 +23,39 @@ export function detailsOf(repositoryUrl: string, details: GitHubPullRequestDetai
     ref: refOf(repositoryUrl, details.number, details.url), state: details.state, sourceBranch: details.headBranch, targetBranch: details.baseBranch, headRevision: details.headCommit,
     ...(details.mergeCommit === undefined ? {} : { mergeRevision: details.mergeCommit }), ...(details.mergedAt === undefined ? {} : { mergedAt: details.mergedAt }), ...(details.mergedBy === undefined ? {} : { mergedBy: details.mergedBy }),
     title: cut(details.title, 500), body: cut(details.body, TEXT_MAX),
+    ...(details.authoredByApp === undefined ? {} : { authoredByRovara: details.authoredByApp }), ...(details.baseRepositoryId === undefined ? {} : { baseRepositoryId: details.baseRepositoryId }),
   };
+}
+
+/** GitHub's account types in Rovara's words: a `User` is a person, a `Bot` a bot, anything else (an `Organization`, a type GitHub adds, nothing) is `other`. */
+export function accountKindOf(type: string | undefined): HostAccountKind {
+  return type === "User" ? "person" : type === "Bot" ? "bot" : "other";
+}
+
+/** GitHub's `mergeable_state` in Rovara's words: `dirty` is a conflict, `has_hooks` (mergeable, with passing commit statuses) is clean; the rest keep their meaning. */
+export function mergeableStateOf(state: PullRequestStatus["mergeableState"]): MergeableState {
+  return state === "dirty" ? "conflicted" : state === "has_hooks" ? "clean" : state;
 }
 
 export function checkOf(check: PullRequestCheck): Check {
   return {
     name: check.name, state: check.status === "completed" ? "completed" : "pending", ...(check.conclusion === undefined ? {} : { conclusion: check.conclusion }),
     required: check.required, url: check.url, ...(check.jobId === undefined ? {} : { runId: check.jobId }), ...(check.appId === undefined ? {} : { source: String(check.appId) }),
+    // A GitHub Actions job (or a check with no app named) has a log the check runner can read by its job id; any other app's check has none here.
+    ...(check.jobId !== undefined && (check.appId === undefined || check.appId === GITHUB_ACTIONS_APP_ID) ? { logReadable: true } : {}),
   };
 }
 
 export function statusOf(status: PullRequestStatus): ChangeRequestStatus {
   return {
-    id: String(status.number), state: status.state, draft: status.draft, headRevision: status.headSha, targetBranch: status.baseBranch, mergeableState: status.mergeableState,
+    id: String(status.number), state: status.state, draft: status.draft, headRevision: status.headSha, targetBranch: status.baseBranch, mergeableState: mergeableStateOf(status.mergeableState),
     ...(status.mergeable === undefined ? {} : { mergeable: status.mergeable }), ...(status.behindBy === undefined ? {} : { behindBy: status.behindBy }),
     checks: status.checks.map(checkOf), ...(status.checksUnavailable === true ? { checksUnavailable: true as const } : {}),
     requiredChecks: status.requiredChecks.map((check) => ({ name: check.name, ...(check.appId === undefined ? {} : { source: String(check.appId) }) })),
     ...(status.reviewsIncomplete === true ? { reviewsIncomplete: true as const } : {}), targetHasRequiredChecks: status.baseHasRequiredChecks, headDefinesChecks: status.headHasWorkflowFiles,
     requestedReviewers: status.requestedReviewers, ...(status.requestedReviewerIds === undefined ? {} : { requestedReviewerIds: status.requestedReviewerIds }),
     reviews: status.reviews.map((review) => ({
-      reviewer: { login: review.login, hostUserId: review.githubUserId }, accountType: review.userType === "" ? "unknown" : review.userType, state: review.state, revision: review.commitId, submittedAt: review.submittedAt,
+      reviewer: { login: review.login, hostUserId: review.githubUserId }, accountType: accountKindOf(review.userType), state: review.state, revision: review.commitId, submittedAt: review.submittedAt,
     })),
   };
 }

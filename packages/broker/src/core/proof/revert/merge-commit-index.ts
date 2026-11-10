@@ -6,12 +6,13 @@
 // The key is the company, the repository AND the commit (a commit id alone is not unique across repositories, forks or companies), and the row also names its company (`orgId`), which a
 // reader checks. The company's close erases the partition (Cloud's company close; Code has one company). The row is written in the same transaction that records the merge (`merged-state.ts#mergedStateItems`), holds no person, and expires (the state table's TTL attribute) well after the
 // longest time a revert is useful to the track record. The reader is `rovara-pull-request-index.ts`, and the revert detector (`revert-detect.ts`) is its consumer: no team record is involved. GitHub only, as the reverse links are.
-import { INDEX_EXPIRY_ATTRIBUTE, mergeCommitIndexKey, type DocumentStore, type OrgId, type TransactItem } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, mergeCommitIndexKey, type DocumentStore, type OrgId, type TransactItem, COMMIT_ID_PATTERN } from "@agentx/contracts";
 
 export const MERGE_COMMIT_ENTITY = "GITHUB_WORKFLOW_MERGE";
 /** How long a row is kept after it is written: a year and then some. */
 export const MERGE_COMMIT_INDEX_KEPT_DAYS = 400;
-const SHA = /^[0-9a-f]{40}$/u;
+/** A commit id of any hash length (item C4): the core never decides it is SHA-1. */
+const SHA = COMMIT_ID_PATTERN;
 const REPOSITORY = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u;
 const PULL_REQUEST_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})\/pull\/([1-9][0-9]{0,9})$/u;
 const DAY_SECONDS = 86_400;
