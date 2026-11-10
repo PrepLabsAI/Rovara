@@ -70,6 +70,14 @@ const notes = (sent: readonly WorkerEvent[]) => sent.flatMap((event) => {
   return event.type === "progress" && note !== undefined ? [note] : [];
 });
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Waits for a state instead of a fixed time: a slow runner takes longer to start the session, and a cancel sent before it registered finds nothing to cancel. */
+async function waitUntil(ready: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!ready()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await wait(10);
+  }
+}
 const PLAN = planAnswer(planDocument({ title: "Update the route" }));
 
 describe("a planning run on the real Pi loop whose model call fails", () => {
@@ -114,7 +122,8 @@ describe("a planning run on the real Pi loop whose model call fails", () => {
     const controller = new WorkerCancellationController();
     const operationId = randomUUID();
     const { faux, sent, settled } = await plan([hangsUntilAborted, fauxAssistantMessage(PLAN)], controller, operationId);
-    await wait(300);
+    // The run is registered and its (hanging) model call has started: only then is there a stream to cancel.
+    await waitUntil(() => controller.isRegistered(operationId) && faux.state.callCount === 1, "the run to register and start its model call");
     await controller.cancel(operationId);
     // Whatever was buffered is already sent when the cancel call returns: the cancel's own result would make the operation terminal and refuse it.
     expect(sent.some((event) => event.type === "progress" && (event.payload as { message?: string } | null)?.message === "AgentX stopped this run because it was cancelled.")).toBe(true);
@@ -129,7 +138,7 @@ describe("a planning run on the real Pi loop whose model call fails", () => {
     const operationId = randomUUID();
     const { faux, sent, settled } = await plan([iseFailure(), fauxAssistantMessage(PLAN)], controller, operationId);
     // The failed call ends at once; Pi then waits 2 s before its retry. Cancel inside that wait.
-    await wait(500);
+    await waitUntil(() => controller.isRegistered(operationId) && notes(sent).length >= 2, "the failed call and the retry wait");
     expect(notes(sent).map((note) => note.outcome)).toEqual(["failed", "retrying"]);
     await controller.cancel(operationId);
     // Pi ends the retry wait with its fixed "Retry cancelled": the task is told the wait was cancelled, not that the retries ran out.

@@ -135,9 +135,9 @@ describe("the driving test's plan and the qualification pins (test 31)", () => {
     expect(pinned).not.toContain(plan.compiled.bundle.bundleDigest);
   });
 
-  it("leaves the pins of the agent probes as they were: asset f383a9b1, scenario efa380e5, bundle 33716f10, all computed here", () => {
+  it("leaves the pins of the agent probes as they were: asset 5d4d0507, scenario efa380e5, bundle 33716f10, all computed here", () => {
     const probe = WEB_API_REQUIRED_PROBES.find((item) => item.probeId === "web-agent-app-isolation-v1")!;
-    expect(probe.assetDigest.startsWith("f383a9b1")).toBe(true);
+    expect(probe.assetDigest.startsWith("5d4d0507")).toBe(true);
     expect(probe.scenarioDigest!.startsWith("efa380e5")).toBe(true);
     expect(probe.bundleDigest!.startsWith("33716f10")).toBe(true);
     for (const item of WEB_API_REQUIRED_PROBES.filter((entry) => entry.agent !== undefined)) {

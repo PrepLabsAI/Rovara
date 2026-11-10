@@ -41,7 +41,7 @@ describe("the dispatch input of an arm", () => {
     expect(() => memoryInputForArm("on")).toThrow(RangeError);
     expect(() => memoryInputForArm("on", "latest")).toThrow();
     expect(() => memoryInputForArm("on", `snp_${"G".repeat(20)}`)).toThrow();
-    expect(() => memoryInputForArm("live" as never)).toThrow();
+    expect(() => memoryInputForArm("live")).toThrow();
     for (const arm of ["off", "on"] as const) expect(memoryInputForArm(arm, SNAPSHOT).mode).not.toBe("live");
   });
 });
