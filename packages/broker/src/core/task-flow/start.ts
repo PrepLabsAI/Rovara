@@ -54,10 +54,10 @@ function parseRequest(value: unknown): StartDeveloperTaskRequest {
 export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: unknown): Promise<StartResult> {
   const parsedRequest = parseRequest(value);
   const { principal } = caller;
-  // `design first:` at the start of a request asks for the design to be reviewed before any code. Read only while the stage exists for the company; the instructions are then the request without the prefix.
+  if (principal.companyId !== deps.companyId) throw agentXError("FORBIDDEN", "this person belongs to another company");
+  // `design first:` at the start of a request asks for the design to be reviewed before any code. Read only while the stage exists for the company (and after the company check, so another company's request is refused before anything is read); the instructions are then the request without the prefix.
   const designFirst = parsedRequest.workflow === true ? await deps.designReview?.designFirst(parsedRequest.instructions) : undefined;
   const request = designFirst?.designFirst === true ? { ...parsedRequest, instructions: designFirst.rest } : parsedRequest;
-  if (principal.companyId !== deps.companyId) throw agentXError("FORBIDDEN", "this person belongs to another company");
   const developerId = principal.personId;
   // A script token's task always has the fixed client "Script token": the body cannot choose that text, and the token's own name never reaches a pull request footer or a turn record (the audit names the token).
   const client = caller.scriptToken !== undefined ? SCRIPT_TOKEN_CLIENT_NAME : cleanClientName(request.client ?? caller.client);

@@ -165,6 +165,18 @@ describe("`design first`", () => {
   });
 });
 
+describe("`design first:` and the company check", () => {
+  it("is not read for a person of another company: the request is refused before the prefix is looked at", async () => {
+    const w = await world({ holdAnswerable: true });
+    let read = 0;
+    const steps = w.h.deps.designReview!;
+    w.h.deps.designReview = { ...steps, designFirst: async (text) => { read += 1; return steps.designFirst(text); } };
+    const stranger = { ...w.h.owner, principal: { ...w.h.owner.principal, companyId: "another-company" } };
+    await expect(w.h.flow.start(stranger as never, { requestId: newRequestId(), project: "payments", instructions: "design first: Retry payments", workflow: true })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(read).toBe(0);
+  });
+});
+
 describe("the wait sweep", () => {
   it("reminds at a day and at three days (once each), parks at a week with the keys released, resumes on the owner's word, and closes a parked review after thirty days", async () => {
     const w = await world({ holdAnswerable: true, price: false });

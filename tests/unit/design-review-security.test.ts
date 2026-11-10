@@ -17,7 +17,7 @@ import { designProofLine } from "../../packages/broker/src/core/design-review/pr
 import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { COMPANY, SIGNING_KEY } from "../support/task-flow-harness.js";
 import { runDueDispatches } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { UNPRICED_REFERENCE_PRICE, unpricedNoteOf, unpricedReferencePriceOf } from "../../packages/broker/src/local/app/design-review.js";
+import { UNPRICED_REFERENCE_PRICE, spendAcceptedFor, unpricedNoteOf, unpricedReferencePriceOf } from "../../packages/broker/src/local/app/design-review.js";
 import { answerRound, choose, localDesignReview, design, finish, mintKeys, nextJob, taskOf, toDesignPhase, toRound, waitingWithBlocker, world, planned, type World } from "../support/design-review-flow-world.js";
 
 const CAPABILITY = "x-agentx-callback-capability";
@@ -248,6 +248,28 @@ describe("the figure an unpriced run is counted at", () => {
     expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: "150, 600" })).toEqual({ inputMicrosPerMillionTokens: 150_000_000, outputMicrosPerMillionTokens: 600_000_000 });
     for (const bad of ["", "15", "15,75,1", "a,b", "0,75", "-1,5", "15,Infinity", "1000000,5"]) expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: bad })).toEqual(UNPRICED_REFERENCE_PRICE);
     expect(unpricedNoteOf(UNPRICED_REFERENCE_PRICE)).toBe("If you run it anyway, Rovara counts it at $15 and $75 per million tokens (input and output). A dearer model can cost more than the limit.");
+  });
+});
+
+describe("which round an accepted \"price unknown\" is for", () => {
+  const at = (minute: number) => `2026-11-09T10:${String(minute).padStart(2, "0")}:00.000Z`;
+  const reviewer = (endedAt: string) => ({ endedAt }) as never;
+  const review = (approvalMinutes: number[], round1EndedMinute?: number) => ({
+    rounds: round1EndedMinute === undefined ? [] : [{ round: 1, reviewers: [reviewer(at(round1EndedMinute))] }],
+    approvals: approvalMinutes.map((minute) => ({ kind: "spend", at: at(minute), by: { actorId: "a" } })),
+  }) as never;
+  it("is the round the approval was made for: an approval from before the previous round ended does not cover a later round, and one made after it does", () => {
+    // Round 1: the approval came before its operation was made.
+    expect(spendAcceptedFor(review([5]), 1, at(6))).toBe(true);
+    expect(spendAcceptedFor(review([]), 1, at(6))).toBe(false);
+    // An approval made after the operation started is not for it.
+    expect(spendAcceptedFor(review([7]), 1, at(6))).toBe(false);
+    // Round 2: the round-1 approval (minute 5) is older than the end of round 1 (minute 20): no.
+    expect(spendAcceptedFor(review([5], 20), 2, at(30))).toBe(false);
+    // A fresh approval after round 1 ended covers round 2.
+    expect(spendAcceptedFor(review([5, 25], 20), 2, at(30))).toBe(true);
+    // Only a spend approval counts.
+    expect(spendAcceptedFor({ rounds: [], approvals: [{ kind: "raise_cap", at: at(5), by: { actorId: "a" }, fromUsd: 10, capUsd: 20 }] } as never, 1, at(6))).toBe(false);
   });
 });
 

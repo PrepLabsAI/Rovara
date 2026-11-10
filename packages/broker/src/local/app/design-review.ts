@@ -5,7 +5,7 @@
 // Not here yet (listed in docs/local.md): repository files at the pinned commit are not read for the packets (no `CodeHost.fileAtRevision` caller on a laptop), so a reviewer reads the design, the requirements and the checkout itself; meta repository
 // files and MCP items are not read (no context sources); the planner's own resolve run spend is counted by the cost ledger, not added to the review's total.
 import { createHash } from "node:crypto";
-import { DesignReviewBindingSchema, agentXError, designReviewActive, type AdapterRegistry, type ModelProviderAdapter, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
+import { DesignReviewBindingSchema, agentXError, type WorkflowDesignReview, designReviewActive, type AdapterRegistry, type ModelProviderAdapter, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { createDesignReviewSteps } from "../../core/design-review/steps.js";
 import { answerReviewQuestions, designFirstOf, resumeParkedReview, retryBlockedReview } from "../../core/design-review/actions.js";
 import { readEffectiveDesignReview } from "../../core/design-review/setting.js";
@@ -37,6 +37,15 @@ import { readVerifiedText } from "./documents.js";
  * million tokens); a dearer figure holds the limit tighter but leaves a default limit with too little room for even one reviewer call (a call is reserved at the worst case it could cost).
  */
 export const UNPRICED_REFERENCE_PRICE = { inputMicrosPerMillionTokens: 15_000_000, outputMicrosPerMillionTokens: 75_000_000 } as const;
+
+/**
+ * Whether the owner accepted "price unknown" for THIS round: a spend approval made after the previous round ended and before this round's operation was made. An approval made for an earlier round is not one for a later
+ * round (a later round that cannot be priced holds again and needs its own).
+ */
+export function spendAcceptedFor(review: Pick<WorkflowDesignReview, "rounds" | "approvals">, round: number, operationStartedAt: string): boolean {
+  const previousEnded = Math.max(0, ...(review.rounds.find((entry) => entry.round === round - 1)?.reviewers.map((reviewer) => Date.parse(reviewer.endedAt)) ?? [0]));
+  return (review.approvals ?? []).some((approval) => approval.kind === "spend" && Date.parse(approval.at) > previousEnded && Date.parse(approval.at) <= Date.parse(operationStartedAt));
+}
 
 /** The figure the install counts an unpriced run at: the setting when it is two positive numbers, else the default. */
 export function unpricedReferencePriceOf(environment: NodeJS.ProcessEnv): { inputMicrosPerMillionTokens: number; outputMicrosPerMillionTokens: number } {
@@ -169,7 +178,7 @@ export function createLocalDesignReview(options: LocalDesignReviewOptions): Loca
     const task = pointer === undefined ? undefined : await readTask(flow, pointer.taskId);
     const review = task?.workflow?.designReview;
     if (task === undefined || review === undefined || !designReviewActive(review)) return undefined;
-    return { slot, binding: binding.data, task };
+    return { slot, binding: binding.data, task, startedAt: stored.createdAt };
   }
 
   return {
@@ -227,7 +236,8 @@ export function createLocalDesignReview(options: LocalDesignReviewOptions): Loca
         // A model with no price here cannot have its spend held to a budget. It runs only after the owner accepted "price unknown" at the cost hold (the review records that approval), and then the slot is bounded by an ASSUMED price
         // (`unpricedReferencePriceOf`): a stated assumption that holds the slot's ceiling only for a model that costs no more than it. Without that acceptance an unpriced slot gets no key.
         const priced = options.provider(choice.provider)?.prices?.models[choice.model] !== undefined;
-        const accepted = found.task.workflow?.designReview?.approvals?.some((approval) => approval.kind === "spend") === true;
+        const review = found.task.workflow?.designReview;
+        const accepted = review !== undefined && spendAcceptedFor(review, found.binding.round, found.startedAt);
         if (!priced && !accepted) return undefined;
         return {
           routes: [options.routeOf(choice).route], budget: { micros: Math.round(ceiling * 1_000_000), currency: "USD" }, taskId: found.task.taskId, projectName: found.task.project,
