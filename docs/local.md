@@ -35,6 +35,8 @@ one handle; a link, a file owned by someone else, or a wrong mode is refused, an
 | --- | --- | --- |
 | `config.json` | 0600 | The plug-in config (`version: 1`, see `docs/ports.md`). Made on first run with no plug-ins. Must not be writable by others. |
 | `keys.json` | 0600 (required) | `{"anthropic": "...", "github": "..."}`. Refused if group or others can read it (`chmod 600`). The environment wins over the file. |
+| `company-instructions.md` | 0600 (not writable by others) | Optional. The company's standing rules, one bullet each under `## Required` or `## Preferred` (read fresh at every step; its SHA-256 is the rules' version). See `docs/ports.md`, "Company instructions". |
+| `audit.db` | 0600 | The append-only audit log (SQLite; rows cannot be changed or removed, each holds a hash of the one before). See `docs/ports.md`, "Audit log". |
 | `session-token` | 0600 | A new random token each start. The login for the local API: `Authorization: Bearer <token>`. |
 | `invoke-key.pem` | 0600 | The P-256 key that signs invocations to workers. Kept, so workers that outlive a restart still accept the new process. |
 | `workspaces/<id>/` | 0777 under a 0700 parent | One folder per worker machine. See "Workspaces". Tasks write here, so nothing in it is ever read as a config or a plug-in. |

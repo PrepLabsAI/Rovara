@@ -8,3 +8,7 @@ export { plugin as sqliteQueuePlugin } from "./queue-plugin.js";
 export { SettingsError } from "./settings.js";
 export * from "./folder-object-storage.js";
 export { plugin as folderObjectStoragePlugin } from "./object-storage-plugin.js";
+export * from "./sqlite-audit-log.js";
+export { plugin as sqliteAuditSinkPlugin } from "./audit-sink-plugin.js";
+export * from "./company-instructions-file.js";
+export { plugin as fileCompanyInstructionsPlugin } from "./company-instructions-plugin.js";

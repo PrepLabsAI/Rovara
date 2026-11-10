@@ -20,6 +20,7 @@ import type { ObjectStorage } from "./object-storage.js";
 import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
 import type { AuditSink } from "./audit-sink.js";
+import type { CompanyInstructionsSource } from "./company-instructions.js";
 import type { QueueService } from "./queue.js";
 import type { WorkerMachines } from "./worker-machines.js";
 
@@ -44,6 +45,8 @@ export const PLUGIN_POINTS = [
   "model-keys",
   /** Provisional (owner decision 58): files too big for the document store, behind `ObjectStorage`. */
   "object-storage",
+  /** Owner decisions 57 and 60 (item L1): the company's standing rules, read-only. Code: a local file; Cloud: its store. */
+  "company-instructions",
 ] as const;
 export const PluginPointSchema = z.enum(PLUGIN_POINTS);
 export type PluginPoint = z.infer<typeof PluginPointSchema>;
@@ -71,6 +74,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   metering: "one",
   "model-keys": "one",
   "object-storage": "one",
+  "company-instructions": "one",
 };
 
 /**
@@ -136,6 +140,7 @@ export interface PluginPointTypes {
   metering: Metering;
   "model-keys": ModelKeyStore;
   "object-storage": ObjectStorage;
+  "company-instructions": CompanyInstructionsSource;
 }
 
 export type AdapterOf<P extends PluginPoint> = PluginPointTypes[P];

@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
+import { COMPANY_INSTRUCTIONS_FILE_NAME, IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
@@ -26,7 +26,7 @@ import {
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
 import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
-import { SqliteDocumentStore, SqliteQueueService } from "@agentx/local-adapters";
+import { FileCompanyInstructions, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import type { BrowserOpener } from "./open-browser.js";
@@ -49,6 +49,7 @@ import { loadInvokeSigner } from "./invoke-signer.js";
 import { createLocalModelProxy, type LocalModelProxy, type ModelGrantSource, type ProviderEndpoints } from "./model-proxy/index.js";
 import { modelProxyWorkerUrl } from "./docker-worker-machines.js";
 import {
+  AUDIT_DB_FILE_NAME,
   KEYS_FILE_NAME,
   SERVER_FILE_NAME,
   STATE_LOCK_FILE_NAME,
@@ -304,7 +305,17 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // The comment reads of the approvers (a comment proves an approval only after Rovara's own checks, `core/pr-commands/comment-checks.ts`) need the app, which is made after the registry is sealed.
   const comments: { current?: Pick<LocalComments, "fetchComment" | "contextOf" | "available"> } = {};
   const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment);
+  const closers: Array<() => Promise<void> | void> = [];
+  const configured = (point: PluginPoint): boolean => config.plugins.some((entry) => entry.point === point);
+  // Port lane P6 (item L2): a local append-only audit log, so "audit before add" holds on a laptop. A test that keeps its records in memory has none; a configured `audit-sink` plug-in replaces it.
+  let auditLog: SqliteAuditLog | undefined;
+  if (options.storage !== "memory" && !configured("audit-sink")) {
+    auditLog = SqliteAuditLog.open({ path: join(stateDirectory, AUDIT_DB_FILE_NAME) });
+    const log = auditLog;
+    closers.push(() => log.close());
+  }
   registerCodeDefaults(registry, {
+    ...(auditLog === undefined ? {} : { auditSink: { name: "sqlite", sink: auditLog } }),
     ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     displayName: ownerName(),
     isValidSession: (value) => constantTimeEqual(value, sessionToken),
@@ -321,8 +332,6 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   });
 
   // Storage and queue: one SQLite file in the state folder (lane L3's adapters), unless the config names its own. The store keeps the indexes the task flow needs.
-  const closers: Array<() => Promise<void> | void> = [];
-  const configured = (point: PluginPoint): boolean => config.plugins.some((entry) => entry.point === point);
   if (options.storage === "memory") {
     registry.register("storage", "memory", new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, ttlAttribute: INDEX_EXPIRY_ATTRIBUTE }), { isDefault: true });
     registry.register("queue", "memory", new MemoryQueueService(), { isDefault: true });
@@ -371,6 +380,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
     if ((await host.resolveCredentials?.())?.found === true) registry.register("code-host", host.kind, host, { isDefault: true });
   }
+
+  // Port lane P6 (item L1): the company's standing rules come from `<state folder>/company-instructions.md` (read fresh at every step); a configured `company-instructions` plug-in replaces it.
+  registry.register("company-instructions", "file", new FileCompanyInstructions({ path: join(stateDirectory, COMPANY_INSTRUCTIONS_FILE_NAME) }), { isDefault: true });
 
   options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });

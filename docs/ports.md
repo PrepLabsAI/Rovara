@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, and `object-storage` (provisional, below). A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, and `object-storage` (provisional, below) and `company-instructions` (read-only company rules, below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -197,7 +197,7 @@ Each has a Code default (`policy-defaults.ts`) and a suite in `policy-conformanc
 | Seam | Code default | Cloud fills it with |
 | --- | --- | --- |
 | `Admission` (`admit`, `stage`, `settle`, `release`; every request has an `idempotencyKey`) | allow everything, hold nothing | budgets and money limits, taken inside the caller's transaction (`stage`) |
-| `AuditSink` (`stage` steps for the caller's transaction, `record`) | writes nothing | the audit ledger's outbox |
+| `AuditSink` (`stage` steps for the caller's transaction, `record`) | `rovara up`: a local append-only log on SQLite (`audit.db`, lane P6); the bare registry default writes nothing | the audit ledger's outbox |
 | `Approvers` (`requirement`, `verify` a proof) | the local machine owner by session, or a repository collaborator with write permission by comment (decision 45.3); one approver, self-approval allowed | a second person, the browser rule |
 | `IdentityProvider` (`authenticate`, `resolveExternalAccount`, `getPrincipal`) | the local owner, plus outside accounts the owner linked in config | members and single sign-on |
 | `Metering` (`price`, `record`; every entry has an `entryId`, recorded once) | tokens times a price table | proxy key spend |
@@ -210,6 +210,22 @@ transaction, keyed on `approvalProofKey(proof)` (a hash of method, token and req
 
 An outside account is an `ExternalAccountRef` (`provider`, `tenant`, `accountId`); no core type names Slack or GitHub. The code host
 adapter only FETCHES a comment (`CodeHost.comments`: text, author, times, the change request it is on; the author's permission comes from `standing`). Code's default approvers read it through `fetchComment` and the request's thread through `commentContext`, and the checks are Rovara's (owner decision 66, `core/pr-commands/comment-checks.ts`): the right thread, written after the version was posted, never edited, `/rovara approve <version>` naming the version that waits, not a bot (`isBot`) or Rovara's own reply, a writer.
+
+### Audit log and "audit before add" (lane P6, item L2)
+
+`rovara up` registers `SqliteAuditLog` (`packages/local-adapters/src/sqlite-audit-log.ts`, plug-in `@agentx/local-adapters/audit-sink`) as the `audit-sink` default, in `~/.rovara/audit.db` (mode 0600, its own file). It
+is one table that only grows: SQLite triggers refuse every UPDATE and DELETE, and each row holds the hash of the row before it, so `verify()` finds a row that was changed or removed by someone who dropped the triggers. It is a
+local record for the machine's owner, not a tamper-proof ledger (Cloud's ledger, its verifier and its outbox stay Cloud only, decision 41). **The rule for callers:** a change that must be audited calls `stage(event)` (or `record(event)`) and
+only then makes the change. The local log writes the row inside `stage`, durably, before the caller's transaction exists, and returns no transaction steps; so an attempt that is later refused still leaves a record, and a write that fails
+throws, so the change is not made. Recording an `eventId` twice records it once. A caller must not assume the audit row commits in its transaction: that holds for Cloud's sink only. A test that keeps its records in memory (`storage: "memory"`) gets no log; a configured `audit-sink` plug-in replaces it.
+
+### Company instructions (lane P6, item L1)
+
+`company-instructions` is a read-only point that holds one adapter: `current(company)` returns the company's latest approved rules as `{ version, rules: [{ text, priority }] }` (priority `required` or `preferred`), or `undefined` for none. It is
+the shape of Cloud's `CompanyInstructionsSource` (lane I2) so Cloud's port is a copy of this one; the sizes (30 rules, 600 characters each, 12,000 in all) and the snapshot schema are in `standing-instructions.ts`. There is no write method.
+Code's adapter (`FileCompanyInstructions`, plug-in `@agentx/local-adapters/company-instructions`, the default of `rovara up`) reads `~/.rovara/company-instructions.md` at every call: bullets under `## Required` and `## Preferred`, a bullet with no
+heading is Required, a line it cannot place is refused (naming the line) instead of being dropped, and the file must be a plain file owned by the user and not writable by others. The version is the SHA-256 of the file's bytes, so it is also the hash a task records.
+The file is outside every repository on purpose: a repository's writers cannot edit the company's rules.
 
 ## Model key store
 

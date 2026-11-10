@@ -54,7 +54,26 @@ describe("rovara up runtime", () => {
       identity: ["local-owner"],
       admission: ["allow-all"],
       "model-keys": ["local"],
+      // Port lane P6: the local audit log and the company rules file are the defaults.
+      "audit-sink": ["sqlite"],
+      "company-instructions": ["file"],
     });
+  });
+
+  it("reads the company rules from company-instructions.md in the state folder at every call, and keeps an append-only audit log beside the records (lane P6)", async () => {
+    const { runtime, stateDirectory } = await launch();
+    const source = runtime.registry.require("company-instructions");
+    expect(await source.current(IMPLICIT_COMPANY_ID)).toBeUndefined();
+    await writeFile(join(stateDirectory, "company-instructions.md"), "## Required\n- Never touch the billing folder.\n", { mode: 0o600 });
+    const first = await source.current(IMPLICIT_COMPANY_ID);
+    expect(first?.rules).toEqual([{ text: "Never touch the billing folder.", priority: "required" }]);
+    await writeFile(join(stateDirectory, "company-instructions.md"), "## Required\n- Never touch the billing folder.\n## Preferred\n- Small commits.\n", { mode: 0o600 });
+    const second = await source.current(IMPLICIT_COMPANY_ID);
+    expect(second?.rules).toHaveLength(2);
+    expect(second?.version).not.toBe(first?.version);
+    const audit = runtime.registry.require("audit-sink");
+    await audit.record({ eventId: "evt-1", companyId: IMPLICIT_COMPANY_ID, at: "2026-11-10T00:00:00.000Z", actor: { type: "system", id: "test" }, action: "lessons.added" });
+    expect((await lstat(join(stateDirectory, "audit.db"))).mode & 0o777).toBe(0o600);
   });
 
   it("keeps the session token in a 0600 file, and serves the status only with it", async () => {

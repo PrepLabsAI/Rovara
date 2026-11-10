@@ -207,13 +207,16 @@ export interface CodeDefaultsOptions extends LocalOwnerIdentityOptions {
   onMeter?: (entry: MeterEntry, result: MeterResult) => void | Promise<void>;
   /** Code's model keys (environment, file). Absent: none is registered and the caller must configure one. */
   modelKeys?: ModelKeyStore;
+  /** Port lane P6 (item L2): a local audit log to register as the default instead of the one that writes nothing. Absent: the no-op sink. */
+  auditSink?: { name: string; sink: AuditSink };
 }
 
 /** Registers Code's policy defaults. Config-named adapters replace them. */
 export function registerCodeDefaults(registry: AdapterRegistry, options: CodeDefaultsOptions): void {
   const owner = localOwnerPrincipal(options);
   registry.register("admission", "allow-all", createAllowAllAdmission(), { isDefault: true });
-  registry.register("audit-sink", "none", createNoopAuditSink(), { isDefault: true });
+  if (options.auditSink === undefined) registry.register("audit-sink", "none", createNoopAuditSink(), { isDefault: true });
+  else registry.register("audit-sink", options.auditSink.name, options.auditSink.sink, { isDefault: true });
   // The identity adapter's `isValidSession` is the owner's SIGN-IN (the `rovara up` cookie). It is never an approval proof: a raw session secret would approve any request. Approval proofs come only from a verifier
   // bound to one request, revision and digest (`options.approvers.verifySession`, for example `localSessionProofVerifier` over the local pages' sessions). Absent: `local-session` proofs are refused.
   const verifySession = options.approvers?.verifySession;

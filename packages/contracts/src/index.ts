@@ -132,6 +132,7 @@ export * from "./workflow-publication-context.js";
 export * from "./company-scope.js";
 export * from "./run-estimate.js";
 export * from "./record-trust.js";
+export * from "./standing-instructions.js";
 export * from "./signing-key.js";
 export * from "./task-budget.js";
 export * from "./model-not-enabled.js";
