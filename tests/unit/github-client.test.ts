@@ -79,7 +79,7 @@ describe("the real GitHub client under the adapters", () => {
 
   it("refuses to list branches under a system scope (the listing is org-scoped)", async () => {
     const world = codeHostWorld();
-    await expect(world.host.listBranches(world.repository, 1, { system: "private-install" })).rejects.toBeDefined();
+    await expect(world.host.listBranches(world.repository, 1, { system: "install" })).rejects.toBeDefined();
   });
 
   it("hands over the expiry GitHub stated for the token, not one of its own; no stated expiry is refused", async () => {

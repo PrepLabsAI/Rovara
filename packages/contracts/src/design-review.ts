@@ -45,7 +45,7 @@ export const DESIGN_REVIEW_APPROVERS_MAX = 10;
 export const DesignReviewApproverSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("maintainers") }).strict(),
   z.object({ kind: z.literal("people"), memberIds: z.array(z.string().min(1).max(100)).min(1).max(DESIGN_REVIEW_APPROVERS_MAX) }).strict(),
-  /** Enterprise only; the broker refuses it in the public edition. */
+  /** Only where the install allows it; the broker refuses it elsewhere. */
   z.object({ kind: z.literal("group"), groupId: z.string().min(1).max(100) }).strict(),
 ]);
 export type DesignReviewApprover = z.infer<typeof DesignReviewApproverSchema>;

@@ -491,13 +491,13 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const register = (registry: AdapterRegistry) => registry.register("code-host", "github-company", companyHost());
     const withHost = (kind: string | undefined) => ({ ...GITHUB_PROJECT, repositories: [{ ...GITHUB_PROJECT.repositories[0]!, ...(kind === undefined ? {} : { host: { kind } }) }] });
     // The record names the non-default connection `github`: the owner's token, although `github-company` is the default.
-    const named = await githubFlow({ token: owner, project: withHost("github") as never, registerAdapters: register });
+    const named = await githubFlow({ token: owner, project: withHost("github"), registerAdapters: register });
     expect(JSON.parse((await named.exchange("clone")).body)).toEqual({ credential: { token: owner } });
     // The record names the company connection: its credential.
-    const company2 = await githubFlow({ token: owner, project: withHost("github-company") as never, registerAdapters: register });
+    const company2 = await githubFlow({ token: owner, project: withHost("github-company"), registerAdapters: register });
     expect(JSON.parse((await company2.exchange("clone")).body)).toEqual({ credential: { token: company } });
     // A record that names none is on the default connection.
-    const none = await githubFlow({ token: owner, project: withHost(undefined) as never, registerAdapters: register });
+    const none = await githubFlow({ token: owner, project: withHost(undefined), registerAdapters: register });
     expect(JSON.parse((await none.exchange("clone")).body)).toEqual({ credential: { token: company } });
   });
 

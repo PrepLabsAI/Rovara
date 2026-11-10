@@ -1,4 +1,4 @@
-// Enterprise foundations, task P2: the in-memory host the fakes (and the GitHub fixture server in the tests) stand on. One model holds one repository: its
+// Plug-in foundations, task P2: the in-memory host the fakes (and the GitHub fixture server in the tests) stand on. One model holds one repository: its
 // revisions and branches, change requests with their reviews, comments and threads, the checks that reported on each revision, and the accounts that may
 // act. It is deterministic (no clock, no randomness unless given) so a test and a fixture agree on every id.
 //

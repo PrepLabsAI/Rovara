@@ -1,4 +1,4 @@
-// Enterprise foundations, task P1: the words every plug-in port shares. This folder holds types and Zod schemas only: no adapter, no I/O.
+// Plug-in foundations, task P1: the words every plug-in port shares. This folder holds types and Zod schemas only: no adapter, no I/O.
 //
 // Ports live in `contracts`; adapters live in `broker/src/plugins/<kind>/<name>/` and ship in the release (no code is loaded at run time).
 // The vocabulary is neutral: change request (a pull request or a CR), revision (a commit or a CR revision), check (a CI job or a build),
@@ -6,17 +6,18 @@
 import { z } from "zod";
 import { OrgIdSchema } from "../browser-ids.js";
 
-/** What a plug-in is called: lower-case words and digits with hyphens. A built-in or a customer-specific kind, registered at build time; never loaded from outside. */
+/** What a plug-in is called: lower-case words and digits with hyphens. A built-in kind, or one the install's owner names in the plug-in config (the install loads the adapters its config names, decision 40); a kind is registered by its adapter, never by a caller's request. */
 export const PluginKindSchema = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/);
 export type PluginKind = z.infer<typeof PluginKindSchema>;
 
 /**
- * Whose authority a plug-in call runs under, for the install's own credential rules: one organization's own work, or a system caller that names no org
- * (a signed webhook, or the one org of a private install). Same shape the GitHub reads use today.
+ * Whose authority a plug-in call runs under, for the install's own credential rules: one company's own work (`orgId` is the company id), or a system
+ * caller that names no company: `webhook` (a signed delivery a host sent) or `install` (the install's own work, for an install that runs as one company).
+ * `private-install` is the older spelling of `install` and is still read (it parses as `install`); it goes away after one release, so write `install`.
  */
 export const HostScopeSchema = z.union([
   z.object({ orgId: OrgIdSchema }).strict(),
-  z.object({ system: z.enum(["webhook", "private-install"]) }).strict(),
+  z.object({ system: z.enum(["webhook", "install", "private-install"]).transform((system) => (system === "private-install" ? "install" as const : system)) }).strict(),
 ]);
 export type HostScope = z.infer<typeof HostScopeSchema>;
 

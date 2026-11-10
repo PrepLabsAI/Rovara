@@ -54,7 +54,7 @@ export async function perform(run: () => Promise<PerformOutcome>): Promise<Perfo
 export const CARD_REFUSAL_OF_GATE: Readonly<Record<GateRefusalReason, DecisionRefusalReason>> = {
   unsupported: "unsupported", invalid: "unsupported", not_found: "stale", not_waiting: "stale", stale: "stale", expired: "stale",
   method_not_allowed: "forbidden", not_approved: "forbidden", not_the_approver: "forbidden", proof_already_used: "forbidden", request_id_reused: "forbidden",
-  self_approval_not_allowed: "second_person_required", needs_more_approvers: "second_person_required", invalid_outcome: "not_ready",
+  self_approval_not_allowed: "second_person_required", needs_more_approvers: "second_person_required", invalid_outcome: "not_ready", sign_in_not_fresh: "forbidden",
 };
 
 /** The card kinds that `workflowDocumentHandler` decides: the documents a task's workflow waits on. A Code install mounts the card routes with these as `highOnCard` and `evidenceFirstOnHigh` (the gate itself asks for the local session on a high card). */

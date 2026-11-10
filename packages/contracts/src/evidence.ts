@@ -74,7 +74,7 @@ export const EVIDENCE_ARTIFACT_CONTENT_TYPES: Record<EvidenceArtifactKind, strin
 };
 export const EVIDENCE_ARTIFACT_MAGIC: Partial<Record<EvidenceArtifactKind, string>> = { jpeg: "ffd8ff", webm: "1a45dfa3", trace_zip: "504b0304" };
 
-/** Days an artifact is kept, per class: the default and the range a company may set (Enterprise). The pilot's Public edition keeps the defaults. */
+/** Days an artifact is kept, per class: the default and the range a company may set (where the install lets a company choose). Otherwise the defaults apply. */
 export const EVIDENCE_RETENTION_DAYS = {
   "evidence-short": { default: 14, min: 1, max: 90 },
   "evidence-std": { default: 30, min: 7, max: 180 },

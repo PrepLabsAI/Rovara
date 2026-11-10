@@ -136,9 +136,9 @@ export function gateOfExternalCheck(check: ExternalCheck): CodeBuildGateDefiniti
 }
 
 /**
- * Enterprise foundations, task P7: where a repository lives, by plug-in kind. A GitHub host carries the installation and the immutable repository id that
+ * Plug-in foundations, task P7: where a repository lives, by plug-in kind. A GitHub host carries the installation and the immutable repository id that
  * `installationId` / `githubRepositoryId` carried at the top of the record (both stay readable for one release: see `repositoryHostOf`). Any other kind
- * is a plug-in registered at build time; it carries one opaque reference of its own. Control-plane only, like the pins: a worker never reads it.
+ * is a plug-in registered by its adapter; it carries one opaque reference of its own. Control-plane only, like the pins: a worker never reads it.
  */
 export const RepositoryHostSchema = z.union([
   z.object({ kind: z.literal("github"), installationId: z.number().int().positive().optional(), repositoryId: z.number().int().positive().optional() }).strict(),

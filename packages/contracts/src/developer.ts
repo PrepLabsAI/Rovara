@@ -5,7 +5,7 @@ import { ProjectRoleSchema } from "./app-projects.js";
 import { EnvironmentNameSchema } from "./environments.js";
 export { normalizeEmail } from "./email.js";
 import { looseCopy } from "./loose.js";
-import { OrgRoleSchema } from "./company-scope.js";
+import { OrgRoleNameSchema } from "./company-scope.js";
 import { DeveloperTaskPolicySchema } from "./project-node.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
@@ -25,7 +25,7 @@ export const FRESH_SIGN_IN_SECONDS = 600;
 export const SLACK_OIDC_ISSUER = "https://slack.com";
 
 export { DeveloperSignInMethodSchema, type DeveloperSignInMethod } from "./developer-web.js";
-import { DeveloperSignInMethodSchema } from "./developer-web.js";
+import { ExternalAccountRefSchema, SignInMethodIdSchema, readExternalAccount } from "./outside-account.js";
 
 const LOOPBACK_REDIRECT = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/callback$/;
 
@@ -60,7 +60,7 @@ export const AgentXConfigurationSchema = z.object({
   methods: z.object({
     slack: z.boolean(),
     oidc: z.object({ displayName: z.string().min(1).max(40) }).nullable(),
-    /** SAML single sign-on, on Enterprise installs whose administrator saved and enabled the identity provider's settings; absent from an older server. */
+    /** SAML single sign-on, on installs whose administrator saved and enabled the identity provider's settings; absent from an older server. */
     saml: z.object({ displayName: z.string().min(1).max(40) }).nullable().optional(),
     /** The hosted Rovara sign-in, which creates an org on first sign-in; absent from an older server. */
     cloud: z.object({ displayName: z.string().min(1).max(40) }).nullable().optional(),
@@ -81,11 +81,17 @@ export type DeveloperTokenResponse = z.infer<typeof DeveloperTokenResponseSchema
 export const DeveloperSummarySchema = z.object({
   id: z.string().regex(/^[a-f0-9]{64}$/),
   name: z.string().min(1).max(200),
-  provider: DeveloperSignInMethodSchema,
+  provider: SignInMethodIdSchema,
+  /** Legacy alias of `account` for a Slack-linked developer: read with `readExternalAccount`; new code writes `account`. */
   slackUserId: SlackUserIdSchema.optional(),
+  /** The developer's outside account in the neutral shape (lane P3, item I2). */
+  account: ExternalAccountRefSchema.optional(),
   email: z.string().email().optional(),
   /** The developer's role in their org; absent from a control plane that predates it. */
-  orgRole: OrgRoleSchema.optional(),
+  orgRole: OrgRoleNameSchema.optional(),
+}).refine((summary) => (summary.account === undefined || summary.slackUserId === undefined) || readExternalAccount(summary) !== undefined, {
+  // The neutral account and the legacy id must name one account: a reader never has to guess which of two was meant (lane P3, review L6).
+  message: "account and slackUserId name different accounts", path: ["account"],
 });
 export type DeveloperSummary = z.infer<typeof DeveloperSummarySchema>;
 

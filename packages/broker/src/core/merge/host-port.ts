@@ -1,4 +1,4 @@
-// Enterprise foundations P5a-c: how Rovara Code's consumers (merge, merge tracking, CI fix, feedback autonomy) reach a repository's code host.
+// Plug-in foundations P5a-c: how Rovara Code's consumers (merge, merge tracking, CI fix, feedback autonomy) reach a repository's code host.
 //
 // They no longer hold a GitHub provider. They ask for the repository of a task's project and get back the address, the code host that serves it and, where there is one, the check runner
 // for its builds. The code host is chosen by the repository's `host` record (task P7: `CodeHostRouter.forRecord`), never by the address and never by a default: a kind with no

@@ -16,7 +16,7 @@ export type GitCredentialKind = z.infer<typeof GitCredentialKindSchema>;
 export const LEGACY_WORKER_CREDENTIAL_KINDS: readonly GitCredentialKind[] = ["token", "basic"];
 /**
  * The feature a worker lists on /ping when it takes a credential kind beyond the legacy two (today: an ssh key, `ssh-key`). Without it the broker neither dispatches a repository whose host
- * hands out such a kind nor sends one at the exchange (Enterprise foundations P8). A kind no worker takes yet (`helper`) is never sent.
+ * hands out such a kind nor sends one at the exchange (plug-in foundations P8). A kind no worker takes yet (`helper`) is never sent.
  */
 export const WORKER_CREDENTIAL_KINDS_FEATURE = "repository.credentialKinds.v1" as const;
 /** The request header a worker sends at `/repository-credentials` to say which kinds it takes: a comma-separated list. Absent or unreadable means the legacy two. */

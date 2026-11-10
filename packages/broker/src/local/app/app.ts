@@ -40,6 +40,7 @@ import { isTerminalStatus } from "../../core/task-flow/results.js";
 import { planFeedbackKey } from "../../core/task-flow/stage-machine.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { localOwnerPrincipal } from "../../ports/policy-defaults.js";
+import { modelKeyReadError, secretsPluginWords } from "../../ports/secret-stores.js";
 import { RepositoryGrantService, type RepositoryCredential } from "../../repository-access.js";
 import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
@@ -145,7 +146,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const keys = registry.require("model-keys");
   const chosen = async (): Promise<LocalModelChoice | undefined> => {
     if (options.modelChoice !== undefined) return options.modelChoice;
-    const picked = chooseLocalModel(await keys.providers(companyId), options.modelSetting);
+    // A `secrets` plug-in's error text is never passed on: Code's own fixed sentences are, anything else becomes a sentence naming the plug-in.
+    const providers = await keys.providers(companyId).catch((error: unknown) => { throw modelKeyReadError(error, secretsPluginWords(registry)); });
+    const picked = chooseLocalModel(providers, options.modelSetting);
     return picked.ok ? { provider: picked.provider, model: picked.model } : undefined;
   };
   const modelRoute = async () => { const choice = await chosen(); return choice === undefined ? undefined : localRoute(choice.provider, choice.model).workerRoute; };

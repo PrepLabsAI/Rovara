@@ -1,7 +1,7 @@
 // Port lane P2, review M2: a project whose external check names a provider nothing in this release runs is refused at task start with a clear sentence, before any machine; and if one still gets to the
 // dispatcher the operation FAILS with the sentence instead of throwing and being redelivered until its attempts run out.
 import { describe, expect, it } from "vitest";
-import { UNRUNNABLE_EXTERNAL_CHECK_MESSAGE, type ProjectDefinition } from "@agentx/contracts";
+import { UNRUNNABLE_EXTERNAL_CHECK_MESSAGE } from "@agentx/contracts";
 import { createTaskFlow } from "../../packages/broker/src/core/task-flow/index.js";
 import type { ProjectRevision } from "../../packages/broker/src/core/task-flow/deps.js";
 import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -9,7 +9,7 @@ import { createHarness, newRequestId, type Harness } from "../support/task-flow-
 
 const OTHER = { provider: "examplebuild", name: "q", reference: "pipeline/1", timeoutMinutes: 10 };
 const withUnrunnable = (revision: ProjectRevision | undefined): ProjectRevision | undefined => revision === undefined ? undefined : {
-  ...revision, definition: { ...revision.definition, repositories: revision.definition.repositories.map((repository) => ({ ...repository, externalChecks: [OTHER] })) } as ProjectDefinition,
+  ...revision, definition: { ...revision.definition, repositories: revision.definition.repositories.map((repository) => ({ ...repository, externalChecks: [OTHER] })) },
 };
 
 /** A flow over a project source that answers the bad project for the revisions named. */
@@ -51,7 +51,7 @@ describe("an external check nothing runs", () => {
     expect(delivered).toBe(0);
     const operation = (await h.store.get(operationKey(task.workspaceId, (await h.store.query({ pk: `WORKSPACE#${task.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items[0]!["id"] as string)))!;
     expect(operation["status"]).toBe("FAILED");
-    expect(String(operation["error"] ?? operation["failure"] ?? JSON.stringify(operation))).toContain(UNRUNNABLE_EXTERNAL_CHECK_MESSAGE);
+    expect(JSON.stringify(operation)).toContain(UNRUNNABLE_EXTERNAL_CHECK_MESSAGE);
     // Nothing is left to redeliver.
     h.clock.advance(120);
     expect(await flow.dispatchOnce({ maxMessages: 10 })).toMatchObject({ received: 0 });

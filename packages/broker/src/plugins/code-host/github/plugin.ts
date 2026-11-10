@@ -3,7 +3,7 @@
 // The module checks that the client has every method the adapter needs, so a client from an older tree is refused when the process starts.
 import { z } from "zod";
 import { PluginRegistryError, type PluginContext, type PluginModule } from "@agentx/contracts";
-import { readPluginSettings, SecretSourceSchema, secretReader } from "../../module-support.js";
+import { contextSecretReader, readPluginSettings, SecretSourceSchema } from "../../module-support.js";
 import { githubCodeHost, GITHUB_HOST_KIND } from "./index.js";
 import { missingGitHubProviderMethods, type GitHubCodeHostProvider } from "./provider.js";
 
@@ -37,7 +37,7 @@ export function githubCodeHostPlugin(options: GitHubCodeHostPluginOptions): Plug
         ...(settings.default === true ? { isDefault: true } : {}),
         credentialRef: settings.credentialRef,
         now: () => context.now().getTime(),
-        ...(settings.webhookSecret === undefined ? {} : { webhookSecret: secretReader(settings.webhookSecret) }),
+        ...(settings.webhookSecret === undefined ? {} : { webhookSecret: contextSecretReader(context, settings.webhookSecret) }),
       });
     },
   };

@@ -30,6 +30,10 @@ describe("GET /v1/admin/health (FR-030, A13)", () => {
       alarmsCheck: { status: "warn", detail: "1 alarm in ALARM" },
       deadLetterQueues: [{ name: "dispatch", depth: 0 }, { name: "slack-requests", depth: 2 }],
       deadLetterQueuesCheck: { status: "warn", detail: "1 queue holds messages" },
+      plugins: [
+        { point: "channel", name: "slack", status: "ok", detail: "the bot token works for team T0BSHLLUGBD" },
+        { point: "code-host", name: "github", status: "ok", detail: "installed on 1 account" },
+      ],
       slack: { status: "ok", detail: "the bot token works for team T0BSHLLUGBD" },
       github: { status: "ok", detail: "installed on 1 account" },
       workerModes: [{ mode: "ec2-ebs", configured: true, latestDispatchFailure: { at, operationId: "11111111-1111-4111-8111-111111111111", error: "RUNTIME_UNAVAILABLE: no capacity" } }],
@@ -48,7 +52,10 @@ describe("GET /v1/admin/health (FR-030, A13)", () => {
       deadLetterQueues: [], deadLetterQueuesCheck: { status: "unknown", detail: "not set up in this deployment" },
       slack: { status: "failed", detail: "Slack refused the bot token (token_revoked)" },
       github: { status: "unknown", detail: "not set up in this deployment" },
+      // A plug-in row is there only for an adapter that is set up: the chat probe is, the code-host one is not.
+      plugins: [{ point: "channel", name: "slack", status: "failed", detail: "Slack refused the bot token (token_revoked)" }],
     });
+    expect((answer.body as { plugins: unknown[] }).plugins).toHaveLength(1);
     expect(answer.body.version).not.toHaveProperty("release");
   });
 

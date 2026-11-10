@@ -17,6 +17,7 @@ import type { DocumentStore } from "./document-store.js";
 import type { JsonObject } from "./json.js";
 import type { ModelKeyStore } from "./model-keys.js";
 import type { ObjectStorage } from "./object-storage.js";
+import type { SecretStore } from "./secrets.js";
 import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
 import type { AuditSink } from "./audit-sink.js";
@@ -44,6 +45,8 @@ export const PLUGIN_POINTS = [
   "model-keys",
   /** Provisional (owner decision 58): files too big for the document store, behind `ObjectStorage`. */
   "object-storage",
+  /** Owner decision 60 (R2): where an adapter's secrets are read (`read(ref)` returns a `SecretValue`). */
+  "secrets",
 ] as const;
 export const PluginPointSchema = z.enum(PLUGIN_POINTS);
 export type PluginPoint = z.infer<typeof PluginPointSchema>;
@@ -71,6 +74,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   metering: "one",
   "model-keys": "one",
   "object-storage": "one",
+  secrets: "one",
 };
 
 /**
@@ -136,6 +140,7 @@ export interface PluginPointTypes {
   metering: Metering;
   "model-keys": ModelKeyStore;
   "object-storage": ObjectStorage;
+  secrets: SecretStore;
 }
 
 export type AdapterOf<P extends PluginPoint> = PluginPointTypes[P];
@@ -200,7 +205,7 @@ export interface PluginModule<P extends PluginPoint = PluginPoint> {
 export interface PluginContext {
   /** The company Code runs as. Cloud serves many companies, so an adapter takes the company from each call, not from here. */
   defaultCompanyId: string;
-  /** This adapter's block of the config file. Never holds a secret in clear: name where to read it (a file, an environment variable). */
+  /** This adapter's block of the config file. Never holds a secret in clear: name where to read it (a file, an environment variable: a `SecretRef`), and read it through the `secrets` point. */
   settings: JsonObject;
   registry: RegistryView;
   now: () => Date;
@@ -242,8 +247,8 @@ export type PluginConfigEntry = z.infer<typeof PluginConfigEntrySchema>;
 /** The config file's content. Entries are created in order, so list a queue's store before the queue. */
 export const PluginConfigSchema = z.object({
   version: z.literal(PLUGIN_CONFIG_VERSION),
-  /** The company Code runs as (decision 45.6). Absent: the implicit company. It has the shape of Cloud's organization id, because plug-in calls carry it as their scope (`HostScope`). */
-  companyId: z.string().regex(/^org_[0-9a-z]{20}$/, "a company id looks like org_ and 20 lower-case letters or digits (the id Cloud uses; code-host and tracker calls are scoped by it)").optional(),
+  /** The company Code runs as (decision 45.6). Absent: the implicit company. It has the shape of an organization id (`org_` and 20 characters), because plug-in calls carry it as their scope (`HostScope`). */
+  companyId: z.string().regex(/^org_[0-9a-z]{20}$/, "a company id looks like org_ and 20 lower-case letters or digits (the same shape a hosted install uses; code-host and tracker calls are scoped by it)").optional(),
   /**
    * Port lane L11 (laptop only, owner-set): a worker may be given the owner's own code-host token even when that token reaches every repository its owner can (a classic token, the GitHub CLI's).
    * Absent or false: such a token is refused for a worker, and a fine-grained token limited to the project's repositories is required. A cloud install ignores it.
