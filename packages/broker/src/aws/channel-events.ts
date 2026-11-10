@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { ChannelEventSchema, publicHttpsUrlProblem, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent } from "@agentx/contracts";
+import { ChannelEventSchema, publicHttpsUrlProblem, steppedUpNote, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent } from "@agentx/contracts";
 import { checkEndpointAddresses, EndpointRefused } from "@agentx/gateway";
 import { getChannelAdapter } from "./channel-adapters.js";
 
@@ -40,11 +40,14 @@ export function fitEventToAdapter(event: ChannelEvent, adapter: Pick<ChannelAdap
   if (event.type === "approval_request") {
     const { actions, ...rest } = event.data;
     const steppedUp = event.data.kind !== "other" && adapter.stepUp.includes(event.data.kind);
-    // The task page link is added after the cut, so a long text never cuts it off.
-    const link = steppedUp && actions !== undefined && !rest.text.includes(rest.taskUrl) ? `\n\nApprove on the task page: ${rest.taskUrl}` : "";
-    return { ...event, data: { ...rest, text: `${cut(rest.text, limit - link.length)}${link}`, ...(steppedUp || actions === undefined ? {} : { actions }) } };
+    // The note is added after the cut, so a long text never cuts it off.
+    const note = steppedUpNote(rest.taskUrl);
+    const link = steppedUp && actions !== undefined && !rest.text.includes(note) ? `\n\n${note}` : "";
+    // An adapter with fewer buttons than actions gets none; the text says how to reply.
+    const keep = !steppedUp && actions !== undefined && actions.length <= adapter.capabilities.buttons;
+    return { ...event, data: { ...rest, text: `${cut(rest.text, limit - link.length)}${link}`, ...(keep ? { actions } : {}) } };
   }
-  if ("text" in event.data) return { ...event, data: { ...event.data, text: cut(event.data.text) } } as ChannelEvent;
+  if ("text" in event.data && typeof event.data.text === "string") return { ...event, data: { ...event.data, text: cut(event.data.text) } } as ChannelEvent;
   return event;
 }
 

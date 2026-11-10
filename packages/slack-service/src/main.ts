@@ -9,19 +9,21 @@ import {
   ChangeMessageVisibilityCommand,
   DeleteMessageCommand,
   ReceiveMessageCommand,
+  SendMessageCommand,
   SQSClient,
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
   SLACK_CHAT_ATTRIBUTE, SLACK_NOTE_TS_ATTRIBUTE, SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, SLACK_TASK_ID_ATTRIBUTE, confirmationBlocks,
-  isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, type SlackRequestMessage,
+  isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, type ConversationRef, type SlackRequestMessage, type SlackThread,
 } from "@agentx/contracts";
+import { channelRequestHandler, readChannelQueueItem } from "./channel-requests.js";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
 import { createDynamoActiveTurnStore } from "./active-turn-store.js";
 import { createDynamoConfirmationStore } from "./confirmation-store.js";
 import { runConsumer, type QueueClient } from "./consumer.js";
-import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
+import { processSlackRequest, type ProcessorMessage, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { createEvalBatchWatchApi, createThreadApi } from "./thread-api.js";
@@ -50,6 +52,10 @@ const controlPlaneUrl = required("CONTROL_PLANE_URL").replace(/\/$/, "");
 const slackSecretArn = required("SLACK_SECRET_ARN");
 const turnRecordsTableName = required("TURN_RECORDS_TABLE_NAME");
 const stateDirectory = process.env.STATE_DIRECTORY ?? "/tmp/agentx-slack";
+// Spec 062 Phase 4: the channel API's queues; both are set only where channel adapters are enabled.
+const channelRequestQueueUrl = process.env.CHANNEL_REQUEST_QUEUE_URL || undefined;
+const channelEventQueueUrl = process.env.CHANNEL_EVENT_QUEUE_URL || undefined;
+const channelConcurrency = Number.parseInt(process.env.CHANNEL_CONCURRENCY ?? "2", 10);
 const concurrency = Number.parseInt(process.env.SLACK_CONCURRENCY ?? "4", 10);
 const model = {
   provider: process.env.AGENTX_ORCHESTRATOR_PROVIDER ?? "amazon-bedrock",
@@ -153,7 +159,7 @@ async function deleteFromSlack(channel: string, ts: string): Promise<void> {
   if (!response.ok || result.ok !== true) throw new SlackApiError("chat.delete", result.error ?? `HTTP ${response.status}`);
 }
 
-function threadApi(message: SlackRequestMessage): ThreadServiceApi {
+function threadApi(message: Pick<SlackRequestMessage, "thread" | "userId">): ThreadServiceApi {
   const signedFetch = createSignedServiceFetch({ region, credentials, thread: message.thread, userId: message.userId });
   return createThreadApi({ controlPlaneUrl, signedFetch });
 }
@@ -261,7 +267,19 @@ async function loadSession(subject: string): Promise<Uint8Array | undefined> {
   }
 }
 
-async function runTurn(input: TurnInput): Promise<string> {
+/** Who a turn's control-plane calls act for: a Slack thread and member, or an adapter conversation and actor. */
+type ServiceScope = Omit<Parameters<typeof createSignedServiceFetch>[0], "region" | "credentials" | "baseFetch">;
+
+/** A Slack turn acts for its thread and member, with the member's display name. */
+async function slackScope(input: TurnInput): Promise<ServiceScope> {
+  const message = input.message as ProcessorMessage<SlackThread>;
+  const userName = await slackUserName(message.userId);
+  return { thread: message.thread, userId: message.userId, ...(userName === undefined ? {} : { userName }) };
+}
+
+const runTurn = (input: TurnInput): Promise<string> => runTurnAs(input, slackScope);
+
+async function runTurnAs(input: TurnInput, scopeOf: (input: TurnInput) => Promise<ServiceScope>): Promise<string> {
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const directory = await mkdtemp(join(stateDirectory, "thread-"));
   try {
@@ -271,8 +289,7 @@ async function runTurn(input: TurnInput): Promise<string> {
     const saved = input.answerOnly === true ? undefined : await loadSession(input.subject);
     const sessionFile = saved === undefined ? undefined : join(sessions, "thread.jsonl");
     if (sessionFile !== undefined && saved !== undefined) await writeFile(sessionFile, saved, { mode: 0o600 });
-    const userName = await slackUserName(input.message.userId);
-    const signedFetch = createSignedServiceFetch({ region, credentials, thread: input.message.thread, userId: input.message.userId, ...(userName === undefined ? {} : { userName }) });
+    const signedFetch = createSignedServiceFetch({ region, credentials, ...await scopeOf(input) });
     // MODEL3: the model that ran in place of a missing-key one is said under the reply.
     let fallbackNote: string | undefined;
     const runtime = await createHostedSlackRuntime(input, {
@@ -324,6 +341,37 @@ async function exists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** An SQS queue as the consumer reads it; the Slack queue also reads the ingress's routing attributes. */
+function sqsQueue(url: string, attributeNames: string[] = []): QueueClient {
+  return {
+    async receive(maximum) {
+      const response = await sqs.send(new ReceiveMessageCommand({
+        QueueUrl: url, MaxNumberOfMessages: maximum, WaitTimeSeconds: 20, VisibilityTimeout: VISIBILITY_SECONDS,
+        MessageSystemAttributeNames: ["MessageGroupId", "ApproximateReceiveCount"],
+        ...(attributeNames.length === 0 ? {} : { MessageAttributeNames: attributeNames }),
+      }));
+      return (response.Messages ?? []).map((message) => ({
+        body: message.Body ?? "",
+        receiptHandle: message.ReceiptHandle ?? "",
+        groupId: message.Attributes?.MessageGroupId ?? "",
+        receiveCount: Number.parseInt(message.Attributes?.ApproximateReceiveCount ?? "1", 10),
+      }));
+    },
+    async delete(receiptHandle) {
+      await sqs.send(new DeleteMessageCommand({ QueueUrl: url, ReceiptHandle: receiptHandle }));
+    },
+    async extendVisibility(receiptHandle, seconds) {
+      await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: url, ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
+    },
+  };
+}
+
+/** An adapter conversation's turn acts for the conversation and its actor; the broker checks the link again. */
+async function channelScope(input: TurnInput): Promise<ServiceScope> {
+  const message = input.message as ProcessorMessage<ConversationRef>;
+  return { conversation: message.thread, actorUserId: message.userId };
 }
 
 const queue: QueueClient = {
@@ -389,8 +437,34 @@ const batchWatcher = runEvalBatchWatcher({
   signal: controller.signal,
 });
 
+// Spec 062 Phase 4: adapter conversations, run beside the Slack queue with their own concurrency.
+const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueueUrl === undefined
+  ? Promise.resolve()
+  : runConsumer(sqsQueue(channelRequestQueueUrl), channelRequestHandler({
+    processor: {
+      api: (message) => createThreadApi({ controlPlaneUrl, signedFetch: createSignedServiceFetch({ region, credentials, conversation: message.thread, actorUserId: message.userId }) }),
+      threads,
+      runTurn: (input) => runTurnAs(input, channelScope),
+      log,
+      confirmations,
+    },
+    send: async (event) => {
+      await sqs.send(new SendMessageCommand({ QueueUrl: channelEventQueueUrl, MessageBody: JSON.stringify(event) }));
+    },
+    log,
+  }), {
+    read: readChannelQueueItem,
+    concurrency: channelConcurrency,
+    maxReceiveCount: MAX_RECEIVE_COUNT,
+    visibilitySeconds: VISIBILITY_SECONDS,
+    heartbeatMilliseconds: 5 * 60 * 1_000,
+    signal: controller.signal,
+    handoffMilliseconds: HANDOFF_MILLISECONDS,
+    log,
+  });
+
 log("service.started", {
-  concurrency, provider: model.provider, model: model.modelId,
+  concurrency, channelAdapters: channelRequestQueueUrl !== undefined && channelEventQueueUrl !== undefined, provider: model.provider, model: model.modelId,
   classifierProvider: classifierModel.provider, classifierModel: classifierModel.modelId, classifierAvailable, requestRouting: requestRouter !== undefined,
 });
 const offerChoice = createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => postToSlack(thread.channelId, thread.threadTs, text, blocks), log });
@@ -451,6 +525,7 @@ function processRequest(message: SlackRequestMessage, context: Parameters<typeof
     userName: slackUserName,
   }, context);
 }
+await channelConsumer;
 // The watcher stops at its next pause; a pass still waiting on Slack or the broker is not waited for long (issue 157).
 await Promise.race([batchWatcher, new Promise((resolve) => setTimeout(resolve, 2_000).unref())]);
 log("service.stopped", {});

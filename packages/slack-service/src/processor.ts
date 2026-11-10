@@ -27,7 +27,7 @@ import {
 } from "@agentx/contracts";
 import type { WorkerAccess } from "@agentx/orchestrator";
 import type { GateSession } from "@agentx/orchestrator/action-gate";
-import { EXPIRED_TEXT, checkConfirmation, settleConfirmations, type ConfirmationCheck, type ConfirmationStore } from "./confirmations.js";
+import { EXPIRED_TEXT, checkConfirmation, settleConfirmations, type ConfirmationAnswer, type ConfirmationCheck, type ConfirmationStore } from "./confirmations.js";
 import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
 import { createLazyWorker } from "./lazy-worker.js";
@@ -119,8 +119,24 @@ export interface ThreadStore {
   saveTurnNote?(subject: string, note: TurnNote | undefined): Promise<void>;
 }
 
+/**
+ * A request the processor runs. A Slack request message is one, with its Slack thread; spec 062 adds an adapter
+ * conversation's, whose `thread` is its conversation reference and whose `userId` is the adapter actor's.
+ */
+export interface ProcessorMessage<Thread = SlackThread> {
+  /** A Slack request message's wire version; the processor never reads it. */
+  version?: number;
+  eventId: string;
+  thread: Thread;
+  userId: string;
+  text: string;
+  receivedAt: string;
+}
+
 export interface TurnInput {
-  message: SlackRequestMessage;
+  message: ProcessorMessage<unknown>;
+  /** Spec 062: the reply goes to a channel adapter, so the model is not told to write Slack markup. */
+  plainReplies?: true;
   subject: string;
   workspaceId: string;
   conversationId: string;
@@ -154,24 +170,32 @@ export interface TurnInput {
 
 export type ServiceLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
 
-export interface ProcessorDependencies {
-  api: (message: SlackRequestMessage) => ThreadServiceApi;
+export interface ProcessorDependencies<Thread = SlackThread> {
+  api: (message: ProcessorMessage<Thread>) => ThreadServiceApi;
   threads: ThreadStore;
   runTurn: (input: TurnInput) => Promise<string>;
-  post: (thread: SlackThread, text: string) => Promise<void>;
+  post: (thread: Thread, text: string) => Promise<void>;
+  /** The thread store's subject for a thread; a Slack thread's subject when absent. */
+  subjectOf?: (thread: Thread) => string;
+  /** Spec 062: replies are plain text for a channel adapter. */
+  plainReplies?: true;
+  /** Spec 062: posted instead of running a command only Slack offers (a SWE-bench run, an eval batch). */
+  slackOnlyCommandText?: string;
+  /** Spec 062 FR-032: false for a confirmation this conversation's adapter may not approve. */
+  mayApprove?: (confirmation: PendingConfirmation) => boolean;
   log?: ServiceLog;
   /** Pending confirmations for the action gate (spec 014). The hosted service always sets it. */
   confirmations?: ConfirmationStore;
   /** Posts a confirmation with its Approve and Cancel buttons; without it, the text alone is posted. */
-  postConfirmation?: (thread: SlackThread, confirmation: PendingConfirmation, text: string) => Promise<void>;
+  postConfirmation?: (thread: Thread, confirmation: PendingConfirmation, text: string) => Promise<void>;
   now?: () => number;
-  /** Where one hidden record per finished Slack event goes; without it nothing is recorded. */
+  /** Where one hidden record per finished Slack event goes; without it nothing is recorded. Slack threads only. */
   turnRecords?: TurnRecordSink;
   /**
    * Posts a message with Block Kit blocks. The reply's Details button needs it (spec 014 FR-024);
    * without it, replies are text only, exactly as before.
    */
-  postWithBlocks?: (thread: SlackThread, text: string, blocks: unknown[]) => Promise<void>;
+  postWithBlocks?: (thread: Thread, text: string, blocks: unknown[]) => Promise<void>;
   /** C13: a Slack member's display name, for a continue-mode turn's record. */
   userName?: (userId: string) => Promise<string | undefined>;
   /** Issue 157: how long the hand-off notice may take before the message is released anyway. Default 10 seconds. */
@@ -184,9 +208,9 @@ export interface ProcessorDependencies {
    * Issue 219: posts a message in the thread and answers its timestamp, for the progress note a
    * long task edits while it runs. With updateMessage; without both, no progress note is posted.
    */
-  postProgress?: (thread: SlackThread, text: string) => Promise<string | undefined>;
+  postProgress?: (thread: Thread, text: string) => Promise<string | undefined>;
   /** Issue 219: edits a message the service posted (chat.update). */
-  updateMessage?: (thread: SlackThread, ts: string, text: string) => Promise<void>;
+  updateMessage?: (thread: Thread, ts: string, text: string) => Promise<void>;
   /** Issue 219: how often the progress note is edited; three minutes when absent. */
   progressIntervalMs?: number;
 }
@@ -201,17 +225,19 @@ const PROGRESS_FINISH_MILLISECONDS = 5_000;
 const CANCEL_TASK_MILLISECONDS = 5_000;
 
 /** Where a reply's Details button points, and how to post it. */
-interface ReplyDetails {
+interface ReplyDetails<Thread> {
   value: string;
-  postWithBlocks: (thread: SlackThread, text: string, blocks: unknown[]) => Promise<void>;
+  postWithBlocks: (thread: Thread, text: string, blocks: unknown[]) => Promise<void>;
 }
 
 const RUNNABLE_STATUSES = new Set(["READY", "STOPPED", "BUSY"]);
 
-export async function processSlackRequest(
-  message: SlackRequestMessage,
-  dependencies: ProcessorDependencies,
+export async function processSlackRequest<Thread = SlackThread>(
+  message: ProcessorMessage<Thread>,
+  dependencies: ProcessorDependencies<Thread>,
   options: {
+    /** Spec 062: an adapter's decision on a pending confirmation, answered as a click. */
+    answer?: ConfirmationAnswer;
     finalAttempt: boolean;
     /** How many earlier requests the ingress told the member this one waits behind; absent from an older ingress. */
     queuedBehind?: number;
@@ -223,7 +249,7 @@ export async function processSlackRequest(
     onHeartbeat?: (listener: () => void) => void;
   },
 ): Promise<void> {
-  const subject = slackThreadSubject(message.thread);
+  const subject = dependencies.subjectOf === undefined ? slackThreadSubject(message.thread as SlackThread) : dependencies.subjectOf(message.thread);
   const log: ServiceLog = dependencies.log ?? (() => undefined);
   const startedAt = new Date();
   // Spec 051 FR-009: every turn has a recorder, because the reply leads with the check report of the
@@ -250,7 +276,7 @@ export async function processSlackRequest(
   // never costs the member the reply: the text is posted on its own. Any other failure (a network
   // error, a timeout, an unreadable answer) may come after Slack posted the message, so it is thrown
   // like any failed post rather than risking the reply twice.
-  const postWithDetails = async (details: ReplyDetails, text: string) => {
+  const postWithDetails = async (details: ReplyDetails<Thread>, text: string) => {
     try {
       await details.postWithBlocks(message.thread, text, detailsReplyBlocks(text, details.value));
       lastPosted = text;
@@ -405,6 +431,13 @@ export async function processSlackRequest(
         return;
       }
     }
+    // Spec 062: a channel adapter's conversation has no batch watcher or SWE-bench thread, so these run only from Slack.
+    if (dependencies.slackOnlyCommandText !== undefined && (parseEvalBatchCommand(message.text) !== undefined || parseSwebenchCommand(message.text) !== undefined)) {
+      draft.disposition = "abandoned";
+      await post(dependencies.slackOnlyCommandText);
+      finished = true;
+      return;
+    }
     // Spec 052 FR-002: a batch is recorded and announced here; the batch watcher posts the rest.
     const batchCommand = parseEvalBatchCommand(message.text);
     if (batchCommand !== undefined) {
@@ -527,7 +560,11 @@ export async function processSlackRequest(
     if (dependencies.confirmations) {
       // A "yes" from someone else, for a confirmation that is no longer pending, too early or too
       // late runs nothing and needs no workspace. Nothing is claimed until the turn is about to run.
-      const check = await checkConfirmation({ message, subject, store: dependencies.confirmations, post, log, now: now() });
+      const check = await checkConfirmation({
+        message, subject, store: dependencies.confirmations, post, log, now: now(),
+        ...(options.answer === undefined ? {} : { answer: options.answer }),
+        ...(dependencies.mayApprove === undefined ? {} : { mayApprove: dependencies.mayApprove }),
+      });
       if (!check.run) {
         // Spec 014 FR-021: a refused confirmation answer is recorded as such, not as abandoned.
         if (check.refused !== undefined) draft.disposition = "confirmation_refused";
@@ -733,6 +770,7 @@ export async function processSlackRequest(
       const turn = dependencies.runTurn({
         message,
         subject,
+        ...(dependencies.plainReplies === true ? { plainReplies: true as const } : {}),
         workspaceId: workspace.workspaceId,
         conversationId,
         orchestratorInstructions: workspace.orchestratorInstructions,
@@ -895,7 +933,8 @@ export async function processSlackRequest(
       // Only a finished event is recorded: an attempt that throws for redelivery leaves the one
       // record to the attempt that finishes (SC-006).
       if (dependencies.turnRecords !== undefined && recorder !== undefined) {
-        await recordTurn(dependencies.turnRecords, log, recorder, { message, subject, startedAt, finishedAt: new Date(), draft, lastPosted });
+        // Turn records are Slack threads' only (see turnRecords), so the message is a Slack request message.
+        await recordTurn(dependencies.turnRecords, log, recorder, { message: message as unknown as SlackRequestMessage, subject, startedAt, finishedAt: new Date(), draft, lastPosted });
       }
       await dependencies.threads.finish(subject);
     }
@@ -931,7 +970,7 @@ function untilHandoff<T>(work: Promise<T>, handoff: AbortSignal | undefined): Pr
  * and its record will be written (a sink and a recorder exist), so the button always names a record
  * the service tries to save. The value derives from the Slack event, as the record's key does.
  */
-function replyDetails(dependencies: ProcessorDependencies, recorder: TurnRecorder, message: SlackRequestMessage): ReplyDetails | undefined {
+function replyDetails<Thread>(dependencies: ProcessorDependencies<Thread>, recorder: TurnRecorder, message: ProcessorMessage<Thread>): ReplyDetails<Thread> | undefined {
   const postWithBlocks = dependencies.postWithBlocks;
   if (postWithBlocks === undefined || dependencies.turnRecords === undefined) return undefined;
   let calls: number;
@@ -942,6 +981,7 @@ function replyDetails(dependencies: ProcessorDependencies, recorder: TurnRecorde
     return undefined;
   }
   if (calls === 0) return undefined;
+  // A turn record exists only for a Slack thread (see turnRecords); the button reads the event ID and time alone.
   const value = detailsButtonValue(message);
   return value === undefined ? undefined : { value, postWithBlocks };
 }
@@ -1014,7 +1054,7 @@ async function recordTurn(
  * schema check catches any drift again and puts the connector back on the list.
  */
 async function rememberRefresh(
-  dependencies: ProcessorDependencies,
+  dependencies: Pick<ProcessorDependencies<unknown>, "threads">,
   log: ServiceLog,
   subject: string,
   eventId: string,

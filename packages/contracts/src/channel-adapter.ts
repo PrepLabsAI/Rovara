@@ -98,9 +98,12 @@ export type ChannelDecision = z.infer<typeof ChannelDecisionSchema>;
  * in a bound space of one of the adapter's projects, from a linked actor. Carries the project and developer it was
  * checked against, so the consumer does not re-derive them from the adapter's claims.
  */
+/** The adapter's step-up set when the item was accepted; an item without one is stepped up for every kind. */
+const QueuedStepUp = uniqueList(StepUpKindSchema, 2, "stepUp").default([...DEFAULT_STEP_UP]);
+
 export const ChannelQueueItemSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("message"), message: InboundMessageSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200) }).strict(),
-  z.object({ kind: z.literal("decision"), decision: ChannelDecisionSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200) }).strict(),
+  z.object({ kind: z.literal("message"), message: InboundMessageSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200), stepUp: QueuedStepUp }).strict(),
+  z.object({ kind: z.literal("decision"), decision: ChannelDecisionSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200), stepUp: QueuedStepUp }).strict(),
 ]);
 export type ChannelQueueItem = z.infer<typeof ChannelQueueItemSchema>;
 
@@ -112,6 +115,8 @@ const ApprovalAction = z.object({ decision: ChannelDecisionValueSchema, label: z
 
 const eventData = {
   ack: z.object({ inReplyTo: ChannelOpaqueIdSchema }).strict(),
+  /** A message from Rovara in the conversation: a reply, a notice or a question it asks in prose. */
+  message: z.object({ text: Text }).strict(),
   progress: z.object({ text: Text }).strict(),
   question: z.object({ text: Text, choices: z.array(z.string().min(1).max(200)).max(10).optional() }).strict(),
   approval_request: z.object({
@@ -120,13 +125,15 @@ const eventData = {
     requestId: z.string().uuid(),
     expectedRevision: z.number().int().positive(),
     artifactDigest: DigestSchema,
-    taskUrl: HttpsUrl,
+    /** The task page, for a request about a task; an action confirmation in a conversation has none. */
+    taskUrl: HttpsUrl.optional(),
     /** Absent when the adapter steps this kind up (FR-032): the person approves on `taskUrl`. */
     actions: z.array(ApprovalAction).min(1).max(4).optional(),
   }).strict(),
   check_report: z.object({ text: Text, status: z.enum(["passed", "failed", "unknown"]) }).strict(),
   pr: z.object({ url: HttpsUrl, title: z.string().min(1).max(300) }).strict(),
-  done: z.object({ text: Text }).strict(),
+  /** The request finished; everything it said came before as `message` events. `text` is an optional closing line. */
+  done: z.object({ inReplyTo: ChannelOpaqueIdSchema.optional(), text: Text.optional() }).strict(),
   error: z.object({ code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/), text: Text }).strict(),
   link_required: z.object({ linkUrl: HttpsUrl, expiresAt: z.string().datetime(), actor: ActorRefSchema }).strict(),
 } as const;
@@ -143,6 +150,7 @@ const eventBase = {
 };
 export const ChannelEventSchema = z.discriminatedUnion("type", [
   z.object({ ...eventBase, type: z.literal("ack"), data: eventData.ack }).strict(),
+  z.object({ ...eventBase, type: z.literal("message"), data: eventData.message }).strict(),
   z.object({ ...eventBase, type: z.literal("progress"), data: eventData.progress }).strict(),
   z.object({ ...eventBase, type: z.literal("question"), data: eventData.question }).strict(),
   z.object({ ...eventBase, type: z.literal("approval_request"), data: eventData.approval_request }).strict(),
@@ -167,10 +175,15 @@ export function shapeApprovalRequest(
   actions: ReadonlyArray<z.infer<typeof ApprovalAction>>,
 ): z.infer<typeof eventData.approval_request> {
   const steppedUp = data.kind !== "other" && adapter.stepUp.includes(data.kind);
-  if (steppedUp) return { ...data, text: `${data.text}\n\nApprove on the task page: ${data.taskUrl}` };
+  if (steppedUp) return { ...data, text: `${data.text}\n\n${steppedUpNote(data.taskUrl)}` };
   if (adapter.capabilities.buttons >= actions.length) return { ...data, actions: [...actions] };
   const replies = actions.map((action, index) => `reply ${index + 1} to ${action.label.toLowerCase()}`).join(", ");
   return { ...data, text: `${data.text}\n\n${replies.charAt(0).toUpperCase()}${replies.slice(1)}.`, actions: [...actions] };
+}
+
+/** What a stepped-up approval request says in place of its actions: where to approve, or that it can't be approved here. */
+export function steppedUpNote(taskUrl: string | undefined): string {
+  return taskUrl === undefined ? "This needs a signed-in approval, which this channel can't give." : `Approve on the task page: ${taskUrl}`;
 }
 
 /** Whether an adapter may post a decision for a request of this kind (FR-032). */

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SlackUserIdSchema } from "./slack.js";
+import { ChannelOpaqueIdSchema } from "./conversation.js";
 
 /** Block Kit action IDs on a confirmation message (feature 014). */
 export const CONFIRM_APPROVE_ACTION = "agentx_confirm_approve";
@@ -43,14 +43,15 @@ export const ConfirmationCallSchema = z.object({
  */
 export const PendingConfirmationSchema = z.object({
   confirmationId: z.uuid(),
-  requesterId: SlackUserIdSchema,
+  /** A Slack member's ID, or (spec 062) a channel adapter actor's user ID. */
+  requesterId: ChannelOpaqueIdSchema,
   calls: z.array(ConfirmationCallSchema).min(1).max(20),
   postedAt: z.string().datetime(),
   expiresAt: z.string().datetime(),
   retiredAt: z.string().datetime().optional(),
   usedBy: z.string().min(1).max(80).optional(),
   /** The member whose live confirmation this one replaced, so their "yes" hears that it was replaced. */
-  replacedRequesterId: SlackUserIdSchema.optional(),
+  replacedRequesterId: ChannelOpaqueIdSchema.optional(),
 }).strict();
 
 export type ConfirmationCall = z.infer<typeof ConfirmationCallSchema>;

@@ -85,6 +85,12 @@ describe("deploy parameters", () => {
       expect(Object.keys(stackParameters(part, answers(), outputs, { packages: true }))).not.toEqual(expect.arrayContaining(["AnthropicSecretArn"]));
     }
   });
+  it("passes the channel queues to the Slack stack only when the control plane has them (spec 062)", () => {
+    expect(stackParameters("slack", answers(), outputs, { packages: true })).not.toHaveProperty("ChannelRequestQueueUrl");
+    const channel = { ChannelRequestQueueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/r.fifo", ChannelEventQueueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/e" };
+    const withChannels = { ...outputs, "control-plane": { ...outputs["control-plane"], ...channel } };
+    expect(stackParameters("slack", answers(), withChannels, { packages: true })).toMatchObject(channel);
+  });
   it("passes the alert topic to the Slack stack, and the budget to the control plane only when there is one", () => {
     expect(stackParameters("slack", answers(), outputs, { packages: true }).OperatorAlertsTopicArn).toBe(outputs["control-plane"].OperatorAlertsTopicArn);
     expect(stackParameters("control-plane", answers(), outputs, { packages: true }).BudgetMonthlyUsd).toBeUndefined();

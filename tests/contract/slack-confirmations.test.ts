@@ -123,7 +123,7 @@ describe("the confirmation store", () => {
     const store = createDynamoConfirmationStore(db, "threads", () => postedAt, log);
     await expect(store.save(subject, { ...pending, calls: [] })).rejects.toThrow();
     expect(db.get(`THREAD#${subject}`, "CONFIRMATION")).toBeUndefined();
-    db.set({ pk: `THREAD#${subject}`, sk: "CONFIRMATION", confirmationId: pending.confirmationId, confirmation: { ...pending, requesterId: "secret-ish" } });
+    db.set({ pk: `THREAD#${subject}`, sk: "CONFIRMATION", confirmationId: pending.confirmationId, confirmation: { ...pending, requesterId: "secret ish!" } });
     expect(await store.load(subject)).toBeUndefined();
     expect(log).toHaveBeenCalledWith("gate.confirmation_unreadable", {});
   });
