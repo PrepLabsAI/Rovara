@@ -281,6 +281,17 @@ asks for it; a coding run saves none, and the pack then says "test details were 
 tails are content-addressed, and the pack is the one object a re-check of the same code replaces (the documented `overwrite` opt-in). Keeping evidence is informational: a fault or a slow store (6 s at most) only means there is none. The local **proof page**
 (`/proof/<task>`, linked from the plan page) lists the recorded checks, the reviews, the risk the broker judged and the pack's test counts and "not tested" list, in the broker's words; with no pack it says so.
 
+## The task page and the pull request's description (lane L12)
+
+- **Rovara asks.** While a step is blocked, the plan page (`/plan/<task>`) shows why, in Rovara's fixed words: the block's reason, the reason it asks instead of acting (`send-back-limit`, `unclear-fault`, ...) and what failed. **Retry** on the page runs the
+  step again through the session control (audited, on the session's timeline, once for the form's token). A page for an older revision of the task is refused as stale.
+- **Questions.** Understand's questions are on the same page, with a form for the answers (the same function as `POST /v1/app/sessions/<id>/answers`).
+- **The pull request.** Its state (draft or ready, checks, reviews, the branch, someone else's push, "changed outside Rovara"), what Rovara is doing about it (fixing failing checks, round n of 3) and, when it is ready, "Ready to merge. Rovara never merges by
+  itself". The sessions use the same words (`step`, and a status of "checking" or "ready to merge").
+- **The description.** It lists the changed files (`+n -m`) read from the `workspace.diff` the worker saved with the run that made the code, and has a **Lessons used** section that says none were used (lessons are not on this install). With the files known the risk is
+  read from them and can be below high; with no diff, or one that cannot be trusted, it says "couldn't list the changed files" and never reads low.
+- **Not done:** the owner's answers to a *structured* plan's decisions. The worker's Plan step saves a Markdown plan here, so there is no structured plan to answer; when one arrives, `approvedCodingPlan` already honours the answers a decision carries.
+
 ## Not wired yet
 
 - **Merge from `rovara up`.** A person merges a draft pull request on the code host (or with their proof); merge tracking never presses Merge (owner decision 1). The owner's own Merge button on the local page is not built;

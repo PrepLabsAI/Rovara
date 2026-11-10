@@ -70,10 +70,11 @@ export interface PullRequestBodyContext {
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
 export interface LessonUsedEntry { title: string; notHelpfulUrl: string }
 /** The "Lessons used" section: how many lessons the task used, the task page's link, and the lessons themselves only where the repository is known to be private (`entries` is empty otherwise). */
-export interface LessonsUsedSection { count: number; taskUrl: string; entries: readonly LessonUsedEntry[] }
+export interface LessonsUsedSection { count: number; taskUrl: string; entries: readonly LessonUsedEntry[]; /** An install with no lessons (Rovara Code before its lessons are ported): the section is there and says none were used. */ none?: true }
 const SAFE_LINK = /^https:\/\/[^\s()<>[\]\\]{1,500}$/u;
 /** The "Lessons used" section's lines, shrinking with the other lists: `limit` entries, then a count. Version 1 and version 2 descriptions both use it. */
 export function lessonsUsedLines(used: LessonsUsedSection | undefined, limit: number): string[] {
+  if (used?.none === true && used.count <= 0) return ["## Lessons used", "None. This install does not use lessons yet.", ""];
   if (used === undefined || used.count <= 0) return [];
   const noun = used.count === 1 ? "lesson" : "lessons";
   const link = SAFE_LINK.test(used.taskUrl) ? used.taskUrl : undefined;

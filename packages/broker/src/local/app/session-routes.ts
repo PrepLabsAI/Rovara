@@ -3,7 +3,7 @@
 // to the agent goes through the control host (L9-wire's `host.ts`), which says plainly that a running step does not take it yet.
 import type { ObjectStorage } from "@agentx/contracts";
 import {
-  AgentXError, IntentAnswerRefusal, SESSION_ACTIONS, SessionIdSchema, WorkflowTransitionError, agentXError, answerIntentQuestions,
+  AgentXError, IntentAnswerRefusal, SESSION_ACTIONS, SessionIdSchema, WorkflowTransitionError, agentXError,
   type AgentSessionRecord, type OrgId,
 } from "@agentx/contracts";
 import { AGENT_SESSION_CONTRACT_VERSION } from "@agentx/contracts";
@@ -12,13 +12,11 @@ import { developerIdOf } from "../../core/sessions/create.js";
 import { listSessions, sessionSnapshot } from "../../core/sessions/read.js";
 import { SessionStore } from "../../core/sessions/store.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
-import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import { readTask, taskViewOf } from "../../core/task-flow/reads.js";
-import { commitWorkflow, runDispatchRow } from "../../core/task-flow/stage-machine.js";
-import { iso } from "../../core/task-flow/support.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { createLocalSessionControl } from "./host.js";
+import { answerUnderstandQuestions } from "./answers.js";
 import { developerTaskView } from "./task-view.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -123,17 +121,10 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   /** The owner's answers to Understand's questions: the workflow takes them, and Understand runs again with them in the same commit. */
   async function answerQuestions(session: AgentSessionRecord, caller: TaskCaller, body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const taskId = session.subject.kind === "task" ? session.subject.taskId : undefined;
-    const task = taskId === undefined ? undefined : await readTask(flow.deps, taskId);
-    const workflow = task?.workflow;
-    if (task === undefined || workflow === undefined) throw agentXError("NOT_FOUND", "There is no such session.");
-    if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", "This task is closed, so it takes no more answers.");
-    const round = typeof body["round"] === "number" ? body["round"] : -1;
-    const now = iso(flow.deps);
-    const next = answerIntentQuestions(workflow, {
-      expectedRevision: workflow.revision, round, by: { actorId: workflow.ownerId, name: caller.principal.displayName }, source: caller.client === "mcp" || caller.client === "cli" ? caller.client : "app", answers: body["answers"], now,
+    if (taskId === undefined) throw agentXError("NOT_FOUND", "There is no such session.");
+    await answerUnderstandQuestions(flow.deps, {
+      taskId, round: typeof body["round"] === "number" ? body["round"] : -1, answers: body["answers"], by: { name: caller.principal.displayName }, source: caller.client === "mcp" || caller.client === "cli" ? caller.client : "app",
     });
-    if (!(await commitWorkflow(flow.deps, task, next, [dispatchRowItem(flow.deps, task.taskId, next.revision, "UNDERSTAND", now)]))) throw agentXError("CONFIG_INVALID", "The task changed while you were answering. Read it again.");
-    await runDispatchRow(flow.deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "UNDERSTAND" });
     return view((await sessions.get(deps.companyId, session.sessionId)) ?? session);
   }
 }

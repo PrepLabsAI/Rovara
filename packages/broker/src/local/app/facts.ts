@@ -4,6 +4,7 @@ import type { DeveloperTaskStatus } from "@agentx/contracts";
 import { developerIdOf } from "../../core/sessions/create.js";
 import type { SessionTaskFacts, TaskFactsSource, TaskRunStatus } from "../../core/sessions/facts.js";
 import { readTask, taskViewOf } from "../../core/task-flow/reads.js";
+import { attentionOf } from "./attention.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 
 const RUN_STATUS: Partial<Record<DeveloperTaskStatus, TaskRunStatus>> = {
@@ -31,6 +32,8 @@ export function createTaskFactsSource(deps: Pick<TaskFlowDeps, "store" | "compan
       const view = await taskViewOf(deps as TaskFlowDeps, task);
       const workflow = task.workflow;
       const failed = view.failure;
+      // Lane L12: Rovara's ask and where the pull request stands, in the words the page uses.
+      const attention = await attentionOf(deps, task);
       return {
         companyId, taskId, project: task.project, ownerDeveloperId: developerIdOf({ provider: task.provider, personId: task.developerId }),
         ...(task.closedAt === undefined ? {} : { closedAt: task.closedAt }),
@@ -38,7 +41,8 @@ export function createTaskFactsSource(deps: Pick<TaskFlowDeps, "store" | "compan
         runStatus: RUN_STATUS[view.status] ?? "IDLE",
         ...(failed === undefined ? {} : { failureCategory: failed.category }),
         ...(failed?.stage === "setup" ? { failedPrepare: {} } : {}),
-        ...(workflow === undefined ? {} : (() => { const step = stepOf(workflow.stage, workflow.state); return step === undefined ? {} : { step }; })()),
+        ...(workflow === undefined ? {} : (() => { const step = attention.step ?? stepOf(workflow.stage, workflow.state); return step === undefined ? {} : { step }; })()),
+        ...(attention.display === undefined ? {} : { display: attention.display }),
         pendingApprovals: 0,
         ...(task.closedAt === undefined ? {} : { endedAt: task.closedAt }),
         updatedAt: task.updatedAt,

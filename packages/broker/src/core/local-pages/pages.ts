@@ -67,6 +67,30 @@ function decideHtml(context: PageContext, view: PlanPageView): string {
     + "<button type=\"submit\" name=\"decision\" value=\"changes\">Ask for changes</button></div></form></section>";
 }
 
+/** Rovara's ask, the merge state and Understand's questions, in fixed words, with the forms that answer them (Retry; the answers). */
+function attentionHtml(context: PageContext, view: PlanPageView): string {
+  const attention = view.attention;
+  if (attention === undefined) return "";
+  const parts: string[] = [];
+  if (attention.ask !== undefined) {
+    const retry = attention.ask.retry
+      ? `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/retry">${hidden("revision", view.revision)}${hidden("ft", context.formToken({ action: "task.retry", taskId: view.taskId, revision: view.revision }))}`
+        + "<div class=\"row\"><button class=\"primary\" type=\"submit\">Retry</button></div></form>"
+      : "";
+    parts.push(`<section class="panel" id="ask"><h2>Rovara asks</h2>${attention.ask.lines.map((line) => `<p>${untrusted(line)}</p>`).join("")}${retry}</section>`);
+  }
+  if (attention.questions !== undefined) {
+    const fields = attention.questions.items.map((item) => {
+      const options = item.options.length === 0 ? "" : item.options.map((option) => `<label><input type="radio" name="option-${esc(item.id)}" value="${esc(option.id)}"> ${untrusted(option.label)}</label>`).join(" ");
+      return `<fieldset><legend>${untrusted(item.text)}</legend>${options}<label>${item.options.length === 0 ? "Your answer" : "Or say it in your own words"}<br><textarea name="text-${esc(item.id)}" maxlength="1000"></textarea></label></fieldset>`;
+    }).join("");
+    parts.push(`<section class="panel" id="questions"><h2>Rovara has questions</h2><form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/answers">${hidden("revision", view.revision)}${hidden("round", attention.questions.round)}`
+      + `${hidden("ft", context.formToken({ action: "task.answers", taskId: view.taskId, revision: view.revision }))}${fields}<div class="row"><button class="primary" type="submit">Send my answers</button></div></form></section>`);
+  }
+  if (attention.merge !== undefined) parts.push(`<section class="panel" id="merge"><h2>The pull request</h2><ul>${attention.merge.lines.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`);
+  return parts.join("");
+}
+
 export async function renderPlanPage(context: PageContext, view: PlanPageView): Promise<string> {
   const current = view.versions.filter((version) => version.current);
   const older = view.versions.filter((version) => !version.current);
@@ -92,7 +116,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${decideHtml(context, view)}${documents}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${decideHtml(context, view)}${documents}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 

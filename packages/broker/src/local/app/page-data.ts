@@ -17,6 +17,10 @@ import type { TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
 import type { LocalEvidence } from "./evidence.js";
+import { answerUnderstandQuestions } from "./answers.js";
+import { attentionOf, retryableBlock } from "./attention.js";
+import { createLocalSessionControl } from "./host.js";
+import { NOTHING_TO_RETRY_STEP, retryBlockedStep } from "./retry.js";
 import { stepOf } from "./facts.js";
 import { proofReportOf } from "./proof-report.js";
 
@@ -109,6 +113,8 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         findings: [],
         pullRequests: (workflow.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state.toLowerCase(), ...(outside.has(`${pullRequest.repositoryId}#${String(pullRequest.number)}`) ? { note: CHANGED_OUTSIDE_NOTE } : {}) })),
         comments: await commentsOf(taskId), ...(approval === undefined ? {} : { approval }),
+        // Rovara's ask, the pull request's state and any questions: fixed words, and the forms that answer them.
+        attention: (await attentionOf(deps.flow, task)).view,
       };
     },
 
@@ -126,7 +132,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
 }
 
 /** The writes of the pages that the decision gate does not own: a comment on a plan, and the lessons (none here yet). */
-export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner">): Pick<LocalPageActions, "addComment" | "lessonAction"> {
+export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner">): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions"> {
   return {
     async addComment(input): Promise<LocalActionResult> {
       const task = await readTask(deps.flow, input.taskId);
@@ -143,6 +149,33 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
         condition: when.absent(),
       });
       return written.applied ? { ok: true, message: "Comment added." } : { ok: false, reason: "refused", message: "That was not accepted." };
+    },
+    async retry(input): Promise<LocalActionResult> {
+      const task = await readTask(deps.flow, input.taskId);
+      const workflow = task?.workflow;
+      if (task === undefined || task.companyId !== deps.companyId || workflow === undefined || task.closedAt !== undefined) return { ok: false, reason: "not_found", message: "That is no longer there." };
+      if (workflow.revision !== input.revision) return { ok: false, reason: "stale", message: "This changed since you read it. Read the latest and try again." };
+      if (!retryableBlock(workflow)) return { ok: false, reason: "refused", message: NOTHING_TO_RETRY_STEP };
+      try {
+        // Through the session's control when it has one, so a Retry from the page is audited, written on the timeline and counted like any other.
+        if (task.sessionId === undefined) await retryBlockedStep(deps.flow, input.taskId);
+        else {
+          const result = await createLocalSessionControl(deps.flow).retry(deps.owner, deps.companyId, task.sessionId, { requestId: randomUUID() });
+          if (result.status === "refused") return { ok: false, reason: "refused", message: result.message };
+        }
+      } catch (error) {
+        return { ok: false, reason: "refused", message: error instanceof Error ? error.message.replace(/^[A-Z_]+: /u, "") : "That could not be run again." };
+      }
+      return { ok: true, message: "Rovara is running that step again." };
+    },
+    async answerQuestions(input): Promise<LocalActionResult> {
+      try {
+        await answerUnderstandQuestions(deps.flow, { taskId: input.taskId, round: input.round, answers: input.answers, by: { name: deps.owner.displayName }, source: "app", expectedRevision: input.revision });
+      } catch (error) {
+        const message = error instanceof Error ? error.message.replace(/^[A-Z_]+: /u, "") : "That was not accepted.";
+        return { ok: false, reason: /changed|Read it again|no longer/iu.test(message) ? "stale" : "refused", message };
+      }
+      return { ok: true, message: "Your answers were sent." };
     },
     async lessonAction(): Promise<LocalActionResult> {
       return { ok: false, reason: "refused", message: "Lessons are not on this install yet." };

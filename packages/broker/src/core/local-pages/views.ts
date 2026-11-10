@@ -36,6 +36,19 @@ export interface CommentView {
   text: string;
 }
 
+/**
+ * What the owner needs to see and answer on the task's page besides the plan (lane L12), in Rovara's fixed words: why it stopped and asks, where the pull request stands, and the questions it is waiting on.
+ * Nothing in it is text a worker or a person wrote.
+ */
+export interface AttentionView {
+  /** Rovara's own ask: it fixed what it could and asks the owner. `retry` says the owner can run the step again from here. */
+  ask?: { lines: string[]; retry: boolean };
+  /** Where the pull request stands (checks, reviews, who pushed), and what Rovara is doing about it. */
+  merge?: { lines: string[] };
+  /** Understand's questions, answered here. `round` is the round being answered. */
+  questions?: { round: number; items: Array<{ id: string; text: string; options: Array<{ id: string; label: string }> }> };
+}
+
 export interface PlanPageView {
   taskId: string;
   title: string;
@@ -50,6 +63,8 @@ export interface PlanPageView {
   comments: CommentView[];
   /** Present while the plan waits for the owner. */
   approval?: ApprovalOffer;
+  /** Rovara's ask, the merge state and any questions (lane L12). */
+  attention?: AttentionView;
 }
 
 export interface DesignMockupView {
@@ -141,4 +156,8 @@ export interface LocalPageActions {
   addComment(input: { taskId: string; target: string; text: string; revision: number }): Promise<LocalActionResult>;
   /** `wrong`: the lesson did not apply or was harmful; it is retired and the reason kept. */
   lessonAction(input: { lessonId: string; action: "approve" | "retire" | "wrong" }): Promise<LocalActionResult>;
+  /** Lane L12: runs a blocked step again. `revision` is the revision the owner was looking at; a task that moved on refuses it. */
+  retry?(input: { taskId: string; revision: number }): Promise<LocalActionResult>;
+  /** Lane L12: the owner's answers to Understand's questions. */
+  answerQuestions?(input: { taskId: string; revision: number; round: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }): Promise<LocalActionResult>;
 }

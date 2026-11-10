@@ -54,6 +54,8 @@ const NOTICES: Record<string, string> = {
   changes: "Your changes were sent.",
   rejected: "Rejected.",
   commented: "Comment added.",
+  retried: "Rovara is running that step again.",
+  answered: "Your answers were sent.",
   lesson: "Lesson updated.",
   stale: "It changed while you were looking. Read it again, then decide.",
   refused: "That was not accepted.",
@@ -140,6 +142,33 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (decision === "changes" && note === "") return redirect(`${request.base}/plan/${taskId}?n=invalid`);
       const result = await options.actions.decidePlan({ taskId, decision, ...(note === "" ? {} : { note }), approval: offer, proof: proofFor(request, offer) });
       return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, decision === "approve" ? "approved" : "changes")}`);
+    } },
+    { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/retry$`), handle: async (request, match) => {
+      const taskId = match[1] ?? "";
+      const revision = Number(request.form?.get("revision"));
+      if (!Number.isSafeInteger(revision) || options.actions.retry === undefined) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
+      if (!verified(request, { action: "task.retry", taskId, revision })) return redirect(`${request.base}/plan/${taskId}?n=form`);
+      const result = await options.actions.retry({ taskId, revision });
+      return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "retried")}`);
+    } },
+    { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/answers$`), handle: async (request, match) => {
+      const taskId = match[1] ?? "";
+      const revision = Number(request.form?.get("revision"));
+      const round = Number(request.form?.get("round"));
+      if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(round) || options.actions.answerQuestions === undefined) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
+      if (!verified(request, { action: "task.answers", taskId, revision })) return redirect(`${request.base}/plan/${taskId}?n=form`);
+      // One answer for each question the form carried: a chosen option, or the person's own words (the workflow checks them against the questions it asked).
+      const answers: Array<{ questionId: string; optionId?: string; text?: string }> = [];
+      for (const name of [...(request.form?.keys() ?? [])].filter((key) => key.startsWith("text-") || key.startsWith("option-"))) {
+        const questionId = name.slice(name.indexOf("-") + 1);
+        if (!/^[A-Za-z0-9_-]{1,40}$/u.test(questionId) || answers.some((answer) => answer.questionId === questionId)) continue;
+        const optionId = request.form?.get(`option-${questionId}`) ?? "";
+        const words = text(request, `text-${questionId}`).trim();
+        if (optionId === "" && words === "") continue;
+        answers.push({ questionId, ...(optionId === "" ? {} : { optionId }), ...(words === "" ? {} : { text: words }) });
+      }
+      const result = await options.actions.answerQuestions({ taskId, revision, round, answers });
+      return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "answered")}`);
     } },
     { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/comment$`), handle: async (request, match) => {
       const taskId = match[1] ?? "";
