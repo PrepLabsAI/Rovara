@@ -41,6 +41,7 @@ export * from "./slack.js";
 export * from "./conversation.js";
 export * from "./channel-binding.js";
 export * from "./channel-adapter.js";
+export * from "./thread-service.js";
 export * from "./slack-details.js";
 export * from "./slack-confirmation.js";
 export * from "./slack-routing.js";
