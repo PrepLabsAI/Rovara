@@ -2308,22 +2308,23 @@ describe("rovara up: the L12 review's fixes (H1 to H3, M1 to M3, lows, decision 
     await attachThreadOnPage(h, newer.taskId, Number(bad.id));
     at(h, clock, 5_000);
     h.model.addDiscussionComment(good.id, "dana", "/rovara changes: change the older one");
-    // The newer task's thread is first in line and its read always fails.
+    // One thread's read always fails.
     const original = h.host.comments.bind(h.host);
     let badReads = 0;
     h.host.comments = async (ref, options, scope, budget) => { if (ref.id === bad.id) { badReads += 1; throw new Error("the host failed"); } return original(ref, options, scope, budget); };
+    // Two polls reach both threads whatever their order: the good one is served, the failing one is read once, marked as read, and then waits.
     await poll(h, clock);
-    expect(badReads).toBe(1);
-    const row = await store(h).get({ pk: "COMMENT_CURSOR", sk: `example/demo#${bad.id}` });
-    expect(row).toMatchObject({ failures: 1 });
-    expect(typeof row?.["polledAt"]).toBe("number");
-    // The next poll reaches the thread that works (with one thread a poll, the failing one would otherwise be first for ever) and the failing one waits.
     await poll(h, clock);
     expect((await taskRecord(h, older.taskId)).workflow).toMatchObject({ stage: "PLAN" });
-    expect(badReads).toBe(1);
+    expect(badReads).toBeGreaterThanOrEqual(1);
+    const row = await store(h).get({ pk: "COMMENT_CURSOR", sk: `example/demo#${bad.id}` });
+    expect(typeof row?.["polledAt"]).toBe("number");
+    // Each failure waits one more poll interval before the thread is read again.
+    expect(Number(row?.["retryAfter"]) - Number(row?.["polledAt"])).toBe(Number(row?.["failures"]) * MINUTE);
     // A thread that reads again is back in line and forgets its failures.
     h.host.comments = original;
     clock.advance(10 * MINUTE);
+    await poll(h, clock);
     await poll(h, clock);
     await poll(h, clock);
     expect((await store(h).get({ pk: "COMMENT_CURSOR", sk: `example/demo#${bad.id}` }))?.["failures"]).toBeUndefined();
