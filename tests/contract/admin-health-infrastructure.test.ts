@@ -148,6 +148,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/task-flow/accept.ts", "packages/broker/src/core/milestones/milestones.ts",
       // Script tokens: the rate window rows, and a token's rows and request marks, which expire after the token's life plus a grace period.
       "packages/broker/src/core/script-tokens/rate.ts", "packages/broker/src/core/script-tokens/store.ts",
+      // Sessions: thread notes and the live-message counters (session retention), followers and presence rows, and Ask's records, locks, request marks and rate rows.
+      "packages/broker/src/core/sessions/followers.ts", "packages/broker/src/core/sessions/notes.ts", "packages/broker/src/core/sessions/ask.ts", "packages/broker/src/core/sessions/steer.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
