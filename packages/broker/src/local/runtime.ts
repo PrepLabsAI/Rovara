@@ -202,6 +202,8 @@ export interface LocalRuntimeOptions {
   workerFetch?: typeof fetch;
   /** The most threads one comment poll reads (default 20). */
   commentThreadsPerPoll?: number;
+  /** The document a planning run is asked to write: a structured plan (the default) or the Markdown plan an older worker takes. */
+  planFormat?: "structured" | "markdown";
   /** The app's clock (the flow's records, the sessions and the tracking timer's schedule). Default: the real time. A test moves it. */
   now?: () => Date;
   /** Run the dispatch, sweep and session timers. Default true; tests call `runtime.tick()`. */
@@ -515,6 +517,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(options.timers === undefined ? {} : { timers: options.timers }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.commentThreadsPerPoll === undefined ? {} : { commentThreadsPerPoll: options.commentThreadsPerPoll }),
+    ...(options.planFormat === undefined ? {} : { planFormat: options.planFormat }),
     ...(options.modelProviderEndpoints === undefined ? {} : { modelProviderEndpoints: options.modelProviderEndpoints }),
     // The flip-back settings of the session features (`0` turns one off; anything else leaves it on).
     liveSteer: options.environment["ROVARA_LIVE_STEER"] !== "0", stepNotes: options.environment["ROVARA_STEP_NOTES"] !== "0", ask: options.environment["ROVARA_ASK"] !== "0",

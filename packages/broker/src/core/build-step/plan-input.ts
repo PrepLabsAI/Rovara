@@ -2,7 +2,7 @@
 // public `loadWorkflowDocument` (it takes a read function, so it needs no object store of its own): a structured plan is given as its Markdown copy, a Markdown plan as it was saved.
 import { WORKFLOW_PLAN_MAX_BYTES, agentXError, type WorkflowSnapshot } from "@agentx/contracts";
 import { loadWorkflowDocument, shortenMarkdown } from "../../developer/plan-document-reader.js";
-import { planOwnerAnswers } from "../../developer/owner-answers.js";
+import { planOwnerAnswers } from "../../developer/owner-answers-text.js";
 import type { ArtifactReader } from "../task-flow/deps.js";
 
 export interface ApprovedPlan {

@@ -51,6 +51,8 @@ import { RepositoryGrantService, type RepositoryCredential } from "../../reposit
 import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { createCallbackHandler } from "./callbacks.js";
+import { attachCitedCode } from "../../core/plan/store.js";
+import { loadPlanDocument, planFactsOf } from "../../core/plan/document.js";
 import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
@@ -102,6 +104,8 @@ export interface LocalAppOptions {
   pagesPort?: number;
   /** The most pull request threads one comment poll reads (default 20): a test lowers it to see the rotation. */
   commentThreadsPerPoll?: number;
+  /** The document a planning run is asked to write: a structured plan (the default) or the Markdown plan an older worker takes. */
+  planFormat?: "structured" | "markdown";
   /** whether script tokens exist on this install (`ROVARA_SCRIPT_TOKENS=0` turns them off). The runtime gives it from its environment. Default: the process environment. */
   scriptTokensEnabled?: () => boolean;
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
@@ -204,12 +208,17 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     repositoryGrants: grants,
     callbackSigningKey: signingKey,
     understandFirst: true,
+    ...(options.planFormat === undefined ? {} : { planFormat: options.planFormat }),
+    // The code a structured plan cites is read after the plan is committed, through the code host of each repository, and attached beside the plan.
+    afterPlanStored: (input) => attachCitedCode(flow.deps, blobs, input),
     liveSteer: options.liveSteer ?? true,
     stepNotes: options.stepNotes ?? true,
     ...(options.machinesName === undefined ? {} : { machinesName: options.machinesName }),
     // No code host adapter registered (none is set up on a fresh laptop): a start is not refused for a host nobody knows, and publishing a pull request is simply not offered.
     checkCodeHosts: registry.names("code-host").length > 0,
     modelAccess: { route: modelRoute },
+    // Every step runs on the install's one model, so the plan check says the model that wrote the plan checked it.
+    installModel: async () => { const choice = await chosen(); return choice === undefined ? undefined : { provider: choice.provider, modelId: choice.model }; },
     ...(options.operationEnded === undefined ? {} : { onOperationEnded: options.operationEnded }),
     startExtras: createSessionStartExtras(companyId),
     milestones,
@@ -269,6 +278,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
         const loaded = parsed?.success === true ? await loadWorkflowDocument(textReaderOf(blobs), parsed.data, {}).catch(() => undefined) : undefined;
         const estimate = (task["runEstimate"] as { highUsd?: unknown } | undefined)?.highUsd;
         return gradePlanRisk({ loaded, workflow, requestText: typeof task["requestText"] === "string" ? task["requestText"] : undefined, ...(typeof estimate === "number" ? { costHighUsd: estimate } : {}) });
+      },
+      // The decided plan's own decisions, read from the checked document (the same load the work breakdown uses), so the owner's answers are held to the options it offered.
+      planFactsOf: async (_task, _workflow, artifact) => {
+        const loaded = await loadPlanDocument(blobs, artifact);
+        return loaded.kind === "structured" ? planFactsOf(loaded.plan) : "unreadable";
       },
       // A plan with a work breakdown (spec 059) is approved WITH its graph: every surface that approves binds the graph in the stored document the approval's digest names.
       breakdown: ({ task, workflow, artifactDigest }) => breakdownForApproval(flow.deps, { taskId: String(task["taskId"]), project: String(task["project"]), startingRevision: Number(task["startingRevision"]) }, workflow, artifactDigest),

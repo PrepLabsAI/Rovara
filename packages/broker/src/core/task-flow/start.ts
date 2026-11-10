@@ -3,6 +3,7 @@
 // One start is one document-store transaction: the workspace, its preparation (an operation and its staged dispatch message), the task, its
 // index row, its callback pointer, the conversation, the idempotency record, the workspace-slot charge, whatever `Admission` and `AuditSink`
 // stage, and (for a workflow that understands first) the dispatch row of its first step. Either all of it exists or none of it does.
+import { ROVARA_CODE_PROGRAM } from "../plan/program.js";
 import {
   AgentXError,
   UNRUNNABLE_EXTERNAL_CHECK_MESSAGE,
@@ -148,6 +149,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
       taskId, ownerId: ownerKey, now: receivedAt, path: workflowPath, checkPolicy: taskWorkflowCheckPolicy(project.definition),
       // A 1.1.0 workflow alone may hold the Understand stage: it starts at UNDERSTAND/READY, and says whether the request or Understand chose the path.
       ...(understandFirst ? { definitionVersion: "1.1.0" as const, understand: true, pathFrom: request.workflowPath === undefined ? "understand" as const : "request" as const } : {}),
+      // Rovara Code's own sequence (plan, plan check, coding, checks, reviews, pull request): the plan check reads each coding plan before a person sees it.
+      ...(understandFirst && deps.planCheck !== false ? { program: ROVARA_CODE_PROGRAM } : {}),
     }) } : {}),
   };
   const pointer: TaskPointerRecord = {

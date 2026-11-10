@@ -3,6 +3,7 @@
 // Cloud's coding-plan instructions that do not depend on the structured reader (what changes, which files, how it is tested, Not changing, Risks, Decisions, no publishing steps).
 import { WORKFLOW_PLAN_MAX_BYTES, redactText } from "@agentx/contracts";
 import { PLAN_UNDERSTANDING_HEADER, understandPrompt } from "../../rovara-code/understand.js";
+import { structuredPlanIntro, structuredPlanRules } from "../plan/prompts.js";
 import type { StepPrompts } from "./deps.js";
 
 /** Which document a planning run writes. A Quick task writes the coding plan at once; a Full one writes requirements, then a design, then the coding plan. */
@@ -66,12 +67,23 @@ const phaseKind = (path: "QUICK" | "FULL", phase: string | undefined): PlanDocum
 
 export const DEFAULT_PROMPTS: StepPrompts = {
   understand: ({ requestText, intent }) => understandPrompt({ requestText, intent: intent, notes: "" }),
-  plan: ({ requestText, path, phase, restatement, assumptions, feedback, intent, earlier, previous }) => {
+  plan: ({ requestText, path, phase, restatement, assumptions, feedback, intent, earlier, previous, structured, revision }) => {
     const kind = phaseKind(path, phase);
     const base = understandPrompt({ requestText, intent: intent, notes: "", forPlan: true });
     // The caller that has only the restatement (no stored intent) still tells the planner what was understood.
     const understood = intent?.assessment?.kind === "ready" || restatement === undefined ? ""
       : [PLAN_UNDERSTANDING_HEADER, inert(restatement), ...(assumptions === undefined || assumptions.length === 0 ? [] : ["Assumptions:", ...assumptions.map((line) => `- ${inert(line)}`)])].join("\n");
+    // A structured plan (the default): the document the owner reads is claims, evidence, decisions and checks, and the previous or approved document is handed over as data in its own shape.
+    if (structured !== undefined) {
+      return [
+        base,
+        understood,
+        structuredPlanIntro({ kind, previous: structured.previous }),
+        ...(feedback === undefined || feedback.length === 0 ? [] : [["The owner read an earlier version and asked for these changes. Make them, and keep the rest as it was unless a change requires otherwise:", ...feedback.map((line) => `- ${line}`)].join("\n")]),
+        structuredPlanRules(structured.rules),
+        ...(revision === undefined ? [] : [revision]),
+      ].filter((section) => section !== "").join("\n\n");
+    }
     return [
       base,
       understood,
@@ -79,6 +91,7 @@ export const DEFAULT_PROMPTS: StepPrompts = {
       ...(previous === undefined ? [] : [`${PLAN_PREVIOUS_HEADER}\n${fenced(previous.slice(0, PLAN_CONTEXT_MAX_BYTES))}`]),
       ...(feedback === undefined || feedback.length === 0 ? [] : [["The owner read an earlier version and asked for these changes. Make them, and keep the rest as it was unless a change requires otherwise:", ...feedback.map((line) => `- ${line}`)].join("\n")]),
       planRules(kind),
+      ...(revision === undefined ? [] : [revision]),
     ].filter((section) => section !== "").join("\n\n");
   },
 };

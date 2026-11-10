@@ -118,9 +118,9 @@ export interface PublicationExpectation {
 }
 
 /** `WORKFLOW_DISPATCH` rows: the intent to start the next workflow step with no one asking, written in the transaction that made it due. */
-export type DispatchKind = "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "REVIEW" | "PUBLISH" | "SYNC" | "AUTOFIX";
+export type DispatchKind = "UNDERSTAND" | "PLAN" | "REPLAN" | "CRITIQUE" | "CRITIC_REPLAN" | "IMPLEMENT" | "REVIEW" | "PUBLISH" | "SYNC" | "AUTOFIX";
 /** The kinds the stage machine's own runner starts (Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`). */
-export const READING_DISPATCH_KINDS: readonly DispatchKind[] = ["UNDERSTAND", "PLAN"];
+export const READING_DISPATCH_KINDS: readonly DispatchKind[] = ["UNDERSTAND", "PLAN", "REPLAN"];
 
 export interface DispatchRowRecord {
   pk: string;
@@ -138,6 +138,8 @@ export interface DispatchRowRecord {
   dispatchDueSk: string;
   indexExpiresAt: number;
   lastError?: string;
+  /** A REPLAN row: what the planner is told on its automatic second run (the plan's problems, or what could not be read), kept on the row. */
+  planPrompt?: string;
   /** An AUTOFIX row: how the block it looks at came about when no finished run wrote it (the run was lost, or its start was tried until the budget ran out). */
   cause?: "run-lost" | "dispatch-exhausted";
 }

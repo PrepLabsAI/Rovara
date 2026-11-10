@@ -32,7 +32,7 @@ const DOCUMENTS = ["requirements", "design", "plan"] as const;
  * document stored as Markdown (before structured plans) is refused: it has no canonical form to return.
  */
 export async function readTaskPlanDocument(
-  task: DeveloperTaskRecord,
+  task: Pick<DeveloperTaskRecord, "taskId" | "ownerKey" | "workspaceId" | "workflow">,
   read: (objectKey: string, maxBytes: number) => Promise<string | undefined>,
   query: { document?: string | null; version?: number | undefined },
 ): Promise<TaskPlanDocumentView> {

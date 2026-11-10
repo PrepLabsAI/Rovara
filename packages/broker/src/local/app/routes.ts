@@ -12,6 +12,9 @@ import { developerIdOf } from "../../core/sessions/create.js";
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
+import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
+import { readTaskPlanDocument } from "../../aws/task-plan-document.js";
+import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { createLocalSessionControl, createSessionControlHost } from "./host.js";
 import { listProjects, registerProject } from "./projects.js";
 import { developerTaskListItem, developerTaskView } from "./task-view.js";
@@ -154,6 +157,15 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
           const digest = workflow === undefined ? undefined : waitingDocumentDigest(workflow);
           const artifact = workflow?.artifacts.filter((candidate) => candidate.type === currentDocumentType(workflow)).at(-1);
           if (workflow === undefined || artifact === undefined || digest === undefined) throw agentXError("NOT_FOUND", "this task has no plan yet");
+          // A structured plan (Cloud's format) is answered whole: its canonical document and the plain wording of its checks and decisions (the same function Cloud's route uses).
+          if (artifact.format === "structured") {
+            const query = new URL(request.path, "http://local").searchParams;
+            const version = query.get("version");
+            const reader = textReaderOf(deps.blobs);
+            // Bytes that do not match the digest the approval binds are not shown (the same refusal a Markdown plan gets).
+            if (await loadWorkflowDocument(reader, artifact, {}).catch(() => undefined) === undefined) throw agentXError("CHANGE_STALE", DOCUMENT_CHANGED);
+            return json(200, { plan: await readTaskPlanDocument(task, reader, { document: query.get("document") ?? artifact.type, ...(version === null ? {} : { version: Number(version) }) }) });
+          }
           const read = await readVerifiedText(deps.blobs, artifact, 200_000);
           if ("changed" in read) throw agentXError("CHANGE_STALE", DOCUMENT_CHANGED);
           const type = artifact.type === "requirements" || artifact.type === "design" || artifact.type === "plan" ? artifact.type : "plan";

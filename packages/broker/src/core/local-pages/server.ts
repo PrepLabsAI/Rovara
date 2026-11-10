@@ -147,7 +147,15 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "plan.decide", taskId, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })) return redirect(`${request.base}/plan/${taskId}?n=form`);
       const note = text(request, "note").trim();
       if (decision === "changes" && note === "") return redirect(`${request.base}/plan/${taskId}?n=invalid`);
-      const result = await options.actions.decidePlan({ taskId, decision, ...(note === "" ? {} : { note }), approval: offer, proof: proofFor(request, offer) });
+      // One answer for each decision the plan's form carried (a radio each, AgentX's recommendation pre-chosen); the workflow checks them against the document's own decisions.
+      const answers: Array<{ decisionId: string; optionId: string; opened: boolean }> = [];
+      for (const name of [...(request.form?.keys() ?? [])].filter((key) => key.startsWith("answer-"))) {
+        const decisionId = name.slice("answer-".length);
+        const optionId = request.form?.get(name) ?? "";
+        if (!/^[A-Za-z0-9_.-]{1,40}$/u.test(decisionId) || !/^[A-Za-z0-9_.-]{1,40}$/u.test(optionId) || answers.some((answer) => answer.decisionId === decisionId)) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
+        answers.push({ decisionId, optionId, opened: true });
+      }
+      const result = await options.actions.decidePlan({ taskId, decision, ...(note === "" ? {} : { note }), ...(answers.length === 0 ? {} : { answers }), approval: offer, proof: proofFor(request, offer) });
       return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, decision === "approve" ? "approved" : "changes")}`);
     } },
     { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/retry$`), handle: async (request, match) => {

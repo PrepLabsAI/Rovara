@@ -3,8 +3,7 @@
 // capability's own. Every other callback the worker can make (a pull request, a candidate export, a model fallback, ...) answers "not available" until its lane is wired; the worker
 // then fails that job with a plain reason instead of waiting for ever.
 //
-// What the result reader does NOT do yet (the Cloud reader, `terminal-result.ts` and `workflow-items.ts`, is about 2,000 lines of AWS-shaped code): a structured plan document, plan
-// evidence, the plan self-check and critique, and everything after the plan is approved. A plan the worker saves as `plan.md` is kept as a Markdown plan.
+// A plan the worker saves as `plan.md` is read by `core/plan` (a structured plan, the default) or kept as a Markdown plan (an install that asks for Markdown).
 import type { ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -23,14 +22,15 @@ import type { StepOutcome } from "../../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
 import { isTerminalStatus, recordOperationResult } from "../../core/task-flow/results.js";
 import { iso } from "../../core/task-flow/support.js";
+import { PLAN_RETENTION } from "../../core/plan/store.js";
+import { processPlanAnswer } from "../../core/plan/process.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { readVerifiedText } from "./documents.js";
 import type { RepositoryCredential, RepositoryGrantService } from "../../repository-access.js";
 
 const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z-]+)$/u;
 export const CAPABILITY_HEADER = "x-agentx-callback-capability";
-/** A retention class the object-storage adapters do not know, so a task's documents are kept until deleted (a plan can wait for its owner for longer than evidence is kept). */
-export const PLAN_RETENTION = "task-document";
+export { PLAN_RETENTION };
 export const PLAN_ARTIFACT_NAME = "plan.md";
 /**
  * Names a step of the build step may post more than once in one operation, each time with other bytes (the worker saves `checks.json` again after the one extra turn it gives a coding run whose first
@@ -174,8 +174,13 @@ export async function readOutcome(deps: CallbackDeps, operation: OperationRecord
     const saved = await readArtifactText(deps, operation, PLAN_ARTIFACT_NAME, PLAN_MAX_BYTES + 1);
     if (saved === undefined || saved.text.trim() === "") return undefined;
     const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get(taskPointerKey(operation.workspaceId)));
-    const workflow = pointer === undefined ? undefined : (await readTask(deps.flow, pointer.taskId))?.workflow;
-    if (workflow === undefined) return undefined;
+    const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
+    const workflow = task?.workflow;
+    if (task === undefined || workflow === undefined) return undefined;
+    // A structured plan (the planning run was asked for one, and says so in its payload): read, judged and stored by `core/plan`, which may also ask the planner again or block planning.
+    if (operation.dispatch.payload["planFormat"] === "structured") {
+      return processPlanAnswer(deps.flow, deps.blobs, { task, workflow, operation, answer: { content: saved.text, artifact: { id: saved.artifact.id, createdAt: saved.artifact.createdAt } } });
+    }
     // The document type is the workflow's own (a Quick or a coding plan is `plan`); `submitWorkflowArtifact` refuses a type the phase does not expect.
     const type = currentDocumentType(workflow);
     const parsed = WorkflowArtifactSchema.safeParse({

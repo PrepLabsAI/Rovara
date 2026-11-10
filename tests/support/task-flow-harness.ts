@@ -71,7 +71,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     store: new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, nowSeconds: () => Math.floor(clock.now / 1_000) }),
     queues: new MemoryQueueService({ now: () => clock.now }),
   };
-  const machines = new FakeWorkerMachines({ startingChecks: 2, features: ["task.workflowMode"], now, ...options.machines });
+  const machines = new FakeWorkerMachines({ startingChecks: 2, features: ["task.workflowMode", "task.structuredPlans"], now, ...options.machines });
   const audit: AuditEvent[] = [];
   const sink: AuditSink = options.audit === "recording" ? {
     stage(event) {

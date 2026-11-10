@@ -15,7 +15,7 @@ import type { TaskRecord } from "../../core/task-flow/records.js";
 
 const line = (text: string, max = 200): string => Array.from(redactText(text).replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim()).slice(0, max).join("");
 /** The stages whose blocked step the owner can run again from the page. */
-const RETRY_STAGES = new Set(["UNDERSTAND", "PLAN", "IMPLEMENT", "VERIFY", "REVIEW", "PULL_REQUEST"]);
+const RETRY_STAGES = new Set(["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "VERIFY", "REVIEW", "PULL_REQUEST"]);
 
 export const retryableBlock = (workflow: WorkflowSnapshot): boolean =>
   workflow.state === "BLOCKED" && (RETRY_STAGES.has(workflow.stage) || (workflow.stage === "WAIT_FOR_MERGE" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed));

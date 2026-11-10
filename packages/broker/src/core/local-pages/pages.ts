@@ -58,12 +58,27 @@ function commentsHtml(context: PageContext, view: PlanPageView): string {
   return `<section class="panel" id="comments"><h2>Comments</h2>${view.comments.length === 0 ? "<p class=\"muted\">No comments yet.</p>" : `<ul>${list(view.comments)}</ul>`}${form}</section>`;
 }
 
+/** What a second model made of the coding plan: Rovara's words, and the second model's points drawn as untrusted. */
+function critiqueHtml(view: PlanPageView): string {
+  if (view.critique === undefined || view.critique.length === 0) return "";
+  return `<section class="panel" id="critique"><h2>A second model's check</h2><ul>${view.critique.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`;
+}
+
+/** One fieldset for each decision of the plan that waits: its options as radios, AgentX's recommendation chosen, so approving as it stands answers each one with the recommendation. The text is the model's: drawn as untrusted. */
+function decisionFields(view: PlanPageView): string {
+  const waiting = view.versions.find((version) => version.current && version.content.format === "structured");
+  if (waiting === undefined || waiting.content.format !== "structured") return "";
+  return waiting.content.plan.decisions.map((decision) => `<fieldset><legend>${untrusted(decision.question)}</legend>${decision.options.map((option) =>
+    `<label><input type="radio" name="answer-${esc(decision.id)}" value="${esc(option.id)}"${option.id === decision.recommended ? " checked" : ""}> ${untrusted(option.label)}${option.id === decision.recommended ? " <span class=\"tag\">recommended</span>" : ""}`
+    + `<br><span class="muted">${untrusted(option.consequence)}</span></label>`).join("")}</fieldset>`).join("");
+}
+
 function decideHtml(context: PageContext, view: PlanPageView): string {
   const offer = view.approval;
   if (offer === undefined) return "";
   return `<section class="panel" id="decide"><h2>Your decision</h2>`
     + `<p>You are deciding revision ${esc(offer.revision)} of this plan. If it changes before you press a button, nothing is sent and you are asked to look again.</p>`
-    + `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/decide">${approvalFields(context, "plan.decide", view.taskId, offer)}`
+    + `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/decide">${approvalFields(context, "plan.decide", view.taskId, offer)}${decisionFields(view)}`
     + "<label>What to change (needed if you ask for changes)<br><textarea name=\"note\" maxlength=\"4000\"></textarea></label>"
     + "<div class=\"row\"><button class=\"primary\" type=\"submit\" name=\"decision\" value=\"approve\">Approve this plan</button>"
     + "<button type=\"submit\" name=\"decision\" value=\"changes\">Ask for changes</button></div></form></section>";
@@ -117,10 +132,11 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
       return `<section class="doc"><h2>${esc(version.kind)} v${esc(version.version)}</h2><p class="doc-status"><span class="status ${version.approved ? "approved" : "pending"}">${version.approved ? "Approved" : "Not approved yet"}</span></p><pre>${untrusted(version.content.markdown)}</pre></section>`;
     }
     const currentVersion = currentVersionOf(version.kind);
-    return renderPlanDocument({
+    const oneScreen = version.check?.oneScreen === undefined ? "" : `<section class="panel" id="one-screen"><h3>On one screen</h3><pre>${untrusted(version.check.oneScreen)}</pre></section>`;
+    return oneScreen + await renderPlanDocument({
       anchor: ANCHOR_OF[version.kind], kind: PLAN_KIND_OF[version.kind], version: version.version, approved: version.approved, current: version.current,
       ...(currentVersion === undefined ? {} : { currentVersion }),
-      plan: version.content.plan, ...(version.content.evidence === undefined ? {} : { evidence: version.content.evidence }),
+      plan: version.content.plan, ...(version.content.evidence === undefined ? {} : { evidence: version.content.evidence }), ...(version.check === undefined ? {} : { selfCheck: version.check.selfCheck }), local: true,
       ...(version.createdAt === undefined ? {} : { createdAt: version.createdAt }),
       openWhatChanged: false,
     });
@@ -134,7 +150,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${attentionHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${critiqueHtml(view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 

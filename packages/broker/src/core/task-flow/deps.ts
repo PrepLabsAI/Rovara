@@ -7,7 +7,9 @@ import type {
   CheckEntry,
   DocumentStore,
   OrgId,
+  PlanDocument,
   InvocationModelRoute,
+  ModelIdentifier,
   Principal,
   ProjectDefinition,
   QueueService,
@@ -24,6 +26,8 @@ import type { RepositoryGrantService } from "../../repository-access.js";
 import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
 import type { StepOutcome } from "./outcome.js";
 import type { CodeMilestones } from "../merge/seams.js";
+import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
+import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
@@ -81,6 +85,9 @@ export interface StepPrompts {
     intent?: WorkflowIntent | undefined;
     /** The documents of earlier phases the owner approved (a Full task's design is written from its requirements), oldest first. */ earlier?: ReadonlyArray<{ kind: "requirements" | "design" | "plan"; markdown: string }>;
     /** The earlier version of the document being written again after the owner asked for changes. */ previous?: string | undefined;
+    /** Present when the planner is asked for a structured plan document (the default): the rules and the document it builds on, as data (`core/plan/prompts.ts`). */
+    structured?: { rules: StructuredPlanInput; previous?: StructuredPlanContext | undefined } | undefined;
+    /** The planner's automatic second run: what is wrong with its last answer (said by Rovara, from fixed words and plan ids), after the rules. */ revision?: string | undefined;
   }): string;
 }
 
@@ -150,6 +157,27 @@ export interface TaskFlowDeps {
   newId?: () => string;
   log?: (entry: Record<string, unknown>) => void;
   prompts?: StepPrompts;
+  /**
+   * The document a planning run is asked to write: a structured plan (claims with evidence, decisions, checks; Cloud's format, the default) or the Markdown plan an older worker takes. A structured
+   * answer is read, judged and stored by `core/plan`; a Markdown one is kept as the worker wrote it.
+   */
+  planFormat?: "structured" | "markdown";
+  /** Whether a plan the planner wrote is held to Rovara's own checks before the owner sees it, and an unreadable one sent back once (Cloud's `planSelfCheck`). Default on. */
+  planSelfCheck?: boolean;
+  /**
+   * A read-only view of a repository's CI definition (its workflow files), when the install's code host can give one: the checks the CI requires then join a coding plan's proposed checks. The CodeHost
+   * port has file reads but no directory listing, so a host that cannot list leaves this out and the plan's checks stay as the planner proposed them.
+   */
+  ciDefinitionReader?: (repository: { name: string; path: string; url: string }) => Promise<CiDefinitionReader | undefined>;
+  /** Whether a coding plan is read by a second step before a person sees it (the plan check). Default on. */
+  planCheck?: boolean;
+  /** The model the install runs its steps on (every step runs on it, so the plan check says the same model checked the plan). Absent: the critique records it as unknown. */
+  installModel?: () => Promise<ModelIdentifier | undefined>;
+  /**
+   * Called once after a structured plan that cites code was committed: reads the cited code (through the code host of each repository) and attaches it beside the plan. Best effort; never throws into the flow.
+   * Absent: the plan page shows the citations as they are.
+   */
+  afterPlanStored?: (input: { task: TaskRecord; workflow: WorkflowSnapshot; artifactId: string; artifactSha256: string; plan: PlanDocument; prefix: string }) => Promise<void>;
   /** Environment every worker machine of this install is started with (lane L9-wire: where the model proxy is). Never a secret. */
   machineEnvironment?: Readonly<Record<string, string>>;
   /** Lane L10: reads the documents workers saved (the approved plan the coding step is given, the plan the reviewers are shown). */

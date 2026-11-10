@@ -44,6 +44,7 @@ interface SurfaceDecision {
   proof: ApprovalProof;
   outcome: DecisionAttempt["outcome"];
   note?: string | undefined;
+  answers?: ReadonlyArray<{ decisionId: string; optionId: string; opened: boolean }> | undefined;
   via?: "PAGE";
 }
 
@@ -59,14 +60,14 @@ export function createDecisionActions(options: DecisionActionsOptions) {
       companyId: options.companyId, kind: WORKFLOW_DOCUMENT_KIND, subjectId: input.taskId, requestId: input.approval.requestId, outcome: input.outcome,
       seen: { revision: input.approval.revision, artifactDigest: input.approval.artifactDigest },
       credentials: [{ method: input.proof.method, token: input.proof.token, ...(input.proof.claimedAccount === undefined ? {} : { claimedAccount: input.proof.claimedAccount }) }],
-      ...(reason === undefined || reason === "" ? {} : { reason }), details: input.via === undefined ? {} : { via: input.via },
+      ...(reason === undefined || reason === "" ? {} : { reason }), details: { ...(input.via === undefined ? {} : { via: input.via }), ...(input.answers === undefined || input.answers.length === 0 ? {} : { answers: input.answers }) },
     });
     return localResultOf(result, done);
   };
   return {
     /** The plan page's Approve and Request changes. */
-    decidePlan: (input: { taskId: string; decision: "approve" | "changes"; note?: string; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult> =>
-      decide({ taskId: input.taskId, approval: input.approval, proof: input.proof, outcome: input.decision === "approve" ? "approve" : "request_changes", note: input.note, via: "PAGE" }, input.decision === "approve" ? "Approved. Rovara is going ahead." : "Sent back with your changes."),
+    decidePlan: (input: { taskId: string; decision: "approve" | "changes"; note?: string; answers?: ReadonlyArray<{ decisionId: string; optionId: string; opened: boolean }>; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult> =>
+      decide({ taskId: input.taskId, approval: input.approval, proof: input.proof, outcome: input.decision === "approve" ? "approve" : "request_changes", note: input.note, answers: input.answers, via: "PAGE" }, input.decision === "approve" ? "Approved. Rovara is going ahead." : "Sent back with your changes."),
     /** The design page's Approve and Reject. A rejected design is sent back with the reason (a task is closed on its own page, not by a click on a design). */
     decideDesign: (input: { taskId: string; decision: "approve" | "reject"; note?: string; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult> =>
       decide({ taskId: input.taskId, approval: input.approval, proof: input.proof, outcome: input.decision === "approve" ? "approve" : "request_changes", note: input.note, via: "PAGE" }, input.decision === "approve" ? "Approved." : "Sent back."),

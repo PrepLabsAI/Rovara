@@ -14,6 +14,8 @@ export interface AcceptInput {
   operationId?: string;
   conversationId?: string;
   workflowMode?: Operation["workflowMode"];
+  /** The program step the operation runs (the plan check's). */
+  programStepId?: string;
   dispatch: DispatchSpec;
   requester?: OperationRecord["requester"];
   workflowRevision?: number;
@@ -54,6 +56,7 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
     kind: input.kind,
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
+    ...(input.programStepId === undefined ? {} : { programStepId: input.programStepId }),
     requestId: input.requestId,
     payloadHash: hashJson({ kind: input.kind, mode: input.workflowMode ?? null, requestId: input.requestId, dispatch: input.dispatch }),
     status: "ACCEPTED",

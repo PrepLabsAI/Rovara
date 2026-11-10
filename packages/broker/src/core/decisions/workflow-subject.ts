@@ -11,12 +11,14 @@ import { createHash } from "node:crypto";
 import { LOCAL_OWNER_PROVIDER } from "../../ports/policy-defaults.js";
 import {
   IMPLICIT_COMPANY_ID, WorkflowDecisionRequestSchema, WorkflowSnapshotSchema, WorkflowTransitionError, change, decideWorkflow, when,
-  type DecisionRisk, type DocumentKey, type DocumentStore, type PolicySubject, type Principal, type TransactItem, type WorkflowSnapshot,
+  type DecisionRisk, type DocumentKey, type DocumentStore, type PolicySubject, type Principal, type TransactItem, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../developer/workflow-actions.js";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "./approval-gate.js";
 
 export const WORKFLOW_DOCUMENT_KIND = "workflow-document";
+/** What a refused decision says when the structured plan it names cannot be read back. */
+export const PLAN_UNREADABLE_REFUSAL = "the plan could not be read back, so it was not approved; refresh and try again";
 
 /** The task document's key, as the hosted product keeps it. */
 export const workflowTaskKey = (taskId: string): DocumentKey => ({ pk: `DEVTASK#${taskId}`, sk: "META" });
@@ -44,6 +46,11 @@ export interface WorkflowSubjectOptions {
    * the checked document. NOT supplying it means "high": a request nobody could grade is never graded low.
    */
   riskOf?: (task: Record<string, unknown>, workflow: WorkflowSnapshot) => DecisionRisk | Promise<DecisionRisk>;
+  /**
+   * The decided plan's own facts, read from the checked document: its decisions (each with its option ids and AgentX's recommendation) and what it says of needing no change. The engine checks the owner's
+   * answers against them. Called for every approval of a structured plan (and for answers or a close as answered); "unreadable" refuses the decision. Absent, answers are refused (a plan whose decisions are not known takes none).
+   */
+  planFactsOf?: (task: Record<string, unknown>, workflow: WorkflowSnapshot, artifact: WorkflowArtifact) => Promise<Pick<WorkflowDecisionDetails, "planDecisions" | "noChangeNeeded"> | "unreadable">;
   /** Who asked for the decision, when it is not the owner themselves (a request another person made). Absent: the owner. */
   requestedBy?: (task: Record<string, unknown>, workflow: WorkflowSnapshot) => Principal | undefined;
   /** When the waiting request stops being answerable (ISO). Absent: it does not expire. */
@@ -138,7 +145,18 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       const actor = actors[0];
       if (actor === undefined || actors.some((entry) => entry === undefined)) throw new SubjectRefusal("not_the_approver", "That person cannot decide this task.");
       const approver = approvers[0]!;
-      const details = (attempt.details ?? {}) as WorkflowDecisionDetails;
+      const given = (attempt.details ?? {}) as WorkflowDecisionDetails;
+      // The plan's own decisions and what it says of needing no change come from the stored document the decision binds, never from what a surface sent: the surface's copies are dropped. A structured plan
+      // that cannot be read back is refused when it is approved or answered (fail closed): an approval is never recorded for bytes nobody could check.
+      const { planDecisions: _surfaceDecisions, noChangeNeeded: _surfaceNoChange, ...surface } = given;
+      void _surfaceDecisions; void _surfaceNoChange;
+      const decidedArtifact = workflow.artifacts.find((entry) => entry.sha256 === attempt.seen.artifactDigest);
+      let facts: Awaited<ReturnType<NonNullable<WorkflowSubjectOptions["planFactsOf"]>>> | undefined;
+      if (options.planFactsOf !== undefined && decidedArtifact?.format === "structured" && (attempt.outcome === "approve" || surface.answers !== undefined || surface.closeAsAnswered === true)) {
+        facts = await options.planFactsOf(task, workflow, decidedArtifact);
+        if (facts === "unreadable") throw new SubjectRefusal("invalid_outcome", PLAN_UNREADABLE_REFUSAL);
+      }
+      const details: WorkflowDecisionDetails = { ...surface, ...(facts === undefined || facts === "unreadable" ? {} : facts) };
       const decision = attempt.outcome === "approve" ? "APPROVE" : attempt.outcome === "reject" ? "REJECT" : "REQUEST_CHANGES";
       // The work breakdown of the plan being approved (spec 059): derived from the stored document the approval binds by its digest. A digest the surface sent must be that one; a plan with none takes none.
       let workBreakdownDigest = details.workBreakdownDigest;

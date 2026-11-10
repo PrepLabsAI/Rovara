@@ -8,6 +8,7 @@ export type LocalActionResult = { ok: true; message?: string } | { ok: false; re
 
 /** The approval a page offers. The id, revision and digest are what the person is looking at; the page signs them into its form. */
 import type { WorkBreakdownView } from "../work-breakdown/view.js";
+import type { PlanSelfCheckView } from "../../developer/plan-self-check.js";
 
 export interface ApprovalOffer {
   /** The decision card or approval request this answers (the `requestId` of the W0 `ApprovalRequest`). */
@@ -27,6 +28,11 @@ export interface PlanVersionView {
   /** A structured plan renders as claims, evidence and decisions; a Markdown plan renders as plain text (never as HTML). */
   content: { format: "structured"; plan: PlanDocument; evidence?: PlanEvidenceBundle } | { format: "markdown"; markdown: string };
   createdAt?: string;
+  /**
+   * What Rovara's own check of a coding plan found, kept beside the plan: the record the page draws under the plan (whether the rules ran, the findings, what each check did on the unchanged code), and the plan on
+   * one screen. Only for the current version of a structured coding plan.
+   */
+  check?: { selfCheck: PlanSelfCheckView; oneScreen?: string };
 }
 
 export interface CommentView {
@@ -69,6 +75,8 @@ export interface PlanPageView {
   approval?: ApprovalOffer;
   /** Rovara's ask, the merge state and any questions (lane L12). */
   attention?: AttentionView;
+  /** What a second model made of the coding plan (the plan check), one line each, in Rovara's fixed words; the points are the second model's text and are drawn as untrusted. Absent: the plan was not checked. */
+  critique?: string[];
   /** The parts of an ordered run (spec 059): what the plan lists and where each stands. Absent for a plan with no work breakdown. */
   breakdown?: WorkBreakdownView;
 }
@@ -154,6 +162,8 @@ export interface PlanDecisionInput {
   decision: "approve" | "changes";
   /** What to change, for `changes`. */
   note?: string;
+  /** The owner's answer to each decision of a structured plan (every decision, once, with one of its options). Absent for a plan with no decisions or a Markdown plan. */
+  answers?: Array<{ decisionId: string; optionId: string; opened: boolean }>;
   approval: ApprovalOffer;
   proof: ApprovalProof;
 }

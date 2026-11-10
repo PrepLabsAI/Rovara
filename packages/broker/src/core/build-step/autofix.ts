@@ -4,12 +4,14 @@
 // the reviews is retried once; an unclear fault, a person's job or a reached limit is asked about, with what failed. It never approves, skips, publishes, picks optional checks or acts in a plan
 // review or a pull request: the only moves are the two below (and an ask), each of which holds the policy's limits again itself.
 //
-// What Code does not have, and so what the facts leave out: the original-code (baseline) round and the dry run of proposed checks (an unclear check fault is asked about rather than waited on),
+// What Code does not have, and so what the facts leave out: the original-code (baseline) round (an unclear check fault is asked about rather than waited on; the plan's dry run of its proposed checks on the unchanged code tells the code's fault from the rest when it was recorded),
 // the browser and API checks, and Cloud's day budgets (the room is always "yes").
 import {
   AUTO_FIX_DEFAULT_CAP_USD, WorkflowTransitionError, autoFixDecision, change, returnWorkflowToImplementationAutomatically, wholeTaskSpendUsd, when, workflowAutomaticRetryDecision,
-  type AutoFixAskReason, type AutoFixCode, type AutoFixDecision, type AutoFixFacts, type WorkflowAutoSpend,
+  type AutoFixAskReason, type AutoFixCode, type AutoFixDecision, type AutoFixFacts, type OriginalCodeResult, type WorkflowAutoSpend, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { loadPlanSelfCheck } from "../../developer/plan-self-check.js";
+import { textReaderOf } from "./plan-input.js";
 import { AutoFixAskSchema, autoFixRetryReason, autoFixSendBackReason } from "../../developer/autofix-messages.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem, resolveRowItem } from "../task-flow/dispatch-rows.js";
@@ -36,6 +38,15 @@ async function writeAsk(deps: TaskFlowDeps, taskId: string, revision: number, re
   return written.applied;
 }
 
+/** What a proposed check did on the original code, from the dry run recorded beside the approved plan. Empty when none was recorded (or the record cannot be trusted). */
+async function proposedCheckOriginals(deps: TaskFlowDeps, workflow: WorkflowSnapshot): Promise<Record<string, OriginalCodeResult>> {
+  const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
+  if (plan === undefined || deps.artifacts === undefined) return {};
+  const read = textReaderOf(deps.artifacts);
+  const view = await loadPlanSelfCheck((key) => read(key, 70_000), plan);
+  return Object.fromEntries(Object.entries(view.tried).map(([checkId, result]) => [checkId, result === "passed" ? "passed" as const : result === "failed" ? "failed" as const : "cannot-run" as const]));
+}
+
 /** Looks at one blocked VERIFY or REVIEW once, and acts or asks. Never throws for a task that moved on. */
 export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; workflowRevision: number }): Promise<StepStart> {
   const done = async (result: AutofixOutcome): Promise<StepStart> => {
@@ -57,7 +68,16 @@ export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; work
   // How the block came about when no finished run wrote it (the row says so): a lost run is the infrastructure's, one automatic retry, never a send back to coding.
   const row_ = fromDocument<DispatchRowRecord>(await deps.store.get(dispatchRowKey(deps.companyId, row.taskId, row.workflowRevision)));
   const facts: AutoFixFacts = row_?.cause === undefined ? {} : { blockCause: row_.cause };
-  const first = autoFixDecision(workflow, facts, { enabled: true, spend, dayBudgetHasRoom: true, baselineRequests: 1 });
+  let first = autoFixDecision(workflow, facts, { enabled: true, spend, dayBudgetHasRoom: true, baselineRequests: 1 });
+  // An unclear check fault is told from the code's own by what the plan's dry run found: a proposed check that already failed (or could not run) on the unchanged code is not the change's fault. The dry run is
+  // recorded beside the plan the owner approved (Cloud's `proposedCheckOriginals`); a task without one leaves the fault unclear.
+  if (first.action !== "NONE" && first.codes.includes("check-failed-cause-unknown")) {
+    const originals = await proposedCheckOriginals(deps, workflow);
+    if (Object.keys(originals).length > 0) {
+      facts.checkOriginal = originals;
+      first = autoFixDecision(workflow, facts, { enabled: true, spend, dayBudgetHasRoom: true, baselineRequests: 1 });
+    }
+  }
   // There is no original-code round in Code, so an unclear fault is the owner's to settle.
   const decision: AutoFixDecision = first.action === "WAIT_FOR_BASELINE" || first.action === "REQUEST_BASELINE" ? { action: "ASK", reason: "unclear-fault", codes: first.codes } : first;
   const at = iso(deps);

@@ -16,6 +16,12 @@ import { listTasks, readTask } from "../../core/task-flow/reads.js";
 import { fromDocument, type OperationRecord, type TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
+import { textReaderOf } from "../../core/build-step/plan-input.js";
+import { planEvidencePointer } from "../../core/plan/store.js";
+import { loadPlanEvidence, loadWorkflowDocument } from "../../developer/plan-document-reader.js";
+import { planOneScreen, planOneScreenText } from "../../developer/plan-one-screen.js";
+import { loadPlanSelfCheck } from "../../developer/plan-self-check.js";
+import { critiqueLines } from "../../rovara-code/critique-lines.js";
 import type { LocalComments } from "./comments.js";
 import type { LocalEvidence } from "./evidence.js";
 import { reportedChangedFiles, verifiedChangedFiles } from "../../core/build-step/changed-files.js";
@@ -92,6 +98,32 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
     const read = await readVerifiedText(deps.blobs, artifact, PLAN_READ_MAX_BYTES);
     return "text" in read ? read.text : "changed" in read ? DOCUMENT_CHANGED : "This document is no longer kept.";
   };
+  /**
+   * What the page shows of one stored document. A structured plan is read back and checked against its digest and shown as claims, decisions and checks; the code it cites is shown for the current version only,
+   * from the evidence the plan's pointer names (read only from this task's own storage, and only when its bytes match the digest recorded). A document that fails its check is not shown.
+   */
+  const contentOf = async (task: TaskRecord, artifact: WorkflowArtifact, current: boolean): Promise<PlanVersionView["content"]> => {
+    if (artifact.format !== "structured") return { format: "markdown", markdown: await markdownOf(artifact) };
+    const read = textReaderOf(deps.blobs);
+    const privatePrefix = `private/${task.ownerKey}/${task.workspaceId}/`;
+    if (!artifact.objectKey.startsWith(privatePrefix)) return { format: "markdown", markdown: DOCUMENT_CHANGED };
+    const loaded = await loadWorkflowDocument(read, artifact, {}).catch(() => undefined);
+    if (loaded?.format !== "structured") return { format: "markdown", markdown: DOCUMENT_CHANGED };
+    let recorded = artifact.evidence;
+    if (current && recorded === undefined) {
+      const pointer = await planEvidencePointer(deps.flow.store, task.taskId, artifact.id).catch(() => undefined);
+      if (pointer?.artifactSha256 === artifact.sha256 && typeof pointer.objectKey === "string" && typeof pointer.sha256 === "string") recorded = { objectKey: pointer.objectKey, sha256: pointer.sha256 };
+    }
+    const evidence = current && recorded?.objectKey.startsWith(privatePrefix) === true ? await loadPlanEvidence(read, { ...artifact, evidence: recorded }).catch(() => undefined) : undefined;
+    return { format: "structured", plan: loaded.plan, ...(evidence === undefined ? {} : { evidence }) };
+  };
+  /** Rovara's check of the current coding plan, read from the record beside the document (no usable record reads as "not checked", never as "no problems"). */
+  const checkOf = async (artifact: WorkflowArtifact, content: PlanVersionView["content"], current: boolean): Promise<PlanVersionView["check"] | undefined> => {
+    if (!current || artifact.type !== "plan" || content.format !== "structured") return undefined;
+    const read = textReaderOf(deps.blobs);
+    const selfCheck = await loadPlanSelfCheck(async (key) => read(key, 70_000), artifact);
+    return { selfCheck, oneScreen: planOneScreenText(planOneScreen(content.plan)) };
+  };
   const commentsOf = async (taskId: string): Promise<CommentView[]> => {
     const items = await queryAll(deps.flow.store, { pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "PAGE_COMMENT#" }, limit: COMMENTS_MAX });
     return items.flatMap((item) => (typeof item["id"] === "string" && typeof item["text"] === "string" && typeof item["createdAt"] === "string"
@@ -126,12 +158,17 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
       const latest = shown.filter((artifact) => artifact.type === waitingType).at(-1);
       const versions: PlanVersionView[] = [];
       for (const artifact of shown) {
+        const current = artifact.id === latest?.id;
+        const content = await contentOf(task, artifact, current);
+        const check = await checkOf(artifact, content, current);
         versions.push({
-          version: artifact.version, kind: KIND[artifact.type]!, approved: approvedDigests.has(artifact.sha256), current: artifact.id === latest?.id,
-          content: { format: "markdown", markdown: await markdownOf(artifact) }, createdAt: artifact.createdAt,
+          version: artifact.version, kind: KIND[artifact.type]!, approved: approvedDigests.has(artifact.sha256), current,
+          content, createdAt: artifact.createdAt, ...(check === undefined ? {} : { check }),
         });
       }
-      const approval = approvalOfferOf(taskId, workflow);
+      // A structured plan whose stored bytes cannot be read back is not offered for approval: the owner could not see what they would approve (the decision refuses it as well).
+      const unreadable = latest?.format === "structured" && versions.find((version) => version.current)?.content.format === "markdown";
+      const approval = unreadable ? undefined : approvalOfferOf(taskId, workflow);
       const breakdown = await breakdownOf(deps.flow, task, workflow);
       // A pull request whose head is no longer the one Rovara checked says so here (the stop-gap until merge tracking runs on a timer).
       const outside = new Map((await checkPullRequestHeads(deps.flow, task).catch(() => [])).filter((entry) => entry.changedOutside).map((entry) => [`${entry.repository}#${String(entry.number)}`, true]));
@@ -141,6 +178,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         findings: [],
         pullRequests: (workflow.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state.toLowerCase(), ...(outside.has(`${pullRequest.repositoryId}#${String(pullRequest.number)}`) ? { note: CHANGED_OUTSIDE_NOTE } : {}) })),
         comments: await commentsOf(taskId), ...(approval === undefined ? {} : { approval }), ...(breakdown === undefined ? {} : { breakdown }),
+        ...(workflow.critique === undefined ? {} : { critique: critiqueLines(workflow.critique, task.project) }),
         // Rovara's ask, the pull request's state and any questions: fixed words, and the forms that answer them.
         attention: await attentionWithThread(deps, task, (await attentionOf(deps.flow, task)).view),
       };

@@ -7,6 +7,7 @@ import { agentXError, taskGraphDigest, validateTaskGraph, type TaskGraphV1, type
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../developer/workflow-actions.js";
 import { textReaderOf } from "../build-step/plan-input.js";
+import { loadPlanDocument } from "../plan/document.js";
 import type { ArtifactReader, TaskFlowDeps } from "../task-flow/deps.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import { workflowDependenciesAllowed } from "./parallel-parts.js";
@@ -37,14 +38,9 @@ export async function breakdownForApproval(
   const artifact = workflow.artifacts.find((entry) => entry.type === "plan" && entry.sha256 === artifactDigest);
   if (artifact === undefined || artifact.format !== "structured") return {};
   // A structured plan that cannot be read now (a storage fault, bytes that no longer match the approval's digest) is refused, never approved as a plan with no breakdown: ordered work never falls back to plain coding.
-  let graph: TaskGraphV1 | undefined;
-  try {
-    const loaded = await loadWorkflowDocument(textReaderOf(deps.artifacts), artifact, {});
-    if (loaded?.format !== "structured") return { refusal: PLAN_UNREADABLE };
-    graph = loaded.plan.workBreakdown;
-  } catch {
-    return { refusal: PLAN_UNREADABLE };
-  }
+  const loaded = await loadPlanDocument(deps.artifacts, artifact);
+  if (loaded.kind !== "structured") return { refusal: PLAN_UNREADABLE };
+  const graph: TaskGraphV1 | undefined = loaded.plan.workBreakdown;
   if (graph === undefined) return {};
   if (!workflowDependenciesAllowed(deps, workflow)) return { refusal: WORKFLOW_BREAKDOWN_REFUSALS.notEnabled };
   const pinned = await deps.projects.revision(task.project, task.startingRevision);

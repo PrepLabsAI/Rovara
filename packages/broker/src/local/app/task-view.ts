@@ -2,7 +2,8 @@
 // hold is filled; the optional parts (events, summary, proof, evidence, testing, run limits) are left out until their lanes are wired.
 import type { ObjectStorage } from "@agentx/contracts";
 import type { DeveloperTaskListItem } from "@agentx/contracts";
-import { readVerifiedText } from "./documents.js";
+import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
+import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { TaskView } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
@@ -17,8 +18,9 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     const digest = waitingDocumentDigest(workflow);
     const artifact = workflow.artifacts.filter((candidate) => candidate.sha256 === digest).at(-1);
     // Only bytes that match the digest the approval binds are handed to a client.
-    const read = artifact === undefined ? undefined : await readVerifiedText(blobs, artifact, PLAN_CONTENT_MAX_BYTES);
-    if (read !== undefined && "text" in read) planContent = read.text;
+    // A structured plan is given as its Markdown copy (derived from the checked document, never stored); a Markdown plan as it was saved.
+    const loaded = artifact === undefined ? undefined : await loadWorkflowDocument(textReaderOf(blobs), artifact, { answers: "recommended" }).catch(() => undefined);
+    if (loaded !== undefined) planContent = loaded.markdown.slice(0, PLAN_CONTENT_MAX_BYTES);
   }
   return JSON.parse(JSON.stringify({
     taskId: task.taskId, title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, shared: false,
