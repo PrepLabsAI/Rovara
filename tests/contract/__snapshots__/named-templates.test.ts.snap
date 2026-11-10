@@ -3429,6 +3429,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::IAM::Policy",
     },
+    "ChannelApiActionsRoute7A0ACA43": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/channels/{channel}/actions",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "ChannelApiIntegration4BC4F1DE",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
     "ChannelApiDecisionsRoute248618C4": {
       "Properties": {
         "ApiId": {

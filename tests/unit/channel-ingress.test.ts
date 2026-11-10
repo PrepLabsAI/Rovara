@@ -79,6 +79,28 @@ describe("an accepted message", () => {
   });
 });
 
+describe("actions (FR-071)", () => {
+  const ACTIONS = "/v1/channels/whatsapp/actions";
+  const action = { version: 1, channel: "whatsapp", eventId: "wamid.HBgL3", conversation, actor, actionId: "workflow.changes", value: "42", form: { note: "keep the old menu" }, receivedAt: "2026-11-08T09:59:59.000Z" };
+
+  it("are queued with the bound project and linked developer, once, without an ack", async () => {
+    const { post, queued, events } = harness();
+    expect(status(await post(ACTIONS, action))).toEqual({ statusCode: 202, status: "accepted" });
+    expect(status(await post(ACTIONS, action))).toEqual({ statusCode: 200, status: "duplicate" });
+    expect(queued).toEqual([{ kind: "action", action, projectName: "web", developerId: "dev-1", stepUp: ["plan_approval", "admin"] }]);
+    expect(events).toEqual([]);
+  });
+
+  it("need a conversation until direct messages' actions arrive, and a bound space", async () => {
+    const { post, queued } = harness();
+    const direct: Record<string, unknown> = { ...action };
+    delete direct.conversation;
+    expect(status(await post(ACTIONS, direct))).toEqual({ statusCode: 400, error: "conversation_required" });
+    expect(status(await post(ACTIONS, { ...action, conversation: { ...conversation, space: "group=Other" } }))).toEqual({ statusCode: 403, error: "space_not_bound" });
+    expect(queued).toEqual([]);
+  });
+});
+
 describe("refusals run nothing (SC-003)", () => {
   it.each([
     ["a bad signature", { tamper: true }, 401, "bad_signature"],

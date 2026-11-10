@@ -29,7 +29,7 @@ const pending = (kind: PendingConfirmation["calls"][number]["kind"]): PendingCon
   calls: [{ tool: "tracker__close_item", argumentsHash: "a".repeat(64), summary: "tracker__close_item: id=TRK-9", kind }],
   postedAt: new Date(postedAt).toISOString(), expiresAt: new Date(postedAt + CONFIRMATION_TTL_MS).toISOString(),
 });
-const decision = (value: "APPROVE" | "REJECT", confirmation: PendingConfirmation, stepUp: ChannelQueueItem["stepUp"] = ["plan_approval", "admin"]): ChannelQueueItem => ({
+const decision = (value: "APPROVE" | "REJECT", confirmation: PendingConfirmation, stepUp: ChannelQueueItem["stepUp"] = ["plan_approval", "admin"]): Extract<ChannelQueueItem, { kind: "decision" }> => ({
   kind: "decision", projectName: "web", developerId: "dev-1", stepUp,
   decision: {
     version: 1, channel: "whatsapp", eventId: "wamid.HBgL2", conversation, actor, requestId: confirmation.confirmationId, expectedRevision: 1,
@@ -96,6 +96,30 @@ describe("an adapter message", () => {
     await run({ ...message, message: { ...message.message, text: "eval swebench verified astropy__astropy-12907" } });
     expect(turns).toEqual([]);
     expect(events[0]).toMatchObject({ type: "message", data: { text: SLACK_ONLY_COMMAND_TEXT } });
+  });
+});
+
+describe("actions (FR-071)", () => {
+  const action: ChannelQueueItem = {
+    kind: "action", projectName: "web", developerId: "dev-1", stepUp: [],
+    action: { version: 1, channel: "whatsapp", eventId: "a1", conversation, actor, actionId: "workflow.approve", value: "42", receivedAt: "2026-11-10T10:00:00.000Z" },
+  };
+
+  it("runs the handler registered for the action's ID, and runs no turn", async () => {
+    const handled: string[] = [];
+    const { turns } = harness();
+    const logs: string[] = [];
+    const handle = channelRequestHandler({
+      processor: { api: vi.fn(), threads: { load: vi.fn(), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish: vi.fn() }, runTurn: vi.fn(), log: () => undefined },
+      send: async () => undefined, log: (event) => { logs.push(event); },
+      actions: { "workflow.approve": async (received) => { handled.push(received.value); } },
+    });
+    await handle(action, { finalAttempt: false });
+    const unknown: ChannelQueueItem = { kind: "action", projectName: "web", developerId: "dev-1", stepUp: [], action: { version: 1, channel: "whatsapp", eventId: "a2", conversation, actor, actionId: "workflow.unknown", value: "42", receivedAt: "2026-11-10T10:00:00.000Z" } };
+    await handle(unknown, { finalAttempt: false });
+    expect(handled).toEqual(["42"]);
+    expect(logs).toEqual(["channel.action_unhandled"]);
+    expect(turns).toEqual([]);
   });
 });
 

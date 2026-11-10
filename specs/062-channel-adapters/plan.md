@@ -188,3 +188,30 @@ production Slack path.
 
 No stored data or wire format changes; revert.
 
+## Phase 7a: the primitives Slack needs
+
+Slack goes through the channel API from Phase 7b (spec FR-070 to FR-074). 7a adds what that needs, behind
+capabilities an adapter declares; nothing is sent to an adapter that does not declare it, and nothing uses it yet.
+
+| Layer | Change |
+|---|---|
+| contracts | Capabilities `ephemeral`, `direct`, `forms`, `documents`, `directory`, `startConversations` (absent means off). `message` events take `key`, `parts`, `actions` (buttons, links, selects, forms) and an `ephemeral` audience; a `direct` event goes to one actor outside any conversation. `ChannelActionSchema` for presses and form submissions. `ChannelCommandSchema` (`start_conversation`, `create_document`, `delete_document`, `space_members`, `user`, `user_by_email`), its results and answers, and `adapterTakesCommand`. Registration takes an optional `commandsUrl`. |
+| broker | `channel-commands.ts`: `sendChannelCommand` signs a command with the adapter's secret (the command's ID as `webhook-id`), refuses a kind the adapter does not declare, a private address and redirects, and accepts only an answer signed for that same ID. The channel API takes `POST /v1/channels/{channel}/actions` (with a conversation, for now) and queues them. The event sender drops a private or direct message to an adapter that cannot keep it private, form buttons without `forms`, and actions past the adapter's buttons. |
+| orchestrator service | The channel consumer runs an action by its ID through a handler registry; one with no handler is logged and dropped. |
+| infra | The actions route. |
+
+### Decisions
+
+- **Forms are declared on the button.** Slack opens a modal only within 3 seconds of a press, which no queue round
+  trip meets, so the adapter opens the form itself and posts the submission as one action.
+- **Commands answer synchronously, signed both ways.** Starting a conversation, creating a canvas and reading a
+  channel's members need their answer before the core can go on; the answer's signature repeats the command's ID, so
+  it cannot be replayed onto another command.
+- **Private means private.** An ephemeral or direct message to an adapter without that capability is dropped, never
+  shown to the whole conversation.
+- **Absent capabilities are off.** Records registered before 7a read as they did.
+
+### Rollback
+
+Nothing uses the primitives yet; revert.
+
