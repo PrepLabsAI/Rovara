@@ -8,6 +8,28 @@ export class SlackPostError extends Error {
   }
 }
 
+/**
+ * Spec 062 FR-042: the broker's one Slack Web API transport. With a body it is a JSON POST; without one, a GET with
+ * the query. The token goes only in the Authorization header. Callers read and judge the answer themselves.
+ */
+export function slackWebFetch(
+  method: string,
+  token: string,
+  request: { body?: unknown; query?: Record<string, string>; signal?: AbortSignal; redirect?: "error" | "follow" | "manual" },
+  fetchImplementation: typeof fetch = fetch,
+): Promise<Response> {
+  const query = request.query === undefined ? "" : `?${new URLSearchParams(request.query).toString()}`;
+  const url = `https://slack.com/api/${method}${query}`;
+  const common = { ...(request.signal === undefined ? {} : { signal: request.signal }), ...(request.redirect === undefined ? {} : { redirect: request.redirect }) };
+  // A read sets no method, as the callers' requests always have (fetch's default is GET).
+  if (request.body === undefined) return fetchImplementation(url, { ...common, headers: { authorization: `Bearer ${token}` } });
+  return fetchImplementation(url, {
+    method: "POST", ...common,
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(request.body),
+  });
+}
+
 /** Errors from a request that may have reached Slack: it failed before or while Slack answered. */
 const unanswered = new WeakSet<object>();
 
@@ -24,12 +46,7 @@ export function postMayHaveLanded(error: unknown): boolean {
 
 /** One Web API call; `complete` says whether a successful answer has what the caller needs. */
 async function callSlack(method: string, botToken: string, body: Record<string, unknown>, fetchImplementation: typeof fetch, complete: (result: Record<string, unknown>) => boolean = () => true): Promise<Record<string, unknown>> {
-  const response = await fetchImplementation(`https://slack.com/api/${method}`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${botToken}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
-  }).catch((error: unknown) => {
+  const response = await slackWebFetch(method, botToken, { body, signal: AbortSignal.timeout(10_000) }, fetchImplementation).catch((error: unknown) => {
     if (typeof error === "object" && error !== null) unanswered.add(error);
     throw error;
   });
@@ -47,13 +64,7 @@ async function callSlack(method: string, botToken: string, body: Record<string, 
 }
 
 async function callSlackGet(method: string, botToken: string, query: Record<string, string>, fetchImplementation: typeof fetch): Promise<Record<string, unknown>> {
-  const url = new URL(`https://slack.com/api/${method}`);
-  for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
-  const response = await fetchImplementation(url, {
-    method: "GET",
-    headers: { authorization: `Bearer ${botToken}` },
-    signal: AbortSignal.timeout(10_000),
-  }).catch((error: unknown) => {
+  const response = await slackWebFetch(method, botToken, { query, signal: AbortSignal.timeout(10_000) }, fetchImplementation).catch((error: unknown) => {
     if (typeof error === "object" && error !== null) unanswered.add(error);
     throw error;
   });

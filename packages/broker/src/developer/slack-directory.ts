@@ -16,6 +16,7 @@ import {
   type TaskPeopleDisplayReadRequest,
   type TaskPeopleDisplayReadResponse,
 } from "@agentx/contracts";
+import { slackWebFetch } from "../aws/slack-web.js";
 
 export type SlackUserStatus = "active" | "gone" | "unavailable";
 export interface SlackDirectory {
@@ -131,11 +132,9 @@ export function slackDirectory(input: {
     }
     let response: Response;
     try {
-      const url = new URL(`https://slack.com/api/${method}`);
-      for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
       const timeoutSignal = AbortSignal.timeout(Math.max(1, Math.min(TIMEOUT_MS, timeoutMs)));
       const signal = admission?.abortSignal === undefined ? timeoutSignal : AbortSignal.any([admission.abortSignal, timeoutSignal]);
-      response = await input.fetch(url, { headers: { authorization: `Bearer ${token}` }, signal });
+      response = await slackWebFetch(method, token, { query, signal }, input.fetch);
     } catch {
       return problem(method, undefined, "unreachable");
     }
