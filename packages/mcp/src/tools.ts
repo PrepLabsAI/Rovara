@@ -475,22 +475,19 @@ export function requestIdFor(context: ToolContext, call: ToolCall, input: Record
 }
 const optional = (value: unknown) => value ?? null;
 /**
- * H3: how a start says "post the task in the project's chat channel". The neutral field is `channel`: true posts it in the project's channel, false does not, and a name or ID
- * picks which bound channel (a name alone never starts a share; it is read as before). `share_to_channel` is the older boolean, still read for one release; a start that gives both
- * must give the same answer. The same answer under either spelling is the same start (it hashes alike).
+ * H3: how a start says "post the task in the project's chat channel". The neutral field is the boolean `share` (true shares it in the project's channel, false keeps it private);
+ * `channel` stays the name or ID of which bound channel to use, and a name alone never starts a share. `share_to_channel` is the older name of `share`, still read for one release;
+ * a start that gives both must give the same answer. The same answer under either spelling is the same start (it hashes alike).
  */
 const shareFields = (input: Record<string, unknown>): { shareToChannel?: boolean; channel?: string } => {
-  const channel = input.channel as boolean | string | undefined;
+  const share = input.share as boolean | undefined;
   const older = input.share_to_channel as boolean | undefined;
-  if (typeof channel === "boolean") {
-    if (older !== undefined && older !== channel) throw new ToolError("INVALID_REQUEST", "channel and share_to_channel disagree: give channel only (share_to_channel is the older name for channel: true or false)");
-    return { shareToChannel: channel };
-  }
-  return { ...(older === undefined ? {} : { shareToChannel: older }), ...(channel === undefined ? {} : { channel }) };
+  if (share !== undefined && older !== undefined && share !== older) throw new ToolError("INVALID_REQUEST", "share and share_to_channel disagree: give share only (share_to_channel is the older name for share)");
+  const wanted = share ?? older;
+  return { ...(wanted === undefined ? {} : { shareToChannel: wanted }), ...(input.channel === undefined ? {} : { channel: input.channel as string }) };
 };
-const channelInput = z.union([z.boolean(), z.string().min(1).max(80)]).optional().describe(
-  "post the task in the project's chat channel: true to share it there, false (the default) to keep it private; or the name or ID of the bound channel to use when the project has several (a name alone does not start a share: also give true)",
-);
+const shareInput = z.boolean().optional().describe("post the task in the project's chat channel, where AgentX replies as it runs: true to share it, false (the default) to keep it private");
+const channelInput = z.string().min(1).max(80).optional().describe("which bound channel to share in, by name or ID; needed only when the project has several; a name alone does not start a share (also give share: true)");
 /**
  * Review M9: what makes a start the same start, for agentx_start and its aliases alike, so a retry under another of the start tools' names is the same start (never a second task).
  * `workflowPath` is QUICK, FULL or absent; an agent run is told apart by its own content.
@@ -688,8 +685,9 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       agent: agentInput,
       run_agent: z.boolean().optional().describe("start an agent run of agent (needs agent) instead of a task; false by default"),
       input: runInputInput,
+      share: shareInput,
+      share_to_channel: z.boolean().optional().describe("deprecated, the same as share; removed after one release"),
       channel: channelInput,
-      share_to_channel: z.boolean().optional().describe("deprecated, the same as channel: true or false; removed after one release"),
       share_mode: z.enum(["view", "continue"]).optional(),
       wait_seconds: waitInput(0).optional().describe("seconds to wait for the task to end, 0 to 600; 0 (answer at once) by default"),
       request_id: requestIdInput,
@@ -701,7 +699,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       const wait = (input.wait_seconds as number | undefined) ?? 0;
       if (input.run_agent === true) {
         if (agent === undefined) throw new ToolError("INVALID_REQUEST", "run_agent: name the agent to run in agent");
-        if (input.workflow_path !== undefined || input.share_to_channel !== undefined || input.share_mode !== undefined || input.channel !== undefined || input.title !== undefined) {
+        if (input.workflow_path !== undefined || input.share !== undefined || input.share_to_channel !== undefined || input.share_mode !== undefined || input.channel !== undefined || input.title !== undefined) {
           throw new ToolError("INVALID_REQUEST", "run_agent: an agent run takes project, instructions, agent, input and wait_seconds only");
         }
         const given = input.input as { context?: RunInput["context"] } | undefined;
@@ -734,8 +732,9 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       project: z.string().min(1).max(200).describe("the project's exact name, from agentx_list_projects"),
       instructions: instructionsInput,
       title: z.string().max(120).optional().describe("a short title, at most 120 characters; the first line of the instructions when left out"),
+      share: shareInput,
+      share_to_channel: z.boolean().optional().describe("deprecated, the same as share; removed after one release"),
       channel: channelInput,
-      share_to_channel: z.boolean().optional().describe("deprecated, the same as channel: true or false; removed after one release"),
       share_mode: z.enum(["view", "continue"]).optional().describe("view (the channel watches) or continue (channel members may mention AgentX in the thread to steer the task); the project's default when left out, and view when the project does not allow continue"),
       agent: agentInput,
       input: runInputInput,
@@ -769,8 +768,9 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       project: z.string().min(1).max(200).describe("the project's exact name, from agentx_list_projects"),
       instructions: instructionsInput,
       title: z.string().max(120).optional(),
+      share: shareInput,
+      share_to_channel: z.boolean().optional().describe("deprecated, the same as share; removed after one release"),
       channel: channelInput,
-      share_to_channel: z.boolean().optional().describe("deprecated, the same as channel: true or false; removed after one release"),
       share_mode: z.enum(["view", "continue"]).optional(),
       workflow_path: z.enum(["quick", "full"]).describe("required approval sequence: quick asks once for the coding plan; full asks separately for requirements, design, and coding steps"),
       agent: agentInput,

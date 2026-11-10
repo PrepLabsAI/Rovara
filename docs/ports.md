@@ -348,7 +348,7 @@ The MCP tools an AI tool calls use chat-neutral names, so a second chat adapter 
 
 | Neutral name | Replaces | Where |
 | --- | --- | --- |
-| `channel` as a boolean (`true` posts the task in the project's chat channel) | `share_to_channel` | `agentx_start`, `agentx_start_task`, `agentx_start_workflow`. `channel` as a string still picks a bound channel and, as before, does not start a share by itself. The two spellings must agree when both are given. |
+| `share` (boolean: `true` posts the task in the project's chat channel, `false` keeps it private) | `share_to_channel` | `agentx_start`, `agentx_start_task`, `agentx_start_workflow`. `channel` stays the string that names which bound channel to use and, as before, does not start a share by itself. The two spellings must agree when both are given. |
 | `channel_user` | `slack_user` | `agentx_whoami`, and each entry of `channel_turns` in a task answer (both names are sent) |
 | `plugins`: one row `{ point, name, status, detail? }` per installed plug-in | `slack`, `github` | `agentx_admin_health` and `GET /v1/admin/health` (both old fields are still sent when that adapter exists; an older server's answer is turned into rows) |
 

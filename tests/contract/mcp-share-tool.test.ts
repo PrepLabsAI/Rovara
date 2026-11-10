@@ -228,10 +228,10 @@ describe("neutral channel fields (item H3, old names kept one release)", () => {
     return { startTask, result };
   };
 
-  it("reads channel: true like the older share_to_channel: true, on every start tool", async () => {
+  it("reads share: true like the older share_to_channel: true, on every start tool", async () => {
     for (const tool of ["agentx_start", "agentx_start_task", "agentx_start_workflow"]) {
       const extra = tool === "agentx_start_workflow" ? { workflow_path: "quick" } : {};
-      const neutral = await startOf({ channel: true, ...extra }, tool);
+      const neutral = await startOf({ share: true, ...extra }, tool);
       const older = await startOf({ share_to_channel: true, ...extra }, tool);
       expect(neutral.startTask.mock.calls[0]?.[0]).toMatchObject({ shareToChannel: true });
       expect(neutral.startTask.mock.calls[0]?.[0]).not.toHaveProperty("channel");
@@ -240,19 +240,21 @@ describe("neutral channel fields (item H3, old names kept one release)", () => {
     }
   });
 
-  it("keeps a channel name as it was: sent, and not a share by itself", async () => {
+  it("keeps a channel name a string: sent, and not a share by itself", async () => {
     const named = await startOf({ channel: "payments-dev" });
     expect(named.startTask.mock.calls[0]?.[0]).toMatchObject({ channel: "payments-dev" });
     expect(named.startTask.mock.calls[0]?.[0]).not.toHaveProperty("shareToChannel");
-    const both = await startOf({ share_to_channel: true, channel: "payments-dev" });
+    const both = await startOf({ share: true, channel: "payments-dev" });
     expect(both.startTask.mock.calls[0]?.[0]).toMatchObject({ shareToChannel: true, channel: "payments-dev" });
+    // A boolean is no longer a channel.
+    expect((await startOf({ channel: true })).result).toMatchObject({ isError: true });
   });
 
-  it("refuses channel and share_to_channel that disagree, and calls nothing", async () => {
-    const refused = await startOf({ channel: false, share_to_channel: true });
+  it("refuses share and share_to_channel that disagree, and calls nothing", async () => {
+    const refused = await startOf({ share: false, share_to_channel: true });
     expect(refused.result).toMatchObject({ isError: true });
     expect(refused.startTask).not.toHaveBeenCalled();
-    const agree = await startOf({ channel: false, share_to_channel: false });
+    const agree = await startOf({ share: false, share_to_channel: false });
     expect(agree.startTask.mock.calls[0]?.[0]).toMatchObject({ shareToChannel: false });
   });
 });
