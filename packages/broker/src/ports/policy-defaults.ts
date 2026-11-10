@@ -83,7 +83,7 @@ export function createLocalOwnerIdentity(options: LocalOwnerIdentityOptions = {}
   const owner = localOwnerPrincipal(options);
   const linked = options.linkedAccounts ?? [];
   return {
-    capabilities: { interactiveSignIn: false, externalAccounts: linked.length > 0 },
+    capabilities: { interactiveSignIn: false, externalAccounts: linked.length > 0, members: true, companySignIn: false },
     async authenticate(credential: PresentedCredential): Promise<AuthResult> {
       if (credential.scheme !== LOCAL_SESSION_SCHEME || options.isValidSession === undefined) return { ok: false, reason: "refused" };
       return (await options.isValidSession(credential.value, credential.remoteAddress)) ? { ok: true, principal: owner } : { ok: false, reason: "unknown" };
@@ -94,6 +94,13 @@ export function createLocalOwnerIdentity(options: LocalOwnerIdentityOptions = {}
     },
     async getPrincipal(companyId: string, personId: string) {
       return companyId === owner.companyId && personId === owner.personId ? owner : undefined;
+    },
+    // Lane P3 (item I1): one company, one member. There is no sign-in flow (`interactiveSignIn` is off): the owner's session is minted by `rovara up`.
+    async listMembers(companyId: string) {
+      return { members: companyId === owner.companyId ? [owner] : [] };
+    },
+    async accountsOf(companyId: string, personId: string) {
+      return companyId === owner.companyId && personId === owner.personId ? linked.map((entry) => ({ ...entry })) : [];
     },
   };
 }
@@ -132,7 +139,9 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
   return {
     async requirement(): Promise<ApprovalRequirement> {
       const methods = [...(options.verifySession === undefined ? [] : [LOCAL_SESSION_METHOD]), ...(options.fetchComment === undefined || options.commentsOn?.() === false ? [] : [CODE_HOST_COMMENT_METHOD])];
-      return { methods, minApprovers: 1, selfApprovalAllowed: true };
+      // The plug-in names its own strong methods (lane P3, item A3): a high-risk approval and every rejection need the local session, never a comment (decisions 45.3 and 62); asking for changes may use either.
+      const session = methods.filter((method) => method === LOCAL_SESSION_METHOD);
+      return { methods, minApprovers: 1, selfApprovalAllowed: true, strongMethods: session, rejectMethods: session, changesMethods: methods };
     },
     async verify(request: ApprovalRequest, proof: ApprovalProof): Promise<ApprovalVerdict> {
       const refuse = (reason: string): ApprovalVerdict => ({ approved: false, reason });

@@ -2,17 +2,19 @@
 // the company directory, member lookup and role change, invite list and status, and the trial state belong to Cloud (decision 41) and stay in Cloud's file, which
 // keeps this part unchanged. Decision 51 gap: the sign-in method list below names its providers in the core.
 import { z } from "zod";
-import { OrgRoleSchema } from "./company-scope.js";
+import { OrgRoleNameSchema } from "./company-scope.js";
 import { DISPLAY_NAME_MAX_CODE_POINTS, containsEmailAddress, isReservedDisplayName } from "./display-name.js";
 import { forwardReader } from "./forward-reader.js";
-export const DeveloperSignInMethodSchema = z.enum(["slack", "oidc", "cloud", "github", "saml"]);
+import { BUILT_IN_SIGN_IN_METHODS, SignInMethodIdSchema } from "./outside-account.js";
+/** The built-in sign-in methods the hosted sign-in server knows (a closed list for that server). Shapes that only carry a method use the open `SignInMethodIdSchema` (outside-account.ts; lane P3, item I2). */
+export const DeveloperSignInMethodSchema = z.enum(BUILT_IN_SIGN_IN_METHODS);
 export type DeveloperSignInMethod = z.infer<typeof DeveloperSignInMethodSchema>;
 /**
  * One sign-in method linked to a developer (`GET /v1/app/me`). It names the method and what the person recognises it by, never the
  * provider's issuer or subject.
  */
 export const LinkedIdentitySchema = z.object({
-  provider: DeveloperSignInMethodSchema,
+  provider: SignInMethodIdSchema,
   email: z.string().optional(),
   login: z.string().optional(),
   linkedAt: z.string(),
@@ -29,7 +31,7 @@ export const AppMeResponseSchema = z.object({
     name: z.string().min(1).max(200),
     /** The person's own email: theirs to see, never shown to others. */
     email: z.string().optional(),
-    orgRole: OrgRoleSchema,
+    orgRole: OrgRoleNameSchema,
     /** True once the person chose their name; false while it is the provider's or a placeholder (the web app then asks once). Absent from a control plane that predates it. */
     nameChosen: z.boolean().optional(),
   }),

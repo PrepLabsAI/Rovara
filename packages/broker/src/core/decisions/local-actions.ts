@@ -23,6 +23,7 @@ const WORDS: Record<GateRefusalReason, { reason: "stale" | "refused" | "not_foun
   proof_already_used: { reason: "refused", message: "That was already used. Read the page again." },
   request_id_reused: { reason: "refused", message: "That was already decided differently." },
   invalid_outcome: { reason: "refused", message: "That is not ready to be decided." },
+  sign_in_not_fresh: { reason: "refused", message: "Sign in again, then decide." },
 };
 
 /** What a gate answer says to a page or a comment. A repeat of a finished decision is a success (the same answer again). */

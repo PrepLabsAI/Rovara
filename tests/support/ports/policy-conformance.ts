@@ -147,6 +147,22 @@ export function runApproversConformance(name: string, harness: ApproversHarness)
       expect(requirement.methods).toContain(harness.acceptable.method);
     });
 
+    it("names its strong, reject and changes methods only among the methods it offers, and never a comment as strong (lane P3, item A3)", async () => {
+      const requirement = await (await harness.create()).requirement(harness.request);
+      for (const named of [requirement.strongMethods, requirement.rejectMethods, requirement.changesMethods]) {
+        if (named !== undefined) for (const method of named) expect(requirement.methods).toContain(method);
+      }
+      for (const named of [requirement.strongMethods, requirement.rejectMethods]) {
+        if (named !== undefined) expect(named).not.toContain("code-host-comment");
+      }
+      if (requirement.signIn !== undefined) expect(["window", "any-active"]).toContain(requirement.signIn.mode);
+    });
+
+    it("gives an approver an authTime that is a time, when it gives one (lane P3, item A1)", async () => {
+      const verdict = await (await harness.create()).verify(harness.request, fresh());
+      if (verdict.approved && verdict.approver.authTime !== undefined) expect(Number.isFinite(Date.parse(verdict.approver.authTime))).toBe(true);
+    });
+
     it("accepts an acceptable proof and names the approver and the proof", async () => {
       const proof = fresh();
       const verdict = await (await harness.create()).verify(harness.request, proof);
@@ -246,6 +262,47 @@ export function runIdentityConformance(name: string, harness: IdentityHarness): 
         expect((await identity.resolveExternalAccount(companyId, harness.linkedAccount))?.personId).toBe(personId);
         expect(await identity.resolveExternalAccount("org_zzzzzzzzzzzzzzzzzzzz", harness.linkedAccount)).toBeUndefined();
       }
+    });
+
+    // Lane P3, item I1: the optional abilities. An adapter offers what its capability flags say, and answers the way the port says.
+    it("offers the abilities its capability flags name", async () => {
+      const identity = await harness.create();
+      if (identity.capabilities.interactiveSignIn) {
+        expect(typeof identity.beginSignIn).toBe("function");
+        expect(typeof identity.completeSignIn).toBe("function");
+        expect(typeof identity.signOut).toBe("function");
+      }
+      if (identity.capabilities.externalAccounts) expect(typeof identity.accountsOf).toBe("function");
+      if (identity.capabilities.members === true) expect(typeof identity.listMembers).toBe("function");
+    });
+
+    it("lists the company's members in its own company only, with a sign-in time that is a time when it has one", async () => {
+      const identity = await harness.create();
+      if (identity.listMembers === undefined) return;
+      const { companyId, personId } = harness.valid.principal;
+      const page = await identity.listMembers(companyId);
+      expect(page.members.map((member) => member.personId)).toContain(personId);
+      for (const member of page.members) {
+        expect(member.companyId).toBe(companyId);
+        if (member.authTime !== undefined) expect(Number.isFinite(Date.parse(member.authTime))).toBe(true);
+      }
+      expect((await identity.listMembers("org_zzzzzzzzzzzzzzzzzzzz")).members).toEqual([]);
+    });
+
+    it("lists a person's outside accounts, the other way round from resolving one, and none for a stranger", async () => {
+      const identity = await harness.create();
+      if (identity.accountsOf === undefined) return;
+      const { companyId, personId } = harness.valid.principal;
+      if (harness.linkedAccount !== undefined) expect(await identity.accountsOf(companyId, personId)).toContainEqual(harness.linkedAccount);
+      expect(await identity.accountsOf(companyId, "no-such-person")).toEqual([]);
+      expect(await identity.accountsOf("org_zzzzzzzzzzzzzzzzzzzz", personId)).toEqual([]);
+    });
+
+    it("ends a sign-in that is over without failing, and refuses nobody a second time", async () => {
+      const identity = await harness.create();
+      if (identity.signOut === undefined) return;
+      await identity.signOut(harness.valid.credential);
+      await identity.signOut(harness.valid.credential);
     });
   });
 }
