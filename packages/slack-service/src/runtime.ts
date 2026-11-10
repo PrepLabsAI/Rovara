@@ -24,7 +24,7 @@ export function createHostedSlackRuntime(input: TurnInput, options: HostedRuntim
     ...runtime,
     projectInstructions: input.orchestratorInstructions,
     // Spec 062: an adapter formats plain text itself, so the model is told Slack's markup only for Slack.
-    ...(input.plainReplies === true ? {} : { replySurface: "slack" as const }),
+    replySurface: input.plainReplies === true ? "plain" as const : "slack" as const,
     context: { workspaceId: input.workspaceId, conversationId: input.conversationId },
     requestId: input.requestId,
     ...(input.connectors === undefined ? {} : { connectors: input.connectors }),

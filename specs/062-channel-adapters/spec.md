@@ -2,7 +2,7 @@
 
 **Feature Branch**: `claude/062-channel-adapters`
 **Created**: 2026-11-08
-**Status**: Phases 1–2 merged (#424), Phase 3 merged (#425); Phase 4a in progress
+**Status**: Phases 1–2 merged (#424), Phase 3 merged (#425), Phase 4a merged (#426); Phase 4b in progress
 **Issue**: #423
 **Input**: "We need a way to trigger Rovara through a third-party trigger, like Slack today. I should be able to
 do it through WhatsApp or anything, as long as it conforms to the protocol through a lightweight adapter."
@@ -141,10 +141,14 @@ phase. A thread started before the change resumes its workspace after it.
 
 ### Core without Slack (Phase 4b)
 
-- **FR-040:** The orchestrator's prompts and action gate name no surface; output is plain text and structured
-  parts, and each adapter formats it.
-- **FR-041:** `model`, `chatgpt connect`, `swebench` and eval-batch are core text commands.
-- **FR-042:** Slack Web API calls happen only inside the Slack adapter.
+- **FR-040:** The orchestrator's prompts and action gate name no surface; the surface chooses the model's reply
+  style. The processor writes every text it posts through the conversation's format: Slack's keeps today's exact
+  texts, and an adapter's is plain text the adapter formats.
+- **FR-041:** `models` and `use <model>` are core text commands, worded for each surface. `swebench` and eval
+  batches stay Slack-only (FR-038). `connect chatgpt`, `chatgpt status` and `disconnect chatgpt` are still answered
+  by Slack ingress for the Slack member; they move to the core with the Slack adapter split (Phase 5).
+- **FR-042:** In each package, Slack Web API calls go through one module: `slack-web.ts` in the broker and in the
+  orchestrator service. (Sign-in's OpenID token exchange and the CLI's setup are not Web API messaging.)
 
 ### Slack and WhatsApp on the protocol (Phases 5–6)
 
@@ -206,4 +210,5 @@ The amendment permits adapters; none exists until Phase 3, so no running behavio
 - **SC-001:** Every existing Slack owner key, subject and binding key is unchanged (Phase 1 and 2 tests).
 - **SC-002:** A WhatsApp message in a bound group starts a task and receives `done`, on a test install.
 - **SC-003:** An unlinked actor, an unbound space and a bad signature each run nothing (abuse tests).
-- **SC-004:** After Phase 4b, no module outside the Slack adapter imports Slack schemas or calls the Slack API.
+- **SC-004:** After Phase 4b, no module outside `slack-web.ts` calls the Slack Web API, and the orchestrator package's
+  prompts and gate texts name no surface. After Phase 5, no module outside the Slack adapter imports Slack schemas.

@@ -5,7 +5,6 @@ import {
   detailsButtonValue,
   detailsReplyBlocks,
   slackThreadSubject,
-  splitSlackMessage,
   WorkspaceClosePreflightResultSchema,
   type SlackRequestMessage,
   type SlackThread,
@@ -31,8 +30,8 @@ import { EXPIRED_TEXT, checkConfirmation, settleConfirmations, type Confirmation
 import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
 import { createLazyWorker } from "./lazy-worker.js";
-import { NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, limitMessage, preparationFailedMessage } from "./messages.js";
-import { escapeText, slackReplyText } from "./slack-format.js";
+import { limitMessage, newWorkspaceMessage, preparationFailedMessage, stillPreparingMessage } from "./messages.js";
+import { SLACK_FORMAT, type ConversationFormat } from "./conversation-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 import { matchApprovedModel, modelCheckWarning, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
 import {
@@ -179,6 +178,8 @@ export interface ProcessorDependencies<Thread = SlackThread> {
   subjectOf?: (thread: Thread) => string;
   /** Spec 062: replies are plain text for a channel adapter. */
   plainReplies?: true;
+  /** Spec 062 FR-040: how the processor's words and the model's reply are written; Slack's when absent. */
+  format?: ConversationFormat;
   /** Spec 062: posted instead of running a command only Slack offers (a SWE-bench run, an eval batch). */
   slackOnlyCommandText?: string;
   /** Spec 062 FR-032: false for a confirmation this conversation's adapter may not approve. */
@@ -250,6 +251,11 @@ export async function processSlackRequest<Thread = SlackThread>(
   },
 ): Promise<void> {
   const subject = dependencies.subjectOf === undefined ? slackThreadSubject(message.thread as SlackThread) : dependencies.subjectOf(message.thread);
+  // Spec 062 FR-040: every text below is written for the conversation's surface.
+  const format = dependencies.format ?? SLACK_FORMAT;
+  const escapeText = format.escape;
+  const slackReplyText = format.reply;
+  const splitSlackMessage = format.split;
   const log: ServiceLog = dependencies.log ?? (() => undefined);
   const startedAt = new Date();
   // Spec 051 FR-009: every turn has a recorder, because the reply leads with the check report of the
@@ -487,7 +493,7 @@ export async function processSlackRequest<Thread = SlackThread>(
       const options = await api.listProjectModels();
       if (modelCommand.kind === "list") {
         draft.disposition = "model_list";
-        await post(modelOptionsMessage(options));
+        await post(modelOptionsMessage(options, undefined, format));
       } else {
         draft.disposition = "model_switch";
         const matches = matchApprovedModel(modelCommand.selector, options.approved);
@@ -497,11 +503,11 @@ export async function processSlackRequest<Thread = SlackThread>(
             : matches.length === 0
               ? `No approved coding model matches “${escapeText(modelCommand.selector)}”.`
               : `“${escapeText(modelCommand.selector)}” matches more than one approved coding model.`;
-          await post(modelOptionsMessage(options, reason));
+          await post(modelOptionsMessage(options, reason, format));
         } else {
           if (api.selectProjectModel === undefined) throw new Error("project model selection is unavailable in this deployment");
           const selected = await api.selectProjectModel({ provider: matches[0]!.provider, modelId: matches[0]!.modelId });
-          await post(`Project \`${escapeText(selected.projectName)}\` now uses ${escapeText(modelName(selected.current))} (\`${escapeText(selected.current.provider)}/${escapeText(selected.current.modelId)}\`) for coding work. This applies to every Slack workspace in the project on its next turn.${modelCheckWarning(matches[0]!)}`);
+          await post(`Project \`${escapeText(selected.projectName)}\` now uses ${escapeText(modelName(selected.current))} (\`${escapeText(selected.current.provider)}/${escapeText(selected.current.modelId)}\`) for coding work. This applies to every ${format.kind === "slack" ? "Slack" : "conversation's"} workspace in the project on its next turn.${modelCheckWarning(matches[0]!, format)}`);
         }
       }
       finished = true;
@@ -518,7 +524,7 @@ export async function processSlackRequest<Thread = SlackThread>(
       }
       if (started.outcome === "REFUSED") {
         await post(started.reason === "not_owner"
-          ? "Only the person who started this Slack thread can authorize discarding its unpublished workspace changes. Nothing was deleted."
+          ? `Only the person who started ${format.kind === "slack" ? "this Slack thread" : format.here} can authorize discarding its unpublished workspace changes. Nothing was deleted.`
           : SHARED_CLOSE_REFUSED_MESSAGE);
         finished = true;
         return;
@@ -561,7 +567,7 @@ export async function processSlackRequest<Thread = SlackThread>(
       // A "yes" from someone else, for a confirmation that is no longer pending, too early or too
       // late runs nothing and needs no workspace. Nothing is claimed until the turn is about to run.
       const check = await checkConfirmation({
-        message, subject, store: dependencies.confirmations, post, log, now: now(),
+        message, subject, store: dependencies.confirmations, post, log, now: now(), format,
         ...(options.answer === undefined ? {} : { answer: options.answer }),
         ...(dependencies.mayApprove === undefined ? {} : { mayApprove: dependencies.mayApprove }),
       });
@@ -596,7 +602,7 @@ export async function processSlackRequest<Thread = SlackThread>(
     if (workspace.outcome === "LIMIT_REACHED") {
       draft.disposition = "workspace_limit";
       log("request.limit_reached", { eventId: message.eventId, limit: workspace.limit, maximum: workspace.maximum });
-      await post(limitMessage(workspace));
+      await post(limitMessage(workspace, format));
       finished = true;
       return;
     }
@@ -621,7 +627,7 @@ export async function processSlackRequest<Thread = SlackThread>(
     draft.workspaceId = workspace.workspaceId;
     if (workspace.outcome === "CLOSED") {
       draft.disposition = "workspace_closed";
-      await post("This thread's workspace is closed. Start a new Slack thread to create a fresh workspace.");
+      await post(`${format.kind === "slack" ? "This thread" : "This conversation"}'s workspace is closed. Start ${format.fresh} to create a fresh workspace.`);
       finished = true;
       return;
     }
@@ -634,12 +640,12 @@ export async function processSlackRequest<Thread = SlackThread>(
       if (name) draft.requesterName = name;
     }
     if (workspace.status === "PREPARING" && workspace.operationId) {
-      await post(workspace.created ? NEW_WORKSPACE_MESSAGE : STILL_PREPARING_MESSAGE);
+      await post(workspace.created ? newWorkspaceMessage(format) : stillPreparingMessage(format));
       const prepared = await api.waitForOperation(workspace.workspaceId, workspace.operationId);
       if (prepared.status !== "SUCCEEDED") {
         draft.disposition = "workspace_unavailable";
         log("workspace.preparation_failed", { eventId: message.eventId, status: prepared.status });
-        await post(preparationFailedMessage(prepared.status, prepared.error));
+        await post(preparationFailedMessage(prepared.status, prepared.error, format));
         finished = true;
         return;
       }
@@ -654,7 +660,7 @@ export async function processSlackRequest<Thread = SlackThread>(
         finished = true;
         return;
       }
-      await post(`This thread's workspace is not available right now (${escapeText(workspace.status)}). Mention me again later to retry.`);
+      await post(`${format.kind === "slack" ? "This thread" : "This conversation"}'s workspace is not available right now (${escapeText(workspace.status)}). ${format.kind === "slack" ? "Mention me" : "Message me"} again later to retry.`);
       finished = true;
       return;
     }
@@ -677,7 +683,7 @@ export async function processSlackRequest<Thread = SlackThread>(
 
     // Spec 014: a thread without compute prepares it only when a tool first needs the worker.
     const worker = workspace.status === "UNPREPARED"
-      ? createLazyWorker({ api, post, log, eventId: message.eventId })
+      ? createLazyWorker({ api, post, log, eventId: message.eventId, format })
       : undefined;
     // Issue 157: past the hand-off deadline nothing new starts, and nothing is claimed, so the
     // redelivery runs this request as if it were the first attempt.
@@ -705,7 +711,7 @@ export async function processSlackRequest<Thread = SlackThread>(
     // stale by the time the retry runs, so this one says it again rather than restarting silently. An
     // older ingress sends no count, and a missing receive count is treated as not redelivered.
     const announceStart = options.queuedBehind === undefined || options.queuedBehind > 0 || waitedForSetup || options.redelivered === true;
-    if (announceStart) await post("Working on it now. I'll post the result in this thread when it's done.");
+    if (announceStart) await post(`Working on it now. I'll post the result in ${format.here} when it's done.`);
     log("task.started", { eventId: message.eventId });
     let response: string;
     const turnStop = new AbortController();
@@ -823,7 +829,7 @@ export async function processSlackRequest<Thread = SlackThread>(
       let settled: Awaited<ReturnType<typeof settleConfirmations>> | undefined;
       try {
         settled = await settleConfirmations({
-          check: confirmation, message, subject, store: dependencies.confirmations, log, now: now(),
+          check: confirmation, message, subject, store: dependencies.confirmations, log, now: now(), format,
           postConfirmation: (pending, text) => dependencies.postConfirmation ? dependencies.postConfirmation(message.thread, pending, text) : post(text),
         });
       } catch (error) {
@@ -841,12 +847,12 @@ export async function processSlackRequest<Thread = SlackThread>(
       } else if (settled?.outcome === "already_answered") {
         await post("This request was retried after an interruption, and I had already asked you to confirm it and had my answer, so I didn't ask again. Ask me again if you still want it.");
       } else if (settled?.outcome === "already_pending" && settled.differs) {
-        await post(`I didn't ask again: the pending confirmation still lists ${shortList(settled.pendingSummaries)}. Ask me again for anything else.`);
+        await post(`I didn't ask again: the pending confirmation still lists ${shortList(settled.pendingSummaries, format)}. Ask me again for anything else.`);
       }
     }
     if (!quiet) {
       // C13: in a continue thread, the reply names the teammate it answers.
-      const mention = shared === undefined ? "" : `<@${message.userId}> `;
+      const mention = shared === undefined || format.mention(message.userId) === "" ? "" : `${format.mention(message.userId)} `;
       // Spec 051 FR-009: AgentX's check verdict leads, and the model's text follows as the agent's account.
       // A turn with no report gives "", so its reply is exactly the model's text.
       const verdict = checksReplyPrefix(recorder.checkReports(), { draftPullRequest: recorder.draftPullRequest() });
@@ -1149,8 +1155,8 @@ function closeBlockedMessage(result: ReturnType<typeof WorkspaceClosePreflightRe
 export { slackThreadUrl } from "@agentx/contracts";
 
 /** At most three Slack-escaped summaries of at most 80 characters each, then how many more. */
-function shortList(summaries: readonly string[]): string {
-  const shown = summaries.slice(0, 3).map((summary) => escapeText(summary.length > 80 ? `${summary.slice(0, 79)}…` : summary));
+function shortList(summaries: readonly string[], format: ConversationFormat): string {
+  const shown = summaries.slice(0, 3).map((summary) => format.escape(summary.length > 80 ? `${summary.slice(0, 79)}…` : summary));
   return summaries.length > 3 ? `${shown.join("; ")} and ${summaries.length - 3} more` : shown.join("; ");
 }
 
