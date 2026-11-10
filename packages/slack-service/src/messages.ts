@@ -1,11 +1,11 @@
-import { redactAndCap, slackThreadUrl, type SlackThread, type SlackWorkspaceLimit } from "@agentx/contracts";
-import { SLACK_FORMAT, type ConversationFormat } from "./conversation-format.js";
+import { redactAndCap, type WorkspaceLimit } from "@agentx/contracts";
+import type { ConversationFormat } from "./conversation-format.js";
 
 // Thread notices follow the reply formatting (spec 014 FR-022): the static texts below contain no
 // Slack control characters, so they post exactly as written; every interpolated value goes through
 // escapeText, so a value such as "<!here>" is shown and never notifies anyone.
 
-// Spec 062: each text is written for the conversation's format; the constants are Slack's.
+// Spec 062: each text is written for the conversation's format; slack-texts.ts holds Slack's as constants.
 const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 const its = (format: ConversationFormat) => `${format.here}'s`;
 
@@ -16,10 +16,6 @@ export const preparationSlowMessage = (format: ConversationFormat) => `${sentenc
 export const workspaceUnconfirmedMessage = (format: ConversationFormat) =>
   `AgentX could not confirm ${its(format)} workspace setup. ${sentence(format.askAgain)} in ${format.here} in a few minutes.`;
 
-export const NEW_WORKSPACE_MESSAGE = newWorkspaceMessage(SLACK_FORMAT);
-export const STILL_PREPARING_MESSAGE = stillPreparingMessage(SLACK_FORMAT);
-export const PREPARATION_SLOW_MESSAGE = preparationSlowMessage(SLACK_FORMAT);
-export const WORKSPACE_UNCONFIRMED_MESSAGE = workspaceUnconfirmedMessage(SLACK_FORMAT);
 
 /** #154: how much of the setup error the thread is shown. */
 export const PREPARATION_FAILURE_REASON_MAX = 300;
@@ -31,7 +27,7 @@ const COMMAND_FAILURE = /^(?:setup step|readiness check) \d+ \(/;
  * preparation gives its workspace's slot back at once (#213), so the notice says so, and a new
  * message in the thread prepares the workspace again, charged afresh.
  */
-export function preparationFailedMessage(status: string, error?: string, format: ConversationFormat = SLACK_FORMAT): string {
+export function preparationFailedMessage(status: string, error: string | undefined, format: ConversationFormat): string {
   const escapeText = format.escape;
   const again = `${sentence(format.askAgain)} in ${format.here} to start fresh.`;
   const head = `AgentX could not set up ${its(format)} workspace (${escapeText(status)}). The workspace was released, so it no longer counts toward the workspace limit.`;
@@ -57,8 +53,7 @@ function fitEscapedReason(escaped: string, alreadyCut: boolean): string {
   return `${escaped.slice(0, cut)}...`;
 }
 
-export function limitMessage(result: { limit: SlackWorkspaceLimit; maximum: number; starterThreads: readonly SlackThread[]; openTaskCount?: number | undefined }, format: ConversationFormat = SLACK_FORMAT): string {
-  const escapeText = format.escape;
+export function limitMessage(result: { limit: WorkspaceLimit; maximum: number; starterThreads: readonly unknown[]; openTaskCount?: number | undefined }, format: ConversationFormat): string {
   if (result.limit === "ORGANIZATION") {
     return `This organization already has ${result.maximum} AgentX workspaces, the most allowed, so I can't start a new one. ` +
       `Continue in an existing ${format.kind === "slack" ? "thread" : "conversation"}, or ask an administrator to raise the limit.`;
@@ -75,7 +70,7 @@ export function limitMessage(result: { limit: SlackWorkspaceLimit; maximum: numb
   if (format.kind !== "slack" && result.starterThreads.length === 0) {
     return `${head} Send \`close this workspace\` in a conversation you no longer need, or ask an administrator to raise the limit.`;
   }
-  const links = result.starterThreads.map((thread, index) => `• <${escapeText(slackThreadUrl(thread))}|Thread ${index + 1}>`);
+  const links = result.starterThreads.flatMap((thread, index) => format.starterLink(thread, index) ?? []);
   return [
     `${head} Continue in one of your existing threads instead:`,
     ...links,

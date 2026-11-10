@@ -5,12 +5,11 @@ import {
   parseConfirmationReply,
   type ConfirmationReply,
   type PendingConfirmation,
-  type SlackRequestMessage,
 } from "@agentx/contracts";
 import { createGateSession, type GateApproval, type GateSession } from "@agentx/orchestrator/action-gate";
 import { deterministicUuid } from "./ids.js";
 import type { ServiceLog } from "./processor.js";
-import { SLACK_FORMAT, type ConversationFormat } from "./conversation-format.js";
+import type { ConversationFormat } from "./conversation-format.js";
 
 export interface ConfirmationStore {
   /** The thread's confirmation, a tombstone included. */
@@ -41,7 +40,7 @@ const KIND_NOTES: Readonly<Record<PendingConfirmation["calls"][number]["kind"], 
 };
 
 /** The message text: every blocked action and its target, and how to answer with or without the buttons. */
-export function confirmationMessage(confirmation: PendingConfirmation, format: ConversationFormat = SLACK_FORMAT): string {
+export function confirmationMessage(confirmation: PendingConfirmation, format: ConversationFormat): string {
   const escapeText = format.escape;
   const mention = format.mention(confirmation.requesterId);
   return [
@@ -57,7 +56,6 @@ export function confirmationMessage(confirmation: PendingConfirmation, format: C
 }
 
 export const yesToAllText = (format: ConversationFormat) => `OK. For the next 24 hours in ${format.here} I'll stop asking you when I'm unsure you asked for something. I'll still ask before destructive actions, large changes and anything an administrator requires.`;
-export const YES_TO_ALL_TEXT = yesToAllText(SLACK_FORMAT);
 export const NO_LONGER_PENDING_TEXT = "That confirmation is no longer pending, so nothing was run.";
 export const ALREADY_USED_BY_THIS_REQUEST_TEXT = "An earlier attempt of this request already used that confirmation, so I didn't run anything again. It may already have run; ask me to check, or ask again.";
 export const CANCELLED_TEXT = "Cancelled. Nothing was run.";
@@ -79,7 +77,7 @@ export function confirmationIdFor(eventId: string): string {
 }
 
 /** The fields of a request a confirmation check reads; a Slack message and an adapter conversation's both have them. */
-export type ConfirmationMessage = Pick<SlackRequestMessage, "eventId" | "text" | "userId" | "receivedAt">;
+export interface ConfirmationMessage { eventId: string; text: string; userId: string; receivedAt: string }
 
 /**
  * Spec 062: an adapter's decision on an approval request, already mapped to a reply. It names the confirmation and the
@@ -124,10 +122,10 @@ export async function checkConfirmation(input: {
   answer?: ConfirmationAnswer;
   /** Spec 062 FR-032: false for a confirmation this channel may not approve; absent, every one may be. */
   mayApprove?: (confirmation: PendingConfirmation) => boolean;
-  /** Spec 062 FR-040: how the replies are written; Slack's when absent. */
-  format?: ConversationFormat;
+  /** Spec 062 FR-040: how the replies are written. */
+  format: ConversationFormat;
 }): Promise<ConfirmationCheck> {
-  const format = input.format ?? SLACK_FORMAT;
+  const format = input.format;
   const { message, subject, store, post, log } = input;
   const click = input.answer !== undefined
     ? { confirmationId: input.answer.confirmationId, click: input.answer.reply === "yes" ? "approve" as const : "cancel" as const }
@@ -238,7 +236,7 @@ export async function settleConfirmations(input: {
   postConfirmation: (confirmation: PendingConfirmation, text: string) => Promise<void>;
   log: ServiceLog;
   now: number;
-  format?: ConversationFormat;
+  format: ConversationFormat;
 }): Promise<SettleOutcome> {
   const { check, message, subject, store } = input;
   const retired = check.claim?.confirmationId ?? check.superseded;

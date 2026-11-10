@@ -2,7 +2,7 @@
 // sharedTask, is processed, written before the shared-thread branches were added and unchanged by them.
 import { describe, expect, it, vi } from "vitest";
 import type { SlackRequestMessage, SlackThreadWorkspaceResult, TurnRecord } from "../../packages/contracts/src/index.js";
-import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/slack-processor.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";

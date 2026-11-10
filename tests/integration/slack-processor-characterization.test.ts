@@ -1,7 +1,7 @@
 // Pins how processSlackRequest treats each workspace result, before phase 14b adds UNPREPARED.
 import { describe, expect, it, vi } from "vitest";
 import type { SlackRequestMessage, SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
-import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
 const workspaceId = "11111111-1111-4111-8111-111111111111";

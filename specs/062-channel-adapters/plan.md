@@ -158,3 +158,33 @@ gives them back; close those workspaces first.
 
 No stored data or wire format changes; revert the PR.
 
+## Phase 5b: Slack as an in-process adapter
+
+Decided 2026-11-10: Slack stays in-process. An HTTP adapter would first need the protocol to carry private messages,
+edits, rich buttons, task-workflow actions, user lookups and canvases, and would add a hop and a secret to the
+production Slack path.
+
+| Layer | Change |
+|---|---|
+| contracts | `thread-service.ts`: neutral names for the service routes' messages (`ThreadWorkspaceResult`, `WorkspaceLimit`, …), the same schema objects as the Slack-named ones. `parseChatGptCommand` in `chatgpt.ts`. |
+| orchestrator service: core | `processor.ts` exports `processConversationRequest`: `subjectOf` and `format` are required; `postReplyEnd`, `onFinished` and `commands` are the surface's hooks. `consumer.ts` takes its reader and a page-comment hook. The text helpers take a format. `thread-api.ts` is the conversation client. |
+| orchestrator service: Slack | `slack-processor.ts` (`processSlackRequest`: Slack's subject and format, the Details button, the turn record, eval batch and SWE-bench commands), `slack-consumer.ts` (Slack request reader, page comments checked against their schema), `slack-thread-api.ts` (SWE-bench and batch routes, the batch watcher's client), `slack-texts.ts` (Slack's texts as constants), and `SLACK_FORMAT` in `slack-format.ts`. |
+| channel | The channel consumer calls the core directly, refuses Slack-only commands, and answers the ChatGPT commands with `agentx chatgpt`. |
+| tests | `tests/contract/slack-boundary.test.ts`: the conversation core (the orchestrator package, the processor and its texts, the queue runner, the channel modules, the broker's conversation identity) imports no Slack-named contract and no Slack module; elsewhere, files importing Slack-named contracts may not exceed 40. |
+
+### Decisions
+
+- **The Slack queue keeps `version: 1`.** Releases deploy the control plane before the orchestrator, so an ingress
+  writing `version: 2` would have Slack messages discarded by an orchestrator older than Phase 1 during the window.
+  The consumer reads both; the Slack queue's format is Slack's adapter's own business.
+- **Slack's defaults moved, not its behaviour.** `processSlackRequest` passes the same subject, format, Details
+  button, record and commands the processor used to apply itself; the Slack tests run unchanged against it.
+- **A ratchet, not a rewrite, outside the core.** Developer tasks shared to Slack threads, Slack sign-in, admin views
+  and eval batches use Slack as a product feature; they keep their imports, and new code cannot add one.
+- **ChatGPT stays private.** An adapter conversation may be a group; the commands get the CLI's names and nothing
+  about the connection.
+
+### Rollback
+
+No stored data or wire format changes; revert.
+

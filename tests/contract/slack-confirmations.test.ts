@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { SLACK_FORMAT } from "../../packages/slack-service/src/slack-format.js";
 import { CONFIRMATION_TTL_MS, PendingConfirmationSchema, answeredConfirmationBlocks, confirmationBlocks, confirmationClickEventId, parseConfirmationClickEventId, parseConfirmationReply, type PendingConfirmation, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import { createGateSession } from "../../packages/orchestrator/src/action-gate.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
@@ -6,11 +7,11 @@ import {
   ALREADY_USED_BY_THIS_REQUEST_TEXT,
   CANCELLED_TEXT,
   NO_LONGER_PENDING_TEXT,
-  YES_TO_ALL_TEXT,
   checkConfirmation,
   confirmationMessage,
   settleConfirmations,
 } from "../../packages/slack-service/src/confirmations.js";
+import { YES_TO_ALL_TEXT } from "../../packages/slack-service/src/slack-texts.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const subject = "T0BSHLLUGBD/C0123456789/1695500000.000001";
@@ -36,7 +37,7 @@ function harness(now = postedAt + 120_000) {
   const posts: string[] = [];
   const log = vi.fn();
   const check = (text: string, overrides: Partial<SlackRequestMessage> = {}) =>
-    checkConfirmation({ message: message(text, overrides), subject, store, post: async (value) => { posts.push(value); }, log, now });
+    checkConfirmation({ format: SLACK_FORMAT, message: message(text, overrides), subject, store, post: async (value) => { posts.push(value); }, log, now });
   return { db, store, posts, log, check };
 }
 
@@ -236,7 +237,7 @@ describe("tombstones, expiry and yes to all", () => {
     const now = postedAt + 25 * 60 * 60 * 1_000;
     const store = createDynamoConfirmationStore(db, "threads", () => now);
     const posts: string[] = [];
-    const check = (text: string, eventId: string) => checkConfirmation({ message: message(text, { eventId, receivedAt: new Date(now).toISOString() }), subject, store, post: async (value) => { posts.push(value); }, log: vi.fn(), now });
+    const check = (text: string, eventId: string) => checkConfirmation({ format: SLACK_FORMAT, message: message(text, { eventId, receivedAt: new Date(now).toISOString() }), subject, store, post: async (value) => { posts.push(value); }, log: vi.fn(), now });
     expect(await check("yes", "EvYES0000002")).toEqual({ run: true, session: createGateSession(requester) });
     expect(await check("yes to all", "EvYES0000003")).toEqual({ run: false, answered: "yes_to_all" });
     expect(posts).toEqual([YES_TO_ALL_TEXT]);
@@ -261,7 +262,7 @@ describe("tombstones, expiry and yes to all", () => {
     expect(await check("yes")).toEqual({ run: false, refused: "already_used_by_this_request" });
     expect(posts).toEqual([ALREADY_USED_BY_THIS_REQUEST_TEXT]);
     const session = createGateSession(requester, { approvals: pending.calls });
-    await settleConfirmations({ check: { run: true, session, claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 120_000 });
+    await settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session, claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 120_000 });
     expect((await store.load(subject))?.usedBy).toBe("EvYES0000001");
   });
 
@@ -334,7 +335,7 @@ describe("tombstones, expiry and yes to all", () => {
     await store.save(subject, pending);
     const session = createGateSession(other);
     session.asks.push({ toolCallId: "1", tool: "tracker__close_item", argumentsHash: "d".repeat(64), summary: "tracker__close_item: id=TRK-2", kind: "destructive" });
-    await settleConfirmations({ check: { run: true, session }, message: message("close TRK-2", { eventId: "EvOTHER00001", userId: other }), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 60_000 });
+    await settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session }, message: message("close TRK-2", { eventId: "EvOTHER00001", userId: other }), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 60_000 });
     expect(await check("yes")).toEqual({ run: false, refused: "replaced" });
     expect(posts).toEqual([`The pending confirmation is <@${other}>'s; yours was replaced. Nothing was run.`]);
   });
@@ -352,7 +353,7 @@ describe("settling a turn's confirmations", () => {
     );
     const posted: Array<{ id: string; text: string }> = [];
     const now = postedAt + 300_000;
-    await settleConfirmations({ check: { run: true, session, claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store,
+    await settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session, claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store,
       postConfirmation: async (confirmation, text) => { posted.push({ id: confirmation.confirmationId, text }); }, log, now });
     const saved = await store.load(subject);
     expect(saved).toMatchObject({ requesterId: requester, postedAt: new Date(now).toISOString(), expiresAt: new Date(now + CONFIRMATION_TTL_MS).toISOString() });
@@ -371,10 +372,10 @@ describe("settling a turn's confirmations", () => {
     const { store, log } = harness();
     await store.save(subject, pending);
     const postConfirmation = vi.fn();
-    await settleConfirmations({ check: { run: true, session: createGateSession(requester), claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store, postConfirmation, log, now: postedAt });
+    await settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session: createGateSession(requester), claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store, postConfirmation, log, now: postedAt });
     expect(await store.load(subject)).toMatchObject({ confirmationId: pending.confirmationId, usedBy: "EvYES0000001" });
     expect(postConfirmation).not.toHaveBeenCalled();
-    expect(confirmationMessage(pending)).toContain("• tracker__close_item: id=TRK-9 (destructive)");
+    expect(confirmationMessage(pending, SLACK_FORMAT)).toContain("• tracker__close_item: id=TRK-9 (destructive)");
   });
 
   it("adds the doubt note only when the classifier doubted the call, and never shows a tool name (#215)", () => {
@@ -382,7 +383,7 @@ describe("settling a turn's confirmations", () => {
       { tool: "agentx_submit_task", argumentsHash: "1".repeat(64), summary: 'Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"', kind: "unchecked" as const },
       { tool: "tracker__save_item", argumentsHash: "2".repeat(64), summary: "Use tracker to save item: id TRK-5", kind: "classifier" as const },
     ];
-    const text = confirmationMessage({ ...pending, calls });
+    const text = confirmationMessage({ ...pending, calls }, SLACK_FORMAT);
     expect(text.split("\n").slice(1, 3)).toEqual([
       '• Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"',
       "• Use tracker to save item: id TRK-5 (I'm not sure you asked for this)",
@@ -397,7 +398,7 @@ describe("settling a turn's confirmations", () => {
       { tool: "tracker__save_item", argumentsHash: "4".repeat(64), summary: "Use tracker to save item: id TRK-6", kind: "classifier" as const },
       { tool: "agentx_submit_task", argumentsHash: "5".repeat(64), summary: 'Start a coding task: "list files"', kind: "unchecked" as const },
     ];
-    const text = confirmationMessage({ ...pending, calls });
+    const text = confirmationMessage({ ...pending, calls }, SLACK_FORMAT);
     expect(text.split("\n").slice(1, 4)).toEqual([
       "• Use tracker to save item: id TRK-5 (AgentX thinks you did not ask for this. Check it before approving.)",
       "• Use tracker to save item: id TRK-6 (I'm not sure you asked for this)",
@@ -408,14 +409,14 @@ describe("settling a turn's confirmations", () => {
 
   it("escapes a stored summary's Slack control characters once, so it cannot mention or link anyone", () => {
     const raw = { ...pending, calls: [{ ...pending.calls[0]!, summary: "tracker__save_item: title=<!channel> & <https://x.example|y>" }] };
-    expect(confirmationMessage(raw)).toContain("• tracker__save_item: title=&lt;!channel&gt; &amp; &lt;https://x.example|y&gt; (destructive)");
+    expect(confirmationMessage(raw, SLACK_FORMAT)).toContain("• tracker__save_item: title=&lt;!channel&gt; &amp; &lt;https://x.example|y&gt; (destructive)");
     const escaped = { ...pending, calls: [{ ...pending.calls[0]!, summary: "tracker__save_item: id=&lt;!here&gt; &amp; more" }] };
-    expect(confirmationMessage(escaped)).toContain("• tracker__save_item: id=&lt;!here&gt; &amp; more (destructive)");
+    expect(confirmationMessage(escaped, SLACK_FORMAT)).toContain("• tracker__save_item: id=&lt;!here&gt; &amp; more (destructive)");
   });
 
   it("splits a long confirmation across sections within Slack's 3,000-character limit", () => {
     const calls = Array.from({ length: 20 }, (_, index) => ({ tool: "tracker__save_item", argumentsHash: index.toString(16).padStart(64, "0"), summary: `tracker__save_item: ${String(index).padStart(2, "0")}${"x".repeat(278)}`, kind: "classifier" as const }));
-    const text = confirmationMessage({ ...pending, calls });
+    const text = confirmationMessage({ ...pending, calls }, SLACK_FORMAT);
     for (const blocks of [confirmationBlocks(text, pending.confirmationId), answeredConfirmationBlocks(text, "Approved by <@U0123456789>")]) {
       const sections = (blocks as Array<{ type: string; text?: { text: string } }>).filter((block) => block.type === "section").map((block) => block.text!.text);
       expect(sections.length).toBeGreaterThan(1);
@@ -430,7 +431,7 @@ describe("settling a turn's confirmations", () => {
     const { store, log } = harness();
     const session = createGateSession(requester);
     session.asks.push({ toolCallId: "1", tool: "tracker__close_item", argumentsHash: "b".repeat(64), summary: "tracker__close_item: id=TRK-1", kind: "destructive" });
-    await expect(settleConfirmations({ check: { run: true, session }, message: message("close TRK-1"), subject, store,
+    await expect(settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session }, message: message("close TRK-1"), subject, store,
       postConfirmation: async () => { throw new Error("msg_too_long"); }, log, now: postedAt })).rejects.toThrow("msg_too_long");
     const saved = await store.load(subject);
     expect(saved?.calls[0]?.argumentsHash).toBe("b".repeat(64));
@@ -438,7 +439,7 @@ describe("settling a turn's confirmations", () => {
     expect(log).toHaveBeenCalledWith("gate.confirmation_post_failed", { eventId: "EvYES0000001" });
     expect(await store.claim(subject, saved!.confirmationId, "EvYES0000002")).toBe(false);
     const posts: string[] = [];
-    const answer = await checkConfirmation({ message: message("ok", { eventId: "EvYES0000002", receivedAt: new Date(postedAt + 60_000).toISOString() }), subject, store, post: async (value) => { posts.push(value); }, log, now: postedAt + 60_000 });
+    const answer = await checkConfirmation({ format: SLACK_FORMAT, message: message("ok", { eventId: "EvYES0000002", receivedAt: new Date(postedAt + 60_000).toISOString() }), subject, store, post: async (value) => { posts.push(value); }, log, now: postedAt + 60_000 });
     expect(answer).toEqual({ run: true, session: createGateSession(requester) });
     expect(posts).toEqual([]);
   });
@@ -452,7 +453,7 @@ describe("settling a turn's confirmations", () => {
     // Normal path: closed while posting, answerable after.
     const normal = harness();
     let whilePosting: PendingConfirmation | undefined;
-    await settleConfirmations({ check: { run: true, session: session() }, message: message("close TRK-1"), subject, store: normal.store,
+    await settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session: session() }, message: message("close TRK-1"), subject, store: normal.store,
       postConfirmation: async () => { whilePosting = await normal.store.load(subject); }, log: normal.log, now: postedAt });
     expect(whilePosting).toMatchObject({ usedBy: "unposted" });
     expect(whilePosting?.retiredAt).toBeDefined();
@@ -463,7 +464,7 @@ describe("settling a turn's confirmations", () => {
     // Posted, but opening fails: it stays closed, and the open's error is thrown.
     const failing = harness();
     const store = { ...failing.store, open: async () => { throw new Error("throttled"); } };
-    await expect(settleConfirmations({ check: { run: true, session: session() }, message: message("close TRK-1"), subject, store,
+    await expect(settleConfirmations({ format: SLACK_FORMAT, check: { run: true, session: session() }, message: message("close TRK-1"), subject, store,
       postConfirmation: async () => undefined, log: failing.log, now: postedAt })).rejects.toThrow("throttled");
     expect(await failing.store.load(subject)).toMatchObject({ usedBy: "unposted" });
     expect(failing.log).toHaveBeenCalledWith("gate.confirmation_open_failed", { eventId: "EvYES0000001" });

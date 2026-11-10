@@ -12,7 +12,7 @@ import {
   type RequestRouteOutcome,
   type SlackRequestMessage,
 } from "../../packages/contracts/src/index.js";
-import { processGroup, type QueueClient } from "../../packages/slack-service/src/consumer.js";
+import { processGroup, type QueueClient } from "../../packages/slack-service/src/slack-consumer.js";
 import { ROUTE_CARD_FAILED_TEXT, createChoiceOffer, routeSlackRequest } from "../../packages/slack-service/src/request-routing.js";
 import { createHostedRequestRouter } from "../../packages/slack-service/src/runtime.js";
 import { createDynamoWorkflowChoiceStore } from "../../packages/broker/src/aws/slack-workflow-choice.js";

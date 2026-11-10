@@ -4,7 +4,7 @@ import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-a
 import { ORCHESTRATION_TOOL_NAMES, RECOVERY_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { ConnectorCallRequestSchema, type ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import { SlackThreadWorkspaceResultSchema, type SlackRequestMessage } from "../../packages/contracts/src/slack.js";
-import { processSlackRequest, type ProcessorDependencies, type ThreadServiceApi, type ThreadStore } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type ThreadServiceApi, type ThreadStore } from "../../packages/slack-service/src/slack-processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createFixtureDirectory } from "../fixtures/index.js";

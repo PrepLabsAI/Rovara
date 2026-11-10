@@ -14,7 +14,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { TurnRecordExport } from "../../packages/broker/src/aws/turns.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
-import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { DynamoTurnRecordWriter, TURN_ITEM_BYTE_BUDGET, fitTurnRecord } from "../../packages/slack-service/src/turn-records.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
