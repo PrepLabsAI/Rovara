@@ -3933,3 +3933,42 @@ describe("sessions: Ask about a task", () => {
 
 const askRequestKeyOf = (sessionId: string, askId: string) => agentSessionKey(IMPLICIT_COMPANY_ID, sessionId, `ASKREQ#${askId}`);
 const sessionAskKeyOf = (sessionId: string, askId: string) => agentSessionKey(IMPLICIT_COMPANY_ID, sessionId, `ASK#${askId}`);
+
+describe("rovara up: the owner's change note reaches the planner's automatic second runs", () => {
+  /** The owner sends the plan that waits back with a note, on the review page; the planner is then asked again. */
+  async function sendBack(h: Awaited<ReturnType<typeof launch>>, taskId: string, note: string): Promise<void> {
+    const link = await h.browse(`/plan/${taskId}`);
+    const form = formOf((await raw_(h, link)).body, "/decide");
+    const sent = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody({ ...form.fields, decision: "changes", note }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(sent.headers["location"]).toContain("n=changes");
+  }
+
+  it("repeats the note in the second run a plan the self-check sends back gets", async () => {
+    const h = await launch();
+    const { taskId, workspaceId, seen, plan } = await toPlanning(h);
+    await answerAndCheck(h, workspaceId, seen, plan, PLAN_TEXT);
+    await sendBack(h, taskId, "Also log the request id.");
+    const revised = await h.nextJob(workspaceId, seen);
+    expect((revised.payload as { prompt: string }).prompt).toContain("Also log the request id.");
+    // Claim 2 is proved by no check: the plan is sent back once, unseen.
+    await answerPlan(h, revised, provedPlan(["1"]));
+    const again = await h.nextJob(workspaceId, seen);
+    const prompt = (again.payload as { prompt: string }).prompt;
+    expect(prompt).toContain("claim-not-covered");
+    expect(prompt).toContain("Also log the request id.");
+  });
+
+  it("repeats the note in the one revision the plan check asks for", async () => {
+    const h = await launch();
+    const { taskId, workspaceId, seen, plan } = await toPlanning(h);
+    await answerAndCheck(h, workspaceId, seen, plan, PLAN_TEXT);
+    await sendBack(h, taskId, "Also log the request id.");
+    const revised = await h.nextJob(workspaceId, seen);
+    await answerPlan(h, revised, PLAN_TEXT);
+    await answerCritique(h, workspaceId, seen, critiqueAnswer("revise", [{ id: "p1", severity: "blocking", text: "No limit." }]));
+    const revision = await h.nextJob(workspaceId, seen);
+    const prompt = (revision.payload as { prompt: string }).prompt;
+    expect(prompt).toContain("A second model checked this plan and found problems");
+    expect(prompt).toContain("Also log the request id.");
+  });
+});

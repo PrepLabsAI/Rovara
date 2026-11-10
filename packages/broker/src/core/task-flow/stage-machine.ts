@@ -299,9 +299,12 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
       const planPrompt = (row as Partial<DispatchRowRecord>).planPrompt ?? fromDocument<DispatchRowRecord>(await deps.store.get(dispatchRowKey(deps.companyId, row.taskId, row.workflowRevision)))?.planPrompt;
       if (planPrompt === undefined || workflow.stage !== "PLAN" || workflow.state !== "RUNNING" || workflow.intent?.assessment?.kind !== "ready") return stale();
       const structured = await structuredPlanContextOf(deps, task, workflow);
+      // The second run is told the owner's change notes again: the plan it revises was written after them, and the run may be a new conversation.
+      const feedback = await planFeedbackOf(deps, task.taskId);
       next = { ...workflow, revision: workflow.revision + 1, updatedAt: iso(deps) };
       prompt = prompts.plan({
         requestText: task.requestText ?? "", path: workflow.path, phase: workflow.reviewPhase, intent: workflow.intent, revision: planPrompt,
+        ...(feedback.length === 0 ? {} : { feedback }),
         ...(structured === undefined ? {} : { structured }),
       });
       planPayload = structured === undefined ? undefined : { planFormat: "structured", ...(workflow.path === "FULL" && workflow.reviewPhase !== undefined ? { workflowPhase: workflow.reviewPhase } : {}) };

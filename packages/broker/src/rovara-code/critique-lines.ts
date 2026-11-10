@@ -23,8 +23,15 @@ export function critiqueLines(critique: WorkflowCritique | undefined, project: s
     if (critique.status === "done") lines.push(CRITIC_NOT_CHECKED_LINE);
     return lines;
   }
+  // The plan was revised after this check and the revised plan was not checked again: the points below are about the earlier version, and are said to be.
+  const earlierVersion = critique.revisions > 0 && critique.notRevised !== true && critique.critiques.length <= critique.revisions;
   const blocking = latest.points.filter((point) => point.severity === "blocking").length;
-  const revised = critique.revisions > 0 && critique.notRevised !== true ? " I revised the plan once after its first check." : "";
+  const revised = critique.revisions > 0 && critique.notRevised !== true && !earlierVersion ? " I revised the plan once after its first check." : "";
+  if (earlierVersion) {
+    lines.push("A second model checked an earlier version of this plan. The plan was revised after that check, and the revised plan was not checked again.");
+    for (const point of latest.points) lines.push(`${point.severity === "blocking" ? "Earlier problem" : "Earlier note"}: ${redactText(point.text).replace(/\s+/gu, " ").trim().slice(0, 500)}`);
+    return lines;
+  }
   lines.push(latest.points.length === 0 ? `A second model checked this plan and found nothing to change.${revised}`
     : `A second model checked this plan${blocking === 0 ? "" : ` and found ${blocking === 1 ? "a problem" : `${blocking} problems`} it thinks should be fixed`}.${revised}`);
   if (critique.notRevised === true) lines.push(notRevisedLine(critique.limit));

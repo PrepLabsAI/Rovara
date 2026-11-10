@@ -259,6 +259,24 @@ describe("critiqueLines: what a person reads under the plan", () => {
     expect(lines).toContain("Problem: No limit on <b>retries</b> so it loops");
     expect(lines).toContain("Note: Name the test file");
   });
+  it("says the points are about an earlier version when the plan was revised and the revised plan was not checked again", () => {
+    const first = critiqued(atCheck(), "revise", [point("p1", "blocking", "No limit on retries"), point("p2", "note", "Name the test file")]);
+    expect(first.stage).toBe("PLAN");
+    // The revised plan's check could not run: the critique stays as it was, and the plan goes to the person.
+    const running: WorkflowSnapshot = { ...first, stage: "PLAN_CRITIQUE", state: "RUNNING" };
+    const unchecked = closePlanCritique(running, { expectedRevision: running.revision, status: "done", now: LATER });
+    const lines = critiqueLines(unchecked.critique, "payments");
+    expect(lines.join("\n")).toContain("checked an earlier version of this plan");
+    expect(lines).toContain("Earlier problem: No limit on retries");
+    expect(lines).toContain("Earlier note: Name the test file");
+    expect(lines.join("\n")).not.toContain("I revised the plan");
+    expect(lines.some((line) => line.startsWith("Problem:"))).toBe(false);
+    // When the revised plan was checked too, the latest critique is about the plan shown.
+    const second = critiqued({ ...first, stage: "PLAN_CRITIQUE", state: "READY" }, "ok", [point("p9", "note", "Fine")]);
+    expect(critiqueLines(second.critique, "payments").join("\n")).toContain("I revised the plan once after its first check.");
+    expect(critiqueLines(second.critique, "payments")).toContain("Note: Fine");
+  });
+
   it("says the same model checked the plan, with the project's name, and that the check stopped at a limit", () => {
     const same = critiqued(atCheck(), "ok", [], { sameModelAsPlanner: true });
     expect(critiqueLines(same.critique, "payments")[0]).toBe("This plan was checked by the same model that wrote it, because payments allows only one model.");

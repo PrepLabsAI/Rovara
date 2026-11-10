@@ -17,7 +17,7 @@ import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import { conversationKey } from "../task-flow/keys.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
-import { acceptStep, blockTaskWorkflow, commitWorkflow, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
+import { acceptStep, blockTaskWorkflow, commitWorkflow, planFeedbackOf, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { DEFAULT_PROMPTS, iso, log } from "../task-flow/support.js";
 import { planDocumentKindOf } from "./answer.js";
 import { earlierPlans, structuredPlanContextOf } from "./context.js";
@@ -91,8 +91,11 @@ export async function startCriticRevision(deps: TaskFlowDeps, row: RowRef): Prom
   const now = iso(deps);
   const next: WorkflowSnapshot = { ...workflow, revision: workflow.revision + 1, state: "RUNNING", updatedAt: now };
   const prompts = deps.prompts ?? DEFAULT_PROMPTS;
+  // The owner's earlier change notes are repeated: the plan being revised was written after them.
+  const feedback = await planFeedbackOf(deps, task.taskId);
   const prompt = prompts.plan({
     requestText: task.requestText ?? "", path: workflow.path, phase: workflow.reviewPhase, intent: workflow.intent,
+    ...(feedback.length === 0 ? {} : { feedback }),
     structured: { rules: structured.rules, previous: { kind: current.kind, version: current.version, plan: current.plan } },
     revision: `${PLAN_REVISION_REQUEST}\n\n${planCriticBlock(points)}`,
   });
