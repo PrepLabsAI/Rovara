@@ -11,7 +11,9 @@ import { existsSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { consoleWorkerLog, logEnvDetectGuardUnavailable, type WorkerLogSink } from "../worker-log.js";
-import { runDetectors } from "./index.js";
+import { BUILT_IN_DETECTOR_NAMES, runDetectors } from "./index.js";
+import { loadPluginDetectors, vetDetectorModules } from "./plugin-detectors.js";
+import { installedDetectorModules } from "../build-systems.js";
 import { emptyDetection, type Detection, type RepositoryReader } from "./types.js";
 
 export const ENV_DETECT_TIMEOUT_MS = 60_000;
@@ -32,6 +34,8 @@ export interface GuardOptions {
   log?: WorkerLogSink | undefined;
   /** Run only the detectors with these names (see `runDetectors`). */
   only?: readonly string[] | undefined;
+  /** Port lane P6 (item B1): the detector modules of the worker's build-system profiles; by default the installed profiles'. They are vetted here and imported by the thread. */
+  detectorModules?: readonly string[] | undefined;
 }
 
 export function defaultThreadEntry(): ThreadEntry {
@@ -42,12 +46,12 @@ export function defaultThreadEntry(): ThreadEntry {
 
 type Attempt = { kind: "done"; detection: Detection } | { kind: "stopped" } | { kind: "unavailable"; code: string };
 
-function attempt(reader: RepositoryReader, cwd: string, legacyOnly: boolean, timeoutMs: number, entry: ThreadEntry, only?: readonly string[]): Promise<Attempt> {
+function attempt(reader: RepositoryReader, cwd: string, legacyOnly: boolean, timeoutMs: number, entry: ThreadEntry, only?: readonly string[], detectorModules?: readonly string[]): Promise<Attempt> {
   return new Promise((resolve) => {
     let worker: Worker;
     try {
       worker = new Worker(entry.url, {
-        workerData: { paths: [...reader.paths], truncated: reader.truncated === true, cwd, legacyOnly, ...(only === undefined ? {} : { only: [...only] }) },
+        workerData: { paths: [...reader.paths], truncated: reader.truncated === true, cwd, legacyOnly, ...(only === undefined ? {} : { only: [...only] }), ...(detectorModules === undefined || detectorModules.length === 0 ? {} : { detectorModules: [...detectorModules] }) },
         execArgv: entry.execArgv,
         env: {},
         resourceLimits: { maxOldGenerationSizeMb: THREAD_MEMORY_MB, maxYoungGenerationSizeMb: 64 },
@@ -91,13 +95,17 @@ function attempt(reader: RepositoryReader, cwd: string, legacyOnly: boolean, tim
 export async function runDetectorsGuarded(reader: RepositoryReader, cwd: string, options: GuardOptions = {}): Promise<Detection> {
   const timeoutMs = options.timeoutMs ?? ENV_DETECT_TIMEOUT_MS;
   const entry = options.entry ?? defaultThreadEntry();
-  const full = await attempt(reader, cwd, false, timeoutMs, entry, options.only);
-  if (full.kind === "done") return full.detection;
+  // Port lane P6 (item B1): a build system's detectors, from the operator's profile (never from the repository), checked before a thread is asked to import them.
+  // A caller that asks for named detectors only (`only`) wants none of a plug-in's.
+  const vetted = await vetDetectorModules(options.only !== undefined ? [] : options.detectorModules ?? installedDetectorModules(), process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace");
+  const full = await attempt(reader, cwd, false, timeoutMs, entry, options.only, vetted.modules);
+  if (full.kind === "done") return vetted.notes.length === 0 ? full.detection : { ...full.detection, notes: [...new Set([...vetted.notes, ...full.detection.notes])] };
   if (full.kind === "unavailable") {
     logEnvDetectGuardUnavailable(options.log ?? consoleWorkerLog, full.code);
-    return runDetectors(reader, cwd, options.only === undefined ? {} : { only: options.only });
+    const plugin = await loadPluginDetectors(vetted.modules, BUILT_IN_DETECTOR_NAMES);
+    return runDetectors(reader, cwd, { ...(options.only === undefined ? {} : { only: options.only }), extraDetectors: plugin.detectors, extraNotes: [...vetted.notes, ...plugin.notes] });
   }
-  const legacy = await attempt(reader, cwd, true, Math.min(ENV_DETECT_FALLBACK_TIMEOUT_MS, timeoutMs), entry, options.only);
+  const legacy = await attempt(reader, cwd, true, Math.min(ENV_DETECT_FALLBACK_TIMEOUT_MS, timeoutMs), entry, options.only, vetted.modules);
   const base = legacy.kind === "done" ? legacy.detection : emptyDetection();
-  return { ...base, notes: [...new Set([...base.notes, ENV_DETECT_TIMEOUT_NOTE])] };
+  return { ...base, notes: [...new Set([...vetted.notes, ...base.notes, ENV_DETECT_TIMEOUT_NOTE])] };
 }

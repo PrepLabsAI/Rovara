@@ -34,6 +34,9 @@ export const DETECTORS: ReadonlyArray<{ name: string; run: Detector }> = [
 /** The detectors that only report dependency candidates (test services D1-D7). The language detectors also report their manifests' drivers, which `legacyOnly` drops. */
 export const DEPENDENCY_DETECTOR_NAMES: ReadonlySet<string> = new Set(["compose", "ci", "env", "sdk", "test-fakes", "iac-resources", "seed-files"]);
 
+/** The names of the built-in detectors: a build-system plug-in's detector may not use one. */
+export const BUILT_IN_DETECTOR_NAMES: ReadonlySet<string> = new Set(DETECTORS.map((detector) => detector.name));
+
 export const ENV_DETECT_MAX_PATHS = 5_000;
 export const ENV_DETECT_MAX_FILE_BYTES = 256 * 1_024;
 export const ENV_DETECT_MAX_TOTAL_BYTES = 4 * 1_048_576;
@@ -94,12 +97,21 @@ function freeId(id: string, detector: string, taken: ReadonlySet<string>): strin
  * one's citation; a check whose id is taken by a different command is KEPT under `<id>-<detector>` rather than silently replaced; setup commands, globs, services, notes and questions are de-duplicated; and the
  * environment's limits hold, each cut saying so. `legacyOnly` runs the detectors that existed before test services, without any dependency candidate (used when the full pass was stopped for taking too long).
  */
-export async function runDetectors(reader: RepositoryReader, cwd: string, options: { legacyOnly?: boolean; /** Run only the detectors with these names (a caller that wants one kind of finding). */ only?: readonly string[] } = {}): Promise<Detection> {
+export async function runDetectors(reader: RepositoryReader, cwd: string, options: {
+  legacyOnly?: boolean;
+  /** Run only the detectors with these names (a caller that wants one kind of finding). */
+  only?: readonly string[];
+  /** Port lane P6 (item B1): detectors a build-system plug-in supplies. They run after the built-in ones, so a built-in's check wins a tie. */
+  extraDetectors?: ReadonlyArray<{ name: string; run: Detector }>;
+  /** Statements to add to the detection's notes first (a plug-in detector that could not be loaded). */
+  extraNotes?: readonly string[];
+} = {}): Promise<Detection> {
   const merged = emptyDetection();
+  merged.notes.push(...(options.extraNotes ?? []));
   const candidates: DependencyCandidate[] = [];
   const ids = new Set<string>();
   let cutChecks = false;
-  for (const detector of DETECTORS) {
+  for (const detector of [...DETECTORS, ...(options.extraDetectors ?? [])]) {
     if (options.only !== undefined && !options.only.includes(detector.name)) continue;
     if (options.legacyOnly === true && DEPENDENCY_DETECTOR_NAMES.has(detector.name)) continue;
     let part: Partial<Detection>;

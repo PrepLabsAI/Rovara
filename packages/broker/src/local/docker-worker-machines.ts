@@ -25,8 +25,11 @@ import {
   createGateway, createGuard, dockerRun, ensureNetworks, gatewayAddresses, isolationNames, type IsolationNames, type Run,
 } from "./isolation/stack.js";
 import {
+  BUILD_SYSTEM_PROFILES_ENV,
   MachineError,
   WORKER_PING_FEATURES_FIELD,
+  serializeBuildSystemProfiles,
+  type BuildSystemProfile,
   type DeliveryReceipt,
   type MachineCapabilities,
   type MachineHandle,
@@ -79,6 +82,8 @@ const RESERVED_ENVIRONMENT = new Set([
   "AGENTX_MODEL_PROXY_URL",
   "AGENTX_RUNTIME",
   "AGENTX_WORKER_PROCESS_SCOPE",
+  // Port lane P6 (item B1): the build systems' detector modules are the operator's; a spec (a project) cannot name code for the worker to load.
+  BUILD_SYSTEM_PROFILES_ENV,
   "PORT",
   "TMPDIR",
   "DOCKER_HOST",
@@ -112,6 +117,11 @@ export interface DockerWorkerMachinesOptions {
   callback: () => { tcpPort: number; socketDirectory?: string | undefined };
   /** Lane L9a: the broker serves the local model proxy on its callback listener; tell the worker where it is (`AGENTX_MODEL_PROXY_URL`). */
   modelProxy?: boolean | undefined;
+  /**
+   * Port lane P6 (item B1): the profiles of the registered `build-system` adapters (`collectBuildSystemProfiles`), asked each time a machine starts. They go to the worker in `ROVARA_BUILD_SYSTEMS`
+   * (never in a job). A change re-creates an idle machine, like any other change of its environment.
+   */
+  buildSystems?: (() => Promise<readonly BuildSystemProfile[]> | readonly BuildSystemProfile[]) | undefined;
   /** Websites the sandboxes and the worker may reach beyond the default list (the cloud's, without its own network's names). */
   allowedDomains?: readonly string[];
   signer: InvokeSigner;
@@ -190,7 +200,8 @@ export class DockerWorkerMachines implements WorkerMachines {
     const workspaceDirectory = join(this.#workspacesRoot, hash);
     const names = isolationNames(hash);
     const callback = this.#options.callback();
-    const environment = this.#environment(spec, workspaceDirectory, image, names);
+    const buildSystems = this.#options.buildSystems === undefined ? [] : [...(await this.#options.buildSystems())];
+    const environment = this.#environment(spec, workspaceDirectory, image, names, buildSystems);
     const digest = createHash("sha256").update(JSON.stringify([image, Object.entries(environment).sort(([a], [b]) => (a < b ? -1 : 1)), ISOLATION_VERSION, this.#allowed, callback.tcpPort, callback.socketDirectory ?? null])).digest("hex");
     const run: Run = dockerRun(this.#options.docker);
 
@@ -445,7 +456,7 @@ export class DockerWorkerMachines implements WorkerMachines {
     return join(this.#workspacesRoot, machineId.slice("rovara-worker-".length));
   }
 
-  #environment(spec: MachineSpec, workspaceDirectory: string, image: string, names: IsolationNames): Record<string, string> {
+  #environment(spec: MachineSpec, workspaceDirectory: string, image: string, names: IsolationNames, buildSystems: readonly BuildSystemProfile[]): Record<string, string> {
     const environment: Record<string, string> = {};
     for (const [key, value] of Object.entries(spec.environment ?? {})) {
       if (!ENVIRONMENT_NAME.test(key) || RESERVED_ENVIRONMENT.has(key) || MODEL_KEY_ENVIRONMENT.test(key) || AMBIENT_CLOUD_ENVIRONMENT.test(key) || RESERVED_ENVIRONMENT_PREFIXES.some((prefix) => key.startsWith(prefix))) throw new MachineError("rejected", `the environment name ${key.slice(0, 40)} is not allowed`);
@@ -462,6 +473,7 @@ export class DockerWorkerMachines implements WorkerMachines {
       // Lane L9a: the broker's model proxy, reached through the same relay. An address, not a secret: the worker asks for its token with its callback
       // capability (`GET /v1/internal/model-access`), and a setup run starts only when this is set (setup-agent-invocation.ts), so its spend is counted.
       ...(this.#options.modelProxy === true ? { AGENTX_MODEL_PROXY_URL: modelProxyWorkerUrl() } : {}),
+      ...(buildSystems.length === 0 ? {} : { [BUILD_SYSTEM_PROFILES_ENV]: serializeBuildSystemProfiles(buildSystems) }),
       // The Docker calls go to the guard, which holds the socket; the sandboxes join the sandbox network, which the worker does not make itself.
       DOCKER_HOST: `tcp://${SOCKET_GUARD_ALIAS}:${SOCKET_GUARD_PORT}`,
       AGENTX_SANDBOX_NETWORK: names.sandboxNet,

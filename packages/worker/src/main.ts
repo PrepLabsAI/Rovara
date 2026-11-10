@@ -15,6 +15,7 @@ import { closeInvocationResult } from "./close-workspace.js";
 import { advertisedInvocationFeatures, anotherOperationActive, createWorkerServerState, startWorkerServer } from "./server.js";
 import { consoleWorkerLog, logWorkerStarted } from "./worker-log.js";
 import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
+import { installBuildSystemProfiles } from "./build-systems.js";
 import { modelFallbackReporter, resolveTaskSessionModel, secondReviewerRuntimes, taskMissingKeyAuthorizer } from "./task-model.js";
 import { createDefaultPiSessionAdapter } from "./pi-session.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
@@ -48,6 +49,9 @@ const trustedRuntimeBackingOwner = CONTAINED_RUNTIME_PROFILE?.id === "linux-arm6
 
 // Read first, so a partly configured EC2 boot fails before the port opens.
 const invokeAuthentication = invokeAuthenticationFromEnvironment();
+// Port lane P6 (item B1): the build systems this worker was started with (extra detectors and setup programs). A value that cannot be read stops the boot, so no task runs under a half-described build system.
+const buildSystems = installBuildSystemProfiles();
+if (buildSystems.length > 0) console.log(JSON.stringify({ component: "worker", event: "build-systems.installed", names: buildSystems.map((profile) => profile.name) }));
 // Pi installs no package for the worker (R56): a settings file's `packages` would otherwise make it run `npmCommand` here.
 process.env.PI_OFFLINE = "1";
 // N9: a preparation that crashed may have left a package registry's config (and its token) in the workspace; it is removed before any task runs.

@@ -374,6 +374,21 @@ The MCP tools an AI tool calls use chat-neutral names, so a second chat adapter 
 Wording only: the tools' descriptions and the fallback name of a task person with no name now say "chat" where they said Slack (`Chat user`, and the requester text `chat member <id>`).
 **Not renamed (internal REST bodies and values, a later lane with I2):** `slackUserId` on the developer principal, task people and turn authors, `shareToChannel` on the start request, `origin: "slack"` in the control plane's records, the `slack_unavailable` notice code, `AdminRequester.kind "slack"`, and the group keys of `agentx_admin_usage` when grouped by origin.
 
+## Build systems (lane P6, item B1)
+
+A `build-system` adapter is a way of building code that the built-in detectors do not know. It has a `name` and a `profile()` that returns a `BuildSystemProfile` (`packages/contracts/src/ports/build-system.ts`):
+
+| Field | What it is for | Where it ends up |
+| --- | --- | --- |
+| `detectorModule` | A package name the worker image installs, or an absolute `.js`/`.mjs` path inside the image. It exports `detectors: [{ name, run }]` (`run` is the worker's `Detector`). | The worker runs them after the built-in detectors, in the same thread and under the same limits. A name may not be a built-in's. A module that cannot be loaded adds a fixed-words note and nothing else. |
+| `setupPrograms` | Program names the setup governor groups into steps by subcommand (`examplebuild build //a:b` is its own step, as `npm ci` is). | `setup-agent-journal.ts`, set once at worker boot. |
+| `keyFileGlobs` | Files whose content decides what a saved environment holds. | The job's existing `detectorGlobs` and the broker's own key (`detectorGlobsWithBuildSystems`), so both sides hash the same files. The worker holds no copy. |
+
+**It does not travel in a job.** A module path in a job would let every job name code for the worker to load. The profile is the operator's, like the worker image: the machine launcher (`DockerWorkerMachines`, option `buildSystems`,
+read from the registry with `collectBuildSystemProfiles`) puts the profiles into the worker's start-up environment as `ROVARA_BUILD_SYSTEMS`, a name a machine spec cannot set. The worker reads it once at boot and refuses to start on a value it cannot
+read. The worker also refuses an absolute module path that lies inside its workspace, where repositories are checked out. No line of the worker job (`operation.ts`, `protocol.ts`) is added or changed (decision 65). A profile that is not valid,
+or that carries a name other than the adapter's, stops the machine from starting. The internal build-system detector stays an optional plug-in package outside the core (decision 45.11).
+
 ## The task flow core (lane L6a)
 
 `packages/broker/src/core/task-flow/` is Cloud's task start, the driver of the stage machine and the dispatch of work to worker machines, built only on

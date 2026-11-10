@@ -7,6 +7,7 @@ export * from "./queue.js";
 export * from "./worker-machines.js";
 export * from "./policy.js";
 export * from "./audit-sink.js";
+export * from "./build-system.js";
 export * from "./company-instructions.js";
 export * from "./model-keys.js";
 export * from "./object-storage.js";

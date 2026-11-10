@@ -1,5 +1,6 @@
 // Port lane W0: the fakes, the registry and Code's defaults for the ports in `@agentx/contracts`.
 export * from "./adapter-registry.js";
+export * from "./build-systems.js";
 export * from "./fake-channel-adapter.js";
 export * from "./fake-worker-machines.js";
 export * from "./memory-document-store.js";

@@ -13,6 +13,7 @@ import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
 import { OperationStore } from "../operations.js";
 import {
+  collectBuildSystemProfiles,
   createAdapterRegistry,
   createEnvironmentModelKeyStore,
   createFileModelKeyStore,
@@ -360,6 +361,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     },
     ...(options.allowedDomains === undefined ? {} : { allowedDomains: options.allowedDomains }),
     modelProxy: true,
+    // Port lane P6 (item B1): what the registered build-system adapters supply (extra detectors, setup programs) goes to the worker's start-up environment; read late, because the config's adapters load after this.
+    buildSystems: () => collectBuildSystemProfiles(registry),
     signer: await loadInvokeSigner(stateDirectory),
     docker: options.docker ?? createDockerRunner(options.environment),
     ...(options.workerFetch === undefined ? {} : { fetch: options.workerFetch }),
