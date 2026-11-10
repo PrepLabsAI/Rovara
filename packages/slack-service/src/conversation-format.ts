@@ -1,10 +1,7 @@
-import { splitSlackMessage } from "@agentx/contracts";
-import { escapeText, slackReplyText } from "./slack-format.js";
-
 /**
  * Spec 062 FR-040: how the processor's own words and the model's reply are written for one surface. The processor
  * composes every message through this, so Slack keeps its exact texts and a channel adapter gets plain text it formats
- * itself. Only Slack's format writes Slack markup.
+ * itself. Only Slack's format, in slack-format.ts, writes Slack markup.
  */
 export interface ConversationFormat {
   readonly kind: "slack" | "plain";
@@ -25,20 +22,9 @@ export interface ConversationFormat {
   readonly replyCancel: string;
   /** Where a new workspace starts: "a new Slack thread" or "a new conversation". */
   readonly fresh: string;
+  /** A link to one of the person's other conversations, which the workspace limit names; undefined when it has none. */
+  starterLink: (thread: unknown, index: number) => string | undefined;
 }
-
-export const SLACK_FORMAT: ConversationFormat = {
-  kind: "slack",
-  escape: escapeText,
-  reply: slackReplyText,
-  split: splitSlackMessage,
-  mention: (userId) => `<@${userId}>`,
-  here: "this thread",
-  askAgain: "mention me again",
-  replyYes: "reply `@AgentX yes`",
-  replyCancel: "reply `@AgentX cancel`",
-  fresh: "a new Slack thread",
-};
 
 /** Plain text, for an adapter. Rovara's own confirmation summaries are stored entity-escaped, so they are unescaped. */
 const unescape = (text: string) => text.replace(/&lt;/gu, "<").replace(/&gt;/gu, ">").replace(/&amp;/gu, "&");
@@ -67,4 +53,5 @@ export const PLAIN_FORMAT: ConversationFormat = {
   replyYes: "reply `yes`",
   replyCancel: "reply `cancel`",
   fresh: "a new conversation",
+  starterLink: () => undefined,
 };

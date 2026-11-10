@@ -13,7 +13,7 @@ import {
   type SwebenchStartResult,
 } from "@agentx/contracts";
 import { matchApprovedModel, modelOptionsMessage } from "./model-command.js";
-import { escapeText } from "./slack-format.js";
+import { SLACK_FORMAT, escapeText } from "./slack-format.js";
 
 export interface SwebenchApi {
   startSwebenchRun(request: { requestId: string; dataset: SwebenchDataset; instanceId: string; model?: ModelIdentifier }): Promise<SwebenchStartResult>;
@@ -58,7 +58,7 @@ export async function runSwebenchCommand(command: SwebenchCommand, api: Swebench
       const reason = matches.length === 0
         ? `No approved coding model matches “${escapeText(command.modelSelector)}”.`
         : `“${escapeText(command.modelSelector)}” matches more than one approved coding model.`;
-      await options.post(modelOptionsMessage(models, reason));
+      await options.post(modelOptionsMessage(models, reason, SLACK_FORMAT));
       return;
     }
     model = { provider: matches[0]!.provider, modelId: matches[0]!.modelId };

@@ -5,31 +5,17 @@ import {
   redactAndCap,
   turnRecordKeys,
   type SlackRequestMessage,
-  type TurnDisposition,
   type TurnObservation,
   type TurnRecord,
 } from "@agentx/contracts";
-import type { ServiceLog } from "./processor.js";
+import type { ServiceLog, TurnDraft } from "./processor.js";
 
 /** DynamoDB's item limit is 400 KB; this leaves room for keys and attribute overhead. */
 export const TURN_ITEM_BYTE_BUDGET = 350_000;
 /** A record write gives up after this long, so a hung request cannot hold the thread. */
 export const TURN_WRITE_TIMEOUT_MS = 5_000;
 
-export interface TurnDraft {
-  disposition: TurnDisposition;
-  workspaceId?: string;
-  conversationId?: string;
-  settingsRevision?: number;
-  /** The orchestrator's answer or failure text; otherwise the last message posted is used. */
-  responseText?: string;
-  error?: { name: string; code?: string };
-  /** This turn posted a confirmation; its reply is then the confirmation, never an empty response. */
-  confirmationPosted?: boolean;
-  /** Spec 025: a continue-mode turn's task, and the teammate's display name (C13). */
-  taskId?: string;
-  requesterName?: string;
-}
+export type { TurnDraft } from "./processor.js";
 
 export interface TurnRecordSink {
   write(record: TurnRecord): Promise<"written" | "duplicate">;

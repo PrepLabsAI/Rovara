@@ -1,5 +1,5 @@
 import { modelCheckClassSentence, type ModelRef, type ProjectModelOptions } from "@agentx/contracts";
-import { SLACK_FORMAT, type ConversationFormat } from "./conversation-format.js";
+import type { ConversationFormat } from "./conversation-format.js";
 
 export type ModelCommand = { kind: "list" } | { kind: "use"; selector: string };
 
@@ -18,11 +18,12 @@ export function matchApprovedModel(selector: string, approved: readonly ModelRef
   return approved.filter((model) => modelNames(model).some((name) => name.toLocaleLowerCase("en-US").includes(sought)));
 }
 
-export function modelOptionsMessage(options: ProjectModelOptions, introduction = "Approved coding models for this project:", format: ConversationFormat = SLACK_FORMAT): string {
+export function modelOptionsMessage(options: ProjectModelOptions, introduction: string | undefined, format: ConversationFormat): string {
+  const intro = introduction ?? "Approved coding models for this project:";
   const escapeText = format.escape;
   const currentKey = `${options.current.provider}\0${options.current.modelId}`;
   return [
-    introduction,
+    intro,
     ...options.approved.map((model) => {
       const selected = `${model.provider}\0${model.modelId}` === currentKey ? " _(current)_" : "";
       const thinking = model.thinkingLevel === undefined ? "" : ` (thinking: ${model.thinkingLevel})`;
@@ -41,7 +42,7 @@ function modelNames(model: ModelRef): string[] {
 }
 
 /** MODEL1: what `@agentx use` adds when the last stored check of the chosen pair failed: the class sentence, never provider text. Empty when the check passed or never ran. */
-export function modelCheckWarning(model: ModelRef, format: ConversationFormat = SLACK_FORMAT): string {
+export function modelCheckWarning(model: ModelRef, format: ConversationFormat): string {
   const escapeText = format.escape;
   const check = model.lastCheck;
   if (check === undefined || check.status !== "failed" || check.class === undefined) return "";

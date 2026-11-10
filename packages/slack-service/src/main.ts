@@ -22,11 +22,14 @@ import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
 import { createDynamoActiveTurnStore } from "./active-turn-store.js";
 import { createDynamoConfirmationStore } from "./confirmation-store.js";
-import { runConsumer, type QueueClient } from "./consumer.js";
-import { processSlackRequest, type ProcessorMessage, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
+import { runConsumer as runQueueConsumer, type QueueClient } from "./consumer.js";
+import type { ProcessorMessage, ServiceLog, ThreadStore, TurnInput } from "./processor.js";
+import { runConsumer } from "./slack-consumer.js";
+import { processSlackRequest } from "./slack-processor.js";
+import { createEvalBatchWatchApi, withSlackThreadRoutes, type SlackThreadServiceApi } from "./slack-thread-api.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
-import { createEvalBatchWatchApi, createThreadApi } from "./thread-api.js";
+import { createThreadApi } from "./thread-api.js";
 import { runEvalBatchWatcher } from "./eval-batch-watcher.js";
 import { createSlackWebClient } from "./slack-web.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
@@ -119,9 +122,9 @@ function postToSlack(channel: string, threadTs: string | undefined, text: string
   return slackWeb.postMessage(channel, threadTs, text, { ...(blocks === undefined ? {} : { blocks }), ...(signal === undefined ? {} : { signal }) });
 }
 
-function threadApi(message: Pick<SlackRequestMessage, "thread" | "userId">): ThreadServiceApi {
+function threadApi(message: Pick<SlackRequestMessage, "thread" | "userId">): SlackThreadServiceApi {
   const signedFetch = createSignedServiceFetch({ region, credentials, thread: message.thread, userId: message.userId });
-  return createThreadApi({ controlPlaneUrl, signedFetch });
+  return withSlackThreadRoutes(createThreadApi({ controlPlaneUrl, signedFetch }), { controlPlaneUrl, signedFetch });
 }
 
 const threads: ThreadStore = {
@@ -400,7 +403,7 @@ const batchWatcher = runEvalBatchWatcher({
 // Spec 062 Phase 4: adapter conversations, run beside the Slack queue with their own concurrency.
 const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueueUrl === undefined
   ? Promise.resolve()
-  : runConsumer(sqsQueue(channelRequestQueueUrl), channelRequestHandler({
+  : runQueueConsumer(sqsQueue(channelRequestQueueUrl), channelRequestHandler({
     processor: {
       api: (message) => createThreadApi({ controlPlaneUrl, signedFetch: createSignedServiceFetch({ region, credentials, conversation: message.thread, actorUserId: message.userId }) }),
       threads,

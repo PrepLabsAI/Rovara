@@ -1,3 +1,6 @@
+import { slackThreadUrl, splitSlackMessage, type SlackThread } from "@agentx/contracts";
+import type { ConversationFormat } from "./conversation-format.js";
+
 /**
  * Converts an orchestrator reply (Markdown-style model output) to Slack mrkdwn before it is posted.
  * Code spans and fenced blocks keep their content; only Slack's three control characters are
@@ -117,3 +120,19 @@ export function escapeText(text: string): string {
     .replace(/</gu, "&lt;")
     .replace(/>/gu, "&gt;");
 }
+
+/** Spec 062 FR-040: Slack's conversation format. Every Slack text the processor posts is written with it, unchanged. */
+export const SLACK_FORMAT: ConversationFormat = {
+  kind: "slack",
+  escape: escapeText,
+  reply: slackReplyText,
+  split: splitSlackMessage,
+  mention: (userId) => `<@${userId}>`,
+  here: "this thread",
+  askAgain: "mention me again",
+  replyYes: "reply `@AgentX yes`",
+  replyCancel: "reply `@AgentX cancel`",
+  fresh: "a new Slack thread",
+  starterLink: (thread, index) => `• <${escapeText(slackThreadUrl(thread as SlackThread))}|Thread ${index + 1}>`,
+};
+
