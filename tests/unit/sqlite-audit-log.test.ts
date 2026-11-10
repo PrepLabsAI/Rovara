@@ -10,7 +10,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, registerCodeDefaults, type ModuleImporter } from "../../packages/broker/src/ports/index.js";
 import * as pluginModule from "../../packages/local-adapters/src/audit-sink-plugin.js";
 import { AUDIT_DETAILS_MAX_BYTES, AuditLogError, SqliteAuditLog } from "../../packages/local-adapters/src/sqlite-audit-log.js";
-import { DocumentAuditSink, auditRowKey, startAuditCopy, verifyAuditCopy } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink, auditRowKey, startAuditCopy, startAuditCopyFromPrimary, verifyAuditCopy } from "../../packages/local-adapters/src/document-audit-sink.js";
 import { SqliteDocumentStore } from "../../packages/local-adapters/src/sqlite-document-store.js";
 
 const folders: string[] = [];
@@ -46,15 +46,16 @@ describe("DocumentAuditSink: the record commits with the change", () => {
     return { store, sink: new DocumentAuditSink({ store: () => store }) };
   };
 
-  it("stages one put step into the caller's transaction, and the row exists once the transaction commits", async () => {
+  it("stages one step into the caller's transaction, and the row exists once the transaction commits", async () => {
     const { store, sink } = make();
     const steps = sink.stage(event(1));
     expect(steps).toHaveLength(1);
-    expect(steps[0]).toMatchObject({ kind: "put", item: { ...auditRowKey(IMPLICIT_COMPANY_ID, "evt-1"), entityType: "AUDIT", action: "lessons.added", actor: { type: "person", id: "local-owner" } } });
+    expect(steps[0]).toMatchObject({ kind: "update", key: auditRowKey(IMPLICIT_COMPANY_ID, "evt-1") });
     expect(await rowsOf(store)).toEqual([]);
     const result = await store.transact([{ kind: "put", item: { ...decisionKey("r1"), state: "approved" }, condition: when.absent() }, ...steps]);
     expect(result).toEqual({ applied: true });
     expect(await rowsOf(store)).toEqual(["evt-1"]);
+    expect(await store.get(auditRowKey(IMPLICIT_COMPANY_ID, "evt-1"))).toMatchObject({ entityType: "AUDIT", action: "lessons.added", actor: { type: "person", id: "local-owner" }, at: "2026-11-10T00:00:01.000Z" });
   });
 
   it("a losing approval leaves no row: two approvers decide at once and only the winner's change, and record, commit", async () => {
@@ -107,12 +108,12 @@ describe("DocumentAuditSink: the record commits with the change", () => {
     expect(different.applied).toBe(false);
     // The change in the same transaction was refused with it.
     expect(await store.get(decisionKey("r2"))).toBeUndefined();
-    const stored = await store.get(auditRowKey(IMPLICIT_COMPANY_ID, "evt-1"));
-    expect(stored?.details).toEqual({ revision: 1 });
-    // The same facts at a later moment are the same record.
+    expect((await store.get(auditRowKey(IMPLICIT_COMPANY_ID, "evt-1")))?.details).toEqual({ revision: 1 });
+    // The same facts at a later moment are the same record, and the row keeps the time of the FIRST commit (read after the retry).
     expect((await store.transact([...sink.stage(event(1, { at: "2026-12-01T00:00:00.000Z", details: { revision: 1 } }))])).applied).toBe(true);
+    await sink.record(event(1, { at: "2027-01-01T00:00:00.000Z", details: { revision: 1 } }));
     expect(await rowsOf(store)).toEqual(["evt-1"]);
-    expect(stored?.at).toBe("2026-11-10T00:00:01.000Z");
+    expect((await store.get(auditRowKey(IMPLICIT_COMPANY_ID, "evt-1")))?.at).toBe("2026-11-10T00:00:01.000Z");
   });
 
   it("record writes a row on its own, accepts the same facts twice, and rejects an event id used for other facts", async () => {
@@ -286,6 +287,81 @@ describe("the copy is fed from committed rows only", () => {
     expect(await startAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toBeUndefined();
     log.append(event(1));
     expect(await verifyAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: true, checked: 1 });
+  });
+});
+
+describe("bringing the copy up to date at start", () => {
+  const rig = async () => {
+    const dir = await folder();
+    const store = SqliteDocumentStore.open({ path: join(dir, "state.db"), indexes: [], migrate: true });
+    closers.push(() => store.close());
+    const sink = new DocumentAuditSink({ store: () => store });
+    const first = SqliteAuditLog.open({ path: join(dir, "audit.db") });
+    const feeding = await startAuditCopy({ store, log: first, companyId: IMPLICIT_COMPANY_ID });
+    for (const n of [1, 2, 3]) await store.transact([...sink.stage(event(n))]);
+    for (let i = 0; i < 100 && (await store.get({ pk: companyScoped(IMPLICIT_COMPANY_ID, "AUDIT_COPY"), sk: "HEAD" }))?.count !== 3; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    await feeding?.stop();
+    first.close();
+    return { dir, store, sink };
+  };
+
+  it("is a no-op for a complete copy", async () => {
+    const { dir, store } = await rig();
+    const log = SqliteAuditLog.open({ path: join(dir, "audit.db") });
+    closers.push(() => log.close());
+    expect(await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ verification: { ok: true, checked: 3 }, backfilled: 0 });
+  });
+
+  it("back-fills a deleted audit.db from the primary rows, oldest first, and re-anchors", async () => {
+    const { dir, store } = await rig();
+    await rm(join(dir, "audit.db"), { force: true });
+    await rm(join(dir, "audit.db-wal"), { force: true });
+    await rm(join(dir, "audit.db-shm"), { force: true });
+    const log = SqliteAuditLog.open({ path: join(dir, "audit.db") });
+    closers.push(() => log.close());
+    const started = await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID });
+    expect(started.verification).toMatchObject({ ok: false, anchor: "behind" });
+    expect(started.backfilled).toBe(3);
+    expect(log.read({ companyId: IMPLICIT_COMPANY_ID }).map((row) => row.eventId)).toEqual(["evt-1", "evt-2", "evt-3"]);
+    expect(await verifyAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: true, checked: 3 });
+    // A second start finds nothing to do.
+    expect((await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID })).backfilled).toBe(0);
+  });
+
+  it("back-fills the rows a poisoned feed batch left out (the anchor alone cannot show them missing)", async () => {
+    const { dir, store } = await rig();
+    await rm(join(dir, "audit.db"), { force: true });
+    await rm(join(dir, "audit.db-wal"), { force: true });
+    await rm(join(dir, "audit.db-shm"), { force: true });
+    const log = SqliteAuditLog.open({ path: join(dir, "audit.db") });
+    closers.push(() => log.close());
+    // The copy holds events 1 and 3 and an anchor that agrees with it: event 2's batch was given up on.
+    log.append(event(1));
+    log.append(event(3));
+    await store.put({ item: { pk: companyScoped(IMPLICIT_COMPANY_ID, "AUDIT_COPY"), sk: "HEAD", entityType: "AUDIT_COPY_HEAD", count: log.head().count, hash: log.head().hash } });
+    expect(await verifyAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: true, checked: 2 });
+    const started = await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID });
+    expect(started.backfilled).toBe(1);
+    expect(log.read({ companyId: IMPLICIT_COMPANY_ID }).map((row) => row.eventId).sort()).toEqual(["evt-1", "evt-2", "evt-3"]);
+    expect(await verifyAuditCopy({ store, log, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: true, checked: 3 });
+  });
+
+  it("does not repair a copy that was CHANGED (chain broken): it reports it and leaves it", async () => {
+    const { dir, store } = await rig();
+    const path = join(dir, "audit.db");
+    const other = new DatabaseSync(path);
+    try {
+      other.exec("DROP TRIGGER audit_events_no_update");
+      other.exec("UPDATE audit_events SET action = 'lessons.removed' WHERE seq = 2");
+    } finally {
+      other.close();
+    }
+    const log = SqliteAuditLog.open({ path });
+    closers.push(() => log.close());
+    const started = await startAuditCopyFromPrimary({ store, log, companyId: IMPLICIT_COMPANY_ID });
+    expect(started.verification).toMatchObject({ ok: false, brokenAt: 2 });
+    expect(started.backfilled).toBe(0);
+    expect(log.read({ companyId: IMPLICIT_COMPANY_ID }).find((row) => row.seq === 2)?.action).toBe("lessons.removed");
   });
 });
 

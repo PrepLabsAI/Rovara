@@ -1,4 +1,4 @@
-// Port lane P6 (item L2, review H1/M2): Code's default `audit-sink`. The audit record COMMITS WITH THE CHANGE, as the port says (`audit-sink.ts`): `stage` returns a `put` step for the caller's own
+// Port lane P6 (item L2, review H1/M2): Code's default `audit-sink`. The audit record COMMITS WITH THE CHANGE, as the port says (`audit-sink.ts`): `stage` returns an `update` step (sets each field only if absent) for the caller's own
 // document-store transaction, an `AUDIT#` row in the same store (state.db). So a change that is refused, lost to a competing writer, or interrupted before its transaction commits leaves NO row, and
 // a change that commits always leaves one. The "audit before add" rule holds because the record and the add are one atomic step.
 //
@@ -8,6 +8,7 @@
 // `startAuditCopy` feeds the append-only, hash-chained copy (`SqliteAuditLog`, audit.db) from COMMITTED rows only, through the store's change feed. The copy is never the primary.
 import {
   companyScoped,
+  queryAll,
   type AuditEvent,
   type AuditSink,
   type DocumentChange,
@@ -15,6 +16,8 @@ import {
   type JsonObject,
   type StoredDocument,
   type TransactItem,
+  type UpdateOp,
+  change,
   when,
 } from "@agentx/contracts";
 import { AuditLogError, auditDigest, checkAuditEvent, storedAuditEvent } from "./audit-event.js";
@@ -63,9 +66,22 @@ export function auditEventOfRow(row: StoredDocument | undefined): AuditEvent | u
   });
 }
 
+/**
+ * The write for an event's row: an update that sets each field only when it is not there yet, under "absent, or the same facts". A new row is created whole; a same-facts retry changes nothing, so the row
+ * keeps the time of the FIRST commit (a plain `put` would overwrite it).
+ */
+function auditWrite(item: StoredDocument): { key: { pk: string; sk: string }; ops: UpdateOp[]; condition: ReturnType<typeof when.or> } {
+  const { pk, sk, ...fields } = item;
+  return {
+    key: { pk, sk },
+    ops: Object.entries(fields).map(([name, value]) => change.setIfAbsent(name, value)),
+    condition: when.or(when.absent(), when.eq("digest", item.digest as string)),
+  };
+}
+
 export interface DocumentAuditSinkOptions {
   /** The store the rows go to; asked when `record` is called, so the registry's `storage` adapter (which may be a plug-in loaded later) is the one used. */
-  store: () => Pick<DocumentStore, "put" | "get">;
+  store: () => Pick<DocumentStore, "update" | "get">;
 }
 
 export class DocumentAuditSink implements AuditSink {
@@ -76,16 +92,15 @@ export class DocumentAuditSink implements AuditSink {
   }
 
   stage(event: AuditEvent): readonly TransactItem[] {
-    const item = auditRow(event);
-    return [{ kind: "put", item, condition: when.or(when.absent(), when.eq("digest", item.digest as string)) }];
+    return [{ kind: "update", ...auditWrite(auditRow(event)) }];
   }
 
   async record(event: AuditEvent): Promise<void> {
-    const item = auditRow(event);
+    const write = auditWrite(auditRow(event));
     const store = this.#options.store();
     let result;
     try {
-      result = await store.put({ item, condition: when.or(when.absent(), when.eq("digest", item.digest as string)) });
+      result = await store.update(write);
     } catch (error) {
       throw new AuditLogError("the audit record could not be written", { cause: error });
     }
@@ -128,6 +143,34 @@ export async function startAuditCopy(options: AuditCopyOptions): Promise<{ stop(
     },
     { onPoison: (_changes, error) => options.onError?.(error) },
   );
+}
+
+export interface AuditCopyStart {
+  /** What the check found before any back-fill. */
+  verification: ReturnType<SqliteAuditLog["verify"]>;
+  /** How many committed rows the copy was missing and got from the primary. 0 when it was complete. */
+  backfilled: number;
+}
+
+/**
+ * Brings the copy up to date with the primary at start, BEFORE the feed is attached. A copy can lack committed rows: its file was deleted, a batch of the feed was given up on (poison), or the process stopped
+ * between a commit and the feed. The missing rows are appended from the primary `AUDIT#` rows, oldest first, and the anchor is rewritten. A copy whose chain is broken or whose anchored row differs (it was
+ * CHANGED, not just short) is not touched: that is reported, never repaired. `behind` (rows cut off) is repaired, since the primary still has them.
+ */
+export async function startAuditCopyFromPrimary(options: Pick<AuditCopyOptions, "store" | "log" | "companyId">): Promise<AuditCopyStart> {
+  const verification = await verifyAuditCopy(options);
+  if (!verification.ok && verification.anchor !== "behind") return { verification, backfilled: 0 };
+  const have = options.log.eventIds();
+  const missing = (await queryAll(options.store, { pk: companyScoped(options.companyId, "AUDIT") }))
+    .map((row) => auditEventOfRow(row))
+    .filter((event): event is AuditEvent => event !== undefined && !have.has(event.eventId))
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.eventId < b.eventId ? -1 : 1));
+  for (const event of missing) options.log.append(event);
+  if (missing.length > 0 || verification.anchor === "behind") {
+    const head = options.log.head();
+    await options.store.put({ item: { ...headKey(options.companyId), entityType: HEAD_ENTITY_TYPE, count: head.count, hash: head.hash } });
+  }
+  return { verification, backfilled: missing.length };
 }
 
 /** Checks the copy's chain and its anchor. A copy that has not been fed yet (no anchor) is checked for its chain alone. */

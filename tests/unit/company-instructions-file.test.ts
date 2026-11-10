@@ -144,6 +144,27 @@ describe("FileCompanyInstructions: bounds and the folder it sits in", () => {
     await expect(new FileCompanyInstructions({ path: over }).current(IMPLICIT_COMPANY_ID)).rejects.toThrow(/larger than/);
   });
 
+  it("refuses a file that has grown past the limit since it was checked: the read itself is bounded (a handle that returns cap+2 bytes)", async () => {
+    const dir = await folder();
+    const path = join(dir, COMPANY_INSTRUCTIONS_FILE_NAME);
+    await writeFile(path, "- Rule.\n", { mode: 0o600 });
+    const real = await (await import("node:fs/promises")).stat(path);
+    let closed = false;
+    const growing = {
+      // `stat` still says a small, private, own file; `read` then keeps handing back bytes (more than the limit), as a file growing under the reader does.
+      stat: async () => ({ isFile: () => true, uid: real.uid, mode: 0o100600, size: 10 }),
+      read: async (buffer: Buffer, offset: number, length: number) => {
+        buffer.fill(0x2d, offset, offset + length);
+        return { bytesRead: length, buffer };
+      },
+      readFile: async () => { throw new Error("an unbounded readFile must not be used"); },
+      close: async () => { closed = true; },
+    };
+    const source = new FileCompanyInstructions({ path, open: (async () => growing) as never });
+    await expect(source.current(IMPLICIT_COMPANY_ID)).rejects.toThrow(/larger than/);
+    expect(closed).toBe(true);
+  });
+
   it.skipIf(process.platform === "win32")("refuses a file whose folder others can write, or that is a link (anyone who can write there can swap the file)", async () => {
     const dir = await folder();
     const path = join(dir, COMPANY_INSTRUCTIONS_FILE_NAME);

@@ -91,6 +91,8 @@ export function companyInstructionsSnapshot(bytes: Uint8Array): CompanyInstructi
 export interface FileCompanyInstructionsOptions {
   /** The file, e.g. `~/.rovara/company-instructions.md`. */
   path: string;
+  /** For tests only: opens the file (default `fs.promises.open`), so a test can hand back a handle whose size changed after `stat`. */
+  open?: typeof open;
 }
 
 /**
@@ -99,6 +101,7 @@ export interface FileCompanyInstructionsOptions {
  */
 export class FileCompanyInstructions implements CompanyInstructionsSource {
   readonly #path: string;
+  readonly #open: typeof open;
 
   /**
    * The folder holding the file must be a real folder (not a link), belong to this user and not be writable by group or others: anyone who can write there can swap the file for another. A missing
@@ -120,6 +123,7 @@ export class FileCompanyInstructions implements CompanyInstructionsSource {
 
   constructor(options: FileCompanyInstructionsOptions) {
     this.#path = options.path;
+    this.#open = options.open ?? open;
   }
 
   async current(company: string): Promise<CompanyInstructionsSnapshot | undefined> {
@@ -127,7 +131,7 @@ export class FileCompanyInstructions implements CompanyInstructionsSource {
     await this.#checkParentFolder();
     let handle;
     try {
-      handle = await open(this.#path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await this.#open(this.#path, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw agentXError("CONFIG_INVALID", "The company rules file could not be opened. It must be a plain file, not a link.");

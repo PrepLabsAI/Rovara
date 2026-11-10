@@ -31,7 +31,7 @@ import {
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
 import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
-import { DocumentAuditSink, FileCompanyInstructions, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService, startAuditCopy, verifyAuditCopy } from "@agentx/local-adapters";
+import { DocumentAuditSink, FileCompanyInstructions, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService, startAuditCopy, startAuditCopyFromPrimary } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import type { BrowserOpener } from "./open-browser.js";
@@ -474,8 +474,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     const copy = SqliteAuditLog.open({ path: join(stateDirectory, AUDIT_DB_FILE_NAME) });
     const store = registry.require("storage");
     const copyCompany = config.companyId ?? IMPLICIT_COMPANY_ID;
-    const verification = await verifyAuditCopy({ store, log: copy, companyId: copyCompany });
-    if (!verification.ok) console.error(JSON.stringify({ component: "broker", event: "audit-copy.verify_failed", ...verification }));
+    const started = await startAuditCopyFromPrimary({ store, log: copy, companyId: copyCompany });
+    if (started.backfilled > 0 || started.verification.anchor === "behind") console.error(JSON.stringify({ component: "broker", event: "audit-copy.backfilled", rows: started.backfilled }));
+    else if (!started.verification.ok) console.error(JSON.stringify({ component: "broker", event: "audit-copy.verify_failed", ...started.verification }));
     const feeding = await startAuditCopy({ store, log: copy, companyId: copyCompany, onError: (error) => { console.error(JSON.stringify({ component: "broker", event: "audit-copy.append_failed", error: error instanceof Error ? error.name : "error" })); } });
     // The feed stops first, then the copy closes, both before the store does.
     closers.unshift(() => copy.close());

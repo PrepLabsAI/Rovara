@@ -131,6 +131,11 @@ export class SqliteAuditLog {
     }
   }
 
+  /** The ids of every event the copy holds. */
+  eventIds(): Set<string> {
+    return new Set(this.#db.all("SELECT event_id FROM audit_events").map((row) => String(row.event_id)));
+  }
+
   /** The number of rows and the newest hash: what the feeder anchors. */
   head(): AuditAnchor {
     const count = this.#db.get("SELECT COUNT(*) AS n FROM audit_events");
