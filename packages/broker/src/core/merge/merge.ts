@@ -10,7 +10,8 @@
 //    `pressMerge` verifies it with `Approvers.verify` and only then merges. A proof is used once: it is stored under `approvalProofKey` in the claim's transaction.
 //  - The merge core trusts `Approvers.verify` and the adapter's `requirement` (the methods it accepts and `minApprovers`, which this core enforces). It does NOT know who is calling: Cloud's rule "a token
 //    (the CLI, an AI tool) never merges" is not enforced here. Keeping the local session secret away from tokens and agent tools is the job of the surface that collects the proof (lane L8, see
-//    DEFERRED-CHECKS.md), and a stronger proof for a high-risk merge is a rule of the Approvers adapter, which `request.risk` lets it make.
+//    DEFERRED-CHECKS.md), and a stronger proof for a high-risk merge is a rule of the Approvers adapter, which `request.risk` lets it make. Lane P3 (items A1, A3): the adapter says it in its requirement, and this core
+//    enforces what it says for a HIGH-risk merge: `strongMethods` (a code host comment never counts) and `signIn` (the approver's sign-in time, a company setting). An adapter that names neither is unchanged.
 //  - The audit fact commits with the claim through W0's `AuditSink.stage`, as Cloud's ledger row did.
 //  - Everything provider-specific is behind the `CodeHost` port; people, settings, the task record, the timeline and the milestones are seams (seams.ts).
 import { createHash } from "node:crypto";
@@ -34,6 +35,7 @@ import {
   type ApprovalRequirement,
   type Approvers,
   type AuditSink,
+  checkApprovalSignIn,
   type ChangeRequestStatus,
   type CodeHost,
   type CodeSettings,
@@ -47,7 +49,7 @@ import {
   type TransactItem,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
-import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
+import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
@@ -329,6 +331,7 @@ export function mergeViewFromReadiness(readiness: Readiness): MergeView {
 /** A code host that does not offer `merge` (the port's `merge` is optional): Rovara never merges there, a person does on the host. */
 const HOST_WILL_NOT_MERGE = "Rovara can't merge on this repository's code host. Merge it there.";
 const NOT_APPROVED = "Nobody approved this merge, so nothing was merged.";
+const SIGN_IN_NOT_FRESH = "This high-risk merge needs a recent sign-in. Sign in again and press Merge, so nothing was merged.";
 const NEEDS_MORE_APPROVERS = "This merge needs more than one approver, which Rovara Code can't collect yet, so nothing was merged.";
 const PROOF_USED = "This approval was already used. Ask for a new one.";
 
@@ -426,6 +429,8 @@ export async function pressMerge(
   const prepared = await prepareMerge(deps, input);
   // What the approver adapter requires is enforced here, before the proof is looked at: a method it does not list is no approval, and more than one approver cannot be collected yet.
   if (!prepared.requirement.methods.includes(input.proof.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
+  const strong = prepared.risk.level === "high" ? prepared.requirement.strongMethods : undefined;
+  if (strong !== undefined && !strong.filter((method) => method !== CODE_HOST_COMMENT_METHOD).includes(input.proof.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
   if (prepared.requirement.minApprovers !== 1) throw agentXError("FORBIDDEN", NEEDS_MORE_APPROVERS);
   const verdict = await deps.approvers.verify(prepared.request, input.proof);
   if (!verdict.approved) {
@@ -435,6 +440,9 @@ export async function pressMerge(
     throw agentXError("FORBIDDEN", NOT_APPROVED);
   }
   if (!prepared.requirement.methods.includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
+  if (strong !== undefined && !strong.filter((method) => method !== CODE_HOST_COMMENT_METHOD).includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
+  // The company's sign-in rule (decision 62): a high-risk merge needs the approver's sign-in to satisfy it. Fails closed on a missing sign-in time.
+  if (prepared.risk.level === "high" && prepared.requirement.signIn !== undefined && !checkApprovalSignIn(prepared.requirement.signIn, verdict.approver, deps.now()).ok) throw agentXError("FORBIDDEN", SIGN_IN_NOT_FRESH);
   const task = await deps.host.loadTask(input.taskId);
   if (task === undefined || task.orgId === undefined || !tracksMerge(task.workflow)) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);

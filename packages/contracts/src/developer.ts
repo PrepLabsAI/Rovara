@@ -25,7 +25,7 @@ export const FRESH_SIGN_IN_SECONDS = 600;
 export const SLACK_OIDC_ISSUER = "https://slack.com";
 
 export { DeveloperSignInMethodSchema, type DeveloperSignInMethod } from "./developer-web.js";
-import { DeveloperSignInMethodSchema } from "./developer-web.js";
+import { ExternalAccountRefSchema, SignInMethodIdSchema } from "./outside-account.js";
 
 const LOOPBACK_REDIRECT = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/callback$/;
 
@@ -81,8 +81,11 @@ export type DeveloperTokenResponse = z.infer<typeof DeveloperTokenResponseSchema
 export const DeveloperSummarySchema = z.object({
   id: z.string().regex(/^[a-f0-9]{64}$/),
   name: z.string().min(1).max(200),
-  provider: DeveloperSignInMethodSchema,
+  provider: SignInMethodIdSchema,
+  /** Legacy alias of `account` for a Slack-linked developer: read with `readExternalAccount`; new code writes `account`. */
   slackUserId: SlackUserIdSchema.optional(),
+  /** The developer's outside account in the neutral shape (lane P3, item I2). */
+  account: ExternalAccountRefSchema.optional(),
   email: z.string().email().optional(),
   /** The developer's role in their org; absent from a control plane that predates it. */
   orgRole: OrgRoleSchema.optional(),

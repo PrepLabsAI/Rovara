@@ -24,6 +24,13 @@ export interface Principal {
   roles: readonly string[];
   /** The identity adapter that vouched for this principal, such as `local-owner`. */
   provider: string;
+  /**
+   * When this person last signed in interactively (ISO time), when the identity adapter knows (lane P3, items I1 and A1). It is the adapter's own fact: a rule that wants a fresh sign-in (`ApprovalRequirement.signIn`) reads it,
+   * and Code's local owner has none. Never taken from anything a caller sends.
+   */
+  authTime?: string;
+  /** The sign-in methods the person used for this sign-in, as open ids in the adapter's words (`password`, `company-sso`). Informational: no core rule branches on a name. */
+  methods?: readonly string[];
 }
 
 /** An account at an outside system. `provider` is the adapter's id for that system; `accountId` is the system's own. */
@@ -104,6 +111,12 @@ export interface ApprovalRequest {
   outcome?: "approve" | "reject" | "request_changes";
 }
 
+/**
+ * How recent an approver's sign-in must be (decision 62: a company setting, lane P3). `window`: the sign-in time (`Principal.authTime`) must be no older than `seconds`, and an approver with no sign-in time is refused.
+ * `any-active`: any active company sign-in counts (the person is signed in now; for a company on its own single sign-on, so a high-risk approval needs no extra step). Only an approver adapter sets it; Code's local owner does not.
+ */
+export type ApprovalSignInRule = { mode: "window"; seconds: number } | { mode: "any-active" };
+
 /** What the approver adapter says is needed, so a surface can offer the right way to answer. */
 export interface ApprovalRequirement {
   /** Ways a person may prove who they are, in the adapter's words: `local-session`, `code-host-comment`, `browser-step-up`. */
@@ -111,6 +124,17 @@ export interface ApprovalRequirement {
   minApprovers: number;
   /** Whether the person who asked may also approve. */
   selfApprovalAllowed: boolean;
+  /**
+   * The methods that may approve a HIGH-risk request (lane P3, item A3: the plug-in that knows its methods names them). A subset of `methods` is used. Absent: only the local session, so a plug-in whose strong method has another name
+   * must say so. A method that proves one act by a code host comment is never strong, whatever is named here.
+   */
+  strongMethods?: readonly string[];
+  /** The methods that may reject. Rejecting needs a signed-in session: a comment method is never one, whatever is named here. Absent: the local session. */
+  rejectMethods?: readonly string[];
+  /** The methods that may ask for changes. Asking for changes by a comment is allowed (decision 62). Absent: the local session or a code host comment. */
+  changesMethods?: readonly string[];
+  /** How recent the approver's sign-in must be for a high-risk approval or a rejection (decision 62). Absent: no rule (Code). */
+  signIn?: ApprovalSignInRule;
 }
 
 /**
@@ -167,10 +191,45 @@ export interface PresentedCredential {
 export type AuthResult = { ok: true; principal: Principal } | { ok: false; reason: "unknown" | "expired" | "refused" };
 
 export interface IdentityCapabilities {
-  /** The adapter signs people in itself (a login page, single sign-on). */
+  /** The adapter signs people in itself (a login page, single sign-on): it offers `beginSignIn`, `completeSignIn` and `signOut`. */
   interactiveSignIn: boolean;
-  /** The adapter can map an outside account to a person. */
+  /** The adapter can map an outside account to a person, and a person to their outside accounts (`accountsOf`). */
   externalAccounts: boolean;
+  /** The adapter can list the company's members (`listMembers`). Absent: it cannot. */
+  members?: boolean;
+  /** The adapter signs people in through the company's own single sign-on, so a company may choose "trust any active company sign-in" (`ApprovalSignInRule`). Absent: it does not. */
+  companySignIn?: boolean;
+}
+
+/** Starts a sign-in: the adapter answers with where to send the person. */
+export interface SignInStartRequest {
+  companyId: string;
+  /** Which of the adapter's sign-in methods, as an open id; absent: the adapter's default. */
+  method?: string;
+  /** Where the person returns to in Rovara afterwards. Rovara checks it is its own address; the adapter does not follow it. */
+  returnTo?: string;
+}
+export interface SignInStart {
+  /** The address the person is sent to. */
+  redirectUrl: string;
+  /** Names this attempt; `completeSignIn` gets it back with what the provider sent. Opaque. */
+  attemptId: string;
+  expiresAt: string;
+}
+/** Finishes a sign-in with what came back from the provider (query values). A value in it is a secret: do not log it. */
+export interface SignInCompleteRequest {
+  companyId: string;
+  attemptId: string;
+  params: Readonly<Record<string, string>>;
+}
+export type SignInResult =
+  | { ok: true; principal: Principal; /** The credential the surface presents from now on. A secret. */ credential: PresentedCredential; expiresAt?: string }
+  | { ok: false; reason: "unknown" | "expired" | "refused" };
+
+export interface IdentityMemberPage {
+  members: readonly Principal[];
+  /** Pass it back to read the next page; absent on the last. */
+  nextCursor?: string;
 }
 
 export interface IdentityProvider {
@@ -180,6 +239,17 @@ export interface IdentityProvider {
   resolveExternalAccount(companyId: string, account: ExternalAccountRef): Promise<Principal | undefined>;
   /** A person of this company by Rovara id, or undefined. */
   getPrincipal(companyId: string, personId: string): Promise<Principal | undefined>;
+  // ---- Optional abilities (lane P3, items I1 and I2; owner decision 60). An adapter offers only what its capability flag says; a caller checks the flag, never the adapter's name.
+  /** Needs `capabilities.interactiveSignIn`. */
+  beginSignIn?(request: SignInStartRequest): Promise<SignInStart>;
+  /** Needs `capabilities.interactiveSignIn`. */
+  completeSignIn?(request: SignInCompleteRequest): Promise<SignInResult>;
+  /** Ends the session a credential stands for. Needs `capabilities.interactiveSignIn`. Ending one that is already over succeeds. */
+  signOut?(credential: PresentedCredential): Promise<void>;
+  /** The company's members, a page at a time. Needs `capabilities.members`. */
+  listMembers?(companyId: string, page?: { cursor?: string; limit?: number }): Promise<IdentityMemberPage>;
+  /** The outside accounts a person is linked to in this company (the other way round from `resolveExternalAccount`). Needs `capabilities.externalAccounts`. */
+  accountsOf?(companyId: string, personId: string): Promise<readonly ExternalAccountRef[]>;
 }
 
 // ---- Metering ----

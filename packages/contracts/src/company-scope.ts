@@ -10,11 +10,20 @@ import { COMPANY_KEY_PREFIX, companyScoped } from "./ports/company-scope.js";
 export { OrgIdSchema, type OrgId };
 
 /**
- * A person's role in the company. Code has one implicit company and its owner; the roles are kept so the keys and wire shapes match Cloud's. Cloud adds an
- * enterprise-only `auditor` role in its own org file.
+ * A person's role in the company: an open role name (lane P3, item I3). The company defines its roles; Code has one implicit company and its owner, and Cloud adds `auditor`. The core ACTS only on the names it knows
+ * (`KNOWN_ORG_ROLES`, `isKnownOrgRole`) and gives an unknown name no power, but a shared answer carrying one is valid, so Code and Cloud need no second schema. `Principal.roles` already works this way.
  */
-export const OrgRoleSchema = z.enum(["owner", "admin", "member"]);
+export const OrgRoleSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/);
 export type OrgRole = z.infer<typeof OrgRoleSchema>;
+
+/** The role names the core knows how to act on. */
+export const KNOWN_ORG_ROLES = ["owner", "admin", "member"] as const;
+export type KnownOrgRole = (typeof KNOWN_ORG_ROLES)[number];
+
+/** Whether the core knows this role name. An unknown name (`auditor`, a company's own) is valid data and carries no power in the core. */
+export function isKnownOrgRole(role: string): role is KnownOrgRole {
+  return (KNOWN_ORG_ROLES as readonly string[]).includes(role);
+}
 
 const ORG_ID_BODY_LENGTH = 20;
 
