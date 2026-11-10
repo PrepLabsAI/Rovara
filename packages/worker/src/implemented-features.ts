@@ -54,7 +54,7 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.ownerRedirect.v1",
   // Live interaction A2: a read-only look at the working tree for an Ask (peek-invocation.ts).
   "task.peek.v1",
-  // Enterprise foundations I3: the commit a publication makes carries a random attribution reference, and the description names who asked and who approved (publish.ts).
+  // Plug-in foundations I3: the commit a publication makes carries a random attribution reference, and the description names who asked and who approved (publish.ts).
   "publish.attribution",
   // Live interaction F3: a deep diagnosis, the read-only look answered with the diagnosis JSON (diagnosis.ts).
   "task.diagnosis.v1",
@@ -76,7 +76,7 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "prepare.savedEnvBuild.v1",
   // P1: a prepare invocation's `pins` (the heads the broker read) are checked against what the worker resolves (prepare.ts).
   "prepare.pins.v1",
-  // Enterprise foundations P8: the repository credential exchange takes an ssh key as well as a token or a password (repository-credentials.ts, git-auth.ts).
+  // Plug-in foundations P8: the repository credential exchange takes an ssh key as well as a token or a password (repository-credentials.ts, git-auth.ts).
   "repository.credentialKinds.v1",
   // SR-1 (switch `cr`): the second reviewer inside a review operation (verification/review.ts `secondReviewer`).
   SECOND_REVIEWER_FEATURE,

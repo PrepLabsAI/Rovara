@@ -151,7 +151,7 @@ export const TestEnvironmentBodySchema = z
       .object({ seeds: z.array(z.union([z.object({ command: ProjectCommandSchema }).strict(), z.object({ fixturePath: RelativeWorkspacePathSchema }).strict()])).max(20), generator: z.literal("faker_seeded"), seed: z.number().int().min(0).max(2_147_483_647) })
       .strict(),
     accounts: z.array(TestEnvAccountSchema).max(16),
-    /** What identifies production, so a run refuses to touch it. Enterprise lists its prod accounts at setup; Public has the same field. */
+    /** What identifies production, so a run refuses to touch it. A company install lists its prod accounts at setup. */
     prodDeny: z.object({ accountIds: z.array(AccountId).max(50), hosts: z.array(z.string().min(1).max(253).regex(/^[a-z0-9.*-]+$/u)).max(100), arnPrefixes: z.array(z.string().min(8).max(256).regex(/^arn:[A-Za-z0-9:*/_.-]+$/u)).max(100) }).strict(),
     preview: z
       .object({

@@ -42,7 +42,7 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     const failed = await mcp.tool("agentx_admin_failed_tasks");
     expect(normalized(failed.value)).toEqual({
       failures: [{
-        time: "<time>", project: "payments", origin: "ai_tool", requester: "`Maya Chen` (developer)", workspace_id: "<uuid>", operation_id: "<uuid>",
+        time: "<time>", project: "payments", source: "ai_tool", origin: "ai_tool", requester: "`Maya Chen` (developer)", workspace_id: "<uuid>", operation_id: "<uuid>",
         operation_kind: "prepare", category: "setup_failed", error: "npm ci exited 1 (token [REDACTED])", turn_record: { task_id: "<uuid>" },
       }],
       since: "<time>", until: "<time>",
@@ -63,7 +63,7 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     // #214's additive identity is checked above; the committed legacy result stays unchanged.
     const legacyWorkspaceAnswer = { ...workspaceAnswer, workspaces: workspaceRows.map((row) => ({ ...row, owner: Object.fromEntries(Object.entries(row.owner).filter(([key]) => key !== "developer_id")) })) };
     expect(normalized(legacyWorkspaceAnswer)).toEqual({
-      workspaces: [{ id: "<uuid>", project: "payments", origin: "ai_tool", owner: { task_id: "<uuid>", developer: "`Maya Chen`" }, status: "PREPARATION_FAILED", busy: false, last_activity_at: "<time>" }],
+      workspaces: [{ id: "<uuid>", project: "payments", source: "ai_tool", origin: "ai_tool", owner: { task_id: "<uuid>", developer: "`Maya Chen`" }, status: "PREPARATION_FAILED", busy: false, last_activity_at: "<time>" }],
       // #213: a workspace whose setup failed no longer counts toward the limits.
       limits: { per_person: 3, per_organization: 20, source: "parameters" }, counts: { organization: 0 }, truncated: false,
     });
@@ -126,9 +126,9 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     const operationId = "44444444-4444-4444-8444-444444444444";
     const workspaceId = "55555555-5555-4555-8555-555555555555";
     const developer = { kind: "developer", developerId: MAYA.developerId, provider: "slack", name: `Maya ${PLANTED[0]}` };
-    harness.db.set({ ...failureIndexKey(at, operationId), entityType: "FAILURE_INDEX", operationId, workspaceId, project: "payments", origin: "ai_tool", requester: developer,
+    harness.db.set({ ...failureIndexKey(at, operationId), entityType: "FAILURE_INDEX", operationId, workspaceId, project: "payments", source: "ai_tool", origin: "ai_tool", requester: developer,
       kind: "task", status: "FAILED", category: "worker_unavailable", error: `RUNTIME_UNAVAILABLE: no capacity (token ${PLANTED[1]} ${PLANTED[2]})`, endedAt: at });
-    harness.db.set({ ...usageIndexKey(at, operationId), entityType: "USAGE_INDEX", operationId, workspaceId, project: "payments", origin: "ai_tool", requester: developer,
+    harness.db.set({ ...usageIndexKey(at, operationId), entityType: "USAGE_INDEX", operationId, workspaceId, project: "payments", source: "ai_tool", origin: "ai_tool", requester: developer,
       at, durationMs: 1_000, inputTokens: 1, outputTokens: 1, costUsd: 0 });
     // A connector credential whose secret name carries a planted value (the secret's value is never read).
     harness.db.set({ pk: "CREDENTIALS", sk: "REF#tracker-key", ref: "tracker-key", type: "static-secret", secretName: `agentx/connectors/${PLANTED[0]}`, registeredBy: `${ADMIN_TOKEN} ${PLANTED[1]}`, registeredAt: at });

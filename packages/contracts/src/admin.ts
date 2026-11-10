@@ -236,6 +236,17 @@ export const MISSING_ALARM_STATE = "MISSING";
 
 export const AdminHealthCheckSchema = z.object({ status: z.enum(["ok", "warn", "failed", "unknown"]), detail: z.string().max(300).optional() });
 export type AdminHealthCheck = z.infer<typeof AdminHealthCheckSchema>;
+/**
+ * One installed plug-in's health (item H3): `point` is the plug-in point it sits at (`channel`, `code-host`, ...) and `name` is the adapter's registered name. The list
+ * grows with the install's plug-ins, so a second chat or code-host adapter adds a row and no field.
+ */
+export const AdminPluginHealthSchema = z.object({
+  point: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
+  name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
+  status: AdminHealthCheckSchema.shape.status,
+  detail: z.string().max(300).optional(),
+});
+export type AdminPluginHealth = z.infer<typeof AdminPluginHealthSchema>;
 export const AdminHealthResponseSchema = z.object({
   version: z.object({ developerApi: z.string(), adminApi: z.string(), release: z.string().optional() }),
   alarms: z.array(z.object({ name: z.string(), state: z.string() })),
@@ -243,8 +254,11 @@ export const AdminHealthResponseSchema = z.object({
   deadLetterQueues: z.array(z.object({ name: z.string(), depth: z.number().int().nonnegative().nullable() })),
   /** R18: the queues' own check; optional so an older control plane's answer still parses. */
   deadLetterQueuesCheck: AdminHealthCheckSchema.optional(),
-  slack: AdminHealthCheckSchema,
-  github: AdminHealthCheckSchema,
+  /** H3: one row per plug-in this install has set up (a chat or code-host adapter with no probe has no row). Absent from an older control plane's answer, which has `slack` and `github` only. */
+  plugins: z.array(AdminPluginHealthSchema).max(64).optional(),
+  /** Deprecated for one release (use `plugins`): the chat and code-host rows under their old names. Always sent by this server (as "not set up" when the adapter has no probe). */
+  slack: AdminHealthCheckSchema.optional(),
+  github: AdminHealthCheckSchema.optional(),
   workerModes: z.array(z.object({
     mode: z.string(),
     configured: z.boolean(),

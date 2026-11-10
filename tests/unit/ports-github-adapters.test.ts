@@ -113,7 +113,7 @@ describe("GitHub adapter specifics", () => {
     for (const branch of ["feature/x", "agentx/x", "agentx/../../etc", `agentx/${"0".repeat(35)}/`, ""]) {
       await expect(world.host.branchHead(world.repository, branch, world.scope), branch).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     }
-    await expect(world.host.listBranches(world.repository, 1, { system: "private-install" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(world.host.listBranches(world.repository, 1, { system: "install" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     for (const page of [0, -1, 1.5, 1_001, Number.NaN]) await expect(world.host.listBranches(world.repository, page, world.scope), String(page)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect(world.api.calls.length).toBe(before);
     expect((await world.host.listBranches(world.repository, 1_000, world.scope)).page).toBe(1_000);
