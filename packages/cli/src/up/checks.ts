@@ -104,12 +104,19 @@ async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
     return { id: "model-key", status: "fail", summary: error instanceof Error ? error.message : "the model key file could not be read", fix: `Fix the file's permissions with \`chmod 600 ${keyFile}\`, or keep the key in the ANTHROPIC_API_KEY environment variable instead.` };
   }
   // Lane L13: the same rule the task flow uses (the config's `model` setting, else Anthropic, OpenAI, OpenRouter), so this says what a task step will call.
-  const picked = chooseLocalModel(found, (await readOwnerConfig(services))?.model);
+  const config = await readOwnerConfig(services);
+  const setting = config?.model;
+  // Item K2: a `model-provider` plug-in named in the config is not loaded by this check (naming a module runs its code); `rovara up` loads it and says what is wrong with its sign-in.
+  if (setting !== undefined && !LOCAL_MODEL_PROVIDERS.includes(setting.provider as (typeof LOCAL_MODEL_PROVIDERS)[number])
+    && config?.plugins.some((entry) => entry.enabled && entry.point === "model-provider" && entry.name === setting.provider) === true) {
+    return { id: "model-key", status: "ok", summary: `Task steps will use ${setting.provider} ${setting.id} (the "model" setting in your config). ${setting.provider} is a model-provider plug-in: its sign-in is checked when rovara up starts.` };
+  }
+  const picked = chooseLocalModel(found, setting);
   if (picked.ok) {
     const why = picked.source === "setting" ? "the \"model\" setting in your config" : `the default for ${found.length === 1 ? "the only key found" : "the first key found"}`;
     return { id: "model-key", status: "ok", summary: `A model key is set for ${found.join(", ")}. Task steps will use ${picked.provider} ${picked.model} (${why}).` };
   }
-  if (picked.problem === "setting-without-key") return { id: "model-key", status: "fail", summary: picked.summary, fix: picked.fix };
+  if (picked.problem !== "no-key") return { id: "model-key", status: "fail", summary: picked.summary, fix: picked.fix };
   return { id: "model-key", status: "fail", summary: "No model key was found.", fix: `${picked.fix} A key file goes at ${keyFile} as {"anthropic": "<your key>"} (or "openai", "openrouter"); then run \`chmod 600 ${keyFile}\`.` };
 }
 

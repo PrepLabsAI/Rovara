@@ -121,6 +121,17 @@ describe("rovara up --check", () => {
     expect(none.out).toContain('"model"');
   });
 
+  it("does not load a model-provider plug-in, and says what it can: the setting names one that is configured, or one that is not installed (item K2)", async () => {
+    const check = (options: Parameters<typeof run>[1]) => run(["up", "--check", "--worker-image", "worker:test"], options);
+    const model = { provider: "company-gateway", id: "house-model" };
+    const configured = await check({ environment: {}, config: JSON.stringify({ version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model }) });
+    expect(configured.out).toContain("Task steps will use company-gateway house-model");
+    expect(configured.out).toContain("model-provider plug-in");
+    const missing = await check({ environment: { ANTHROPIC_API_KEY: "an-test-value" }, config: JSON.stringify({ version: 1, plugins: [], model }) });
+    expect(missing.code).not.toBe(0);
+    expect(missing.out).toContain("no model provider called company-gateway is installed");
+  });
+
   it("says how to get GitHub access, and when GitHub rejects the token", async () => {
     const none = await run(["up", "--check", "--worker-image", "worker:test"], { gh: undefined });
     expect(none.out).toContain("No GitHub access was found.");

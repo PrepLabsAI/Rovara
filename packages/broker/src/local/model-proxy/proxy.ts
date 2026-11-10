@@ -13,13 +13,16 @@
 // Not here: Bedrock (it needs the computer's AWS sign-in; listed as a decision 51 gap) and design-review key slots.
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { TASK_BUDGET_EXCEEDED_PREFIX, type AgentXError, type Cost, type Metering, type ModelKeyStore } from "@agentx/contracts";
+import { TASK_BUDGET_EXCEEDED_PREFIX, providerFormat, type AdapterRegistry, type AgentXError, type Cost, type Metering, type ModelKeyStore } from "@agentx/contracts";
 import type { BrokerResponse } from "../../handler.js";
+import { BUILTIN_MODEL_PROVIDERS } from "../../plugins/model-provider/builtin.js";
+import { credentialFix, credentialOf, hasCredential } from "./credentials.js";
 import {
-  DEFAULT_PROVIDER_ENDPOINTS, PROXY_PATH_API, RequestNotAllowed, checkRequestBody, checkRequestHeaders, upstreamUrl, type ProviderEndpoints,
+  PROXY_PATH_API, RequestNotAllowed, checkRequestBody, checkRequestHeaders, upstreamTarget, type ProviderEndpoints,
 } from "./providers.js";
+import { SignInProblem, needsCredential, signCall } from "./sign-in.js";
 import { ModelTokenBook } from "./tokens.js";
-import type { ModelGrantSource, ModelProxyEvent, ProxyApi, ProxyProvider, ProxyRoute } from "./types.js";
+import type { ModelGrantSource, ModelProviderBook, ModelProxyEvent, ProxyApi, ProxyProvider, ProxyRoute } from "./types.js";
 import { UsageCollector, type TokenUsage } from "./usage.js";
 
 export const MODEL_ACCESS_PATH = "/v1/internal/model-access";
@@ -33,6 +36,25 @@ const ERROR_BODY_MAX_BYTES = 65_536;
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_MAX_CONCURRENT = 8;
 const ANTHROPIC_VERSION = "2023-06-01";
+/** The `anthropic_version` Claude on Google Cloud's Vertex AI takes in the body. */
+const VERTEX_ANTHROPIC_VERSION = "vertex-2023-10-16";
+
+/**
+ * The providers of the `model-provider` point, looked up when asked (so a provider registered at start-up is seen). A registry with none registered (a test that builds its own)
+ * has the three built-ins.
+ */
+export function registryModelProviderBook(registry: Pick<AdapterRegistry, "get" | "names">): ModelProviderBook {
+  const fallback = builtinModelProviderBook();
+  return {
+    get: (id) => (registry.names("model-provider").length === 0 ? fallback.get(id) : registry.get("model-provider", id)),
+    ids: () => (registry.names("model-provider").length === 0 ? fallback.ids() : registry.names("model-provider")),
+  };
+}
+
+/** A book of the three built-in providers, for a caller (a test) that gives the proxy none. */
+export function builtinModelProviderBook(): ModelProviderBook {
+  return { get: (id) => BUILTIN_MODEL_PROVIDERS.find((provider) => provider.kind === id), ids: () => BUILTIN_MODEL_PROVIDERS.map((provider) => provider.kind) };
+}
 
 export interface LocalModelProxyOptions {
   /** Where the real keys are (the `model-keys` port). Read per call; never kept. */
@@ -43,7 +65,9 @@ export interface LocalModelProxyOptions {
   grants: ModelGrantSource;
   /** The address the worker is told to call: its egress gateway's name for the broker, plus `MODEL_PROXY_PREFIX`. */
   workerUrl: string;
-  /** Where each provider is. Absent: the providers' own addresses. Tests point these at a fake provider. */
+  /** The providers a route may name (the `model-provider` plug-ins). Absent: the three built-in providers. */
+  providers?: ModelProviderBook | undefined;
+  /** Where each provider is, by provider id, in place of its own address. Absent: the providers' own addresses. Tests point these at a fake provider. */
   endpoints?: Partial<ProviderEndpoints> | undefined;
   fetch?: typeof fetch | undefined;
   now?: (() => number) | undefined;
@@ -123,6 +147,15 @@ async function readBody(request: IncomingMessage, limit: number): Promise<Buffer
   return Buffer.concat(chunks);
 }
 
+/** Whether a request's `tool_choice` makes the model call a tool (a named tool, "required", "any"), as opposed to leaving it free ("auto", "none"). */
+export function forcesToolChoice(choice: unknown): boolean {
+  if (choice === undefined || choice === null) return false;
+  if (typeof choice === "string") return choice === "required" || choice === "any";
+  if (typeof choice !== "object" || Array.isArray(choice)) return false;
+  const type = (choice as Record<string, unknown>).type;
+  return type !== "auto" && type !== "none";
+}
+
 /** Used when a request names no output limit (OpenAI's routes may not): the most output a call is assumed to be able to use. */
 export const ASSUMED_MAX_OUTPUT_TOKENS = 64_000;
 
@@ -141,7 +174,8 @@ export function worstCaseUsage(body: Readonly<Record<string, unknown>>, requestB
 export function createLocalModelProxy(options: LocalModelProxyOptions): LocalModelProxy {
   const now = options.now ?? Date.now;
   const tokens = new ModelTokenBook({ now, ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }) });
-  const endpoints: ProviderEndpoints = { ...DEFAULT_PROVIDER_ENDPOINTS, ...options.endpoints };
+  const endpoints: Partial<ProviderEndpoints> = { ...options.endpoints };
+  const book = options.providers ?? builtinModelProviderBook();
   const transport = options.fetch ?? fetch;
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxConcurrent = options.maxConcurrentPerOperation ?? DEFAULT_MAX_CONCURRENT;
@@ -187,12 +221,18 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
     const providers = [...new Set(grant.routes.map((route) => route.provider))];
     let held: Array<{ provider: ProxyProvider; has: boolean }>;
     try {
-      held = await Promise.all(providers.map(async (provider) => ({ provider, has: (await options.keys.get(options.companyId, provider)) !== undefined })));
+      held = await Promise.all(providers.map(async (provider) => {
+        const row = book.get(provider);
+        return { provider, has: row !== undefined && (await hasCredential(row, options.keys, options.companyId)) };
+      }));
     } catch {
       // The key file could not be read (wrong mode, not JSON). The words of that error can quote the file, so none are passed on.
       return { statusCode: 503, headers: { ...JSON_HEADERS }, body: JSON.stringify({ error: { code: "MODEL_PROXY_UNAVAILABLE", message: "the model keys on this computer could not be read; check ~/.rovara/keys.json" } }) };
     }
-    if (!held.some((entry) => entry.has)) return notAllowed(`no ${providers.join(" or ")} key is set on this computer; put it in ~/.rovara/keys.json or the ${providers[0]!.toUpperCase()}_API_KEY variable and restart rovara up`);
+    if (!held.some((entry) => entry.has)) {
+      const first = book.get(providers[0]!);
+      return notAllowed(first === undefined ? `the model provider ${providers[0]!.slice(0, 40)} is not set up on this computer` : `no ${providers.join(" or ")} ${first.signIn.kind === "bearer-key" || first.signIn.kind === "named-header" ? "key" : "sign-in"} is set on this computer; ${credentialFix(first)} and restart rovara up`);
+    }
     const ledger = tokens.ledger(grant.operationId);
     if (grant.budget !== undefined) {
       if (ledger.currency !== undefined && ledger.currency !== grant.budget.currency) return notAllowed("this task's budget is in another currency than its spend");
@@ -307,8 +347,14 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       route = typeof alias === "string" ? token.routes.get(alias) : undefined;
       if (route === undefined) throw new Refusal(403, "model_not_allowed", "this task may not call that model");
       if (route.api !== api) throw new Refusal(400, "request_not_allowed", "request not allowed: that model speaks another route");
-      const target = upstreamUrl(endpoints, route.provider, route.api);
-      if (target === undefined) throw new Refusal(400, "request_not_allowed", "request not allowed: that provider does not serve this route");
+      const row = book.get(route.provider);
+      if (row === undefined) throw new Refusal(400, "request_not_allowed", "request not allowed: that provider is not set up");
+      const format = providerFormat(row, route.api);
+      if (format === undefined) throw new Refusal(400, "request_not_allowed", "request not allowed: that provider does not serve this route");
+      // A provider that ignores a forced tool choice would let the model answer without the tool: refuse it by name (the plug-in states what it honours).
+      if (!format.capabilities.forcedToolChoice && forcesToolChoice(body.tool_choice)) throw new Refusal(400, "request_not_allowed", `request not allowed: ${row.name} does not honour a forced tool choice on this route`);
+      const stream = body.stream === true;
+      const target = upstreamTarget(row, format, route.model, stream, endpoints[route.provider]);
       provider = route.provider;
       note({ operationId: token.operationId, provider });
 
@@ -327,28 +373,46 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
         ledger.reservedMicros += reserved;
       }
 
-      // ---- the key, only now
-      const secret = await options.keys.get(options.companyId, route.provider);
-      if (secret === undefined) throw new Refusal(403, "model_not_allowed", `no ${route.provider} key is set on this computer`);
-      const key = secret.reveal();
+      // ---- the credential, only now
+      let secret;
+      try {
+        secret = await credentialOf(row, options.keys, options.companyId);
+      } catch {
+        // The provider's own credential could not be resolved (a role that expired, a token that could not be refreshed). Its words can quote a setting, so none are passed on.
+        throw new Refusal(502, "provider_sign_in_failed", `the sign-in to ${row.name} could not be made; check it on this computer`);
+      }
+      if (needsCredential(row) && secret === undefined) throw new Refusal(403, "model_not_allowed", `no ${route.provider} ${row.signIn.kind === "bearer-key" || row.signIn.kind === "named-header" ? "key" : "sign-in"} is set on this computer`);
 
-      const stream = body.stream === true;
       const forwarded: Record<string, unknown> = { ...body, model: route.model };
       if (stream && api === "openai-completions") {
         const asked = body.stream_options;
         forwarded.stream_options = { ...(asked !== null && typeof asked === "object" && !Array.isArray(asked) ? asked : {}), include_usage: true };
       }
+      // Responses is sent stateless: the full history goes in every call and nothing is kept at the provider, whatever the worker asked (`previous_response_id` is not an allowed field).
+      if (api === "openai-responses") forwarded.store = false;
+      if (target.variant === "vertex") {
+        // Claude on Google Cloud: the model is in the address, the API version in the body.
+        delete forwarded.model;
+        forwarded.anthropic_version = VERTEX_ANTHROPIC_VERSION;
+      }
+      const forwardedText = JSON.stringify(forwarded);
       const upstreamHeaders: Record<string, string> = {
         "content-type": "application/json",
         accept: stream ? "text/event-stream" : "application/json",
         "user-agent": "rovara-local-model-proxy",
       };
-      if (route.provider === "anthropic") {
-        upstreamHeaders["x-api-key"] = key;
+      if (api === "anthropic-messages" && target.variant === undefined) {
         upstreamHeaders["anthropic-version"] = /^\d{4}-\d{2}-\d{2}$/u.test(headers["anthropic-version"] ?? "") ? headers["anthropic-version"]! : ANTHROPIC_VERSION;
         if (headers["anthropic-beta"] !== undefined) upstreamHeaders["anthropic-beta"] = headers["anthropic-beta"].split(",").map((value) => value.trim()).join(",");
-      } else {
-        upstreamHeaders.authorization = `Bearer ${key}`;
+      }
+      let sensitive: string[];
+      try {
+        const signed = signCall({ provider: row, url: new URL(target.url), headers: { "content-type": "application/json" }, body: forwardedText, secret, now: new Date(now()) });
+        Object.assign(upstreamHeaders, signed.headers);
+        sensitive = signed.sensitive;
+      } catch (error) {
+        if (error instanceof SignInProblem) throw new Refusal(502, "provider_sign_in_failed", `the sign-in to ${row.name} could not be made; check it on this computer`);
+        throw error;
       }
 
       timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -356,7 +420,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       try {
         // redirect "manual": a redirect is never followed (the next address would get the key); it is an error.
         requestSent = true;
-        upstream = await transport(target, { method: "POST", headers: upstreamHeaders, body: JSON.stringify(forwarded), redirect: "manual", signal: controller.signal });
+        upstream = await transport(target.url, { method: "POST", headers: upstreamHeaders, body: forwardedText, redirect: "manual", signal: controller.signal });
       } catch {
         throw new Refusal(controller.signal.aborted ? 504 : 502, "provider_unreachable", `the ${route.provider} provider could not be reached`);
       }
@@ -365,9 +429,9 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
         // An error answer is not billed.
         requestSent = false;
         const text = await readBounded(upstream, ERROR_BODY_MAX_BYTES).catch(() => "");
-        throw providerRefusal(upstream.status, upstream.headers.get("retry-after"), text, key);
+        throw providerRefusal(upstream.status, upstream.headers.get("retry-after"), text, sensitive);
       }
-      const keyBytes = key.length >= 8 ? Buffer.from(key) : undefined;
+      const keyBytes = sensitive.filter((value) => value.length >= 8).map((value) => Buffer.from(value));
       const contentType = upstream.headers.get("content-type") ?? "";
       if (stream && contentType.toLowerCase().startsWith("text/event-stream") && upstream.body !== null) {
         upstreamOk = true;
@@ -425,14 +489,14 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
   }
 
   /** A provider's refusal as the worker should see it: its status class, its words shortened and scrubbed, never its headers. */
-  function providerRefusal(status: number, retryAfter: string | null, text: string, key: string): Refusal {
+  function providerRefusal(status: number, retryAfter: string | null, text: string, secrets: readonly string[]): Refusal {
     let message = "";
     try {
       const error = (JSON.parse(text) as { error?: { message?: unknown } | string }).error;
       message = typeof error === "string" ? error : typeof error?.message === "string" ? error.message : "";
     } catch { /* not JSON */ }
     tell({ event: "provider_refused", status });
-    const cleaned = scrubProviderText(message, key);
+    const cleaned = (secrets.length === 0 ? [""] : secrets).reduce((clean, secret) => scrubProviderText(clean, secret), message);
     const headers: Record<string, string> = retryAfter !== null && /^\d{1,5}$/u.test(retryAfter) ? { "retry-after": retryAfter } : {};
     if (status === 401 || status === 403) return new Refusal(502, "provider_refused_key", "the model provider refused the key on this computer; check it", headers);
     // 3xx is never followed, and anything else keeps its status class so the worker retries what is worth retrying (429, 5xx).
@@ -443,7 +507,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
   return { tokens, access, handle, operationEnded: (operationId) => tokens.forgetOperation(operationId) };
 }
 
-async function readBounded(upstream: Response, limit: number, keyBytes?: Buffer): Promise<string> {
+async function readBounded(upstream: Response, limit: number, keyBytes: readonly Buffer[] = []): Promise<string> {
   if (upstream.body === null) return "";
   const chunks: Buffer[] = [];
   let size = 0;
@@ -458,13 +522,13 @@ async function readBounded(upstream: Response, limit: number, keyBytes?: Buffer)
       throw new Error("too large");
     }
     const chunk = Buffer.from(value);
-    if (keyBytes !== undefined) {
+    if (keyBytes.length > 0) {
       const window = Buffer.concat([tail, chunk]);
-      if (window.includes(keyBytes)) {
+      if (keyBytes.some((secret) => window.includes(secret))) {
         await reader.cancel();
         throw new Refusal(502, "key_in_answer", "the provider's answer was dropped");
       }
-      tail = window.subarray(Math.max(0, window.length - (keyBytes.length - 1)));
+      tail = window.subarray(Math.max(0, window.length - (Math.max(...keyBytes.map((secret) => secret.length)) - 1)));
     }
     chunks.push(chunk);
   }
@@ -492,9 +556,9 @@ function drained(response: ServerResponse, signal: AbortSignal): Promise<void> {
  * the next chunk (or at a clean end), so a key split across two chunks is found before any byte of it has left: "key" when it showed up and the copy was stopped,
  * "aborted" when the call was aborted or the worker went away, "clean" when the whole answer was copied.
  */
-async function pump(body: ReadableStream<Uint8Array>, response: ServerResponse, onChunk: (chunk: Uint8Array) => void, keyBytes: Buffer | undefined, signal: AbortSignal): Promise<"clean" | "key" | "aborted"> {
+async function pump(body: ReadableStream<Uint8Array>, response: ServerResponse, onChunk: (chunk: Uint8Array) => void, keyBytes: readonly Buffer[], signal: AbortSignal): Promise<"clean" | "key" | "aborted"> {
   const reader: ReadableStreamDefaultReader<Uint8Array> = body.getReader();
-  const hold = keyBytes === undefined ? 0 : keyBytes.length - 1;
+  const hold = keyBytes.length === 0 ? 0 : Math.max(...keyBytes.map((secret) => secret.length)) - 1;
   let tail: Buffer = Buffer.alloc(0);
   const send = async (bytes: Buffer): Promise<boolean> => {
     if (bytes.length > 0) {
@@ -508,7 +572,7 @@ async function pump(body: ReadableStream<Uint8Array>, response: ServerResponse, 
       const { done, value } = await reader.read();
       if (done) return (await send(tail)) ? "clean" : "aborted";
       const window = Buffer.concat([tail, Buffer.from(value)]);
-      if (keyBytes !== undefined && window.includes(keyBytes)) {
+      if (keyBytes.some((secret) => window.includes(secret))) {
         await reader.cancel();
         return "key";
       }

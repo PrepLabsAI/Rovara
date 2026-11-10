@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, assertModelProvider, modelPriceRows, type AdapterRegistry, type ModelKeyStore, type ModelPrice, type PluginConfig, type PluginPoint } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
@@ -46,7 +46,8 @@ import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { assertGithubRepositoryAddress, type GhRunner } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
-import { createLocalModelProxy, type LocalModelProxy, type ModelGrantSource, type ProviderEndpoints } from "./model-proxy/index.js";
+import { registerBuiltinModelProviders } from "../plugins/model-provider/builtin.js";
+import { createLocalModelProxy, registryModelProviderBook, type LocalModelProxy, type ModelGrantSource, type ProviderEndpoints } from "./model-proxy/index.js";
 import { modelProxyWorkerUrl } from "./docker-worker-machines.js";
 import {
   KEYS_FILE_NAME,
@@ -66,10 +67,13 @@ import { THIS_MACHINE_ADAPTER_NAME, ThisMachineWorkerMachines } from "./this-mac
 
 /** The model providers whose keys `rovara up` looks for (the environment variable is `<PROVIDER>_API_KEY`). */
 export const LOCAL_MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
-/** Where Code's model keys come from: the environment first, then `<state folder>/keys.json` (refused unless only the owner can read it). */
-export function createLocalModelKeyStore(stateDirectory: string, environment: NodeJS.ProcessEnv): ModelKeyStore {
+/**
+ * Where Code's model keys come from: the environment first, then `<state folder>/keys.json` (refused unless only the owner can read it). `providers` lists the providers whose
+ * environment variable is looked for: the three built-ins, and any `model-provider` plug-in added later (the array is read at each call, so a caller may extend it).
+ */
+export function createLocalModelKeyStore(stateDirectory: string, environment: NodeJS.ProcessEnv, providers: readonly string[] = LOCAL_MODEL_PROVIDERS): ModelKeyStore {
   return createLayeredModelKeyStore([
-    createEnvironmentModelKeyStore(environment, LOCAL_MODEL_PROVIDERS),
+    createEnvironmentModelKeyStore(environment, providers),
     createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME)),
   ]);
 }
@@ -303,7 +307,11 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const registry = createAdapterRegistry();
   // The comment reads of the approvers (a comment proves an approval only after Rovara's own checks, `core/pr-commands/comment-checks.ts`) need the app, which is made after the registry is sealed.
   const comments: { current?: Pick<LocalComments, "fetchComment" | "contextOf" | "available"> } = {};
-  const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment);
+  // The providers whose environment variable is looked for: the built-ins, then each `model-provider` plug-in once the config is loaded (below).
+  const keyedProviders: string[] = [...LOCAL_MODEL_PROVIDERS];
+  const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment, keyedProviders);
+  // Item K2: what each provider costs comes from its plug-in. The table is filled after the config is loaded; the metering port reads it at each call.
+  const priceTable: { currency: string; models: Record<string, ModelPrice> } = { currency: "USD", models: {} };
   registerCodeDefaults(registry, {
     ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     displayName: ownerName(),
@@ -316,9 +324,11 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       commentsOn: () => comments.current?.available() === true,
     },
     modelKeys,
-    // Nothing is priced until a price table is configured: usage is recorded as "unknown", never guessed.
-    priceTable: { currency: "USD", models: {} },
+    // Nothing is priced until a `model-provider` plug-in brings a price table: usage is recorded as "unknown", never guessed.
+    priceTable,
   });
+  // Item K2: the model providers. The three Code has always known are rows; a configured `model-provider` plug-in of the same name replaces one.
+  registerBuiltinModelProviders(registry);
 
   // Storage and queue: one SQLite file in the state folder (lane L3's adapters), unless the config names its own. The store keeps the indexes the task flow needs.
   const closers: Array<() => Promise<void> | void> = [];
@@ -374,6 +384,19 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
 
   options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
+  // Item K2: each provider is checked as a whole (an address that is not https, a header the proxy owns, a vertex variant on the wrong format), then its prices join the metering table.
+  const providerRows = registry.names("model-provider").map((name) => registry.require("model-provider", name));
+  for (const provider of providerRows) {
+    try {
+      assertModelProvider(provider);
+    } catch (error) {
+      throw new LocalStateError(`${error instanceof Error ? error.message : "a model provider is not valid"}`);
+    }
+    if (!keyedProviders.includes(provider.kind)) keyedProviders.push(provider.kind);
+  }
+  const priced = modelPriceRows(providerRows);
+  priceTable.currency = priced.currency ?? "USD";
+  Object.assign(priceTable.models, priced.models);
   // Every record the core writes expires by `indexExpiresAt`. A store that sweeps another attribute (the SQLite plug-in's own default is `expiresAt`) would keep them for ever without a word,
   // so such a store is refused here, saying what to set.
   const storeTtl = registry.require("storage").ttlAttribute;
@@ -475,6 +498,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     keys: registry.require("model-keys"),
     metering: registry.require("metering"),
     companyId: config.companyId ?? IMPLICIT_COMPANY_ID,
+    providers: registryModelProviderBook(registry),
     // What a worker may call is the task flow's decision (the grants over the flow's operations); a caller's own source (tests) replaces it.
     grants: options.modelGrants ?? app.modelGrants,
     workerUrl: modelProxyWorkerUrl(),
