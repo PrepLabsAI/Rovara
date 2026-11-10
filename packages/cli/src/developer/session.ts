@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { AGENTX_CLI_CLIENT_ID, DeveloperTokenResponseSchema, agentXError } from "@agentx/contracts";
 import { sanitizeServerText } from "../auth.js";
 import type { StoredTokens, TokenStore } from "../token-store.js";
-import { developerTokenKey, resolveDeveloperEnvironment, type DeveloperEnvironment } from "./config.js";
+import { requireLocalRuntime } from "../up/local-runtime.js";
+import { LOCAL_ENVIRONMENT, developerTokenKey, readDeveloperConfig, resolveDeveloperEnvironment, type DeveloperEnvironment } from "./config.js";
 
 export interface DeveloperSessionDeps { home: string; tokenStore: TokenStore; fetch: typeof fetch; now?: () => number; sleep?: (ms: number) => Promise<void>; lockWaitMs?: number }
 
@@ -69,6 +70,16 @@ async function withRefreshLock<T>(deps: DeveloperSessionDeps, env: string, work:
  * already replaced it while this one waited for the lock.
  */
 export async function developerAccessToken(deps: DeveloperSessionDeps, env: string | undefined, options: { force?: boolean } = {}): Promise<{ env: string; entry: DeveloperEnvironment; accessToken: string }> {
+  // `--env local` is the `rovara up` on this computer (the name is reserved: login refuses to save a hosted sign-in under it). It has no sign-in to refresh: its owner routes take the
+  // login `rovara up` keeps in its state folder, read again at every call (a restart of `rovara up` makes a new one, so `force` needs nothing more).
+  if (env === LOCAL_ENVIRONMENT) {
+    // An older hosted sign-in saved under this name is never used silently as the laptop, nor the laptop as it: the person ends it first.
+    if ((await readDeveloperConfig(deps.home)).environments[LOCAL_ENVIRONMENT] !== undefined) {
+      throw agentXError("CONFIG_INVALID", `this computer has an older saved sign-in named ${LOCAL_ENVIRONMENT}, but ${LOCAL_ENVIRONMENT} now means the rovara up running here; end the old one with: npx ${CLI_PACKAGE_NAME} --env ${LOCAL_ENVIRONMENT} logout`);
+    }
+    const local = await requireLocalRuntime(deps.home);
+    return { env: LOCAL_ENVIRONMENT, entry: { url: local.url, issuer: local.url, tokenEndpoint: `${local.url}/v1/auth/token`, revocationEndpoint: `${local.url}/v1/auth/revoke` }, accessToken: local.secret };
+  }
   const now = deps.now ?? Date.now;
   const resolved = await resolveDeveloperEnvironment(deps.home, env);
   const key = developerTokenKey(resolved.entry.issuer);

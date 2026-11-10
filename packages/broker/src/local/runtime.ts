@@ -41,6 +41,8 @@ import { configurationAnswer } from "./app/routes.js";
 import { usableWorkerCredential } from "./app/push-credential.js";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
+import { scriptTokensEnabled } from "../core/script-tokens/switch.js";
+import { isScriptTokenHeader } from "../core/script-tokens/token-format.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createLocalCodeHosts } from "./github-code-host.js";
 import { listProjects } from "./app/projects.js";
@@ -495,6 +497,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(options.openBrowser === undefined ? {} : { openBrowser: options.openBrowser }),
     // The model proxy is made after the servers (it is served on the callback listener); the app asks it, late, to forget an operation that ended.
     operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
+    scriptTokensEnabled: () => scriptTokensEnabled(options.environment),
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
     // Lane L13: the owner's model setting, read from the owner's own config only.
@@ -549,6 +552,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     if (request.method === "GET" && path === "/healthz") return json(200, { status: "ok", version: options.version });
     if (request.method === "GET" && path === "/v1/auth/.well-known/agentx-configuration") return configurationAnswer(options.version);
     const bearer = request.headers.authorization;
+    // a script token is checked before anything else and reaches only its closed list of routes; it never falls through to the owner's routes or to the older broker handler.
+    if (isScriptTokenHeader(bearer)) return app.scriptTokens.serve(request, (routed, caller) => app.routes(routed, caller));
     const authenticated = bearer?.startsWith("Bearer ") === true
       ? await identity.authenticate({ scheme: "local-session", value: bearer.slice(7), remoteAddress: "127.0.0.1" })
       : ({ ok: false } as const);

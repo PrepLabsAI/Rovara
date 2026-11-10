@@ -1,12 +1,13 @@
 // Lane L8: the five pages, as pure functions from a view model to HTML. A page that takes a decision draws its form with a form token that binds the
 // exact content shown; the server checks that binding again when the form comes back.
-import type { PlanDocumentKind } from "@agentx/contracts";
+import { randomUUID } from "node:crypto";
+import { SCRIPT_TOKEN_DEFAULT_DAYS, SCRIPT_TOKEN_MAX_DAYS, SCRIPT_TOKEN_NAME_MAX, SCRIPT_TOKEN_PERMISSIONS, type CreatedScriptToken, type PlanDocumentKind } from "@agentx/contracts";
 import { renderPlanDocument, type PlanAnchor } from "../../aws/plan-page/render-plan.js";
 import { esc, externalLink, layout, untrusted } from "./html.js";
 import type { FormBinding } from "./guard.js";
 import { PART_STATE_WORDS } from "../work-breakdown/view.js";
 import type {
-  ApprovalOffer, CommentView, DesignReviewView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView,
+  ApprovalOffer, CommentView, DesignReviewView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView,
 } from "./views.js";
 
 /** What every page needs from the server that draws it. */
@@ -182,5 +183,41 @@ export function renderProof(context: PageContext, view: ProofReportView): string
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">Proof report · revision ${esc(view.revision)}${view.cost === undefined ? "" : ` · ${untrusted(view.cost)}`}</p><p>${untrusted(view.summary)}</p>${prs}`
       + `${rows.length === 0 ? "<p class=\"muted\">No claims to prove yet.</p>" : `<table><thead><tr><th>Claim</th><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>${rows.join("")}</tbody></table>`}`
       + `<p><a href="${esc(context.base)}/plan/${esc(view.taskId)}">Back to the plan</a></p>`,
+  });
+}
+
+// ---- script tokens
+
+const TOKEN_STATUS_CLASS = { active: "ok", expired: "warn", revoked: "bad" } as const;
+const PERMISSION_WORDS: Record<string, string> = { read: "read your tasks on these projects", start: "start tasks on these projects" };
+
+/**
+ * The script tokens page: the tokens (names, hints and states, never a secret), a form to make one when this page session is fresh enough, and a Revoke button for each live token. A token reaches only
+ * what the page says: read the owner's tasks on its projects and start a task on one of them. It never approves anything.
+ */
+export function renderScriptTokens(context: PageContext, view: ScriptTokensPageView, options: { canMake: boolean; created?: CreatedScriptToken }): string {
+  const created = options.created === undefined ? "" : `<section class="panel" id="created"><h2>Your new token</h2>`
+    + "<p><strong>Copy it now.</strong> It is shown this once and is not kept anywhere: Rovara stores only a fingerprint of it. If you lose it, revoke it and make another.</p>"
+    + `<p><code>${esc(options.created.secret)}</code></p>`
+    + `<p class="muted">${untrusted(options.created.token.name)}: ${options.created.token.permissions.map((permission) => esc(PERMISSION_WORDS[permission] ?? permission)).join(" and ")}, until ${esc(options.created.token.expiresAt)}.</p></section>`;
+  const rows = view.tokens.map((token) => `<tr><td>${untrusted(token.name)}<br><code>${esc(token.hint)}</code></td>`
+    + `<td>${token.projects.map((project) => untrusted(project)).join(", ")}</td><td>${token.permissions.map(esc).join(", ")}</td>`
+    + `<td><span class="${TOKEN_STATUS_CLASS[token.status]}">${esc(token.status)}</span><br><span class="muted">until ${esc(token.expiresAt)}${token.lastUsedAt === undefined ? "" : `, last used ${esc(token.lastUsedAt)}`}</span></td>`
+    + `<td>${token.status === "active" ? `<form method="post" action="${esc(context.base)}/tokens/revoke" class="row">${hidden("tokenId", token.tokenId)}${hidden("ft", context.formToken({ action: "tokens.revoke", subject: token.tokenId }))}<button class="danger" type="submit">Revoke</button></form>` : ""}</td></tr>`);
+  const requestId = randomUUID();
+  const form = !options.canMake
+    ? "<p class=\"muted\">To make a token, open this page again with <code>rovara token create</code>: a token lasts for weeks, so making one needs a page you opened in the last few minutes.</p>"
+    : view.projects.length === 0 ? "<p class=\"muted\">Register a project first: a token is made for the projects it may use.</p>"
+    : `<form class="decide" method="post" action="${esc(context.base)}/tokens/create">${hidden("requestId", requestId)}${hidden("ft", context.formToken({ action: "tokens.create", requestId }))}`
+      + `<label>A name for it (such as the script that uses it)<br><input type="text" name="name" maxlength="${SCRIPT_TOKEN_NAME_MAX}" required autocomplete="off"></label>`
+      + `<fieldset><legend>Projects it may use</legend>${view.projects.map((project) => `<label><input type="checkbox" name="project" value="${esc(project)}"> ${untrusted(project)}</label>`).join(" ")}</fieldset>`
+      + `<fieldset><legend>What it may do</legend>${SCRIPT_TOKEN_PERMISSIONS.map((permission) => `<label><input type="checkbox" name="permission" value="${esc(permission)}"${permission === "read" ? " checked" : ""}> ${esc(PERMISSION_WORDS[permission] ?? permission)}</label>`).join(" ")}</fieldset>`
+      + `<label>Days it lasts (1 to ${SCRIPT_TOKEN_MAX_DAYS})<br><input type="number" name="days" min="1" max="${SCRIPT_TOKEN_MAX_DAYS}" value="${SCRIPT_TOKEN_DEFAULT_DAYS}"></label>`
+      + "<div class=\"row\"><button class=\"primary\" type=\"submit\">Make the token</button></div></form>";
+  return layout({
+    title: "Script tokens", nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
+    body: `<h1>Script tokens</h1><p>A script token lets your own scripts on this computer read your tasks and start tasks on the projects you choose, without your session. It can do nothing else: it cannot approve a plan, merge, or make another token. You can revoke it at any time.</p>`
+      + `${created}<section class="panel" id="make"><h2>Make a token</h2>${form}</section>`
+      + `${rows.length === 0 ? "<p class=\"muted\">You have no script tokens.</p>" : `<table><thead><tr><th>Token</th><th>Projects</th><th>May</th><th>State</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`}`,
   });
 }

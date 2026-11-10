@@ -215,7 +215,7 @@ ports and not each other, and this is the only place that knows all of them.
 | Pages | lane L8's server on its own port (`runtime.pagesUrl`); a page address carries the owner's page session and can approve, so it never leaves the server process: `rovara open [task]` asks the running server to open the page in your browser (`POST /v1/local/pages/open`, which answers `{ opened: true }` and nothing else), and `rovara up` prints only the pages' origin |
 | Worker callbacks | `app/callbacks.ts` on the callback listener: events, artifacts, the terminal result, and the repository credential exchange |
 | Merge tracking | lane L12 (`app/tracking.ts`): a timer polls the due tracking rows and calls the core's `reconcileTrackingTask`; see "Merge tracking by polling" below |
-| Owner routes | `/v1/dev/projects`, `/v1/admin/projects`, `/v1/dev/tasks...` and `/v1/app/sessions...`, behind the session token (the routes the MCP tools and the CLI's `session` commands call) |
+| Owner routes | `/v1/dev/projects`, `/v1/admin/projects`, `/v1/dev/tasks...` and `/v1/app/sessions...`, behind the session token (the routes the MCP tools and the CLI's `session` commands call); `/v1/app/script-tokens...` (see "Script tokens"); a request with a script token is checked first and reaches only its own closed list |
 
 **Choosing the model (lane L13).** A task step calls one model, chosen by one rule (`chooseLocalModel`, used by the task flow and by `rovara up --check`):
 
@@ -312,7 +312,7 @@ tails are content-addressed, and the pack is the one object a re-check of the sa
   the proof page shows it only as "reported by the worker, not checked", and it can never lower the risk. A host that cannot list the files leaves the risk high and is asked again. It has a **Lessons used** section that says none were used (lessons are not on this install).
 - **Not done:** the owner's answers to a *structured* plan's decisions. The worker's Plan step saves a Markdown plan here, so there is no structured plan to answer; when one arrives, `approvedCodingPlan` already honours the answers a decision carries.
 
-## Ordered work and parts built side by side (spec 059, Rovara Code v2)
+## Ordered work and parts built side by side
 
 A coding plan can list the pieces of the work and what each waits for (a "work breakdown": 1 to 8 pieces in the task's one repository, at most 12 dependency links). Approving the plan approves its graph: the decision binds the graph's digest,
 read by Rovara from the stored plan the approval's own digest names (every surface that approves gets the same digest, so none can bind a graph the person was not shown), and the engine records the approval. A plan whose graph is invalid,
@@ -330,6 +330,47 @@ Milestones (`core/milestones`): a milestone ("questions", "plan_ready", "pr_read
 
 **Not part of Rovara Code:** complex work (stacked milestone pull requests, step gates) and a per-company workspace limits setting. The limits are the flow's fixed ones.
 
+## The CLI and the MCP tools on `rovara up`
+
+`--env local` names the `rovara up` running on this computer. There is no sign-in to make: the CLI and the MCP server read where `rovara up` listens (`server.json`, no secret) and the login for the owner's routes (`session-token`, mode 0600) from its state
+folder at each call, so a restart is picked up and no token is ever written into an MCP entry.
+
+```sh
+rovara --env local session start "Add a /health endpoint" --project payments --workflow quick
+rovara --env local sessions
+rovara --env local mcp install --client claude-code      # the entry runs `rovara --env local mcp`; it holds no token
+```
+
+The tools keep Cloud's neutral names (H3). What works here: `agentx_whoami`, `agentx_list_projects`, `agentx_start` (and `agentx_start_task`, `agentx_start_workflow`), `agentx_get_task`, `agentx_get_plan`, `agentx_wait_for_task`, `agentx_list_tasks`
+(`project` and `status` are honoured), `agentx_decide_workflow` (refused: a plan is approved on its page, see "Approving"), `agentx_answer_task_questions`, `agentx_retry_workflow`, `agentx_cancel_task`, `agentx_close_task`, `agentx_list_sessions`,
+`agentx_get_session`, `agentx_tell_session_agent` (saved, not passed on), `agentx_stop_session` and `agentx_comment_on_session` (refused: one owner). These answer "That is not on this install yet" because their features are not in Code yet:
+
+| Tool or command | Waits on |
+| --- | --- |
+| `agentx_list_agents`, `agentx_run_agent` | custom agents |
+| `agentx_list_approvals`, `agentx_open_approval` | approvals of connected systems and step gates; a plan waiting for you shows as a session that needs you |
+| `agentx_share_task`, `agentx_get_task_people`, `agentx_set_task_person`, `agentx_take_task_ownership` | channels and task people |
+| `agentx_review_workflow_candidate`, `agentx_send_workflow_back`, `agentx_resolve_review_findings`, `agentx_retry_workflow_publish`, `agentx_keep_pull_request`, `agentx_open_pull_request` | the owner-side review and publish controls |
+| `agentx_get_pr_feedback`, `agentx_decide_pr_feedback` | pull request feedback review |
+| `agentx_continue_task` | a task's budget |
+| `rovara session merge` | the local Merge button, which is not built (see "Not wired yet"); the core's `prepareMerge` and `pressMerge` exist |
+| `rovara session link`, `rovara home`, `rovara lessons` | tracker write-back, the web feed, lessons |
+
+## Script tokens
+
+A script token lets the owner's own scripts and CI on this computer read their tasks and start tasks on chosen projects without the owner's session token. It is a scoped, expiring, revocable credential, stored only as a hash and shown once.
+
+- **A token reaches only a closed list**: `POST /v1/dev/tasks` (start, on a project the token names), `GET /v1/dev/tasks?project=<one of its projects>` and `GET /v1/dev/tasks/<id>` (read, for a task of one of its projects). Everything else, including every decision, approval,
+  session, page, project, token and merge route, answers one fixed refusal before anything is read. **A script token is never an approval proof** (L7A-1). It acts as the owner, only while the owner still holds the role it was made with (else it is revoked for good),
+  and the task it starts always has the client "Script token", whatever the body says.
+- **Making one is on a page**: `rovara token create` asks the running `rovara up` to open the script tokens page in your browser, on a NEW page session; the page's form works only for a session opened in the last 10 minutes and once per form. The API session token (the one an
+  AI tool may hold) cannot make a token: a long-lived credential must not be makeable by a program's credential. The secret is on the answer to that one form post, never in an address, a redirect, a file, a log or the audit trail.
+- **Listing and revoking** work with the API session token (`rovara token list`, `rovara token revoke <id>`, `GET /v1/app/script-tokens`, `POST /v1/app/script-tokens/<id>/revoke`): they show names and hints and only end a credential.
+- **Limits**: a token lives 30 days unless you choose 1 to 90, a person keeps at most 10 live tokens and makes at most 10 an hour, a token may make 60 requests a minute and start 20 tasks an hour (120 and 20 across all of one person's tokens).
+- **Audit**: making, revoking and the first use each day, and each task a token starts, go through the audit sink (`script_token.created`, `script_token.revoked`, `script_token.used`), staged in the same transaction as the change.
+- **Off switch**: `ROVARA_SCRIPT_TOKENS=0` in the environment of `rovara up` turns the feature off (no token authenticates, the page and routes do not exist). Starting with the switch off also REVOKES every live token (audited), so turning it back on never revives one.
+- **Keys**: Cloud's (`scriptTokenKey`, `orgScriptTokensKey`, the rate rows under `ORG#<company>#SCRIPT_TOKEN_RATE`...). Differences: the record also keeps `personId`, and `amr` may be `local`; Cloud's reader strips the first and its sign-in list does not have the second.
+
 ## Not wired yet
 
 - **Merge from `rovara up`.** A person merges a draft pull request on the code host (or with their proof); merge tracking never presses Merge (owner decision 1). The owner's own Merge button on the local page is not built;
@@ -338,8 +379,7 @@ Milestones (`core/milestones`): a milestone ("questions", "plan_ready", "pr_read
   `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself, given only for a repository on github.com over https and only to clone (no push credential is given yet; lane L11 brings a scoped one).
 - **A budget on the model proxy.** The task flow grants a step the install's model (see "Choosing the model") and no budget: the flow has no run limit before a price table exists, and Code's price table is empty. See "Model calls" below; `operationEnded` is called when an operation settles.
 - **Lessons** and **design review** answer "nothing there"; **notifications** need a `channel` adapter (none on a laptop).
-- **A CLI sign-in to the local runtime.** The CLI and the MCP server sign in the way a hosted install does (an environment and refresh tokens); a local profile for them is not
-  written. The routes work with `Authorization: Bearer <session token>`.
+- **A CLI sign-in to the local runtime** is `--env local` (see "The CLI and the MCP tools on `rovara up`").
 - **A message to a running step** is saved and reported as not delivered; the step does not take it.
 
 ### Model providers (lane P5, item K2, owner decisions 60 and 61)

@@ -14,6 +14,10 @@ const ConfigSchema = z.object({ schemaVersion: z.literal(1), default: Environmen
 export type DeveloperEnvironment = z.infer<typeof EntrySchema>;
 interface DeveloperConfig { default?: string; environments: Record<string, DeveloperEnvironment> }
 
+/** The environment name that means "the `rovara up` on this computer". It is reserved: a hosted sign-in cannot be saved under it. */
+export const LOCAL_ENVIRONMENT = "local";
+export const LOCAL_ENVIRONMENT_RESERVED = `the environment name ${LOCAL_ENVIRONMENT} is reserved for the rovara up running on this computer; sign in to a hosted AgentX under another name`;
+
 export const developerConfigPath = (home: string): string => join(home, ".agentx", "developer.yaml");
 export const developerTokenKey = (issuer: string): string => tokenStoreKey({ issuer, clientId: AGENTX_CLI_CLIENT_ID, audience: DEVELOPER_TOKEN_AUDIENCE });
 
@@ -59,6 +63,7 @@ async function write(home: string, config: DeveloperConfig): Promise<void> {
 
 /** Records a signed-in environment; it becomes the default. */
 export async function saveDeveloperEnvironment(home: string, env: string, entry: DeveloperEnvironment): Promise<void> {
+  if (env === LOCAL_ENVIRONMENT) throw agentXError("CONFIG_INVALID", LOCAL_ENVIRONMENT_RESERVED);
   const config = await readDeveloperConfig(home);
   await write(home, { default: env, environments: { ...config.environments, [env]: EntrySchema.parse(entry) } });
 }

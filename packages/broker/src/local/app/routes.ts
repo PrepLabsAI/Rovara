@@ -4,7 +4,7 @@
 // Plan decisions are NOT here: an approval is authority, and the only proof the local owner can give is the one a local page signs for exactly one request, revision and digest
 // (decisions/local-session.ts). The session token that logs a tool in is not an approval proof, so a tool that asks to approve is told to open the page.
 import type { ObjectStorage } from "@agentx/contracts";
-import { AgentXError, agentXError, type Principal } from "@agentx/contracts";
+import { AgentXError, DEVELOPER_API_VERSION, agentXError, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import { loadOwnedTask, taskViewOf } from "../../core/task-flow/reads.js";
@@ -17,6 +17,8 @@ import { listProjects, registerProject } from "./projects.js";
 import { developerTaskListItem, developerTaskView } from "./task-view.js";
 
 export const OPENS_PER_MINUTE = 5;
+/** The most pages of the task index one list reads to fill a filtered answer. */
+const LIST_PAGES_MAX = 5;
 const OPEN_WINDOW_MS = 60_000;
 export const APPROVE_ON_THE_PAGE = "A plan is approved on its local review page, by you. Run `rovara open <task>` to open it; an assistant cannot approve for you.";
 
@@ -24,7 +26,7 @@ export interface OwnerRoutesDeps {
   flow: TaskFlow;
   blobs: ObjectStorage;
   /** Opens a review page in the owner's browser, from this process. Resolves when the browser was asked; the address is not returned. */
-  openPage: (path: string) => Promise<void>;
+  openPage: (path: string, options?: { fresh?: boolean }) => Promise<void>;
   version: string;
 }
 
@@ -38,9 +40,17 @@ function bodyOf(request: BrokerRequest): unknown {
 export const ATTACH_ON_THE_PAGE = "Saying where a task's plan is posted is done on the task's page, in your browser (run `rovara open <task>`): it lets a comment there decide the plan, so a tool with the API token cannot do it.";
 const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|thread|workflow\/decision|workflow\/retry|continue))?$/u;
 
+/**
+ * routes the MCP tools and the CLI call that have no core feature in Code yet (they wait on features not built yet: custom agents, approvals of connected systems, sharing and task people,
+ * opening a pull request by hand, a second review, review of a candidate, PR feedback, parallel parts, a task's budget). Answered in plain words instead of the older handler's "route not found".
+ */
+const NOT_ON_THIS_INSTALL = /^\/v1\/app\/(?:agents|approvals)(?:\/|$)|^\/v1\/dev\/tasks\/[0-9a-f-]{36}\/(?:share|people|pull-requests|continue|workflow\/(?:review|send-back|review-findings|publish-retry|keep-pull-requests|feedback|feedback-decision|feedback-retry))(?:\/|$)/u;
+export const NOT_ON_THIS_INSTALL_MESSAGE = "That is not on this install yet: Rovara on this computer does not do it. It comes with a later release.";
+
 /** `GET /v1/auth/.well-known/agentx-configuration`: what a client asks before it signs in. Open, like `/healthz`. */
 export function configurationAnswer(version: string): BrokerResponse {
-  return json(200, { env: "local", apiVersion: version });
+  // `apiVersion` is the developer API this install speaks (what the CLI and the MCP tools check, `major.minor`); `version` is the Rovara release running.
+  return json(200, { env: "local", apiVersion: DEVELOPER_API_VERSION, version });
 }
 
 export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerRequest, caller: TaskCaller) => Promise<BrokerResponse | undefined> {
@@ -69,9 +79,10 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
   };
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
-    const isOurs = path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/open";
+    const isOurs = NOT_ON_THIS_INSTALL.test(path) || path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/open";
     if (!isOurs) return undefined;
     try {
+      if (NOT_ON_THIS_INSTALL.test(path)) throw agentXError("NOT_AVAILABLE_HERE", NOT_ON_THIS_INSTALL_MESSAGE);
       if (path === "/v1/dev/projects" && request.method === "GET") {
         const principal: Principal = caller.principal;
         const projects = (await listProjects(flow.deps.store, companyId)).map((project) => ({ ...project, access: "granted" as const, channels: [], role: "maintainer" as const }));
@@ -85,8 +96,10 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
       }
       if (path === "/v1/local/pages/open" && request.method === "POST") {
         // The server opens the page in the owner's browser; the address (which carries the page session and can approve) never leaves this process.
-        const body = bodyOf(request) as { path?: unknown };
+        const body = bodyOf(request) as { path?: unknown; fresh?: unknown };
         const target = typeof body.path === "string" && /^\/[A-Za-z0-9/_-]{0,200}$/u.test(body.path) ? body.path : "/";
+        // A page that makes a long-lived credential asks for a page session opened a few minutes ago: only the script tokens page may ask the page server for a new one.
+        const fresh = body.fresh === true && target === "/tokens";
         // A few a minute, one at a time: a holder of the API token cannot open a pile of browser tabs and processes.
         const now = (flow.deps.now?.() ?? new Date()).getTime();
         while (opens.length > 0 && opens[0]! <= now - OPEN_WINDOW_MS) opens.shift();
@@ -94,7 +107,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         opens.push(now);
         opening = true;
         try {
-          await deps.openPage(target);
+          await deps.openPage(target, fresh ? { fresh: true } : {});
         } catch {
           throw agentXError("RUNTIME_UNAVAILABLE", "Rovara could not open a browser. Open the review pages from the terminal where `rovara up` runs.");
         } finally {
@@ -107,9 +120,28 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         return json(started.duplicate ? 200 : 201, { task: await viewOf(caller, started.task.taskId) });
       }
       if (path === "/v1/dev/tasks" && request.method === "GET") {
-        const limit = Number(new URL(request.path, "http://local").searchParams.get("limit"));
-        const listed = await flow.list(caller, Number.isInteger(limit) && limit > 0 ? { limit } : {});
-        return json(200, { tasks: listed.tasks.map((row) => developerTaskListItem(row as never)), ...(listed.cursor === undefined ? {} : { nextCursor: listed.cursor }) });
+        const query = new URL(request.path, "http://local").searchParams;
+        const limit = Number(query.get("limit"));
+        const project = query.get("project") ?? undefined;
+        const status = query.get("status") ?? undefined;
+        const cursor = query.get("cursor") ?? undefined;
+        const wanted = Number.isInteger(limit) && limit > 0 ? limit : 50;
+        // The list is filtered by what the caller asked for (`project`, `status`); a script token's list shows only its own projects, whatever it asked for. Pages are read until enough match (a few at most),
+        // and the cursor is the last page read, so nothing is skipped.
+        const shown: Array<Parameters<typeof developerTaskListItem>[0]> = [];
+        let next = cursor;
+        for (let pages = 0; pages < LIST_PAGES_MAX; pages += 1) {
+          const listed = await flow.list(caller, { limit: Math.min(wanted, 200), ...(next === undefined ? {} : { cursor: next }) });
+          for (const row of listed.tasks) {
+            if (project !== undefined && row.project !== project) continue;
+            if (status !== undefined && row.status !== status) continue;
+            if (caller.scriptToken !== undefined && !caller.scriptToken.projects.includes(row.project)) continue;
+            shown.push(row);
+          }
+          next = listed.cursor;
+          if (next === undefined || shown.length >= wanted) break;
+        }
+        return json(200, { tasks: shown.map((row) => developerTaskListItem(row)), ...(next === undefined ? {} : { nextCursor: next }) });
       }
       const match = TASK.exec(path);
       if (match !== null) {

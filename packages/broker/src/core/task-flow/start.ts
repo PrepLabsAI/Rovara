@@ -11,6 +11,7 @@ import {
   StartDeveloperTaskRequestSchema,
   WORKFLOW_PATH_REQUIRED,
   agentXError,
+  SCRIPT_TOKEN_CLIENT_NAME,
   cleanClientName,
   createWorkflowSnapshot,
   workspaceProjectIndexAttributes,
@@ -54,7 +55,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
   const { principal } = caller;
   if (principal.companyId !== deps.companyId) throw agentXError("FORBIDDEN", "this person belongs to another company");
   const developerId = principal.personId;
-  const client = cleanClientName(request.client ?? caller.client);
+  // A script token's task always has the fixed client "Script token": the body cannot choose that text, and the token's own name never reaches a pull request footer or a turn record (the audit names the token).
+  const client = caller.scriptToken !== undefined ? SCRIPT_TOKEN_CLIENT_NAME : cleanClientName(request.client ?? caller.client);
   const asWorkflow = request.workflow === true;
   const payloadHash = hashJson({
     project: request.project, instructions: request.instructions, title: request.title ?? null,

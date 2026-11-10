@@ -11,7 +11,7 @@ import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import type { ApprovalProof } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
-import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, type PageContext } from "./pages.js";
+import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, type PageContext } from "./pages.js";
 import type { ApprovalOffer, LocalActionResult, LocalPageActions, LocalPageData } from "./views.js";
 
 export interface LocalPagesServer {
@@ -26,8 +26,9 @@ export interface LocalPagesServer {
   /**
    * An address for a browser to be opened on, that holds no session: `<origin>/s/once/<code>`. The code is good for ONE request within `ttlMs` (30 s by default); that request is
    * answered with a redirect to the real address. So the address that sits in the process list while the browser starts is spent by the time anyone reads it.
+   * `fresh`: the redirect opens a NEW page session instead of reusing the owner's, so the page it lands on can ask for a session opened a few minutes ago (making a script token does).
    */
-  onceLink(path?: string, options?: { ttlMs?: number; label?: string }): string;
+  onceLink(path?: string, options?: { ttlMs?: number; label?: string; fresh?: boolean }): string;
   close(): Promise<void>;
 }
 
@@ -47,6 +48,8 @@ const TASK_ID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const ID = "[A-Za-z0-9_-]{1,100}";
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/** a page session this young may make a script token (Cloud asks for a sign-in made in the last few minutes for the same reason: the credential lasts for weeks). */
+export const SCRIPT_TOKEN_FRESH_MS = 10 * 60 * 1000;
 
 /** The sentences a page shows after a write. The address carries a code, never text. */
 const NOTICES: Record<string, string> = {
@@ -58,6 +61,8 @@ const NOTICES: Record<string, string> = {
   attached: "That thread is attached. A writer's comment there can decide this plan.",
   answered: "Your answers were sent.",
   lesson: "Lesson updated.",
+  revoked: "That script token is revoked.",
+  tokenfresh: "Making a token needs a page you opened in the last few minutes. Run `rovara token create` to open one.",
   stale: "It changed while you were looking. Read it again, then decide.",
   refused: "That was not accepted.",
   invalid: "That was not understood.",
@@ -66,7 +71,7 @@ const NOTICES: Record<string, string> = {
 };
 
 type Route = { method: "GET" | "POST"; pattern: RegExp; handle: (request: Req, match: RegExpExecArray) => Promise<Reply> };
-interface Req { session: { id: string; token: string }; url: URL; form: URLSearchParams | undefined; base: string; origin: string }
+interface Req { session: { id: string; token: string; createdAt: number }; url: URL; form: URLSearchParams | undefined; base: string; origin: string }
 type Reply = { status: number; type: string; body: string | Uint8Array; headers?: Record<string, string> };
 
 const html = (body: string, status = 200): Reply => ({ status, type: "text/html; charset=utf-8", body });
@@ -85,7 +90,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
   const sessions = options.sessions ?? new LocalPageSessions(now);
   const forms = new FormTokens(randomBytes(32), now);
   // Single-use codes for `onceLink`: only a hash is kept, and at most a few at a time.
-  const onceCodes = new Map<string, { path: string; label: string | undefined; expires: number }>();
+  const onceCodes = new Map<string, { path: string; label: string | undefined; fresh: boolean; expires: number }>();
   const limiter = new FailureLimiter(60, 60_000, now);
   let origin = "";
   let ownerToken: string | undefined;
@@ -118,6 +123,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     const value = request.form?.get(name) ?? "";
     return [...value].length > TEXT_MAX ? [...value].slice(0, TEXT_MAX).join("") : value;
   };
+  const tokenPageIsFresh = (request: Req): boolean => now() - request.session.createdAt <= SCRIPT_TOKEN_FRESH_MS;
   const offerOf = (request: Req, kind: "plan" | "design"): ApprovalOffer | undefined => {
     const revision = Number(request.form?.get("revision"));
     const requestId = request.form?.get("requestId") ?? "";
@@ -228,6 +234,37 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const result = await options.actions.lessonAction({ lessonId, action });
       return redirect(`${request.base}/lessons?n=${outcomeCode(result, "lesson")}`);
     } },
+    { method: "GET", pattern: /^\/tokens$/, handle: async (request) => {
+      const view = await options.data.listScriptTokens?.();
+      if (view === undefined) return notFound();
+      return page(request, (context) => renderScriptTokens(context, view, { canMake: tokenPageIsFresh(request) && options.actions.createScriptToken !== undefined }));
+    } },
+    { method: "POST", pattern: /^\/tokens\/create$/, handle: async (request) => {
+      if (options.data.listScriptTokens === undefined || options.actions.createScriptToken === undefined) return notFound();
+      const requestId = request.form?.get("requestId") ?? "";
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(requestId)) return redirect(`${request.base}/tokens?n=invalid`);
+      // A form answers once. The token binds this form's request id, so a form drawn for one request cannot make another.
+      if (!verified(request, { action: "tokens.create", requestId })) return redirect(`${request.base}/tokens?n=form`);
+      // A long-lived credential: only from a page session opened a few minutes ago (checked again here, not only when the page was drawn).
+      if (!tokenPageIsFresh(request)) return redirect(`${request.base}/tokens?n=tokenfresh`);
+      const name = text(request, "name").trim();
+      const days = (request.form?.get("days") ?? "").trim();
+      const result = await options.actions.createScriptToken({
+        requestId, name, projects: request.form?.getAll("project") ?? [], permissions: request.form?.getAll("permission") ?? [], ...(days === "" ? {} : { days: Number(days) }),
+      });
+      const view = (await options.data.listScriptTokens()) ?? { tokens: [], projects: [] };
+      // The secret is on the answer to this one form post: not in an address, a redirect or any later page.
+      if (!result.ok) return page(request, (context) => renderScriptTokens({ ...context, notice: result.message }, view, { canMake: true }));
+      return page(request, (context) => renderScriptTokens(context, view, { canMake: false, created: result.created }));
+    } },
+    { method: "POST", pattern: /^\/tokens\/revoke$/, handle: async (request) => {
+      if (options.actions.revokeScriptToken === undefined) return notFound();
+      const tokenId = request.form?.get("tokenId") ?? "";
+      if (!/^stk_[0-9a-z]{20}$/u.test(tokenId)) return redirect(`${request.base}/tokens?n=invalid`);
+      if (!verified(request, { action: "tokens.revoke", subject: tokenId })) return redirect(`${request.base}/tokens?n=form`);
+      const result = await options.actions.revokeScriptToken({ tokenId });
+      return redirect(`${request.base}/tokens?n=${outcomeCode(result, "revoked")}`);
+    } },
     { method: "GET", pattern: new RegExp(`^/proof/(${TASK_ID})$`), handle: async (request, match) => {
       const view = await options.data.getProofReport(match[1] ?? "");
       return view === undefined ? notFound() : page(request, (context) => renderProof(context, view));
@@ -285,7 +322,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
         if (limiter.failed()) return send(response, { status: 429, type: "text/plain; charset=utf-8", body: "slow down\n" }, head);
         return send(response, notFound(), head);
       }
-      return send(response, redirect(ownerLink(entry.path, { label: entry.label })), head);
+      return send(response, redirect(ownerLink(entry.path, { label: entry.label, ...(entry.fresh ? { fresh: true } : {}) })), head);
     }
     // /s/<token>/<rest>. A wrong token is answered like a path that does not exist.
     const match = /^\/s\/([A-Za-z0-9_-]{43})(\/.*)?$/.exec(url.pathname);
@@ -306,7 +343,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     }
     // The route sees the path without the token, so its patterns and task ids read the same wherever the session lives.
     const inner = new URL(rest + url.search, origin);
-    const reply = await route.handle({ session: { id: session.id, token }, url: inner, form, base: `/s/${token}`, origin }, route.pattern.exec(rest) as RegExpExecArray);
+    const reply = await route.handle({ session: { id: session.id, token, createdAt: session.createdAt }, url: inner, form, base: `/s/${token}`, origin }, route.pattern.exec(rest) as RegExpExecArray);
     send(response, reply, head);
   };
 
@@ -335,7 +372,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     // One session serves the owner's links until it ends, so opening a second link does not push the first tab's session out of the cap.
     const mintOptions = { ...(sessionOptions.ttlMs === undefined ? {} : { ttlMs: sessionOptions.ttlMs }), ...(sessionOptions.label === undefined ? {} : { label: sessionOptions.label }) };
     if (sessionOptions.fresh !== true && (ownerToken === undefined || !sessions.isValidSecret(ownerToken))) ownerToken = sessions.mint(mintOptions).token;
-    return linkIn(sessionOptions.fresh === true ? sessions.mint(mintOptions).token : (ownerToken as string), path);
+    return linkIn(sessionOptions.fresh === true ? sessions.mint({ ...mintOptions, fresh: true }).token : (ownerToken as string), path);
   };
   return {
     origin, port: address.port, sessions,
@@ -346,7 +383,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       for (const [key, entry] of onceCodes) if (entry.expires <= at) onceCodes.delete(key);
       // A few at a time: opening more than that in 30 seconds drops the oldest.
       while (onceCodes.size >= 8) onceCodes.delete(onceCodes.keys().next().value as string);
-      onceCodes.set(createHash("sha256").update(code).digest("hex"), { path: path.startsWith("/") ? path : `/${path}`, label: onceOptions.label, expires: at + (onceOptions.ttlMs ?? 30_000) });
+      onceCodes.set(createHash("sha256").update(code).digest("hex"), { path: path.startsWith("/") ? path : `/${path}`, label: onceOptions.label, fresh: onceOptions.fresh === true, expires: at + (onceOptions.ttlMs ?? 30_000) });
       return `${origin}/s/once/${code}`;
     },
     linkIn,

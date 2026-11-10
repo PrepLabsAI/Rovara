@@ -6,7 +6,7 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_REVIEW_FAILURE_REASONS, taskGraphDigest, workflowFindingFingerprint, type DeveloperTaskView } from "@agentx/contracts";
 import {
-  DEVELOPER_TOOLS, NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient,
+  DEVELOPER_TOOLS, NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient,
   type ControlPlaneClient, type ToolContext,
 } from "../../packages/mcp/src/index.js";
 import { toolError as parseToolError } from "../support/mcp-tool-error.js";
@@ -428,6 +428,28 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
       instructions: "Retry only the read-only reviews.",
       expectedRevision: 15,
       candidateDigest: "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad",
+    });
+  });
+
+  describe("a feature that is not on this install", () => {
+    const answering = (status: number, code: string) => {
+      const fetch = vi.fn(async () => new Response(JSON.stringify({ error: { code, message: "That is not on this install yet." } }), { status, headers: { "content-type": "application/json" } }));
+      return { fetch, client: httpControlPlaneClient({ session: async () => ({ baseUrl: "https://agentx.example.test", accessToken: "token", signInCommand: "login" }), fetch, sleep: async () => undefined, traceId: () => "trace-1" }) };
+    };
+
+    it("says it is not on this install, with the next step 'do not retry', when the control plane's code says so, and asks once", async () => {
+      const { fetch, client } = answering(404, "NOT_AVAILABLE_HERE");
+      const mcp = await connect(client);
+      const result = await mcp.callTool({ name: "agentx_list_agents", arguments: {} });
+      expect(toolError(result)).toMatchObject({ code: "NOT_ON_THIS_INSTALL", next_step: NEXT_STEPS.NOT_ON_THIS_INSTALL });
+      expect(NEXT_STEPS.NOT_ON_THIS_INSTALL).toContain("do not retry");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("keys on the code, never on the words: the same words under another code keep today's fallback", async () => {
+      const { client } = answering(404, "NOT_FOUND");
+      const mcp = await connect(client);
+      expect(toolError(await mcp.callTool({ name: "agentx_list_agents", arguments: {} }))).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", next_step: UNEXPECTED_ANSWER_STEP });
     });
   });
 

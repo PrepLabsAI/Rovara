@@ -3,10 +3,11 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { agentXError } from "@agentx/contracts";
-import { SERVER_FILE_NAME, SESSION_TOKEN_FILE_NAME, createDockerRunner, defaultStateDirectory, readOwnerFile, startLocalRuntime, type DockerRunner, type LocalRuntime, type LocalRuntimeOptions } from "@agentx/broker/local";
+import { createDockerRunner, defaultStateDirectory, startLocalRuntime, type DockerRunner, type LocalRuntime, type LocalRuntimeOptions } from "@agentx/broker/local";
 import type { Command } from "commander";
 import type { TextWriter } from "../init/prompts.js";
 import { runUpChecks, upChecksText, type UpCheck, type UpCheckServices } from "./checks.js";
+import { requireLocalRuntime } from "./local-runtime.js";
 
 export const DEFAULT_LOCAL_WORKER_IMAGE = "rovara-worker:local";
 
@@ -65,16 +66,11 @@ export function registerOpenCommand(program: Command, context: Pick<UpCommandCon
     .action(async (task: string | undefined, options: { stateDir?: string }, command: Command) => {
       const globals = command.optsWithGlobals<{ json: boolean }>();
       if (task !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), or leave it out");
-      const stateDirectory = options.stateDir ?? defaultStateDirectory(context.home ?? homedir());
-      const server = await readOwnerFile(join(stateDirectory, SERVER_FILE_NAME), { private: false, label: "server file" }).catch(() => undefined);
-      const secret = await readOwnerFile(join(stateDirectory, SESSION_TOKEN_FILE_NAME), { private: true, label: "session token" }).catch(() => undefined);
-      let url: string | undefined;
-      try { url = server === undefined ? undefined : (JSON.parse(server.text) as { url?: unknown }).url as string | undefined; } catch { url = undefined; }
-      if (url === undefined || secret === undefined || !/^http:\/\/127\.0\.0\.1:\d+$/.test(url)) throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is not running here. Start it with `rovara up` first.");
+      const { url, secret } = await requireLocalRuntime(context.home ?? homedir(), options.stateDir);
       let response: Response;
       try {
         response = await context.fetch(`${url}/v1/local/pages/open`, {
-          method: "POST", headers: { authorization: `Bearer ${secret.text.trim()}`, "content-type": "application/json" },
+          method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
           body: JSON.stringify({ path: task === undefined ? "/" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
         });
       } catch {

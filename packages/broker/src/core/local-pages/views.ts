@@ -1,7 +1,7 @@
 // Lane L8: what the local review pages read and do. The pages know nothing about task records, the document store or a code host: the task flow
 // (lanes L6a and L6b) implements these two interfaces and hands them to `createLocalPagesServer`. Reads are plain view models; every write names
 // the exact revision and digest the person saw, and an approval carries a proof for the W0 `Approvers` seam to check.
-import type { ApprovalProof, PlanDocument, PlanEvidenceBundle } from "@agentx/contracts";
+import type { ApprovalProof, CreatedScriptToken, PlanDocument, PlanEvidenceBundle, ScriptTokenView } from "@agentx/contracts";
 
 /** Why a write did not happen, in words fit to show. `stale`: the content moved on since the page was drawn. */
 export type LocalActionResult = { ok: true; message?: string } | { ok: false; reason: "stale" | "refused" | "not_found" | "invalid"; message: string };
@@ -125,6 +125,15 @@ export interface PendingItemView {
   since: string;
 }
 
+/** what the script tokens page shows. `projects` are the names a token can be made for. */
+export interface ScriptTokensPageView {
+  tokens: ScriptTokenView[];
+  projects: string[];
+}
+
+/** A token the page just made: the secret is shown on the answer to the form, once, and kept nowhere. */
+export type LocalCreateTokenResult = { ok: true; created: CreatedScriptToken } | { ok: false; reason: "refused" | "invalid" | "not_found"; message: string };
+
 /** The read side: each method answers undefined for something that is not there. */
 export interface LocalPageData {
   /** What waits for the owner. */
@@ -135,6 +144,8 @@ export interface LocalPageData {
   readMockup(taskId: string, mockupId: string): Promise<{ contentType: string; bytes: Uint8Array } | undefined>;
   listLessons(): Promise<LessonView[]>;
   getProofReport(taskId: string): Promise<ProofReportView | undefined>;
+  /** the owner's script tokens. Absent, or undefined: script tokens are off here and the page is not found. */
+  listScriptTokens?(): Promise<ScriptTokensPageView | undefined>;
 }
 
 /** What a page write names. `proof` is built by the server from the page session; the action hands it to the `Approvers` seam. */
@@ -168,4 +179,11 @@ export interface LocalPageActions {
   attachThread?(input: { taskId: string; revision: number; repository: string; number: number }): Promise<LocalActionResult>;
   /** Lane L12: the owner's answers to Understand's questions. */
   answerQuestions?(input: { taskId: string; revision: number; round: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }): Promise<LocalActionResult>;
+  /**
+   * makes a script token. The server calls it only for a verified form on a page session opened a few minutes ago; the secret in the answer is shown once on the page that answers the form.
+   * Like a decision, this is the owner's own act on a page: the API token an AI tool may hold cannot do it.
+   */
+  createScriptToken?(input: { requestId: string; name: string; projects: string[]; permissions: string[]; days?: number }): Promise<LocalCreateTokenResult>;
+  /** revokes a script token. */
+  revokeScriptToken?(input: { tokenId: string }): Promise<LocalActionResult>;
 }

@@ -21,12 +21,20 @@ export interface ProofBinding { requestId: string; revision: number; artifactDig
 export const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 /** How long a drawn form stays good. */
 export const FORM_TOKEN_TTL_MS = 60 * 60 * 1000;
-/** The most sessions alive at once; the oldest is dropped for a new one. */
+/** The most sessions alive at once; the oldest is dropped for a new one (a fresh session is dropped first). */
 export const MAX_SESSIONS = 16;
+/** The most fresh sessions alive at once: a new one drops the oldest fresh one, so repeated opens can never fill the cap or push the owner's own session out. */
+export const MAX_FRESH_SESSIONS = 3;
+/** How long a fresh session lives: long enough to read the page and make one token. */
+export const FRESH_SESSION_TTL_MS = 15 * 60 * 1000;
 
 export interface LocalPageSession {
   /** A name that is safe to log; not the token. */
   id: string;
+  /** When the session was opened (ms): a page that makes a long-lived credential asks for a session opened a few minutes ago. */
+  createdAt: number;
+  /** A short-lived session opened for the script tokens page (`rovara token create`): dropped before any other session when the cap is reached, and few at a time. */
+  fresh: boolean;
   expiresAt: number;
   label: string;
 }
@@ -46,16 +54,25 @@ export class LocalPageSessions {
   constructor(private readonly now: () => number = Date.now, private readonly random: (bytes: number) => Buffer = randomBytes) {}
 
   /** Opens a session and returns the secret once. */
-  mint(options: { ttlMs?: number; label?: string } = {}): { token: string; session: LocalPageSession } {
+  mint(options: { ttlMs?: number; label?: string; fresh?: boolean } = {}): { token: string; session: LocalPageSession } {
     this.sweep();
+    const fresh = options.fresh === true;
+    const oldestFresh = (): string | undefined => [...this.sessions].find(([, session]) => session.fresh)?.[0];
+    // A fresh session replaces the oldest fresh one once there are enough of them.
+    while (fresh && [...this.sessions.values()].filter((session) => session.fresh).length >= MAX_FRESH_SESSIONS) {
+      const key = oldestFresh();
+      if (key === undefined) break;
+      this.drop(key);
+    }
     while (this.sessions.size >= MAX_SESSIONS) {
-      const oldest = this.sessions.keys().next().value;
+      // Fresh sessions go before the owner's own, whichever is older.
+      const oldest = oldestFresh() ?? this.sessions.keys().next().value;
       if (oldest === undefined) break;
       this.drop(oldest);
     }
     const token = this.random(32).toString("base64url");
     const key = sha256(token);
-    const session: LocalPageSession = { id: key.slice(0, 12), expiresAt: this.now() + (options.ttlMs ?? DEFAULT_SESSION_TTL_MS), label: options.label ?? "" };
+    const session: LocalPageSession = { id: key.slice(0, 12), createdAt: this.now(), fresh, expiresAt: this.now() + (options.ttlMs ?? (fresh ? FRESH_SESSION_TTL_MS : DEFAULT_SESSION_TTL_MS)), label: options.label ?? "" };
     this.sessions.set(key, session);
     this.byId.set(session.id, key);
     return { token, session };

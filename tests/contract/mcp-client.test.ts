@@ -352,6 +352,19 @@ describe("the control-plane client (FR-027)", () => {
     await expect(client(async () => new Response("<html>", { status: 200 })).getTask(view.taskId, 10)).rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
   });
 
+  it("maps the broker's NOT_AVAILABLE_HERE to NOT_ON_THIS_INSTALL by its code, and an unknown 4xx stays as it was", async () => {
+    const notHere = await client(async () => reply(404, { error: { code: "NOT_AVAILABLE_HERE", message: "That is not on this install yet." } })).projects().catch((caught: unknown) => caught);
+    expect(notHere).toMatchObject({ code: "NOT_ON_THIS_INSTALL", nextStep: NEXT_STEPS.NOT_ON_THIS_INSTALL });
+    // A 5xx with the code is an answer too, not an outage to try again.
+    let calls = 0;
+    const again = await client(async () => { calls += 1; return reply(501, { error: { code: "NOT_AVAILABLE_HERE", message: "That is not on this install yet." } }); }).projects().catch((caught: unknown) => caught);
+    expect(again).toMatchObject({ code: "NOT_ON_THIS_INSTALL" });
+    expect(calls).toBe(1);
+    // The words alone do nothing: another code keeps the fallback for a 4xx this client does not know.
+    const words = await client(async () => reply(404, { error: { code: "SOMETHING_NEW", message: "That is not on this install yet." } })).projects().catch((caught: unknown) => caught);
+    expect(words).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", nextStep: UNEXPECTED_ANSWER_STEP });
+  });
+
   it("has a next step for every code", () => {
     for (const code of TOOL_ERROR_CODES) expect(NEXT_STEPS[code].length, code).toBeGreaterThan(0);
     expect(TOOL_ERROR_CODES).toContain("INVALID_REQUEST");

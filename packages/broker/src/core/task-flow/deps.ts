@@ -29,6 +29,11 @@ import type { CodeMilestones } from "../merge/seams.js";
 export interface TaskCaller {
   principal: Principal;
   client?: string | undefined;
+  /**
+   * Set only by the script token check: the request is a script token's, scoped to these projects and permissions. The start gives such a task the fixed client "Script token", whatever
+   * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
+   */
+  scriptToken?: { tokenId: string; name: string; permissions: readonly ("read" | "start")[]; projects: readonly string[] } | undefined;
 }
 
 /** A registered project revision, as the flow needs it. */

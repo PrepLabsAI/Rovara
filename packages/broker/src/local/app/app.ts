@@ -9,7 +9,7 @@
 // Decision 53: artifacts live in the registry's `object-storage` adapter (lane L9a); a worker's model calls go through the model proxy (lane L9a), which the task flow grants per operation.
 import { createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
+import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import { LOCAL_MODEL_PROVIDER_ORDER, chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
 import { capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, type ModelGrantSource } from "../model-proxy/index.js";
@@ -54,6 +54,8 @@ import { createTaskFactsSource } from "./facts.js";
 import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
 import { createSessionRoutes } from "./session-routes.js";
+import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens.js";
+
 import { createSessionStartExtras } from "./session-start.js";
 
 export { TASK_FLOW_INDEXES };
@@ -85,6 +87,8 @@ export interface LocalAppOptions {
   pagesPort?: number;
   /** The most pull request threads one comment poll reads (default 20): a test lowers it to see the rotation. */
   commentThreadsPerPoll?: number;
+  /** whether script tokens exist on this install (`ROVARA_SCRIPT_TOKENS=0` turns them off). The runtime gives it from its environment. Default: the process environment. */
+  scriptTokensEnabled?: () => boolean;
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
   timers?: boolean;
   now?: () => Date;
@@ -106,6 +110,8 @@ export interface LocalApp {
   readonly milestones: Pick<DocumentMilestones, "register" | "deliverDue">;
   /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
   readonly modelGrants: ModelGrantSource;
+  /** Script tokens: serving a request that carries one, and the settings the local pages and routes use. */
+  readonly scriptTokens: LocalScriptTokens;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
   routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
   /** The worker's callbacks (`/v1/internal/...`). */
@@ -263,17 +269,43 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const decisionActions = createDecisionActions({ gate, companyId });
   const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
+  // script tokens. The creator is asked of the identity port by Rovara id; the audit steps are the registry's sink's.
+  const scriptTokens = createLocalScriptTokens({ store, audit: registry.require("audit-sink"), now: () => clock().getTime(), log, companyId, owner, identity: registry.require("identity"), ...(options.scriptTokensEnabled === undefined ? {} : { enabled: options.scriptTokensEnabled }) });
+  // The switch is off: every token made before is ended now, so turning it back on later revives nothing.
+  await scriptTokens.revokeAllForSwitchOff().catch((error: unknown) => log({ event: "local_app.script_tokens_switch_off_failed", error: error instanceof Error ? error.name : "unknown" }));
   const pages = await createLocalPagesServer({
-    data: createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments }),
-    actions: { decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments }) },
+    data: {
+      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments }),
+      listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
+    },
+    actions: {
+      decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments }),
+      async createScriptToken(input) {
+        try {
+          return { ok: true, created: await scriptTokens.create(input) };
+        } catch (error) {
+          if (!(error instanceof ScriptTokenAgentXError)) throw error;
+          return { ok: false, reason: error.code === "NOT_FOUND" ? "not_found" : error.code === "CONFIG_INVALID" ? "invalid" : "refused", message: error.message.slice(error.code.length + 2) };
+        }
+      },
+      async revokeScriptToken(input) {
+        try {
+          await scriptTokens.revoke(input.tokenId);
+          return { ok: true };
+        } catch (error) {
+          if (!(error instanceof ScriptTokenAgentXError)) throw error;
+          return { ok: false, reason: error.code === "NOT_FOUND" ? "not_found" : "refused", message: error.message.slice(error.code.length + 2) };
+        }
+      },
+    },
     sessions: options.pageSessions,
     ...(options.pagesPort === undefined ? {} : { port: options.pagesPort }),
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser" })), version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true ? { fresh: true } : {}) })), version: options.version });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, origin: options.origin ?? (() => "http://127.0.0.1") });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -311,7 +343,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants, milestones,
+    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants, milestones, scriptTokens,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

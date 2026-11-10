@@ -20,7 +20,7 @@ type Script = (call: { method: string; path: string; body: Record<string, unknow
 async function cli(script: Script) {
   const home = await mkdtemp(join(tmpdir(), "rovara-session-cli-"));
   dirs.push(home);
-  await saveDeveloperEnvironment(home, "local", entry);
+  await saveDeveloperEnvironment(home, "laptop", entry);
   const tokenStore = new InMemoryTokenStore();
   await tokenStore.set(developerTokenKey(ISSUER), { accessToken: "local-owner-token", refreshToken: `agxr_${"a".repeat(43)}`, expiresAt: Date.now() + 3_600_000 });
   const out: string[] = [];
@@ -34,7 +34,7 @@ async function cli(script: Script) {
     const reply = script({ method, path: target.pathname + target.search, body });
     return new Response(JSON.stringify(reply.body), { status: reply.status ?? 200, headers: { "content-type": "application/json" } });
   };
-  const run = (argv: string[]) => executeCli(["--env", "local", ...argv], { fetchImplementation, tokenStore, environments: { home }, stdout: { write: (text: string) => out.push(text) }, stderr: { write: (text: string) => err.push(text) } });
+  const run = (argv: string[]) => executeCli(["--env", "laptop", ...argv], { fetchImplementation, tokenStore, environments: { home }, stdout: { write: (text: string) => out.push(text) }, stderr: { write: (text: string) => err.push(text) } });
   return { run, text: () => out.join(""), errors: () => err.join(""), calls };
 }
 

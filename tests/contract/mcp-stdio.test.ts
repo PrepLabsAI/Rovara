@@ -94,7 +94,10 @@ interface Message { jsonrpc?: unknown; id?: unknown; result?: Record<string, unk
 
 /** `node packages/cli/dist/main.js mcp`, with raw stdout kept so every byte on it can be checked. */
 function spawnMcp(home: string, path: string) {
-  const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [CLI, "mcp"], { env: { HOME: home, PATH: path, TMPDIR: tmpdir() }, stdio: ["pipe", "pipe", "pipe"] });
+  // The CLI runs macOS `security` by absolute path, so the stand-in on PATH is not enough there: the test-mode
+  // override points it at the stand-in (honoured only with ROVARA_TEST_MODE=1 and an absolute path).
+  const env = { HOME: home, PATH: path, TMPDIR: tmpdir(), ROVARA_TEST_MODE: "1", ROVARA_TEST_SECURITY_PATH: join(home, "fake-bin", "security") };
+  const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [CLI, "mcp"], { env, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   let pending = "";

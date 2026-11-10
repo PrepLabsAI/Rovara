@@ -2,7 +2,7 @@
 import { CLI_PACKAGE_NAME, AGENTX_CLI_CLIENT_ID, AgentXConfigurationSchema, DEVELOPER_API_VERSION, DeveloperTokenResponseSchema, agentXError, apiVersionCompatible, type AgentXConfiguration } from "@agentx/contracts";
 import { createCallbackListener, createPkceParameters, openSystemBrowser } from "../auth.js";
 import type { TokenStore } from "../token-store.js";
-import { developerTokenKey, saveDeveloperEnvironment } from "./config.js";
+import { LOCAL_ENVIRONMENT, LOCAL_ENVIRONMENT_RESERVED, developerTokenKey, saveDeveloperEnvironment } from "./config.js";
 import { serverReason } from "./session.js";
 
 export interface DeveloperLoginOptions { url: string; allowLoopback: boolean; browser: boolean; home: string; tokenStore: TokenStore; fetch: typeof fetch; openBrowser?: (url: string) => Promise<void>; write: (line: string) => void; timeoutMs?: number; callbackPort?: number }
@@ -44,6 +44,8 @@ export async function developerLogin(options: DeveloperLoginOptions): Promise<{ 
   }
   const url = base.origin + base.pathname.replace(/\/+$/, "");
   const configuration = await readConfiguration(options, base, url);
+  // Refused before the browser opens, not after the sign-in is done.
+  if (configuration.env === LOCAL_ENVIRONMENT) throw agentXError("CONFIG_INVALID", LOCAL_ENVIRONMENT_RESERVED);
 
   const pkce = createPkceParameters();
   const again = `run npx ${CLI_PACKAGE_NAME} login ${url} again`;

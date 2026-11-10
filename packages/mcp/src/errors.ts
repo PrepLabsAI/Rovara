@@ -14,6 +14,8 @@ export const TOOL_ERROR_CODES = [
   "SESSION_NOT_FOUND", "SESSION_REFUSED",
   // The server is counting how often the person sends (a message to an agent, a comment): wait, do not ask an admin.
   "RATE_LIMITED",
+  // The control plane says the feature is not on this install (broker code NOT_AVAILABLE_HERE): nothing is wrong and nothing will change by trying again.
+  "NOT_ON_THIS_INSTALL",
 ] as const;
 export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];
 
@@ -44,6 +46,7 @@ export const NEXT_STEPS: Record<ToolErrorCode, string> = {
   SESSION_NOT_FOUND: "run agentx_list_sessions to see the sessions you can see",
   RATE_LIMITED: "wait a few minutes before sending again; do not retry in a loop",
   SESSION_REFUSED: "nothing was changed; tell the person what the message says, and do not try to get around it",
+  NOT_ON_THIS_INSTALL: "this is not on this install; tell the person, and do not retry",
 };
 /** BUDGET_REACHED's next steps: the task's own budget is raised by continuing the task; any other budget by whoever runs the install. */
 const OTHER_BUDGET_STEP = "ask whoever runs this AgentX to raise the budget";
@@ -99,7 +102,7 @@ const INVALID = new Set<string>(["CONFIG_INVALID", "IDEMPOTENCY_CONFLICT"]);
 
 /** True when a control-plane error code is an answer to show, not an outage to try again. */
 export function isMeaningfulCode(code: string | undefined): boolean {
-  return code !== undefined && (PASSED_THROUGH.has(code) || code === "BUDGET_EXCEEDED" || BUSY.has(code) || INVALID.has(code) || code === "AUTH_REQUIRED");
+  return code !== undefined && (PASSED_THROUGH.has(code) || code === "NOT_AVAILABLE_HERE" || code === "BUDGET_EXCEEDED" || BUSY.has(code) || INVALID.has(code) || code === "AUTH_REQUIRED");
 }
 
 /**
@@ -135,6 +138,8 @@ export function toolErrorFromResponse(status: number, value: unknown, signInComm
   // Refused before any work started: the broker's own words are the answer, and so is its next step.
   if (code === "BUDGET_EXCEEDED") return new ToolError("BUDGET_REACHED", message, message.startsWith(TASK_BUDGET_EXCEEDED_PREFIX) ? TASK_BUDGET_STEP : OTHER_BUDGET_STEP);
   if (code === "TOO_MANY_REQUESTS") return new ToolError("RATE_LIMITED", message);
+  // By the broker's code, never by its words. An older client does not know the code and falls through to the 4xx answer below, as before.
+  if (code === "NOT_AVAILABLE_HERE") return new ToolError("NOT_ON_THIS_INSTALL", message);
   if (code !== undefined && SESSION_REFUSALS.has(code)) return new ToolError("SESSION_REFUSED", message);
   if (status === 404 && code === "NOT_FOUND" && error?.message === SESSION_NOT_FOUND_TEXT) return new ToolError("SESSION_NOT_FOUND", message);
   if (code !== undefined && PASSED_THROUGH.has(code)) return new ToolError(code as ToolErrorCode, message, OWN_STEPS.get(`${code}:${message}`));
