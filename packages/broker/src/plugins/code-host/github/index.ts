@@ -189,7 +189,8 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
         const listed = await listComments(ref.repository.url, pullRequestNumber(ref), commentOptions, checkedScope(scope), budget);
         return {
           comments: listed.comments.map((comment) => ({
-            id: comment.id, ref: refOf(ref.repository.url, comment.number, ref.url), author: { login: comment.authorLogin, ...(comment.authorId === undefined ? {} : { hostUserId: comment.authorId }), accountType: comment.authorType },
+            // The place is what GitHub reported for the comment, not what was asked: the core compares it with the request's thread.
+            id: comment.id, ref: refOf(comment.onRepositoryUrl, comment.number, ""), author: { login: comment.authorLogin, ...(comment.authorId === undefined ? {} : { hostUserId: comment.authorId }), isBot: comment.isBot },
             body: comment.body, createdAt: comment.createdAt, updatedAt: comment.updatedAt,
           })),
           ...(listed.nextPage === undefined ? {} : { nextPage: listed.nextPage }),

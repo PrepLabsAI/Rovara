@@ -78,6 +78,8 @@ export interface LocalAppOptions {
   openBrowser?: BrowserOpener;
   /** Port of the review pages (0: a free one). */
   pagesPort?: number;
+  /** The most pull request threads one comment poll reads (default 20): a test lowers it to see the rotation. */
+  commentThreadsPerPoll?: number;
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
   timers?: boolean;
   now?: () => Date;
@@ -237,17 +239,17 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const decisionActions = createDecisionActions({ gate, companyId });
-  const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, now: () => clock().getTime(), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
+  const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
   const pages = await createLocalPagesServer({
-    data: createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence }),
-    actions: { decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, ...createPageExtraActions({ flow: flow.deps, companyId, owner }) },
+    data: createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments }),
+    actions: { decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments }) },
     sessions: options.pageSessions,
     ...(options.pagesPort === undefined ? {} : { port: options.pagesPort }),
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, comments, openPage: (path) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser" })), version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser" })), version: options.version });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, origin: options.origin ?? (() => "http://127.0.0.1") });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? ownerRoutes(request, caller);
 

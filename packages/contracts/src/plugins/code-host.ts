@@ -314,6 +314,14 @@ export type ChangeRequestFeedback = z.infer<typeof ChangeRequestFeedbackSchema>;
 export const ROVARA_REPLY_MARKER = "<!-- rovara-reply -->";
 
 /**
+ * Whether a comment is exactly Rovara's own reply: one line of at most 200 characters with no mention or control character, a blank line, then the marker and nothing else. A comment that merely QUOTES the
+ * marker (a person replying with Rovara's reply pasted in) is not Rovara's, and a command above it still runs.
+ */
+export function isRovareReplyComment(body: string): boolean {
+  return /^[^\p{Cc}@]{1,200}\r?\n\r?\n<!-- rovara-reply -->$/u.test(body.trimEnd());
+}
+
+/**
  * A comment on a change request's conversation, as the host reports it (lane L12, owner decision 66): the text, who wrote it, when, and the change request it is on. NOTHING in it is a decision: whether it is a
  * command, whether it is fresh or edited, whether its author may approve and whether it is on the right change request are all decided by Rovara's core. `updatedAt` differs from `createdAt` once the host
  * records an edit. The text is untrusted.
@@ -322,7 +330,8 @@ export const HostCommentSchema = z.object({
   id: ExternalIdSchema,
   /** The change request (or issue) the comment is on. */
   ref: ChangeRequestRefSchema,
-  author: HostAccountSchema.extend({ accountType: z.string().min(1).max(40) }).strict(),
+  /** `isBot`: an automation account, as the host's own plug-in decides (the core never reads a provider's account words). */
+  author: HostAccountSchema.extend({ isBot: z.boolean() }).strict(),
   body: z.string().max(65_536),
   createdAt: ISO_TIME,
   updatedAt: ISO_TIME,

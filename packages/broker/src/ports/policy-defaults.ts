@@ -150,7 +150,7 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
         if (options.fetchComment === undefined) return refuse("method_not_available");
         const comment = await options.fetchComment(proof.token, request);
         // Every check on the comment is Rovara's (owner decision 66); the host only reported what it holds.
-        const checked = checkCommentProof({ comment, context: await options.commentContext?.(request), outcome: request.outcome });
+        const checked = checkCommentProof({ comment, context: await options.commentContext?.(request), outcome: request.outcome, artifactDigest: request.artifactDigest });
         if (!checked.ok || comment === undefined) return refuse(checked.ok ? "no_approving_comment" : checked.reason);
         if (comment.permission !== "write" && comment.permission !== "admin") return refuse("not_a_collaborator");
         const claimed = proof.claimedAccount;

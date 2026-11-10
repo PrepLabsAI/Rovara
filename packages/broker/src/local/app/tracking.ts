@@ -13,7 +13,7 @@
 //
 // Decision 51: nothing here names a provider; the code host is whatever the repository's record names, and a host that cannot read a merge (`mergeObservation`) is simply never seen merged.
 import {
-  CodeMilestoneSchema, CODE_MILESTONES_BEFORE_PR, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, codeMilestoneKey, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, sessionEventId, when,
+  blockWorkflow, CodeMilestoneSchema, CODE_MILESTONES_BEFORE_PR, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, codeMilestoneKey, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, sessionEventId, when,
   type CodeMilestone, type OrgId, type ReadBudget, type RegistryView, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { SWEEP_INTERVAL_MS, type MergeRecoveryResult } from "../../core/merge/budget.js";
@@ -27,6 +27,7 @@ import { registryRepositoryResolver } from "../../core/merge/resolver.js";
 import type { CodeMilestones, MergeTask, SessionTimeline } from "../../core/merge/seams.js";
 import { recoveryRowKey, workflowUpdateItem } from "../../core/merge/store.js";
 import { sessionEventItem } from "../../core/sessions/store.js";
+import { verifyPublishedChanges } from "../../core/build-step/changed-files.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { recordedHeadOf } from "../../core/build-step/head-check.js";
@@ -41,6 +42,9 @@ export const TRACKING_FAILURE_MAX_MS = TRACKING_HEARTBEAT_MINUTES * 60_000;
 export const SWEEP_MAX_ROWS = 10;
 export const SWEEP_MAX_REQUESTS = 256;
 export const SWEEP_MAX_MS = 20_000;
+/** What the task says when its pull request ended at a head Rovara did not check. */
+export const MERGED_OUTSIDE = "The pull request was merged with commits Rovara did not check, so this is not a merge of the code Rovara checked. Look at what was merged, then close this task.";
+export const CLOSED_OUTSIDE = "The pull request was closed on the code host with commits Rovara did not check. Look at it there, then close this task.";
 /** A milestone is kept this long after it happened. */
 const MILESTONE_RETENTION_SECONDS = 30 * 86_400;
 
@@ -208,12 +212,20 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
       // Only a change the workflow does not know: a merge, a close, or a closed pull request opened again. An open pull request the workflow has as open (or does not know yet) is left as it is, so a fix
       // being coded or pushed is never moved back to waiting by a read.
       if (state === "OPEN" && pullRequest.state !== "CLOSED") continue;
-      if (state !== "OPEN" && details.headRevision !== pullRequest.headSha) {
-        log({ component: "merge_tracking", event: "observe.head_differs", taskId, number: pullRequest.number });
-        continue;
-      }
       const at = new Date(now()).toISOString();
-      const next = observeWorkflowPullRequest(workflow, { repositoryId: pullRequest.repositoryId, number: pullRequest.number, candidateDigest: pullRequest.candidateDigest, state, source: "GITHUB_API", observedAt: at }, at);
+      if (state !== "OPEN" && details.headRevision !== pullRequest.headSha) {
+        // Merged or closed at a head Rovara did not check (a reviewer's fix-up, say): that is not the merge of the checked code and the workflow does not say it is. The task stops waiting, with the fact in
+        // plain words on its page and its session, and the tracking row ends.
+        const outside = blockWorkflow(workflow, state === "MERGED" ? MERGED_OUTSIDE : CLOSED_OUTSIDE, at);
+        const stuck = milestones.items({
+          kind: "stuck", orgId: companyId, taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at, text: state === "MERGED" ? MERGED_OUTSIDE : CLOSED_OUTSIDE,
+          pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
+        }, outside.revision, { definitionVersion: workflow.definitionVersion });
+        const recorded = await store.transact([workflowUpdateItem(taskId, outside, workflow.revision), ...stuck]);
+        if (recorded.applied) await milestones.deliver(taskId).catch(() => undefined);
+        return recorded.applied ? { kind: "TERMINAL", release: "confirmed" } : { kind: "OBSERVED" };
+      }
+      const next = observeWorkflowPullRequest(workflow, { repositoryId: pullRequest.repositoryId, number: pullRequest.number, candidateDigest: pullRequest.candidateDigest, state, source: "CODE_HOST", observedAt: at }, at);
       const items: TransactItem[] = [
         workflowUpdateItem(taskId, next, workflow.revision),
         ...await mergedMilestoneItems({ milestones, bindings: { read: async () => [] } }, task, workflow, next, at),
@@ -233,6 +245,12 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
   // ---- the sweep
 
   let cooldownUntil: number | undefined;
+  const COOLDOWN_KEY = { pk: "WORKFLOW_MERGE_SWEEP", sk: "COOLDOWN" };
+  /** The pause a code host asked for is kept, so a restart of `rovara up` inside it does not ask the host again at once. */
+  const remember = (until: number | undefined): void => {
+    void (until === undefined ? store.delete({ key: COOLDOWN_KEY }) : store.put({ item: { ...COOLDOWN_KEY, entityType: "WORKFLOW_MERGE_SWEEP", until, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(until / 1000) + 86_400 } })).catch(() => undefined);
+  };
+  let cooldownRead = false;
   let sweeping: Promise<{ attempted: number }> | undefined;
 
   const dueRows = async (): Promise<Array<{ taskId: string; attempts: number; quiet: number }>> => {
@@ -262,7 +280,7 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
       }
       case "RETRY": {
         const attempts = row.attempts + 1;
-        if (result.scope === "github-global") cooldownUntil = Math.max(cooldownUntil ?? 0, result.retryAt);
+        if (result.scope === "github-global") { cooldownUntil = Math.max(cooldownUntil ?? 0, result.retryAt); remember(cooldownUntil); }
         await set({ nextAttemptAt: Math.max(result.retryAt, at + Math.min(pollMs * attempts, TRACKING_FAILURE_MAX_MS)), attempts, updatedAt: new Date(at).toISOString() });
         return;
       }
@@ -274,7 +292,13 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
   };
 
   const runSweep = async (): Promise<{ attempted: number }> => {
+    if (!cooldownRead) {
+      cooldownRead = true;
+      const kept = await store.get(COOLDOWN_KEY).catch(() => undefined);
+      if (typeof kept?.["until"] === "number") cooldownUntil = Math.max(cooldownUntil ?? 0, kept["until"]);
+    }
     if (cooldownUntil !== undefined && now() < cooldownUntil) return { attempted: 0 };
+    if (cooldownUntil !== undefined) remember(undefined);
     cooldownUntil = undefined;
     let rows: Awaited<ReturnType<typeof dueRows>>;
     try {
@@ -293,7 +317,11 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
         attempted += 1;
         const versionBefore = await trackingVersions(row.taskId);
         let result: MergeRecoveryResult;
+        let unverified = false;
         try {
+          // The changed files are read from the code host once for the code the pull requests hold (review H3): until then the risk is high. A host that cannot answer now is asked again soon.
+          const task = await readTask(flow, row.taskId);
+          if (task !== undefined) unverified = (await verifyPublishedChanges(flow, task, budget.beforeRequest)) === "unavailable";
           result = await reconcileTrackingTask(deps, row.taskId, budget);
         } catch (error) {
           const limitedUntil = hostRateLimitRetryAt(error);
@@ -301,7 +329,7 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
           if (limitedUntil === undefined) log({ component: "merge_tracking", event: "sweep.row_failed", taskId: row.taskId, error: error instanceof Error ? error.name : "unknown" });
         }
         // Did the pass change anything? Its tracking item's version moves whenever it wrote.
-        await settle(row, result, await trackingVersions(row.taskId) !== versionBefore);
+        await settle(row, result, unverified || await trackingVersions(row.taskId) !== versionBefore);
         if (result.kind === "RETRY" && result.scope === "github-global") break;
       }
     } finally {
@@ -315,7 +343,7 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
     const items = await queryAll(store, { pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "MERGE_TRACKING#" } }).catch(() => []);
     const task = await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }).catch(() => undefined);
     const workflow = task?.["workflow"] as { revision?: number } | undefined;
-    return `${String(workflow?.revision ?? "")}|${items.map((item) => `${String(item["sk"])}:${JSON.stringify(item["version"])}`).join(",")}`;
+    return `${String(workflow?.revision ?? "")}|${JSON.stringify((workflow as { risk?: { level?: string } } | undefined)?.risk?.level)}|${items.map((item) => `${String(item["sk"])}:${JSON.stringify(item["version"])}`).join(",")}`;
   };
 
   return {
@@ -328,7 +356,7 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
     async wake(taskId) {
       await store.update({ key: recoveryRowKey(taskId), ops: [change.set("nextAttemptAt", now()), change.set("quiet", 0)], condition: when.and(when.present(), when.eq("kind", "tracking")) }).catch(() => undefined);
     },
-    pauseUntil(retryAt) { cooldownUntil = Math.max(cooldownUntil ?? 0, retryAt); },
+    pauseUntil(retryAt) { cooldownUntil = Math.max(cooldownUntil ?? 0, retryAt); remember(cooldownUntil); },
     pausedUntil: () => (cooldownUntil !== undefined && now() < cooldownUntil ? cooldownUntil : undefined),
     async idle() { await sweeping?.catch(() => undefined); },
   };

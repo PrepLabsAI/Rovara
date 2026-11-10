@@ -12,10 +12,12 @@ import { startChecksRerun, startReview } from "../../core/build-step/start.js";
 
 export const NOTHING_TO_RETRY_STEP = "There is nothing to retry: the task is not blocked at a step Rovara can run again.";
 
-export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string): Promise<void> {
+export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string, expectedRevision?: number): Promise<void> {
   const task = await readTask(deps, taskId);
   const workflow = task?.workflow;
   if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.state !== "BLOCKED") throw agentXError("CONFIG_INVALID", NOTHING_TO_RETRY_STEP);
+  // The page the owner pressed Retry on was for one revision: a task that moved on since is not retried by a button that was for something else.
+  if (expectedRevision !== undefined && workflow.revision !== expectedRevision) throw agentXError("CONFIG_INVALID", "This changed since you read it. Read the latest and try again.");
   const ref = { taskId, workflowRevision: workflow.revision };
   const now = iso(deps);
   /** What the owner's Retry started: "STALE" means the step is not one that can be run again from where the task is. */

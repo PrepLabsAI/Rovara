@@ -265,11 +265,11 @@ merge of the base. **It never merges**: a person does, on the code host. A pull 
 A writer's comment on a pull request can approve or send back a plan (`/rovara approve`, `/rovara changes: ...`) or stop the work (`/rovara stop`). A laptop has no webhook, so the app **polls** (every 60 s, with the same rate-limit pause as merge
 tracking) the conversation of each thread through the code host's optional `comments` read, and answers with its optional `postComment`.
 
-- **A thread** is where the owner says a task's plan is posted: `POST /v1/dev/tasks/<id>/thread {"repository": "<project repository name>", "number": 12}` (an issue or pull request of the task's own project), else the task's pull request.
-  A task has one. Only a repository of the task's project can be named.
+- **A thread** is where the owner says a task's plan is posted: a form on the task's page (`rovara open <task>`: "Where the plan is posted", with the session's form token): the API token gets 403, because attaching lets a comment decide the plan. It names an issue or pull request of the task's own project, and **one open task per thread**: a thread another open task has is refused, and where several tasks would answer a comment Rovara decides nothing and says so.
+  The task's own pull requests are read too, whether or not a thread is attached.
 - **The code host only fetches.** A comment is text, author, created and updated times, the change request it is on, and (through `standing`) its author's permission. **Every safety check is Rovara's**
   (`core/pr-commands/handler.ts`, `core/pr-commands/comment-checks.ts`): the right thread, written after the version being decided was posted, never edited (the host's `updatedAt` moved), the right command for the answer
-  (`approve` approves, `changes:` asks for changes, and an `approve` comment is no proof of a request for changes), not a bot's, not Rovara's own reply (its hidden marker), a writer, and used once. The Approvers seam
+  (`approve <version>` approves and must name the version that waits: Rovara posts a notice with the short digest, e.g. `/rovara approve 3f2a9c`, and a bare or older one is refused and told which version waits; `changes:` asks for changes, and an `approve` comment is no proof of a request for changes), not a bot's, not Rovara's own reply (its hidden marker), a writer, and used once. The Approvers seam
   makes the checks again from a second read when the decision is made.
 - **What a comment cannot do.** It cannot approve a high-risk plan (the owner's page session only), reject (the session only), or merge. Asking for changes by comment is allowed (decision 62).
 - **Not wired:** `/rovara lesson` (no lessons on this install) answers so. A host without `comments` offers no comment way of approving.
@@ -288,8 +288,10 @@ tails are content-addressed, and the pack is the one object a re-check of the sa
 - **Questions.** Understand's questions are on the same page, with a form for the answers (the same function as `POST /v1/app/sessions/<id>/answers`).
 - **The pull request.** Its state (draft or ready, checks, reviews, the branch, someone else's push, "changed outside Rovara"), what Rovara is doing about it (fixing failing checks, round n of 3) and, when it is ready, "Ready to merge. Rovara never merges by
   itself". The sessions use the same words (`step`, and a status of "checking" or "ready to merge").
-- **The description.** It lists the changed files (`+n -m`) read from the `workspace.diff` the worker saved with the run that made the code, and has a **Lessons used** section that says none were used (lessons are not on this install). With the files known the risk is
-  read from them and can be below high; with no diff, or one that cannot be trusted, it says "couldn't list the changed files" and never reads low.
+- **The description.** It opens saying it could not list the changed files, with the risk **high** and the reason "Rovara has not yet checked which files changed against the code host". Within a tracking pass of the push, the changed files are read **from the code host**
+  (the files between the base and the checked head, with the host's counts) and the description is rewritten (only if nobody edited it) to list them; the risk is judged from those files and can then be below high. What the worker reported in `workspace.diff` is never believed:
+  the proof page shows it only as "reported by the worker, not checked", and it can never lower the risk. A host that cannot list the files leaves the risk high and is asked again. It has a **Lessons used** section that says none were used (lessons are not on this install).
+  Tracking rows written before L12 with a text due time are never due (the due time is a number now); there are none outside a build of this lane.
 - **Not done:** the owner's answers to a *structured* plan's decisions. The worker's Plan step saves a Markdown plan here, so there is no structured plan to answer; when one arrives, `approvedCodingPlan` already honours the answers a decision carries.
 
 ## Not wired yet

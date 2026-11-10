@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 import type { ApprovalOffer } from "../../packages/broker/src/core/local-pages/index.js";
 import { createPrCommentCommands, type CommentPermission, type LookedUpComment, type PendingOffer, type PrCommentEvent, type PrCommandWorld } from "../../packages/broker/src/core/pr-commands/index.js";
 import { CODE_HOST_COMMENT_METHOD, createLocalOwnerApprovers } from "../../packages/broker/src/ports/policy-defaults.js";
-import { commentReads, freshComment } from "../support/comment-fakes.js";
+import { ARTIFACT_DIGEST, commentReads, freshComment } from "../support/comment-fakes.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, parseRovaraComment, type ApprovalProof, type ExternalAccountRef } from "@agentx/contracts";
 
-const OFFER: ApprovalOffer = { requestId: "card-7", revision: 4, artifactDigest: "sha256-1234", kind: "plan" };
+const OFFER: ApprovalOffer = { requestId: "card-7", revision: 4, artifactDigest: ARTIFACT_DIGEST, kind: "plan" };
 const PENDING: PendingOffer = { taskId: "0b4f2b1e-3c6a-4d2e-9a77-5f1d8c0a1e11", approval: OFFER, postedAt: "2026-11-09T10:00:00.000Z", repository: "example/repo" };
 const AUTHOR: ExternalAccountRef = { provider: "examplehost", tenant: "", accountId: "dana" };
 
@@ -18,7 +18,7 @@ function hostComment(body: string, overrides: Partial<LookedUpComment> = {}): Lo
   return { body, createdAt: "2026-11-09T10:05:00.000Z", updatedAt: "2026-11-09T10:05:00.000Z", author: AUTHOR, authorPermission: "write", authorIsBot: false, on: { repository: "example/repo", number: 12 }, ...overrides };
 }
 
-function setup(options: { permission?: CommentPermission; pending?: PendingOffer | undefined; hostPermission?: "none" | "read" | "write" | "admin" } = {}) {
+function setup(options: { permission?: CommentPermission; pending?: PendingOffer | undefined | "several"; hostPermission?: "none" | "read" | "write" | "admin" } = {}) {
   const replies: string[] = [];
   const decided: Array<{ taskId: string; decision: string; note?: string; proof: ApprovalProof }> = [];
   const verdicts: unknown[] = [];
@@ -62,15 +62,15 @@ describe("which comments run", () => {
 
   it("never runs an edited or deleted comment, one that is gone, a bot's, or one Rovara posted itself", async () => {
     const { commands, decided, say } = setup();
-    expect(await commands.handle({ ...say("/rovara approve", "c-1"), action: "edited" })).toEqual({ handled: false, reason: "not_created" });
-    expect(await commands.handle({ ...say("/rovara approve", "c-2"), action: "deleted" })).toEqual({ handled: false, reason: "not_created" });
+    expect(await commands.handle({ ...say("/rovara approve 3f2a9c", "c-1"), action: "edited" })).toEqual({ handled: false, reason: "not_created" });
+    expect(await commands.handle({ ...say("/rovara approve 3f2a9c", "c-2"), action: "deleted" })).toEqual({ handled: false, reason: "not_created" });
     expect(await commands.handle(event({ commentId: "never-posted" }))).toEqual({ handled: false, reason: "gone" });
-    expect(await commands.handle(say("/rovara approve", "c-3", { authorIsBot: true }))).toEqual({ handled: false, reason: "bot" });
+    expect(await commands.handle(say("/rovara approve 3f2a9c", "c-3", { authorIsBot: true }))).toEqual({ handled: false, reason: "bot" });
     // Rovara posts with the owner's own token in Code, so the author looks like the owner: Rovara's reply carries its marker, and the core reads that.
-    expect(await commands.handle(say(`/rovara approve\n\n${ROVARA_REPLY_MARKER}`, "c-4"))).toEqual({ handled: false, reason: "own_comment" });
+    expect(await commands.handle(say(`Approved.\n\n${ROVARA_REPLY_MARKER}`, "c-4"))).toEqual({ handled: false, reason: "own_comment" });
     // A comment the host records an edit of never runs, and a comment that is on another thread than the one named is not this thread's.
-    expect(await commands.handle(say("/rovara approve", "c-5", { updatedAt: "2026-11-09T10:05:30.000Z" }))).toEqual({ handled: false, reason: "edited" });
-    expect(await commands.handle(say("/rovara approve", "c-6", { on: { repository: "example/repo", number: 99 } }))).toEqual({ handled: false, reason: "other_thread" });
+    expect(await commands.handle(say("/rovara approve 3f2a9c", "c-5", { updatedAt: "2026-11-09T10:05:30.000Z" }))).toEqual({ handled: false, reason: "edited" });
+    expect(await commands.handle(say("/rovara approve 3f2a9c", "c-6", { on: { repository: "example/repo", number: 99 } }))).toEqual({ handled: false, reason: "other_thread" });
     expect(decided).toEqual([]);
   });
 
@@ -85,7 +85,7 @@ describe("which comments run", () => {
   it("does nothing, and says nothing, for an author without write permission", async () => {
     for (const permission of ["none", "read"] as const) {
       const { commands, replies, decided, say } = setup({ permission });
-      expect(await commands.handle(say("/rovara approve"))).toEqual({ handled: false, reason: "no_permission" });
+      expect(await commands.handle(say("/rovara approve 3f2a9c"))).toEqual({ handled: false, reason: "no_permission" });
       expect(replies).toEqual([]);
       expect(decided).toEqual([]);
     }
@@ -93,12 +93,12 @@ describe("which comments run", () => {
 
   it("runs a comment once, however often the host delivers it, and again after a failure that could be retried", async () => {
     const world = setup();
-    const delivery = world.say("/rovara approve");
+    const delivery = world.say("/rovara approve 3f2a9c");
     expect((await world.commands.handle(delivery)).handled).toBe(true);
     expect(await world.commands.handle(delivery)).toEqual({ handled: false, reason: "duplicate" });
     expect(world.decided).toHaveLength(1);
     const retry = setup();
-    const again = retry.say("/rovara approve");
+    const again = retry.say("/rovara approve 3f2a9c");
     retry.failNext();
     await expect(retry.commands.handle(again)).rejects.toThrow("store unavailable");
     expect((await retry.commands.handle(again)).handled).toBe(true);
@@ -109,15 +109,15 @@ describe("which comments run", () => {
 describe("approve and changes", () => {
   it("approves with a code-host-comment proof for exactly the offer, and the approvers seam accepts it", async () => {
     const { commands, decided, replies, say } = setup();
-    const outcome = await commands.handle(say("/rovara approve"));
+    const outcome = await commands.handle(say("/rovara approve 3f2a9c"));
     expect(outcome).toEqual({ handled: true, command: "approve", result: { ok: true } });
-    expect(decided[0]!.proof).toMatchObject({ method: CODE_HOST_COMMENT_METHOD, token: "c-100", requestId: "card-7", revision: 4, artifactDigest: "sha256-1234", claimedAccount: AUTHOR });
+    expect(decided[0]!.proof).toMatchObject({ method: CODE_HOST_COMMENT_METHOD, token: "c-100", requestId: "card-7", revision: 4, artifactDigest: ARTIFACT_DIGEST, claimedAccount: AUTHOR });
     expect(replies).toEqual(["Approved. I am going ahead."]);
   });
 
   it("does not approve when the host says the author may not (the approvers' rule, not this module's)", async () => {
     const { commands, replies, say } = setup({ hostPermission: "read" });
-    const outcome = await commands.handle(say("/rovara approve"));
+    const outcome = await commands.handle(say("/rovara approve 3f2a9c"));
     expect(outcome).toMatchObject({ handled: true, command: "approve", result: { ok: false } });
     expect(replies[0]).toContain("Not approved");
   });
@@ -130,28 +130,45 @@ describe("approve and changes", () => {
 
   it("refuses a comment written before the latest version was posted, and one whose time cannot be read", async () => {
     const { commands, decided, replies, say } = setup();
-    expect(await commands.handle(say("/rovara approve", "c-1", { createdAt: "2026-11-09T09:59:59.000Z", updatedAt: "2026-11-09T09:59:59.000Z" }))).toMatchObject({ result: { ok: false, reason: "stale" } });
-    expect(await commands.handle(say("/rovara approve", "c-2", { createdAt: "yesterday-ish", updatedAt: "yesterday-ish" }))).toMatchObject({ result: { ok: false, reason: "stale" } });
+    expect(await commands.handle(say("/rovara approve 3f2a9c", "c-1", { createdAt: "2026-11-09T09:59:59.000Z", updatedAt: "2026-11-09T09:59:59.000Z" }))).toMatchObject({ result: { ok: false, reason: "stale" } });
+    expect(await commands.handle(say("/rovara approve 3f2a9c", "c-2", { createdAt: "yesterday-ish", updatedAt: "yesterday-ish" }))).toMatchObject({ result: { ok: false, reason: "stale" } });
     expect(decided).toEqual([]);
     expect(replies[0]).toContain("before the latest version was posted");
   });
 
+  it("refuses an approval that does not name the waiting version, and tells which version waits (decision 66: the version the person read)", async () => {
+    const { commands, decided, replies, say } = setup();
+    expect(await commands.handle(say("/rovara approve", "c-1"))).toMatchObject({ result: { ok: false, reason: "stale" } });
+    expect(await commands.handle(say("/rovara approve 111111", "c-2"))).toMatchObject({ result: { ok: false, reason: "stale" } });
+    expect(replies).toEqual(["Version 3f2a9c is waiting. To approve that one, say /rovara approve 3f2a9c.", "Version 3f2a9c is waiting. To approve that one, say /rovara approve 3f2a9c."]);
+    expect(decided).toEqual([]);
+    // Asking for changes names no version.
+    expect(await commands.handle(say("/rovara changes: keep it", "c-3"))).toMatchObject({ result: { ok: true } });
+  });
+
+  it("decides nothing when several tasks wait on the change: a comment names no task", async () => {
+    const world = setup({ pending: "several" });
+    expect(await world.commands.handle(world.say("/rovara approve 3f2a9c"))).toMatchObject({ result: { ok: false, reason: "refused" } });
+    expect(world.replies[0]).toContain("Several tasks wait on this change");
+    expect(world.decided).toEqual([]);
+  });
+
   it("refuses a decision on a task that works on another repository than the comment's, even for a writer there", async () => {
     const world = setup({ pending: { ...PENDING, repository: "example/other" } });
-    expect(await world.commands.handle(world.say("/rovara approve"))).toMatchObject({ result: { ok: false, reason: "refused" } });
+    expect(await world.commands.handle(world.say("/rovara approve 3f2a9c"))).toMatchObject({ result: { ok: false, reason: "refused" } });
     expect(world.decided).toEqual([]);
   });
 
   it("refuses an approval that names another repository", async () => {
     const { commands, decided, say } = setup();
-    expect(await commands.handle(say("/rovara approve other/place", "c-1"))).toMatchObject({ result: { ok: false, reason: "refused" } });
-    expect((await commands.handle(say("/rovara approve Example/Repo", "c-101"))).handled).toBe(true);
+    expect(await commands.handle(say("/rovara approve other/place 3f2a9c", "c-1"))).toMatchObject({ result: { ok: false, reason: "refused" } });
+    expect((await commands.handle(say("/rovara approve Example/Repo 3f2a9c", "c-101"))).handled).toBe(true);
     expect(decided).toHaveLength(1);
   });
 
   it("says so when nothing waits", async () => {
     const { commands, replies, say } = setup({ pending: undefined });
-    expect(await commands.handle(say("/rovara approve"))).toMatchObject({ result: { ok: false, reason: "not_found" } });
+    expect(await commands.handle(say("/rovara approve 3f2a9c"))).toMatchObject({ result: { ok: false, reason: "not_found" } });
     expect(replies).toEqual(["Nothing is waiting for a decision here."]);
   });
 

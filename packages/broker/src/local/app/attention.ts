@@ -22,7 +22,8 @@ export const retryableBlock = (workflow: WorkflowSnapshot): boolean =>
 
 /** Whether a pull request is ready for a person to merge, from what tracking read (the same words the session says). */
 export function readyToMerge(item: Pick<MergeTrackingItem, "state" | "draft" | "ci" | "review" | "branch" | "headByRovara">): boolean {
-  return item.state === "open" && !item.draft && (item.ci === "passing" || item.ci === "none") && item.review !== "changes_requested" && item.branch !== "conflicted" && item.headByRovara;
+  // A review that was asked for and has not come is not "ready": ready needs the reviews approved, or none asked for.
+  return item.state === "open" && !item.draft && (item.ci === "passing" || item.ci === "none") && (item.review === "approved" || item.review === "not_requested") && item.branch !== "conflicted" && item.headByRovara;
 }
 
 const CI_WORDS: Record<MergeTrackingItem["ci"], string> = { none: "no checks run on it", pending: "its checks are running", passing: "its checks pass", failing: "its checks are failing" };
@@ -85,7 +86,7 @@ export async function attentionOf(deps: Pick<TaskFlowDeps, "store" | "companyId"
       lines.push(ready ? "Ready to merge. Rovara never merges by itself: a person merges it on the code host." : "Rovara is watching it. It is not ready to merge yet.");
       if (!ready && workflow.state === "WAITING") {
         const failing = items.some((entry) => entry.ci === "failing");
-        step = failing ? "Waiting to fix failing checks" : items.some((entry) => entry.ci === "pending" || entry.draft) ? "Waiting for the pull request's checks" : items.some((entry) => entry.review === "changes_requested") ? "Changes requested on the pull request" : "Watching the pull request";
+        step = failing ? "Waiting to fix failing checks" : items.some((entry) => entry.ci === "pending" || entry.draft) ? "Waiting for the pull request's checks" : items.some((entry) => entry.review === "changes_requested") ? "Changes requested on the pull request" : items.some((entry) => entry.review === "requested") ? "Checks pass; waiting for a review" : "Watching the pull request";
         display = { state: "checking", reason: step.toLowerCase(), next: "Rovara keeps watching; it tells you when the pull request is ready to merge." };
       } else {
         step = "Ready to merge";

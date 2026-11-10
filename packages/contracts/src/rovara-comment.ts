@@ -8,7 +8,7 @@
 export type RovaraComment =
   | { kind: "stop" }
   /** `/rovara approve` or `/rovara approve owner/name` (#358: one per-PR loop's blocked reviews, from the issue). */
-  | { kind: "approve"; repo?: string }
+  | { kind: "approve"; repo?: string; /** The first hex characters of the version being approved (`/rovara approve 3f2a9c`): the version the person read. */ digest?: string }
   | { kind: "changes"; text: string }
   /** `/rovara file 2,4`: file a Review loop's findings as issues (#359). */
   | { kind: "file"; numbers: number[] }
@@ -36,8 +36,10 @@ export function parseRovaraComment(body: string): RovaraComment {
     return { kind: "file", numbers };
   }
   if (keyword === "approve") {
-    const repo = /^\s+`?([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})`?\s*$/u.exec(match[2] ?? "")?.[1];
-    return repo === undefined ? { kind: "approve" } : { kind: "approve", repo };
+    // `/rovara approve`, `/rovara approve <digest>`, `/rovara approve owner/name`, `/rovara approve owner/name <digest>` (the digest is 6 to 12 hex characters).
+    const parts = /^(?:\s+`?([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})`?)?(?:\s+`?([0-9a-fA-F]{6,12})`?)?\s*$/u.exec(match[2] ?? "");
+    if (parts === null) return { kind: "approve" };
+    return { kind: "approve", ...(parts[1] === undefined ? {} : { repo: parts[1] }), ...(parts[2] === undefined ? {} : { digest: parts[2].toLowerCase() }) };
   }
   // `/rovara changes: <what>` (the colon is optional); the request is the rest of the comment.
   if (keyword === "changes" || keyword === "changes:") {

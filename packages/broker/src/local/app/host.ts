@@ -17,7 +17,7 @@ export const MESSAGES_PER_TASK = 200;
 export const MESSAGE_NOT_PASSED_ON = "Rovara does not pass messages to a running step on this computer yet. Your message is saved on the session.";
 export const MESSAGE_RATE_LIMITED = "You have sent a lot of messages to this task in the last hour. Wait a little, then try again.";
 
-export function createSessionControlHost(deps: TaskFlowDeps): SessionControlHost {
+export function createSessionControlHost(deps: TaskFlowDeps, options: { expectedRevision?: number } = {}): SessionControlHost {
   return {
     async cancelTask(taskId): Promise<{ nothingRunning: boolean; message?: string }> {
       const task = await readTask(deps, taskId);
@@ -41,7 +41,7 @@ export function createSessionControlHost(deps: TaskFlowDeps): SessionControlHost
     },
 
     async retryWorkflow(taskId) {
-      await retryBlockedStep(deps, taskId);
+      await retryBlockedStep(deps, taskId, options.expectedRevision);
     },
 
     async deliverMessage(taskId, message) {
@@ -76,6 +76,6 @@ export function createSessionControlHost(deps: TaskFlowDeps): SessionControlHost
 const MESSAGE_KEEP_SECONDS = 30 * 86_400;
 
 /** The session control (who may stop, retry or message; the request recorded once under its id, with the event and the audit step) over this install's flow. Every route that stops or retries uses this one. */
-export function createLocalSessionControl(deps: TaskFlowDeps) {
-  return createSessionControl({ store: deps.store, audit: deps.audit, host: createSessionControlHost(deps), now: deps.now ?? (() => new Date()) });
+export function createLocalSessionControl(deps: TaskFlowDeps, options: { expectedRevision?: number } = {}) {
+  return createSessionControl({ store: deps.store, audit: deps.audit, host: createSessionControlHost(deps, options), now: deps.now ?? (() => new Date()) });
 }

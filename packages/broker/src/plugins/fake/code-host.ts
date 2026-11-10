@@ -238,7 +238,7 @@ export class FakeCodeHost implements CodeHost {
     const page = options.page ?? 1;
     const all = cr.comments.filter((comment) => comment.kind === "discussion" && (since === undefined || Date.parse(comment.updatedAt) >= since));
     const listed = all.slice((page - 1) * 100, page * 100).map((comment) => ({
-      id: comment.id, ref: this.ref(cr.id), author: { login: comment.author, ...(this.model.accounts.get(comment.author) === undefined ? {} : { hostUserId: this.model.accounts.get(comment.author)!.hostUserId }), accountType: this.model.accounts.get(comment.author)?.accountType ?? "User" },
+      id: comment.id, ref: this.ref(cr.id), author: { login: comment.author, ...(this.model.accounts.get(comment.author) === undefined ? {} : { hostUserId: this.model.accounts.get(comment.author)!.hostUserId }), isBot: (this.model.accounts.get(comment.author)?.accountType ?? "User") === "Bot" || comment.author.endsWith("[bot]") },
       body: comment.body, createdAt: comment.createdAt ?? comment.updatedAt, updatedAt: comment.updatedAt,
     }));
     return { comments: listed, ...(all.length > page * 100 ? { nextPage: page + 1 } : {}) };

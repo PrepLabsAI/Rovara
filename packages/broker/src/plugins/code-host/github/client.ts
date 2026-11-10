@@ -1039,12 +1039,15 @@ export class GitHubAppCredentialProvider {
     const comments = answered.body.flatMap((value): GitHubIssueComment[] => {
       const record = statusRecord(value);
       const user = statusRecord(record.user);
-      const issue = typeof record.issue_url === "string" ? /\/issues\/([1-9][0-9]*)$/u.exec(record.issue_url)?.[1] : undefined;
+      // WHERE GitHub says the comment is: parsed from its own `issue_url`, not from what was asked. A comment that says nothing about its place is left out (the core cannot judge it).
+      const place = typeof record.issue_url === "string" ? /^https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues\/([1-9][0-9]*)$/u.exec(record.issue_url) : null;
       if (!(typeof record.id === "number" || typeof record.id === "string") || typeof record.body !== "string" || typeof user.login !== "string" || user.login === ""
-        || typeof record.created_at !== "string" || typeof record.updated_at !== "string" || (issue !== undefined && Number(issue) !== number)) return [];
+        || typeof record.created_at !== "string" || typeof record.updated_at !== "string" || place === null) return [];
+      const type = typeof user.type === "string" ? user.type : "User";
       return [{
-        id: String(record.id), number, body: record.body.slice(0, 65_536), authorLogin: user.login, ...(typeof user.id === "number" ? { authorId: String(user.id) } : {}),
-        authorType: typeof user.type === "string" && user.type !== "" ? user.type.slice(0, 40) : "User", createdAt: record.created_at, updatedAt: record.updated_at,
+        id: String(record.id), onRepositoryUrl: `https://github.com/${place[1]!}/${place[2]!}`, number: Number(place[3]), body: record.body.slice(0, 65_536), authorLogin: user.login, ...(typeof user.id === "number" ? { authorId: String(user.id) } : {}),
+        // GitHub's words for an automation account (`Bot`, a `[bot]` login) end here; the contract carries a plain flag.
+        isBot: type === "Bot" || user.login.endsWith("[bot]"), createdAt: record.created_at, updatedAt: record.updated_at,
         url: typeof record.html_url === "string" && record.html_url.startsWith("https://") ? record.html_url : "",
       }];
     });
@@ -2471,12 +2474,13 @@ export class GitHubAppCredentialProvider {
 /** A comment on a pull request's conversation as GitHub reports it (lane L12): the facts only. */
 export interface GitHubIssueComment {
   id: string;
-  /** The pull request (issue) number it is on. */
+  /** The repository and the pull request (issue) number GitHub says it is on. */
+  onRepositoryUrl: string;
   number: number;
   body: string;
   authorLogin: string;
   authorId?: string;
-  authorType: string;
+  isBot: boolean;
   createdAt: string;
   updatedAt: string;
   url: string;

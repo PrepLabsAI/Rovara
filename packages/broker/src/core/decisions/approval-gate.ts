@@ -14,6 +14,7 @@
 //   - nothing a caller can send widens it: an unknown kind, subject or method is a refusal, not a default.
 // It never throws for a refusal (a refusal is an answer); it throws only for a fault of the store.
 import { createHash, randomUUID } from "node:crypto";
+import { CODE_HOST_COMMENT_METHOD } from "../../ports/policy-defaults.js";
 import {
   INDEX_EXPIRY_ATTRIBUTE, approvalProofKey, companyScoped, when,
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type Approvers, type AuditSink, type Condition, type DocumentKey, type DocumentStore, type ExternalAccountRef, type Principal,
@@ -213,7 +214,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   const subjects = new Map(deps.subjects.map((subject) => [subject.kind, subject]));
   const highRiskMethods = deps.policy?.highRiskMethods ?? [LOCAL_SESSION_METHOD_NAME];
   const rejectMethods = deps.policy?.rejectMethods ?? [LOCAL_SESSION_METHOD_NAME];
-  const changesMethods = deps.policy?.changesMethods ?? [LOCAL_SESSION_METHOD_NAME, "code-host-comment"];
+  const changesMethods = deps.policy?.changesMethods ?? [LOCAL_SESSION_METHOD_NAME, CODE_HOST_COMMENT_METHOD];
   const proofKeepSeconds = deps.policy?.proofKeepSeconds ?? PROOF_KEEP_SECONDS;
   const reusableMethods = deps.policy?.reusableMethods ?? [LOCAL_SESSION_METHOD_NAME];
   const markerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));

@@ -38,13 +38,15 @@ export interface CommentView {
 
 /**
  * What the owner needs to see and answer on the task's page besides the plan (lane L12), in Rovara's fixed words: why it stopped and asks, where the pull request stands, and the questions it is waiting on.
- * Nothing in it is text a worker or a person wrote.
+ * The sentences are Rovara's; the names in them (checks, files) and the questions are redacted text from outside, and a page draws them as untrusted.
  */
 export interface AttentionView {
   /** Rovara's own ask: it fixed what it could and asks the owner. `retry` says the owner can run the step again from here. */
   ask?: { lines: string[]; retry: boolean };
   /** Where the pull request stands (checks, reviews, who pushed), and what Rovara is doing about it. */
   merge?: { lines: string[] };
+  /** Where the plan is posted (lane L12): the thread the owner attached, and the project's repositories one can be attached from. Absent: no code host reads comments. */
+  thread?: { attached?: { repository: string; number: number }; repositories: string[] };
   /** Understand's questions, answered here. `round` is the round being answered. */
   questions?: { round: number; items: Array<{ id: string; text: string; options: Array<{ id: string; label: string }> }> };
 }
@@ -158,6 +160,8 @@ export interface LocalPageActions {
   lessonAction(input: { lessonId: string; action: "approve" | "retire" | "wrong" }): Promise<LocalActionResult>;
   /** Lane L12: runs a blocked step again. `revision` is the revision the owner was looking at; a task that moved on refuses it. */
   retry?(input: { taskId: string; revision: number }): Promise<LocalActionResult>;
+  /** Lane L12: the owner says a task's plan is posted on an issue or pull request, so a writer's comment there can decide it. */
+  attachThread?(input: { taskId: string; revision: number; repository: string; number: number }): Promise<LocalActionResult>;
   /** Lane L12: the owner's answers to Understand's questions. */
   answerQuestions?(input: { taskId: string; revision: number; round: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }): Promise<LocalActionResult>;
 }

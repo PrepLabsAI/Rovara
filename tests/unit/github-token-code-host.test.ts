@@ -185,9 +185,11 @@ describe("the laptop GitHub code host", () => {
     const ref = { repository: world.repository, id: cr.id, url: "" };
     const page = await world.host.comments!(ref, {}, world.scope);
     expect(page).toEqual({ comments: [{
-      id: comment.id, ref: expect.objectContaining({ id: cr.id }) as unknown, author: { login: "dana", hostUserId: expect.any(String) as unknown, accountType: "User" },
+      id: comment.id, ref: expect.objectContaining({ id: cr.id }) as unknown, author: { login: "dana", hostUserId: expect.any(String) as unknown, isBot: false },
       body: "/rovara approve", createdAt: comment.createdAt, updatedAt: comment.updatedAt,
     }] });
+    // The place is what GitHub reported for the comment (its issue address), not what was asked.
+    expect(page.comments[0]!.ref).toMatchObject({ repository: { url: GITHUB_REPO_URL.replace(/\.git$/u, "") }, id: cr.id });
     // Nothing in it is a judgement: whether it approves, is fresh or is from someone who may is the core's.
     expect(Object.keys(page.comments[0]!).sort()).toEqual(["author", "body", "createdAt", "id", "ref", "updatedAt"]);
     expect((await world.host.comments!(ref, { since: new Date(Date.parse(comment.updatedAt) + 60_000).toISOString() }, world.scope)).comments).toEqual([]);

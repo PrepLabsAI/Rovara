@@ -79,6 +79,14 @@ function attentionHtml(context: PageContext, view: PlanPageView): string {
       : "";
     parts.push(`<section class="panel" id="ask"><h2>Rovara asks</h2>${attention.ask.lines.map((line) => `<p>${untrusted(line)}</p>`).join("")}${retry}</section>`);
   }
+  if (attention.thread !== undefined) {
+    const t = attention.thread;
+    const current = t.attached === undefined ? "<p class=\"muted\">No thread is attached. A plan is decided on this page.</p>" : `<p>A writer's <code>/rovara approve</code> on ${untrusted(t.attached.repository)} #${esc(t.attached.number)} can decide this plan. Rovara posts the version that waits there.</p>`;
+    const form = `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/thread">${hidden("revision", view.revision)}${hidden("ft", context.formToken({ action: "task.thread", taskId: view.taskId, revision: view.revision }))}`
+      + `<label>Repository<br><select name="repository">${t.repositories.map((name) => `<option value="${esc(name)}">${untrusted(name)}</option>`).join("")}</select></label>`
+      + "<label>Issue or pull request number<br><input type=\"number\" name=\"number\" min=\"1\" required></label><div class=\"row\"><button type=\"submit\">Attach this thread</button></div></form>";
+    parts.push(`<section class="panel" id="thread"><h2>Where the plan is posted</h2>${current}${form}</section>`);
+  }
   if (attention.questions !== undefined) {
     const fields = attention.questions.items.map((item) => {
       const options = item.options.length === 0 ? "" : item.options.map((option) => `<label><input type="radio" name="option-${esc(item.id)}" value="${esc(option.id)}"> ${untrusted(option.label)}</label>`).join(" ");

@@ -209,7 +209,7 @@ principal or account the proof only claims. A proof has a `proofId`; the caller 
 transaction, keyed on `approvalProofKey(proof)` (a hash of method, token and request, so a token cannot be reused under a fresh `proofId`); that is the single-use guarantee (the Code default also refuses a repeat in its own process, bounded).
 
 An outside account is an `ExternalAccountRef` (`provider`, `tenant`, `accountId`); no core type names Slack or GitHub. The code host
-adapter answers "who wrote this comment and what may they do" through `verifyComment`.
+adapter only FETCHES a comment (`CodeHost.comments`: text, author, times, the change request it is on; the author's permission comes from `standing`). Code's default approvers read it through `fetchComment` and the request's thread through `commentContext`, and the checks are Rovara's (owner decision 66, `core/pr-commands/comment-checks.ts`): the right thread, written after the version was posted, never edited, `/rovara approve <version>` naming the version that waits, not a bot (`isBot`) or Rovara's own reply, a writer.
 
 ## Model key store
 

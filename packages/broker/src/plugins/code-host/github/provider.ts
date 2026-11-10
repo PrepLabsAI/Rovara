@@ -83,12 +83,13 @@ export interface GitHubFeedbackComment {
 /** A comment on a pull request's conversation as GitHub reports it (lane L12): the facts only. */
 export interface GitHubIssueComment {
   id: string;
-  /** The pull request (issue) number it is on. */
+  /** The repository and the pull request (issue) number GitHub says it is on. */
+  onRepositoryUrl: string;
   number: number;
   body: string;
   authorLogin: string;
   authorId?: string;
-  authorType: string;
+  isBot: boolean;
   createdAt: string;
   updatedAt: string;
   url: string;

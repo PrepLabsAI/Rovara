@@ -11,10 +11,11 @@
 //
 // Nothing here knows GitHub: the event, the permission lookup and the reply come from the code host adapter, through the three seams below.
 import {
-  IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, companyScoped, parseRovaraComment, when,
+  IMPLICIT_COMPANY_ID, companyScoped, isRovareReplyComment, parseRovaraComment, when,
   type ApprovalProof, type DocumentStore, type ExternalAccountRef,
 } from "@agentx/contracts";
 import { CODE_HOST_COMMENT_METHOD } from "../../ports/policy-defaults.js";
+import { digestNamed, shortDigest } from "./comment-checks.js";
 import type { ApprovalOffer, LocalActionResult } from "../local-pages/views.js";
 
 /** What the webhook says happened. Only the reference is believed: everything else is read back from the host (`PrCommentHost.lookupComment`). */
@@ -66,10 +67,12 @@ export interface PendingOffer {
 
 /** The task flow's side (lanes L6b and L7b implement it). */
 export interface PrCommandWorld {
-  pendingFor(change: { repository: string; number: number }): Promise<PendingOffer | undefined>;
+  /** What waits on this change request. `"several"`: more than one task works here, so a comment cannot say which it means (it names no task): the person decides on the page. */
+  pendingFor(change: { repository: string; number: number }): Promise<PendingOffer | undefined | "several">;
   decide(input: { taskId: string; decision: "approve" | "changes"; note?: string; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
   /** `number` is the position in the "Lessons used" list of the pull request. */
   lesson(input: { repository: string; number: number; lessonNumber: number; verdict: "wrong" | "right" | "retire" }): Promise<LocalActionResult>;
+  /** `"several"` is refused by the world itself (it answers `refused`); the handler never picks one. */
   stop(input: { repository: string; number: number }): Promise<LocalActionResult>;
 }
 
@@ -108,7 +111,7 @@ export function createPrCommentCommands(options: PrCommandsOptions): { handle(ev
       const comment = await options.host.lookupComment({ repository: event.repository, number: event.number, commentId: event.commentId });
       if (comment === undefined) return { handled: false, reason: "gone" };
       // Rovara's own replies carry its marker (a host account that is also a person's); the core reads them as Rovara's, wherever the host says they came from.
-      if (comment.body.includes(ROVARA_REPLY_MARKER)) return { handled: false, reason: "own_comment" };
+      if (isRovareReplyComment(comment.body)) return { handled: false, reason: "own_comment" };
       // The delivery or the poll only named a place; the comment is where the host says it is.
       if (comment.on.repository.toLowerCase() !== event.repository.toLowerCase() || comment.on.number !== event.number) return { handled: false, reason: "other_thread" };
       if (comment.authorIsBot) return { handled: false, reason: "bot" };
@@ -140,6 +143,11 @@ export function createPrCommentCommands(options: PrCommandsOptions): { handle(ev
         }
         // approve / changes
         const pending = await options.world.pendingFor({ repository: event.repository, number: event.number });
+        if (pending === "several") {
+          const message = "Several tasks wait on this change, and a comment cannot say which one it means. Decide on the task's page.";
+          await say(event, message);
+          return { handled: true, command: parsed.kind, result: { ok: false, reason: "refused", message } };
+        }
         if (pending === undefined) {
           await say(event, "Nothing is waiting for a decision here.");
           return { handled: true, command: parsed.kind, result: { ok: false, reason: "not_found", message: "Nothing is waiting for a decision here." } };
@@ -148,6 +156,13 @@ export function createPrCommentCommands(options: PrCommandsOptions): { handle(ev
           const message = `That names ${parsed.repo}, but this is about ${pending.repository}. Nothing was approved.`;
           await say(event, message);
           return { handled: true, command: "approve", result: { ok: false, reason: "refused", message } };
+        }
+        // An approval names the version it approves: the one Rovara posted a notice for. A bare approve, or one for another version, approves nothing and is told which version waits.
+        if (parsed.kind === "approve" && !digestNamed(parsed.digest, pending.approval.artifactDigest)) {
+          const short = shortDigest(pending.approval.artifactDigest);
+          const message = `Version ${short} is waiting. To approve that one, say /rovara approve ${short}.`;
+          await say(event, message);
+          return { handled: true, command: "approve", result: { ok: false, reason: "stale", message } };
         }
         // The permission above is on the comment's repository. The task's repository must be that one, or a writer on another repository could decide this task.
         if (pending.repository.toLowerCase() !== event.repository.toLowerCase()) {

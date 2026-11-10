@@ -10,13 +10,15 @@ import {
 } from "@agentx/contracts";
 import { CHANGED_OUTSIDE_NOTE, checkPullRequestHeads } from "../../core/build-step/head-check.js";
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
-import type { ApprovalOffer, CommentView, LocalActionResult, LocalPageActions, LocalPageData, PendingItemView, PlanPageView, PlanVersionView, ProofReportView } from "../../core/local-pages/views.js";
+import type { ApprovalOffer, AttentionView, CommentView, LocalActionResult, LocalPageActions, LocalPageData, PendingItemView, PlanPageView, PlanVersionView, ProofReportView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { listTasks, readTask } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
+import type { LocalComments } from "./comments.js";
 import type { LocalEvidence } from "./evidence.js";
+import { reportedChangedFiles, verifiedChangedFiles } from "../../core/build-step/changed-files.js";
 import { answerUnderstandQuestions } from "./answers.js";
 import { attentionOf, retryableBlock } from "./attention.js";
 import { createLocalSessionControl } from "./host.js";
@@ -50,10 +52,20 @@ export interface PageDataDeps {
   flow: TaskFlowDeps;
   /** Lane L12: the evidence kept for a task's checked code (the proof report reads it). Absent: the report shows the recorded checks and reviews only. */
   evidence?: Pick<LocalEvidence, "packOf">;
+  /** Lane L12: comment commands, so the page can show and attach the thread a plan is posted on. */
+  comments?: Pick<LocalComments, "attachThread" | "attachedThread" | "available">;
   blobs: ObjectStorage;
   /** The owner of the install: the pages are the owner's. */
   owner: Principal;
   companyId: OrgId;
+}
+
+/** The attention view with where the plan is posted: the attached thread and the project's repositories, only while a code host reads comments. */
+async function attentionWithThread(deps: PageDataDeps, task: TaskRecord, view: AttentionView): Promise<AttentionView> {
+  if (deps.comments === undefined || task.closedAt !== undefined || !deps.comments.available()) return view;
+  const project = await deps.flow.projects.revision(task.project, task.startingRevision);
+  const attached = await deps.comments.attachedThread(task.taskId);
+  return { ...view, thread: { ...(attached === undefined ? {} : { attached }), repositories: (project?.definition.repositories ?? []).map((repository) => repository.name) } };
 }
 
 export function createLocalPageData(deps: PageDataDeps): LocalPageData {
@@ -114,7 +126,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         pullRequests: (workflow.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state.toLowerCase(), ...(outside.has(`${pullRequest.repositoryId}#${String(pullRequest.number)}`) ? { note: CHANGED_OUTSIDE_NOTE } : {}) })),
         comments: await commentsOf(taskId), ...(approval === undefined ? {} : { approval }),
         // Rovara's ask, the pull request's state and any questions: fixed words, and the forms that answer them.
-        attention: (await attentionOf(deps.flow, task)).view,
+        attention: await attentionWithThread(deps, task, (await attentionOf(deps.flow, task)).view),
       };
     },
 
@@ -126,13 +138,13 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
       const workflow = task?.workflow;
       if (task === undefined || workflow === undefined) return undefined;
       const pack = workflow.candidate === undefined ? undefined : await deps.evidence?.packOf(task, workflow.candidate.digest);
-      return proofReportOf(task, workflow, pack);
+      return proofReportOf(task, workflow, pack, { verified: await verifiedChangedFiles(deps.flow, task.workspaceId, workflow.candidate?.digest), reported: await reportedChangedFiles(deps.flow, task.workspaceId) });
     },
   };
 }
 
 /** The writes of the pages that the decision gate does not own: a comment on a plan, and the lessons (none here yet). */
-export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner">): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions"> {
+export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments">): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions" | "attachThread"> {
   return {
     async addComment(input): Promise<LocalActionResult> {
       const task = await readTask(deps.flow, input.taskId);
@@ -158,15 +170,26 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
       if (!retryableBlock(workflow)) return { ok: false, reason: "refused", message: NOTHING_TO_RETRY_STEP };
       try {
         // Through the session's control when it has one, so a Retry from the page is audited, written on the timeline and counted like any other.
-        if (task.sessionId === undefined) await retryBlockedStep(deps.flow, input.taskId);
+        if (task.sessionId === undefined) await retryBlockedStep(deps.flow, input.taskId, input.revision);
         else {
-          const result = await createLocalSessionControl(deps.flow).retry(deps.owner, deps.companyId, task.sessionId, { requestId: randomUUID() });
+          const result = await createLocalSessionControl(deps.flow, { expectedRevision: input.revision }).retry(deps.owner, deps.companyId, task.sessionId, { requestId: randomUUID() });
           if (result.status === "refused") return { ok: false, reason: "refused", message: result.message };
         }
       } catch (error) {
         return { ok: false, reason: "refused", message: error instanceof Error ? error.message.replace(/^[A-Z_]+: /u, "") : "That could not be run again." };
       }
       return { ok: true, message: "Rovara is running that step again." };
+    },
+    async attachThread(input): Promise<LocalActionResult> {
+      const task = await readTask(deps.flow, input.taskId);
+      if (task === undefined || task.companyId !== deps.companyId || task.workflow === undefined || task.closedAt !== undefined || deps.comments === undefined) return { ok: false, reason: "not_found", message: "That is no longer there." };
+      if (task.workflow.revision !== input.revision) return { ok: false, reason: "stale", message: "This changed since you read it. Read the latest and try again." };
+      try {
+        await deps.comments.attachThread(input.taskId, { repository: input.repository, number: input.number });
+      } catch (error) {
+        return { ok: false, reason: "refused", message: error instanceof Error ? error.message.replace(/^[A-Z_]+: /u, "") : "That could not be attached." };
+      }
+      return { ok: true, message: "That thread is attached." };
     },
     async answerQuestions(input): Promise<LocalActionResult> {
       try {

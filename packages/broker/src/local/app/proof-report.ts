@@ -18,7 +18,19 @@ function testsDetail(check: EvidencePack["checks"][number]): string | undefined 
     ...(tests.newTests.length > 0 ? [`${String(tests.newTests.length)} new`] : [])].join(", ");
 }
 
-export function proofReportOf(task: TaskRecord, workflow: WorkflowSnapshot, pack: EvidencePack | undefined): ProofReportView {
+/** A short list of file names, redacted, with the count of the rest. */
+function fileList(files: ReadonlyArray<{ path: string }>): string {
+  const listed = files.slice(0, 5).map((file) => words(file.path, 80));
+  return `${listed.join(", ")}${files.length > listed.length ? ` and ${String(files.length - listed.length)} more` : ""}`;
+}
+
+/** The files read from the code host (what the risk is judged from), and what the worker reported it changed (never believed, never used for the risk). */
+export interface ChangedFilesFacts {
+  verified?: { files: ReadonlyArray<{ path: string }>; complete: boolean } | undefined;
+  reported?: { files: ReadonlyArray<{ path: string }>; complete: boolean } | undefined;
+}
+
+export function proofReportOf(task: TaskRecord, workflow: WorkflowSnapshot, pack: EvidencePack | undefined, changed: ChangedFilesFacts = {}): ProofReportView {
   const rows: ProofRowView[] = [];
   const verification = workflow.verification;
   const labels = new Map(workflowSelectedChecks(workflow.checkPolicy).map((check) => [check.id, check.label]));
@@ -50,6 +62,9 @@ export function proofReportOf(task: TaskRecord, workflow: WorkflowSnapshot, pack
   const summary = [
     pack === undefined ? "No evidence was kept for this code, so only what Rovara recorded itself is shown." : `Evidence kept for this code: ${pack.environment.tier} environment${pack.environment.envRevision === 0 ? ", no approved test environment" : ""}.`,
     ...(risk === undefined ? [] : [`Risk: ${risk.level}${risk.reasons.length === 0 ? "" : ` (${risk.reasons.slice(0, 3).map((reason) => words(reason, 100)).join("; ")})`}.`]),
+    changed.verified === undefined ? "The changed files have not been checked against the code host yet, so the risk stays high."
+      : `Changed files, read from the code host: ${String(changed.verified.files.length)}${changed.verified.complete ? "" : " or more"} (${fileList(changed.verified.files)}).`,
+    ...(changed.reported === undefined ? [] : [`The worker reported ${String(changed.reported.files.length)} changed file${changed.reported.files.length === 1 ? "" : "s"} (${fileList(changed.reported.files)}); Rovara has not checked that list and does not use it.`]),
     ...(rows.length === 0 ? ["Nothing has been checked yet."] : []),
   ].join(" ");
   return {

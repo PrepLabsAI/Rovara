@@ -16,8 +16,7 @@ import {
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { branchSyncRequestId, planBranchSyncOutcome, type BranchSyncGithub } from "../branch-sync/branch-sync.js";
 import { linkedChangeRequestKey } from "../proof/revert/linked-change-requests.js";
-import { changedFilesOfCandidate } from "./changed-files.js";
-import { recomputeRisk } from "../proof/pull-request-body.js";
+import { riskFromFiles } from "./changed-files.js";
 import { requireRepositoryKey } from "../merge/repository-key.js";
 import { prHeadItems } from "../merge/store.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -74,8 +73,8 @@ export async function startPullRequestUpdate(deps: TaskFlowDeps, row: RowRef, lo
   if (remote.state !== "open" || remote.headRevision !== pullRequest.headSha) return block("HEAD_MOVED");
   const receivedAt = iso(deps);
   const started = startWorkflowPullRequestUpdate(workflow, receivedAt);
-  // The code on the pull request changes with this push, so its risk is judged again for the new code (the changed files are those of the newest saved diff; with none the level never reads low).
-  const judged = workflow.definitionVersion === "1.1.0" ? recomputeRisk(started, await changedFilesOfCandidate(deps, task.workspaceId), {}) : started;
+  // The code on the pull request changes with this push, so its risk is judged again for the new code (the changed files are read from the code host after the push, so until then the level is high).
+  const judged = workflow.definitionVersion === "1.1.0" ? riskFromFiles(started, undefined) : started;
   const mergeBaseCommit = workflow.fixSource === "conflict" ? workflow.conflictBase : undefined;
   const maintenance = {
     action: "append" as const, repository: repository.repositoryId, pullRequestNumber: pullRequest.number, headBranch: record.headBranch, baseBranch: record.baseBranch, expectedHeadCommit: pullRequest.headSha,

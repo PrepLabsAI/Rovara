@@ -29,7 +29,10 @@ import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/br
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { shortDigest } from "../../packages/broker/src/core/pr-commands/comment-checks.js";
 import { approvalOfferOf } from "../../packages/broker/src/local/app/page-data.js";
+import { readyToMerge } from "../../packages/broker/src/local/app/attention.js";
+import { retryBlockedStep } from "../../packages/broker/src/local/app/retry.js";
 import { recordedHeadOf } from "../../packages/broker/src/core/build-step/head-check.js";
 import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
@@ -76,7 +79,7 @@ const classicToken = (seed: string): string => ["gh", "p_"].join("") + seed.repe
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date } = {}) {
+async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -105,7 +108,7 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
   };
   const runtime: LocalRuntime = await startLocalRuntime({
     stateDirectory, cwd: join(root, "project"), environment: extra.environment ?? {}, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false,
-    registerAdapters, openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }), ...(extra.now === undefined ? {} : { now: extra.now }),
+    registerAdapters, openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }), ...(extra.now === undefined ? {} : { now: extra.now }), ...(extra.commentThreadsPerPoll === undefined ? {} : { commentThreadsPerPoll: extra.commentThreadsPerPoll }),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
@@ -1674,38 +1677,53 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(reads()).toBe(0);
   });
 
-  it("opens the pull request with the changed files listed and a Lessons used section, and the risk reads from those files (lane L12 slice 4)", async () => {
-    const h = await launch({ host: true });
-    const { taskId, workspaceId, seen, coding } = await toCoding(h);
-    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
-    const tree = h.model.revision(commit).tree;
-    const diff = "## demo\n### status\n M src/health.ts\n### diff\ndiff --git a/src/health.ts b/src/health.ts\n--- a/src/health.ts\n+++ b/src/health.ts\n@@ -0,0 +1 @@\n+export const health = 200;\n";
-    await h.callback(coding, "artifacts", { name: "workspace.diff", mediaType: "text/plain", content: diff });
-    await h.callback(coding, "result", builtResult(tree, h.base, commit));
-    const review = await h.nextJob(workspaceId, seen);
-    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
-    const publish = await h.nextJob(workspaceId, seen);
-    const body = (publish.payload as { body: string }).body;
-    expect(body).toContain("## What changed");
-    expect(body).toMatch(/1 file changed \(\+1 -0\)/u);
-    expect(body).toContain("- src/health.ts (+1 -0)");
-    expect(body).toContain("## Lessons used");
-    expect(body).toContain("None. This install does not use lessons yet.");
-    // With the files known, the level is read from them (a one-file change that touches nothing sensitive is not high).
-    expect(body).toContain("## Risk: Medium");
-    expect(body).not.toContain("## Risk: High");
-    expect(body).not.toContain("couldn't list the changed files");
-    // Without a diff, the same task reads high and says it could not list the files (the level never reads low on a guess).
-    const g = await launch({ host: true });
-    const other = await toCoding(g);
-    const c2 = g.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
-    await g.callback(other.coding, "result", builtResult(g.model.revision(c2).tree, g.base, c2));
-    const review2 = await g.nextJob(other.workspaceId, other.seen);
-    await g.callback(review2, "result", reviewsOf(review2, g.model.revision(c2).tree, "pass", g.base, c2));
-    const publish2 = await g.nextJob(other.workspaceId, other.seen);
-    expect((publish2.payload as { body: string }).body).toContain("couldn't list the changed files");
-    expect((publish2.payload as { body: string }).body).not.toContain("## Risk: Low");
-    void taskId;
+
+  it("lists the changed files from the code host after the push, not from the worker's report: a worker that leaves a sensitive file out cannot lower the risk (review H3)", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    // The worker reports one harmless file; the commit also changes a CI workflow.
+    const { taskId, cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n", ".github/workflows/ci.yml": "name: ci\n" }, diffOf("src/health.ts"));
+    // At opening nothing is verified: the description cannot list the files, and the risk is HIGH and says why (the worker's list is not believed).
+    expect(openingBody).toContain("couldn't list the changed files");
+    expect(openingBody).toContain("## Risk: High");
+    expect(openingBody).toContain("Rovara has not yet checked which files changed against the code host.");
+    expect(openingBody).toContain("## Lessons used");
+    expect(((await taskRecord(h, taskId)).workflow as unknown as { risk?: { level: string } }).risk?.level).toBe("high");
+    // The next tracking pass reads the files from the code host: the description now lists BOTH files and the risk names the CI workflow.
+    await h.runtime.tick();
+    expect(cr.body).toContain("2 files changed");
+    expect(cr.body).toContain(".github/workflows/ci.yml");
+    expect(cr.body).toContain("- src/health.ts");
+    expect(cr.body).toContain("## Risk: High");
+    expect(cr.body).toContain("Changes sensitive paths: .github/workflows/ci.yml");
+    // The proof page shows the worker's list only as unchecked.
+    const link = await h.browse(`/proof/${taskId}`);
+    const proof = await raw(h.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
+    expect(proof.body).toContain("Changed files, read from the code host: 2");
+    expect(proof.body).toContain("The worker reported 1 changed file");
+    expect(proof.body).toContain("has not checked that list and does not use it");
+  });
+
+  it("reads a harmless change below high once the code host has listed its files, and keeps it high until then", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const { taskId, cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    expect(openingBody).toContain("## Risk: High");
+    // A host that cannot list the files now leaves the risk high; the next pass tries again.
+    const original = h.host.changedFiles.bind(h.host);
+    h.host.changedFiles = async () => { throw new Error("the host is down"); };
+    await h.runtime.tick();
+    expect(((await taskRecord(h, taskId)).workflow as unknown as { risk?: { level: string } }).risk?.level).toBe("high");
+    h.host.changedFiles = original;
+    clock.advance(2 * MINUTE);
+    await h.runtime.tick();
+    const risk = ((await taskRecord(h, taskId)).workflow as unknown as { risk?: { level: string } }).risk?.level;
+    expect(risk).not.toBe("high");
+    expect(cr.body).toContain("1 file changed");
+    expect(cr.body).toContain("- src/health.ts (+2 -0)");
+    expect(cr.body).not.toContain("## Risk: High");
+    // A description a person edited is left as they left it.
+    expect(cr.body).toContain("None. This install does not use lessons yet.");
   });
 
   it("backs off when the code host says slow down, pauses every row until the time it names, and goes on after", async () => {
@@ -1732,6 +1750,43 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
   });
 });
 
+/** A task through publication with the given files in its commit, and the worker's own report of what it changed (its `workspace.diff`) as given. */
+async function published(h: Awaited<ReturnType<typeof launch>>, files: Record<string, string>, reportedDiff: string | undefined) {
+  const { taskId, workspaceId, seen, coding } = await toCoding(h);
+  const commit = h.model.commit("work", files);
+  const tree = h.model.revision(commit).tree;
+  if (reportedDiff !== undefined) await h.callback(coding, "artifacts", { name: "workspace.diff", mediaType: "text/plain", content: reportedDiff });
+  await h.callback(coding, "result", builtResult(tree, h.base, commit));
+  const review = await h.nextJob(workspaceId, seen);
+  await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+  const publish = await h.nextJob(workspaceId, seen);
+  const payload = publish.payload as Record<string, unknown>;
+  const headBranch = String(payload["headBranch"]);
+  h.model.branches.set(headBranch, commit);
+  await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+  const cr = h.model.changeRequests.find((entry) => entry.sourceBranch === headBranch)!;
+  await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: Number(cr.id), url: h.model.crUrl(cr.id), headBranch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true } });
+  return { taskId, workspaceId, commit, cr, openingBody: String(payload["body"]) };
+}
+const diffOf = (path: string) => `## demo\n### status\n M ${path}\n### diff\ndiff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -0,0 +1 @@\n+x\n`;
+/** Counts the pull request reads the host is asked for from now on. */
+const countReadsOf = (h: Awaited<ReturnType<typeof launch>>) => {
+  let reads = 0;
+  const original = h.host.changeRequestStatus.bind(h.host);
+  h.host.changeRequestStatus = async (...args) => { reads += 1; return original(...args); };
+  return () => reads;
+};
+
+/** The owner attaches a thread on the task's page, as a person would (a form of the page session; the API token cannot). */
+async function attachThreadOnPage(h: Awaited<ReturnType<typeof launch>>, taskId: string, number: number, repository = "demo"): Promise<string> {
+  const link = await h.browse(`/plan/${taskId}`);
+  const page = await raw(h.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
+  const form = formOf(page.body, "/thread");
+  const post = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody({ ...form.fields, repository, number: String(number) }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+  return String(post.headers["location"]);
+}
+const noticeOf = (short: string): string => `Plan version ${short} is waiting for a decision. To approve it, say /rovara approve ${short}. To ask for changes, say /rovara changes: and what to change.`;
+
 describe("rovara up: pull request comment commands, polled through the code host and checked by the core (lane L12 slice 2, decision 66)", () => {
   const MINUTE = 60_000;
   type Harness = Awaited<ReturnType<typeof launch>>;
@@ -1743,10 +1798,9 @@ describe("rovara up: pull request comment commands, polled through the code host
     const planned = await toPlanReview(h);
     h.model.commit("design-discussion", { "NOTES.md": "# notes\n" });
     const thread = h.model.reconcile({ sourceBranch: "design-discussion", targetBranch: "main", title: "Discussion of the plan" }).cr;
-    const attached = await h.api(`/v1/dev/tasks/${planned.taskId}/thread`, { method: "POST", body: { repository: "demo", number: Number(thread.id) } });
-    expect(attached.status).toBe(200);
-    // Only a repository of the task's own project can be named.
-    expect((await h.api(`/v1/dev/tasks/${planned.taskId}/thread`, { method: "POST", body: { repository: "elsewhere", number: 3 } })).status).toBe(400);
+    // Only the owner, on the task's page, can say where the plan is posted; only a repository of the task's own project can be named.
+    expect(await attachThreadOnPage(h, planned.taskId, Number(thread.id), "elsewhere")).toContain("n=refused");
+    expect(await attachThreadOnPage(h, planned.taskId, Number(thread.id))).toContain("n=attached");
     h.model.setAccount("dana", "write");
     h.model.setAccount("rita", "read");
     /** The fake host's own clock, lined up with the app's. */
@@ -1762,7 +1816,9 @@ describe("rovara up: pull request comment commands, polled through the code host
     };
     const poll = async () => { options.clock.advance(MINUTE + 1_000); await h.runtime.tick(); };
     const repliesOnThread = () => thread.comments.filter((comment) => comment.body.includes(ROVARA_REPLY_MARKER)).map((comment) => comment.body.split("\n")[0]);
-    return { h, ...planned, thread, write, workflowOf, viaGate, poll, repliesOnThread };
+    /** The words that approve exactly the version that waits (its notice names it). */
+    const short = shortDigest(offer.artifactDigest);
+    return { h, ...planned, thread, write, workflowOf, viaGate, poll, repliesOnThread, short, offer };
   }
 
   it("runs a plan approval from a writer's comment, and refuses a wrong thread, a stale or edited comment, a read-only author and a reused comment, each decided in the core", async () => {
@@ -1772,7 +1828,7 @@ describe("rovara up: pull request comment commands, polled through the code host
     const waiting = async () => expect(await w.workflowOf()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
 
     // WRONG THREAD: the host reports a comment as being on another change request than the one the plan was posted on. The core refuses; the host is never asked what it means.
-    const wrongThread = w.write(5_000, "rita", "/rovara approve");
+    const wrongThread = w.write(5_000, "rita", `/rovara approve ${w.short}`);
     const original = h.host.comments.bind(h.host);
     h.host.comments = async (...args) => { const page = await original(...args); return { ...page, comments: page.comments.map((comment) => (comment.id === wrongThread.id ? { ...comment, ref: { ...comment.ref, id: "77" } } : comment)) }; };
     expect(await w.viaGate(wrongThread.id)).toMatchObject({ status: "refused", reason: "not_approved", detail: expect.stringContaining("comment_on_other_change") as unknown });
@@ -1780,38 +1836,39 @@ describe("rovara up: pull request comment commands, polled through the code host
 
     // STALE: written before the plan was posted (the thread's clock is earlier than the plan's).
     h.model.setNow(new Date(clock.at - 3_600_000).toISOString());
-    const stale = h.model.addDiscussionComment(w.thread.id, "dana", "/rovara approve");
+    const stale = h.model.addDiscussionComment(w.thread.id, "dana", `/rovara approve ${w.short}`);
     expect(await w.viaGate(stale.id)).toMatchObject({ status: "refused", detail: expect.stringContaining("comment_before_request") as unknown });
 
     // EDITED: the host records an edit, so the comment is never a proof, whatever it says now.
     const edited = w.write(10_000, "dana", "looks fine");
     h.model.setNow(new Date(clock.at + 11_000).toISOString());
-    h.model.editDiscussionComment(w.thread.id, edited.id, "/rovara approve");
+    h.model.editDiscussionComment(w.thread.id, edited.id, `/rovara approve ${w.short}`);
     expect(await w.viaGate(edited.id)).toMatchObject({ status: "refused", detail: expect.stringContaining("comment_edited") as unknown });
 
     // READ-ONLY AUTHOR and a plain remark: polled and dropped; nothing is decided and Rovara says nothing.
-    w.write(15_000, "rita", "/rovara approve");
+    w.write(15_000, "rita", `/rovara approve ${w.short}`);
     w.write(16_000, "dana", "one question about the second step");
-    const readOnly = w.write(17_000, "rita", "/rovara approve");
+    const readOnly = w.write(17_000, "rita", `/rovara approve ${w.short}`);
     expect(await w.viaGate(readOnly.id)).toMatchObject({ status: "refused", detail: expect.stringContaining("not_a_collaborator") as unknown });
     await w.poll();
     await waiting();
-    expect(w.repliesOnThread()).toEqual([]);
+    // Rovara posted ONE notice naming the version that waits, and said nothing to a reader or a remark.
+    expect(w.repliesOnThread()).toEqual([noticeOf(w.short)]);
 
     // A FRESH `/rovara approve` from a writer on the plan's thread approves the plan: the flow goes on to coding, recorded as the writer's decision (a project approver), never the owner's.
-    const approving = w.write(2 * MINUTE, "dana", "/rovara approve");
+    const approving = w.write(2 * MINUTE, "dana", `/rovara approve ${w.short}`);
     await w.poll();
     expect(await w.workflowOf()).toMatchObject({ stage: "IMPLEMENT" });
     const decision = (await w.workflowOf()).decisions.at(-1) as { decision: string; actorRole?: string };
     expect(decision).toMatchObject({ decision: "APPROVE" });
     expect(decision.actorRole).not.toBe("TASK_OWNER");
-    expect(w.repliesOnThread()).toEqual(["Approved."]);
+    expect(w.repliesOnThread()).toEqual([noticeOf(w.short), "Approved."]);
 
     // REUSED: the same comment cannot approve again, here or anywhere; Rovara's own reply (it carries the marker) is never read as a command; a later poll does nothing more.
     expect(await w.viaGate(approving.id)).toMatchObject({ status: "replayed" });
     expect(await w.viaGate(approving.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")).toMatchObject({ status: "refused" });
     await w.poll();
-    expect(w.repliesOnThread()).toEqual(["Approved."]);
+    expect(w.repliesOnThread()).toEqual([noticeOf(w.short), "Approved."]);
     expect((await taskRecord(h, taskId)).workflow.decisions.filter((entry) => entry.source === undefined && (entry as { decision?: string }).decision === "APPROVE")).toHaveLength(1);
   });
 
@@ -1822,11 +1879,11 @@ describe("rovara up: pull request comment commands, polled through the code host
     h.model.commit("unrelated", { "OTHER.md": "# other\n" });
     const other = h.model.reconcile({ sourceBranch: "unrelated", targetBranch: "main", title: "Something else" }).cr;
     h.model.setNow(new Date(clock.at + 4_000).toISOString());
-    h.model.addDiscussionComment(other.id, "dana", "/rovara approve");
+    h.model.addDiscussionComment(other.id, "dana", `/rovara approve ${w.short}`);
     w.write(5_000, "dana", "/rovara changes: keep the old endpoint too");
     await w.poll();
     expect(await w.workflowOf()).toMatchObject({ stage: "PLAN" });
-    expect(w.repliesOnThread()).toEqual(["Sent back."]);
+    expect(w.repliesOnThread()).toEqual([noticeOf(w.short), "Sent back."]);
     const feedback = await store(h).query({ pk: `DEVTASK#${w.taskId}`, sk: { op: "beginsWith", prefix: "PLAN_FEEDBACK" } });
     expect(JSON.stringify(feedback.items)).toContain("keep the old endpoint too");
   });
@@ -1965,10 +2022,11 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     // The plan is posted on a thread; a writer approves it there. The comment is read by the poll, checked by the core, and decides as the writer, not the owner.
     h.model.commit("design-thread", { "NOTES.md": "# notes\n" });
     const thread = h.model.reconcile({ sourceBranch: "design-thread", targetBranch: "main", title: "The plan" }).cr;
-    expect((await h.api(`/v1/dev/tasks/${taskId}/thread`, { method: "POST", body: { repository: "demo", number: Number(thread.id) } })).status).toBe(200);
+    expect(await attachThreadOnPage(h, taskId, Number(thread.id))).toContain("n=attached");
     h.model.setAccount("dana", "write");
     h.model.setNow(new Date(clock.at + 5_000).toISOString());
-    h.model.addDiscussionComment(thread.id, "dana", "/rovara approve");
+    const waitingOffer = approvalOfferOf(taskId, (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workflow"] as unknown as WorkflowSnapshot)!;
+    h.model.addDiscussionComment(thread.id, "dana", `/rovara approve ${shortDigest(waitingOffer.artifactDigest)}`);
     clock.advance(MINUTE + 1_000);
     await h.runtime.tick();
     const coding = await h.nextJob(workspaceId, seen);
@@ -1993,7 +2051,7 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: Number(cr.id), url: h.model.crUrl(cr.id), headBranch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true } });
     expect((await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workflow"]).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(cr.draft).toBe(true);
-    expect(String(payload["body"])).toContain("src/health.ts");
+    expect(String(payload["body"])).toContain("## Lessons used");
 
     // The timer: checks pass, the draft is taken out of draft; then CI goes red and Rovara fixes it by itself.
     h.model.setChecks(commit, [passingCheck()]);
@@ -2041,6 +2099,244 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     const proof = await raw(h.runtime.pagesUrl, { path: proofLink.pathname + proofLink.search, headers: { host: proofLink.host } });
     expect(proof.body).toContain("npm test");
     expect(proof.body).toContain("Evidence kept for this code");
+  });
+});
+
+describe("rovara up: the L12 review's fixes (H1 to H3, M1 to M3, lows, decision 51)", () => {
+  const MINUTE = 60_000;
+  type Harness = Awaited<ReturnType<typeof launch>>;
+  const store = (h: Harness) => h.runtime.registry.require("storage");
+  const thread = (h: Harness, name: string) => { h.model.commit(name, { [`${name}.md`]: `# ${name}\n` }); return h.model.reconcile({ sourceBranch: name, targetBranch: "main", title: name }).cr; };
+  const at = (h: Harness, clock: ReturnType<typeof movingClock>, ms: number) => h.model.setNow(new Date(clock.at + ms - 1_000).toISOString());
+  const offerOf = async (h: Harness, taskId: string) => approvalOfferOf(taskId, (await store(h).get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workflow"] as unknown as WorkflowSnapshot)!;
+  const poll = async (h: Harness, clock: ReturnType<typeof movingClock>) => { clock.advance(MINUTE + 1_000); await h.runtime.tick(); };
+  const repliesOn = (cr: { comments: Array<{ body: string }> }): string[] => cr.comments.filter((comment) => comment.body.includes(ROVARA_REPLY_MARKER)).map((comment) => comment.body.split("\n")[0] ?? "");
+
+  it("H1: one open task per thread: a second task cannot be attached, and a comment where several tasks work decides none and stops none", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const a = await toPlanReview(h, "11111111-1111-4111-8111-1111111111a1");
+    const b = await toPlanReview(h, "11111111-1111-4111-8111-1111111111b2");
+    const shared = thread(h, "epic");
+    expect(await attachThreadOnPage(h, a.taskId, Number(shared.id))).toContain("n=attached");
+    // Task B cannot take the thread task A has.
+    expect(await attachThreadOnPage(h, b.taskId, Number(shared.id))).toContain("n=refused");
+    expect(await store(h).get({ pk: "COMMENT_THREADS", sk: `TASK#${b.taskId}` })).toBeUndefined();
+    // Whatever put B there anyway (an older record), a comment names no task: nothing is decided, and Rovara says so.
+    await store(h).put({ item: { pk: "COMMENT_THREADS", sk: `TASK#${b.taskId}`, entityType: "COMMENT_THREAD", taskId: b.taskId, repositoryId: "demo", number: Number(shared.id), attachedAt: new Date(clock.at).toISOString() } });
+    h.model.setAccount("dana", "write");
+    at(h, clock, 5_000);
+    h.model.addDiscussionComment(shared.id, "dana", `/rovara approve ${shortDigest((await offerOf(h, a.taskId)).artifactDigest)}`);
+    at(h, clock, 6_000);
+    h.model.addDiscussionComment(shared.id, "dana", "/rovara stop");
+    await poll(h, clock);
+    for (const task of [a, b]) expect((await taskRecord(h, task.taskId)).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(repliesOn(shared).filter((line) => line.startsWith("Several tasks"))).toHaveLength(2);
+    // The same holds for a pull request: a task cannot be attached to the pull request another open task works on.
+    const c = await launch({ host: true, now: clock.now });
+    const done = await published(c, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    const other = await toPlanReview(c, "11111111-1111-4111-8111-1111111111c3");
+    expect(await attachThreadOnPage(c, other.taskId, Number(done.cr.id))).toContain("n=refused");
+  });
+
+  it("H2: the API token cannot attach a thread (403); only the task's page can", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const planned = await toPlanReview(h);
+    const shared = thread(h, "design");
+    const refused = await h.api(`/v1/dev/tasks/${planned.taskId}/thread`, { method: "POST", body: { repository: "demo", number: Number(shared.id) } });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error?.message).toContain("on the task's page");
+    expect(await store(h).get({ pk: "COMMENT_THREADS", sk: `TASK#${planned.taskId}` })).toBeUndefined();
+    // The page shows the form, and the form needs the page session's token (a replayed or foreign one is refused).
+    const link = await h.browse(`/plan/${planned.taskId}`);
+    const page = await raw(h.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
+    const form = formOf(page.body, "/thread");
+    const forged = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody({ ...form.fields, ft: "forged", repository: "demo", number: shared.id }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(String(forged.headers["location"])).toContain("n=form");
+    expect(await store(h).get({ pk: "COMMENT_THREADS", sk: `TASK#${planned.taskId}` })).toBeUndefined();
+  });
+
+  it("M1: Rovara posts the waiting version on the thread once, and an approval must name that version: a bare approve or an older version's is refused and told which waits", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const planned = await toPlanReview(h);
+    const shared = thread(h, "plan-thread");
+    expect(await attachThreadOnPage(h, planned.taskId, Number(shared.id))).toContain("n=attached");
+    h.model.setAccount("dana", "write");
+    const v1 = shortDigest((await offerOf(h, planned.taskId)).artifactDigest);
+    await poll(h, clock);
+    await poll(h, clock);
+    expect(repliesOn(shared)).toEqual([noticeOf(v1)]);
+    // A bare approve approves nothing and says which version waits.
+    at(h, clock, 2 * MINUTE);
+    h.model.addDiscussionComment(shared.id, "dana", "/rovara approve");
+    await poll(h, clock);
+    expect((await taskRecord(h, planned.taskId)).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(repliesOn(shared).at(-1)).toBe(`Version ${v1} is waiting. To approve that one, say /rovara approve ${v1}.`);
+    // The writer asks for changes; the next version is posted, and approving the OLD one is refused.
+    at(h, clock, 4 * MINUTE);
+    h.model.addDiscussionComment(shared.id, "dana", "/rovara changes: also cover the 503 case");
+    await poll(h, clock);
+    const replan = await h.nextJob(planned.workspaceId, planned.seen);
+    expect(replan).toMatchObject({ payload: { workflowMode: "PLAN" } });
+    await h.callback(replan, "artifacts", { name: "plan.md", mediaType: "text/markdown", content: `${PLAN_TEXT}\nAlso answer 503 when the store is down.\n` });
+    await h.callback(replan, "result", { status: "SUCCEEDED" });
+    const v2 = shortDigest((await offerOf(h, planned.taskId)).artifactDigest);
+    expect(v2).not.toBe(v1);
+    at(h, clock, 8 * MINUTE);
+    h.model.addDiscussionComment(shared.id, "dana", `/rovara approve ${v1}`);
+    await poll(h, clock);
+    expect(repliesOn(shared)).toContain(noticeOf(v2));
+    expect(repliesOn(shared).at(-1)).toBe(`Version ${v2} is waiting. To approve that one, say /rovara approve ${v2}.`);
+    expect((await taskRecord(h, planned.taskId)).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    at(h, clock, 10 * MINUTE);
+    h.model.addDiscussionComment(shared.id, "dana", `/rovara approve ${v2}`);
+    await poll(h, clock);
+    expect((await taskRecord(h, planned.taskId)).workflow).toMatchObject({ stage: "IMPLEMENT" });
+  });
+
+  it("M2: a pull request merged at a head Rovara did not check ends the tracking row and stops the task waiting, saying so", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const { taskId, commit, cr } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    h.model.setChecks(commit, [passingCheck()]);
+    await h.runtime.tick();
+    // A reviewer pushes a fix-up and merges.
+    const fixUp = h.model.commit(cr.sourceBranch, { "src/extra.ts": "export const extra = 1;\n" });
+    expect(h.model.merge(cr.id, { revision: fixUp, method: "squash" })).toMatchObject({ outcome: "merged" });
+    clock.advance(10 * MINUTE);
+    await h.runtime.tick();
+    const task = await taskRecord(h, taskId);
+    expect(task.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED", blockReason: expect.stringContaining("merged with commits Rovara did not check") as unknown });
+    expect(task.workflow.stage).not.toBe("MERGED");
+    expect(await store(h).get({ pk: "WORKFLOW_MERGE_RECOVERY", sk: `TASK#${taskId}` })).toBeUndefined();
+    const sessionId = (await store(h).get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["sessionId"] as string;
+    const lines = (await readSessionEvents(store(h), IMPLICIT_COMPANY_ID, sessionId as never)).events.map((event) => event.text ?? "");
+    expect(lines.some((line) => line.includes("not a merge of the code Rovara checked"))).toBe(true);
+    const reads = countReadsOf(h);
+    clock.advance(20 * MINUTE);
+    await h.runtime.tick();
+    expect(reads()).toBe(0);
+  });
+
+  it("M3: a thread the owner attached never hides the task's pull request, and with more threads than one poll reads every thread is reached in turn", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now, commentThreadsPerPoll: 1 });
+    h.model.setAccount("dana", "write");
+    // Two tasks, each with its own thread; one thread is read per poll.
+    const a = await toPlanReview(h, "11111111-1111-4111-8111-1111111111d4");
+    const b = await toPlanReview(h, "11111111-1111-4111-8111-1111111111e5");
+    const ta = thread(h, "thread-a");
+    const tb = thread(h, "thread-b");
+    await attachThreadOnPage(h, a.taskId, Number(ta.id));
+    await attachThreadOnPage(h, b.taskId, Number(tb.id));
+    at(h, clock, 5_000);
+    h.model.addDiscussionComment(ta.id, "dana", "/rovara changes: change a");
+    at(h, clock, 6_000);
+    h.model.addDiscussionComment(tb.id, "dana", "/rovara changes: change b");
+    await poll(h, clock);
+    await poll(h, clock);
+    await poll(h, clock);
+    for (const task of [a, b]) expect((await taskRecord(h, task.taskId)).workflow).toMatchObject({ stage: "PLAN" });
+    // A task with an attached thread whose pull request exists: a command on the pull request still reaches it.
+    const c = await launch({ host: true, now: clock.now });
+    c.model.setAccount("dana", "write");
+    const planned = await toPlanReview(c, "11111111-1111-4111-8111-1111111111f6");
+    const plan = thread(c, "plan-thread");
+    await attachThreadOnPage(c, planned.taskId, Number(plan.id));
+    await approvePlan(c, planned.taskId);
+    const coding = await c.nextJob(planned.workspaceId, planned.seen);
+    const commit = c.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = c.model.revision(commit).tree;
+    await c.callback(coding, "result", builtResult(tree, c.base, commit));
+    const review = await c.nextJob(planned.workspaceId, planned.seen);
+    await c.callback(review, "result", reviewsOf(review, tree, "pass", c.base, commit));
+    const publish = await c.nextJob(planned.workspaceId, planned.seen);
+    const payload = publish.payload as Record<string, unknown>;
+    const headBranch = String(payload["headBranch"]);
+    c.model.branches.set(headBranch, commit);
+    await c.callback(publish, "pull-request", { repository: "demo", repositoryUrl: c.project.repositories[0]!.url, headBranch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+    const cr = c.model.changeRequests.find((entry) => entry.sourceBranch === headBranch)!;
+    await c.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: Number(cr.id), url: c.model.crUrl(cr.id), headBranch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true } });
+    at(c, clock, 3 * MINUTE);
+    c.model.addDiscussionComment(cr.id, "dana", "/rovara stop");
+    await poll(c, clock);
+    expect(repliesOn(cr)).toEqual(["Stopped the work on this change."]);
+  });
+
+  it("51: a bot's comment is not a command (the adapter says isBot), and the merge observation names a neutral source", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const planned = await toPlanReview(h);
+    const shared = thread(h, "bots");
+    await attachThreadOnPage(h, planned.taskId, Number(shared.id));
+    h.model.setAccount("ci-bot", "write", "Bot");
+    at(h, clock, 5_000);
+    h.model.addDiscussionComment(shared.id, "ci-bot", "/rovara changes: change everything");
+    await poll(h, clock);
+    expect((await taskRecord(h, planned.taskId)).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    const page = await h.runtime.app.comments.fetchComment(shared.comments.find((comment) => comment.author === "ci-bot")!.id, { ...(await offerOf(h, planned.taskId)), companyId: IMPLICIT_COMPANY_ID, kind: "plan", subject: { type: "task", id: planned.taskId } });
+    expect(page).toMatchObject({ authorIsBot: true });
+    // The account is the host's own id when it gives one (a login can be renamed).
+    expect(page?.author.accountId).toBe(h.model.accounts.get("ci-bot")!.hostUserId);
+  });
+
+  it("L5, L7, L8, L9 and L10: the pause survives a restart, a pending review is not ready, a retry is for the revision the page showed, the cursor waits for the whole conversation, and a poll reads the task list once", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    // L5: a pause the host asked for is kept, and a restart inside it reads it back.
+    h.runtime.app.tracking.pauseUntil(clock.at + 30 * MINUTE);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await store(h).get({ pk: "WORKFLOW_MERGE_SWEEP", sk: "COOLDOWN" }))?.["until"]).toBe(clock.at + 30 * MINUTE);
+    await h.runtime.stop();
+    const again = await launch({ root: h.root, now: clock.now, host: true });
+    await again.runtime.tick();
+    expect(again.runtime.app.tracking.pausedUntil()).toBe(clock.at + 30 * MINUTE);
+
+    // L7: "ready to merge" waits for the reviews that were asked for.
+    const item = { state: "open", draft: false, ci: "passing", review: "requested", branch: "up_to_date", headByRovara: true } as const;
+    expect(readyToMerge(item)).toBe(false);
+    expect(readyToMerge({ ...item, review: "approved" })).toBe(true);
+    expect(readyToMerge({ ...item, review: "not_requested" })).toBe(true);
+
+    // L8: a retry for an older revision of the page is refused by the retry itself.
+    const g = await launch();
+    const { taskId, workspaceId, seen, coding } = await toCoding(g);
+    await g.callback(coding, "result", builtResult("1".repeat(40)));
+    const review = await g.nextJob(workspaceId, seen);
+    await g.callback(review, "result", { status: "FAILED", error: "the review stopped" });
+    const blocked = (await taskRecord(g, taskId)).workflow;
+    await expect(retryBlockedStep(g.runtime.app.flow.deps, taskId, blocked.revision - 1)).rejects.toThrow(/changed since you read it/u);
+    expect((await taskRecord(g, taskId)).workflow.revision).toBe(blocked.revision);
+  });
+
+  it("L9 and L10: the poll cursor does not move past comments it did not read, and a poll reads the owner's task list once however many commands it runs", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    h.model.setAccount("dana", "write");
+    const planned = await toPlanReview(h);
+    const shared = thread(h, "busy");
+    await attachThreadOnPage(h, planned.taskId, Number(shared.id));
+    // L9: a conversation that never ends (every page says there is one more) leaves the cursor where it was.
+    await poll(h, clock);
+    const before = (await store(h).get({ pk: "COMMENT_CURSOR", sk: `example/demo#${shared.id}` }))?.["since"];
+    expect(typeof before).toBe("string");
+    const original = h.host.comments.bind(h.host);
+    h.host.comments = async (ref, options, scope, budget) => ({ ...(await original(ref, options, scope, budget)), nextPage: (options.page ?? 1) + 1 });
+    at(h, clock, 5_000);
+    h.model.addDiscussionComment(shared.id, "dana", "chatter");
+    await poll(h, clock);
+    expect((await store(h).get({ pk: "COMMENT_CURSOR", sk: `example/demo#${shared.id}` }))?.["since"]).toBe(before);
+    h.host.comments = original;
+    // L10: three command comments, one read of the task list.
+    for (let n = 0; n < 3; n += 1) { at(h, clock, 6_000 + n * 1_000); h.model.addDiscussionComment(shared.id, "dana", "/rovara stop"); }
+    let listings = 0;
+    const query = store(h).query.bind(store(h));
+    store(h).query = async (input) => { if ("sk" in input && typeof input.sk === "object" && "prefix" in input.sk && input.sk.prefix === "TASK#" && input.pk.startsWith("DEVELOPER")) listings += 1; return query(input); };
+    await poll(h, clock);
+    store(h).query = query;
+    expect(listings).toBeLessThanOrEqual(1);
   });
 });
 

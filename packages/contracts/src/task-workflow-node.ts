@@ -982,7 +982,8 @@ export function observeWorkflowPullRequest(currentInput: unknown, observationInp
     number: z.number().int().positive(),
     candidateDigest: DigestSchema,
     state: z.enum(["OPEN", "CLOSED", "MERGED", "UNKNOWN"]),
-    source: z.literal("GITHUB_API"),
+    /** Where the observation came from: `GITHUB_API` (Cloud's webhook path) or `CODE_HOST` (any code host's adapter, polled). */
+    source: z.enum(["GITHUB_API", "CODE_HOST"]),
     observedAt: z.string().datetime(),
   }).strict().safeParse(observationInput);
   // A merge is tracked from the first pull request on, in every stage after it opened (an approved fix being coded,

@@ -10,11 +10,10 @@ import {
   type ChangeRequestRef, type CodeHost, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
-import { NO_LESSONS_USED, changedFilesOfCandidate } from "./changed-files.js";
+import { NO_LESSONS_USED, riskFromFiles } from "./changed-files.js";
 import { openBranchWriters } from "../branch-sync/branch-writers.js";
 import { linkedChangeRequestStep } from "../proof/revert/linked-change-requests.js";
 import { pullRequestTitle, workflowPullRequestBody } from "../proof/workflow-pull-request-body.js";
-import { recomputeRisk } from "../proof/pull-request-body.js";
 import { requireRepositoryKey } from "../merge/repository-key.js";
 import { prHeadItems, recoveryRowKey } from "../merge/store.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -69,12 +68,11 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
   const receivedAt = iso(deps);
   const plan = await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined);
   const rovaraV2 = workflow.definitionVersion === "1.1.0";
-  // The risk is judged again for this code and recorded with it, without moving the revision (it is derived from the very code this write is conditioned on). The changed files are those of the
-  // diff the worker saved with the run that made the code: with them the risk can read below high where the rules allow; without them (no diff, or one that cannot be trusted) it never reads low.
-  const changedFiles = await changedFilesOfCandidate(deps, task.workspaceId);
-  const judged = rovaraV2 ? recomputeRisk(workflow, changedFiles, {}) : workflow;
+  // The risk is judged again for this code and recorded with it, without moving the revision (it is derived from the very code this write is conditioned on). The changed files are read from the code host
+  // AFTER the push (`verifyPublishedChanges`), never from what the worker reports, so until then the level is high and says why.
+  const judged = rovaraV2 ? riskFromFiles(workflow, undefined) : workflow;
   const title = pullRequestTitle(task.title, rovaraV2);
-  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(changedFiles === undefined ? {} : { changedFiles }), lessonsUsed: NO_LESSONS_USED });
+  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { lessonsUsed: NO_LESSONS_USED });
   const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha;
   const operationId = newId(deps);
   const headBranch = headBranchOf(operationId);

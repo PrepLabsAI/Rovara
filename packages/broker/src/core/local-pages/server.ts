@@ -55,6 +55,7 @@ const NOTICES: Record<string, string> = {
   rejected: "Rejected.",
   commented: "Comment added.",
   retried: "Rovara is running that step again.",
+  attached: "That thread is attached. A writer's comment there can decide this plan.",
   answered: "Your answers were sent.",
   lesson: "Lesson updated.",
   stale: "It changed while you were looking. Read it again, then decide.",
@@ -150,6 +151,16 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "task.retry", taskId, revision })) return redirect(`${request.base}/plan/${taskId}?n=form`);
       const result = await options.actions.retry({ taskId, revision });
       return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "retried")}`);
+    } },
+    { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/thread$`), handle: async (request, match) => {
+      const taskId = match[1] ?? "";
+      const revision = Number(request.form?.get("revision"));
+      const number = Number(request.form?.get("number"));
+      const repository = (request.form?.get("repository") ?? "").trim();
+      if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(number) || number < 1 || !/^[A-Za-z0-9_.-]{1,100}$/u.test(repository) || options.actions.attachThread === undefined) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
+      if (!verified(request, { action: "task.thread", taskId, revision })) return redirect(`${request.base}/plan/${taskId}?n=form`);
+      const result = await options.actions.attachThread({ taskId, revision, repository, number });
+      return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "attached")}`);
     } },
     { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/answers$`), handle: async (request, match) => {
       const taskId = match[1] ?? "";
