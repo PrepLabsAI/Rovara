@@ -4,7 +4,7 @@
 // builds. The code host is chosen by the repository record's `host.kind` (`codeHostForRecord`), never by the address and never by a default but the legacy one: a kind with no registered
 // adapter is refused with a fixed sentence that does not name the kind, and nothing falls back to another adapter.
 import type { CheckRunner, OrgId, PluginKind, RegistryView } from "@agentx/contracts";
-import { codeHostForRecord } from "../../plugins/routing.js";
+import { codeHostForRecord, providerOf } from "../../plugins/routing.js";
 import type { ConsumerRepository, RepositoryResolver } from "./host-port.js";
 
 /** A repository as the task's project pins it: its address and the host its record names (a record without one is on the legacy kind). */
@@ -28,8 +28,9 @@ export function registryRepositoryResolver(registry: RegistryView, options: Regi
     const repository = await options.pinned(project, revision, repositoryId, orgId);
     if (repository === undefined) return undefined;
     const codeHost = codeHostForRecord(registry, repository);
-    const checkRunner = options.checkRunner?.(codeHost.kind, repository);
-    const isTeamMember = options.isTeamMember?.(codeHost.kind, repository);
+    // The runner and the team lookup are chosen by the connection's provider (a second GitHub connection reads builds the way the first does).
+    const checkRunner = options.checkRunner?.(providerOf(codeHost), repository);
+    const isTeamMember = options.isTeamMember?.(providerOf(codeHost), repository);
     return { url: repository.url, codeHost, ...(checkRunner === undefined ? {} : { checkRunner }), ...(isTeamMember === undefined ? {} : { isTeamMember }) };
   };
 }

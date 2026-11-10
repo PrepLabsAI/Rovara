@@ -1,56 +1,65 @@
-// Rovara Code (Plan 6 Task 19): whose approval on GitHub counts toward a merge (Finding 1), and who the requesters of a task are. Port lane L7a: the rules are Cloud's, unchanged; the lookups of people go through `MergePeople` (people.ts). Rovara's rules govern only its own Merge button: merging
+// Rovara Code (Plan 6 Task 19): whose approval on the code host counts toward a merge (Finding 1), and who the requesters of a task are. Port lane L7a: the rules are Cloud's, unchanged; the lookups of people go through `MergePeople` (people.ts). Rovara's rules govern only its own Merge button: merging
 // on GitHub is governed by the repository's own branch protection. Pure: the lookups of who is a member are read by the callers (through `MergePeople`) and passed in.
-import type { OrgId } from "@agentx/contracts";
-import type { PullRequestReview } from "../../github-pull-status.js";
+import type { HostAccountKind, HostPermission, OrgId, ReviewState } from "@agentx/contracts";
 import type { MergePeople } from "./people.js";
 import type { MergeTask } from "./seams.js";
 
-export type RepositoryPermission = "admin" | "write" | "read" | "none";
+/** A review as the approval rules read it: the neutral review of the code-host port, with the reviewer's host account id always set (see `approvalReviewsOf`). */
+export interface ApprovalReview {
+  hostUserId: string;
+  login: string;
+  accountType: HostAccountKind;
+  state: ReviewState;
+  commitId: string;
+  submittedAt: string;
+}
+
+export type RepositoryPermission = HostPermission;
 
 export type ApprovalRefusal = "none" | "no_write" | "self_only" | "unlinked_requester" | "stale" | "changes_requested";
 export type HumanApproval =
-  | { approved: true; by: { githubUserId: string; login: string }; commitId: string; approvers: Array<{ githubUserId: string; login: string }> }
+  | { approved: true; by: { hostUserId: string; login: string }; commitId: string; approvers: Array<{ hostUserId: string; login: string }> }
   | { approved: false; reason: ApprovalRefusal };
 
 export interface ApprovalInput {
-  reviews: readonly PullRequestReview[];
+  reviews: readonly ApprovalReview[];
   headSha: string;
   /** The head the pull request had before a run of clean merges of the base (Task 17's `syncedFrom`): an approval of that head carries when CI passes on the merged head. */
   syncedFrom: string | undefined;
   ciPassingOnHead: boolean;
   /** The live permission of each reviewer, by login. A login with no entry has no access. */
   permissions: ReadonlyMap<string, RepositoryPermission>;
-  /** The GitHub accounts of the task's requesters, or "unlinked" when any requester has no linked account. */
-  requesterGithubUserIds: readonly string[] | "unlinked";
-  /** The GitHub accounts (among the reviewers) that are linked to a member of the org. */
-  linkedGithubUserIds: ReadonlySet<string>;
-  /** The App's own GitHub user: never counts, whatever its type says. */
+  /** The code-host accounts of the task's requesters, or "unlinked" when any requester has no linked account. */
+  requesterHostUserIds: readonly string[] | "unlinked";
+  /** The code-host accounts (among the reviewers) that are linked to a member of the org. */
+  linkedHostUserIds: ReadonlySet<string>;
+  /** The host account Rovara acts as: never counts, whatever its type says. */
   appUserId?: string | undefined;
   allowSelfApproval: boolean;
   /**
-   * GitHub accounts (among the reviewers) that are linked to a person whose company role is not a writer's (the Auditor). Their approval never counts, in either mode: with self-approval on,
+   * Host accounts (among the reviewers) that are linked to a person whose company role is not a writer's (the Auditor). Their approval never counts, in either mode: with self-approval on,
    * any account with write access would otherwise count, linked or not (I2). Absent: none known, which is how a caller built before this field behaves.
    */
-  excludedGithubUserIds?: ReadonlySet<string> | undefined;
+  excludedHostUserIds?: ReadonlySet<string> | undefined;
 }
 
 const permissionOf = (permissions: ReadonlyMap<string, RepositoryPermission>, login: string): RepositoryPermission => permissions.get(login) ?? permissions.get(login.toLowerCase()) ?? "none";
 const writes = (permission: RepositoryPermission): boolean => permission === "admin" || permission === "write";
 
 /** The reviewers whose standing counts for a decision: each one's latest review among approving, asking for changes and dismissal (comments say nothing), a person and not a dismissed one. */
-export function latestReviewers(reviews: readonly PullRequestReview[], appUserId?: string): PullRequestReview[] {
-  const latest = new Map<string, PullRequestReview>();
+export function latestReviewers(reviews: readonly ApprovalReview[], appUserId?: string): ApprovalReview[] {
+  const latest = new Map<string, ApprovalReview>();
   const ordered = reviews.map((review, index) => ({ review, index })).sort((left, right) => left.review.submittedAt.localeCompare(right.review.submittedAt) || left.index - right.index);
   for (const { review } of ordered) {
     if (review.state !== "APPROVED" && review.state !== "CHANGES_REQUESTED" && review.state !== "DISMISSED") continue;
-    latest.set(review.githubUserId, review);
+    latest.set(review.hostUserId, review);
   }
-  return [...latest.values()].filter((review) => review.state !== "DISMISSED" && review.userType === "User" && review.githubUserId !== appUserId);
+  return [...latest.values()].filter((review) => review.state !== "DISMISSED" && review.accountType === "person" && review.hostUserId !== appUserId);
 }
 
 /**
  * Whose approval counts. Only a person (not an App or a bot) with write access counts; one of them asking for changes refuses; an approval counts on the head, or on the head before
- * a run of clean merges of the base when CI passes on the merged head. With self-approval off, the requesters must all have a linked GitHub account and only an account linked to a
+ * a run of clean merges of the base when CI passes on the merged head. With self-approval off, the requesters must all have a linked host account and only an account linked to a
  * member who is not a requester counts.
  */
 export function humanApprovalOf(input: ApprovalInput): HumanApproval {
@@ -58,21 +67,21 @@ export function humanApprovalOf(input: ApprovalInput): HumanApproval {
   const withWrite = people.filter((review) => writes(permissionOf(input.permissions, review.login)));
   if (withWrite.some((review) => review.state === "CHANGES_REQUESTED")) return { approved: false, reason: "changes_requested" };
   if (!people.some((review) => review.state === "APPROVED")) return { approved: false, reason: "none" };
-  const writeApprovals = withWrite.filter((review) => review.state === "APPROVED" && input.excludedGithubUserIds?.has(review.githubUserId) !== true);
+  const writeApprovals = withWrite.filter((review) => review.state === "APPROVED" && input.excludedHostUserIds?.has(review.hostUserId) !== true);
   if (writeApprovals.length === 0) return { approved: false, reason: "no_write" };
   const fresh = writeApprovals.filter((review) => review.commitId === input.headSha || (input.syncedFrom !== undefined && review.commitId === input.syncedFrom && input.ciPassingOnHead));
   if (fresh.length === 0) return { approved: false, reason: "stale" };
   let counted = fresh;
   if (!input.allowSelfApproval) {
-    if (input.requesterGithubUserIds === "unlinked") return { approved: false, reason: "unlinked_requester" };
-    const requesters = input.requesterGithubUserIds;
-    counted = fresh.filter((review) => input.linkedGithubUserIds.has(review.githubUserId) && !requesters.includes(review.githubUserId));
-    if (counted.length === 0) return { approved: false, reason: fresh.some((review) => requesters.includes(review.githubUserId)) ? "self_only" : "none" };
+    if (input.requesterHostUserIds === "unlinked") return { approved: false, reason: "unlinked_requester" };
+    const requesters = input.requesterHostUserIds;
+    counted = fresh.filter((review) => input.linkedHostUserIds.has(review.hostUserId) && !requesters.includes(review.hostUserId));
+    if (counted.length === 0) return { approved: false, reason: fresh.some((review) => requesters.includes(review.hostUserId)) ? "self_only" : "none" };
   }
   const newest = counted[counted.length - 1]!;
   return {
-    approved: true, by: { githubUserId: newest.githubUserId, login: newest.login }, commitId: newest.commitId,
-    approvers: counted.map((review) => ({ githubUserId: review.githubUserId, login: review.login })).reverse(),
+    approved: true, by: { hostUserId: newest.hostUserId, login: newest.login }, commitId: newest.commitId,
+    approvers: counted.map((review) => ({ hostUserId: review.hostUserId, login: review.login })).reverse(),
   };
 }
 

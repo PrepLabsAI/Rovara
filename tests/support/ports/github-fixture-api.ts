@@ -3,9 +3,13 @@
 // provider's own parsing runs on every answer, so a mapping that drifts from what the provider accepts fails here.
 //
 // One model feeds both this server and the FakeCodeHost, so the same contract suite can be run through the GitHub adapter and through the fake.
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { GitHubAppCredentialProvider } from "../../../packages/broker/src/plugins/code-host/github/client.js";
 import type { FakeChangeRequest, FakeHostModel } from "../../../packages/broker/src/plugins/fake/model.js";
+
+/** The fake model speaks Rovara's words; this fixture speaks GitHub's. */
+export const githubMergeableState = (state: string): string => (state === "conflicted" ? "dirty" : state);
+export const githubAccountType = (kind: string): string => (kind === "person" ? "User" : kind === "bot" ? "Bot" : "Organization");
 
 export const GITHUB_OWNER = "acme";
 export const GITHUB_NAME = "app";
@@ -24,6 +28,7 @@ const CONCLUSIONS: Record<string, string> = {
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 const text = (status: number, body: string) => new Response(body, { status, headers: { "content-type": "text/plain" } });
 const NOT_FOUND = () => json(404, { message: "Not Found" });
+const gitSha = (seed: string): string => createHash("sha1").update(seed).digest("hex");
 
 /** Port lane L11: the fake GitHub in the mode of a laptop signed in with one personal token. The App's endpoints do not exist (401), and the one token is accepted everywhere else. */
 export interface GitHubFixtureOptions {
@@ -50,8 +55,9 @@ export class GitHubFixtureApi {
       number: Number(cr.id), node_id: `PR_node_${cr.id}`, html_url: this.model.crUrl(cr.id), state: cr.state === "open" ? "open" : "closed", merged: cr.state === "merged",
       ...(cr.mergedBy === undefined ? {} : { merged_by: { login: cr.mergedBy } }), ...(cr.mergedAt === undefined ? {} : { merged_at: cr.mergedAt }),
       draft: cr.draft, title: cr.title, body: cr.body === "" ? null : cr.body, merge_commit_sha: cr.mergeRevision ?? null,
-      head: { ref: cr.sourceBranch, sha: head, repo: { full_name: FULL } }, base: { ref: cr.targetBranch, repo: { full_name: FULL } },
-      mergeable_state: this.model.mergeableState(cr), mergeable: !cr.conflicts,
+      user: { login: cr.author, id: 1, type: cr.author.endsWith("[bot]") ? "Bot" : "User" },
+      head: { ref: cr.sourceBranch, sha: head, repo: { full_name: FULL } }, base: { ref: cr.targetBranch, repo: { full_name: FULL, id: Number(this.model.id) } },
+      mergeable_state: githubMergeableState(this.model.mergeableState(cr)), mergeable: !cr.conflicts,
       requested_reviewers: cr.requestedReviewers.filter((name) => !name.includes("/")).map((login) => ({ login, id: Number(this.model.accounts.get(login)?.hostUserId ?? "1"), type: "User" })),
       requested_teams: cr.requestedReviewers.filter((name) => name.includes("/")).map((name) => ({ slug: name.split("/")[1] })),
     };
@@ -69,6 +75,9 @@ export class GitHubFixtureApi {
     if (this.model.revisions.has(ref)) return ref;
     return this.model.branches.get(ref);
   }
+
+  private readonly blobs = new Map<string, string>();
+  private readonly trees = new Map<string, { files: Map<string, string>; symlinks: ReadonlySet<string> }>();
 
   /** P6: when set, every request is answered 429 with this many seconds to wait, as GitHub does when a caller is limited. */
   private limitedForSeconds: number | undefined;
@@ -132,11 +141,32 @@ export class GitHubFixtureApi {
       const names = files === undefined ? [] : [...this.model.revision(files).files.keys()].filter((name) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(name));
       return names.length === 0 ? NOT_FOUND() : json(200, names.map((name) => ({ name: name.split("/").pop() })));
     }
-    match = new RegExp(`^${ROOT}/contents/(.+)$`).exec(path);
+    match = new RegExp(`^${ROOT}/contents(?:/(.+))?$`).exec(path);
     if (method === "GET" && match) {
       const revision = this.revisionFor(url.searchParams.get("ref") ?? "");
-      const content = revision === undefined ? undefined : this.model.revision(revision).files.get(match[1]!);
-      return content === undefined ? NOT_FOUND() : text(200, content);
+      if (revision === undefined) return NOT_FOUND();
+      const found = this.model.revision(revision);
+      const wanted = match[1] ?? "";
+      const accept = new Headers(init?.headers).get("accept") ?? "";
+      // The raw media type is a file's text; any other is GitHub's JSON: a file's record, a symbolic link's, or a directory's listing.
+      if (accept.includes("raw")) {
+        const content = found.files.get(wanted);
+        return content === undefined ? NOT_FOUND() : text(200, content);
+      }
+      // A path below a symbolic link is the link's record, whatever the name (a client cannot tell what the link points at).
+      for (const link of found.symlinks) if (wanted.startsWith(`${link}/`)) return json(200, { type: "symlink", name: link.split("/").pop(), path: link, sha: gitSha(`link ${link}`) });
+      if (found.symlinks.has(wanted)) return json(200, { type: "symlink", name: wanted.split("/").pop(), path: wanted, sha: gitSha(`link ${wanted}`) });
+      const file = found.files.get(wanted);
+      if (file !== undefined) return json(200, { type: "file", name: wanted.split("/").pop(), path: wanted, sha: gitSha(`blob ${file}`), encoding: "base64", content: Buffer.from(file, "utf8").toString("base64") });
+      const prefix = wanted === "" ? "" : `${wanted}/`;
+      const children = new Map<string, string>();
+      for (const name of [...found.files.keys(), ...found.symlinks]) {
+        if (!name.startsWith(prefix)) continue;
+        const rest = name.slice(prefix.length);
+        const first = rest.split("/")[0]!;
+        children.set(first, rest.includes("/") ? "dir" : found.symlinks.has(name) ? "symlink" : "file");
+      }
+      return children.size === 0 ? NOT_FOUND() : json(200, [...children.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([name, type]) => ({ name, path: `${prefix}${name}`, type, sha: gitSha(`entry ${prefix}${name}`) })));
     }
     match = new RegExp(`^${ROOT}/git/ref/heads/(.+)$`).exec(path);
     if (method === "GET" && match) {
@@ -148,10 +178,54 @@ export class GitHubFixtureApi {
       const revision = this.model.revisions.get(match[1]!);
       return revision === undefined ? NOT_FOUND() : json(200, { sha: revision.sha, tree: { sha: revision.tree }, parents: revision.parents.map((sha) => ({ sha })) });
     }
+    // The git data API (item C1): references, blobs, trees and commits, enough for a client that writes files on a branch.
+    if (method === "POST" && path === `${ROOT}/git/refs`) {
+      const branch = String(body.ref).replace(/^refs\/heads\//, "");
+      if (this.model.branches.has(branch)) return json(422, { message: "Reference already exists" });
+      if (!this.model.revisions.has(String(body.sha))) return json(422, { message: "Object does not exist" });
+      this.model.branches.set(branch, String(body.sha));
+      return json(201, { ref: `refs/heads/${branch}`, object: { type: "commit", sha: body.sha } });
+    }
+    if (method === "POST" && path === `${ROOT}/git/blobs`) {
+      const content = Buffer.from(String(body.content), "base64").toString("utf8");
+      const sha = gitSha(`blob ${content}`);
+      this.blobs.set(sha, content);
+      return json(201, { sha });
+    }
+    if (method === "POST" && path === `${ROOT}/git/trees`) {
+      const base = [...this.model.revisions.values()].find((revision) => revision.tree === String(body.base_tree));
+      if (base === undefined) return json(422, { message: "The tree does not exist" });
+      const files = new Map(base.files);
+      for (const item of body.tree as Array<{ path: string; sha: string }>) {
+        const content = this.blobs.get(item.sha);
+        if (content === undefined) return json(422, { message: "The blob does not exist" });
+        files.set(item.path, content);
+      }
+      const sha = gitSha(`tree ${JSON.stringify([...files.entries()])}${String(body.base_tree)}`);
+      this.trees.set(sha, { files, symlinks: base.symlinks });
+      return json(201, { sha });
+    }
+    if (method === "POST" && path === `${ROOT}/git/commits`) {
+      const tree = this.trees.get(String(body.tree));
+      const parents = (body.parents ?? []) as string[];
+      if (tree === undefined || parents.some((parent) => !this.model.revisions.has(parent))) return json(422, { message: "The tree or a parent does not exist" });
+      return json(201, { sha: this.model.makeRevision(parents, tree.files, tree.symlinks).sha });
+    }
+    match = new RegExp(`^${ROOT}/git/refs/heads/(.+)$`).exec(path);
+    if (method === "PATCH" && match) {
+      const current = this.model.branches.get(match[1]!);
+      if (current === undefined) return NOT_FOUND();
+      // `force: false`: only a fast-forward of the branch's current head.
+      const target = this.model.revisions.get(String(body.sha));
+      if (target === undefined || body.force !== false || target.parents[0] !== current) return json(422, { message: "Update is not a fast forward" });
+      this.model.branches.set(match[1]!, target.sha);
+      return json(200, { ref: `refs/heads/${match[1]}`, object: { type: "commit", sha: target.sha } });
+    }
+    if (method === "DELETE" && match) return this.model.removeBranch(match[1]!) ? new Response(null, { status: 204 }) : json(422, { message: "Reference does not exist" });
     match = new RegExp(`^${ROOT}/collaborators/([^/]+)/permission$`).exec(path);
     if (method === "GET" && match) {
       const account = this.model.accounts.get(match[1]!);
-      return account === undefined ? NOT_FOUND() : json(200, { permission: account.permission, user: { login: account.login, type: account.accountType } });
+      return account === undefined ? NOT_FOUND() : json(200, { permission: account.permission, user: { login: account.login, type: githubAccountType(account.accountType) } });
     }
     match = new RegExp(`^${ROOT}/actions/jobs/([0-9]+)/logs$`).exec(path);
     if (method === "GET" && match) {
@@ -162,7 +236,10 @@ export class GitHubFixtureApi {
     // pull requests
     if (method === "GET" && path === `${ROOT}/pulls`) {
       const head = (url.searchParams.get("head") ?? "").split(":")[1];
-      const found = this.model.changeRequests.find((cr) => cr.state === "open" && cr.sourceBranch === head && cr.targetBranch === url.searchParams.get("base"));
+      // `state=all` with no base branch: any change request made from the branch, the newest first (the lookup of a lessons branch).
+      const found = url.searchParams.get("state") === "all"
+        ? [...this.model.changeRequests].reverse().find((cr) => cr.sourceBranch === head)
+        : this.model.changeRequests.find((cr) => cr.state === "open" && cr.sourceBranch === head && cr.targetBranch === url.searchParams.get("base"));
       return json(200, found === undefined ? [] : [this.crJson(found)]);
     }
     if (method === "POST" && path === `${ROOT}/pulls`) {
@@ -238,7 +315,7 @@ export class GitHubFixtureApi {
 
   private userJson(login: string): Record<string, unknown> {
     const account = this.model.accounts.get(login);
-    return { login, id: Number(account?.hostUserId ?? "1"), type: account?.accountType ?? "User" };
+    return { login, id: Number(account?.hostUserId ?? "1"), type: githubAccountType(account?.accountType ?? "person") };
   }
 
   private reviewJson(cr: FakeChangeRequest, index: number, review: FakeChangeRequest["reviews"][number]): Record<string, unknown> {

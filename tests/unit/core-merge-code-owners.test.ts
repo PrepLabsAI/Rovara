@@ -1,61 +1,16 @@
-// Owner decision 2026-10-27: where the repository has a CODEOWNERS file that covers the changed paths, a code owner has to approve before the pull request is ready.
+// Owner decision 2026-10-27: where the repository has code owners that cover the changed paths, a code owner has to approve before the change request is ready. The host reads its own owners file (item C4);
+// these tests feed the verdict the neutral answer, made by the shared file reader for the syntax most hosts use.
 import { describe, expect, it } from "vitest";
-import { codeOwnerVerdict, ownersOfPath, parseCodeOwners } from "../../packages/broker/src/core/merge/code-owners.js";
+import { codeOwnerVerdict } from "../../packages/broker/src/core/merge/code-owners.js";
+import { readCodeOwnersFile } from "../../packages/broker/src/plugins/code-host/code-owners-file.js";
 
-const rules = (text: string) => parseCodeOwners(text).rules;
 const never = async (): Promise<"unknown"> => "unknown";
-
-describe("parseCodeOwners and ownersOfPath", () => {
-  it("takes the last matching rule, in GitHub's way", () => {
-    const text = ["# owners", "*       @acme/everyone", "/docs/  @docs-lead", "*.ts @ts-lead", "/src/payments/ @pay-lead @acme/payments  # trailing comment"].join("\n");
-    expect(ownersOfPath(rules(text), "README.md")).toEqual(["@acme/everyone"]);
-    expect(ownersOfPath(rules(text), "docs/a/b.md")).toEqual(["@docs-lead"]);
-    expect(ownersOfPath(rules(text), "src/index.ts")).toEqual(["@ts-lead"]);
-    expect(ownersOfPath(rules(text), "src/payments/charge.ts")).toEqual(["@pay-lead", "@acme/payments"]);
-  });
-
-  it("an anchored rule matches only from the root, an unanchored directory rule at any depth", () => {
-    expect(ownersOfPath(rules("/build/ @a"), "src/build/x.js")).toEqual([]);
-    expect(ownersOfPath(rules("/build/ @a"), "build/x.js")).toEqual(["@a"]);
-    expect(ownersOfPath(rules("build/ @a"), "src/build/x.js")).toEqual(["@a"]);
-    expect(ownersOfPath(rules("docs/*.md @a"), "docs/x.md")).toEqual(["@a"]);
-    expect(ownersOfPath(rules("docs/*.md @a"), "docs/deep/x.md")).toEqual([]);
-    expect(ownersOfPath(rules("/docs/* @a"), "docs/deep/x.md")).toEqual([]);
-    expect(ownersOfPath(rules("/docs/* @a"), "docs/x.md")).toEqual(["@a"]);
-  });
-
-  it("supports ** and ?, and is case sensitive on paths", () => {
-    expect(ownersOfPath(rules("/src/**/test_*.py @a"), "src/x/y/test_one.py")).toEqual(["@a"]);
-    expect(ownersOfPath(rules("/src/**/test_*.py @a"), "src/test_one.py")).toEqual(["@a"]);
-    expect(ownersOfPath(rules("/a?.txt @a"), "ab.txt")).toEqual(["@a"]);
-    expect(ownersOfPath(rules("/Docs/ @a"), "docs/x")).toEqual([]);
-  });
-
-  it("a rule with no owner takes ownership away; an email is an owner Rovara cannot match", () => {
-    expect(ownersOfPath(rules("* @a\n/vendor/\n"), "vendor/x.js")).toEqual([]);
-    expect(ownersOfPath(rules("* a@example.com @ok"), "x")).toEqual(["a@example.com", "@ok"]);
-  });
-
-  it("says when the file holds anything Rovara cannot read the way GitHub does: negation, character classes, a malformed owner, a name that is no owner, too many rules", () => {
-    for (const text of ["!/docs/ @a", "/src/[ab].ts @a", "/secure/ @alice!x", "/secure/ nobody", "/secure/ @", "* @a @-bad", "/x/ @a/b/c"]) {
-      expect(parseCodeOwners(text).unsupported, text).toBe(true);
-    }
-    const crowded = Array.from({ length: 5_001 }, (_, index) => `/f${String(index)}/ @a`).join("\n");
-    expect(parseCodeOwners(crowded).unsupported).toBe(true);
-    expect(parseCodeOwners(Array.from({ length: 5_000 }, (_, index) => `/f${String(index)}/ @a`).join("\n")).unsupported).toBe(false);
-    expect(parseCodeOwners("* @a @b/team a@b.co\n# c\n\n/docs/\n").unsupported).toBe(false);
-  });
-
-  it("ignores blank lines, comments and a file that is not text", () => {
-    expect(rules("\n# only\n\n")).toEqual([]);
-  });
-});
 
 describe("codeOwnerVerdict", () => {
   const verdict = (text: string | undefined, paths: string[], approvers: string[], team: (team: string, login: string) => Promise<"member" | "not_member" | "unknown"> = never) =>
-    codeOwnerVerdict({ codeOwnersText: text, paths, approverLogins: approvers, teamMember: team });
+    codeOwnerVerdict({ codeOwners: text === undefined ? undefined : readCodeOwnersFile(text), paths, approverLogins: approvers, teamMember: team });
 
-  it("fails closed on a file it cannot read the way GitHub does, whatever the changed paths are", async () => {
+  it("fails closed on a file it cannot read the way the host does, whatever the changed paths are", async () => {
     for (const text of ["* @bob\n!/secure/ @alice", "* @bob\n/secure/[a].ts @alice", "* @bob\n/secure/ @alice!x", "* @bob\n/secure/ nobody"]) {
       expect(await verdict(text, ["docs/readme.md"], ["bob"]), text).toEqual({ ok: false, unreadable: true });
     }
@@ -108,5 +63,17 @@ describe("codeOwnerVerdict", () => {
     await verdict("/src/ @acme/t\n/docs/ @acme/t @other", ["src/a", "src/b", "docs/c"], ["x", "y"], team);
     // Two sets of owners name the same team: each login is asked about once, not once per set.
     expect(asked).toBe(2);
+  });
+});
+
+describe("codeOwnerVerdict over a neutral answer", () => {
+  it("works from any host's owners, not only a file's: a person, a team and an owner it cannot match", async () => {
+    const owners = { unsupported: false, ownersOf: (path: string) => (path.startsWith("pay/") ? [{ kind: "team" as const, team: "acme/pay" }, { kind: "person" as const, login: "Lee" }] : []) };
+    const team = async (name: string, login: string) => (name === "acme/pay" && login === "kim" ? "member" as const : "not_member" as const);
+    expect(await codeOwnerVerdict({ codeOwners: owners, paths: ["pay/a.ts"], approverLogins: ["lee"], teamMember: team })).toEqual({ ok: true });
+    expect(await codeOwnerVerdict({ codeOwners: owners, paths: ["pay/a.ts"], approverLogins: ["kim"], teamMember: team })).toEqual({ ok: true });
+    expect(await codeOwnerVerdict({ codeOwners: owners, paths: ["pay/a.ts"], approverLogins: ["zed"], teamMember: team })).toEqual({ ok: false, owners: "@acme/pay, @Lee" });
+    expect(await codeOwnerVerdict({ codeOwners: owners, paths: ["other.ts"], approverLogins: [], teamMember: team })).toEqual({ ok: true });
+    expect(await codeOwnerVerdict({ codeOwners: { unsupported: true, ownersOf: () => [] }, paths: ["x"], approverLogins: [], teamMember: team })).toEqual({ ok: false, unreadable: true });
   });
 });

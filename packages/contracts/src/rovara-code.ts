@@ -5,6 +5,7 @@ import { z } from "zod";
 import { IntentDesignSchema } from "./design-review.js";
 import { OrgIdSchema, SessionBindingSchema, SessionIdSchema } from "./browser-ids.js";
 import { forwardReader } from "./forward-reader.js";
+import { CommitIdSchema } from "./plugins/common.js";
 import { EVIDENCE_NOT_TESTED_KINDS, ProofDetailSchema } from "./evidence.js";
 import { MODEL_COMPANIES, ModelCompanySchema, ModelIdentifierSchema } from "./models.js";
 import { redactText } from "./redaction.js";
@@ -76,7 +77,9 @@ export const TASK_VIEW_VERSION = "2";
 // ---- small pieces
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
-const GitShaSchema = z.string().regex(/^[a-f0-9]{40}$/);
+/** The commit id of a repository on any host, of any hash length (item C4). `WorkflowFixPayloadSchema.startFrom` keeps `WorkerGitShaSchema`: the worker job line older workers parse stays 40 hex (decision 65). */
+const GitShaSchema = CommitIdSchema;
+const WorkerGitShaSchema = z.string().regex(/^[a-f0-9]{40}$/);
 const InstantSchema = z.string().datetime();
 const QuestionIdSchema = z.string().regex(/^q[1-3]$/);
 const OptionIdSchema = z.string().regex(/^[a-d]$/);
@@ -295,7 +298,7 @@ export type WorkflowFixRounds = z.infer<typeof WorkflowFixRoundsSchema>;
 export const WorkflowFixPayloadSchema = z.object({
   source: FixSourceSchema,
   /** A run that starts a CI or feedback fix: the head the pull request has. The worker starts from it, so what an abandoned conflict round left (markers, a local merge commit) is not what the fix begins on. */
-  startFrom: GitShaSchema.optional(),
+  startFrom: WorkerGitShaSchema.optional(),
 }).strict();
 export type WorkflowFixPayload = z.infer<typeof WorkflowFixPayloadSchema>;
 
@@ -436,7 +439,7 @@ export const MergeTrackingItemSchema = z
     checksEverSeen: z.boolean(),
     failingChecks: z.array(z.string().min(1).max(200)).max(10),
     review: z.enum(["not_requested", "requested", "changes_requested", "approved"]),
-    approval: z.object({ githubUserId: z.string().min(1).max(40), login: z.string().min(1).max(100), commitId: GitShaSchema }).strict().optional(),
+    approval: z.object({ hostUserId: z.string().min(1).max(200), login: z.string().min(1).max(100), commitId: GitShaSchema }).strict().optional(),
     branch: z.enum(["up_to_date", "behind", "conflicted", "unknown"]),
     headByRovara: z.boolean(),
     lastRovaraPushAt: InstantSchema.optional(),

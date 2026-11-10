@@ -21,6 +21,7 @@ import {
   type AgentXError,
   type Autonomy,
   type ChangeRequestStatus,
+  type HostAccountKind,
   type CodeSettings,
   type DocumentStore,
   type HostScope,
@@ -60,10 +61,10 @@ export const PERMISSION_LOOKUPS_MAX = 8;
 export const SOMEONE_ELSE_PUSHED_MESSAGE = "Someone else pushed to this pull request, so I'll stop changing it. I'll keep watching for reviews and the merge.";
 export const PUSH_WAS_MINE_MESSAGE = "That push was mine after all. I'll carry on.";
 
-/** A person's standing on a repository, read live: the permission, and the account kind GitHub names (`User`, `Bot`, `Organization`), when it names one. */
+/** A person's standing on a repository, read live: the permission, and the account kind the host names (`person`, `bot`, `other`), when it names one. */
 export interface RepositoryStanding {
   permission: "admin" | "write" | "read" | "none";
-  userType?: string | undefined;
+  accountType?: HostAccountKind | undefined;
 }
 
 /** The part of the task record tracking reads (see seams.ts). */
@@ -178,7 +179,7 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
   // Checks that could not be read are not known: nothing may say they passed.
   if (status.checksUnavailable === true) return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [] };
   const required = status.requiredChecks;
-  // A required check is met by a check of that name, from the named app when the setting names one (a commit status has no app, so it cannot meet one that does).
+  // A required check is met by a check of that name, from the named source when the host's rule names one (a check with no source cannot meet a requirement that names one).
   const meets = (entry: ChangeRequestStatus["requiredChecks"][number], check: ChangeRequestStatus["checks"][number]): boolean =>
     check.name === entry.name && (entry.source === undefined || check.source === entry.source);
   if (status.checks.length === 0) {
@@ -187,13 +188,14 @@ export function readCi(status: ChangeRequestStatus, input: { checksEverSeen: boo
     const waitEnds = !input.checksEverSeen && !status.headDefinesChecks && required.length === 0 && input.lastRovaraPushAt !== undefined ? input.lastRovaraPushAt + NO_CI_GRACE_MS : undefined;
     return { ci: "pending", ciBasis, failingChecks: [], failingDetails: [], ...(waitEnds === undefined || waitEnds <= input.now ? {} : { recheckAt: waitEnds }) };
   }
-  // A check counts when GitHub says the base requires it for this pull request, or when branch protection or a ruleset names it (the name is the fallback when `isRequired` says nothing).
+  // A check counts when the host says the target requires it for this change request, or when a protection rule names it (the name is the fallback when `isRequired` says nothing).
   const counted = ciBasis === "required" ? status.checks.filter((check) => check.required || required.some((entry) => meets(entry, check))) : status.checks;
   const failing = counted.filter((check) => check.state === "completed" && check.conclusion !== undefined && FAILED_CONCLUSIONS.has(check.conclusion));
   if (failing.length > 0) {
     const names = [...new Set(failing.map((check) => check.name))].slice(0, 10);
     const failingDetails = names.map((name) => failing.find((check) => check.name === name)!).map((check): FailingCheck => ({
       name: check.name, conclusion: check.conclusion ?? "failure", url: check.url, ...(check.runId === undefined ? {} : { jobId: check.runId }), ...(check.source === undefined ? {} : { source: check.source }),
+      ...(check.logReadable === true ? { logReadable: true } : {}),
     }));
     return { ci: "failing", ciBasis, failingChecks: names, failingDetails };
   }
@@ -226,9 +228,9 @@ export async function readReviews(
   const ordered = [...approvalReviewsOf(status.reviews)].sort((left, right) => left.submittedAt.localeCompare(right.submittedAt));
   for (const review of ordered) {
     if (review.state === "COMMENTED" || review.state === "PENDING") continue;
-    latest.set(review.githubUserId, review);
+    latest.set(review.hostUserId, review);
   }
-  const candidates = [...latest.values()].filter((review) => review.state !== "DISMISSED" && review.userType === "User");
+  const candidates = [...latest.values()].filter((review) => review.state !== "DISMISSED" && review.accountType === "person");
   const asked = input.requested || candidates.length > 0;
   if (candidates.length > PERMISSION_LOOKUPS_MAX) return { review: "requested" };
   const counted: typeof candidates = [];
@@ -239,15 +241,15 @@ export async function readReviews(
   if (counted.some((review) => review.state === "CHANGES_REQUESTED")) return { review: "changes_requested" };
   const approvals = counted.filter((review) => review.state === "APPROVED");
   const newest = approvals[approvals.length - 1];
-  if (newest !== undefined) return { review: "approved", approval: { githubUserId: newest.githubUserId, login: newest.login, commitId: newest.commitId } };
+  if (newest !== undefined) return { review: "approved", approval: { hostUserId: newest.hostUserId, login: newest.login, commitId: newest.commitId } };
   return { review: asked ? "requested" : "not_requested" };
 }
 
 // ---- the branch and the head
 
-/** The branch against its base: conflicting (GitHub's own word), behind, up to date, or not yet known. */
+/** The branch against its base: conflicting (the host says so), behind, up to date, or not yet known. */
 export function readBranch(status: ChangeRequestStatus): MergeTrackingItem["branch"] {
-  if (status.mergeable === false || status.mergeableState === "dirty") return "conflicted";
+  if (status.mergeable === false || status.mergeableState === "conflicted") return "conflicted";
   if (status.mergeableState === "behind") return "behind";
   if (status.mergeableState === "unknown" || status.behindBy === undefined) return "unknown";
   return status.behindBy > 0 ? "behind" : "up_to_date";
@@ -508,7 +510,7 @@ async function trackOne(
     const key = `${requireRepositoryKey(on.codeHost.kind, on.url)}:${login.toLowerCase()}`;
     let found = standings.get(key);
     if (found === undefined) {
-      found = on.codeHost.standing({ url: on.url }, { login }, scope, budget).then((read): RepositoryStanding => ({ permission: read.permission, userType: read.accountType }));
+      found = on.codeHost.standing({ url: on.url }, { login }, scope, budget).then((read): RepositoryStanding => ({ permission: read.permission, accountType: read.accountType }));
       standings.set(key, found);
     }
     return found;
@@ -600,12 +602,12 @@ async function trackOne(
     for (const reviewer of reviewers) known.set(reviewer.login, await permission(reviewer.login));
     const counted = humanApprovalOf({
       reviews: approvalReviews, headSha: status.headRevision, syncedFrom: pullRequest.syncedFrom, ciPassingOnHead: ci.ci === "passing" || ci.ci === "none", permissions: known,
-      requesterGithubUserIds: await requesterHostIds(deps.people, task.orgId, task), linkedGithubUserIds: await linkedAmong(deps.people, task.orgId, reviewers.map((reviewer) => reviewer.githubUserId)),
-      excludedGithubUserIds: await nonWritersAmong(deps.people, task.orgId, reviewers.map((reviewer) => reviewer.githubUserId)),
+      requesterHostUserIds: await requesterHostIds(deps.people, task.orgId, task), linkedHostUserIds: await linkedAmong(deps.people, task.orgId, reviewers.map((reviewer) => reviewer.hostUserId)),
+      excludedHostUserIds: await nonWritersAmong(deps.people, task.orgId, reviewers.map((reviewer) => reviewer.hostUserId)),
       allowSelfApproval: settings.allowSelfApproval,
     });
     if (counted.approved) {
-      const n = Number.parseInt(createHash("sha256").update(`${pullRequest.repositoryId}\n${String(pullRequest.number)}\n${counted.commitId}\n${counted.by.githubUserId}`).digest("hex").slice(0, 6), 16) % 1_000_000;
+      const n = Number.parseInt(createHash("sha256").update(`${pullRequest.repositoryId}\n${String(pullRequest.number)}\n${counted.commitId}\n${counted.by.hostUserId}`).digest("hex").slice(0, 6), 16) % 1_000_000;
       const said = await deps.store.get(codeMilestoneKey(task.taskId, "approved", n));
       if (said === undefined) announce = { login: counted.by.login, n };
     }

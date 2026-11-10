@@ -30,6 +30,12 @@ export function trackingItemOf(stored: Record<string, unknown> | undefined, orgI
   if (stored === undefined || stored["orgId"] !== orgId || stored["taskId"] !== taskId) return undefined;
   const picked: Record<string, unknown> = {};
   for (const field of TRACKING_FIELDS) if (stored[field] !== undefined) picked[field] = stored[field];
+  // Dual read (item C4): an item written before the host account id got its neutral name keeps the old spelling for the approval's account; it reads as `hostUserId` and is rewritten that way.
+  const approval = picked["approval"];
+  if (approval !== null && typeof approval === "object" && !Array.isArray(approval) && "githubUserId" in approval) {
+    const { githubUserId, ...rest } = approval as Record<string, unknown>;
+    picked["approval"] = "hostUserId" in rest ? rest : { ...rest, hostUserId: githubUserId };
+  }
   const parsed = MergeTrackingItemSchema.safeParse(picked);
   return parsed.success ? parsed.data : undefined;
 }

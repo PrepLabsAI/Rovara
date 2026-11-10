@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ActingIdentityPolicySchema, AttributionSchema, ChangeRequestFeedbackSchema, ChangeRequestInputSchema, ChangeRequestStatusSchema, ChangeRequestUpdateSchema, CheckSchema,
   CheckStartRequestSchema, CheckTargetSchema, DELEGATED_GRANT_MAX_LIFETIME_MS, GIT_CREDENTIAL_HELPERS, GIT_CREDENTIAL_MAX_LIFETIME_MS, workerGitCredentialUsable, CodeHostCapabilitiesSchema, CodeHostEventSchema, CODE_HOST_EVENT_TYPES, DelegatedGrantSchema, GitCredentialSchema,
+  ChangeRequestDetailsSchema, COMMIT_FILES_MAX, COMMIT_ID_PATTERN, CommitFilesInputSchema, CommitFilesResultSchema, isCommitId, LESSON_FILE_BRANCH_PATTERN, LESSON_FILE_PATH, LESSON_FILE_WRITE_PATHS,
   HostScopeSchema, MergeResultSchema, PluginKindSchema, TrackerEventSchema, TrackerItemSchema, actingIdentityModeAllowed, delegatedUseAllowed,
 } from "../../packages/contracts/src/plugins/index.js";
 
@@ -113,10 +114,15 @@ describe("change requests", () => {
       id: "7", state: "open", draft: false, headRevision: sha, targetBranch: "main", mergeableState: "clean", mergeable: true,
       checks: [{ name: "ci", state: "completed", conclusion: "success", required: true, url: "" }], requiredChecks: [{ name: "ci" }], targetHasRequiredChecks: true,
       headDefinesChecks: true, requestedReviewers: 0,
-      reviews: [{ reviewer: { login: "pat" }, accountType: "User", state: "APPROVED", revision: sha, submittedAt: "2026-10-30T00:00:00Z" }],
+      reviews: [{ reviewer: { login: "pat" }, accountType: "person", state: "APPROVED", revision: sha, submittedAt: "2026-10-30T00:00:00Z" }],
     };
     expect(ChangeRequestStatusSchema.parse(status)).toEqual(status);
     expect(ChangeRequestStatusSchema.safeParse({ ...status, mergeableState: "fine" }).success).toBe(false);
+    // Item C4: Rovara's own words for the merge state and the account kind; a host's words (`dirty`, `has_hooks`, `User`) are mapped by its adapter and are not accepted here.
+    for (const state of ["clean", "conflicted", "behind", "blocked", "unstable", "draft", "unknown"]) expect(ChangeRequestStatusSchema.safeParse({ ...status, mergeableState: state }).success, state).toBe(true);
+    for (const state of ["dirty", "has_hooks"]) expect(ChangeRequestStatusSchema.safeParse({ ...status, mergeableState: state }).success, state).toBe(false);
+    for (const kind of ["person", "bot", "other"]) expect(ChangeRequestStatusSchema.safeParse({ ...status, reviews: [{ ...status.reviews[0], accountType: kind }] }).success, kind).toBe(true);
+    expect(ChangeRequestStatusSchema.safeParse({ ...status, reviews: [{ ...status.reviews[0], accountType: "User" }] }).success).toBe(false);
     expect(ChangeRequestStatusSchema.safeParse({ ...status, reviews: [{ ...status.reviews[0], state: "LGTM" }] }).success).toBe(false);
   });
 
@@ -231,5 +237,40 @@ describe("acting identity", () => {
     expect(() => grantOf({ expiresAt: 1_000 })).toThrow();
     expect(() => grantOf({ purpose: "approve" })).toThrow();
     expect(() => grantOf({ grantedBy: "short" })).toThrow();
+  });
+});
+
+describe("item C1 and C4: optional change request facts and the lessons write", () => {
+
+  it("carries who made a change request and which repository it is against, both optional", () => {
+    const details = { ref, state: "open", sourceBranch: "b", targetBranch: "main", headRevision: sha, title: "t", body: "" };
+    expect(ChangeRequestDetailsSchema.parse(details)).toEqual(details);
+    expect(ChangeRequestDetailsSchema.parse({ ...details, authoredByRovara: true, baseRepositoryId: "42" })).toMatchObject({ authoredByRovara: true, baseRepositoryId: "42" });
+    expect(ChangeRequestDetailsSchema.safeParse({ ...details, authoredByRovara: "yes" }).success).toBe(false);
+  });
+
+  it("takes any hash length as a revision id", () => {
+    expect(COMMIT_ID_PATTERN.test("a".repeat(40))).toBe(true);
+    expect(COMMIT_ID_PATTERN.test("b".repeat(64))).toBe(true);
+    expect(COMMIT_ID_PATTERN.test("abc")).toBe(false);
+    expect(COMMIT_ID_PATTERN.test("A".repeat(40))).toBe(false);
+    expect(isCommitId("0".repeat(64))).toBe(true);
+  });
+
+  it("holds the lessons write to a bounded, allowlisted input", () => {
+    const input = { repository: ref.repository, branch: "rovara/lessons-0123456789ab", baseBranch: "main", message: "m", files: [{ path: ".rovara/lessons.md", content: "x" }], fromBase: true };
+    expect(CommitFilesInputSchema.parse(input)).toEqual(input);
+    expect(CommitFilesInputSchema.safeParse({ ...input, files: [] }).success).toBe(false);
+    expect(CommitFilesInputSchema.safeParse({ ...input, files: Array.from({ length: COMMIT_FILES_MAX + 1 }, () => ({ path: "a", content: "" })) }).success).toBe(false);
+    expect(CommitFilesInputSchema.safeParse({ ...input, extra: 1 }).success).toBe(false);
+    expect(LESSON_FILE_BRANCH_PATTERN.test("rovara/lessons-0123456789ab")).toBe(true);
+    expect(LESSON_FILE_BRANCH_PATTERN.test("rovara/lessons-0123456789abc")).toBe(false);
+    expect(LESSON_FILE_BRANCH_PATTERN.test("main")).toBe(false);
+    expect(LESSON_FILE_WRITE_PATHS).toContain(LESSON_FILE_PATH);
+    expect(CommitFilesResultSchema.parse({ revision: sha, changed: false })).toEqual({ revision: sha, changed: false });
+  });
+
+  it("marks a check whose log can be read by the host", () => {
+    expect(CheckSchema.parse({ name: "ci", state: "completed", conclusion: "failure", required: false, url: "", runId: "9", logReadable: true }).logReadable).toBe(true);
   });
 });

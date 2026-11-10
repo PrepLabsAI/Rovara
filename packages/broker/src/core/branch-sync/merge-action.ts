@@ -17,8 +17,10 @@ export interface FailingCheck {
   url: string;
   /** The runner's id for the check run (the job id, where the host's runner has jobs). */
   jobId?: string;
-  /** The system that made the check (a GitHub App's id as text). */
+  /** The system that made the check, as the host words it (an opaque word the core does not read). */
   source?: string;
+  /** The host can hand out this run's log through the check runner (the host decides; the core never reads `source` for it). */
+  logReadable?: boolean;
 }
 
 /** The kinds of dispatch a decider can ask for: a coding run (a CI fix round), or the merge of the base branch into the task's branch (or its restack). */

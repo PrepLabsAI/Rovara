@@ -183,7 +183,7 @@ export async function mergeWorld(options: MergeWorldOptions = {}): Promise<Merge
       for (const pr of prs) {
         const fields = {
           orgId: ORG, taskId: TASK_ID, repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head, draft: false, state: "open" as const, baseBranch: "main", ci: "passing" as const,
-          ciBasis: "all_checks" as const, checksEverSeen: true, failingChecks: [], review: "approved" as const, approval: { githubUserId: pr.model.accounts.get("priya")!.hostUserId, login: "priya", commitId: pr.head },
+          ciBasis: "all_checks" as const, checksEverSeen: true, failingChecks: [], review: "approved" as const, approval: { hostUserId: pr.model.accounts.get("priya")!.hostUserId, login: "priya", commitId: pr.head },
           branch: "up_to_date" as const, headByRovara: true, nudges: { count: 0 }, syncs: { day: "2026-11-09", count: 0 }, readyAt: stamp, ...overrides,
         };
         const item: MergeTrackingItem = { ...fields, version: 1, decisionDigest: mergeTrackingDecisionDigest(fields), observedAt: stamp };

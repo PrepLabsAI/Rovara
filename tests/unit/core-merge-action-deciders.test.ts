@@ -36,7 +36,7 @@ function waiting(extra: Record<string, unknown> = {}): WorkflowSnapshot {
 
 const item = (overrides: Partial<MergeTrackingItem> = {}): MergeTrackingItem => ({
   orgId: ORG, taskId: TASK, repositoryId: "payments", number: 7, version: 1, headSha: HEAD_A, draft: false, state: "open", baseBranch: "main", ci: "passing", ciBasis: "required", checksEverSeen: true,
-  failingChecks: [], review: "approved", approval: { githubUserId: "1", login: "maint", commitId: HEAD_A }, branch: "behind", headByRovara: true, nudges: { count: 0 },
+  failingChecks: [], review: "approved", approval: { hostUserId: "1", login: "maint", commitId: HEAD_A }, branch: "behind", headByRovara: true, nudges: { count: 0 },
   syncs: { day: "2026-10-25", count: 0 }, decisionDigest: "d".repeat(64), observedAt: at, ...overrides,
 });
 
@@ -116,7 +116,7 @@ describe("the conflict slot", () => {
 
 describe("the CI slot", () => {
   const failing = { branch: "up_to_date" as const, ci: "failing" as const, failingChecks: ["test"] };
-  const check = { name: "test", conclusion: "failure", url: "https://github.com/acme/payments/actions/runs/1/job/4242", jobId: "4242", source: "15368" };
+  const check = { name: "test", conclusion: "failure", url: "https://github.com/acme/payments/actions/runs/1/job/4242", jobId: "4242", source: "15368", logReadable: true };
 
   it("starts one round: the counted workflow, the block of what CI said as a row of its own, the coding run's dispatch and a 'fixing' milestone", async () => {
     const read: string[] = [];

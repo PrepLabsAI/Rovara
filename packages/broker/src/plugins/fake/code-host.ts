@@ -2,12 +2,13 @@
 // a real adapter must answer what this one answers for the same state.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
-  agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
+  agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, CommitFilesInputSchema, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
   type BranchPage, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
-  type ChangeRequestRef, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
+  type ChangeRequestRef, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
   type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
   type RepositoryRef,
 } from "@agentx/contracts";
+import { readCodeOwnersFile } from "../code-host/code-owners-file.js";
 import type { FakeChangeRequest, FakeHostModel } from "./model.js";
 
 export const FAKE_HOST_KIND = "fake";
@@ -98,9 +99,13 @@ export class FakeCodeHost implements CodeHost {
     return (options?.untilLine === undefined ? content : content.split("\n").slice(0, options.untilLine).join("\n"));
   }
 
-  async pathKind(repository: RepositoryRef, path: string, revision: string, scope: HostScope): Promise<"file" | "dir" | "none"> {
+  async pathKind(repository: RepositoryRef, path: string, revision: string, scope: HostScope): Promise<PathKind> {
     this.checkScope(scope);
-    const files = this.registered(repository).revision(revision).files;
+    const found = this.registered(repository).revision(revision);
+    const files = found.files;
+    if (found.symlinks.has(path)) return "symlink";
+    // Like a real host: a path below a symbolic link cannot be told (what the link points at is not known), so it is an error, never "none".
+    for (const link of found.symlinks) if (path.startsWith(`${link}/`)) throw agentXError("RUNTIME_UNAVAILABLE", "a symbolic link is the parent of this path");
     if (files.has(path)) return "file";
     // A directory is a path some file lives under.
     for (const name of files.keys()) if (name.startsWith(`${path}/`)) return "dir";
@@ -143,11 +148,31 @@ export class FakeCodeHost implements CodeHost {
     return ({ branches: all.slice((page - 1) * size, page * size), page, mayHaveMore: all.length > page * size, omittedUnsupported: false });
   }
 
-  async codeOwners(repository: RepositoryRef, branch: string, scope: HostScope): Promise<string | undefined> {
+  async codeOwners(repository: RepositoryRef, branch: string, scope: HostScope): Promise<CodeOwnersRead | undefined> {
     this.checkScope(scope);
     const model = this.registered(repository);
     const files = model.revision(model.headOf(branch)).files;
-    return (files.get(".github/CODEOWNERS") ?? files.get("CODEOWNERS") ?? files.get("docs/CODEOWNERS"));
+    const text = files.get(".github/CODEOWNERS") ?? files.get("CODEOWNERS") ?? files.get("docs/CODEOWNERS");
+    return text === undefined ? undefined : readCodeOwnersFile(text);
+  }
+
+  /** Item C1: the same rules a real host's adapter holds (see `FakeHostModel.commitLessonFiles`). */
+  async commitFiles(input: CommitFilesInput, scope: HostScope): Promise<CommitFilesResult> {
+    this.checkScope(scope);
+    const parsed = CommitFilesInputSchema.parse(input);
+    return this.registered(parsed.repository).commitLessonFiles(parsed);
+  }
+
+  async changeRequestForBranch(repository: RepositoryRef, branch: string, scope: HostScope): Promise<ChangeRequestRef | undefined> {
+    this.checkScope(scope);
+    const found = this.registered(repository).changeRequestForLessonBranch(branch);
+    return found === undefined ? undefined : this.ref(found.id);
+  }
+
+  /** Deleting the source branch of an open change request closes it, as a real host does. */
+  async deleteBranch(repository: RepositoryRef, branch: string, scope: HostScope): Promise<"deleted" | "gone"> {
+    this.checkScope(scope);
+    return this.registered(repository).deleteLessonBranch(branch);
   }
 
   async reconcileChangeRequest(input: ChangeRequestInput, scope: HostScope): Promise<ChangeRequestReconciled> {
@@ -169,6 +194,7 @@ export class FakeCodeHost implements CodeHost {
     return {
       ref: this.ref(cr.id), state: cr.state, sourceBranch: cr.sourceBranch, targetBranch: cr.targetBranch, headRevision: this.model.headRevisionOf(cr),
       ...(cr.mergeRevision === undefined ? {} : { mergeRevision: cr.mergeRevision }), ...(cr.mergedAt === undefined ? {} : { mergedAt: cr.mergedAt }), ...(cr.mergedBy === undefined ? {} : { mergedBy: cr.mergedBy }), title: cr.title, body: cr.body,
+      authoredByRovara: cr.author === "rovara-app[bot]", baseRepositoryId: this.model.id,
     };
   }
 
@@ -238,7 +264,7 @@ export class FakeCodeHost implements CodeHost {
     const page = options.page ?? 1;
     const all = cr.comments.filter((comment) => comment.kind === "discussion" && (since === undefined || Date.parse(comment.updatedAt) >= since));
     const listed = all.slice((page - 1) * 100, page * 100).map((comment) => ({
-      id: comment.id, ref: this.ref(cr.id), author: { login: comment.author, ...(this.model.accounts.get(comment.author) === undefined ? {} : { hostUserId: this.model.accounts.get(comment.author)!.hostUserId }), isBot: (this.model.accounts.get(comment.author)?.accountType ?? "User") === "Bot" || comment.author.endsWith("[bot]") },
+      id: comment.id, ref: this.ref(cr.id), author: { login: comment.author, ...(this.model.accounts.get(comment.author) === undefined ? {} : { hostUserId: this.model.accounts.get(comment.author)!.hostUserId }), isBot: (this.model.accounts.get(comment.author)?.accountType ?? "person") === "bot" || comment.author.endsWith("[bot]") },
       body: comment.body, createdAt: comment.createdAt ?? comment.updatedAt, updatedAt: comment.updatedAt,
     }));
     return { comments: listed, ...(all.length > page * 100 ? { nextPage: page + 1 } : {}) };

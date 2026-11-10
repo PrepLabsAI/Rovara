@@ -12,6 +12,7 @@ import {
   WorkflowSnapshotSchema, nextWorkflowPullRequestUpdate, observeWorkflowPullRequestMergedWithFix, recordWorkflowBranchSync, recordWorkflowPullRequestUpdate, startWorkflowBranchSyncRun, startWorkflowPullRequestUpdate, when,
   workflowRequestId, CONFLICT_ROUNDS_MAX,
   type TransactItem, type WorkflowPullRequestUpdateCause, type WorkflowSnapshot,
+  COMMIT_ID_PATTERN,
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { branchSyncRequestId, planBranchSyncOutcome, type BranchSyncGithub } from "../branch-sync/branch-sync.js";
@@ -29,7 +30,8 @@ import { pullRequestRecordKey, pullRequestRecordOf, taskOfOperation } from "./re
 import type { Ended } from "./results.js";
 
 const scopeOf = (deps: Pick<TaskFlowDeps, "companyId">) => ({ orgId: deps.companyId });
-const SHA = /^[a-f0-9]{40}$/u;
+/** A commit id of any hash length (item C4): the core never decides it is SHA-1. */
+const SHA = COMMIT_ID_PATTERN;
 const objectOf = (value: unknown): Record<string, unknown> => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw agentXError("CONFIG_INVALID", "the pull request update callback must be an object");
   return value as Record<string, unknown>;

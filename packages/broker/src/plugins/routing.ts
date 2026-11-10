@@ -7,6 +7,9 @@ import {
   PluginKindSchema, agentXError,
   type CheckRunner, type CheckRunnerContext, type CodeHost, type PluginKind, type RegistryView, type RepositoryRef, type Tracker,
 } from "@agentx/contracts";
+import { defaultConnectionOf } from "./code-host/connections.js";
+
+export { providerOf } from "./code-host/connections.js";
 
 export const NO_CODE_HOST_MESSAGE = "No code host is set up for this repository.";
 /** Said when a repository record names a code host this install has not registered (the kind is not echoed). */
@@ -14,29 +17,51 @@ export const NO_HOST_MESSAGE = "This repository's code host is not available in 
 export const NO_TRACKER_MESSAGE = "No tracker is set up for this kind of item.";
 export const NO_CHECK_RUNNER_MESSAGE = "No check runner is set up for this kind of build.";
 
-/** The kind of code host a repository record without a `host` is on. A decision-51 gap: records written before the host field name no provider, and the old default is GitHub. */
+/** The provider a repository record without a `host` is on; its default connection serves it (item C2). Records written before the host field name no provider, and the old default is GitHub. */
 export const LEGACY_CODE_HOST_KIND: PluginKind = "github";
 
 function requireKind(kind: PluginKind): void {
   if (!PluginKindSchema.safeParse(kind).success) throw agentXError("CONFIG_INVALID", "A plug-in has a name that is not a plug-in name.");
 }
 
-/** The code host registered under this kind; throws CONFIG_INVALID (a fixed sentence) when there is none. */
+/**
+ * The code host connection a name stands for (item C2): the connection registered under exactly that name; else, when the name is a provider (`github`), that provider's default connection. Undefined when neither.
+ * Throws a `PluginRegistryError` (`ambiguous`) when the provider's connections have no single default.
+ */
+function connectionNamed(registry: RegistryView, name: PluginKind): CodeHost | undefined {
+  return registry.get("code-host", name) ?? defaultConnectionOf(registry, name);
+}
+
+/** The default connection of a provider (item C2): the one a repository that names no code host uses. Throws CONFIG_INVALID (a fixed sentence) when the provider has none. */
+export function defaultCodeHostFor(registry: RegistryView, provider: PluginKind): CodeHost {
+  requireKind(provider);
+  const host = defaultConnectionOf(registry, provider);
+  if (host === undefined) throw agentXError("CONFIG_INVALID", NO_CODE_HOST_MESSAGE);
+  return host;
+}
+
+/** The code host registered under this name (a connection), or the default connection of the provider of that name; throws CONFIG_INVALID (a fixed sentence) when there is none. */
 export function codeHostForKind(registry: RegistryView, kind: PluginKind): CodeHost {
   requireKind(kind);
-  const host = registry.get("code-host", kind);
+  const host = connectionNamed(registry, kind);
   if (host === undefined) throw agentXError("CONFIG_INVALID", NO_CODE_HOST_MESSAGE);
   return host;
 }
 
 /**
- * The code host for a repository record, by its `host.kind`. A record without one is on `LEGACY_CODE_HOST_KIND`. Throws CONFIG_INVALID with a
- * fixed sentence when that kind has no registered host; never falls back to another host.
+ * The code host for a repository record, by its `host.kind` (a connection name, or a provider whose default connection serves it). A record without one is on the default connection of
+ * `LEGACY_CODE_HOST_KIND`. Throws CONFIG_INVALID with a fixed sentence when that has no registered host; never falls back to another host.
  */
 export function codeHostForRecord(registry: RegistryView, repository: { host?: { kind: PluginKind } | undefined }): CodeHost {
-  const kind = repository.host?.kind ?? LEGACY_CODE_HOST_KIND;
+  const named = repository.host?.kind;
+  if (named === undefined) {
+    const standard = defaultConnectionOf(registry, LEGACY_CODE_HOST_KIND);
+    if (standard === undefined) throw agentXError("CONFIG_INVALID", NO_HOST_MESSAGE);
+    return standard;
+  }
+  const kind = named;
   requireKind(kind);
-  const host = registry.get("code-host", kind);
+  const host = connectionNamed(registry, kind);
   if (host === undefined) throw agentXError("CONFIG_INVALID", NO_HOST_MESSAGE);
   return host;
 }
@@ -53,9 +78,10 @@ export function codeHostKinds(registry: RegistryView): readonly PluginKind[] {
 
 /** At task start: every repository of the project must have a registered code host, or the start is refused before any work is spent. */
 export function assertRepositoryHostsKnown(registry: RegistryView, repositories: readonly { host?: { kind: PluginKind } | undefined }[]): void {
-  const kinds = new Set(codeHostKinds(registry));
   for (const repository of repositories) {
-    if (!kinds.has(repository.host?.kind ?? LEGACY_CODE_HOST_KIND)) throw agentXError("CONFIG_INVALID", NO_HOST_MESSAGE);
+    const named = repository.host?.kind;
+    const found = named === undefined ? defaultConnectionOf(registry, LEGACY_CODE_HOST_KIND) : PluginKindSchema.safeParse(named).success ? connectionNamed(registry, named) : undefined;
+    if (found === undefined) throw agentXError("CONFIG_INVALID", NO_HOST_MESSAGE);
   }
 }
 

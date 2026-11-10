@@ -202,7 +202,7 @@ function detector(state: HostState, extra: Partial<RevertDetectorDependencies> =
     standing: async (_repo: RepositoryRef, person: HostAccount) => {
       standingCalls.push(person.login);
       if (state.standingFails === true) throw new Error("host down");
-      return { permission: state.writers[person.login] ?? "none", ...(state.bots?.includes(person.login) === true ? { accountType: "Bot" } : {}) };
+      return { permission: state.writers[person.login] ?? "none", ...(state.bots?.includes(person.login) === true ? { accountType: "bot" } : {}) };
     },
   } as unknown as RevertDetectorDependencies["codeHost"];
   const index = createRovaraPullRequestIndex({ store, companyId: ORG });

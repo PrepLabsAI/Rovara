@@ -120,3 +120,31 @@ describe("the head index and the tracking item's writes", () => {
     expect(trackingItemOf({ orgId: ORG, taskId: TASK_ID, junk: true }, ORG, TASK_ID)).toBeUndefined();
   });
 });
+
+describe("the tracking item's neutral spellings (item C4)", () => {
+  it("reads an item written before the host account id got its neutral name, and writes it back under the new one", async () => {
+    const world = await mergeWorld();
+    await world.seedTracking();
+    const key = { pk: `DEVTASK#${TASK_ID}`, sk: `MERGE_TRACKING#app#${String(world.prs[0]!.number)}` };
+    const stored = (await world.store.get(key))!;
+    const approval = stored["approval"] as { hostUserId: string; login: string; commitId: string };
+    const { hostUserId, ...rest } = approval;
+    await world.store.put({ item: { ...stored, approval: { ...rest, githubUserId: hostUserId } } });
+    const read = trackingItemOf(await world.store.get(key), ORG, TASK_ID)!;
+    expect(read.approval).toEqual({ hostUserId, login: "priya", commitId: world.prs[0]!.head });
+    // The new spelling still reads, and an item that names the account both ways keeps the new one.
+    expect(trackingItemOf({ ...stored, approval: { ...approval, githubUserId: "stale" } }, ORG, TASK_ID)?.approval?.hostUserId).toBe(hostUserId);
+  });
+
+  it("takes a commit id of any hash length, and refuses what is no commit id", async () => {
+    const world = await mergeWorld();
+    await world.seedTracking();
+    const key = { pk: `DEVTASK#${TASK_ID}`, sk: `MERGE_TRACKING#app#${String(world.prs[0]!.number)}` };
+    const stored = (await world.store.get(key))!;
+    const long = "cd".repeat(32);
+    expect(trackingItemOf({ ...stored, headSha: long }, ORG, TASK_ID)?.headSha).toBe(long);
+    expect(trackingItemOf({ ...stored, headSha: "main" }, ORG, TASK_ID)).toBeUndefined();
+    expect(trackingItemOf({ ...stored, headSha: "AB".repeat(20) }, ORG, TASK_ID)).toBeUndefined();
+  });
+});
+

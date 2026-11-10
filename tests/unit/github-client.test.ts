@@ -99,6 +99,29 @@ describe("the real GitHub client under the adapters", () => {
     await expect(stub.issueGitCredential(world.repository, "clone", world.scope)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
 
+  it("tells that Rovara's own App account made a change request (item C1), and not that a person's did", async () => {
+    const world = codeHostWorld();
+    world.model.commit(WORKING_BRANCH(1), { "src/a.ts": "a\n" });
+    const mine = await world.host.reconcileChangeRequest({ repository: world.repository, sourceBranch: WORKING_BRANCH(1), targetBranch: "main", title: "Mine" }, world.scope);
+    expect((await world.host.getChangeRequest(mine.ref, world.scope)).authoredByRovara).toBe(true);
+    world.model.commit(WORKING_BRANCH(2), { "src/b.ts": "b\n" });
+    const theirs = world.model.reconcile({ sourceBranch: WORKING_BRANCH(2), targetBranch: "main", title: "Theirs" }, "a-person").cr;
+    const read = await world.host.getChangeRequest({ repository: world.repository, id: theirs.id, url: "" }, world.scope);
+    expect(read.authoredByRovara).toBe(false);
+    expect(read.baseRepositoryId).toBe("4242");
+  });
+
+  it("writes lessons files with a token that can write contents only, for this repository only; a read of pull requests asks for pull request read only (item C1)", async () => {
+    const world = codeHostWorld();
+    const branch = "rovara/lessons-0123456789ab";
+    await world.host.commitFiles!({ repository: world.repository, branch, baseBranch: "main", message: "Lessons", files: [{ path: ".rovara/lessons.md", content: "x\n" }], fromBase: true }, world.scope);
+    await world.host.changeRequestForBranch!(world.repository, branch, world.scope);
+    await world.host.deleteBranch!(world.repository, branch, world.scope);
+    const mints = world.api.tokens.map((token) => JSON.stringify(token.permissions));
+    expect(mints).toEqual([JSON.stringify({ contents: "write" }), JSON.stringify({ pull_requests: "read" }), JSON.stringify({ contents: "write" })]);
+    expect(world.api.tokens.every((token) => token.repositories?.join() === "app")).toBe(true);
+  });
+
   it("is built as the narrow provider by githubAppClient", () => {
     const client = githubAppClient({ credentialRef: "github", appId: "5002502", getPrivateKey: async () => "unused" });
     expect(missingGitHubProviderMethods(client)).toEqual([]);

@@ -5,10 +5,12 @@
 // Cloud runs these suites through its real `GitHubAppCredentialProvider` against a fixture of GitHub's HTTP API. That client is not in this tree yet
 // (see `provider.ts`), so the fixture stops one level higher. The client's own request choreography is tested with the client, in the lane that brings it.
 import { agentXError, HostRateLimitError, type HostScope, type ReadBudget } from "../../../packages/contracts/src/index.js";
+import { githubAccountType, githubMergeableState } from "./github-fixture-api.js";
 import type {
   GitHubCodeHostProvider, GitHubFeedbackComment, GitHubPullRequestChangedFile, GitHubPullRequestDetails, GitHubPullRequestFeedback, GitHubPullRequestInput, GitHubPullRequestResult,
   GitHubPullRequestUpdate, GitHubRepositoryCredential, GitHubRepositoryIdentity, MergePullRequestResult, PullRequestCheck, PullRequestStatus, WorkingBranchPage,
 } from "../../../packages/broker/src/plugins/code-host/github/provider.js";
+import type { CommitFilesRequest } from "../../../packages/broker/src/plugins/code-host/github/commit-files.js";
 import type { FakeChangeRequest, FakeHostModel } from "../../../packages/broker/src/plugins/fake/model.js";
 
 export const GITHUB_OWNER = "acme";
@@ -50,7 +52,7 @@ export class GitHubFixtureProvider implements GitHubCodeHostProvider {
     return {
       number: Number(cr.id), url: this.model.crUrl(cr.id), state: cr.state, headBranch: cr.sourceBranch, baseBranch: cr.targetBranch, headCommit: this.model.headRevisionOf(cr),
       ...(cr.mergeRevision === undefined ? {} : { mergeCommit: cr.mergeRevision }), ...(cr.mergedAt === undefined ? {} : { mergedAt: cr.mergedAt }), ...(cr.mergedBy === undefined ? {} : { mergedBy: cr.mergedBy }),
-      title: cr.title, body: cr.body,
+      title: cr.title, body: cr.body, authorLogin: cr.author, baseRepositoryId: this.model.id, authoredByApp: cr.author === `${APP_SLUG}[bot]`,
     };
   }
 
@@ -65,7 +67,7 @@ export class GitHubFixtureProvider implements GitHubCodeHostProvider {
     this.serve("getRepositoryStanding", repositoryUrl, scope);
     this.spend(budget);
     const account = this.model.accounts.get(login);
-    return account === undefined ? { permission: "none" } : { permission: account.permission, userType: account.accountType };
+    return account === undefined ? { permission: "none" } : { permission: account.permission, userType: githubAccountType(account.accountType) };
   }
   async resolveWithExpiry(_credentialRef: string, repositoryUrl: string, access: "clone" | "push", scope: HostScope): Promise<GitHubRepositoryCredential> {
     this.serve(`resolve:${access}`, repositoryUrl, scope);
@@ -80,12 +82,28 @@ export class GitHubFixtureProvider implements GitHubCodeHostProvider {
     if (options?.maxBytes !== undefined && Buffer.byteLength(content, "utf8") > options.maxBytes) throw agentXError("CONFIG_INVALID", "file too large");
     return options?.untilLine === undefined ? content : content.split("\n").slice(0, options.untilLine).join("\n");
   }
-  async getPathKindAtCommit(repositoryUrl: string, path: string, commitSha: string, scope: HostScope): Promise<"file" | "dir" | "none"> {
+  async getPathKindAtCommit(repositoryUrl: string, path: string, commitSha: string, scope: HostScope): Promise<"file" | "dir" | "symlink" | "none"> {
     this.serve("getPathKindAtCommit", repositoryUrl, scope);
-    const files = this.model.revision(commitSha).files;
+    const found = this.model.revision(commitSha);
+    const files = found.files;
+    if (found.symlinks.has(path)) return "symlink";
+    for (const link of found.symlinks) if (path.startsWith(`${link}/`)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub reports a symbolic link as a parent of this path");
     if (files.has(path)) return "file";
     for (const name of files.keys()) if (name.startsWith(`${path}/`)) return "dir";
     return "none";
+  }
+  async commitFilesToBranch(repositoryUrl: string, request: CommitFilesRequest, scope: HostScope): Promise<{ revision: string; changed: boolean }> {
+    this.serve("commitFilesToBranch", repositoryUrl, scope);
+    return this.model.commitLessonFiles({ repository: { url: repositoryUrl }, ...request, files: [...request.files], ...(request.previous === undefined ? {} : { previous: [...request.previous] }) } as never);
+  }
+  async findLessonsPullRequest(repositoryUrl: string, branch: string, scope: HostScope): Promise<{ number: number; url: string } | undefined> {
+    this.serve("findLessonsPullRequest", repositoryUrl, scope);
+    const found = this.model.changeRequestForLessonBranch(branch);
+    return found === undefined ? undefined : { number: Number(found.id), url: this.model.crUrl(found.id) };
+  }
+  async deleteLessonsBranch(repositoryUrl: string, branch: string, scope: HostScope): Promise<"deleted" | "gone"> {
+    this.serve("deleteLessonsBranch", repositoryUrl, scope);
+    return this.model.deleteLessonBranch(branch);
   }
   async getCommitTree(repositoryUrl: string, commitSha: string, scope: HostScope): Promise<string> {
     this.serve("getCommitTree", repositoryUrl, scope);
@@ -152,13 +170,13 @@ export class GitHubFixtureProvider implements GitHubCodeHostProvider {
       url: check.url, ...(check.runId === undefined ? {} : { jobId: check.runId }),
     }));
     return {
-      number, state: cr.state, draft: cr.draft, headSha: head, baseBranch: cr.targetBranch, mergeableState: this.model.mergeableState(cr), mergeable: !cr.conflicts, checks,
+      number, state: cr.state, draft: cr.draft, headSha: head, baseBranch: cr.targetBranch, mergeableState: githubMergeableState(this.model.mergeableState(cr)) as PullRequestStatus["mergeableState"], mergeable: !cr.conflicts, checks,
       requiredChecks: this.model.requiredChecks.map((name) => ({ name })), baseHasRequiredChecks: this.model.requiredChecks.length > 0,
       headHasWorkflowFiles: [...this.model.revision(head).files.keys()].some((name) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(name)) || this.model.revision(head).files.has(".ci/checks.yml"),
       requestedReviewers: cr.requestedReviewers.length,
       ...(cr.requestedReviewers.length === 0 ? {} : { requestedReviewerIds: cr.requestedReviewers.map((login) => this.model.accounts.get(login)?.hostUserId ?? login) }),
       reviews: cr.reviews.map((review) => ({
-        githubUserId: this.model.accounts.get(review.reviewer.login)?.hostUserId ?? "1", login: review.reviewer.login, userType: review.accountType, state: review.state, commitId: review.revision, submittedAt: review.submittedAt,
+        githubUserId: this.model.accounts.get(review.reviewer.login)?.hostUserId ?? "1", login: review.reviewer.login, userType: githubAccountType(review.accountType), state: review.state, commitId: review.revision, submittedAt: review.submittedAt,
       })),
     };
   }

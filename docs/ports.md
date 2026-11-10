@@ -265,9 +265,35 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
 - **The registry name is the adapter's `kind`.** `register` refuses a code host, tracker or check runner whose `kind` differs from the
   name it is registered under, so a lookup by name finds the adapter that calls itself that.
 - **Routing.** `codeHostForRecord(registry, repository)` picks the code host by the repository record's `host.kind`; a record with no
-  `host` (written before the field) is on the legacy kind `github`. `codeHostForKind`, `trackerForKind` and `checkRunnerForKind` do the
+  `host` (written before the field) is on the default connection of the legacy provider `github`. `codeHostForKind`, `trackerForKind` and `checkRunnerForKind` do the
   same by kind. A kind with no adapter is refused with a fixed sentence that does not name the kind, and nothing falls back to another
-  adapter. `assertRepositoryHostsKnown` refuses a task start whose repositories name a code host nobody registered.
+  adapter. `assertRepositoryHostsKnown` refuses a task start whose repositories name a code host nobody registered. A repository's `host` may be written (lane P2, item C2); see
+  "Code host connections" below.
+- **Code host connections (lane P2, item C2, decision 60).** A code host adapter is a *connection*: it has a name (`github`, `github-company`; equal to its `kind` and to the name it is registered under) and a
+  provider (`CodeHost.provider`, the kind of host it is; absent means its own name). Several connections can share a provider: register one module per connection
+  (`githubCodeHostPlugin({ name: "github-company", createProvider })`). A repository record names a connection with `host.kind`; when no connection has that exact name but the name is a provider,
+  that provider's **default connection** serves it, and so does a record with no `host`. Exactly one connection of a provider is its default: the only one, or the one whose settings say `"default": true`
+  (`CodeHost.defaultConnection`). Several connections with no default, or two defaults, are refused with a fixed sentence, and the config loader refuses such a config when the process starts
+  (`connectionProblems`). Nothing falls back to a connection of another provider. The runner and the team lookup for a repository are chosen by the connection's *provider*. A GitHub Enterprise address
+  (a base URL for a connection) is not built: the GitHub adapter still accepts github.com only. `GitHubCodeHostProvider` is a lasting extension point (for `gh` and personal-token clients), not a temporary seam.
+- **Neutral code-host types (lane P2, item C4, decision 60).** The port speaks Rovara's words and a host's adapter maps its own: the merge state is `clean`, `conflicted`, `behind`, `blocked`, `unstable`, `draft`
+  or `unknown` (GitHub's `dirty` and `has_hooks` are mapped in `plugins/code-host/github/mapping.ts`); an account is a `person`, a `bot` or `other` (`HostAccountKind`; only a person can approve); a permission
+  is `admin`, `write`, `read` or `none` (`HostPermission` is the mapping target); a reviewer is a `hostUserId` string (the core's approval rules say `hostUserId`, `accountType`); change request ids and commit ids are strings
+  and a commit id may be any hash length (`COMMIT_ID_PATTERN`: 40 to 128 lower-case hex digits; the core never decides it is SHA-1, an adapter that knows its host's exact length holds it); the code owners of a branch
+  are read and understood by the host (`CodeHost.codeOwners()` answers a `CodeOwnersRead`; the CODEOWNERS file syntax lives in `plugins/code-host/code-owners-file.ts`, not in the merge core); a required check is
+  `{ name, source }` where `source` is an opaque word the host also puts on the matching check; whether a check's log can be read is the host's word (`Check.logReadable`), not a comparison with an app id in the core.
+  The tracking item's `approval.githubUserId` is now `approval.hostUserId`; an item written with the old spelling still reads and is rewritten with the new one.
+  **Not done, and why:** the stored pull request `number` (the tracking item, the workflow snapshot's pull requests, the keys) is still a number, because it is the layout Cloud shares and changing it is a data
+  migration (the port itself, the refs and the events already use strings; a host with non-numeric ids needs that migration first). `WorkflowFixPayload.startFrom` (a line of the worker's job) stays 40 hex (decision 65).
+  The person-linking records (`githubMemberKey`, the learning rows' `githubUserId`) are the identity lane's (I2).
+- **Lessons file methods (lane P2, item C1, decision 59).** `CodeHost` has optional `commitFiles` (an expected head, allowlisted branch `rovara/lessons-<12 hex>` and paths, never the base branch, never an existing
+  branch for a new change request), `changeRequestForBranch`, `deleteBranch`, `PathKind` `"symlink"`, and the change request facts `authoredByRovara` and `baseRepositoryId`. They are copied from Cloud's lessons repo
+  file lane (`commit-files.ts` is `github-commit-files.ts`). A host without them has no lessons file; nothing else changes. On a laptop signed in with the owner's own token `authoredByRovara` is absent (the host
+  account is the owner's, so Rovara cannot tell its own pull requests from the owner's): never a guess.
+- **External checks (lane P2, item C5, decision 61).** A repository's `externalChecks` are `{ provider, name, reference, timeoutMinutes }`; `codeBuildGates` is the same list in CodeBuild's words and stays readable
+  (the two share one set of names, at most 8 together and 420 minutes). A worker is still sent `codeBuildGates` only (its job line is unchanged, decision 65), made from the CodeBuild checks by
+  `workerProjectDefinition`; a check of a provider no runner of this release runs refuses the dispatch instead of being skipped. The check-runner factory (`CheckRunnerAdapter.create`) stays synchronous and takes
+  only `allowedRepositories`.
 - **No edition gate and no required adapter.** Any kind registers; a registry with no code host simply refuses lookups.
 - **A check runner is built per project.** CodeBuild builds for the repositories that project registered and refuses any other.
 - **A plug-in module needs its client.** A config entry names a small module that exports `plugin` built by a factory, which is told how the
@@ -314,7 +340,7 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
   (`http.followRedirects=false`) and its askpass answers only for github.com and the host of the address it was given. The synthetic installation number the branch listing pins is derived from the owner's name; it is not a GitHub installation id.
   **Sign-in and the setup check are the adapter's** (BOTH-OWNERS-INTERFACE-ITEMS C3, approved in decision 61): `CodeHost.resolveCredentials?()` finds the sign-in (key file, `GH_TOKEN` / `GITHUB_TOKEN`, then `gh auth token`), says where and returns
   no secret; `CodeHost.checkAccess?()` tests the connection once (`GET /user`) and answers `ok`, `warn` or `fail` with the fix in words (a broad token is a `warn` that recommends a fine-grained, repository-limited one). `rovara up --check` calls
-  them instead of GitHub-specific code, and `github-access.ts` moved into the adapter. (Decision 59's optional methods are not in Code's contract yet, so the client has none of them.)
+  them instead of GitHub-specific code, and `github-access.ts` moved into the adapter. (Decision 59's optional methods are in Code's contract and the client since lane P2: `commitFilesToBranch`, `findLessonsPullRequest`, `deleteLessonsBranch`.)
   **51 follow-up for both owners:** a broker-side git relay so a worker never holds the token at all (the broker adds `Authorization` only for the granted repository and refuses pushes outside `refs/heads/agentx/*`).
 - **The merge core calls the routing.** `core/merge/` (lane L7a) reaches a repository through `registryRepositoryResolver(registry, ...)`, which picks the code host by the
   repository record's `host.kind` (`codeHostForRecord`). The task flow's other calls to `github-app.ts` move in their own lanes.

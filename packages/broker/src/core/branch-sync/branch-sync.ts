@@ -31,6 +31,7 @@ import {
   type PullRequestLifecycleResult,
   type WorkflowBranchSync,
   type WorkflowSnapshot,
+  COMMIT_ID_PATTERN,
 } from "@agentx/contracts";
 import { WORKFLOW_NO_CANDIDATE_DIGEST, type MergeActionContext, type MergeActionInput, type MergeActionRequest, type RegisterMergeActionDecider } from "./merge-action.js";
 
@@ -131,7 +132,8 @@ export type BranchSyncOutcome =
   /** Nothing was pushed, or nothing GitHub shows is the merge: the task waits for the merge as it did. */
   | { kind: "unchanged"; workflow: WorkflowSnapshot };
 
-const SHA = /^[a-f0-9]{40}$/u;
+/** A commit id of any hash length (item C4): the core never decides it is SHA-1. */
+const SHA = COMMIT_ID_PATTERN;
 
 /**
  * What a finished merge of the base is, from what GitHub shows (never from the worker's word alone):

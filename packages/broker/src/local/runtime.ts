@@ -40,7 +40,7 @@ import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createLocalCodeHosts } from "./github-code-host.js";
 import { listProjects } from "./app/projects.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
-import { codeHostForKind } from "../plugins/routing.js";
+import { defaultCodeHostFor } from "../plugins/routing.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { assertGithubRepositoryAddress, type GhRunner } from "./github-access.js";
@@ -402,9 +402,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // and a token that reaches every repository its owner can only when the config allows it. The address rules below (github.com, plain characters) run first.
     resolveRepositoryCredential: async (_credentialRef, repositoryUrl, accessKind) => {
       assertGithubRepositoryAddress(repositoryUrl);
-      const credential = await codeHostForKind(registry, "github").issueGitCredential({ url: repositoryUrl }, accessKind, { orgId: companyOrg });
+      const credential = await defaultCodeHostFor(registry, "github").issueGitCredential({ url: repositoryUrl }, accessKind, { orgId: companyOrg });
       // Expiring, and a shape the worker takes (a token, or the password of a basic credential); a push is the same call with `push`, so the adapter's push checks apply (lane L10, review H1).
-      return usableWorkerCredential(codeHostForKind(registry, "github"), credential);
+      return usableWorkerCredential(defaultCodeHostFor(registry, "github"), credential);
     },
     ...(options.timers === undefined ? {} : { timers: options.timers }),
     ...(options.now === undefined ? {} : { now: options.now }),
