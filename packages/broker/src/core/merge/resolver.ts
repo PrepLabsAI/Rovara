@@ -28,9 +28,11 @@ export function registryRepositoryResolver(registry: RegistryView, options: Regi
     const repository = await options.pinned(project, revision, repositoryId, orgId);
     if (repository === undefined) return undefined;
     const codeHost = codeHostForRecord(registry, repository);
-    // The runner and the team lookup are chosen by the connection's provider (a second GitHub connection reads builds the way the first does).
-    const checkRunner = options.checkRunner?.(providerOf(codeHost), repository);
-    const isTeamMember = options.isTeamMember?.(providerOf(codeHost), repository);
+    // The runner and the team lookup of a repository are the ones registered under its CONNECTION's own name; only when there is none, the ones of the connection's provider (lane P2, review L2). A second
+    // GitHub connection therefore never reads job logs or team membership with another connection's credential unless the install registered the provider's for all of its connections.
+    const providerKind = providerOf(codeHost);
+    const checkRunner = options.checkRunner?.(codeHost.kind, repository) ?? (providerKind === codeHost.kind ? undefined : options.checkRunner?.(providerKind, repository));
+    const isTeamMember = options.isTeamMember?.(codeHost.kind, repository) ?? (providerKind === codeHost.kind ? undefined : options.isTeamMember?.(providerKind, repository));
     return { url: repository.url, codeHost, ...(checkRunner === undefined ? {} : { checkRunner }), ...(isTeamMember === undefined ? {} : { isTeamMember }) };
   };
 }

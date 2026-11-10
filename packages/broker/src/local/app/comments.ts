@@ -9,6 +9,7 @@
 // What a task's threads are: the thread the owner attached to the task from its page (a plan posted on an issue or pull request), and each of the task's open pull requests. ONE OPEN TASK PER THREAD: a comment names
 // no task, so a thread two tasks share decides nothing (review H1). The thread a decision waits on is the attached one, else the task's first pull request.
 import { randomUUID } from "node:crypto";
+import { providerOf } from "../../plugins/routing.js";
 import {
   INDEX_EXPIRY_ATTRIBUTE, agentXError, hostRateLimitRetryAt, queryAll, when,
   type ApprovalRequest, type CodeHost, type HostComment, type OrgId, type Principal, type RegistryView, type StoredDocument,
@@ -103,7 +104,7 @@ export function createLocalComments(options: LocalCommentsOptions): LocalComment
   const threadAt = async (task: TaskRecord, repositoryId: string, number: number, attachedRow: StoredDocument | undefined): Promise<Thread | undefined> => {
     const home = await resolver(task.project, task.startingRevision, repositoryId, companyId).catch(() => undefined);
     if (home === undefined) return undefined;
-    const repositoryKey = codeHostRepositoryKey(home.codeHost.kind, home.url);
+    const repositoryKey = codeHostRepositoryKey(providerOf(home.codeHost), home.url);
     if (repositoryKey === undefined) return undefined;
     const pullRequest = (task.workflow?.pullRequests ?? []).find((entry) => entry.repositoryId === repositoryId && entry.number === number);
     const since = typeof attachedRow?.["attachedAt"] === "string" ? attachedRow["attachedAt"] : pullRequest?.observedAt ?? task.updatedAt;
@@ -173,7 +174,7 @@ export function createLocalComments(options: LocalCommentsOptions): LocalComment
 
   /** Where the host says the comment is. The core compares it with the request's thread. */
   const onOf = (thread: Thread, comment: HostComment): { repository: string; number: number } => {
-    const key = codeHostRepositoryKey(thread.host.kind, comment.ref.repository.url);
+    const key = codeHostRepositoryKey(providerOf(thread.host), comment.ref.repository.url);
     return { repository: key ?? "", number: Number(comment.ref.id) };
   };
 

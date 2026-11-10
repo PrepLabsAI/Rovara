@@ -59,7 +59,7 @@ export interface CodeSettingsReader {
 
 /** The pull request of a task, found from the repository and number a host reports (the reverse link `publish` writes). */
 export interface LinkedChangeRequestFinder {
-  find(query: { hostKind: PluginKind; repositoryAddress: string; id: string }): Promise<{ taskId: string; repositoryId: string; url: string } | undefined>;
+  find(query: { hostKind: PluginKind; connectionKind?: PluginKind | undefined; repositoryAddress: string; id: string }): Promise<{ taskId: string; repositoryId: string; url: string } | undefined>;
 }
 
 /** What a tracking pass saw of one change request, for the optional hooks below. */

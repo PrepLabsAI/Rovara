@@ -5,7 +5,7 @@ import { request as httpRequest } from "node:http";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AdapterRegistry, AuditEvent, AuditSink } from "@agentx/contracts";
+import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
   change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, when, type Check, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
@@ -436,7 +436,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
   });
 
   /** A running `rovara up` with the Docker adapter (simulated), a GitHub token in the environment and a fake GitHub; the project is registered and a task started, and the worker's grant is at hand. */
-  async function githubFlow(input: { token: string; canPush?: boolean; config?: unknown }) {
+  async function githubFlow(input: { token: string; canPush?: boolean; config?: unknown; project?: typeof GITHUB_PROJECT; registerAdapters?: (registry: AdapterRegistry) => void }) {
     const root = await mkdtemp(join(tmpdir(), "rovara-l11-flow-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const stateDirectory = join(root, "state");
@@ -445,11 +445,11 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const docker = new FakeDocker();
     docker.features = ["task.workflowMode"];
     const github = fakeGithub(input.token, input.canPush === undefined ? {} : { canPush: input.canPush });
-    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: input.token }, gh: async () => undefined, fetch: github.fetch, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false });
+    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: input.token }, gh: async () => undefined, fetch: github.fetch, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false, ...(input.registerAdapters === undefined ? {} : { registerAdapters: input.registerAdapters }) });
     cleanup.push(() => runtime.stop());
     const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
     const call = async (path: string, body?: unknown) => (await fetch(`${runtime.url}${path}`, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })).json() as Promise<ApiBody>;
-    await call("/v1/admin/projects", GITHUB_PROJECT);
+    await call("/v1/admin/projects", input.project ?? GITHUB_PROJECT);
     await call("/v1/dev/tasks", { requestId: "13131313-1313-4313-8313-131313131313", project: "ghproject", instructions: "Add a /health endpoint", workflow: true });
     for (let attempt = 0; attempt < 8 && docker.invocations.length === 0; attempt += 1) {
       await runtime.tick();
@@ -475,6 +475,30 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const allowedToken = classicToken("d4");
     const allowed = await githubFlow({ token: allowedToken, config: { version: 1, allowBroadTokenForWorker: true, plugins: [] } });
     expect(JSON.parse((await allowed.exchange("clone")).body)).toEqual({ credential: { token: allowedToken } });
+  });
+
+  it("gives a worker the credential of the connection the repository's record resolves to, never a different default (P2 review M1)", async () => {
+    const owner = fineGrainedToken("f6");
+    const company = fineGrainedToken("g7");
+    // A second GitHub connection, the default one, with a credential of its own. The laptop's own token connection is `github`.
+    const companyHost = (): CodeHost => {
+      const fake = new FakeCodeHost(new FakeHostModel({ url: GITHUB_PROJECT.repositories[0]!.url, id: "77", fullName: "example/demo" }));
+      return Object.assign(Object.create(fake) as CodeHost, {
+        kind: "github-company", provider: "github", defaultConnection: true,
+        issueGitCredential: async () => ({ kind: "token" as const, username: "x-access-token", token: company, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() }),
+      });
+    };
+    const register = (registry: AdapterRegistry) => registry.register("code-host", "github-company", companyHost());
+    const withHost = (kind: string | undefined) => ({ ...GITHUB_PROJECT, repositories: [{ ...GITHUB_PROJECT.repositories[0]!, ...(kind === undefined ? {} : { host: { kind } }) }] });
+    // The record names the non-default connection `github`: the owner's token, although `github-company` is the default.
+    const named = await githubFlow({ token: owner, project: withHost("github") as never, registerAdapters: register });
+    expect(JSON.parse((await named.exchange("clone")).body)).toEqual({ credential: { token: owner } });
+    // The record names the company connection: its credential.
+    const company2 = await githubFlow({ token: owner, project: withHost("github-company") as never, registerAdapters: register });
+    expect(JSON.parse((await company2.exchange("clone")).body)).toEqual({ credential: { token: company } });
+    // A record that names none is on the default connection.
+    const none = await githubFlow({ token: owner, project: withHost(undefined) as never, registerAdapters: register });
+    expect(JSON.parse((await none.exchange("clone")).body)).toEqual({ credential: { token: company } });
   });
 
   it("gives a worker a credential only for a registered project's repository, and stops when the project is archived (L11 M2)", async () => {

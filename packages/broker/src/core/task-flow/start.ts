@@ -5,6 +5,8 @@
 // stage, and (for a workflow that understands first) the dispatch row of its first step. Either all of it exists or none of it does.
 import {
   AgentXError,
+  UNRUNNABLE_EXTERNAL_CHECK_MESSAGE,
+  unrunnableExternalCheck,
   ROVARA_CODE_V2_FOR_NEW_ORGS,
   StartDeveloperTaskRequestSchema,
   WORKFLOW_PATH_REQUIRED,
@@ -98,6 +100,9 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
       throw error;
     }
   }
+
+  // An external check nothing in this release runs is refused here, with the clear sentence, before the budget, the limits and any machine (lane P2, review M2).
+  if (unrunnableExternalCheck(project.definition.repositories) !== undefined) return refused(agentXError("CONFIG_INVALID", UNRUNNABLE_EXTERNAL_CHECK_MESSAGE));
 
   const understandFirst = asWorkflow && (deps.understandFirst ?? ROVARA_CODE_V2_FOR_NEW_ORGS);
   // A workflow with no Quick or Full path is Understand's to choose on version 1.1.0; anywhere else the explicit path is required.

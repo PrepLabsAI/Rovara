@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CODEBUILD_CHECK_PROVIDER, CodeBuildGateDefinitionSchema, ExternalCheckSchema, ProjectDefinitionSchema, RepositoryDefinitionSchema, codeBuildGatesOf, externalCheckOfGate, gateOfExternalCheck,
-  repositoryExternalChecks, workerProjectDefinition,
+  repositoryExternalChecks, workerProjectDefinition, unrunnableExternalCheck, UNRUNNABLE_EXTERNAL_CHECK_MESSAGE, RUNNABLE_EXTERNAL_CHECK_PROVIDERS,
 } from "@agentx/contracts";
 import { CODEBUILD_RUNNER_KIND } from "../../packages/broker/src/plugins/check-runner/codebuild/index.js";
 
@@ -28,7 +28,8 @@ describe("external checks", () => {
   it("is one list: generic checks and gates are read together, once each", () => {
     const record = RepositoryDefinitionSchema.parse(repository({ codeBuildGates: [gate], externalChecks: [{ ...check, name: "lint", reference: "agentx-demo-lint" }] }));
     expect(repositoryExternalChecks(record).map((entry) => entry.name)).toEqual(["lint", "quality"]);
-    expect(codeBuildGatesOf(record).map((entry) => entry.name)).toEqual(["quality", "lint"]);
+    // One list, one order (review L5): what the worker is sent is in the order `repositoryExternalChecks` gives.
+    expect(codeBuildGatesOf(record).map((entry) => entry.name)).toEqual(["lint", "quality"]);
     expect(repositoryExternalChecks(RepositoryDefinitionSchema.parse(repository()))).toEqual([]);
   });
 
@@ -52,7 +53,7 @@ describe("external checks", () => {
     const project = { name: "demo", repositories: [RepositoryDefinitionSchema.parse(repository({ codeBuildGates: [gate], externalChecks: [{ ...check, name: "lint", reference: "agentx-demo-lint" }] }))] };
     const sent = workerProjectDefinition(project) as { repositories: Array<Record<string, unknown>> };
     expect(sent.repositories[0]).not.toHaveProperty("externalChecks");
-    expect((sent.repositories[0]!["codeBuildGates"] as Array<{ name: string }>).map((entry) => entry.name)).toEqual(["quality", "lint"]);
+    expect((sent.repositories[0]!["codeBuildGates"] as Array<{ name: string }>).map((entry) => entry.name)).toEqual(["lint", "quality"]);
     const unrun = { name: "demo", repositories: [RepositoryDefinitionSchema.parse(repository({ externalChecks: [{ provider: "examplebuild", name: "q", reference: "pipeline/1", timeoutMinutes: 10 }] }))] };
     expect(() => workerProjectDefinition(unrun)).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
     // A repository with neither is unchanged.
@@ -60,3 +61,25 @@ describe("external checks", () => {
     expect(ProjectDefinitionSchema).toBeDefined();
   });
 });
+
+describe("a check nothing runs is refused early (review M2)", () => {
+  const project = (checks: unknown[]) => ({
+    name: "demo", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.", repositories: [repository({ externalChecks: checks })],
+  });
+  const other = { provider: "examplebuild", name: "q", reference: "pipeline/1", timeoutMinutes: 10 };
+
+  it("knows which providers this release runs, and finds the first check of another one", () => {
+    expect(RUNNABLE_EXTERNAL_CHECK_PROVIDERS).toEqual(["codebuild"]);
+    expect(unrunnableExternalCheck([RepositoryDefinitionSchema.parse(repository({ externalChecks: [check] }))])).toBeUndefined();
+    expect(unrunnableExternalCheck([RepositoryDefinitionSchema.parse(repository({ externalChecks: [check, other] }))])?.name).toBe("q");
+    expect(unrunnableExternalCheck([RepositoryDefinitionSchema.parse(repository())])).toBeUndefined();
+  });
+
+  it("refuses to save a project that names such a check, with the clear sentence, and still saves a CodeBuild one", () => {
+    const refused = ProjectDefinitionSchema.safeParse(project([other]));
+    expect(refused.success ? [] : refused.error.issues.filter((issue) => issue.message === UNRUNNABLE_EXTERNAL_CHECK_MESSAGE).map((issue) => issue.path.join("."))).toEqual(["repositories.0.externalChecks.0.provider"]);
+    expect(ProjectDefinitionSchema.safeParse(project([check])).success).toBe(true);
+    expect(ProjectDefinitionSchema.safeParse(project([])).success).toBe(true);
+  });
+});
+

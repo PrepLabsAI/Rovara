@@ -7,6 +7,7 @@
 //
 // Merge tracking never presses merge: a person always does (owner decision 1). It marks a draft ready and asks for reviewers; fixes and syncs are other tasks' deciders.
 import { createHash } from "node:crypto";
+import { providerOf } from "../../plugins/routing.js";
 import {
   TRACKING_REQUESTS_BASE,
   TRACKING_REQUESTS_PER_EXTRA_PR,
@@ -490,9 +491,9 @@ async function trackOne(
   const home = await deps.repository(task.project, task.startingRevision, pullRequest.repositoryId, task.orgId);
   if (home === undefined) throw agentXError("CONFIG_INVALID", "the pull request's repository is not in the task's project");
   const { url, codeHost } = home;
-  const repositoryKey = requireRepositoryKey(codeHost.kind, url);
+  const repositoryKey = requireRepositoryKey(providerOf(codeHost), url);
   // The pull request must be the one Rovara linked to this task, in this repository of the pinned project: nothing a webhook or a read says moves it.
-  const linked = await deps.links.find({ hostKind: codeHost.kind, repositoryAddress: url, id: String(pullRequest.number) });
+  const linked = await deps.links.find({ hostKind: providerOf(codeHost), connectionKind: codeHost.kind, repositoryAddress: url, id: String(pullRequest.number) });
   if (linked === undefined || linked.taskId !== task.taskId || linked.repositoryId !== pullRequest.repositoryId || linked.url !== pullRequest.url) {
     throw agentXError("CONFIG_INVALID", "the pull request is not linked to this task");
   }
@@ -507,7 +508,7 @@ async function trackOne(
     // The repository of this pull request is known; another repository of the task is looked up as the task's project pins it.
     const on = repositoryId === pullRequest.repositoryId ? home : await deps.repository(task.project, task.startingRevision, repositoryId, task.orgId);
     if (on === undefined) throw agentXError("CONFIG_INVALID", "the repository is not in the task's project");
-    const key = `${requireRepositoryKey(on.codeHost.kind, on.url)}:${login.toLowerCase()}`;
+    const key = `${requireRepositoryKey(providerOf(on.codeHost), on.url)}:${login.toLowerCase()}`;
     let found = standings.get(key);
     if (found === undefined) {
       found = on.codeHost.standing({ url: on.url }, { login }, scope, budget).then((read): RepositoryStanding => ({ permission: read.permission, accountType: read.accountType }));

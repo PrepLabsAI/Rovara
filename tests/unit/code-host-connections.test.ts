@@ -102,33 +102,55 @@ describe("code host connections", () => {
     expect(company.defaultConnection).toBe(true);
   });
 
-  it("looks up the runner and the team lookup by the connection's provider", async () => {
+  it("looks up the runner and the team lookup under the connection's own name first, and the provider's only when there is none (review L2)", async () => {
     const registry = createAdapterRegistry();
     registry.register("code-host", "github-company", connection("github-company", "github", true));
+    registry.register("code-host", "github-main", connection("github-main", "github"));
     const asked: string[] = [];
-    const resolver = registryRepositoryResolver(registry, {
-      pinned: async () => ({ url: "https://github.com/acme/app", host: { kind: "github-company" } }),
-      checkRunner: (kind) => { asked.push(`runner:${kind}`); return undefined; },
-      isTeamMember: (kind) => { asked.push(`team:${kind}`); return undefined; },
+    const runnerFor = (kind: string) => ({ kind } as never);
+    const resolverWith = (registered: readonly string[]) => registryRepositoryResolver(registry, {
+      pinned: async (_project, _revision, repositoryId) => ({ url: "https://github.com/acme/app", host: { kind: repositoryId === "main" ? "github-main" : "github-company" } }),
+      checkRunner: (kind) => { asked.push(`runner:${kind}`); return registered.includes(kind) ? runnerFor(kind) : undefined; },
+      isTeamMember: (kind) => { asked.push(`team:${kind}`); return registered.includes(kind) ? (async () => "member" as const) : undefined; },
     });
-    const found = await resolver("p", 1, "app", "org_aaaaaaaaaaaaaaaaaaaa");
-    expect(found?.codeHost.kind).toBe("github-company");
-    expect(asked).toEqual(["runner:github", "team:github"]);
+    const org = "org_aaaaaaaaaaaaaaaaaaaa" as never;
+    // Two GitHub connections, a runner registered for each: each repository gets its own connection's runner.
+    const both = resolverWith(["github-company", "github-main"]);
+    expect((await both("p", 1, "company", org))?.checkRunner?.kind).toBe("github-company");
+    expect((await both("p", 1, "main", org))?.checkRunner?.kind).toBe("github-main");
+    // Only the provider has one: it serves both connections, after the connection's own name was tried.
+    asked.length = 0;
+    const shared = resolverWith(["github"]);
+    expect((await shared("p", 1, "company", org))?.checkRunner?.kind).toBe("github");
+    expect(asked).toEqual(["runner:github-company", "runner:github", "team:github-company", "team:github"]);
+    // Nobody has one: none is invented.
+    expect((await resolverWith([])("p", 1, "main", org))?.checkRunner).toBeUndefined();
   });
 });
 
 describe("the repository's host may be written (item C2)", () => {
   const project = (host?: unknown) => ({
-    name: "demo", repositories: [{ name: "app", url: "https://git.examplehost.test/acme/app", path: "app", defaultBranch: "main", credentialRef: "git", ...(host === undefined ? {} : { host }) }],
-    readiness: [], setup: [], test: [],
+    name: "demo", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.",
+    repositories: [{ name: "app", url: "https://git.examplehost.test/acme/app", path: "app", defaultBranch: "main", credentialRef: "git", ...(host === undefined ? {} : { host }) }],
   });
 
   it("accepts a repository that names its connection, and still a record without one", () => {
     for (const host of [undefined, { kind: "github-company" }, { kind: "examplehost", ref: "r1" }, { kind: "github" }]) {
-      const parsed = ProjectDefinitionSchema.safeParse(project(host));
-      // Whatever else the minimal fixture lacks, the host is no longer what is refused.
-      expect(JSON.stringify(parsed.success ? [] : parsed.error.issues.map((issue) => issue.path)), JSON.stringify(host)).not.toContain('"host"');
+      expect(ProjectDefinitionSchema.safeParse(project(host)).success, JSON.stringify(host)).toBe(true);
     }
+  });
+
+  it("lets any connection of provider github carry the GitHub pins, and no other connection (review M3)", () => {
+    const pinned = (host: Record<string, unknown>, top: Record<string, unknown> = {}) => ProjectDefinitionSchema.safeParse({ ...project(host), repositories: [{ ...project(host).repositories[0], ...top }] }).success;
+    expect(pinned({ kind: "github", installationId: 5, repositoryId: 9 })).toBe(true);
+    expect(pinned({ kind: "github-company", provider: "github", installationId: 5, repositoryId: 9 })).toBe(true);
+    // The dual-read spelling at the top of the record must agree with the host's, for a second GitHub connection as for `github`.
+    expect(pinned({ kind: "github-company", provider: "github", installationId: 5, repositoryId: 9 }, { installationId: 5, githubRepositoryId: 9 })).toBe(true);
+    expect(pinned({ kind: "github-company", provider: "github", installationId: 5 }, { installationId: 6 })).toBe(false);
+    // A connection of another provider, or one that does not say, has no GitHub pins.
+    expect(pinned({ kind: "examplehost", provider: "examplehost", installationId: 5 })).toBe(false);
+    expect(pinned({ kind: "github-company", installationId: 5 })).toBe(false);
+    expect(pinned({ kind: "examplehost" }, { installationId: 5 })).toBe(false);
   });
 
   it("keeps the other rules of a host: a repository on another host has no GitHub pins", () => {

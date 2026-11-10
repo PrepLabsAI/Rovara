@@ -7,12 +7,12 @@
 //  - a COMMIT pushed to the default branch (subject `Revert "..."`, a body line `This reverts commit <sha>`), when the host can show the commit (its author, its committer, whether it is a merge and verified)
 //    and its author and the account that pushed it both can write. Port gap: the CodeHost port has no commit read, and the push event names no pusher, so the caller supplies `CommitReader` and `pusher`.
 // Anything unproven records nothing. A revert of a revert names the first revert's commit, so it matches nothing and the task stays reverted (there is no un-revert).
-import { when, type ChangeRequestRef, type CodeHost, type DocumentStore, type HostAccount, type HostScope, type OrgId, type RepositoryRef, COMMIT_ID_PATTERN } from "@agentx/contracts";
+import { when, type ChangeRequestRef, type CodeHost, type DocumentStore, type HostAccount, type HostScope, type OrgId, type RepositoryRef, COMMIT_ID_PATTERN, COMMIT_ID_SOURCE } from "@agentx/contracts";
 import type { RovaraPullRequest, RovaraPullRequestIndex } from "./rovara-pull-request-index.js";
 
 /** A commit id of any hash length (item C4): the core never decides it is SHA-1. */
 const SHA = COMMIT_ID_PATTERN;
-const REVERTS_COMMIT = /This reverts commit ([0-9a-f]{40,64})\b/giu;
+const REVERTS_COMMIT = new RegExp(`This reverts commit (${COMMIT_ID_SOURCE})\\b`, "giu");
 /** The most revert targets one signal can name. */
 const TARGETS_MAX = 20;
 
@@ -21,7 +21,7 @@ export function gitRevertedCommits(message: string): string[] {
   const subject = message.split("\n", 1)[0] ?? "";
   if (!/^Revert\s+["“']/iu.test(subject.trim())) return [];
   const out = new Set<string>();
-  for (const match of message.matchAll(/^This reverts commit ([0-9a-f]{40,64})\b/gimu)) out.add(match[1]!.toLowerCase());
+  for (const match of message.matchAll(new RegExp(`^This reverts commit (${COMMIT_ID_SOURCE})\\b`, "gimu"))) out.add(match[1]!.toLowerCase());
   return [...out].slice(0, TARGETS_MAX);
 }
 
@@ -92,7 +92,7 @@ async function canWrite(deps: RevertDetectorDependencies, repository: Repository
   if (person === undefined || isBot === true || /\[bot\]$/iu.test(person.login) || deps.isExcluded?.(person.login) === true) return false;
   try {
     const standing = await deps.codeHost.standing(repository, person, scope);
-    return (standing.permission === "write" || standing.permission === "admin") && standing.accountType?.toLowerCase() !== "bot";
+    return (standing.permission === "write" || standing.permission === "admin") && standing.accountType === "person";
   } catch {
     return false;
   }

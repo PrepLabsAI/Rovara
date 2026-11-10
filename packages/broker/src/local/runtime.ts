@@ -40,7 +40,7 @@ import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createLocalCodeHosts } from "./github-code-host.js";
 import { listProjects } from "./app/projects.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
-import { defaultCodeHostFor } from "../plugins/routing.js";
+import { codeHostForRepositoryAddress } from "../plugins/routing.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { assertGithubRepositoryAddress, type GhRunner } from "./github-access.js";
@@ -362,12 +362,14 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // Port lane L11: each code host the owner has a sign-in for (a GitHub token from the key file, GH_TOKEN or the GitHub CLI) is registered under its own kind; a configured `code-host` plug-in of that name
   // replaces it. The repositories a host may be used for are the registered projects' (the store the app registers them in, read when asked, so a plug-in storage works too).
   const companyOrg = OrgIdSchema.parse(config.companyId ?? IMPLICIT_COMPANY_ID);
-  const registeredRepositories = async (): Promise<string[]> => {
+  /** The registered projects' repositories (not archived), as their records state them: the address and the code host connection the record names, if any. */
+  const registeredRepositoryRecords = async (): Promise<Array<{ url: string; host?: { kind: string } | undefined }>> => {
     const store = registry.require("storage");
     const source = createStoreProjectSource(store, companyOrg);
     const latest = await Promise.all((await listProjects(store, companyOrg)).map((project) => source.latest(project.name)));
-    return latest.flatMap((revision) => (revision === undefined || revision.archived === true ? [] : revision.definition.repositories.map((repository) => repository.url)));
+    return latest.flatMap((revision) => (revision === undefined || revision.archived === true ? [] : revision.definition.repositories.map((repository) => ({ url: repository.url, host: repository.host }))));
   };
+  const registeredRepositories = async (): Promise<string[]> => (await registeredRepositoryRecords()).map((repository) => repository.url);
   for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
     if ((await host.resolveCredentials?.())?.found === true) registry.register("code-host", host.kind, host, { isDefault: true });
   }
@@ -402,9 +404,11 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // and a token that reaches every repository its owner can only when the config allows it. The address rules below (github.com, plain characters) run first.
     resolveRepositoryCredential: async (_credentialRef, repositoryUrl, accessKind) => {
       assertGithubRepositoryAddress(repositoryUrl);
-      const credential = await defaultCodeHostFor(registry, "github").issueGitCredential({ url: repositoryUrl }, accessKind, { orgId: companyOrg });
+      // The credential comes from the connection the repository's record resolves to (`codeHostForRecord`, the one its pull request and merge calls use), never from a different default (lane P2, review M1).
+      const host = codeHostForRepositoryAddress(registry, repositoryUrl, await registeredRepositoryRecords());
+      const credential = await host.issueGitCredential({ url: repositoryUrl }, accessKind, { orgId: companyOrg });
       // Expiring, and a shape the worker takes (a token, or the password of a basic credential); a push is the same call with `push`, so the adapter's push checks apply (lane L10, review H1).
-      return usableWorkerCredential(defaultCodeHostFor(registry, "github"), credential);
+      return usableWorkerCredential(host, credential);
     },
     ...(options.timers === undefined ? {} : { timers: options.timers }),
     ...(options.now === undefined ? {} : { now: options.now }),

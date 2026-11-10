@@ -81,6 +81,16 @@ export async function findLegacyGithubLink(store: Pick<DocumentStore, "get">, in
  */
 export async function findLinkedChangeRequest(
   store: Pick<DocumentStore, "get">,
+  query: { hostKind: PluginKind; connectionKind?: PluginKind | undefined; repositoryAddress: string; id: string },
+): Promise<LinkedChangeRequest | undefined> {
+  const found = await findLinkedChangeRequestOf(store, query);
+  if (found !== undefined || query.connectionKind === undefined || query.connectionKind === query.hostKind) return found;
+  // Dual read (lane P2, review L1): rows are filed by the connection's PROVIDER, so a connection can be renamed without orphaning them. A row an earlier build filed under the connection's own name is still found.
+  return findLinkedChangeRequestOf(store, { hostKind: query.connectionKind, repositoryAddress: query.repositoryAddress, id: query.id });
+}
+
+async function findLinkedChangeRequestOf(
+  store: Pick<DocumentStore, "get">,
   query: { hostKind: PluginKind; repositoryAddress: string; id: string },
 ): Promise<LinkedChangeRequest | undefined> {
   const key = linkedChangeRequestKey(query.hostKind, query.repositoryAddress, query.id);

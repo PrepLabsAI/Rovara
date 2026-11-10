@@ -14,6 +14,7 @@
 //  - The audit fact commits with the claim through W0's `AuditSink.stage`, as Cloud's ledger row did.
 //  - Everything provider-specific is behind the `CodeHost` port; people, settings, the task record, the timeline and the milestones are seams (seams.ts).
 import { createHash } from "node:crypto";
+import { providerOf } from "../../plugins/routing.js";
 import {
   MERGE_CLAIM_SECONDS,
   MERGE_NOT_READY_MESSAGES as M,
@@ -485,7 +486,7 @@ async function mergeableNow(
     if (home === undefined) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
     const { url } = home;
     // The pull request must be the one Rovara linked to this task: nothing a stored field says moves it to another.
-    const linked = await deps.links.find({ hostKind: home.codeHost.kind, repositoryAddress: url, id: String(entry.number) });
+    const linked = await deps.links.find({ hostKind: providerOf(home.codeHost), connectionKind: home.codeHost.kind, repositoryAddress: url, id: String(entry.number) });
     if (linked === undefined || linked.taskId !== task.taskId || linked.repositoryId !== entry.repositoryId || linked.url !== entry.url) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
     const status = await home.codeHost.changeRequestStatus(changeRequestRef(url, entry.number), scope);
     if (status.id !== String(entry.number)) throw agentXError("RUNTIME_UNAVAILABLE", "The code host answered for another pull request");
@@ -656,7 +657,7 @@ async function mergeTask(
   for (const step of plan) {
     const { entry, url, headSha } = step;
     const claim = await claimMerge(
-      deps, tracked, { repositoryId: entry.repositoryId, number: entry.number, url, repositoryKey: requireRepositoryKey(step.codeHost.kind, url) }, headSha, who.decidedBy,
+      deps, tracked, { repositoryId: entry.repositoryId, number: entry.number, url, repositoryKey: requireRepositoryKey(providerOf(step.codeHost), url) }, headSha, who.decidedBy,
       { occurrence: who.occurrence, method: settings.mergeMethod, proofMethod: who.method, proof: who.proof, requestId: who.requestId }, !proofUsed,
     );
     if (!claim.claimed) {

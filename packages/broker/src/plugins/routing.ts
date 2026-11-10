@@ -14,6 +14,7 @@ export { providerOf } from "./code-host/connections.js";
 export const NO_CODE_HOST_MESSAGE = "No code host is set up for this repository.";
 /** Said when a repository record names a code host this install has not registered (the kind is not echoed). */
 export const NO_HOST_MESSAGE = "This repository's code host is not available in this install.";
+export const AMBIGUOUS_REPOSITORY_HOST_MESSAGE = "This repository is registered with different code host connections, so Rovara cannot tell which one to use.";
 export const NO_TRACKER_MESSAGE = "No tracker is set up for this kind of item.";
 export const NO_CHECK_RUNNER_MESSAGE = "No check runner is set up for this kind of build.";
 
@@ -64,6 +65,17 @@ export function codeHostForRecord(registry: RegistryView, repository: { host?: {
   const host = connectionNamed(registry, kind);
   if (host === undefined) throw agentXError("CONFIG_INVALID", NO_HOST_MESSAGE);
   return host;
+}
+
+/**
+ * The connection that serves a repository, found by its address among the registered repositories' records (lane P2, review M1): the one its record resolves to (`codeHostForRecord`). A repository no record
+ * holds is on the default connection of the legacy provider. An address held by records that name different connections is refused (CONFIG_INVALID, a fixed sentence): no guess.
+ */
+export function codeHostForRepositoryAddress(registry: RegistryView, address: string, records: readonly { url: string; host?: { kind: PluginKind } | undefined }[]): CodeHost {
+  const named = new Set(records.filter((record) => record.url === address).map((record) => record.host?.kind ?? ""));
+  if (named.size > 1) throw agentXError("CONFIG_INVALID", AMBIGUOUS_REPOSITORY_HOST_MESSAGE);
+  const kind = [...named][0];
+  return codeHostForRecord(registry, kind === undefined || kind === "" ? {} : { host: { kind } });
 }
 
 /** The code host that serves a bare repository address. `hostKindOf` says which kind an address is on; the default is `LEGACY_CODE_HOST_KIND`. */

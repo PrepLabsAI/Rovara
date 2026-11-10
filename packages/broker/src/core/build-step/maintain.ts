@@ -14,7 +14,7 @@ import {
   type TransactItem, type WorkflowPullRequestUpdateCause, type WorkflowSnapshot,
   COMMIT_ID_PATTERN,
 } from "@agentx/contracts";
-import { codeHostForRecord } from "../../plugins/routing.js";
+import { codeHostForRecord, providerOf } from "../../plugins/routing.js";
 import { branchSyncRequestId, planBranchSyncOutcome, type BranchSyncGithub } from "../branch-sync/branch-sync.js";
 import { linkedChangeRequestKey } from "../proof/revert/linked-change-requests.js";
 import { riskFromFiles } from "./changed-files.js";
@@ -309,7 +309,7 @@ async function recordAppended(deps: TaskFlowDeps, task: TaskRecord, workflow: Wo
     ...rekeyItems(host, definition.url, task, workflow, next),
     ...(record !== undefined && record.expectedHeadCommit !== head
       ? [{ kind: "update" as const, key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", head), change.set("state", state), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
-    ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(host.kind, definition.url), headSha: head, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number, branch: maintenance.headBranch }, Date.parse(now)),
+    ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(providerOf(host), definition.url), headSha: head, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number, branch: maintenance.headBranch }, Date.parse(now)),
     // More pull requests to go: the next push is due, as the first one was after the reviews.
     ...(next.stage === "PULL_REQUEST" && next.state === "READY" ? [dispatchRowItem(deps, task.taskId, next.revision, "PUBLISH", now)] : []),
   ];
@@ -388,7 +388,7 @@ async function recordSynced(deps: TaskFlowDeps, task: TaskRecord, workflow: Work
       ...rekeyItems(host, definition.url, task, workflow, outcome.workflow),
       ...(record !== undefined && record.expectedHeadCommit !== outcome.headSha
         ? [{ kind: "update" as const, key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", outcome.headSha), change.set("state", "open"), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
-      ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(host.kind, definition.url), headSha: outcome.headSha, taskId: task.taskId, repositoryId: marker.repositoryId, number: marker.number, branch: maintenance.headBranch }, Date.parse(now)),
+      ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(providerOf(host), definition.url), headSha: outcome.headSha, taskId: task.taskId, repositoryId: marker.repositoryId, number: marker.number, branch: maintenance.headBranch }, Date.parse(now)),
     ]);
     if (committed) {
       await startChecksRerun(deps, { taskId: task.taskId, workflowRevision: recheck.revision }, { requestId: `sync-recheck-${task.taskId}-${String(recheck.revision)}`, actorId: workflow.ownerId })
