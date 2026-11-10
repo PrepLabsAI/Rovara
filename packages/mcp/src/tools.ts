@@ -434,7 +434,7 @@ function shareText(task: DeveloperTaskClientView): string {
   ];
   const thread = share.threadUrl !== undefined
     ? ` Thread: ${share.threadUrl}.`
-    : share.postFailed === true ? " AgentX could not post the thread in Slack." : " The Slack thread link appears in agentx_get_task within a few seconds.";
+    : share.postFailed === true ? " AgentX could not post the thread in the channel." : " The thread link appears in agentx_get_task within a few seconds.";
   return ` Shared in ${where}, ${mode}${why.length === 0 ? "" : ` (${why.join("; ")})`}.${thread}`;
 }
 
@@ -487,7 +487,7 @@ const shareFields = (input: Record<string, unknown>): { shareToChannel?: boolean
   return { ...(wanted === undefined ? {} : { shareToChannel: wanted }), ...(input.channel === undefined ? {} : { channel: input.channel as string }) };
 };
 const shareInput = z.boolean().optional().describe("post the task in the project's chat channel, where AgentX replies as it runs: true to share it, false (the default) to keep it private");
-const channelInput = z.string().min(1).max(80).optional().describe("which bound channel to share in, by name or ID; needed only when the project has several; a name alone does not start a share (also give share: true)");
+const channelInput = z.string().min(1).max(80).optional().describe("which bound channel to share in, by name or ID; needed only when the project has several; a name alone does not ask for a share (a project that requires sharing shares anyway); give share: true to share");
 /**
  * Review M9: what makes a start the same start, for agentx_start and its aliases alike, so a retry under another of the start tools' names is the same start (never a second task).
  * `workflowPath` is QUICK, FULL or absent; an agent run is told apart by its own content.
@@ -619,16 +619,17 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       "Shows which AgentX environment this computer is signed in to and as whom: your name, how you signed in, your linked chat user (channel_user), whether this computer also holds an unexpired admin sign-in, and the server and AgentX API versions, with a notice when a newer AgentX CLI is available. Use it to check the setup, or when another AgentX tool says to sign in or upgrade.",
     inputSchema: {},
     outputSchema: {
-      environment: z.string(), developer_name: z.string(), sign_in_method: z.string(), channel_user: z.string().optional(), slack_user: z.string().optional().describe("deprecated, the same as channel_user; removed after one release"), admin: z.boolean(),
+      environment: z.string(), developer_name: z.string(), sign_in_method: z.string().describe("deprecated, the same as sign_in_provider; removed after one release"), sign_in_provider: z.string().describe("the id of the sign-in provider (slack for a chat sign-in)"), sign_in_kind: z.enum(["chat", "company"]).describe("chat (signed in through the chat tool) or company (your company sign-in)"), channel_user: z.string().optional(), slack_user: z.string().optional().describe("deprecated, the same as channel_user; removed after one release"), admin: z.boolean(),
       server_version: z.string(), control_plane_api_version: z.string(), upgrade_notice: z.string().optional(),
     },
     async handler(context) {
       const [compatibility, projects, admin, notice] = await Promise.all([context.compatibility(), context.client.projects(), context.adminSignedIn(), context.adminSignInNotice?.()]);
       const { developer } = projects;
-      const method = developer.provider === "slack" ? "Slack" : "your company sign-in";
+      const method = developer.provider === "slack" ? "your chat sign-in" : "your company sign-in";
+      const signInKind = developer.provider === "slack" ? "chat" as const : "company" as const;
       return {
         structured: {
-          environment: compatibility.env, developer_name: developer.name, sign_in_method: developer.provider,
+          environment: compatibility.env, developer_name: developer.name, sign_in_method: developer.provider, sign_in_provider: developer.provider, sign_in_kind: signInKind,
           ...(developer.slackUserId === undefined ? {} : { channel_user: developer.slackUserId, slack_user: developer.slackUserId }), admin,
           server_version: context.serverVersion, control_plane_api_version: compatibility.apiVersion,
           ...(compatibility.notice === undefined ? {} : { upgrade_notice: compatibility.notice }),
@@ -643,7 +644,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_list_projects",
     title: "List AgentX projects",
     description:
-      "Lists the AgentX projects you can hand coding tasks to, with each project's Slack channels and task policy. Use it before agentx_start_task to get a project's exact name. A project with tasks_enabled false cannot take tasks from an AI tool; use its Slack channel instead. With share_policy required, every task is shared to the project's channel.",
+      "Lists the AgentX projects you can hand coding tasks to, with each project's chat channels and task policy. Use it before agentx_start_task to get a project's exact name. A project with tasks_enabled false cannot take tasks from an AI tool; use its chat channel instead. With share_policy required, every task is shared to the project's channel.",
     inputSchema: {},
     outputSchema: {
       projects: z.array(z.object({
@@ -667,8 +668,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
           share_mode_policy: { default: policy.shareMode.default, allow_continue: policy.shareMode.allowContinue },
         };
       });
-      const notice = response.notices.includes("slack_unavailable") ? " Slack could not be reached, so projects you use through a Slack channel may be missing; try again in a few minutes." : "";
-      const list = projects.length === 0 ? "You cannot use any AgentX project yet: join a project's Slack channel, or ask an AgentX admin for access." : `You can use: ${projects.map((project) => project.name).join(", ")}.`;
+      const notice = response.notices.includes("slack_unavailable") ? " The chat tool could not be reached, so projects you use through a chat channel may be missing; try again in a few minutes." : "";
+      const list = projects.length === 0 ? "You cannot use any AgentX project yet: join a project's chat channel, or ask an AgentX admin for access." : `You can use: ${projects.map((project) => project.name).join(", ")}.`;
       return { structured: { projects, notices: response.notices }, text: `${list}${notice}` };
     },
   },
@@ -1064,7 +1065,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_keep_pull_request",
     title: "Keep an AgentX pull request as it is",
-    description: "After an approved fix from pull request feedback changed no code, keeps the pull request as it is: the task waits for its merge again, and the next comments on it are reviewed as usual. The same as Keep the pull request as it is in the task's Slack thread. Copy expected_revision from agentx_get_task; the call is refused if the task moved on. Only the task's owner can use it.",
+    description: "After an approved fix from pull request feedback changed no code, keeps the pull request as it is: the task waits for its merge again, and the next comments on it are reviewed as usual. The same as Keep the pull request as it is in the task's chat thread. Copy expected_revision from agentx_get_task; the call is refused if the task moved on. Only the task's owner can use it.",
     inputSchema: {
       task_id: taskIdInput, request_id: requestIdInput,
       expected_revision: z.number().int().positive().describe("the current workflow revision from agentx_get_task"),
@@ -1129,7 +1130,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_decide_pr_feedback",
     title: "Decide AgentX's proposal for pull request feedback",
-    description: "Records your decision on the proposal agentx_get_pr_feedback shows, exactly as the buttons in the task's Slack thread do. APPROVE has AgentX make the fixes for the findings you name in finding_ids (the recommended ones when left out), run the checks and reviews again, and push the fix to the same pull request; a finding that asks you a question needs your answer in note. REQUEST_CHANGES keeps the pull request as it is and saves your note for the next round of feedback. DISMISS keeps the pull request as it is and gives your reason in note. RETRY_REVIEW reviews the same comments again after a review that couldn't finish; it needs only review_digest. Copy expected_revision, review_digest, proposal_digest and bundle_digests from agentx_get_pr_feedback; the call is refused if the feedback or the task moved on (AgentX then reviews the new feedback). Only the task's owner can use it.",
+    description: "Records your decision on the proposal agentx_get_pr_feedback shows, exactly as the buttons in the task's chat thread do. APPROVE has AgentX make the fixes for the findings you name in finding_ids (the recommended ones when left out), run the checks and reviews again, and push the fix to the same pull request; a finding that asks you a question needs your answer in note. REQUEST_CHANGES keeps the pull request as it is and saves your note for the next round of feedback. DISMISS keeps the pull request as it is and gives your reason in note. RETRY_REVIEW reviews the same comments again after a review that couldn't finish; it needs only review_digest. Copy expected_revision, review_digest, proposal_digest and bundle_digests from agentx_get_pr_feedback; the call is refused if the feedback or the task moved on (AgentX then reviews the new feedback). Only the task's owner can use it.",
     inputSchema: {
       task_id: taskIdInput, request_id: requestIdInput,
       decision: z.enum(["APPROVE", "REQUEST_CHANGES", "DISMISS", "RETRY_REVIEW"]),
@@ -1301,8 +1302,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     outputSchema: { revision: z.number(), orphaned: z.boolean(), people: z.array(z.object({ person_id: z.string(), name: z.string(), role: TaskPeopleRoleSchema, you: z.boolean(), effective_role: z.enum(["owner", "commenter", "viewer"]).nullable() })), can_manage: z.boolean(), can_take_ownership: z.boolean(), add_people_url: z.string().optional() },
     async handler(context, input) {
       const view = await context.client.getTaskPeople(input.task_id as string);
-      const structured = { revision: view.revision, orphaned: view.orphaned, people: view.people.map((person) => ({ person_id: person.personId, name: plainText(person.name, "Slack user"), role: person.role, you: person.you, effective_role: person.effectiveRole })), can_manage: view.canManage, can_take_ownership: view.canTakeOwnership, add_people_url: view.addPeopleUrl };
-      return { structured, text: view.people.map((person) => `${plainText(person.name, "Slack user")}: ${person.role}`).join("\n") || "No task people are available." };
+      const structured = { revision: view.revision, orphaned: view.orphaned, people: view.people.map((person) => ({ person_id: person.personId, name: plainText(person.name, "Chat user"), role: person.role, you: person.you, effective_role: person.effectiveRole })), can_manage: view.canManage, can_take_ownership: view.canTakeOwnership, add_people_url: view.addPeopleUrl };
+      return { structured, text: view.people.map((person) => `${plainText(person.name, "Chat user")}: ${person.role}`).join("\n") || "No task people are available." };
     },
   },
   {

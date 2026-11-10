@@ -240,6 +240,23 @@ describe("neutral channel fields (item H3, old names kept one release)", () => {
     }
   });
 
+  it("hashes the two spellings alike: one connection, a counting request id, and the retry under the older name gets the same id (L1)", async () => {
+    const startTask = vi.fn<(request: Record<string, unknown>) => Promise<DeveloperTaskView>>(async () => view());
+    let next = 0;
+    const mcp = await connect({ startTask }, { newRequestId: () => `33333333-3333-4333-8333-${String(++next).padStart(12, "0")}` });
+    const call = (extra: Record<string, unknown>) => mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix it", ...extra } });
+    await call({ share: true });
+    await call({ share_to_channel: true });
+    await call({ share: false });
+    await call({});
+    const ids = startTask.mock.calls.map(([request]) => request.requestId);
+    expect(ids[1]).toBe(ids[0]);
+    // share: false is a different start from one that says nothing, so it is not folded into it.
+    expect(ids[2]).not.toBe(ids[3]);
+    expect(ids[2]).not.toBe(ids[0]);
+    expect(new Set(ids).size).toBe(3);
+  });
+
   it("keeps a channel name a string: sent, and not a share by itself", async () => {
     const named = await startOf({ channel: "payments-dev" });
     expect(named.startTask.mock.calls[0]?.[0]).toMatchObject({ channel: "payments-dev" });

@@ -1,4 +1,4 @@
-// MCP servers on the customer's own network (Enterprise; design meta-repo-mcp.md 3.6 "Enterprise endpoints", lane E task E6, owner decision Q12).
+// MCP servers on the customer's own network (company installs; design meta-repo-mcp.md 3.6, lane E task E6, owner decision Q12).
 //
 // The admin does not edit infrastructure. They paste an address (or a stdio server's package) in settings. Rovara tests it, shows what it offers, and asks for
 // approval. On approval the entry becomes part of the install's allow-list, which is nothing more than the set of approved entries: there is no second list to

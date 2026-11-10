@@ -52,7 +52,10 @@ describe("GET /v1/admin/health (FR-030, A13)", () => {
       deadLetterQueues: [], deadLetterQueuesCheck: { status: "unknown", detail: "not set up in this deployment" },
       slack: { status: "failed", detail: "Slack refused the bot token (token_revoked)" },
       github: { status: "unknown", detail: "not set up in this deployment" },
+      // A plug-in row is there only for an adapter that is set up: the chat probe is, the code-host one is not.
+      plugins: [{ point: "channel", name: "slack", status: "failed", detail: "Slack refused the bot token (token_revoked)" }],
     });
+    expect((answer.body as { plugins: unknown[] }).plugins).toHaveLength(1);
     expect(answer.body.version).not.toHaveProperty("release");
   });
 

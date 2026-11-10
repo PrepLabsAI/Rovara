@@ -254,9 +254,9 @@ export const AdminHealthResponseSchema = z.object({
   deadLetterQueues: z.array(z.object({ name: z.string(), depth: z.number().int().nonnegative().nullable() })),
   /** R18: the queues' own check; optional so an older control plane's answer still parses. */
   deadLetterQueuesCheck: AdminHealthCheckSchema.optional(),
-  /** H3: one row per installed plug-in. Absent from an older control plane's answer, which has `slack` and `github` only. */
+  /** H3: one row per plug-in this install has set up (a chat or code-host adapter with no probe has no row). Absent from an older control plane's answer, which has `slack` and `github` only. */
   plugins: z.array(AdminPluginHealthSchema).max(64).optional(),
-  /** Deprecated for one release (use `plugins`): the chat and code-host rows under their old names. A server without that adapter omits them. */
+  /** Deprecated for one release (use `plugins`): the chat and code-host rows under their old names. Always sent by this server (as "not set up" when the adapter has no probe). */
   slack: AdminHealthCheckSchema.optional(),
   github: AdminHealthCheckSchema.optional(),
   workerModes: z.array(z.object({

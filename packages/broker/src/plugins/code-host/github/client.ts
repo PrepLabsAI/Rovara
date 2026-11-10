@@ -60,7 +60,7 @@ export interface GitHubAppCredentialProviderOptions {
   getAppSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /**
    * Cloud installs only: refuses (GITHUB_NOT_CONNECTED) unless the installation is bound to `orgId` and active. Called before every mint for
-   * an `orgId` scope. Absent on a private install.
+   * an `orgId` scope. Absent on a single-company install.
    */
   requireInstallationBound?: (orgId: OrgId, installationId: number, repository?: { owner: string; name: string }) => Promise<void>;
   /**
@@ -2389,7 +2389,7 @@ export class GitHubAppCredentialProvider {
     retried = false,
     options: AgentTokenOptions = {},
     minting = false,
-    /** Receives the expiry GitHub states for the minted token (Enterprise foundations M-7), when the caller wants it. */
+    /** Receives the expiry GitHub states for the minted token (Plug-in foundations M-7), when the caller wants it. */
     expiry?: { expiresAt?: string },
   ): Promise<string> {
     const installed = "installationId" in repository ? repository : await this.installed(repository, scope);

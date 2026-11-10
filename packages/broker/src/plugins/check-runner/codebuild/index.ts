@@ -1,4 +1,4 @@
-// Enterprise foundations, task P3: AWS CodeBuild as a CheckRunner, over the existing `CodeBuildGateway` (`broker/src/codebuild.ts`, not edited). CodeBuild has no
+// Plug-in foundations, task P3: AWS CodeBuild as a CheckRunner, over the existing `CodeBuildGateway` (`broker/src/codebuild.ts`, not edited). CodeBuild has no
 // "list the checks on a commit": a build is started for one gate at one revision and read again by its id, so this runner starts and reads runs and lists only
 // a run it was told about. A repository is served only if it was registered with the runner; anything else is refused before the gateway is called.
 import {

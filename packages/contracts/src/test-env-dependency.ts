@@ -197,7 +197,7 @@ export const CatalogConfigSchema = z
 export type CatalogConfig = z.infer<typeof CatalogConfigSchema>;
 
 /**
- * A company-approved image run in place of the catalog's (Enterprise, 4.1.5): its digest, Rovara's digest it replaces, and the approval that allowed it. Without the reference there is no substitute.
+ * A company-approved image run in place of the catalog's (4.1.5): its digest, Rovara's digest it replaces, and the approval that allowed it. Without the reference there is no substitute.
  *
  * This schema checks SHAPE only: that the digests differ and that a reference is there. It cannot know the catalog or the approvals, so TS19 and TS40 MUST check, where the entry is used:
  *   1. `catalogDigest` equals the digest of the catalog entry named by the backing's `catalogId` (a substitute that "replaces" some other digest replaces nothing);

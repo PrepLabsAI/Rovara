@@ -1,4 +1,4 @@
-// Enterprise foundations, task I3: who a change was made for. Rovara writes to a code host as a service identity the customer owns; a person's own account is not
+// Plug-in foundations, task I3: who a change was made for. Rovara writes to a code host as a service identity the customer owns; a person's own account is not
 // the author. So every write says whose request it was and who approved the plan.
 //
 // Where each thing goes (owner ruling on erasure, 2026-10-31: an erased person is never named, and nothing may be traced back to them):

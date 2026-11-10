@@ -778,7 +778,7 @@ describe("the other task tools (FR-030)", () => {
       ],
       notices: ["slack_unavailable"],
     });
-    expect(text(result)).toContain("Slack could not be reached");
+    expect(text(result)).toContain("The chat tool could not be reached");
   });
 });
 
@@ -846,10 +846,18 @@ describe("versions (FR-048, R23, ruling S1)", () => {
     const mcp = await connect({ projects }, { compatibility: async () => ({ env: "staging", apiVersion: "1.2", notice: "a newer AgentX CLI is available" }), adminSignedIn: async () => true });
     const result = await mcp.callTool({ name: "agentx_whoami", arguments: {} });
     expect(result.structuredContent).toEqual({
-      environment: "staging", developer_name: "Maya Chen", sign_in_method: "slack", channel_user: "U0MAYA001", slack_user: "U0MAYA001", admin: true,
+      environment: "staging", developer_name: "Maya Chen", sign_in_method: "slack", sign_in_provider: "slack", sign_in_kind: "chat", channel_user: "U0MAYA001", slack_user: "U0MAYA001", admin: true,
       server_version: "0.4.0", control_plane_api_version: "1.2", upgrade_notice: "a newer AgentX CLI is available",
     });
     expect(text(result)).toContain("admin sign-in");
+  });
+
+  it("tells a company sign-in from a chat sign-in with sign_in_kind, and sends no chat user for it (item I2)", async () => {
+    const projects = async () => ({ developer: { id: "d".repeat(64), name: "Lee Park", provider: "oidc" as const }, projects: [], notices: [] });
+    const mcp = await connect({ projects }, { compatibility: async () => ({ env: "staging", apiVersion: "1.2" }) });
+    const result = await mcp.callTool({ name: "agentx_whoami", arguments: {} });
+    expect(result.structuredContent).toMatchObject({ sign_in_method: "oidc", sign_in_provider: "oidc", sign_in_kind: "company" });
+    expect(result.structuredContent).not.toHaveProperty("channel_user");
   });
 
   const configured = (apiVersion: string) => ({ configuration: vi.fn(async () => ({ env: "staging", apiVersion, baseUrl: "https://agentx.example.test" })) });

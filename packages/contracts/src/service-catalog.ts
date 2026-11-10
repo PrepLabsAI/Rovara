@@ -122,7 +122,7 @@ export const CatalogEntrySchema = z
     status: z.enum(CATALOG_STATUSES),
     image: z
       .object({
-        /** The repository name under the registry Rovara (or an Enterprise install) serves it from; the registry host is the install's, not the catalog's. */
+        /** The repository name under the registry Rovara (or a company's own install) serves it from; the registry host is the install's, not the catalog's. */
         repository: z.string().regex(/^svc\/[a-z0-9][a-z0-9._-]{0,62}$/u),
         digest: Sha256Schema.optional(),
         platforms: z.array(z.enum(CATALOG_PLATFORMS)).min(1).max(2),

@@ -95,6 +95,21 @@ describe("agentx_list_agents and agentx_run_agent", () => {
   });
 });
 
+describe("agentx_start with run_agent refuses the share fields (item H3)", () => {
+  it("refuses share, share_to_channel (and channel), and starts nothing", async () => {
+    const runAgent = vi.fn(async () => view);
+    const startTask = vi.fn(async () => view);
+    const mcp = await connect({ runAgent, startTask });
+    for (const extra of [{ share: true }, { share: false }, { share_to_channel: true }, { channel: "payments-dev" }]) {
+      const result = await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Look at the build", run_agent: true, agent: { agent_id: AGT }, ...extra } });
+      expect(result).toMatchObject({ isError: true });
+      expect(JSON.stringify((result as { content: unknown }).content)).toContain("INVALID_REQUEST");
+    }
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(startTask).not.toHaveBeenCalled();
+  });
+});
+
 describe("agentx_run_agent when the version asked for waits for the agent's owner (owner decision 2026-10-22)", () => {
   const WAITING = { status: "NEEDS_OWNER_APPROVAL", confirmUrl: CONFIRM, changes: ["Runs version 1 of Triage on payments, which is less safe than the version that runs now (version 3)"] };
 

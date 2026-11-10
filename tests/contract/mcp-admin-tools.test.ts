@@ -50,7 +50,7 @@ describe("the admin read tools (FR-030)", () => {
     const result = await client.callTool({ name: "agentx_admin_failed_tasks", arguments: { project: "payments", limit: 10 } });
     expect(failures).toHaveBeenCalledWith({ project: "payments", limit: 10 });
     expect(result.structuredContent).toEqual({
-      failures: [{ time: "2026-09-30T07:00:00.000Z", project: "payments", origin: "ai_tool", requester: "`Maya Chen` (developer)", workspace_id: "22222222-2222-4222-8222-222222222222",
+      failures: [{ time: "2026-09-30T07:00:00.000Z", project: "payments", source: "ai_tool", origin: "ai_tool", requester: "`Maya Chen` (developer)", workspace_id: "22222222-2222-4222-8222-222222222222",
         operation_id: "11111111-1111-4111-8111-111111111111", operation_kind: "prepare", category: "setup_failed", error: "npm ci exited 1", turn_record: { task_id: "33333333-3333-4333-8333-333333333333" } }],
       since: "2026-09-29T08:00:00.000Z", until: "2026-09-30T08:00:00.000Z",
     });
@@ -183,6 +183,30 @@ describe("the admin read tools (FR-030)", () => {
   it("shows a Slack workspace owner's identity and keeps their name inert", async () => {
     const client = await connect({ workspaces: async () => ({ workspaces: [{ id: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "slack", owner: { slackTeamId: "T0123456789", slackUserId: "U0123456789", slackName: "Priya Shah" }, status: "READY", busy: false, lastActivityAt: "t" }], limits: { perPerson: 3, perOrganization: 20, source: "setting" }, counts: { organization: 1 }, truncated: false }) });
     expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { slack_team_id: "T0123456789", slack_user_id: "U0123456789", slack_name: "`Priya Shah`" } }] });
+  });
+
+  it("shows the neutral source and owner fields beside the older slack ones (item I2)", async () => {
+    const client = await connect({ workspaces: async () => ({ workspaces: [{ id: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "slack", owner: { slackTeamId: "T0123456789", slackUserId: "U0123456789", slackName: "Priya Shah" }, status: "READY", busy: false, lastActivityAt: "t" }], limits: { perPerson: 3, perOrganization: 20, source: "setting" }, counts: { organization: 1 }, truncated: false }) });
+    expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({
+      workspaces: [{ source: "chat", origin: "slack", owner: { channel_team_id: "T0123456789", channel_user_id: "U0123456789", channel_user_name: "`Priya Shah`", slack_user_id: "U0123456789" } }],
+    });
+    const failures = vi.fn(async () => ({ since: "s", until: "u", failures: [{ operationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "slack" as const, requester: { kind: "slack" as const, teamId: "T0123456789", userId: "U0123456789" }, kind: "prepare", status: "FAILED" as const, category: "setup_failed" as const, error: "x", endedAt: "t" }] }));
+    const failed = (await (await connect({ failures })).callTool({ name: "agentx_admin_failed_tasks", arguments: {} })).structuredContent as { failures: Array<Record<string, unknown>> };
+    expect(failed.failures[0]).toMatchObject({ source: "chat", origin: "slack", requester: "chat member U0123456789" });
+  });
+
+  it("filters turns by source, reads the older origin, and refuses the two when they disagree (item I2)", async () => {
+    const turns = vi.fn<(filter: Record<string, unknown>) => Promise<{ turns: Array<Record<string, unknown>> }>>(async () => ({ turns: [{ origin: "slack", requestText: "hello" }, { origin: "ai_tool", requestText: "hi" }] }));
+    const client = await connect({ turns });
+    const since = "2026-09-29T00:00:00.000Z";
+    const chat = await client.callTool({ name: "agentx_admin_turns", arguments: { since, source: "chat" } });
+    await client.callTool({ name: "agentx_admin_turns", arguments: { since, origin: "slack" } });
+    await client.callTool({ name: "agentx_admin_turns", arguments: { since, origin: "chat" } });
+    await client.callTool({ name: "agentx_admin_turns", arguments: { since, source: "ai_tool" } });
+    expect(turns.mock.calls.map(([filter]) => filter.origin)).toEqual(["slack", "slack", "slack", "ai_tool"]);
+    expect(chat.structuredContent).toMatchObject({ turns: [{ source: "chat", origin: "slack" }, { source: "ai_tool", origin: "ai_tool" }] });
+    expect((await client.callTool({ name: "agentx_admin_turns", arguments: { since, source: "ai_tool", origin: "slack" } })).isError).toBe(true);
+    expect(turns).toHaveBeenCalledTimes(4);
   });
 
   it("each description says when to use the tool and what to do next", () => {

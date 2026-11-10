@@ -348,9 +348,15 @@ The MCP tools an AI tool calls use chat-neutral names, so a second chat adapter 
 
 | Neutral name | Replaces | Where |
 | --- | --- | --- |
-| `share` (boolean: `true` posts the task in the project's chat channel, `false` keeps it private) | `share_to_channel` | `agentx_start`, `agentx_start_task`, `agentx_start_workflow`. `channel` stays the string that names which bound channel to use and, as before, does not start a share by itself. The two spellings must agree when both are given. |
+| `share` (boolean: `true` posts the task in the project's chat channel, `false` keeps it private) | `share_to_channel` | `agentx_start`, `agentx_start_task`, `agentx_start_workflow`. `channel` stays the string that names which bound channel to use; a name alone does not ask for a share (a project that requires sharing shares anyway, as before). The two spellings must agree when both are given. |
 | `channel_user` | `slack_user` | `agentx_whoami`, and each entry of `channel_turns` in a task answer (both names are sent) |
-| `plugins`: one row `{ point, name, status, detail? }` per installed plug-in | `slack`, `github` | `agentx_admin_health` and `GET /v1/admin/health` (both old fields are still sent when that adapter exists; an older server's answer is turned into rows) |
+| `plugins`: one row `{ point, name, status, detail? }` per plug-in set up on the install (a chat or code-host adapter with no probe has no row) | `slack`, `github` | `agentx_admin_health` and `GET /v1/admin/health` (both old fields are still sent, with status unknown when not set up; an older server's answer is turned into rows) |
+| `sign_in_provider` and `sign_in_kind` (`chat` or `company`) | `sign_in_method` | `agentx_whoami` |
+| `source` (`chat` or `ai_tool`) | `origin` (`slack` means `chat`) | `agentx_admin_failed_tasks`, `agentx_admin_list_workspaces` and the turn records of `agentx_admin_turns` (output, both sent); `agentx_admin_turns` input (`origin` is read as before, the two must agree) |
+| `channel_team_id`, `channel_user_id`, `channel_user_name` | `slack_team_id`, `slack_user_id`, `slack_name` | `owner` in `agentx_admin_list_workspaces` (both sent) |
+
+Wording only: the tools' descriptions and the fallback name of a task person with no name now say "chat" where they said Slack (`Chat user`, and the requester text `chat member <id>`).
+**Not renamed (internal REST bodies and values, a later lane with I2):** `slackUserId` on the developer principal, task people and turn authors, `shareToChannel` on the start request, `origin: "slack"` in the control plane's records, the `slack_unavailable` notice code, `AdminRequester.kind "slack"`, and the group keys of `agentx_admin_usage` when grouped by origin.
 
 ## The task flow core (lane L6a)
 

@@ -40,8 +40,11 @@ function pluginHealth(health: AdminHealthResponse): ReadonlyArray<{ point: strin
   ];
 }
 
+/** I2: the neutral name of an origin. The control plane still says `slack` for a task that came from the chat tool; the tools also show it as `chat`. */
+const sourceOf = (origin: string): string => (origin === "slack" ? "chat" : origin);
+
 function requesterText(requester: AdminRequester): string {
-  if (requester.kind === "slack") return `Slack member ${requester.userId}`;
+  if (requester.kind === "slack") return `chat member ${requester.userId}`;
   if (requester.kind === "developer") return `${requester.name === undefined ? requester.developerId.slice(0, 12) : inertName(requester.name)} (developer)`;
   return "nobody recorded";
 }
@@ -58,7 +61,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
       dead_letter_queues: z.array(z.object({ name: z.string(), depth: z.number().nullable() })),
       // Ruling R18: the queues' own check; absent from an older control plane's answer.
       dead_letter_queues_check: z.object({ status: z.string(), detail: z.string().optional() }).optional(),
-      plugins: z.array(z.object({ point: z.string(), name: z.string(), status: z.string(), detail: z.string().optional() })).describe("one row per installed plug-in: the plug-in point (channel, code-host), its name, and whether it works"),
+      plugins: z.array(z.object({ point: z.string(), name: z.string(), status: z.string(), detail: z.string().optional() })).describe("one row per plug-in set up on the install: the plug-in point (channel, code-host), its name, and whether it works"),
       // Deprecated for one release (use plugins): the chat and code-host rows under their old names.
       slack: z.object({ status: z.string(), detail: z.string().optional() }).optional(), github: z.object({ status: z.string(), detail: z.string().optional() }).optional(),
       worker_modes: z.array(z.object({ mode: z.string(), configured: z.boolean(), latest_dispatch_failure: z.object({ at: z.string(), operation_id: z.string(), error: z.string() }).optional() })),
@@ -86,7 +89,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_admin_failed_tasks",
     title: "List failed AgentX tasks",
-    description: "Lists operations that ended FAILED or INTERRUPTED, newest first: when, the project, where it came from (slack or ai_tool), who asked, the workspace, the operation kind, the failure category and the redacted error. since defaults to 24 hours ago; AgentX keeps 30 days. Use it when a task or a Slack turn went wrong, or after agentx_admin_health shows a problem. To see what happened around a failure, pass its turn_record's thread or task_id to agentx_admin_turns.",
+    description: "Lists operations that ended FAILED or INTERRUPTED, newest first: when, the project, where it came from (source: chat or ai_tool; origin is the older name and says slack for chat), who asked, the workspace, the operation kind, the failure category and the redacted error. since defaults to 24 hours ago; AgentX keeps 30 days. Use it when a task or a chat turn went wrong, or after agentx_admin_health shows a problem. To see what happened around a failure, pass its turn_record's thread or task_id to agentx_admin_turns.",
     inputSchema: {
       since: time.optional().describe("ISO time to start from; 24 hours ago by default"),
       until: time.optional().describe("ISO time to stop at; now by default"),
@@ -95,7 +98,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     },
     outputSchema: {
       failures: z.array(z.object({
-        time: z.string(), project: z.string(), origin: z.string(), requester: z.string(), workspace_id: z.string(), operation_id: z.string(),
+        time: z.string(), project: z.string(), source: z.string(), origin: z.string().describe("deprecated, the same as source (slack for chat); removed after one release"), requester: z.string(), workspace_id: z.string(), operation_id: z.string(),
         operation_kind: z.string(), category: z.string(), error: z.string(), turn_record: z.object({ thread: z.string().optional(), task_id: z.string().optional() }),
       })),
       since: z.string(), until: z.string(),
@@ -104,7 +107,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     async handler(context, input) {
       const answer = await adminOf(context).failures(given({ since: input.since as string | undefined, until: input.until as string | undefined, project: input.project as string | undefined, limit: input.limit as number | undefined }));
       const failures = answer.failures.map((failure) => ({
-        time: failure.endedAt, project: failure.project, origin: failure.origin, requester: requesterText(failure.requester), workspace_id: failure.workspaceId, operation_id: failure.operationId,
+        time: failure.endedAt, project: failure.project, source: sourceOf(failure.origin), origin: failure.origin, requester: requesterText(failure.requester), workspace_id: failure.workspaceId, operation_id: failure.operationId,
         operation_kind: failure.kind, category: failure.category, error: failure.error, turn_record: given({ thread: failure.thread, task_id: failure.taskId }),
       }));
       const byCategory = new Map<string, number>();
@@ -118,13 +121,14 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_admin_turns",
     title: "Read AgentX turn records",
-    description: "Reads turn records, newest first: what each Slack turn was asked, offered, chose and answered, and each action from an AI tool. They hold request and response text, already redacted. Narrow them with until, project, origin (slack or ai_tool), thread (a Slack thread subject) or task_id (a task's own records and its channel turns); send next_cursor back as cursor for more. since is required; AgentX keeps 30 days. Use it to see what a failure's thread or task asked and answered; then compare with agentx_admin_failed_tasks.",
+    description: "Reads turn records, newest first: what each chat turn was asked, offered, chose and answered, and each action from an AI tool. They hold request and response text, already redacted. Narrow them with until, project, source (chat or ai_tool), thread (a chat thread subject) or task_id (a task's own records and its channel turns); send next_cursor back as cursor for more. since is required; AgentX keeps 30 days. Use it to see what a failure's thread or task asked and answered; then compare with agentx_admin_failed_tasks.",
     inputSchema: {
       since: time.describe("ISO time to start from, within the last 30 days"),
       until: time.optional().describe("ISO time to stop at"),
       project: projectInput,
-      origin: z.enum(["slack", "ai_tool"]).optional().describe("only Slack turns, or only actions from AI tools"),
-      thread: z.string().min(1).max(128).optional().describe("a Slack thread subject such as T0123456789/C0123456789/1695500000.000100"),
+      source: z.enum(["chat", "ai_tool"]).optional().describe("only chat turns, or only actions from AI tools"),
+      origin: z.enum(["slack", "chat", "ai_tool"]).optional().describe("deprecated, the same as source (slack means chat); removed after one release"),
+      thread: z.string().min(1).max(128).optional().describe("a chat thread subject such as T0123456789/C0123456789/1695500000.000100"),
       task_id: z.string().uuid().optional().describe("a task's ID: its own records and its channel turns"),
       limit: limitInput(ADMIN_LIST_MAX),
       cursor: z.string().min(1).max(2_048).optional().describe("next_cursor from the previous call"),
@@ -132,12 +136,15 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     outputSchema: { turns: z.array(z.record(z.string(), z.unknown())), next_cursor: z.string().optional(), skipped: z.number().optional() },
     async handler(context, input) {
       if (input.thread !== undefined && input.task_id !== undefined) throw new ToolError("INVALID_REQUEST", "send thread or task_id, not both");
+      const wanted = [input.source, input.origin === undefined ? undefined : input.origin === "slack" ? "chat" : input.origin].filter((value) => value !== undefined);
+      if (new Set(wanted).size > 1) throw new ToolError("INVALID_REQUEST", "source and origin disagree: give source only (origin is the older name for source)");
+      const origin = wanted[0] === undefined ? undefined : wanted[0] === "chat" ? "slack" as const : "ai_tool" as const;
       const page = await adminOf(context).turns(given({
-        since: input.since as string, until: input.until as string | undefined, project: input.project as string | undefined, origin: input.origin as "slack" | "ai_tool" | undefined,
+        since: input.since as string, until: input.until as string | undefined, project: input.project as string | undefined, origin,
         thread: input.thread as string | undefined, task: input.task_id as string | undefined, limit: input.limit as number | undefined, cursor: input.cursor as string | undefined,
       }));
       return {
-        structured: given({ turns: page.turns, next_cursor: page.cursor, skipped: page.skipped }),
+        structured: given({ turns: page.turns.map((turn) => (typeof turn.origin === "string" ? { source: sourceOf(turn.origin), ...turn } : turn)), next_cursor: page.cursor, skipped: page.skipped }),
         text: `${page.turns.length} turn record${page.turns.length === 1 ? "" : "s"}.${page.cursor === undefined ? "" : " More remain: call again with cursor set to next_cursor."}`,
       };
     },
@@ -145,7 +152,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_admin_usage",
     title: "Show AgentX usage",
-    description: "Adds up AgentX usage per project, requester, origin or day: Slack turns, worker tasks, total task time, model input and output tokens, and cost in US dollars as the usage records carry it (a cost the provider did not give is counted in cost_unknown). since defaults to 7 days ago; AgentX keeps 30 days. Use it to see who and what is spending; then look at agentx_admin_turns or agentx_admin_list_workspaces for the detail.",
+    description: "Adds up AgentX usage per project, requester, origin or day: chat turns, worker tasks, total task time, model input and output tokens, and cost in US dollars as the usage records carry it (a cost the provider did not give is counted in cost_unknown). since defaults to 7 days ago; AgentX keeps 30 days. Use it to see who and what is spending; then look at agentx_admin_turns or agentx_admin_list_workspaces for the detail.",
     inputSchema: {
       group_by: AdminUsageGroupBySchema.describe("project, requester, origin or day"),
       since: time.optional().describe("ISO time to start from; 7 days ago by default"),
@@ -192,7 +199,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_admin_list_channels",
     title: "List AgentX channel bindings",
-    description: "Lists the Slack channels bound to projects: the channel's ID, its name when it is public or when your linked Slack user is a member of the private channel (otherwise a private channel is shown by ID only), the project, and when the binding last changed. Use it to find which channel a project answers in, or why a channel does not answer; then check the project with agentx_admin_list_projects.",
+    description: "Lists the chat channels bound to projects: the channel's ID, its name when it is public or when your linked chat user is a member of the private channel (otherwise a private channel is shown by ID only), the project, and when the binding last changed. Use it to find which channel a project answers in, or why a channel does not answer; then check the project with agentx_admin_list_projects.",
     inputSchema: {},
     outputSchema: { bindings: z.array(z.object({ channel_id: z.string(), channel_name: z.string().optional(), private: z.boolean().optional(), project: z.string(), updated_at: z.string() })), notices: z.array(z.string()) },
     async handler(context) {
@@ -223,14 +230,14 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_admin_list_workspaces",
     title: "List AgentX workspaces",
-    description: "Lists workspaces, newest activity first: the ID, project, origin, owner (Slack user ID and captured name, or developer ID and name), thread link or task ID, status and last activity, with the current workspace limits and counts. A Slack owner is the charged starter, or the creator before preparation. Missing identity or name is unknown, never guessed. Closed workspaces are left out unless status is CLOSED. A task's title and results stay private to its developer. Use it when a developer or the organization hits the workspace limit; then look at a workspace's turns with agentx_admin_turns.",
+    description: "Lists workspaces, newest activity first: the ID, project, origin, owner (chat user ID and captured name, or developer ID and name), thread link or task ID, status and last activity, with the current workspace limits and counts. A chat owner is the charged starter, or the creator before preparation. Missing identity or name is unknown, never guessed. Closed workspaces are left out unless status is CLOSED. A task's title and results stay private to its developer. Use it when a developer or the organization hits the workspace limit; then look at a workspace's turns with agentx_admin_turns.",
     inputSchema: {
       project: projectInput,
       status: WorkspaceStatusSchema.optional().describe("only workspaces with this status"),
       limit: limitInput(ADMIN_WORKSPACES_DEFAULT_LIMIT),
     },
     outputSchema: {
-      workspaces: z.array(z.object({ id: z.string(), project: z.string(), origin: z.string(), owner: z.object({ thread_url: z.string().optional(), task_id: z.string().optional(), developer: z.string().optional(), developer_id: z.string().optional(), slack_team_id: z.string().optional(), slack_user_id: z.string().optional(), slack_name: z.string().optional() }), status: z.string(), busy: z.boolean(), last_activity_at: z.string() })),
+      workspaces: z.array(z.object({ id: z.string(), project: z.string(), source: z.string(), origin: z.string().describe("deprecated, the same as source (slack for chat); removed after one release"), owner: z.object({ thread_url: z.string().optional(), task_id: z.string().optional(), developer: z.string().optional(), developer_id: z.string().optional(), channel_team_id: z.string().optional(), channel_user_id: z.string().optional(), channel_user_name: z.string().optional(), slack_team_id: z.string().optional().describe("deprecated, the same as channel_team_id"), slack_user_id: z.string().optional().describe("deprecated, the same as channel_user_id"), slack_name: z.string().optional().describe("deprecated, the same as channel_user_name") }), status: z.string(), busy: z.boolean(), last_activity_at: z.string() })),
       limits: z.object({ per_person: z.number(), per_organization: z.number(), source: z.string() }),
       counts: z.object({ organization: z.number(), developer_organization: z.number().optional() }),
       truncated: z.boolean(),
@@ -240,8 +247,8 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
       return {
         structured: {
           workspaces: answer.workspaces.map((workspace) => ({
-            id: workspace.id, project: workspace.project, origin: workspace.origin,
-            owner: given({ thread_url: workspace.owner.threadUrl, task_id: workspace.owner.taskId, developer: workspace.owner.developerName === undefined ? undefined : inertName(workspace.owner.developerName), developer_id: workspace.owner.developerId, slack_team_id: workspace.owner.slackTeamId, slack_user_id: workspace.owner.slackUserId, slack_name: workspace.owner.slackName === undefined ? undefined : inertName(workspace.owner.slackName) }),
+            id: workspace.id, project: workspace.project, source: sourceOf(workspace.origin), origin: workspace.origin,
+            owner: given({ thread_url: workspace.owner.threadUrl, task_id: workspace.owner.taskId, developer: workspace.owner.developerName === undefined ? undefined : inertName(workspace.owner.developerName), developer_id: workspace.owner.developerId, channel_team_id: workspace.owner.slackTeamId, channel_user_id: workspace.owner.slackUserId, channel_user_name: workspace.owner.slackName === undefined ? undefined : inertName(workspace.owner.slackName), slack_team_id: workspace.owner.slackTeamId, slack_user_id: workspace.owner.slackUserId, slack_name: workspace.owner.slackName === undefined ? undefined : inertName(workspace.owner.slackName) }),
             status: workspace.status, busy: workspace.busy, last_activity_at: workspace.lastActivityAt,
           })),
           limits: { per_person: answer.limits.perPerson, per_organization: answer.limits.perOrganization, source: answer.limits.source },

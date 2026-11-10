@@ -166,7 +166,7 @@ export function isQuoteForbiddenSystem(system: string | undefined): boolean {
   return system !== undefined && QUOTE_FORBIDDEN_SYSTEMS.includes(system);
 }
 
-/** Enterprise: `citations_only` until a per-user check exists for the source. Public: `project_members`. Slack: always `citations_only`. */
+/** Company-run installs: `citations_only` until a per-user check exists for the source. Hosted: `project_members`. Slack: always `citations_only`. */
 export function defaultQuoteVisibility(edition: "enterprise" | "public", system?: string): QuoteVisibility {
   if (isQuoteForbiddenSystem(system)) return "citations_only";
   return edition === "enterprise" ? "citations_only" : "project_members";

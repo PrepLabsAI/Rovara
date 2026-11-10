@@ -55,7 +55,7 @@ export interface LinearTrackerAccess {
   readIssue?: ((orgId: OrgId, key: string) => Promise<LinearIssueRead | undefined>) | undefined;
   /** The Linear hook (its tenant and signing secret) a delivery under this scope belongs to. Absent: the adapter accepts no delivery. */
   hook?: ((scope: HostScope) => Promise<{ hook: LinearHook; secret: string } | undefined>) | undefined;
-  /** The organization a private install's system scope speaks for (a private install has exactly one). Absent: a system scope has no organization, so nothing is written or read for it. */
+  /** The organization an install's system scope speaks for (a single-company install has exactly one). Absent: a system scope has no organization, so nothing is written or read for it. */
   installOrg?: (() => OrgId | undefined) | undefined;
 }
 
