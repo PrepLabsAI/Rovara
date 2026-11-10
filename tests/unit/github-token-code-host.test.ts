@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SecretValue, type ModelKeyStore } from "@agentx/contracts";
 import { createFileModelKeyStore } from "../../packages/broker/src/ports/index.js";
+import { parseIssueUrl } from "../../packages/broker/src/plugins/code-host/github/client.js";
 import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { codeHostChecks, type CodeHostWorld } from "../support/ports/code-host-conformance.js";
@@ -225,5 +226,21 @@ describe("the laptop GitHub code host", () => {
     // 60 seconds on, the cached look at the repository has also lapsed; the next read uses the new sign-in.
     const credential = await host.issueGitCredential(repository, "clone", GITHUB_ORG_SCOPE);
     expect(credential).toMatchObject({ kind: "basic", password: second });
+  });
+});
+
+describe("where a comment says it is (N4: the API origin the request went to, matched exactly)", () => {
+  it("reads github.com and a GitHub Enterprise server's address, and nothing from another origin", () => {
+    expect(parseIssueUrl("https://api.github.com/repos/acme/app/issues/12", "https://api.github.com")).toEqual({ repositoryUrl: "https://github.com/acme/app", number: 12 });
+    // A GitHub Enterprise server: its API origin, with /api/v3 in front.
+    expect(parseIssueUrl("https://ghes.example.test/api/v3/repos/acme/app/issues/7", "https://ghes.example.test")).toEqual({ repositoryUrl: "https://ghes.example.test/acme/app", number: 7 });
+    // Another origin than the one asked, a look-alike, a different scheme or port, an extra query or a path that is not an issue: nothing.
+    expect(parseIssueUrl("https://api.github.com/repos/acme/app/issues/12", "https://ghes.example.test")).toBeUndefined();
+    expect(parseIssueUrl("https://api.github.com.evil.example/repos/acme/app/issues/12", "https://api.github.com")).toBeUndefined();
+    expect(parseIssueUrl("http://api.github.com/repos/acme/app/issues/12", "https://api.github.com")).toBeUndefined();
+    expect(parseIssueUrl("https://api.github.com:8443/repos/acme/app/issues/12", "https://api.github.com")).toBeUndefined();
+    expect(parseIssueUrl("https://api.github.com/repos/acme/app/issues/12?x=1", "https://api.github.com")).toBeUndefined();
+    expect(parseIssueUrl("https://api.github.com/repos/acme/app/pulls/12", "https://api.github.com")).toBeUndefined();
+    expect(parseIssueUrl("not a url", "https://api.github.com")).toBeUndefined();
   });
 });

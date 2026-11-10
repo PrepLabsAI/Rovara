@@ -1040,12 +1040,12 @@ export class GitHubAppCredentialProvider {
       const record = statusRecord(value);
       const user = statusRecord(record.user);
       // WHERE GitHub says the comment is: parsed from its own `issue_url`, not from what was asked. A comment that says nothing about its place is left out (the core cannot judge it).
-      const place = typeof record.issue_url === "string" ? /^https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues\/([1-9][0-9]*)$/u.exec(record.issue_url) : null;
+      const place = typeof record.issue_url === "string" ? parseIssueUrl(record.issue_url, new URL(root).origin) : undefined;
       if (!(typeof record.id === "number" || typeof record.id === "string") || typeof record.body !== "string" || typeof user.login !== "string" || user.login === ""
-        || typeof record.created_at !== "string" || typeof record.updated_at !== "string" || place === null) return [];
+        || typeof record.created_at !== "string" || typeof record.updated_at !== "string" || place === undefined) return [];
       const type = typeof user.type === "string" ? user.type : "User";
       return [{
-        id: String(record.id), onRepositoryUrl: `https://github.com/${place[1]!}/${place[2]!}`, number: Number(place[3]), body: record.body.slice(0, 65_536), authorLogin: user.login, ...(typeof user.id === "number" ? { authorId: String(user.id) } : {}),
+        id: String(record.id), onRepositoryUrl: place.repositoryUrl, number: place.number, body: record.body.slice(0, 65_536), authorLogin: user.login, ...(typeof user.id === "number" ? { authorId: String(user.id) } : {}),
         // GitHub's words for an automation account (`Bot`, a `[bot]` login) end here; the contract carries a plain flag.
         isBot: type === "Bot" || user.login.endsWith("[bot]"), createdAt: record.created_at, updatedAt: record.updated_at,
         url: typeof record.html_url === "string" && record.html_url.startsWith("https://") ? record.html_url : "",
@@ -2468,6 +2468,23 @@ export class GitHubAppCredentialProvider {
     }
     if (value.length === 0) return undefined;
     return parsePullRequestWithDraft(value[0], repository);
+  }
+}
+
+/**
+ * WHERE a comment says it is: its `issue_url`, accepted only at the API origin the request went to (exact origin, so a comment cannot name another host), with the path `/repos/<owner>/<name>/issues/<n>` (a GitHub Enterprise
+ * server's API sits under `/api/v3`). The repository address is the web address of the same host. Undefined for anything else.
+ */
+export function parseIssueUrl(issueUrl: string, apiOrigin: string): { repositoryUrl: string; number: number } | undefined {
+  try {
+    const url = new URL(issueUrl);
+    if (url.origin !== apiOrigin || url.search !== "" || url.hash !== "") return undefined;
+    const match = /^(?:\/api\/v3)?\/repos\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/issues\/([1-9][0-9]*)$/u.exec(url.pathname);
+    if (match === null) return undefined;
+    const web = apiOrigin === "https://api.github.com" ? "https://github.com" : apiOrigin;
+    return { repositoryUrl: `${web}/${match[1]!}/${match[2]!}`, number: Number(match[3]) };
+  } catch {
+    return undefined;
   }
 }
 
