@@ -151,7 +151,7 @@ export interface ModelProxyWorld {
   /** The models an operation may call (default: all three). */
   allowed: Map<string, ProxyRoute[]>;
   /** The key store as the proxy sees it: remove a provider to have none. */
-  keyStore: ModelKeyStore & { remove(provider: string): void };
+  keyStore: ModelKeyStore & { remove(provider: string): void; failWith(error: Error | undefined): void };
   /** Calls the callback listener the way the egress gateway's relay does (the owner's side of the wire). */
   send(options: { method?: string; path: string; headers?: Record<string, string | undefined>; body?: unknown; raw?: string }): Promise<{ status: number; headers: Record<string, string>; text: string }>;
   /** Everything the world ever put on a wire or in a log, for "the key is not here" checks. */
@@ -159,15 +159,17 @@ export interface ModelProxyWorld {
   directory: string;
 }
 
-export async function startModelProxyWorld(options: { ttlSeconds?: number; now?: () => number; fetch?: typeof fetch; maxConcurrentPerOperation?: number; keyDelayMs?: number; requestTimeoutMs?: number } = {}): Promise<ModelProxyWorld> {
+export async function startModelProxyWorld(options: { ttlSeconds?: number; now?: () => number; fetch?: typeof fetch; maxConcurrentPerOperation?: number; keyDelayMs?: number; requestTimeoutMs?: number; keySource?: string } = {}): Promise<ModelProxyWorld> {
   const provider = await startFakeProvider();
   const directory = await mkdtemp(join(tmpdir(), "model-proxy-"));
   const keys = { anthropic: fakeKey("sk-ant"), openai: fakeKey("sk-oai"), openrouter: fakeKey("sk-or") };
   const present = new Map<string, string>(Object.entries(keys));
-  const keyStore: ModelKeyStore & { remove(provider: string): void } = {
-    async get(_company, name) { if (options.keyDelayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.keyDelayMs)); const value = present.get(name); return value === undefined ? undefined : new SecretValue(value); },
+  let failure: Error | undefined;
+  const keyStore: ModelKeyStore & { remove(provider: string): void; failWith(error: Error | undefined): void } = {
+    async get(_company, name) { if (failure !== undefined) throw failure; if (options.keyDelayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.keyDelayMs)); const value = present.get(name); return value === undefined ? undefined : new SecretValue(value); },
     async providers() { return [...present.keys()]; },
     remove(name) { present.delete(name); },
+    failWith(error) { failure = error; },
   };
   const metered: ModelProxyWorld["metered"] = [];
   const metering = createPriceTableMetering(PRICES, (entry, result) => { metered.push({ entry, result }); });
@@ -180,6 +182,7 @@ export async function startModelProxyWorld(options: { ttlSeconds?: number; now?:
   const events: ModelProxyEvent[] = [];
   const proxy = createLocalModelProxy({
     keys: keyStore, metering, companyId: COMPANY,
+    ...(options.keySource === undefined ? {} : { keySource: options.keySource }),
     workerUrl: "http://rovara-broker:8081/v1/internal/model-proxy",
     endpoints: { anthropic: provider.url, openai: provider.url, openrouter: provider.url },
     grants: capabilityModelGrants({

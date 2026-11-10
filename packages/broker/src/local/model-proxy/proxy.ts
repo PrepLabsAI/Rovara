@@ -37,6 +37,8 @@ const ANTHROPIC_VERSION = "2023-06-01";
 export interface LocalModelProxyOptions {
   /** Where the real keys are (the `model-keys` port). Read per call; never kept. */
   keys: ModelKeyStore;
+  /** Where the keys come from, in words for the owner, when it is not the key file and the environment (`the "svc" secrets plug-in`). */
+  keySource?: string | undefined;
   /** Prices and records what each call used (the `metering` port). */
   metering: Metering;
   companyId: string;
@@ -189,10 +191,10 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
     try {
       held = await Promise.all(providers.map(async (provider) => ({ provider, has: (await options.keys.get(options.companyId, provider)) !== undefined })));
     } catch {
-      // The key file could not be read (wrong mode, not JSON). The words of that error can quote the file, so none are passed on.
-      return { statusCode: 503, headers: { ...JSON_HEADERS }, body: JSON.stringify({ error: { code: "MODEL_PROXY_UNAVAILABLE", message: "the model keys on this computer could not be read; check ~/.rovara/keys.json" } }) };
+      // The keys could not be read (wrong mode, not JSON, or a secrets plug-in failed). The words of that error can quote the file or the plug-in's data, so none are passed on; the source is named.
+      return { statusCode: 503, headers: { ...JSON_HEADERS }, body: JSON.stringify({ error: { code: "MODEL_PROXY_UNAVAILABLE", message: `the model keys on this computer could not be read; check ${options.keySource ?? "~/.rovara/keys.json"}` } }) };
     }
-    if (!held.some((entry) => entry.has)) return notAllowed(`no ${providers.join(" or ")} key is set on this computer; put it in ~/.rovara/keys.json or the ${providers[0]!.toUpperCase()}_API_KEY variable and restart rovara up`);
+    if (!held.some((entry) => entry.has)) return notAllowed(`no ${providers.join(" or ")} key is set on this computer; put it in ${options.keySource === undefined ? `~/.rovara/keys.json or the ${providers[0]!.toUpperCase()}_API_KEY variable` : `a place ${options.keySource} reads`} and restart rovara up`);
     const ledger = tokens.ledger(grant.operationId);
     if (grant.budget !== undefined) {
       if (ledger.currency !== undefined && ledger.currency !== grant.budget.currency) return notAllowed("this task's budget is in another currency than its spend");
@@ -328,7 +330,8 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       }
 
       // ---- the key, only now
-      const secret = await options.keys.get(options.companyId, route.provider);
+      // A failing key store (or a secrets plug-in) ends the call with a fixed sentence naming the source, never its own text.
+      const secret = await options.keys.get(options.companyId, route.provider).catch(() => { throw new Refusal(503, "model_proxy_unavailable", `the model key could not be read from ${options.keySource ?? "the key file"}`); });
       if (secret === undefined) throw new Refusal(403, "model_not_allowed", `no ${route.provider} key is set on this computer`);
       const key = secret.reveal();
 

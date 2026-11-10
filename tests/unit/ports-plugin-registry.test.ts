@@ -1,6 +1,6 @@
 // Port lane L2: the code-host, tracker and check-runner plug-in points in the ONE registry: routing, loading from the plug-in config, the settings
 // of each module, and the proof that a second provider plugs in with no core change.
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -195,7 +195,7 @@ describe("loading code hosts, trackers and check runners from the plug-in config
 });
 
 describe("the settings helpers of the plug-in modules", () => {
-  const fixtureDir = async () => mkdtemp(join(tmpdir(), "rovara-l2-"));
+  const fixtureDir = async () => realpath(await mkdtemp(join(tmpdir(), "rovara-l2-")));
   const secretValue = ["fixture", "signing", "value"].join("-");
 
   it("reads a secret from an environment variable by name, each time, and says nothing about the name's absence beyond one sentence", async () => {
