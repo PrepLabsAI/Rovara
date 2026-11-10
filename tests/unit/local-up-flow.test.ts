@@ -247,6 +247,24 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await raw(h.runtime.pagesUrl, { path: "/", headers: { host: new URL(h.runtime.pagesUrl).host } })).status).toBe(404);
   });
 
+  it("a learned context the worker's schema does not take is dropped: the step is still built and sent, without lessons", async () => {
+    const h = await launch();
+    expect((await h.api("/v1/admin/projects", { method: "POST", body: PROJECT })).status).toBe(201);
+    const flow = h.runtime.app.flow.deps;
+    let asked = 0;
+    flow.learned = async () => { asked += 1; return { learnedContext: { v: 1, nonsense: true } as never }; };
+    const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "22222222-2222-4222-8222-222222222222", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+    const store = h.runtime.registry.require("storage");
+    const workspaceId = (await store.get({ pk: `DEVTASK#${started.body.task.taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    const prepare = await h.nextJob(workspaceId, seen);
+    expect((await h.callback(prepare, "result", { status: "SUCCEEDED", result: {} })).status).toBe(200);
+    const understand = await h.nextJob(workspaceId, seen);
+    expect(understand).toMatchObject({ kind: "task", payload: { workflowMode: "UNDERSTAND" } });
+    expect((understand.payload as Record<string, unknown>)["learnedContext"]).toBeUndefined();
+    expect(asked).toBeGreaterThan(0);
+  });
+
   it("runs a task from the request to an approved plan", async () => {
     const h = await launch();
     expect((await h.api("/v1/admin/projects", { method: "POST", body: PROJECT })).status).toBe(201);
@@ -2127,6 +2145,19 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(cr.body).toBe(openingBody);
   });
 
+  it("lessons are on in a fresh install (the description says none were used yet), and ROVARA_LESSONS=0 turns them off (the description says so)", async () => {
+    const clock = movingClock();
+    const fresh = await launch({ host: true, now: clock.now });
+    const on = await published(fresh, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    await fresh.runtime.tick();
+    expect(on.cr.body).toContain("None used yet. Lessons are on:");
+    const off = await launch({ host: true, now: clock.now, environment: { ROVARA_LESSONS: "0" } });
+    const stopped = await published(off, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    await off.runtime.tick();
+    expect(stopped.cr.body).toContain("None. Lessons are switched off on this install.");
+    expect(stopped.cr.body).not.toContain("None used yet");
+  });
+
   it("N2: a description a person edited is left as they left it, though the files are verified and the risk is judged", async () => {
     const clock = movingClock();
     const h = await launch({ host: true, now: clock.now });
@@ -2164,7 +2195,7 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(cr.body).toContain("- src/health.ts (+2 -0)");
     expect(cr.body).not.toContain("## Risk: High");
     // A description a person edited is left as they left it.
-    expect(cr.body).toContain("None. This install does not use lessons yet.");
+    expect(cr.body).toContain("None used yet. Lessons are on:");
   });
 
   it("backs off when the code host says slow down, pauses every row until the time it names, and goes on after", async () => {
@@ -3318,6 +3349,30 @@ describe("rovara up: the second review by another AI company", () => {
       expect(answer.body.error?.message).toContain("local page");
     }
     expect(await h.runtime.registry.require("storage").get({ pk: `ORG#${IMPLICIT_COMPANY_ID}`, sk: "SECONDREVIEW#REPLAY#run-1" })).toBeUndefined();
+  });
+
+  it("`rovara open lessons` opens the lessons page in a new page session, and `rovara open` alone does not", async () => {
+    const h = await launch();
+    const printed: string[] = [];
+    const run = async (...args: string[]) => {
+      const program = new Command().exitOverride().option("--json");
+      registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
+      await program.parseAsync(["node", "rovara", ...args]);
+    };
+    const landed = async () => {
+      const once = new URL(h.opened.at(-1)!);
+      return new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
+    };
+    await run("open", "lessons", "--state-dir", h.stateDirectory);
+    const first = await landed();
+    await run("open", "lessons", "--state-dir", h.stateDirectory);
+    const second = await landed();
+    expect(first.pathname).toMatch(/\/lessons$/u);
+    expect(second.pathname.split("/")[2]).not.toBe(first.pathname.split("/")[2]);
+    await run("open", "--state-dir", h.stateDirectory);
+    const home = await landed();
+    await run("open", "--state-dir", h.stateDirectory);
+    expect((await landed()).pathname.split("/")[2]).toBe(home.pathname.split("/")[2]);
   });
 
   it("`rovara second-review` shows the state, `evidence` and `rovara open second-review` open its page; neither can change the model, the mode or the evidence", async () => {

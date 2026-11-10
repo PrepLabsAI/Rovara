@@ -64,6 +64,8 @@ const NOTICES: Record<string, string> = {
   chosen: "Done. Rovara carries on with the design review.",
   resumed: "Picked up again.",
   lesson: "Lesson updated.",
+  lessonrepo: "Saved. A switched-on repository gets its first pull request within a day.",
+  lessonfresh: "Switching a repository's lessons file on needs a page you opened in the last few minutes. Run `rovara open lessons` to open one.",
   revoked: "That script token is revoked.",
   linked: "That chat account is linked to you.",
   unlinked: "That chat account is no longer linked.",
@@ -173,7 +175,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     Promise.resolve(contextFor(request)).then(async (context) => ({ ...html(await draw(context)), headers: { "content-security-policy": pagePolicy(context.nonce) } }));
 
   /** The proof an approval form carries: the page session is the evidence that the local owner is here. */
-  const proofFor = (request: Req, offer: ApprovalOffer): ApprovalProof => ({
+  const proofFor = (request: Req, offer: Pick<ApprovalOffer, "requestId" | "revision" | "artifactDigest">): ApprovalProof => ({
     proofId: randomUUID(), method: LOCAL_SESSION_METHOD, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest,
     // Not the session's secret: a token signed over this session and exactly this request, revision and digest.
     token: sessions.issueProof(request.session.id, { requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest }),
@@ -324,7 +326,20 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const result = await options.actions.decideDesign({ taskId, decision, ...(note === "" ? {} : { note }), approval: offer, proof: proofFor(request, offer) });
       return redirect(`${request.base}/design/${taskId}?n=${outcomeCode(result, decision === "approve" ? "approved" : "rejected")}`);
     } },
-    { method: "GET", pattern: /^\/lessons$/, handle: async (request) => page(request, async (context) => renderLessons(context, await options.data.listLessons())) },
+    { method: "GET", pattern: /^\/lessons$/, handle: async (request) => page(request, async (context) => renderLessons(context, await options.data.listLessons(), await (options.data.listLessonRepos?.() ?? Promise.resolve([])).catch(() => []))) },
+    { method: "POST", pattern: /^\/lessons\/repo$/, handle: async (request) => {
+      const project = request.form?.get("project") ?? "";
+      const repo = request.form?.get("repo") ?? "";
+      const action = request.form?.get("action");
+      const actions = ["on", "off", "resume", "pointer_add", "pointer_decline"] as const;
+      const chosen = actions.find((candidate) => candidate === action);
+      if (options.actions.lessonRepoAction === undefined || chosen === undefined || project === "" || project.length > 200 || repo === "" || repo.length > 200) return redirect(`${request.base}/lessons?n=invalid`);
+      if (!verified(request, { action: "lesson.repo", subject: `${project}:${repo}:${chosen}` })) return redirect(`${request.base}/lessons?n=form`);
+      // Switching on makes Rovara open pull requests in a repository: it asks for a page opened a few minutes ago, as a long-lived credential does.
+      if (chosen === "on" && !tokenPageIsFresh(request)) return redirect(`${request.base}/lessons?n=lessonfresh`);
+      const result = await options.actions.lessonRepoAction({ project, repo, action: chosen, fresh: tokenPageIsFresh(request) });
+      return redirect(`${request.base}/lessons?n=${outcomeCode(result, "lessonrepo")}`);
+    } },
     { method: "POST", pattern: /^\/lessons\/act$/, handle: async (request) => {
       const lessonId = request.form?.get("lessonId") ?? "";
       const action = request.form?.get("action");
@@ -332,8 +347,10 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       // The form is good only for the lesson as it was drawn: its state is part of what the token binds.
       const lesson = (await options.data.listLessons()).find((candidate) => candidate.id === lessonId);
       if (lesson === undefined) return redirect(`${request.base}/lessons?n=missing`);
-      if (!verified(request, { action: "lesson.act", subject: `${lessonId}:${action}:${lesson.status}` })) return redirect(`${request.base}/lessons?n=form`);
-      const result = await options.actions.lessonAction({ lessonId, action });
+      // An approval is bound to the lesson's own text and version too: the form names what the owner read, and the proof the page signs is for exactly that.
+      const offer = action === "approve" ? lesson.offer : undefined;
+      if (!verified(request, { action: "lesson.act", subject: `${lessonId}:${action}:${lesson.status}`, ...(offer === undefined ? {} : { requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest }) })) return redirect(`${request.base}/lessons?n=form`);
+      const result = await options.actions.lessonAction({ lessonId, action, ...(offer === undefined ? {} : { offer, proof: proofFor(request, offer) }) });
       return redirect(`${request.base}/lessons?n=${outcomeCode(result, "lesson")}`);
     } },
     { method: "GET", pattern: /^\/tokens$/, handle: async (request) => {

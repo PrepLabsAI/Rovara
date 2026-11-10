@@ -31,6 +31,8 @@ import {
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
 import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
+import { createLocalLearningAdapter } from "../lessons/local-embedder.js";
+import { localLessonsEnabled } from "../lessons/switch.js";
 import { DocumentAuditSink, FileCompanyInstructions, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService, startAuditCopy, startAuditCopyFromPrimary } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
@@ -386,6 +388,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // Nothing is priced until a `model-provider` plug-in brings a price table: usage is recorded as "unknown", never guessed.
     priceTable,
   });
+  // The learning point: how lessons are compared. Code's own compares on keywords and cited paths; `ROVARA_LESSONS_EMBEDDER=local` adds the small embedder that runs in this process. A configured `learning` plug-in is used instead.
+  registry.register("learning", "local", createLocalLearningAdapter({ embedder: options.environment["ROVARA_LESSONS_EMBEDDER"] === "local" }), { isDefault: true });
   // Item K2: the model providers. The three Code has always known are rows; a configured `model-provider` plug-in of the same name replaces one.
   registerBuiltinModelProviders(registry);
 
@@ -525,7 +529,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(options.planFormat === undefined ? {} : { planFormat: options.planFormat }),
     ...(options.modelProviderEndpoints === undefined ? {} : { modelProviderEndpoints: options.modelProviderEndpoints }),
     // The flip-back settings of the session features (`0` turns one off; anything else leaves it on).
-    liveSteer: options.environment["ROVARA_LIVE_STEER"] !== "0", stepNotes: options.environment["ROVARA_STEP_NOTES"] !== "0", ask: options.environment["ROVARA_ASK"] !== "0",
+    liveSteer: options.environment["ROVARA_LIVE_STEER"] !== "0", stepNotes: options.environment["ROVARA_STEP_NOTES"] !== "0", ask: options.environment["ROVARA_ASK"] !== "0", lessonsEnabled: () => localLessonsEnabled(options.environment),
     diagnosis: options.environment["ROVARA_DIAGNOSIS"] !== "0",
   });
 

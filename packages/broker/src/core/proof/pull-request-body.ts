@@ -68,13 +68,17 @@ export interface PullRequestBodyContext {
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
-export interface LessonUsedEntry { title: string; notHelpfulUrl: string }
+export interface LessonUsedEntry { title: string; notHelpfulUrl: string; /** The number a comment command names it by (`/rovara lesson <number> wrong`), for an install with no page this description can link to. */ number?: number }
 /** The "Lessons used" section: how many lessons the task used, the task page's link, and the lessons themselves only where the repository is known to be private (`entries` is empty otherwise). */
-export interface LessonsUsedSection { count: number; taskUrl: string; entries: readonly LessonUsedEntry[]; /** An install with no lessons (Rovara Code before its lessons are ported): the section is there and says none were used. */ none?: true }
+export interface LessonsUsedSection { count: number; taskUrl: string; entries: readonly LessonUsedEntry[]; /** The section is there and says none were used. `reason`: lessons are `off` on this install, or on but none `unused` yet; absent: an install with no lessons at all. */ none?: true; reason?: "off" | "unused" }
 const SAFE_LINK = /^https:\/\/[^\s()<>[\]\\]{1,500}$/u;
 /** The "Lessons used" section's lines, shrinking with the other lists: `limit` entries, then a count. Version 1 and version 2 descriptions both use it. */
 export function lessonsUsedLines(used: LessonsUsedSection | undefined, limit: number): string[] {
-  if (used?.none === true && used.count <= 0) return ["## Lessons used", "None. This install does not use lessons yet.", ""];
+  if (used?.none === true && used.count <= 0) {
+    if (used.reason === "off") return ["## Lessons used", "None. Lessons are switched off on this install.", ""];
+    if (used.reason === "unused") return ["## Lessons used", "None used yet. Lessons are on: Rovara learns from finished tasks, and each lesson waits for the owner's approval before it is used.", ""];
+    return ["## Lessons used", "None. This install does not use lessons yet.", ""];
+  }
   if (used === undefined || used.count <= 0) return [];
   const noun = used.count === 1 ? "lesson" : "lessons";
   const link = SAFE_LINK.test(used.taskUrl) ? used.taskUrl : undefined;
@@ -82,8 +86,9 @@ export function lessonsUsedLines(used: LessonsUsedSection | undefined, limit: nu
     // A public repository, or one whose visibility is unknown: no titles, one link (the task page, behind sign-in), so the lessons' words are not published to everyone who can read the code.
     return ["## Lessons used", `Rovara used ${used.count} ${noun} from this project's record.${link === undefined ? "" : ` Review them, or tell Rovara one did not help, on the [task page](${link}).`}`, ""];
   }
-  const shown = used.entries.slice(0, limit).map((entry) => `- ${inertLine(entry.title, 100)}${SAFE_LINK.test(entry.notHelpfulUrl) ? ` ([not helpful](${entry.notHelpfulUrl}))` : ""}`);
-  return ["## Lessons used", `Rovara used ${used.count} ${noun} from this project's record. Tell Rovara when one did not help.`, ...shown, ...(used.count > shown.length ? [`- and ${used.count - shown.length} more`] : []), ""];
+  const shown = used.entries.slice(0, limit).map((entry) => `- ${entry.number === undefined ? "" : `${String(entry.number)}. `}${inertLine(entry.title, 100)}${SAFE_LINK.test(entry.notHelpfulUrl) ? ` ([not helpful](${entry.notHelpfulUrl}))` : ""}`);
+  const byComment = used.entries.some((entry) => entry.number !== undefined && !SAFE_LINK.test(entry.notHelpfulUrl));
+  return ["## Lessons used", `Rovara used ${used.count} ${noun} from this project's record. ${byComment ? "Comment `/rovara lesson <number> wrong` to tell Rovara one did not help." : "Tell Rovara when one did not help."}`, ...shown, ...(used.count > shown.length ? [`- and ${used.count - shown.length} more`] : []), ""];
 }
 
 const byteLength = (text: string) => Buffer.byteLength(text, "utf8");

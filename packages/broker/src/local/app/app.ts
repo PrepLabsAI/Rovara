@@ -66,6 +66,8 @@ import { attachCitedCode } from "../../core/plan/store.js";
 import { loadPlanDocument, planFactsOf } from "../../core/plan/document.js";
 import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
+import { createLocalLessons, type LocalLessons } from "./lessons.js";
+import { createLessonRoutes } from "./lessons-routes.js";
 import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
 import type { DocumentMilestones } from "../../core/milestones/milestones.js";
 import { createTaskFactsSource } from "./facts.js";
@@ -130,6 +132,8 @@ export interface LocalAppOptions {
   modelProxy?: () => LoopbackProxy | undefined;
   /** Whether Fix with agent is served. The runtime sets it from `ROVARA_DIAGNOSIS` (`0` turns it off); default on. */
   diagnosis?: boolean;
+  /** Whether lessons are switched on. The runtime gives it from `ROVARA_LESSONS` (on unless exactly `0`); absent: the process environment, read the same way. */
+  lessonsEnabled?: () => boolean;
   /** Port of the review pages (0: a free one). */
   pagesPort?: number;
   /** The most pull request threads one comment poll reads (default 20): a test lowers it to see the rotation. */
@@ -161,6 +165,8 @@ export interface LocalApp {
   readonly secondReview: SecondReview;
   /** Fix with agent: a diagnosis of the error a task shows, answered by the owner's own model through the proxy. */
   readonly diagnosis: LocalDiagnosis;
+  /** Lessons: what was learned, the owner's decisions on it, and the pass that reflects on finished tasks. */
+  readonly lessons: LocalLessons;
   /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
   readonly modelGrants: ModelGrantSource;
   /** Script tokens: serving a request that carries one, and the settings the local pages and routes use. */
@@ -391,7 +397,17 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const decisionActions = createDecisionActions({ gate, companyId });
   // Chat (owner decision 58): the owner's own acts on the chat page, and what an adapter may hand the core. Nothing here approves: see chat.ts.
   const chat = createLocalChat({ registry, flow, store, companyId, owner, now: () => clock().getTime(), gate, log });
-  const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
+  // Lessons: what Rovara learned from finished tasks, loaded into later steps and decided on the owner's page. On unless `ROVARA_LESSONS=0`, in Suggest mode (every lesson waits for the owner); the pages still show what exists.
+  const lessonNames = registry.names("learning");
+  const lessons = createLocalLessons({
+    flow: flow.deps, registry, companyId, owner, blobs, milestones, audit: registry.require("audit-sink"), admission: registry.require("admission"), metering: registry.require("metering"), approvers: registry.require("approvers"), identity: registry.require("identity"),
+    model: { choice: chosen, keys, providers, endpoints: options.modelProviderEndpoints, fetch: options.askFetch },
+    learning: lessonNames.length === 0 ? undefined : registry.get("learning", lessonNames.find((name) => name !== "local") ?? lessonNames[0]!),
+    ...(options.lessonsEnabled === undefined ? {} : { enabled: options.lessonsEnabled }), now: () => clock().getTime(), log,
+  });
+  flow.deps.learned = (input) => lessons.learnedFor(input);
+  flow.deps.lessonsUsed = (task, repositoryId) => lessons.usedInPullRequest(task, repositoryId);
+  const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, lessons, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
   // script tokens. The creator is asked of the identity port by Rovara id; the audit steps are the registry's sink's.
   const scriptTokens = createLocalScriptTokens({ store, audit: registry.require("audit-sink"), now: () => clock().getTime(), log, companyId, owner, identity: registry.require("identity"), ...(options.scriptTokensEnabled === undefined ? {} : { enabled: options.scriptTokensEnabled }) });
@@ -404,7 +420,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const pages = await createLocalPagesServer({
     data: {
-      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview, diagnosis }),
+      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview, diagnosis, lessons }),
       listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
       getChatPage: () => chat.view(),
       previewChatLink: (code) => chat.preview(code),
@@ -412,7 +428,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     actions: {
       ...chat.actions,
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume,
-      ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, diagnosis, designAnswers: (input) => designPageActions.answerQuestions(input) }),
+      ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       async createScriptToken(input) {
         try {
           return { ok: true, created: await scriptTokens.create(input) };
@@ -444,7 +460,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     replay: (taskId, key) => readWorkflowE2EReplayRecord({ store }, taskId, key),
     grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
-  const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords } });
+  const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, onEvents: (operation, events) => lessons.onEvents(operation, events) });
   const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
@@ -456,7 +472,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? ownerRoutes(request, caller);
+  const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await lessonRoutes(request, caller)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -481,9 +498,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await tracking.sweep().catch(logFailure("local_app.tracking_failed"));
     await comments.poll().catch(logFailure("local_app.comments_failed"));
   };
+  // What Rovara learns from finished tasks takes model calls that last tens of seconds, so it has its own timer: neither the dispatch nor the pull request reads wait for it.
+  const tickLessons = async (): Promise<void> => {
+    await lessons.tick().catch(logFailure("local_app.lessons_failed"));
+  };
   const tick = async (): Promise<void> => {
     await tickCore();
     await tickTracking();
+    await tickLessons();
   };
   // The in-process chat adapters begin to listen. What one hears goes through the sink, which applies the checks of the channel API (bound space, linked person, a card's request); a start that fails
   // (a token the chat does not accept) is reported and leaves the rest of Rovara running.
@@ -515,10 +537,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     };
     every(2_000, tickCore);
     every(5_000, tickTracking);
+    every(10_000, tickLessons);
   }
 
   return {
-    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants, secondReview, diagnosis, milestones, scriptTokens,
+    flow, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, diagnosis, milestones, scriptTokens,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

@@ -220,6 +220,11 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
   let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }) };
+  // The lessons the step is given are chosen now, from the lessons as they are at this moment (a lesson retired since the step was queued is not sent). A worker that does not list the feature gets none.
+  if (spec.kind === "task" && deps.learned !== undefined) {
+    const learned = await deps.learned({ workspaceId: workspace.id, operationId: operation.id, workflowMode: operation.workflowMode, features }).catch(() => undefined);
+    if (learned?.learnedContext !== undefined) payload = { ...payload, learnedContext: learned.learnedContext };
+  }
   // An approved plan's parts for a worker that does not list "task.workflowParallelParts": it would reject the `parallel` setting, and it builds the parts one after another, which the checkpoint rules accept and which
   // costs no more (only time). The setting is the one field of an ordered run that is withheld rather than refused, and only when the older worker can take over the retained progress; otherwise the run is refused.
   const ordered = spec.kind === "task" ? payload["workflowDependencies"] as WorkflowDependencyInvocation | undefined : undefined;
@@ -285,7 +290,15 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     }
   }
   const parsed = WorkerInvocationSchema.safeParse(draft);
-  return parsed.success ? parsed.data : "the job could not be built for the worker";
+  if (parsed.success) return parsed.data;
+  // Lessons never block a step: a learned context the worker's schema does not take is dropped, and the step is built without it.
+  if (draft.payload["learnedContext"] !== undefined) {
+    const { learnedContext: _dropped, ...withoutLessons } = draft.payload;
+    void _dropped;
+    const retried = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutLessons });
+    if (retried.success) return retried.data;
+  }
+  return "the job could not be built for the worker";
 }
 
 /** Records the workspace's machine (and the allowance taken for it). False when the workspace has moved on (the fence no longer holds): the caller must not use the machine. */

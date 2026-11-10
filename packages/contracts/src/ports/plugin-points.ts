@@ -25,6 +25,7 @@ import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.
 import type { AuditSink } from "./audit-sink.js";
 import type { BuildSystem } from "./build-system.js";
 import type { CompanyInstructionsSource } from "./company-instructions.js";
+import type { LearningAdapter } from "./learning.js";
 import type { QueueService } from "./queue.js";
 import type { WorkerMachines } from "./worker-machines.js";
 
@@ -131,7 +132,7 @@ export interface ChannelAdapter {
 }
 
 /**
- * The thing an adapter of a point that has no port yet must be (monitoring, learning, team-record-source). The lane
+ * The thing an adapter of a point that has no port yet must be (monitoring, team-record-source). The lane
  * that defines the point's port narrows its line in `PluginPointTypes` to the real interface. Until then only the name is known.
  */
 export interface UnspecifiedAdapter {
@@ -148,7 +149,7 @@ export interface PluginPointTypes {
   storage: DocumentStore;
   queue: QueueService;
   monitoring: UnspecifiedAdapter;
-  learning: UnspecifiedAdapter;
+  learning: LearningAdapter;
   "team-record-source": UnspecifiedAdapter;
   identity: IdentityProvider;
   "build-system": BuildSystem;

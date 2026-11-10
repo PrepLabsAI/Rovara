@@ -31,6 +31,8 @@ import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts
 import type { SecondReview } from "../second-review/service.js";
 import type { ProofContext } from "../proof/proof-section.js";
 import type { E2EVerificationDeps } from "../e2e/authority.js";
+import type { LearnedContext } from "@agentx/contracts";
+import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
@@ -253,6 +255,16 @@ export interface TaskFlowDeps {
   liveSteer?: boolean;
   /** Whether the planning, understanding and coding steps read the people's notes (the flip-back setting, default on). Off: notes are saved and no step reads them. */
   stepNotes?: boolean;
+  /**
+   * The "Lessons used" section of the description of the task's pull request in one repository: what the task was given and, where that repository's readers may read it, which lessons. `undefined`: no section. Absent: the
+   * install has no lessons, and the description says so.
+   */
+  lessonsUsed?: (task: { taskId: string; project: string; startingRevision: number }, repositoryId: string) => Promise<LessonsUsedSection | undefined>;
+  /**
+   * The lessons a step is given: asked when the step's invocation is built, only for a task step. `features` are the worker's. The answer is the worker's `learnedContext` or none; it never throws into the dispatch, and a slow
+   * answer is none (the step then runs as it would without lessons). Absent: no step is given a lesson.
+   */
+  learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }) => Promise<{ learnedContext?: LearnedContext }>;
 }
 
 export const DEFAULT_DISPATCH_QUEUE = "task-dispatch";

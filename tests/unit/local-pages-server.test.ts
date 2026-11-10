@@ -313,6 +313,51 @@ describe("lessons", () => {
     expect(world.actions.calls).toHaveLength(1);
   });
 
+  it("shows the repository lessons file switches, and a switch needs its own form token", async () => {
+    const page = (await get(`${base}/lessons`)).body;
+    expect(page).toContain("Lessons in the repository");
+    const { action, fields } = formOf(page, "/lessons/repo");
+    expect(fields).toMatchObject({ project: "payments", repo: "api", action: "on" });
+    expect(String((await post(action, { ...fields, action: "off" })).headers.location)).toContain("n=form");
+    expect(String((await post(action, { ...fields, repo: "other" })).headers.location)).toContain("n=form");
+    expect(world.actions.calls).toEqual([]);
+    expect(String((await post(action, fields)).headers.location)).toContain("n=lessonrepo");
+    expect(world.actions.calls[0]).toMatchObject({ name: "lessonRepoAction", input: { project: "payments", repo: "api", action: "on", fresh: true } });
+  });
+
+  it("switching a repository's lessons file on needs a page opened in the last few minutes; switching off does not", async () => {
+    let clock = Date.parse("2026-11-10T10:00:00.000Z");
+    const aged = await createLocalPagesServer({ data: world.data, actions: world.actions, now: () => clock });
+    try {
+      const agedBase = `/s/${aged.sessions.mint().token}`;
+      const aHost = new URL(aged.origin).host;
+      const getAged = (path: string) => raw(aged.origin, { path, headers: { host: aHost } });
+      const postAged = (path: string, fields: Record<string, string>) => raw(aged.origin, { method: "POST", path, body: formBody(fields), headers: { host: aHost, origin: aged.origin, "content-type": "application/x-www-form-urlencoded" } });
+      const on = formOf((await getAged(`${agedBase}/lessons`)).body, "/lessons/repo");
+      clock += 11 * 60 * 1000;
+      expect(String((await postAged(on.action, on.fields)).headers.location)).toContain("n=lessonfresh");
+      expect(world.actions.calls).toEqual([]);
+      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [{ repo: "api", enabled: true, fileDeleted: false, pointer: "not_yet", notices: [] }], available: [] }];
+      const off = formOf((await getAged(`${agedBase}/lessons`)).body, "/lessons/repo");
+      expect(off.fields["action"]).toBe("off");
+      expect(String((await postAged(off.action, off.fields)).headers.location)).toContain("n=lessonrepo");
+      expect(world.actions.calls[0]).toMatchObject({ name: "lessonRepoAction", input: { action: "off", fresh: false } });
+    } finally { await aged.close(); }
+  });
+
+  it("binds a lesson's approval to its own text and version, and hands the action a proof signed for exactly that", async () => {
+    const offer = { requestId: "lesson:L1:3", revision: 3, artifactDigest: "d".repeat(64), risk: "medium" as const };
+    world.data.lessons = world.data.lessons.map((lesson) => (lesson.id === "L1" ? { ...lesson, offer } : lesson));
+    const { action, fields } = await formNow("/lessons", "/lessons/act");
+    expect((await post(action, fields)).headers.location).toContain("n=lesson");
+    expect(world.actions.calls[0]).toMatchObject({ name: "lessonAction", input: { lessonId: "L1", action: "approve", offer, proof: { method: LOCAL_SESSION_METHOD, requestId: offer.requestId, revision: 3, artifactDigest: offer.artifactDigest, token: expect.stringMatching(/^p1\./) as string } } });
+    // A form drawn for another version of the lesson does not carry over: the lesson changed, so the form is refused and nothing is decided.
+    const stale = await formNow("/lessons", "/lessons/act");
+    world.data.lessons = world.data.lessons.map((lesson) => (lesson.id === "L1" ? { ...lesson, offer: { ...offer, revision: 4, requestId: "lesson:L1:4" } } : lesson));
+    expect(String((await post(stale.action, stale.fields)).headers.location)).toContain("n=form");
+    expect(world.actions.calls).toHaveLength(1);
+  });
+
   it("refuses a lesson form after the lesson changed state, so an old form cannot bring a retired lesson back", async () => {
     const { action, fields } = formOf((await get(`${base}/lessons`)).body, "/lessons/act");
     world.data.lessons = world.data.lessons.map((lesson) => (lesson.id === "L1" ? { ...lesson, status: "retired" as const } : lesson));

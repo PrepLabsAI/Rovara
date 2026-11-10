@@ -1,0 +1,114 @@
+[
+ {
+  "id": "i1",
+  "intent": "Add a giftWrap boolean to Order and show it on the order detail page",
+  "plan": "Edit schema.prisma, create a migration, add the field to openapi.yaml, regenerate the web client, render it on OrderDetail.",
+  "relevant": [
+   "a1",
+   "a8",
+   "r6"
+  ]
+ },
+ {
+  "id": "i2",
+  "intent": "Invoice totals are wrong for Japanese yen orders",
+  "plan": "Look at Money.fromDecimalString and the invoice total calculation in billing.",
+  "relevant": [
+   "a2",
+   "r4"
+  ]
+ },
+ {
+  "id": "i3",
+  "intent": "Order confirmation emails ignore the new-checkout rollout for pilot tenants",
+  "plan": "Check the flag call in the confirmation email job.",
+  "relevant": [
+   "a7",
+   "r3"
+  ]
+ },
+ {
+  "id": "i4",
+  "intent": "Stripe webhooks return 400 after upgrading Express to v5",
+  "plan": "Inspect middleware order in billing server and the webhook route.",
+  "relevant": [
+   "a11",
+   "a27"
+  ]
+ },
+ {
+  "id": "i5",
+  "intent": "Playwright checkout specs hang in CI on the login step",
+  "plan": "Check e2e setup, the test database and playwright.config.ts.",
+  "relevant": [
+   "a4",
+   "a22",
+   "r5"
+  ]
+ },
+ {
+  "id": "i6",
+  "intent": "Speed up the orders list GraphQL query",
+  "plan": "Profile the Order resolver and the queries it issues; add indexes if needed.",
+  "relevant": [
+   "a10",
+   "a25"
+  ]
+ },
+ {
+  "id": "i7",
+  "intent": "Add a refunded status badge with its own colour",
+  "plan": "Extend StatusBadge with the new status and a colour.",
+  "relevant": [
+   "a12",
+   "a26",
+   "c12"
+  ]
+ },
+ {
+  "id": "i8",
+  "intent": "Rename Cart.lines back to Cart.items in the cart model",
+  "plan": "Change the Cart type and the cart cache serialization.",
+  "relevant": [
+   "a13",
+   "c13"
+  ]
+ },
+ {
+  "id": "i9",
+  "intent": "Pricing quotes time out during the load test",
+  "plan": "Look at how the API calls the pricing service, its retries and timeout.",
+  "relevant": [
+   "a16",
+   "c16",
+   "a23"
+  ]
+ },
+ {
+  "id": "i10",
+  "intent": "Translate the new tax note into German and pluralise the item count",
+  "plan": "Add keys to de.json and use plural syntax for the count.",
+  "relevant": [
+   "a15",
+   "c15"
+  ]
+ },
+ {
+  "id": "i11",
+  "intent": "Add a seasonality feature to the elasticity model in pricing-svc",
+  "plan": "Change the training code and run the pricing tests.",
+  "relevant": [
+   "a6",
+   "d6"
+  ]
+ },
+ {
+  "id": "i12",
+  "intent": "Log the tenant id when an order fails to save",
+  "plan": "Add a log line in the order save path in the API.",
+  "relevant": [
+   "a5",
+   "r2"
+  ]
+ }
+]

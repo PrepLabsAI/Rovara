@@ -25,6 +25,7 @@ import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { listTasks, readTask } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { approvalOfferOf } from "./page-data.js";
+import type { LocalLessons } from "./lessons.js";
 import { createReadBudget, createRepositoryResolver } from "./tracking.js";
 
 /** The comment poll of one pass: threads, requests and time. */
@@ -48,6 +49,8 @@ export interface LocalCommentsOptions {
   companyId: OrgId;
   owner: Principal;
   decisions: ReturnType<typeof createDecisionActions>;
+  /** `/rovara lesson <n> wrong|right|retire`: answered by the lessons of this install. Absent: the command answers that there are no lessons. */
+  lessons?: Pick<LocalLessons, "command"> | undefined;
   now: () => number;
   /** Told when a code host asks Rovara to slow down (the same pause merge tracking keeps). */
   pauseUntil?: (retryAt: number) => void;
@@ -237,7 +240,13 @@ export function createLocalComments(options: LocalCommentsOptions): LocalComment
       return undefined;
     },
     decide: (input) => options.decisions.decideFromComment(input),
-    async lesson() { return { ok: false, reason: "refused", message: "Lessons are not on this install yet." }; },
+    async lesson(input) {
+      // The number names a lesson in the "Lessons used" list of the pull request the comment is on, which belongs to one task; a change several tasks share decides none.
+      const tasks = await tasksAt({ repository: input.repository, number: input.number });
+      if (tasks.length > 1) return { ok: false, reason: "refused", message: "Several tasks work on this change, so I cannot tell which one used that lesson." };
+      if (tasks[0] === undefined || options.lessons === undefined) return { ok: false, reason: "not_found", message: "No lessons are recorded for this change." };
+      return options.lessons.command({ ...input, taskId: tasks[0] });
+    },
     async stop(change) {
       const tasks = await tasksAt(change);
       if (tasks.length > 1) return { ok: false, reason: "refused", message: "Several tasks work on this change, so I cannot tell which to stop. Stop the one you mean on its page." };

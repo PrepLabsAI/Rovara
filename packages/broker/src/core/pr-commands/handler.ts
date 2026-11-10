@@ -71,7 +71,8 @@ export interface PrCommandWorld {
   pendingFor(change: { repository: string; number: number }): Promise<PendingOffer | undefined | "several">;
   decide(input: { taskId: string; decision: "approve" | "changes"; note?: string; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
   /** `number` is the position in the "Lessons used" list of the pull request. */
-  lesson(input: { repository: string; number: number; lessonNumber: number; verdict: "wrong" | "right" | "retire" }): Promise<LocalActionResult>;
+  /** `author` is the comment's own author, as the host says: the one who asked, whatever the install's owner is. */
+  lesson(input: { repository: string; number: number; lessonNumber: number; verdict: "wrong" | "right" | "retire"; author: ExternalAccountRef }): Promise<LocalActionResult>;
   /** `"several"` is refused by the world itself (it answers `refused`); the handler never picks one. */
   stop(input: { repository: string; number: number }): Promise<LocalActionResult>;
 }
@@ -137,7 +138,7 @@ export function createPrCommentCommands(options: PrCommandsOptions): { handle(ev
           return { handled: true, command: "stop", result };
         }
         if (parsed.kind === "lesson") {
-          const result = await options.world.lesson({ repository: event.repository, number: event.number, lessonNumber: parsed.number, verdict: parsed.verdict });
+          const result = await options.world.lesson({ repository: event.repository, number: event.number, lessonNumber: parsed.number, verdict: parsed.verdict, author: comment.author });
           await say(event, sentenceFor(result, "Thanks. I noted that."));
           return { handled: true, command: "lesson", result };
         }

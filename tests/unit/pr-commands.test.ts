@@ -184,7 +184,8 @@ describe("lessons and stop", () => {
     const { commands, verdicts, replies, say } = setup();
     await commands.handle(say("/rovara lesson 3 wrong", "c-1"));
     await commands.handle(say("/rovara stop", "c-2"));
-    expect(verdicts).toEqual([{ repository: "example/repo", number: 12, lessonNumber: 3, verdict: "wrong" }, "stop"]);
+    // The command carries the comment's own author, so the world acts as that person.
+    expect(verdicts).toEqual([{ repository: "example/repo", number: 12, lessonNumber: 3, verdict: "wrong", author: AUTHOR }, "stop"]);
     expect(replies).toEqual(["Thanks. I noted that.", "Stopped the work on this change."]);
   });
 });

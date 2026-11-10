@@ -291,7 +291,7 @@ tracking) the conversation of each thread through the code host's optional `comm
   (`approve <version>` approves and must name the version that waits: Rovara posts a notice with the short digest, e.g. `/rovara approve 3f2a9c00`, and a bare or older one is refused and told which version waits; `changes:` asks for changes, and an `approve` comment is no proof of a request for changes), not a bot's, not Rovara's own reply (its hidden marker), a writer, and used once. The Approvers seam
   makes the checks again from a second read when the decision is made.
 - **What a comment cannot do.** It cannot approve a high-risk plan (the owner's page session only), reject (the session only), or merge. Asking for changes by comment is allowed (decision 62).
-- **Not wired:** `/rovara lesson` (no lessons on this install) answers so. A host without `comments` offers no comment way of approving.
+- **Lessons:** `/rovara lesson <n> wrong`, `right` or `retire` marks or retires the n-th lesson in the pull request's "Lessons used" list (see "Lessons"). It cannot approve a lesson. A host without `comments` offers no comment way of approving.
 
 ## Proof (lane L12)
 
@@ -328,6 +328,31 @@ names another repository than the one the task is pinned to, is refused at appro
 - **The result must be the approved run's.** A successful coding run's `workflowDependenciesResult` must name this operation, graph and approval, hold exactly the acknowledged items in the plan's order and bind the final combined candidate and its tree. Anything else blocks the step (the sentences are in `core/work-breakdown/results.ts`); a coding run of an approved plan that carries no graph is refused too (a CI, conflict or feedback fix is the one run that carries none).
 - **A stopped run is resumed, not repeated.** A run that failed, was lost or was stopped (the owner's Stop) marks every part still running as unknown, written with the block. Retry resumes from the parts acknowledged as built; a send-back runs the whole plan again over the code the workspace holds.
 - **The plan page** (`/plan/<task>`) lists the parts in the order they run and where each stands ("waiting", "being built", "built", "failed", "stopped, will be checked again").
+
+## Lessons
+
+Rovara learns from finished work: a merged or closed task is reflected on once, by the model your steps use and on your own key, and what it learns is kept as short typed advice (a title, a body of at most 600
+characters, a scope, code citations that are checked against the repository) under the project. **It is on by default, in `Suggest` mode: every lesson waits for your approval on the lessons page, and none goes live by itself.** The reflection runs on your own model account, so it spends there. `ROVARA_LESSONS=0` turns it off (only exactly `0` does). While it is off nothing is reflected, loaded or sent to an agent and no model call is made; the lessons page still shows what exists. The switch covers the whole `rovara up` process, not one project; a project can still be set to `Off` or `Collect` in its own settings.
+
+- **Capture** (`local/app/lessons.ts`, `lessons-sources.ts`): the `merged` and `closed` milestones put one message of ids on the `lessons-reflect` queue; the timer's lessons pass takes it, takes a lease on the task's outcome (so it is
+  reflected on once, and never run again after a model call may have been billed), reads the task's record and asks for at most three lessons. What it reads: the request and your send-backs' reasons (a member's words), the approved plan and
+  the reviews' findings (an agent's words: advice, never your correction), and the review comments on the task's merged pull requests, a member's only when the code host says the author is a person with write or admin standing there.
+  Anything else keeps the class `outsider`, which is removed before the model sees it. Not captured here: "remember this" notes and a person's fix-up commits (no source for them on a laptop yet).
+- **What happens to a lesson:** a project that never chose a mode runs as `Suggest`: every lesson waits for you. A project set to `On` with the Standard preset lets a low-risk lesson from a member's own correction go live **on trial** for 14 days; everything else waits for you.
+  The mode, the preset and the approval levels are items in the store (`LESSONSET#...`, `MODE`) that a hosted install reads too; there is no settings page yet.
+- **Approval is yours, on the page.** `/lessons` lists the lessons (`rovara open lessons`). Approve's form is bound to the lesson's own text and version; the page signs a proof for exactly that, and the `approvers` point verifies it
+  (`kind: "lesson"`) before the library's approval runs. Only the page's own proof counts: a comment can never approve. A tier-2 lesson (it reaches reviewers or checks) needs two people: on a laptop you are the only one, so it goes through the sole-owner exception, which is recorded as such. Retire and Wrong
+  need no proof, but they are your act on your page. The API token an assistant holds only reads: approving, retiring, marking a lesson and switching the lessons file all answer 403 with the way to the page (`rovara open lessons`).
+- **Loading:** when a step's invocation is built (understand, plan, code, review), `TaskFlowDeps.learned` asks the loader for the lessons that fit the task (keywords and cited paths, plus the embedder when `ROVARA_LESSONS_EMBEDDER=local`),
+  records what it loaded and gives the worker a `learnedContext`; the worker checks every citation against the task's base commit and reports which lessons reached its prompt (`learnedLoadReport`), which `callbacks.ts` applies to the load record.
+- **The pull request** says which lessons the task used under "Lessons used": the count, and for a repository the host says is private the titles with the number a comment names (`/rovara lesson 2 wrong`).
+  A lesson from a restricted source is only counted. With lessons on and none used yet the section says "None used yet"; with lessons off it says so. The numbers are the list as it was written into the description, kept: a later round, or a lesson retired since, does not change what a number means.
+  A writer's comment acts as that writer, never as you: `wrong` and `right` are marked for the person the identity point says the account is (an account it does not know does nothing), and `retire` only records a request, which the lessons page shows beside the lesson until you press Retire there (retiring cannot be undone).
+- **Lessons in the repository:** per repository, off by default. The lessons page has a switch for each repository (`rovara open lessons` opens it in a new page session; switching **on** needs a page opened in the last ten minutes) that lets the weekly pass propose `.rovara/lessons.md` in one pull request containing only lessons
+  learned from that repository's own review comments. The code host needs `commitFiles`, `deleteBranch`, `pathKind` and `changeRequestForBranch`. A code host that cannot say who opened a pull request is still handled: Rovara's old pull request is found by its branch name and the commit it left, and closed before a new one opens.
+- **Routes** (same paths as a hosted install): all reads: `GET /v1/app/projects/<p>/lessons`, `.../lessons/<id>/history`, `.../lessons/repo`, `GET /v1/app/tasks/<task>/lessons`. The writes on the same paths (`POST .../retire`, `POST .../lessons/repo`, `POST .../feedback`) answer 403.
+- **Not here:** the team record (a hosted install's lake of source rows), the weekly digest's delivery, replay of past tasks, the nightly re-reflection of reverted tasks (nothing in `rovara up` calls the revert detector yet; `lessons.noteReverted` is the seam),
+  and the suggested rules of the older learning loop (they belong to How we work).
 
 Milestones (`core/milestones`): a milestone ("questions", "plan_ready", "pr_ready", "merged", ...) is a row in the task's partition and a line on its session, written in the change's transaction. After the commit the handlers an adapter registered
 (`app.milestones.register`) are told; one that failed is told again by the timer's sweep, up to 5 times. None is registered by default on a laptop.
@@ -479,7 +504,7 @@ What does not run on a laptop yet, and why:
   `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself, given only for a repository on github.com over https and only to clone (no push credential is given yet; lane L11 brings a scoped one).
 - **A budget on the model proxy.** The task flow grants a step the install's model (see "Choosing the model") and no budget: the flow has no run limit before a price table exists, and Code's price table is empty. See "Model calls" below; `operationEnded` is called when an operation settles.
 - **Ask, Revise the plan and Close in the CLI, in the MCP tools and on the local page** are not wired: the routes above are what they will call (the tools, commands and a page form are built separately). Stop and redirect (the owner stops a coding step to give a new instruction) is not ported.
-- **Lessons** answer "nothing there". **Design review** runs (see "Design review" below); its CLI and MCP surfaces are not built yet. **Notifications** and chat need a `channel` adapter (see "Chat and notices"); none is set up by default.
+- **Design review** runs (see "Design review" below); its CLI and MCP surfaces are not built yet. **Notifications** and chat need a `channel` adapter (see "Chat and notices"); none is set up by default.
 - **A CLI sign-in to the local runtime** is `--env local` (see "The CLI and the MCP tools on `rovara up`").
 
 ### Design review

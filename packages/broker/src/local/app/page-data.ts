@@ -23,6 +23,7 @@ import { planOneScreen, planOneScreenText } from "../../developer/plan-one-scree
 import { loadPlanSelfCheck } from "../../developer/plan-self-check.js";
 import { critiqueLines } from "../../rovara-code/critique-lines.js";
 import type { LocalComments } from "./comments.js";
+import type { LocalLessons } from "./lessons.js";
 import type { LocalEvidence } from "./evidence.js";
 import { reportedChangedFiles, verifiedChangedFiles } from "../../core/build-step/changed-files.js";
 import { answerUnderstandQuestions } from "./answers.js";
@@ -80,6 +81,8 @@ export interface PageDataDeps {
   secondReview?: SecondReview;
   /** Fix with agent. Absent: the task page has no such part. */
   diagnosis?: Pick<LocalDiagnosis, "pageView" | "diagnose">;
+  /** The lessons page: what Rovara has learned, and the owner's decisions on it. Absent: the page says there is nothing. */
+  lessons?: Pick<LocalLessons, "list" | "act" | "repoSwitches" | "repoSwitch">;
 }
 
 /** The attention view with where the plan is posted: the attached thread and the project's repositories, only while a code host reads comments. */
@@ -223,7 +226,8 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
     async getSecondReview() { return deps.secondReview?.enabled() === true ? deps.secondReview.state() : undefined; },
     async getDesignReview() { return undefined; },
     async readMockup() { return undefined; },
-    async listLessons() { return []; },
+    async listLessons() { return deps.lessons === undefined ? [] : deps.lessons.list(); },
+    async listLessonRepos() { return deps.lessons === undefined ? [] : deps.lessons.repoSwitches(); },
     async getProofReport(taskId): Promise<ProofReportView | undefined> {
       const task = await taskOf(taskId);
       const workflow = task?.workflow;
@@ -238,7 +242,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
 }
 
 /** The writes of the pages that the decision gate does not own: a comment on a plan, and the lessons (none here yet). */
-export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview" | "diagnosis"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "diagnose" | "acknowledgeSecondReview"> {
+export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview" | "diagnosis" | "lessons"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "lessonRepoAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "diagnose" | "acknowledgeSecondReview"> {
   return {
     async diagnose(input): Promise<LocalActionResult> {
       return deps.diagnosis === undefined ? { ok: false, reason: "not_found", message: "That is no longer there." } : deps.diagnosis.diagnose(input);
@@ -321,8 +325,11 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
       }
       return { ok: true, message: "Your answers were sent." };
     },
-    async lessonAction(): Promise<LocalActionResult> {
-      return { ok: false, reason: "refused", message: "Lessons are not on this install yet." };
+    async lessonAction(input): Promise<LocalActionResult> {
+      return deps.lessons === undefined ? { ok: false, reason: "refused", message: "Lessons are not on this install." } : deps.lessons.act(input);
+    },
+    async lessonRepoAction(input): Promise<LocalActionResult> {
+      return deps.lessons === undefined ? { ok: false, reason: "refused", message: "Lessons are not on this install." } : deps.lessons.repoSwitch(input);
     },
   };
 }

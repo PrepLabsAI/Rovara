@@ -187,17 +187,18 @@ export function registerDiagnosisCommand(program: Command, context: Pick<UpComma
 export function registerOpenCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
   program
     .command("open [task]")
-    .description("open the local review page for a task (or for everything that waits for you, or `second-review`) in your browser; `rovara up` must be running")
+    .description("open the local review page for a task (or for everything that waits for you, `second-review`, or `lessons`) in your browser; `rovara up` must be running")
     .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
     .action(async (task: string | undefined, options: { stateDir?: string }, command: Command) => {
       const globals = command.optsWithGlobals<{ json: boolean }>();
-      if (task !== undefined && task !== "second-review" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), `second-review`, or leave it out");
+      if (task !== undefined && task !== "second-review" && task !== "lessons" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), `second-review`, `lessons`, or leave it out");
       const { url, secret } = await requireLocalRuntime(context.home ?? homedir(), options.stateDir);
       let response: Response;
       try {
         response = await context.fetch(`${url}/v1/local/pages/open`, {
           method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
-          body: JSON.stringify({ path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
+          // The lessons page opens in a new page session: switching on a repository's lessons file asks for one opened in the last few minutes.
+          body: JSON.stringify(task === "lessons" ? { path: "/lessons", fresh: true } : { path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
         });
       } catch {
         throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is not answering at its address. Start it again with `rovara up`.");

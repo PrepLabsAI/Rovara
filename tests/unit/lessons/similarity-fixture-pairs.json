@@ -1,0 +1,242 @@
+[
+ {
+  "existing": "a1",
+  "draft": "b1",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a2",
+  "draft": "b2",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a3",
+  "draft": "b3",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a4",
+  "draft": "b4",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a5",
+  "draft": "b5",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a6",
+  "draft": "b6",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a7",
+  "draft": "b7",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a8",
+  "draft": "b8",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a9",
+  "draft": "b9",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a10",
+  "draft": "b10",
+  "label": "duplicate_paraphrase",
+  "note": ""
+ },
+ {
+  "existing": "a11",
+  "draft": "b11",
+  "label": "duplicate_paths_only",
+  "note": "terse draft; shares file paths and identifiers, few other words"
+ },
+ {
+  "existing": "a12",
+  "draft": "b12",
+  "label": "duplicate_paths_only",
+  "note": "terse draft; shares file paths and identifiers, few other words"
+ },
+ {
+  "existing": "a13",
+  "draft": "b13",
+  "label": "duplicate_paths_only",
+  "note": "terse draft; shares file paths and identifiers, few other words"
+ },
+ {
+  "existing": "a14",
+  "draft": "b14",
+  "label": "duplicate_paths_only",
+  "note": "terse draft; shares file paths and identifiers, few other words"
+ },
+ {
+  "existing": "a15",
+  "draft": "b15",
+  "label": "duplicate_paths_only",
+  "note": "terse draft; shares file paths and identifiers, few other words"
+ },
+ {
+  "existing": "a16",
+  "draft": "b16",
+  "label": "duplicate_paths_only",
+  "note": "terse draft; shares file paths and identifiers, few other words"
+ },
+ {
+  "existing": "a17",
+  "draft": "b17",
+  "label": "duplicate_paths_only",
+  "note": "terse draft; shares file paths and identifiers, few other words"
+ },
+ {
+  "existing": "a18",
+  "draft": "b18",
+  "label": "contradiction",
+  "note": ""
+ },
+ {
+  "existing": "a19",
+  "draft": "b19",
+  "label": "contradiction",
+  "note": ""
+ },
+ {
+  "existing": "a20",
+  "draft": "b20",
+  "label": "contradiction",
+  "note": ""
+ },
+ {
+  "existing": "a21",
+  "draft": "b21",
+  "label": "contradiction",
+  "note": ""
+ },
+ {
+  "existing": "a22",
+  "draft": "b22",
+  "label": "contradiction",
+  "note": ""
+ },
+ {
+  "existing": "a23",
+  "draft": "b23",
+  "label": "contradiction",
+  "note": ""
+ },
+ {
+  "existing": "a24",
+  "draft": "b24",
+  "label": "contradiction",
+  "note": ""
+ },
+ {
+  "existing": "a25",
+  "draft": "c25",
+  "label": "same_file_unrelated",
+  "note": "same file, different advice: must NOT merge"
+ },
+ {
+  "existing": "a12",
+  "draft": "a26",
+  "label": "same_file_unrelated",
+  "note": "same file, different advice: must NOT merge"
+ },
+ {
+  "existing": "a11",
+  "draft": "a27",
+  "label": "same_file_unrelated",
+  "note": "same file, different advice: must NOT merge"
+ },
+ {
+  "existing": "a13",
+  "draft": "c13",
+  "label": "same_file_unrelated",
+  "note": "same file, different advice: must NOT merge"
+ },
+ {
+  "existing": "a16",
+  "draft": "c16",
+  "label": "same_file_unrelated",
+  "note": "same file, different advice: must NOT merge"
+ },
+ {
+  "existing": "a22",
+  "draft": "c22",
+  "label": "same_file_unrelated",
+  "note": "same file, different advice: must NOT merge"
+ },
+ {
+  "existing": "a15",
+  "draft": "c15",
+  "label": "same_file_unrelated",
+  "note": "same file, different advice: must NOT merge"
+ },
+ {
+  "existing": "a1",
+  "draft": "r1",
+  "label": "refinement",
+  "note": "narrows or extends: judge should say refines"
+ },
+ {
+  "existing": "a5",
+  "draft": "r2",
+  "label": "refinement",
+  "note": "narrows or extends: judge should say refines"
+ },
+ {
+  "existing": "a7",
+  "draft": "r3",
+  "label": "refinement",
+  "note": "narrows or extends: judge should say refines"
+ },
+ {
+  "existing": "a2",
+  "draft": "r4",
+  "label": "refinement",
+  "note": "narrows or extends: judge should say refines"
+ },
+ {
+  "existing": "a4",
+  "draft": "r5",
+  "label": "refinement",
+  "note": "narrows or extends: judge should say refines"
+ },
+ {
+  "existing": "a8",
+  "draft": "r6",
+  "label": "refinement",
+  "note": "narrows or extends: judge should say refines"
+ },
+ {
+  "existing": "a9",
+  "draft": "a14",
+  "label": "unrelated",
+  "note": ""
+ },
+ {
+  "existing": "a6",
+  "draft": "a20",
+  "label": "unrelated",
+  "note": ""
+ },
+ {
+  "existing": "a3",
+  "draft": "a19",
+  "label": "unrelated",
+  "note": ""
+ }
+]

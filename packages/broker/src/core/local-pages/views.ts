@@ -150,6 +150,24 @@ export interface LessonView {
   status: "proposed" | "active" | "retired";
   /** Tasks that used it, newest first. */
   usedIn: Array<{ taskId: string; title: string }>;
+  /** The project it belongs to, when the install has several. */
+  project?: string;
+  /**
+   * How the owner may approve it: present for a lesson that waits for a person. The approval is bound to this lesson's own text and version (`artifactDigest`), so what is approved is what was read; the `approvers`
+   * point decides whether the page's proof is the owner's.
+   */
+  offer?: { requestId: string; revision: number; artifactDigest: string; risk: "low" | "medium" | "high" };
+  /** A person asked, from a pull request comment, for this lesson to be retired. Nothing changed: pressing Retire on this page confirms it. */
+  retireRequest?: { by: string; pullRequest: number };
+}
+
+/** One project's `.rovara/lessons.md` switches, as the lessons page shows them. Fixed sentences only. */
+export interface LessonReposView {
+  project: string;
+  canEnable: boolean;
+  repos: Array<{ repo: string; enabled: boolean; fileDeleted: boolean; pointer: "not_yet" | "added" | "missing" | "declined"; notices: string[] }>;
+  /** The project's repositories not switched on yet. */
+  available: string[];
 }
 
 export interface ProofRowView {
@@ -205,6 +223,8 @@ export interface LocalPageData {
   /** An image of a design review; the page checks its type again before sending it. */
   readMockup(taskId: string, mockupId: string): Promise<{ contentType: string; bytes: Uint8Array } | undefined>;
   listLessons(): Promise<LessonView[]>;
+  /** The repository lessons file switches of each project. Absent: the page shows none. */
+  listLessonRepos?(): Promise<LessonReposView[]>;
   getProofReport(taskId: string): Promise<ProofReportView | undefined>;
   /** the owner's script tokens. Absent, or undefined: script tokens are off here and the page is not found. */
   listScriptTokens?(): Promise<ScriptTokensPageView | undefined>;
@@ -255,7 +275,9 @@ export interface LocalPageActions {
   /** `revision` is the revision of the plan the person was reading; the action may refuse a comment on one that has moved on. */
   addComment(input: { taskId: string; target: string; text: string; revision: number }): Promise<LocalActionResult>;
   /** `wrong`: the lesson did not apply or was harmful; it is retired and the reason kept. */
-  lessonAction(input: { lessonId: string; action: "approve" | "retire" | "wrong" }): Promise<LocalActionResult>;
+  lessonAction(input: { lessonId: string; action: "approve" | "retire" | "wrong"; /** For an approval: what the form was bound to, and the proof the page signed over it. */ offer?: NonNullable<LessonView["offer"]>; proof?: ApprovalProof }): Promise<LocalActionResult>;
+  /** One switch of a project's repository lessons file. `fresh`: the page session was opened in the last few minutes (switching on needs it). Absent: the switches are not on this page. */
+  lessonRepoAction?(input: { project: string; repo: string; action: "on" | "off" | "resume" | "pointer_add" | "pointer_decline"; fresh: boolean }): Promise<LocalActionResult>;
   /** Lane L12: runs a blocked step again. `revision` is the revision the owner was looking at; a task that moved on refuses it. */
   retry?(input: { taskId: string; revision: number }): Promise<LocalActionResult>;
   /** Lane L12: the owner says a task's plan is posted on an issue or pull request, so a writer's comment there can decide it. */

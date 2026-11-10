@@ -63,6 +63,8 @@ export interface CallbackDeps {
    * answered "not available" (no checks operation is ever started there, so no worker asks).
    */
   e2e?: { records: RoundRecordReaders };
+  /** Told after a batch of a worker's events was stored (the lessons' load report). Best effort: it never fails the batch and is not waited on past its own work. */
+  onEvents?: ((operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>) => Promise<void>) | undefined;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -260,7 +262,11 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
       const body = bodyOf(request);
-      if (action === "events") return json(200, await recordEvents(deps, operation, body));
+      if (action === "events") {
+        const recorded = await recordEvents(deps, operation, body);
+        await deps.onEvents?.(operation, ((body["events"] as Array<{ type?: unknown; payload?: unknown }>) ?? []).map((event) => ({ type: String(event.type), payload: event.payload }))).catch(() => undefined);
+        return json(200, recorded);
+      }
       if (action === "artifacts") return json(200, await recordArtifact(deps, operation, body));
       const status = body["status"];
       if (status !== "SUCCEEDED" && status !== "FAILED" && status !== "CANCELLED") throw agentXError("CONFIG_INVALID", "a result needs a status");

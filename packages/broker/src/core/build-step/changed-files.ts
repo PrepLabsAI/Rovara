@@ -33,6 +33,15 @@ export const verifiedFilesKey = (workspaceId: string, candidateDigest: string) =
 /** The "Lessons used" section of a description on an install with no lessons: it says so, so the section is there and a reader knows why it is empty. */
 export const NO_LESSONS_USED: LessonsUsedSection = { count: 0, taskUrl: "", entries: [], none: true };
 
+/**
+ * The "Lessons used" section of the description of the task's pull request in one repository. An install with no lessons says so (`NO_LESSONS_USED`); one with lessons asks them (`TaskFlowDeps.lessonsUsed`), which
+ * counts what the task was given and names it only where the repository's readers may read it. A failure is no section: a description never waits on, or fails because of, lessons.
+ */
+export async function lessonsUsedOf(deps: Pick<TaskFlowDeps, "lessonsUsed">, task: { taskId: string; project: string; startingRevision: number }, repositoryId: string): Promise<LessonsUsedSection | undefined> {
+  if (deps.lessonsUsed === undefined) return NO_LESSONS_USED;
+  try { return await deps.lessonsUsed(task, repositoryId); } catch { return undefined; }
+}
+
 /** The workflow with its risk judged for the code, from the files the CODE HOST gave; with none (`undefined`) the risk is high and says why. */
 export function riskFromFiles(workflow: WorkflowSnapshot, verified: ChangedFilesRead | undefined): WorkflowSnapshot {
   const judged = recomputeRisk(workflow, verified, {});
@@ -141,9 +150,11 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   const plan = await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined);
   const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
-  const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, lessonsUsed: NO_LESSONS_USED, ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
   for (const entry of hosts) {
     try {
+      // Each repository's description names the lessons that repository's readers may read.
+      const lessonsUsed = await lessonsUsedOf(deps, task, entry.repositoryId);
+      const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
       const record = await pullRequestRecordOf(deps, task.workspaceId, entry.repositoryId, entry.number);
       const ref = changeRequestRef(entry.url, entry.number);
       beforeRequest?.();

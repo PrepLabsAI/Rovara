@@ -70,6 +70,15 @@ describe("the lint shards: which files they lint", () => {
     expect(new Set(shards.map((shard) => shard.name)).size).toBe(shards.length);
   });
 
+  it("name every test directory under tests/unit and tests/contract in a shard, so a new directory is not left to the catch-all's memory", () => {
+    const named = new Set(SHARD_DIRECTORIES.flatMap((shard) => shard.directories));
+    for (const parent of ["tests/unit", "tests/contract"]) {
+      for (const entry of readdirSync(join(root, parent), { withFileTypes: true })) {
+        if (entry.isDirectory() && entry.name !== "__snapshots__") expect(named.has(`${parent}/${entry.name}`), `${parent}/${entry.name} is in no shard of scripts/lint-shards.ts`).toBe(true);
+      }
+    }
+  });
+
   it("respect the ignores of eslint.config.js: an ignored fixture is in no shard", () => {
     const ignoredFixture = "tests/fixtures/e2e-web-api-app/server.mjs";
     expect(wholeRepository).not.toContain(ignoredFixture);

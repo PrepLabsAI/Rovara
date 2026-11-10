@@ -65,6 +65,14 @@ Two optional abilities of the `CodeHost` port serve comment commands: `comments(
 text, `createdAt`, `updatedAt`; **fetch only**, owner decision 66) and `postComment(ref, text)` (one comment of Rovara's own fixed text; on an account that is also a person's it carries `ROVARA_REPLY_MARKER`). A host without them
 simply has no comment commands. Whether a comment is a command, fresh, edited, on the right thread or from someone who may approve is decided in Rovara's core (`core/pr-commands/comment-checks.ts`), never by the plug-in.
 
+## Learning
+
+`learning` (`packages/contracts/src/ports/learning.ts`, `LearningAdapter`) is how a host makes lessons comparable, and nothing else: an optional `embedder(company)` (text to a vector of fixed `dimension`, with a `spec` naming the model) and an optional
+`vectors(company)` (where a lesson's vector is kept; the default is beside the lessons in the document store). With neither, lessons are compared on code-aware keywords and cited paths, so a laptop needs no network and no model download. The lessons themselves
+live in the `storage` point (`DocumentLessonStore`, the keys of `lesson-keys.ts`, the same rows a hosted install keeps), their model calls go through the install's model, their spend through `admission` and `metering`, their audit through `audit-sink`
+(`lesson.*` actions; `rovara up` registers the document audit sink, so approvals, including the sole-owner exception, and retire requests are kept) and their approvals through `approvers` (`kind: "lesson"`, bound to the lesson's text and version). Code registers `local` (keywords) as the default; `ROVARA_LESSONS_EMBEDDER=local` makes it also give a hashing embedder
+that runs in the process (it finds shared words and word forms, not meaning). The point's cardinality is many; the first adapter that is not `local` is used. The lessons switch and the gate the library asks before a learning call are process-wide (one install per process), not per project or per company.
+
 ## Company scope
 
 Code runs as one implicit company (`IMPLICIT_COMPANY_ID`) and keeps Cloud's `ORG#<company>#<name>` key scheme (decision 45.6):
@@ -381,7 +389,7 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
   branch for a new change request), `changeRequestForBranch`, `deleteBranch`, `PathKind` `"symlink"`, and the change request facts `authoredByRovara` and `baseRepositoryId`. They are copied from Cloud's lessons repo
   file lane (`commit-files.ts` is `github-commit-files.ts`). A host without them has no lessons file; nothing else changes. On a laptop signed in with the owner's own token `authoredByRovara` is absent (the host
   account is the owner's, so Rovara cannot tell its own pull requests from the owner's): never a guess.
-  Nothing in Code calls these yet. When the lessons pass is ported it must bring Cloud's `guardTarget` and `verifyRepository` checks with it and treat a `"symlink"` path as not a file (Cloud's `lessons-wiring.ts` reader is the model); `pathKind` returning `"symlink"` instead of throwing changes no behaviour today.
+  The lessons pass (`lessons/repo-file-*.ts`) calls them, with `guardTarget` and `verifyRepository` first and a `"symlink"` path read as not a file; it runs only for a repository the owner switched on.
 - **External checks (lane P2, item C5, decision 61).** A repository's `externalChecks` are `{ provider, name, reference, timeoutMinutes }`; `codeBuildGates` is the same list in CodeBuild's words and stays readable
   (the two share one set of names, at most 8 together and 420 minutes). A worker is still sent `codeBuildGates` only (its job line is unchanged, decision 65), made from the CodeBuild checks by
   `workerProjectDefinition`, in the order of `repositoryExternalChecks` (generic checks first). A check of a provider no runner of this release runs is refused when the project is saved and when a task starts (before any machine), with a clear sentence; the dispatcher turns the backstop throw into a failed operation. Cloud must not take `externalChecks` until its worker and record readers do (DEFERRED-CHECKS, P2-EXTERNAL-CHECKS-CLOUD-ADOPTION). The check-runner factory (`CheckRunnerAdapter.create`) stays synchronous and takes

@@ -295,6 +295,16 @@ describe("rovara up: making a token on a page, and using it", () => {
     expect((await h.api("/v1/local/pages/open", { method: "POST", body: { path: "/", fresh: true } })).status).toBe(200);
   });
 
+  it("the lessons page may ask for a new page session (switching a repository's lessons file on needs one), and the home page may not", async () => {
+    const h = await launch();
+    const first = await h.browse("/lessons", true);
+    const second = await h.browse("/lessons", true);
+    expect(second.base).not.toBe(first.base);
+    const home = await h.browse("/", true);
+    const again = await h.browse("/", true);
+    expect(again.base).toBe(home.base);
+  });
+
   it("makes a form usable once, and refuses a project it does not know and a permission it does not offer", async () => {
     const h = await launch();
     const where = await h.browse("/tokens", true);
