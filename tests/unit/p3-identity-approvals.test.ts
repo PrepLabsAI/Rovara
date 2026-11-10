@@ -463,7 +463,7 @@ describe("A1 and A3 on the merge press", () => {
       return pressMerge(deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared), presserPersonId: "presser-1" });
     };
     // The presser's accounts are "999" and the approver's: refused, nothing merged.
-    expect(await refusedMessage(() => press(["999", priya!]))).toBe("You approved this pull request, so someone else must press Merge.");
+    expect(await refusedMessage(() => press(["999", priya]))).toBe("You approved this pull request, so someone else must press Merge.");
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
     // Control: the presser has only "999" (a different person from the approver): it merges.
     expect((await press(["999"])).status).toBe("MERGED");
