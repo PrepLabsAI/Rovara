@@ -13,7 +13,7 @@
 // Not here: Bedrock (it needs the computer's AWS sign-in; listed as a decision 51 gap) and design-review key slots.
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { TASK_BUDGET_EXCEEDED_PREFIX, providerFormat, type AdapterRegistry, type AgentXError, type Cost, type Metering, type ModelKeyStore } from "@agentx/contracts";
+import { TASK_BUDGET_EXCEEDED_PREFIX, providerFormat, type AdapterRegistry, type AgentXError, type Cost, type Metering, type ModelKeyStore, type ModelProviderAdapter } from "@agentx/contracts";
 import type { BrokerResponse } from "../../handler.js";
 import { BUILTIN_MODEL_PROVIDERS } from "../../plugins/model-provider/builtin.js";
 import { credentialFix, credentialOf, hasCredential } from "./credentials.js";
@@ -146,6 +146,15 @@ async function readBody(request: IncomingMessage, limit: number): Promise<Buffer
   }
   return Buffer.concat(chunks);
 }
+
+/** The fixed words for a sign-in that could not be made: the provider's own sentence about why (no secret in it), then where to look. */
+function signInFailure(row: ModelProviderAdapter): string {
+  const why = row.credentialProblem?.();
+  return `the sign-in to ${row.name} could not be made${why === undefined ? "" : ` (${why})`}; check it on this computer`;
+}
+
+/** A provider's words that say the request's signature time is off (AWS: "Signature expired", "RequestTimeTooSkewed"). */
+export const CLOCK_SKEW_PATTERN = /signature expired|signature not yet current|requesttimetooskewed|request has expired|request time too skewed|too skewed|time.{0,20}skew|clock/iu;
 
 /** Whether a request's `tool_choice` makes the model call a tool (a named tool, "required", "any"), as opposed to leaving it free ("auto", "none"). */
 export function forcesToolChoice(choice: unknown): boolean {
@@ -379,17 +388,18 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
         secret = await credentialOf(row, options.keys, options.companyId);
       } catch {
         // The provider's own credential could not be resolved (a role that expired, a token that could not be refreshed). Its words can quote a setting, so none are passed on.
-        throw new Refusal(502, "provider_sign_in_failed", `the sign-in to ${row.name} could not be made; check it on this computer`);
+        throw new Refusal(502, "provider_sign_in_failed", signInFailure(row));
       }
-      if (needsCredential(row) && secret === undefined) throw new Refusal(403, "model_not_allowed", `no ${route.provider} ${row.signIn.kind === "bearer-key" || row.signIn.kind === "named-header" ? "key" : "sign-in"} is set on this computer`);
+      if (needsCredential(row) && secret === undefined) throw new Refusal(403, "model_not_allowed", `no ${route.provider} ${row.signIn.kind === "bearer-key" || row.signIn.kind === "named-header" ? "key" : "sign-in"} is set on this computer${row.credentialProblem?.() === undefined ? "" : ` (${row.credentialProblem()!})`}`);
 
       const forwarded: Record<string, unknown> = { ...body, model: route.model };
       if (stream && api === "openai-completions") {
         const asked = body.stream_options;
         forwarded.stream_options = { ...(asked !== null && typeof asked === "object" && !Array.isArray(asked) ? asked : {}), include_usage: true };
       }
-      // Responses is sent stateless: the full history goes in every call and nothing is kept at the provider, whatever the worker asked (`previous_response_id` is not an allowed field).
-      if (api === "openai-responses") forwarded.store = false;
+      // Nothing is kept at the provider, whatever the worker asked: Responses and chat completions are both sent with `store: false` (the full history goes in every call; `previous_response_id`
+      // is not an allowed field). The guard's allow-lists still allow the field, as Cloud's do; this is an override of the forwarded body.
+      if (api === "openai-responses" || api === "openai-completions") forwarded.store = false;
       if (target.variant === "vertex") {
         // Claude on Google Cloud: the model is in the address, the API version in the body.
         delete forwarded.model;
@@ -411,7 +421,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
         Object.assign(upstreamHeaders, signed.headers);
         sensitive = signed.sensitive;
       } catch (error) {
-        if (error instanceof SignInProblem) throw new Refusal(502, "provider_sign_in_failed", `the sign-in to ${row.name} could not be made; check it on this computer`);
+        if (error instanceof SignInProblem) throw new Refusal(502, "provider_sign_in_failed", signInFailure(row));
         throw error;
       }
 
@@ -498,6 +508,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
     tell({ event: "provider_refused", status });
     const cleaned = (secrets.length === 0 ? [""] : secrets).reduce((clean, secret) => scrubProviderText(clean, secret), message);
     const headers: Record<string, string> = retryAfter !== null && /^\d{1,5}$/u.test(retryAfter) ? { "retry-after": retryAfter } : {};
+    if ((status === 401 || status === 403) && CLOCK_SKEW_PATTERN.test(text.slice(0, ERROR_BODY_MAX_BYTES))) return new Refusal(502, "provider_clock_skew", "the model provider says the time of this call is off; check your computer's clock", headers);
     if (status === 401 || status === 403) return new Refusal(502, "provider_refused_key", "the model provider refused the key on this computer; check it", headers);
     // 3xx is never followed, and anything else keeps its status class so the worker retries what is worth retrying (429, 5xx).
     const outgoing = status >= 300 && status < 400 ? 502 : status === 429 || status === 408 || status === 413 || status === 422 || status === 404 || status === 400 || status === 529 || (status >= 500 && status < 600) ? status : 502;

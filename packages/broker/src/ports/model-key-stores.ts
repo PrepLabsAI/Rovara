@@ -11,16 +11,27 @@ export function environmentVariableFor(provider: string): string {
   return `${provider.toUpperCase().replaceAll("-", "_")}_API_KEY`;
 }
 
-export function createEnvironmentModelKeyStore(environment: Readonly<Record<string, string | undefined>>, knownProviders: readonly string[]): ModelKeyStore {
+/** The providers whose environment variable keeps its long-standing name. */
+export const BUILTIN_KEY_PROVIDERS: readonly string[] = ["anthropic", "openai", "openrouter"];
+
+/**
+ * The environment variable a model provider's key is read from: the long-standing `<PROVIDER>_API_KEY` for the three built-ins, and `ROVARA_MODEL_<ID>_API_KEY` for any other provider id, so a
+ * provider a plug-in brings (say one called `linear`) can never read another component's variable (`LINEAR_API_KEY`).
+ */
+export function modelKeyVariable(provider: string): string {
+  return BUILTIN_KEY_PROVIDERS.includes(provider) ? environmentVariableFor(provider) : `ROVARA_MODEL_${provider.toUpperCase().replaceAll("-", "_")}_API_KEY`;
+}
+
+export function createEnvironmentModelKeyStore(environment: Readonly<Record<string, string | undefined>>, knownProviders: readonly string[], variableFor: (provider: string) => string = environmentVariableFor): ModelKeyStore {
   return {
     async get(_companyId, provider) {
       if (!PROVIDER.test(provider)) return undefined;
-      const value = environment[environmentVariableFor(provider)];
+      const value = environment[variableFor(provider)];
       return value === undefined || value.trim() === "" ? undefined : new SecretValue(value.trim());
     },
     async providers() {
       return knownProviders.filter((provider) => {
-        const value = environment[environmentVariableFor(provider)];
+        const value = environment[variableFor(provider)];
         return value !== undefined && value.trim() !== "";
       });
     },

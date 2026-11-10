@@ -123,7 +123,7 @@ describe("chooseLocalModel with model-provider plug-ins (item K2)", () => {
     expect(role).toMatchObject({ ok: false, problem: "setting-without-key" });
     if (!role.ok) { expect(role.summary).toContain("sign-in"); expect(role.fix).toContain("AWS"); }
     const key = chooseLocalModel([], { provider: "company-gateway", id: "x" }, book(gateway));
-    if (!key.ok) expect(key.fix).toContain("COMPANY_GATEWAY_API_KEY");
+    if (!key.ok) expect(key.fix).toContain("ROVARA_MODEL_COMPANY_GATEWAY_API_KEY");
   });
 
   it("counts a provider that needs no key, or brings its own role, as ready without an entry in the key file", async () => {
@@ -131,6 +131,21 @@ describe("chooseLocalModel with model-provider plug-ins (item K2)", () => {
     expect(await readyProviders(book(gateway, local, bedrock), keys, "org_00000000000000000000")).toEqual(["company-gateway", "local-llm", "amazon-bedrock"]);
     const noRole = bedrockModelProvider({ region: "us-west-2", credentials: async () => { throw new Error("no role"); } });
     expect(await readyProviders(book(noRole), { async get() { return undefined; }, async providers() { return []; } }, "org_00000000000000000000")).toEqual([]);
+  });
+
+  it("looks at the key store before the provider's own credential, and asks only the providers it was told to (review M2, L1)", async () => {
+    let asked = 0;
+    const roleful: ModelProviderAdapter = { ...bedrock, async credential() { asked += 1; return undefined; } };
+    const stored = { async get() { return undefined; }, async providers() { return ["amazon-bedrock", "company-gateway"]; } };
+    // A key-file entry makes the provider ready without running its credential().
+    expect(await readyProviders(book(gateway, roleful), stored, "org_00000000000000000000")).toEqual(["company-gateway", "amazon-bedrock"]);
+    expect(asked).toBe(0);
+    // With no entry, only the providers named in `only` are asked.
+    const empty = { async get() { return undefined; }, async providers() { return []; } };
+    expect(await readyProviders(book(gateway, roleful), empty, "org_00000000000000000000", ["anthropic"])).toEqual([]);
+    expect(asked).toBe(0);
+    await readyProviders(book(gateway, roleful), empty, "org_00000000000000000000", ["amazon-bedrock"]);
+    expect(asked).toBe(1);
   });
 
   it("needs a default model from a plug-in provider that has none", () => {

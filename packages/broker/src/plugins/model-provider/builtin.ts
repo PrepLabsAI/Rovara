@@ -2,7 +2,7 @@
 // request format the local model proxy used when they were fixed in its code, so nothing changes for a laptop that uses them. A `model-provider` plug-in of the same
 // name replaces one (to add a price table, or to point it at a gateway).
 import type { AdapterRegistry, ModelFormatCapabilities, ModelProviderAdapter } from "@agentx/contracts";
-import { assertModelProvider } from "@agentx/contracts";
+import { ModelProviderError, assertModelProvider } from "@agentx/contracts";
 
 /** What the provider's own API honours, by format (research: MODEL-PROVIDER-FORMATS-RESEARCH.md). */
 export const NATIVE_MESSAGES_CAPABILITIES: ModelFormatCapabilities = { forcedToolChoice: true, parallelToolCalls: true, reasoning: "thinking", reasoningReturned: true, promptCaching: true, streamUsage: true };
@@ -43,4 +43,22 @@ export const BUILTIN_MODEL_PROVIDERS: readonly ModelProviderAdapter[] = [ANTHROP
 /** Registers the built-ins as defaults: a configured provider of the same name replaces one without a conflict. */
 export function registerBuiltinModelProviders(registry: AdapterRegistry): void {
   for (const provider of BUILTIN_MODEL_PROVIDERS) registry.register("model-provider", provider.kind, provider, { isDefault: true });
+}
+
+/**
+ * Review L4: the ids of the built-in providers belong to them. A plug-in of the same name may change the name, default model and prices (to price Anthropic's models, say), but not where the
+ * provider is, how it signs in or what formats it speaks: otherwise `anthropic` could send ANTHROPIC_API_KEY to another address. `amazon-bedrock` may only be an AWS sign-in to a Bedrock runtime address.
+ * Throws a `ModelProviderError`; the caller names it at start-up.
+ */
+export function assertBuiltinIdsKept(provider: ModelProviderAdapter): void {
+  const builtin = BUILTIN_MODEL_PROVIDERS.find((row) => row.kind === provider.kind);
+  if (builtin !== undefined) {
+    const same = (value: unknown, other: unknown): boolean => JSON.stringify(value) === JSON.stringify(other);
+    if (provider.address !== builtin.address || !same(provider.signIn, builtin.signIn) || !same(provider.formats, builtin.formats)) {
+      throw new ModelProviderError(provider.kind, "a built-in provider's id cannot point at another address or sign in another way; use another provider id");
+    }
+  }
+  if (provider.kind === "amazon-bedrock" && (provider.signIn.kind !== "aws-sigv4" || !new URL(provider.address).hostname.startsWith("bedrock-runtime."))) {
+    throw new ModelProviderError(provider.kind, "the id amazon-bedrock is for AWS sign-in to a Bedrock runtime address; use another provider id");
+  }
 }

@@ -338,16 +338,26 @@ A model provider is a plug-in of the `model-provider` point (`packages/contracts
 Code registers `anthropic`, `openai` and `openrouter` as defaults, with the addresses, sign-in and format the proxy always used. A module for a company's own gateway is a few lines
 (`modelProviderPlugin({...})`, `packages/broker/src/plugins/model-provider/plugin.ts`); the config entry names it (`{ "point": "model-provider", "name": "company-gateway", "module": "./gateway.mjs",
 "settings": { "address": "...", "defaultModel": "...", "prices": {...} } }`), and the settings may change only the name, address, default model and prices. Its key is the provider's entry in `keys.json`
-or `<PROVIDER>_API_KEY` (hyphens become underscores), never the config. `rovara up` refuses to start with a provider that is not well formed (an `http` address to another machine, a sign-in header
-the proxy owns, the vertex variant on another format) and names the provider and the rule.
+or an environment variable (the three built-ins keep `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`; any other provider reads `ROVARA_MODEL_<ID>_API_KEY`, hyphens becoming underscores, so a provider called `linear` can never read `LINEAR_API_KEY`), never the config. `rovara up` refuses to start with a provider that is not well formed (an `http` address to another machine, a sign-in header
+the proxy owns, the vertex variant on another format, a price of 0, an `aws-sigv4` provider whose address is not https `*.amazonaws.com` in its region, an id that belongs to another part of Rovara such as `github` or
+`linear`, a plug-in that moves a built-in provider's id to another address or sign-in) and names the provider and the rule. A price of 0 is refused unless the model is marked `"free": true` (and then every price is 0), so a task budget cannot be passed by accident.
 
-- **Bedrock** is `bedrockModelProvider({ region })` (plug-in `bedrockModelProviderPlugin()`, provider id `amazon-bedrock`): SigV4 for service `bedrock`, Claude through the messages format on
-  `/anthropic/v1/messages`, open models through chat completions on `/openai/v1/chat/completions`. The credential is the AWS role the broker runs as (the default provider chain, loaded when first needed), or an
-  `amazon-bedrock` entry in `keys.json` holding `{"accessKeyId","secretAccessKey","sessionToken"?}`. The paths and the capability rows (Claude on Bedrock does not honour a forced tool choice) are from the
-  research (designs-2026-10-30/MODEL-PROVIDER-FORMATS-RESEARCH.md) and have not been tried on a live account.
+**Which credential is used** (the same for every provider, tested): (1) sign-in `none` has none; (2) the key store's entry for the provider (the environment variable, then `keys.json`) always wins; (3) the provider's own `credential()` is used only
+when the key store has no entry. A model choice asks only the provider that could be chosen (the `model` setting's, else the default order of the three built-ins) for a credential, never every installed provider.
+
+- **Bedrock** is `bedrockModelProviderPlugin()` (provider id `amazon-bedrock`): SigV4 for service `bedrock`, Claude through the messages format on `/anthropic/v1/messages`, open models through chat completions on
+  `/openai/v1/chat/completions`. **It never signs with the AWS identity your shell happens to have, unless you say so.** The settings must name exactly one identity: `"profile": "<a named AWS profile>"` (give it only
+  `bedrock:InvokeModel*`; that is what we recommend), or `"roleArn": "<a role>"` (assumed for a 15-minute session; the default chain is used only to call AssumeRole), or `"allowAmbientAwsCredentials": true` (the default
+  chain, whatever this shell has). With none of them Rovara refuses to start and says which to set. An `amazon-bedrock` entry in `keys.json` holding `{"accessKeyId","secretAccessKey","sessionToken"?}` wins over all
+  three. The credential provider is built once and the credential cached until a minute before it expires. `rovara up --check` says which identity Bedrock will use. Bedrock models are **unpriced unless you set `prices`**,
+  and a task with a budget is refused for an unpriced model. A missing SDK module is reported as "AWS credential module missing". A "signature expired" answer is reported as "check your computer's clock". The paths and the
+  capability rows (Claude on Bedrock does not honour a forced tool choice) are from the research (designs-2026-10-30/MODEL-PROVIDER-FORMATS-RESEARCH.md) and have not been tried on a live account.
+- **Open checks (staging or a live account, nothing built depends on them being true).** (1) Does Bedrock's Claude really refuse a forced `tool_choice` (`any` or `tool`)? The row says it does not honour one; if it does, set
+  `forcedToolChoice: true` for the messages format. (2) Does Vertex accept a model id with `@` sent as `%40` in the path (`claude-...@2025...:rawPredict`)? One live call. (3) Is a clock skew of more than five minutes
+  reported by AWS in words the clock-skew message catches (`Signature expired`, `RequestTimeTooSkewed`)? Also: whether `/anthropic/v1/messages` on `bedrock-runtime` wants an `anthropic-version` header or body field.
 - **Claude on Google Cloud** is the messages format with `variant: "vertex"`: `address` is the models collection, the call goes to `<address>/<model>:rawPredict` (`:streamRawPredict` when streaming), the model leaves the body
   and `anthropic_version: "vertex-2023-10-16"` enters it. Google and Microsoft sign-ins send an access token as a bearer token; refreshing it is the plug-in's `credential()`, not the proxy's (no refresher ships in Code).
-- **Responses is always stateless.** The proxy forwards `store: false` on every Responses call, whatever the worker asked, and `previous_response_id` and `conversation` are not allowed fields, so the full history
+- **Calls are always stateless.** The proxy forwards `store: false` on every Responses and chat-completions call, whatever the worker asked, and `previous_response_id` and `conversation` are not allowed fields, so the full history
   is sent every time and nothing depends on state kept at the provider.
 - **Same rules for every provider.** The request guard (field allow-lists, function tools only, header bans, `anthropic-beta` allow-list, no redirects, key cut from answers) runs before a provider is looked at; a
   provider's capability row can only add a refusal (a forced tool choice at a provider that ignores it is answered 400 by name, not dropped), and the SigV4 secret key and session token are cut from answers like a key.

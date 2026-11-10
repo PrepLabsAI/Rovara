@@ -78,10 +78,17 @@ export interface ModelProviderFormat {
   capabilities: ModelFormatCapabilities;
 }
 
+/**
+ * One model's price. A price of zero would let a task budget pass any call, so it is refused unless the plug-in says the model is free (`free: true`, and then both prices are zero).
+ */
+export interface ModelProviderModelPrice extends ModelPrice {
+  free?: boolean;
+}
+
 /** Prices per million tokens, keyed by the provider's own model id. The proxy prices a call as `<provider id>/<model id>`. */
 export interface ModelProviderPrices {
   currency: string;
-  models: Readonly<Record<string, ModelPrice>>;
+  models: Readonly<Record<string, ModelProviderModelPrice>>;
 }
 
 /** The adapter a `model-provider` plug-in registers. Its `kind` is the provider id (the registry name), as for a code host. */
@@ -99,10 +106,13 @@ export interface ModelProviderAdapter {
   /** What a call costs. Absent: the provider's models are unpriced (usage is recorded as unknown and a task budget cannot be held). */
   readonly prices?: ModelProviderPrices;
   /**
-   * The credential for `aws-sigv4`, `google-oauth` and `microsoft-entra`, resolved when a call is made (a role's temporary credentials, a refreshed token). Absent: the
-   * key store's entry for this provider is used. The value is a `SecretValue` and goes nowhere but into the signed call.
+   * The credential for `aws-sigv4`, `google-oauth` and `microsoft-entra`, resolved when a call is made (a role's temporary credentials, a refreshed token). The key store's entry for this
+   * provider, when there is one, WINS: an explicit entry the owner made is never overridden by a session the shell happens to have. `credential()` is used when the key store has none.
+   * The value is a `SecretValue` and goes nowhere but into the signed call. It may throw; the proxy answers a fixed sentence.
    */
   readonly credential?: () => Promise<SecretValue | undefined>;
+  /** A fixed sentence (never a secret) saying why the last `credential()` gave nothing: "AWS credential module missing", "the AWS profile could not be used". Shown to the owner. */
+  readonly credentialProblem?: () => string | undefined;
 }
 
 // ---- Checking a provider ----
@@ -149,7 +159,16 @@ const PriceSchema = z.object({
   outputMicrosPerMillionTokens: z.number().finite().nonnegative(),
   cacheReadMicrosPerMillionTokens: z.number().finite().nonnegative().optional(),
   cacheWriteMicrosPerMillionTokens: z.number().finite().nonnegative().optional(),
-}).strict();
+  free: z.boolean().optional(),
+}).strict().superRefine((price, context) => {
+  const zero = price.inputMicrosPerMillionTokens === 0 || price.outputMicrosPerMillionTokens === 0;
+  if (price.free === true) {
+    const prices = [price.inputMicrosPerMillionTokens, price.outputMicrosPerMillionTokens, price.cacheReadMicrosPerMillionTokens ?? 0, price.cacheWriteMicrosPerMillionTokens ?? 0];
+    if (prices.some((value) => value !== 0)) context.addIssue({ code: "custom", message: "a model marked free has every price 0" });
+  } else if (zero) {
+    context.addIssue({ code: "custom", message: "a price of 0 would let a task budget pass any call; set the price, or mark the model free (free: true)" });
+  }
+});
 
 const PricesObjectSchema = z.object({
   currency: z.string().regex(/^[A-Z]{3}$/u),
@@ -193,6 +212,27 @@ export function modelProviderAddressProblem(address: string): string | undefined
   return "the address must be https (plain http only for this computer)";
 }
 
+/**
+ * Provider ids that name something else Rovara reads a secret for (the code host's token is kept in the same key file, under `github`). A model provider with one of these ids would be handed
+ * that secret as a model key, so it is refused.
+ */
+export const MODEL_PROVIDER_RESERVED_IDS: readonly string[] = ["github", "linear", "slack", "jira", "gitlab", "bitbucket", "rovara"];
+
+/** Whether an AWS host is one a SigV4 signature may be sent to: an https `*.amazonaws.com` (or `.amazonaws.com.cn`) name that has the signing region as a label. */
+export function awsHostProblem(address: string, region: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(address);
+  } catch {
+    return "the address is not a URL";
+  }
+  if (url.protocol !== "https:") return "an AWS sign-in is sent to https only";
+  const host = url.hostname.toLowerCase();
+  if (!host.endsWith(".amazonaws.com") && !host.endsWith(".amazonaws.com.cn")) return "an AWS sign-in is sent only to an address ending in .amazonaws.com";
+  if (!host.split(".").includes(region)) return "the address must be in the region the call is signed for";
+  return undefined;
+}
+
 export class ModelProviderError extends Error {
   constructor(readonly providerId: string, message: string) {
     super(`model provider ${providerId.slice(0, 40)}: ${message}`);
@@ -205,6 +245,7 @@ export function assertModelProvider(provider: ModelProviderAdapter): ModelProvid
   // `credential` is a function; the rest is data and is checked as such.
   const data: Record<string, unknown> = { ...provider };
   delete data.credential;
+  delete data.credentialProblem;
   const parsed = ModelProviderDataSchema.safeParse(data);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
@@ -212,6 +253,11 @@ export function assertModelProvider(provider: ModelProviderAdapter): ModelProvid
   }
   const problem = modelProviderAddressProblem(provider.address);
   if (problem !== undefined) throw new ModelProviderError(provider.kind, problem);
+  if (MODEL_PROVIDER_RESERVED_IDS.includes(provider.kind)) throw new ModelProviderError(provider.kind, "that id belongs to another part of Rovara; pick another provider id");
+  if (provider.signIn.kind === "aws-sigv4") {
+    const aws = awsHostProblem(provider.address, provider.signIn.region);
+    if (aws !== undefined) throw new ModelProviderError(provider.kind, aws);
+  }
   const seen = new Set<string>();
   for (const entry of provider.formats) {
     if (seen.has(entry.format)) throw new ModelProviderError(provider.kind, `the format ${entry.format} is listed twice`);
@@ -239,7 +285,12 @@ export function modelPriceRows(providers: readonly ModelProviderAdapter[]): { cu
     if (provider.prices === undefined) continue;
     if (currency !== undefined && currency !== provider.prices.currency) throw new ModelProviderError(provider.kind, `prices are in ${provider.prices.currency}, another provider's are in ${currency}`);
     currency = provider.prices.currency;
-    for (const [model, price] of Object.entries(provider.prices.models)) models[`${provider.kind}/${model}`] = price;
+    for (const [model, price] of Object.entries(provider.prices.models)) {
+      // The `free` mark is for the check at load; the metering port reads the four prices only.
+      models[`${provider.kind}/${model}`] = { inputMicrosPerMillionTokens: price.inputMicrosPerMillionTokens, outputMicrosPerMillionTokens: price.outputMicrosPerMillionTokens,
+        ...(price.cacheReadMicrosPerMillionTokens === undefined ? {} : { cacheReadMicrosPerMillionTokens: price.cacheReadMicrosPerMillionTokens }),
+        ...(price.cacheWriteMicrosPerMillionTokens === undefined ? {} : { cacheWriteMicrosPerMillionTokens: price.cacheWriteMicrosPerMillionTokens }) };
+    }
   }
   return { currency, models };
 }

@@ -11,7 +11,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
-import { chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
+import { LOCAL_MODEL_PROVIDER_ORDER, chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
 import { capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
@@ -147,7 +147,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const providers = registryModelProviderBook(registry);
   const chosen = async (): Promise<LocalModelChoice | undefined> => {
     if (options.modelChoice !== undefined) return options.modelChoice;
-    const picked = chooseLocalModel(await readyProviders(providers, keys, companyId), options.modelSetting, providers);
+    // Only the providers that could be chosen are asked for a credential: the setting's provider, else the default order. A provider that is installed but not chosen (Bedrock, with Anthropic chosen) is never asked.
+    const candidates = options.modelSetting === undefined ? LOCAL_MODEL_PROVIDER_ORDER : [options.modelSetting.provider];
+    const picked = chooseLocalModel(await readyProviders(providers, keys, companyId, candidates), options.modelSetting, providers);
     return picked.ok ? { provider: picked.provider, model: picked.model, ...(picked.api === undefined ? {} : { api: picked.api }) } : undefined;
   };
   /** The route of the chosen model: the request format the owner named, else the provider's first. */

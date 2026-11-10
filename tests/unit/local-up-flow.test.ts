@@ -834,13 +834,13 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
       formats: [{ format: "openai-completions", pathOverride: "/chat/completions", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "none", reasoningReturned: false, promptCaching: false, streamUsage: true } },
         { format: "openai-responses", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "effort", reasoningReturned: true, promptCaching: false, streamUsage: true } }] }; } };\n`;
     const keyed = await launch({
-      environment: { COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" },
+      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" },
       files: { "gateway.mjs": gateway("company-gateway", '{ kind: "bearer-key" }', "https://models.example.test/v1") },
       config: { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model: { provider: "company-gateway", id: "house-model" } },
     });
     expect((await understandStep(keyed)).payload).toMatchObject({ modelRoute: { alias: "company-gateway/house-model", api: "openai-completions", catalog: "house-model" } });
     const responses = await launch({
-      environment: { COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" },
+      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" },
       files: { "gateway.mjs": gateway("company-gateway", '{ kind: "bearer-key" }', "https://models.example.test/v1") },
       config: { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model: { provider: "company-gateway", api: "openai-responses", id: "house-model" } },
     });
@@ -856,6 +856,30 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
       config: { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model: { provider: "company-gateway", id: "house-model" } },
     });
     expect((await understandStep(noKey)).payload).not.toHaveProperty("modelRoute");
+  });
+
+  it("never asks a provider that is installed but not chosen for its credential (review L1), and asks the chosen one only", async () => {
+    const asks = `globalThis.__p5Asks = globalThis.__p5Asks ?? { aws: 0 };`;
+    const aws = `${asks}\nexport const plugin = { point: "model-provider", name: "aws-gateway", create() { return { kind: "aws-gateway", name: "AWS gateway", address: "https://bedrock-runtime.us-west-2.amazonaws.com",
+      signIn: { kind: "aws-sigv4", region: "us-west-2", service: "bedrock" }, defaultModel: "m",
+      formats: [{ format: "anthropic-messages", capabilities: { forcedToolChoice: false, parallelToolCalls: true, reasoning: "thinking", reasoningReturned: true, promptCaching: true, streamUsage: true } }],
+      async credential() { globalThis.__p5Asks.aws += 1; return undefined; } }; } };\n`;
+    const globals = globalThis as unknown as { __p5Asks?: { aws: number } };
+    const chosen = await launch({
+      environment: { ANTHROPIC_API_KEY: ["sk", "ant", "y".repeat(24)].join("-") },
+      files: { "aws.mjs": aws },
+      config: { version: 1, plugins: [{ point: "model-provider", name: "aws-gateway", module: "./aws.mjs" }] },
+    });
+    expect((await understandStep(chosen)).payload).toMatchObject({ modelRoute: { api: "anthropic-messages" } });
+    expect(globals.__p5Asks?.aws ?? 0).toBe(0);
+    // Named by the setting, it is asked (and has none here, so no route).
+    const named = await launch({
+      files: { "aws.mjs": aws },
+      config: { version: 1, plugins: [{ point: "model-provider", name: "aws-gateway", module: "./aws.mjs" }], model: { provider: "aws-gateway", id: "m" } },
+    });
+    expect((await understandStep(named)).payload).not.toHaveProperty("modelRoute");
+    expect(globals.__p5Asks?.aws ?? 0).toBeGreaterThan(0);
+    delete globals.__p5Asks;
   });
 });
 

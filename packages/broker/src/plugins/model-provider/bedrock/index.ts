@@ -1,8 +1,9 @@
 // Port lane P5 (item K2): Amazon Bedrock as a normal model provider. Nothing here is hard-wired to the machine's role: Bedrock is a `model-provider` plug-in whose sign-in is
-// AWS Signature Version 4, with the credential from the AWS role the broker runs as (or from the key file). Claude goes through the messages format on bedrock-runtime's `/anthropic`
-// path; open models go through chat completions on `/openai/v1`. Both paths and the capability rows come from the research (MODEL-PROVIDER-FORMATS-RESEARCH.md, 2026-11-09) and are not yet
-// tried against a live account: they are plain data a deployment can correct in a module.
+// AWS Signature Version 4, with the credential from an identity the owner NAMED (a profile, or a role to assume), or from the default chain only when the owner opted in (review M1).
+// Claude goes through the messages format on bedrock-runtime's `/anthropic` path; open models go through chat completions on `/openai/v1`. Both paths and the capability rows come from the
+// research (MODEL-PROVIDER-FORMATS-RESEARCH.md, 2026-11-09) and are not yet tried against a live account (docs/local.md, open checks): they are plain data a deployment can correct in a module.
 import { SecretValue, type ModelFormatCapabilities, type ModelProviderAdapter, type ModelProviderPrices } from "@agentx/contracts";
+import { createAwsCredentialSource, type AwsCredentialLoaders, type AwsIdentity } from "./credentials.js";
 
 export const BEDROCK_PROVIDER_ID = "amazon-bedrock";
 
@@ -14,23 +15,23 @@ export const BEDROCK_CHAT_CAPABILITIES: ModelFormatCapabilities = { forcedToolCh
 export interface BedrockProviderOptions {
   /** The AWS region (`us-west-2`). It names the address and the signature scope. */
   region: string;
+  /** Whose credential signs: a named profile, a role to assume, or (opted in) the default chain. Required unless `credentials` is given. */
+  identity?: AwsIdentity;
   /** The Claude model used when the owner names none (a Bedrock model id or inference profile id). Absent: only the owner's `model` setting chooses it. */
   defaultModel?: string;
   prices?: ModelProviderPrices;
-  /**
-   * The AWS credential as `{accessKeyId, secretAccessKey, sessionToken?}`, resolved at each call (a role's temporary credentials expire). Absent: the default AWS provider chain
-   * (environment, shared config, SSO, container or instance role), loaded when first needed.
-   */
+  /** Replaces the AWS SDK's credential providers (tests, or a deployment that resolves its role another way). It is called at each call; make it cache. */
   credentials?: (() => Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken?: string | undefined }>) | undefined;
-}
-
-async function defaultChainCredentials(): Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken?: string | undefined }> {
-  const { defaultProvider } = await import("@aws-sdk/credential-provider-node");
-  return defaultProvider()();
+  loaders?: AwsCredentialLoaders;
+  now?: () => number;
 }
 
 export function bedrockModelProvider(options: BedrockProviderOptions): ModelProviderAdapter {
-  const resolve = options.credentials ?? defaultChainCredentials;
+  if (options.credentials === undefined && options.identity === undefined) throw new Error("Bedrock needs an AWS identity: a profile, a role, or the opt-in to the default chain");
+  let problem: string | undefined;
+  const source = options.credentials === undefined && options.identity !== undefined
+    ? createAwsCredentialSource(options.identity, options.region, { ...(options.loaders === undefined ? {} : { loaders: options.loaders }), ...(options.now === undefined ? {} : { now: options.now }) })
+    : undefined;
   return {
     kind: BEDROCK_PROVIDER_ID,
     name: "Amazon Bedrock",
@@ -42,12 +43,15 @@ export function bedrockModelProvider(options: BedrockProviderOptions): ModelProv
     ],
     ...(options.defaultModel === undefined ? {} : { defaultModel: options.defaultModel }),
     ...(options.prices === undefined ? {} : { prices: options.prices }),
+    credentialProblem: () => source?.problem() ?? problem,
     async credential() {
       try {
-        const { accessKeyId, secretAccessKey, sessionToken } = await resolve();
+        const { accessKeyId, secretAccessKey, sessionToken } = await (source !== undefined ? source.resolve() : options.credentials!());
+        problem = undefined;
         return new SecretValue(JSON.stringify({ accessKeyId, secretAccessKey, ...(sessionToken === undefined ? {} : { sessionToken }) }));
       } catch {
-        // No role to use: the key file's entry for this provider is tried next, and the words of an AWS error are never passed on.
+        // No identity to use. The key file's entry is tried first, so reaching here means it had none; the SDK's own words (a profile, an ARN) are never passed on.
+        problem = source === undefined ? "no AWS credentials were found" : undefined;
         return undefined;
       }
     },

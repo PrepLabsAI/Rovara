@@ -14,3 +14,5 @@ export * from "./this-machine-worker-machines.js";
 export * from "./isolation/allow-list.js";
 export * from "./isolation/stack.js";
 export * from "./open-browser.js";
+// Port lane P5 (review M1): what `rovara up --check` says about a configured Bedrock provider, without loading it.
+export { describeBedrockSettings } from "../plugins/model-provider/bedrock/plugin.js";

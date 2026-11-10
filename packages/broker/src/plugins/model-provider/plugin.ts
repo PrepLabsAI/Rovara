@@ -12,7 +12,9 @@
 // provider's entry in the key file or its environment variable (or the provider's own `credential()`).
 import { z } from "zod";
 import { ModelProviderPricesSchema, assertModelProvider, type ModelProviderAdapter, type PluginModule } from "@agentx/contracts";
+import { PluginRegistryError } from "@agentx/contracts";
 import { readPluginSettings } from "../module-support.js";
+import { BUILTIN_MODEL_PROVIDER_IDS } from "./builtin.js";
 
 const SettingsSchema = z.object({
   name: z.string().min(1).max(80).optional(),
@@ -28,6 +30,9 @@ export function modelProviderPlugin(provider: ModelProviderAdapter): PluginModul
     name: provider.kind,
     create(context) {
       const settings = readPluginSettings(SettingsSchema, context.settings, `model-provider/${provider.kind}`);
+      if (settings.address !== undefined && (BUILTIN_MODEL_PROVIDER_IDS as readonly string[]).includes(provider.kind)) {
+        throw new PluginRegistryError("bad_config", `the address of the built-in provider ${provider.kind} cannot be changed; use another provider id`);
+      }
       // Rebuilt with the owner's settings, then checked as a whole: an address that is not https, or a price in a bad shape, stops the start.
       return assertModelProvider({
         ...provider,

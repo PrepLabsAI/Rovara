@@ -8,7 +8,7 @@ import { createPriceTableMetering } from "../../packages/broker/src/ports/policy
 import {
   MODEL_PROXY_PREFIX, WORKSPACE_HEADER, builtinModelProviderBook, createLocalModelProxy, localRoute, type LocalModelProxy, type ModelProviderBook, type ProxyRoute,
 } from "../../packages/broker/src/local/model-proxy/index.js";
-import { BUILTIN_MODEL_PROVIDERS, NATIVE_CHAT_CAPABILITIES, NATIVE_MESSAGES_CAPABILITIES, NATIVE_RESPONSES_CAPABILITIES, bedrockModelProvider } from "../../packages/broker/src/plugins/model-provider/index.js";
+import { AWS_MODULE_MISSING, AwsCredentialSetupError, BUILTIN_MODEL_PROVIDERS, NATIVE_CHAT_CAPABILITIES, NATIVE_MESSAGES_CAPABILITIES, NATIVE_RESPONSES_CAPABILITIES, bedrockModelProvider } from "../../packages/broker/src/plugins/model-provider/index.js";
 import { fakeKey } from "../support/model-proxy-world.js";
 
 const COMPANY = "org_00000000000000000000";
@@ -174,7 +174,7 @@ describe("the guard is the same for every provider", () => {
 });
 
 describe("Responses is stateless", () => {
-  it("always sends store: false, and refuses a stored-state field", async () => {
+  it("always sends store: false (Responses and chat completions), and refuses a stored-state field", async () => {
     const upstream = await fakeUpstream();
     const { call } = await world({ providers: [], keys: { openai: fakeKey("sk-oai") }, endpoints: { openai: upstream.url } });
     const route = localRoute("openai", "gpt-test").route;
@@ -185,10 +185,10 @@ describe("Responses is stateless", () => {
     const stored = await call(route, { input: "hi", previous_response_id: "resp_1" });
     expect(stored.status).toBe(400);
     expect(upstream.calls).toHaveLength(2);
-    // Chat completions keeps the owner's own `store` field as it was.
+    // Chat completions is sent stateless too (review L5).
     const chatWorld = await world({ providers: [chat()], keys: { "company-gateway": fakeKey("gw") }, endpoints: { "company-gateway": `${upstream.url}/v1` } });
     await chatWorld.call(localRoute("company-gateway", "m", "openai-completions").route, { ...userMessage, store: true });
-    expect(upstream.calls[2]!.body.store).toBe(true);
+    expect(upstream.calls[2]!.body.store).toBe(false);
   });
 });
 
@@ -308,5 +308,82 @@ describe("the built-in providers are unchanged", () => {
     expect(upstream.calls[1]!.path).toBe("/v1/chat/completions");
     expect(builtinModelProviderBook().ids()).toEqual(["anthropic", "openai", "openrouter"]);
     expect(NATIVE_RESPONSES_CAPABILITIES.reasoning).toBe("effort");
+  });
+});
+
+describe("which credential wins (review M2)", () => {
+  const ambient = { accessKeyId: "AKIAAMBIENT", secretAccessKey: ["ambient", "never", "real"].join("-") };
+  const explicit = { accessKeyId: "AKIAEXPLICIT", secretAccessKey: ["explicit", "never", "real"].join("-") };
+
+  it("uses the amazon-bedrock entry of the key file before the provider's own session", async () => {
+    const upstream = await fakeUpstream();
+    let sessionAsked = 0;
+    const bedrock = bedrockModelProvider({ region: "us-west-2", credentials: async () => { sessionAsked += 1; return ambient; } });
+    const { call } = await world({ providers: [bedrock], keys: { "amazon-bedrock": JSON.stringify(explicit) }, endpoints: { "amazon-bedrock": upstream.url } });
+    expect((await call(localRoute("amazon-bedrock", "m", "anthropic-messages").route, { messages: [{ role: "user", content: "x" }], max_tokens: 5 })).status).toBe(200);
+    expect(upstream.calls[0]!.headers.authorization).toContain("Credential=AKIAEXPLICIT/");
+    expect(sessionAsked).toBe(0);
+  });
+
+  it("falls back to the provider's own session when the key file has no entry", async () => {
+    const upstream = await fakeUpstream();
+    const bedrock = bedrockModelProvider({ region: "us-west-2", credentials: async () => ambient });
+    const { call } = await world({ providers: [bedrock], keys: {}, endpoints: { "amazon-bedrock": upstream.url } });
+    await call(localRoute("amazon-bedrock", "m", "anthropic-messages").route, { messages: [{ role: "user", content: "x" }], max_tokens: 5 });
+    expect(upstream.calls[0]!.headers.authorization).toContain("Credential=AKIAAMBIENT/");
+  });
+
+  it("holds for any provider with a credential(): the stored token wins over the refreshed one", async () => {
+    const upstream = await fakeUpstream();
+    const vertex: ModelProviderAdapter = {
+      kind: "vertex-claude", name: "Claude on Google Cloud", address: "https://models.example.test/models", signIn: { kind: "google-oauth" },
+      formats: [{ format: "anthropic-messages", variant: "vertex", capabilities: NATIVE_MESSAGES_CAPABILITIES }],
+      credential: async () => new SecretValue("ya29.refreshed-never-real-0123456789"),
+    };
+    const { call } = await world({ providers: [vertex], keys: { "vertex-claude": "ya29.stored-never-real-0123456789" }, endpoints: { "vertex-claude": `${upstream.url}/models` } });
+    await call(localRoute("vertex-claude", "m", "anthropic-messages").route, { messages: [{ role: "user", content: "x" }], max_tokens: 5 });
+    expect(upstream.calls[0]!.headers.authorization).toBe("Bearer ya29.stored-never-real-0123456789");
+  });
+});
+
+describe("the words for a failed sign-in and a skewed clock (review L2, info)", () => {
+  it("names a missing AWS module in the refusal, and the access answer, and never the SDK's words", async () => {
+    const upstream = await fakeUpstream();
+    const bedrock = bedrockModelProvider({ region: "us-west-2", identity: { kind: "ambient" }, loaders: {
+      async profile() { throw new Error("n/a"); }, async role() { throw new Error("n/a"); },
+      async ambient() { throw new AwsCredentialSetupError(AWS_MODULE_MISSING); },
+    } });
+    const { call } = await world({ providers: [bedrock], keys: {}, endpoints: { "amazon-bedrock": upstream.url } });
+    const refused = await call(localRoute("amazon-bedrock", "m", "anthropic-messages").route, { messages: [{ role: "user", content: "x" }], max_tokens: 5 });
+    expect(refused.status).toBe(403);
+    expect(refused.text).toContain("AWS credential module missing");
+    expect(upstream.calls).toHaveLength(0);
+  });
+
+  it("tells the owner to check the computer's clock when AWS says the signature is expired or too skewed, and does not repeat the key", async () => {
+    const skewed = await fakeUpstream((_seen, response) => {
+      response.writeHead(403, { "content-type": "application/json" });
+      response.end(JSON.stringify({ message: "Signature expired: 20261110T000000Z is now earlier than 20261110T001000Z (20261110T001500Z - 5 min.)" }));
+      return true;
+    });
+    const credentials = { accessKeyId: "AKIAEXAMPLE", secretAccessKey: ["wJalr", "never", "real"].join("-") };
+    const { call } = await world({ providers: [bedrockModelProvider({ region: "us-west-2", credentials: async () => credentials })], keys: {}, endpoints: { "amazon-bedrock": skewed.url } });
+    const refused = await call(localRoute("amazon-bedrock", "m", "anthropic-messages").route, { messages: [{ role: "user", content: "x" }], max_tokens: 5 });
+    expect(refused.status).toBe(502);
+    expect(refused.json().error.code).toBe("provider_clock_skew");
+    expect(refused.text).toContain("check your computer's clock");
+    // Any other 403 is still "refused the key".
+    const denied = await fakeUpstream((_seen, response) => { response.writeHead(403, { "content-type": "application/json" }); response.end(JSON.stringify({ message: "not authorized" })); return true; });
+    const other = await world({ providers: [bedrockModelProvider({ region: "us-west-2", credentials: async () => credentials })], keys: {}, endpoints: { "amazon-bedrock": denied.url } });
+    expect((await other.call(localRoute("amazon-bedrock", "m", "anthropic-messages").route, { messages: [{ role: "user", content: "x" }], max_tokens: 5 })).json().error.code).toBe("provider_refused_key");
+  });
+
+  it("holds a Bedrock model with no price out of a budget-held task, as for any unpriced model", async () => {
+    const upstream = await fakeUpstream();
+    const { call } = await world({ providers: [bedrockModelProvider({ region: "us-west-2", credentials: async () => ({ accessKeyId: "A", secretAccessKey: "S" }) })], keys: {}, endpoints: { "amazon-bedrock": upstream.url } });
+    const refused = await call(localRoute("amazon-bedrock", "m", "anthropic-messages").route, { messages: [{ role: "user", content: "x" }], max_tokens: 5 }, { budget: { micros: 1_000_000, currency: "USD" } });
+    expect(refused.status).toBe(403);
+    expect(refused.text).toContain("no price");
+    expect(upstream.calls).toHaveLength(0);
   });
 });

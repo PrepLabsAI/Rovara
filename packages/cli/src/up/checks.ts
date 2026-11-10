@@ -13,6 +13,7 @@ import {
   assertStateDirectoryLocation,
   createLocalCodeHosts,
   createLocalModelKeyStore,
+  describeBedrockSettings,
   parsePluginConfigText,
   readOwnerFile,
   resolveConfigLocation,
@@ -107,8 +108,15 @@ async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
   const config = await readOwnerConfig(services);
   const setting = config?.model;
   // Item K2: a `model-provider` plug-in named in the config is not loaded by this check (naming a module runs its code); `rovara up` loads it and says what is wrong with its sign-in.
-  if (setting !== undefined && !LOCAL_MODEL_PROVIDERS.includes(setting.provider as (typeof LOCAL_MODEL_PROVIDERS)[number])
-    && config?.plugins.some((entry) => entry.enabled && entry.point === "model-provider" && entry.name === setting.provider) === true) {
+  const entry = setting === undefined || LOCAL_MODEL_PROVIDERS.includes(setting.provider as (typeof LOCAL_MODEL_PROVIDERS)[number])
+    ? undefined : config?.plugins.find((candidate) => candidate.enabled && candidate.point === "model-provider" && candidate.name === setting.provider);
+  if (setting !== undefined && entry !== undefined) {
+    // Bedrock signs with an AWS identity the owner must name (review M1): say which, and that its models are unpriced unless prices are set.
+    if (entry.name === "amazon-bedrock") {
+      const described = describeBedrockSettings(entry.settings);
+      if (!described.ok) return { id: "model-key", status: "fail", summary: `The amazon-bedrock settings in your config are not valid: ${described.problem}.`, fix: 'Name one AWS identity in the amazon-bedrock settings: "profile": "<an AWS profile>", "roleArn": "<a role>", or "allowAmbientAwsCredentials": true.' };
+      return { id: "model-key", status: "ok", summary: `Task steps will use amazon-bedrock ${setting.id} (the "model" setting in your config). Bedrock will sign with ${described.identity}.${described.priced ? "" : " Bedrock models are unpriced until you set prices, so a task with a budget is refused."} The sign-in itself is checked when rovara up starts.` };
+    }
     return { id: "model-key", status: "ok", summary: `Task steps will use ${setting.provider} ${setting.id} (the "model" setting in your config). ${setting.provider} is a model-provider plug-in: its sign-in is checked when rovara up starts.` };
   }
   const picked = chooseLocalModel(found, setting);

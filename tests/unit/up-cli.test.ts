@@ -132,6 +132,20 @@ describe("rovara up --check", () => {
     expect(missing.out).toContain("no model provider called company-gateway is installed");
   });
 
+  it("says which AWS identity Bedrock will use and that its models are unpriced, and fails when none is named (review M1)", async () => {
+    const check = (options: Parameters<typeof run>[1]) => run(["up", "--check", "--worker-image", "worker:test"], options);
+    const config = (settings: Record<string, unknown>) => JSON.stringify({ version: 1, plugins: [{ point: "model-provider", name: "amazon-bedrock", module: "./bedrock.mjs", settings }], model: { provider: "amazon-bedrock", id: "anthropic.claude-test-v1:0" } });
+    const profile = await check({ environment: {}, config: config({ region: "us-west-2", profile: "rovara-bedrock" }) });
+    expect(profile.out).toContain('Bedrock will sign with the AWS profile "rovara-bedrock"');
+    expect(profile.out).toContain("Bedrock models are unpriced until you set prices");
+    const priced = await check({ environment: {}, config: config({ region: "us-west-2", allowAmbientAwsCredentials: true, prices: { currency: "USD", models: { "anthropic.claude-test-v1:0": { inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 2 } } } }) });
+    expect(priced.out).toContain("the default AWS credential chain");
+    expect(priced.out).not.toContain("unpriced");
+    const none = await check({ environment: {}, config: config({ region: "us-west-2" }) });
+    expect(none.code).not.toBe(0);
+    expect(none.out).toContain("exactly one AWS identity");
+  });
+
   it("says how to get GitHub access, and when GitHub rejects the token", async () => {
     const none = await run(["up", "--check", "--worker-image", "worker:test"], { gh: undefined });
     expect(none.out).toContain("No GitHub access was found.");

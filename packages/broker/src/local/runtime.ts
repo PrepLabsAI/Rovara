@@ -15,6 +15,7 @@ import { OperationStore } from "../operations.js";
 import {
   createAdapterRegistry,
   createEnvironmentModelKeyStore,
+  modelKeyVariable,
   createFileModelKeyStore,
   createLayeredModelKeyStore,
   createModuleImporter,
@@ -46,7 +47,7 @@ import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { assertGithubRepositoryAddress, type GhRunner } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
-import { registerBuiltinModelProviders } from "../plugins/model-provider/builtin.js";
+import { assertBuiltinIdsKept, registerBuiltinModelProviders } from "../plugins/model-provider/builtin.js";
 import { createLocalModelProxy, registryModelProviderBook, type LocalModelProxy, type ModelGrantSource, type ProviderEndpoints } from "./model-proxy/index.js";
 import { modelProxyWorkerUrl } from "./docker-worker-machines.js";
 import {
@@ -73,7 +74,7 @@ export const LOCAL_MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as co
  */
 export function createLocalModelKeyStore(stateDirectory: string, environment: NodeJS.ProcessEnv, providers: readonly string[] = LOCAL_MODEL_PROVIDERS): ModelKeyStore {
   return createLayeredModelKeyStore([
-    createEnvironmentModelKeyStore(environment, providers),
+    createEnvironmentModelKeyStore(environment, providers, modelKeyVariable),
     createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME)),
   ]);
 }
@@ -389,6 +390,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   for (const provider of providerRows) {
     try {
       assertModelProvider(provider);
+      assertBuiltinIdsKept(provider);
     } catch (error) {
       throw new LocalStateError(`${error instanceof Error ? error.message : "a model provider is not valid"}`);
     }

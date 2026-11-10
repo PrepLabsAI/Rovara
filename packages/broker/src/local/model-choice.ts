@@ -7,7 +7,7 @@
 // never changes which provider an existing install uses.
 import { DEFAULT_DIRECT_MODELS, DEFAULT_OPENROUTER_WORKER_MODEL } from "@agentx/model-runtime/config";
 import { providerFormat } from "@agentx/contracts";
-import { environmentVariableFor } from "../ports/model-key-stores.js";
+import { modelKeyVariable } from "../ports/model-key-stores.js";
 import { credentialFix } from "./model-proxy/credentials.js";
 import { builtinModelProviderBook } from "./model-proxy/proxy.js";
 import type { ModelProviderBook, ProxyApi, ProxyProvider } from "./model-proxy/types.js";
@@ -66,7 +66,7 @@ export function chooseLocalModel(have: readonly string[], setting?: LocalModelSe
     return {
       ok: false, problem: "setting-without-key",
       summary: `The config names ${setting.provider} (${setting.id}) as the model, but no ${setting.provider} ${row.signIn.kind === "bearer-key" || row.signIn.kind === "named-header" ? "key" : "sign-in"} was found.`,
-      fix: `${row.signIn.kind === "bearer-key" || row.signIn.kind === "named-header" ? `Set ${environmentVariableFor(row.kind)} in your environment (or put {"${row.kind}": "<your key>"} in the keys file)` : `Fix the sign-in: ${credentialFix(row)}`}, or change or remove the "model" setting in your config.`,
+      fix: `${row.signIn.kind === "bearer-key" || row.signIn.kind === "named-header" ? `Set ${modelKeyVariable(row.kind)} in your environment (or put {"${row.kind}": "<your key>"} in the keys file)` : `Fix the sign-in: ${credentialFix(row)}`}, or change or remove the "model" setting in your config.`,
     };
   }
   const provider = LOCAL_MODEL_PROVIDER_ORDER.find((candidate) => have.includes(candidate) && book.get(candidate) !== undefined);
