@@ -17,6 +17,11 @@ export interface MergePeople {
   nonWritersAmong(orgId: OrgId, hostUserIds: readonly string[]): Promise<Set<string>>;
   /** The code-host account a person (who presses Merge) linked, or undefined. */
   hostAccountOf(orgId: OrgId, personId: string): Promise<string | undefined>;
+  /**
+   * EVERY code-host account a person linked, when a person may link several (lane P3, review M1). The merge code excludes all of them from the "someone else approved" count, so a person cannot approve with a second account.
+   * Absent: `hostAccountOf` is the person's only account.
+   */
+  hostAccountsOf?(orgId: OrgId, personId: string): Promise<string[]>;
 }
 
 /** Code's default: one owner, no linked accounts, nobody excluded. */
@@ -40,9 +45,9 @@ export interface IdentityMergePeopleOptions {
 export function createIdentityMergePeople(identity: IdentityProvider, options: IdentityMergePeopleOptions): MergePeople {
   const tenant = options.hostTenant ?? "";
   const mayApprove = options.mayApprove ?? ((person: Principal) => person.roles.some((role) => isKnownOrgRole(role)));
-  const hostAccountOf = async (orgId: OrgId, personId: string): Promise<string | undefined> => {
-    const accounts = await identity.accountsOf?.(orgId, personId);
-    return accounts?.find((account) => account.provider === options.hostProvider && account.tenant === tenant)?.accountId;
+  const hostAccountsOf = async (orgId: OrgId, personId: string): Promise<string[]> => {
+    const accounts = (await identity.accountsOf?.(orgId, personId)) ?? [];
+    return [...new Set(accounts.filter((account) => account.provider === options.hostProvider && account.tenant === tenant).map((account) => account.accountId))];
   };
   const peopleOf = async (orgId: OrgId, hostUserIds: readonly string[]): Promise<Array<{ hostUserId: string; person: Principal }>> => {
     const found: Array<{ hostUserId: string; person: Principal }> = [];
@@ -56,9 +61,9 @@ export function createIdentityMergePeople(identity: IdentityProvider, options: I
     async requestersOf(orgId, task) {
       const accounts: string[] = [];
       for (const personId of requesterIds(task)) {
-        const account = await hostAccountOf(orgId, personId);
-        if (account === undefined) return "unlinked";
-        accounts.push(account);
+        const own = await hostAccountsOf(orgId, personId);
+        if (own.length === 0) return "unlinked";
+        accounts.push(...own);
       }
       return accounts.length === 0 ? "unlinked" : [...new Set(accounts)];
     },
@@ -68,6 +73,7 @@ export function createIdentityMergePeople(identity: IdentityProvider, options: I
     async nonWritersAmong(orgId, hostUserIds) {
       return new Set((await peopleOf(orgId, hostUserIds)).filter((entry) => !mayApprove(entry.person)).map((entry) => entry.hostUserId));
     },
-    hostAccountOf,
+    hostAccountOf: async (orgId, personId) => (await hostAccountsOf(orgId, personId))[0],
+    hostAccountsOf,
   };
 }

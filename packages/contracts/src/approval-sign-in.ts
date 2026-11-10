@@ -37,17 +37,23 @@ export function checkApprovalSignInSetting(input: unknown, context: { companyOwn
   return { ok: true, setting: parsed.data };
 }
 
-export type ApprovalSignInVerdict = { ok: true } | { ok: false; reason: "no_sign_in_time" | "sign_in_too_old" | "sign_in_in_future" };
+export type ApprovalSignInVerdict = { ok: true } | { ok: false; reason: "invalid_rule" | "no_company_sign_in" | "no_sign_in_time" | "sign_in_too_old" | "sign_in_in_future" };
 
 /**
- * Whether an approver's sign-in satisfies a rule. `any-active` always holds (the identity adapter just vouched for a signed-in person). A window fails closed: no sign-in time, a time that cannot be read, or one in the
- * future refuses.
+ * Whether an approver's sign-in satisfies a rule. The rule is checked first (a plug-in's rule is data): seconds must be a whole number within the limits, else the answer is `invalid_rule`.
+ * Every mode needs a readable sign-in time that is not in the future: it is the proof that an interactive sign-in exists. A window fails closed on a missing, unreadable or future time, and on one older than the window.
+ * `any-active` (decision 62: trust any active company sign-in) also needs `context.companySignIn`, the identity adapter's own `capabilities.companySignIn`, read by the caller from the adapter and never from a request; without it
+ * the answer is `no_company_sign_in`, so a plug-in cannot switch freshness off for a company that has no sign-in of its own.
  */
-export function checkApprovalSignIn(rule: ApprovalSignInRule, approver: Pick<Principal, "authTime">, nowMs: number): ApprovalSignInVerdict {
-  if (rule.mode === "any-active") return { ok: true };
+export function checkApprovalSignIn(rule: ApprovalSignInRule, approver: Pick<Principal, "authTime">, nowMs: number, context: { companySignIn: boolean }): ApprovalSignInVerdict {
+  const parsed = ApprovalSignInSettingSchema.safeParse(rule);
+  if (!parsed.success) return { ok: false, reason: "invalid_rule" };
+  const checked = parsed.data;
+  if (checked.mode === "any-active" && !context.companySignIn) return { ok: false, reason: "no_company_sign_in" };
   if (approver.authTime === undefined) return { ok: false, reason: "no_sign_in_time" };
   const signedIn = Date.parse(approver.authTime);
   if (!Number.isFinite(signedIn)) return { ok: false, reason: "no_sign_in_time" };
   if (signedIn > nowMs + APPROVAL_SIGN_IN_SKEW_SECONDS * 1000) return { ok: false, reason: "sign_in_in_future" };
-  return nowMs - signedIn <= rule.seconds * 1000 ? { ok: true } : { ok: false, reason: "sign_in_too_old" };
+  if (checked.mode === "any-active") return { ok: true };
+  return nowMs - signedIn <= checked.seconds * 1000 ? { ok: true } : { ok: false, reason: "sign_in_too_old" };
 }

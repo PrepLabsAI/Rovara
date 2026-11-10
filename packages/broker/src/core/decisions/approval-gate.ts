@@ -10,16 +10,18 @@
 //     is decided once, by the same rule (the decision record is written with `when.absent()`).
 //   - the change to the subject carries the condition the subject loaded it under (its revision and that it still waits), so a concurrent change loses; the whole decision is one transaction.
 //   - policy on top of the seam, which only narrows what it allows: a high-risk approval and every rejection accept only the methods the approvers plug-in names as strong (`ApprovalRequirement.strongMethods`,
-//     `rejectMethods`; default the local session) and NEVER a code host comment, whatever is named (a comment is an approval of a change request, and says nothing about a rejection); a request for changes accepts the
-//     methods the plug-in names (default the local session or a comment); when the plug-in sets a sign-in rule (`ApprovalRequirement.signIn`, a company setting) the approver's sign-in time must satisfy it for a
+//     `rejectMethods`; default the local session) and NEVER a comment method (`strong-methods.ts`: `code-host-comment`, any `code-host-*`, the plug-in's `commentMethods`), whatever is named (a comment is an approval of a change
+//     request, and says nothing about a rejection); a request for changes accepts the methods the plug-in names (default the local session or a comment); the gate's policy option can only narrow the plug-in's sets; when the plug-in sets a sign-in rule (`ApprovalRequirement.signIn`, a company setting) the approver's sign-in time must satisfy it for a
 //     high-risk approval and a rejection; a request that does not allow self-approval refuses the person who asked; `minApprovers` distinct approvers are needed.
 //   - nothing a caller can send widens it: an unknown kind, subject or method is a refusal, not a default.
 // It never throws for a refusal (a refusal is an answer); it throws only for a fault of the store.
 import { createHash, randomUUID } from "node:crypto";
-import { CODE_HOST_COMMENT_METHOD } from "../../ports/policy-defaults.js";
+import { strictMethodsFor } from "./strong-methods.js";
+
+export { isCommentMethod, strictMethodsFor } from "./strong-methods.js";
 import {
   INDEX_EXPIRY_ATTRIBUTE, approvalProofKey, checkApprovalSignIn, companyScoped, when,
-  type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type Approvers, type AuditSink, type Condition, type DocumentKey, type DocumentStore, type ExternalAccountRef, type Principal,
+  type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type Approvers, type AuditSink, type Condition, type DocumentKey, type DocumentStore, type ExternalAccountRef, type IdentityProvider, type Principal,
   type StoredDocument, type TransactItem, type UpdateOp,
 } from "@agentx/contracts";
 
@@ -118,9 +120,9 @@ export type GateResult =
   | { status: "refused"; reason: GateRefusalReason; /** The Approvers seam's own reason, or a fixed sentence. Never a token. */ detail: string };
 
 export interface DecisionGatePolicy {
-  /** The only methods that may approve a high-risk request. Overrides what the approvers plug-in names (`strongMethods`). Default: what the plug-in names, else the local session. A comment method is never accepted. */
+  /** Limits the methods that may approve a high-risk request to these, among the ones the approvers plug-in names (`strongMethods`; when it names none, among the local session). Narrows only. A comment method is never accepted. */
   highRiskMethods?: readonly string[];
-  /** The only methods that may reject. Overrides the plug-in's `rejectMethods`. Default: what the plug-in names, else the local session. A comment method is never accepted. */
+  /** Limits the methods that may reject to these, among the plug-in's `rejectMethods`. Narrows only. A comment method is never accepted. */
   rejectMethods?: readonly string[];
   /** The only methods that may ask for changes. Overrides the plug-in's `changesMethods`. Default: what the plug-in names, else the local session or a repository writer's comment (owner decision 62, A3: asking for changes by comment is allowed; rejecting is not). */
   changesMethods?: readonly string[];
@@ -139,6 +141,8 @@ export interface DecisionGateDependencies {
   audit: AuditSink;
   subjects: readonly DecisionSubject[];
   policy?: DecisionGatePolicy;
+  /** The identity adapter, for its capabilities: a sign-in rule of `any-active` is honoured only when `capabilities.companySignIn` is true (lane P3, decision 62). Absent: it is not. */
+  identity?: Pick<IdentityProvider, "capabilities">;
   now?: () => Date;
 }
 
@@ -210,21 +214,6 @@ export interface DecisionGate {
   decide(attempt: DecisionAttempt): Promise<GateResult>;
   /** What the person can present for this subject now, so a surface offers the right way to answer (never decides anything). */
   requirement(companyId: string, kind: string, subjectId: string): Promise<{ requirement: ApprovalRequirement; risk: string; revision: number; artifactDigest: string } | undefined>;
-}
-
-/**
- * The methods that may give this answer, or undefined when the requirement's own list is the only limit (a low or medium risk approval). The gate's policy option overrides the plug-in's names; the plug-in's names override the
- * default (the local session; for a request for changes also a comment). A code host comment is dropped from the strong sets (high risk, reject) whatever names it: it proves one act and says nothing about a rejection or a high-risk
- * approval (owner decisions 45.3, 62). An empty set is a set: nothing is accepted.
- */
-export function strictMethodsFor(
-  outcome: DecisionOutcome, risk: string, requirement: Pick<ApprovalRequirement, "strongMethods" | "rejectMethods" | "changesMethods">,
-  policy: { [K in "highRiskMethods" | "rejectMethods" | "changesMethods"]?: readonly string[] | undefined } = {},
-): readonly string[] | undefined {
-  const noComment = (methods: readonly string[]): readonly string[] => methods.filter((method) => method !== CODE_HOST_COMMENT_METHOD);
-  if (outcome === "reject") return noComment(policy.rejectMethods ?? requirement.rejectMethods ?? [LOCAL_SESSION_METHOD_NAME]);
-  if (outcome === "request_changes") return policy.changesMethods ?? requirement.changesMethods ?? [LOCAL_SESSION_METHOD_NAME, CODE_HOST_COMMENT_METHOD];
-  return risk === "high" ? noComment(policy.highRiskMethods ?? requirement.strongMethods ?? [LOCAL_SESSION_METHOD_NAME]) : undefined;
 }
 
 export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate {
@@ -338,8 +327,8 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
       // The company's sign-in rule (decision 62), set by the approvers plug-in, for the answers that need a strong proof. Code sets none.
       if (requirement.signIn !== undefined && policyMethods !== undefined && attempt.outcome !== "request_changes") {
         for (const person of approvers) {
-          const fresh = checkApprovalSignIn(requirement.signIn, person, at.getTime());
-          if (!fresh.ok) return refuse("sign_in_not_fresh", fresh.reason === "no_sign_in_time" ? "Sign in again to do this: Rovara has no record of when you signed in." : "Sign in again to do this: your sign-in is too old.");
+          const fresh = checkApprovalSignIn(requirement.signIn, person, at.getTime(), { companySignIn: deps.identity?.capabilities.companySignIn === true });
+          if (!fresh.ok) return refuse("sign_in_not_fresh", fresh.reason === "no_sign_in_time" ? "Sign in again to do this: Rovara has no record of when you signed in." : fresh.reason === "sign_in_too_old" ? "Sign in again to do this: your sign-in is too old." : "Sign in again to do this: your sign-in cannot be checked.");
         }
       }
       const requester = request.requestedBy;

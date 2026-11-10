@@ -10,8 +10,8 @@
 //    `pressMerge` verifies it with `Approvers.verify` and only then merges. A proof is used once: it is stored under `approvalProofKey` in the claim's transaction.
 //  - The merge core trusts `Approvers.verify` and the adapter's `requirement` (the methods it accepts and `minApprovers`, which this core enforces). It does NOT know who is calling: Cloud's rule "a token
 //    (the CLI, an AI tool) never merges" is not enforced here. Keeping the local session secret away from tokens and agent tools is the job of the surface that collects the proof (lane L8, see
-//    DEFERRED-CHECKS.md), and a stronger proof for a high-risk merge is a rule of the Approvers adapter, which `request.risk` lets it make. Lane P3 (items A1, A3): the adapter says it in its requirement, and this core
-//    enforces what it says for a HIGH-risk merge: `strongMethods` (a code host comment never counts) and `signIn` (the approver's sign-in time, a company setting). An adapter that names neither is unchanged.
+//    DEFERRED-CHECKS.md). Lane P3 (items A1, A3): a HIGH-risk merge needs a strong method, by the same rule as the decision gate (`strictMethodsFor`: what the adapter names in `strongMethods`, else the local session; a
+//    comment method never counts) and, when the adapter sets `signIn` (a company setting), a sign-in that satisfies it.
 //  - The audit fact commits with the claim through W0's `AuditSink.stage`, as Cloud's ledger row did.
 //  - Everything provider-specific is behind the `CodeHost` port; people, settings, the task record, the timeline and the milestones are seams (seams.ts).
 import { createHash } from "node:crypto";
@@ -41,6 +41,7 @@ import {
   type CodeSettings,
   type DocumentStore,
   type HostScope,
+  type IdentityProvider,
   type MergeResult,
   type MergeRisk,
   type MergeTrackingItem,
@@ -49,7 +50,8 @@ import {
   type TransactItem,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
-import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
+import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
+import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
@@ -97,7 +99,8 @@ export interface ReadinessInput {
   workflow: ReadinessWorkflow;
   /** The base branch each pull request was opened against, by `repositoryId#number`. */
   recordedBases: ReadonlyMap<string, string>;
-  presser: { githubUserId: string | undefined };
+  /** `githubUserId` is the presser's account; `otherGithubUserIds` are the rest of the accounts the same person has linked (a person with two accounts cannot be the "other" approver by using the second). */
+  presser: { githubUserId: string | undefined; otherGithubUserIds?: readonly string[] };
   /**
    * Whether whoever presses Merge must have a linked code-host account (Cloud: always, controller ruling 2026-10-26, so the approval of the presser can be told from a reviewer's). Code has
    * one owner who proves themselves by a session or a collaborator's comment, so its install turns this off. Default true.
@@ -177,9 +180,10 @@ export function mergeReadiness(input: ReadinessInput): Readiness {
   // With self-approval off the presser must be known, whatever `requirePresserAccount` says: otherwise "the only approver cannot press" could not be checked.
   if (input.presser.githubUserId === undefined && (input.requirePresserAccount !== false || !input.allowSelfApproval)) return notReady(M.linkGithub);
   if (!input.allowSelfApproval && input.presser.githubUserId !== undefined) {
+    const presserAccounts = [input.presser.githubUserId, ...(input.presser.otherGithubUserIds ?? [])];
     for (const pr of open) {
       const approval = input.approvals.get(pullRequestKey(pr));
-      if (approval?.approved === true && approval.approvers.length === 1 && approval.approvers[0]!.githubUserId === input.presser.githubUserId) return notReady(M.presserApproved);
+      if (approval?.approved === true && approval.approvers.length === 1 && presserAccounts.includes(approval.approvers[0]!.githubUserId)) return notReady(M.presserApproved);
     }
   }
   return { ready: true };
@@ -209,6 +213,8 @@ export interface MergeDependencies {
   approvers: Approvers;
   audit: AuditSink;
   people: MergePeople;
+  /** The identity adapter, for its capabilities: a sign-in rule of `any-active` is honoured only when `capabilities.companySignIn` is true (lane P3, decision 62). Absent: it is not. */
+  identity?: Pick<IdentityProvider, "capabilities">;
   settings: CodeSettingsReader;
   milestones: CodeMilestones;
   timeline: SessionTimeline;
@@ -260,6 +266,15 @@ async function approvalOfItem(
 
 interface StoredReadiness { readiness: Readiness; items: MergeTrackingItem[]; settings: CodeSettings; entries: PullRequestEntry[] }
 
+/** Every code-host account of the presser: `hostAccountsOf` when the people seam has it, else the one `hostAccountOf` gives. */
+async function presserAccountsOf(people: MergePeople, orgId: OrgId, personId: string): Promise<string[]> {
+  const first = await people.hostAccountOf(orgId, personId);
+  const all = (await people.hostAccountsOf?.(orgId, personId)) ?? [];
+  return [...new Set([...(first === undefined ? [] : [first]), ...all])];
+}
+const presserOf = (accounts: readonly string[] | undefined): ReadinessInput["presser"] =>
+  accounts === undefined || accounts.length === 0 ? { githubUserId: undefined } : { githubUserId: accounts[0], otherGithubUserIds: accounts.slice(1) };
+
 async function readinessFromItems(
   deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, items: readonly MergeTrackingItem[], presserPersonId: string | undefined,
   options: { behindRequired?: ReadonlyMap<string, boolean> } = {},
@@ -268,7 +283,7 @@ async function readinessFromItems(
   const entries = requiredPullRequests(task.workflow).filter((entry) => entry.state !== "MERGED");
   const itemOf = new Map(items.map((item) => [pullRequestKey(item), item]));
   const requesters = await requesterHostIds(deps.people, task.orgId, task);
-  const presser = { githubUserId: presserPersonId === undefined ? undefined : await deps.people.hostAccountOf(task.orgId, presserPersonId) };
+  const presser = presserOf(presserPersonId === undefined ? undefined : await presserAccountsOf(deps.people, task.orgId, presserPersonId));
   const facts: MergePullRequestFacts[] = [];
   const approvals = new Map<string, HumanApproval>();
   const bases = new Map<string, string>();
@@ -429,8 +444,8 @@ export async function pressMerge(
   const prepared = await prepareMerge(deps, input);
   // What the approver adapter requires is enforced here, before the proof is looked at: a method it does not list is no approval, and more than one approver cannot be collected yet.
   if (!prepared.requirement.methods.includes(input.proof.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
-  const strong = prepared.risk.level === "high" ? prepared.requirement.strongMethods : undefined;
-  if (strong !== undefined && !strong.filter((method) => method !== CODE_HOST_COMMENT_METHOD).includes(input.proof.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
+  const strong = strictMethodsFor("approve", prepared.risk.level, prepared.requirement);
+  if (strong !== undefined && !strong.includes(input.proof.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
   if (prepared.requirement.minApprovers !== 1) throw agentXError("FORBIDDEN", NEEDS_MORE_APPROVERS);
   const verdict = await deps.approvers.verify(prepared.request, input.proof);
   if (!verdict.approved) {
@@ -440,9 +455,9 @@ export async function pressMerge(
     throw agentXError("FORBIDDEN", NOT_APPROVED);
   }
   if (!prepared.requirement.methods.includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
-  if (strong !== undefined && !strong.filter((method) => method !== CODE_HOST_COMMENT_METHOD).includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
+  if (strong !== undefined && !strong.includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
   // The company's sign-in rule (decision 62): a high-risk merge needs the approver's sign-in to satisfy it. Fails closed on a missing sign-in time.
-  if (prepared.risk.level === "high" && prepared.requirement.signIn !== undefined && !checkApprovalSignIn(prepared.requirement.signIn, verdict.approver, deps.now()).ok) throw agentXError("FORBIDDEN", SIGN_IN_NOT_FRESH);
+  if (prepared.risk.level === "high" && prepared.requirement.signIn !== undefined && !checkApprovalSignIn(prepared.requirement.signIn, verdict.approver, deps.now(), { companySignIn: deps.identity?.capabilities.companySignIn === true }).ok) throw agentXError("FORBIDDEN", SIGN_IN_NOT_FRESH);
   const task = await deps.host.loadTask(input.taskId);
   if (task === undefined || task.orgId === undefined || !tracksMerge(task.workflow)) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);
@@ -514,7 +529,7 @@ async function mergeableNow(
   }
   const mergedBefore = [...mergedByWorkflow, ...facts.filter((fact) => fact.state === "merged").map((fact) => fact.repositoryId)];
   if (facts.every((fact) => fact.state === "merged")) return { plan: [], settings, alreadyMerged: true, mergedBefore, entries };
-  const presser = { githubUserId: await deps.people.hostAccountOf(task.orgId, presserPersonId) };
+  const presser = presserOf(await presserAccountsOf(deps.people, task.orgId, presserPersonId));
   const wait = deps.mergeWait?.(task);
   const readiness = mergeReadiness({
     pullRequests: facts, approvals, workflow: task.workflow, recordedBases: bases, presser, requirePresserAccount: deps.requirePresserAccount ?? true,

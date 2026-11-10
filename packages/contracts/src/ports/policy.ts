@@ -131,6 +131,11 @@ export interface ApprovalRequirement {
   strongMethods?: readonly string[];
   /** The methods that may reject. Rejecting needs a signed-in session: a comment method is never one, whatever is named here. Absent: the local session. */
   rejectMethods?: readonly string[];
+  /**
+   * The methods that prove ONE act by a code host comment, in the plug-in's words (lane P3, review L1). The core never accepts a comment method as strong or for rejecting: the method `code-host-comment`, any method whose name starts with `code-host-`,
+   * and every method listed here. Absent: only the first two.
+   */
+  commentMethods?: readonly string[];
   /** The methods that may ask for changes. Asking for changes by a comment is allowed (decision 62). Absent: the local session or a code host comment. */
   changesMethods?: readonly string[];
   /** How recent the approver's sign-in must be for a high-risk approval or a rejection (decision 62). Absent: no rule (Code). */

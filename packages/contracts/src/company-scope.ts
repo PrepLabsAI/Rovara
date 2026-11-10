@@ -10,11 +10,19 @@ import { COMPANY_KEY_PREFIX, companyScoped } from "./ports/company-scope.js";
 export { OrgIdSchema, type OrgId };
 
 /**
- * A person's role in the company: an open role name (lane P3, item I3). The company defines its roles; Code has one implicit company and its owner, and Cloud adds `auditor`. The core ACTS only on the names it knows
- * (`KNOWN_ORG_ROLES`, `isKnownOrgRole`) and gives an unknown name no power, but a shared answer carrying one is valid, so Code and Cloud need no second schema. `Principal.roles` already works this way.
+ * A person's role in the company, the closed list: Code has one implicit company and its owner; the roles are kept so the keys and wire shapes match Cloud's. Cloud adds an enterprise-only `auditor` role in its own org file.
+ * Code code that SELECTS or AUTHORISES by role parses with this schema: a name outside the list is refused, so a new role never passes a check by being unknown. Shapes that must carry a role they do not act on use
+ * `OrgRoleNameSchema` (lane P3, item I3).
  */
-export const OrgRoleSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/);
+export const OrgRoleSchema = z.enum(["owner", "admin", "member"]);
 export type OrgRole = z.infer<typeof OrgRoleSchema>;
+
+/**
+ * An open role name for a shared answer about a person (lane P3, item I3): the company defines its roles, so Code and Cloud need no second schema for an answer about an `auditor`. The core ACTS only on `KNOWN_ORG_ROLES`
+ * (`isKnownOrgRole`) and gives any other name no power. A name that is also a property of every object (`constructor`, `toString`) is refused, so a role never becomes a key into a table's prototype; look roles up with `ownRoleEntry`.
+ */
+export const OrgRoleNameSchema = z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/).refine((name) => !(name in Object.prototype), "not a role name");
+export type OrgRoleName = z.infer<typeof OrgRoleNameSchema>;
 
 /** The role names the core knows how to act on. */
 export const KNOWN_ORG_ROLES = ["owner", "admin", "member"] as const;
@@ -23,6 +31,11 @@ export type KnownOrgRole = (typeof KNOWN_ORG_ROLES)[number];
 /** Whether the core knows this role name. An unknown name (`auditor`, a company's own) is valid data and carries no power in the core. */
 export function isKnownOrgRole(role: string): role is KnownOrgRole {
   return (KNOWN_ORG_ROLES as readonly string[]).includes(role);
+}
+
+/** A table's entry for a role, by the table's OWN keys only: `undefined` for a name the table does not list, including `constructor` and `__proto__`. */
+export function ownRoleEntry<T>(table: Readonly<Record<string, T>>, role: string): T | undefined {
+  return Object.hasOwn(table, role) ? table[role] : undefined;
 }
 
 const ORG_ID_BODY_LENGTH = 20;

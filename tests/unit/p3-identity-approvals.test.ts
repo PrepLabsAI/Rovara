@@ -4,19 +4,21 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  AppMeResponseSchema, BUILT_IN_SIGN_IN_METHODS, DeveloperSummarySchema, ExternalAccountRefSchema, FRESH_SIGN_IN_SECONDS, IMPLICIT_COMPANY_ID, KNOWN_ORG_ROLES, LinkedIdentitySchema, OrgRoleSchema, SignInMethodIdSchema,
+  AppMeResponseSchema, BUILT_IN_SIGN_IN_METHODS, DeveloperSummarySchema, ExternalAccountRefSchema, FRESH_SIGN_IN_SECONDS, IMPLICIT_COMPANY_ID, KNOWN_ORG_ROLES, LinkedIdentitySchema, OrgRoleNameSchema, OrgRoleSchema, SignInMethodIdSchema, ownRoleEntry,
   actorOfExternalAccount, checkApprovalSignIn, checkApprovalSignInSetting, createWorkflowSnapshot, externalAccountKey, externalAccountOfActor, externalAccountOfHostAccount, isKnownOrgRole, readExternalAccount,
   submitWorkflowArtifact, DEFAULT_APPROVAL_SIGN_IN_SETTING,
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type AuditEvent, type AuditSink, type IdentityProvider, type Principal, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createDecisionGate, strictMethodsFor, approvalRecordKey, type DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
+import { createDecisionGate, approvalRecordKey, type DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
+import { isCommentMethod, strictMethodsFor } from "../../packages/broker/src/core/decisions/strong-methods.js";
 import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { approvalSignInSettingKey, changeApprovalSignInSetting, readApprovalSignInRule, readApprovalSignInSetting } from "../../packages/broker/src/core/decisions/sign-in-setting.js";
 import { createIdentityMergePeople, soleOwnerPeople } from "../../packages/broker/src/core/merge/people.js";
-import { prepareMerge, pressMerge } from "../../packages/broker/src/core/merge/index.js";
+import { mergeReadiness, prepareMerge, pressMerge } from "../../packages/broker/src/core/merge/index.js";
 import { TASK_ID as MERGE_TASK, mergeWorld, OWNER_SESSION } from "../support/merge-world.js";
+import { commentReads, freshComment } from "../support/comment-fakes.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
 const NOW = new Date("2026-11-10T12:00:00.000Z");
@@ -25,6 +27,8 @@ const OWNER_HEX = "a".repeat(64);
 const STEP_UP = "browser-step-up";
 // Tokens are built at run time: nothing in this file looks like a key.
 const TOKEN = ["step", "up", "proof", "for", "tests"].join("-");
+const NO_SSO = { companySignIn: false };
+const SSO = { companySignIn: true };
 const iso = (secondsAgo: number): string => new Date(NOW.getTime() - secondsAgo * 1000).toISOString();
 
 const person = (overrides: Partial<Principal> = {}): Principal => ({ companyId: COMPANY, personId: "maya", displayName: "Maya", roles: ["owner"], provider: "example-sso", ...overrides });
@@ -46,6 +50,9 @@ function plugin(options: PluginOptions = {}): Approvers {
   };
 }
 
+const readinessFact = () => ({ repositoryId: "app", number: 7, headSha: "a".repeat(40), state: "open" as const, draft: false, baseBranch: "main", ci: "passing" as const, branch: "up_to_date" as const, behindRequired: false });
+const identityWith = (companySignIn: boolean): Pick<IdentityProvider, "capabilities"> => ({ capabilities: { interactiveSignIn: true, externalAccounts: false, companySignIn } });
+
 const planArtifact = (version: number, sha: string) => ({
   id: `plan-v${String(version)}`, type: "plan" as const, version, sha256: sha, producer: "agentx-planner",
   objectKey: `tasks/${TASK_ID}/plan-v${String(version)}.json`, createdAt: "2026-11-10T10:00:00.000Z", format: "structured" as const,
@@ -56,11 +63,11 @@ function waiting(): WorkflowSnapshot {
 }
 const R0 = waiting().revision;
 
-function world(approvers: Approvers, options: { risk?: "low" | "medium" | "high"; policy?: Parameters<typeof createDecisionGate>[0]["policy"]; audit?: AuditSink } = {}) {
+function world(approvers: Approvers, options: { risk?: "low" | "medium" | "high"; policy?: Parameters<typeof createDecisionGate>[0]["policy"]; audit?: AuditSink; companySignIn?: boolean } = {}) {
   const store = new MemoryDocumentStore();
   const ready = store.put({ item: { ...workflowTaskKey(TASK_ID), entityType: "DEVELOPER_TASK", orgId: COMPANY, project: "web", workflow: JSON.parse(JSON.stringify(waiting())) } });
   const subject = createWorkflowDocumentSubject({ store, riskOf: () => options.risk ?? "high" });
-  const gate = createDecisionGate({ store, approvers, audit: options.audit ?? createNoopAuditSink(), subjects: [subject], now: () => NOW, ...(options.policy === undefined ? {} : { policy: options.policy }) });
+  const gate = createDecisionGate({ store, approvers, audit: options.audit ?? createNoopAuditSink(), subjects: [subject], now: () => NOW, ...(options.policy === undefined ? {} : { policy: options.policy }), ...(options.companySignIn === undefined ? {} : { identity: identityWith(options.companySignIn) }) });
   return { store, gate, ready };
 }
 function attempt(overrides: Partial<DecisionAttempt> = {}): DecisionAttempt {
@@ -116,12 +123,33 @@ describe("A3: the approvers plug-in names its strong methods", () => {
     expect(strictMethodsFor("request_changes", "low", { changesMethods: [STEP_UP] })).toEqual([STEP_UP]);
   });
 
-  it("the gate's own policy option overrides what the plug-in names, and cannot let a comment in", async () => {
-    expect(strictMethodsFor("approve", "high", { strongMethods: [STEP_UP] }, { highRiskMethods: [LOCAL_SESSION_METHOD] })).toEqual([LOCAL_SESSION_METHOD]);
+  it("the gate's policy option can only NARROW what the plug-in names (review L2), and cannot let a comment in", async () => {
+    expect(strictMethodsFor("approve", "high", { strongMethods: [STEP_UP, "emailed-link"] }, { highRiskMethods: [STEP_UP] })).toEqual([STEP_UP]);
+    // A method the plug-in left out is not re-admitted by the policy.
+    expect(strictMethodsFor("approve", "high", { strongMethods: [STEP_UP] }, { highRiskMethods: [STEP_UP, "emailed-link"] })).toEqual([STEP_UP]);
+    expect(strictMethodsFor("approve", "high", { strongMethods: [STEP_UP] }, { highRiskMethods: [LOCAL_SESSION_METHOD] })).toEqual([]);
     expect(strictMethodsFor("approve", "high", {}, { highRiskMethods: [CODE_HOST_COMMENT_METHOD] })).toEqual([]);
     const { gate, ready } = world(plugin({ requirement: { strongMethods: [STEP_UP] } }), { policy: { highRiskMethods: [LOCAL_SESSION_METHOD] } });
     await ready;
     expect(await gate.decide(attempt())).toMatchObject({ reason: "method_not_allowed" });
+    const widened = world(plugin({ requirement: { methods: [STEP_UP, "emailed-link"], strongMethods: [STEP_UP] } }), { policy: { highRiskMethods: [STEP_UP, "emailed-link"] } });
+    await widened.ready;
+    expect(await widened.gate.decide(attempt({ credentials: [{ method: "emailed-link", token: TOKEN }] }))).toMatchObject({ reason: "method_not_allowed" });
+  });
+
+  it("a comment is recognised by KIND, not one exact name: code-host-* and the plug-in's own commentMethods are never strong or a rejection (review L1)", async () => {
+    expect(isCommentMethod("code-host-comment")).toBe(true);
+    expect(isCommentMethod("code-host-review-button")).toBe(true);
+    expect(isCommentMethod("slack-comment")).toBe(false);
+    expect(isCommentMethod("slack-comment", { commentMethods: ["slack-comment"] })).toBe(true);
+    const requirement = { strongMethods: [STEP_UP, "slack-comment", "code-host-review-button"], rejectMethods: [STEP_UP, "slack-comment", "code-host-review-button"], commentMethods: ["slack-comment"] };
+    expect(strictMethodsFor("approve", "high", requirement)).toEqual([STEP_UP]);
+    expect(strictMethodsFor("reject", "low", requirement)).toEqual([STEP_UP]);
+    const asked = plugin({ requirement: { methods: [STEP_UP, "slack-comment"], ...requirement } });
+    const high = world(asked);
+    await high.ready;
+    expect(await high.gate.decide(attempt({ credentials: [{ method: "slack-comment", token: TOKEN }] }))).toMatchObject({ reason: "method_not_allowed" });
+    expect(await revisionOf(high.store)).toBe(R0);
   });
 
   it("a low or medium risk approval is limited only by the methods the plug-in offers", () => {
@@ -174,22 +202,51 @@ describe("A1 and decision 62: the sign-in time, and the company's window", () =>
     expect(await changes.gate.decide(attempt({ outcome: "request_changes", reason: "Use the other table." }))).toMatchObject({ status: "decided" });
   });
 
-  it("'trust any active company sign-in' needs no sign-in time", async () => {
-    const { gate, ready } = world(plugin({ requirement: { strongMethods: [STEP_UP], signIn: { mode: "any-active" } } }));
-    await ready;
-    expect(await gate.decide(attempt())).toMatchObject({ status: "decided" });
+  it("'trust any active company sign-in' needs the identity adapter's company sign-in and a real sign-in time, but not a recent one (review M3)", async () => {
+    const requirement = { strongMethods: [STEP_UP], signIn: { mode: "any-active" as const } };
+    const ok = world(plugin({ requirement, authTime: iso(86_400 * 30) }), { companySignIn: true });
+    await ok.ready;
+    expect(await ok.gate.decide(attempt())).toMatchObject({ status: "decided" });
+    // A plug-in cannot switch freshness off for a company with no sign-in of its own: no identity given, or one without the capability.
+    for (const options of [{}, { companySignIn: false }]) {
+      const refused = world(plugin({ requirement, authTime: iso(1) }), options);
+      await refused.ready;
+      expect(await refused.gate.decide(attempt())).toMatchObject({ status: "refused", reason: "sign_in_not_fresh" });
+      expect(await revisionOf(refused.store)).toBe(R0);
+    }
+    // And it still wants a sign-in time that exists.
+    const noTime = world(plugin({ requirement }), { companySignIn: true });
+    await noTime.ready;
+    expect(await noTime.gate.decide(attempt())).toMatchObject({ reason: "sign_in_not_fresh" });
+  });
+
+  it("a plug-in's malformed window (Infinity, zero) refuses the approval instead of switching the rule off (review L3)", async () => {
+    for (const seconds of [Number.POSITIVE_INFINITY, 0]) {
+      const { gate, ready, store } = world(plugin({ requirement: { strongMethods: [STEP_UP], signIn: { mode: "window", seconds } }, authTime: iso(1) }));
+      await ready;
+      expect(await gate.decide(attempt())).toMatchObject({ status: "refused", reason: "sign_in_not_fresh" });
+      expect(await revisionOf(store)).toBe(R0);
+    }
   });
 
   it("checkApprovalSignIn fails closed on a missing, unreadable or future time, and holds the window edge inclusive", () => {
     const rule = { mode: "window" as const, seconds: 600 };
     const at = NOW.getTime();
-    expect(checkApprovalSignIn(rule, {}, at)).toEqual({ ok: false, reason: "no_sign_in_time" });
-    expect(checkApprovalSignIn(rule, { authTime: "yesterday" }, at)).toEqual({ ok: false, reason: "no_sign_in_time" });
-    expect(checkApprovalSignIn(rule, { authTime: iso(-600) }, at)).toEqual({ ok: false, reason: "sign_in_in_future" });
-    expect(checkApprovalSignIn(rule, { authTime: iso(-60) }, at)).toEqual({ ok: true });
-    expect(checkApprovalSignIn(rule, { authTime: iso(600) }, at)).toEqual({ ok: true });
-    expect(checkApprovalSignIn(rule, { authTime: iso(601) }, at)).toEqual({ ok: false, reason: "sign_in_too_old" });
-    expect(checkApprovalSignIn({ mode: "any-active" }, {}, at)).toEqual({ ok: true });
+    expect(checkApprovalSignIn(rule, {}, at, NO_SSO)).toEqual({ ok: false, reason: "no_sign_in_time" });
+    expect(checkApprovalSignIn(rule, { authTime: "yesterday" }, at, NO_SSO)).toEqual({ ok: false, reason: "no_sign_in_time" });
+    expect(checkApprovalSignIn(rule, { authTime: iso(-600) }, at, NO_SSO)).toEqual({ ok: false, reason: "sign_in_in_future" });
+    expect(checkApprovalSignIn(rule, { authTime: iso(-60) }, at, NO_SSO)).toEqual({ ok: true });
+    expect(checkApprovalSignIn(rule, { authTime: iso(600) }, at, NO_SSO)).toEqual({ ok: true });
+    expect(checkApprovalSignIn(rule, { authTime: iso(601) }, at, NO_SSO)).toEqual({ ok: false, reason: "sign_in_too_old" });
+    // Review L3: a plug-in's rule is data. Infinity, zero, a fraction and a negative number refuse; they never disable the window.
+    for (const seconds of [Number.POSITIVE_INFINITY, 0, -5, 59, 86_401, 600.5, Number.NaN]) expect(checkApprovalSignIn({ mode: "window", seconds }, { authTime: iso(1) }, at, NO_SSO)).toEqual({ ok: false, reason: "invalid_rule" });
+    expect(checkApprovalSignIn({ mode: "never" } as never, { authTime: iso(1) }, at, SSO)).toEqual({ ok: false, reason: "invalid_rule" });
+    // Review M3: 'any active sign-in' still needs a readable, non-future sign-in time, and the identity adapter's own company sign-in.
+    expect(checkApprovalSignIn({ mode: "any-active" }, { authTime: iso(86_400 * 30) }, at, SSO)).toEqual({ ok: true });
+    expect(checkApprovalSignIn({ mode: "any-active" }, {}, at, SSO)).toEqual({ ok: false, reason: "no_sign_in_time" });
+    expect(checkApprovalSignIn({ mode: "any-active" }, { authTime: "yesterday" }, at, SSO)).toEqual({ ok: false, reason: "no_sign_in_time" });
+    expect(checkApprovalSignIn({ mode: "any-active" }, { authTime: iso(-600) }, at, SSO)).toEqual({ ok: false, reason: "sign_in_in_future" });
+    expect(checkApprovalSignIn({ mode: "any-active" }, { authTime: iso(1) }, at, NO_SSO)).toEqual({ ok: false, reason: "no_company_sign_in" });
   });
 
   it("the default window is ten minutes", () => {
@@ -200,42 +257,48 @@ describe("A1 and decision 62: the sign-in time, and the company's window", () =>
 
 describe("the company's sign-in setting", () => {
   const owner = person({ roles: ["owner"] });
-  const deps = (store: MemoryDocumentStore, audit: AuditSink = createNoopAuditSink()) => ({ store, audit, now: () => NOW });
+  const deps = (store: MemoryDocumentStore, audit: AuditSink = createNoopAuditSink(), sso = false) => ({ store, audit, identity: identityWith(sso), now: () => NOW });
+  const noSso = identityWith(false);
+  const sso = identityWith(true);
 
   it("a company that chose nothing has the default window", async () => {
     const store = new MemoryDocumentStore();
-    expect(await readApprovalSignInSetting(store, COMPANY, { companyOwnSignIn: false })).toEqual({ setting: DEFAULT_APPROVAL_SIGN_IN_SETTING, revision: 0, isDefault: true });
+    expect(await readApprovalSignInSetting(store, COMPANY, noSso)).toEqual({ setting: DEFAULT_APPROVAL_SIGN_IN_SETTING, revision: 0, isDefault: true });
   });
 
   it("an owner or an admin sets a window; the rule read back is what the plug-in puts in its requirement", async () => {
     const store = new MemoryDocumentStore();
-    expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 1800 }, expectedRevision: 0, companyOwnSignIn: false })).toEqual({ ok: true, setting: { mode: "window", seconds: 1800 }, revision: 1 });
-    expect(await readApprovalSignInRule(store, COMPANY, { companyOwnSignIn: false })).toEqual({ mode: "window", seconds: 1800 });
+    expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 1800 }, expectedRevision: 0 })).toEqual({ ok: true, setting: { mode: "window", seconds: 1800 }, revision: 1 });
+    expect(await readApprovalSignInRule(store, COMPANY, noSso)).toEqual({ mode: "window", seconds: 1800 });
     const admin = person({ personId: "ravi", roles: ["admin"] });
-    expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by: admin, setting: { mode: "window", seconds: 300 }, expectedRevision: 1, companyOwnSignIn: false })).toMatchObject({ ok: true, revision: 2 });
+    expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by: admin, setting: { mode: "window", seconds: 300 }, expectedRevision: 1 })).toMatchObject({ ok: true, revision: 2 });
   });
 
   it("a member, a role the core does not know, and a person of another company may not change it", async () => {
     const store = new MemoryDocumentStore();
     for (const by of [person({ roles: ["member"] }), person({ roles: ["auditor"] }), person({ roles: [] }), person({ companyId: "org_zzzzzzzzzzzzzzzzzzzz" })]) {
-      expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by, setting: { mode: "window", seconds: 600 }, expectedRevision: 0, companyOwnSignIn: true })).toEqual({ ok: false, reason: "not_allowed" });
+      expect(await changeApprovalSignInSetting(deps(store, undefined, true), { companyId: COMPANY, by, setting: { mode: "window", seconds: 600 }, expectedRevision: 0 })).toEqual({ ok: false, reason: "not_allowed" });
     }
     expect(await store.get(approvalSignInSettingKey(COMPANY))).toBeUndefined();
   });
 
-  it("'trust any active company sign-in' is refused unless the company has its own sign-in", async () => {
+  it("'trust any active company sign-in' is allowed only when the IDENTITY ADAPTER says it has the company's own sign-in, read inside the function (review M3)", async () => {
     const store = new MemoryDocumentStore();
-    expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by: owner, setting: { mode: "any-active" }, expectedRevision: 0, companyOwnSignIn: false })).toEqual({ ok: false, reason: "needs_company_sign_in" });
-    expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by: owner, setting: { mode: "any-active" }, expectedRevision: 0, companyOwnSignIn: true })).toMatchObject({ ok: true });
-    expect(await readApprovalSignInRule(store, COMPANY, { companyOwnSignIn: true })).toEqual({ mode: "any-active" });
+    const any = { companyId: COMPANY, by: owner, setting: { mode: "any-active" }, expectedRevision: 0 };
+    expect(await changeApprovalSignInSetting(deps(store), any)).toEqual({ ok: false, reason: "needs_company_sign_in" });
+    // No caller flag exists to turn it on: an input that claims the capability changes nothing.
+    expect(await changeApprovalSignInSetting(deps(store), { ...any, companyOwnSignIn: true } as never)).toEqual({ ok: false, reason: "needs_company_sign_in" });
+    expect(await changeApprovalSignInSetting({ ...deps(store), identity: { capabilities: { interactiveSignIn: true, externalAccounts: false } } }, any)).toEqual({ ok: false, reason: "needs_company_sign_in" });
+    expect(await changeApprovalSignInSetting(deps(store, undefined, true), any)).toMatchObject({ ok: true });
+    expect(await readApprovalSignInRule(store, COMPANY, sso)).toEqual({ mode: "any-active" });
     // The company later loses its own sign-in: the stored choice is not used, the default window is.
-    expect(await readApprovalSignInRule(store, COMPANY, { companyOwnSignIn: false })).toEqual(DEFAULT_APPROVAL_SIGN_IN_SETTING);
+    expect(await readApprovalSignInRule(store, COMPANY, noSso)).toEqual(DEFAULT_APPROVAL_SIGN_IN_SETTING);
   });
 
   it("refuses a window outside the limits and anything that is not a setting", async () => {
     const store = new MemoryDocumentStore();
     for (const setting of [{ mode: "window", seconds: 59 }, { mode: "window", seconds: 86_401 }, { mode: "window", seconds: 600.5 }, { mode: "never" }, { mode: "window" }, "any-active", null, { mode: "any-active", seconds: 5 }]) {
-      expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by: owner, setting, expectedRevision: 0, companyOwnSignIn: true })).toEqual({ ok: false, reason: "invalid" });
+      expect(await changeApprovalSignInSetting(deps(store, undefined, true), { companyId: COMPANY, by: owner, setting, expectedRevision: 0 })).toEqual({ ok: false, reason: "invalid" });
     }
     expect(checkApprovalSignInSetting({ mode: "window", seconds: 60 }, { companyOwnSignIn: false })).toMatchObject({ ok: true });
   });
@@ -244,17 +307,31 @@ describe("the company's sign-in setting", () => {
     const store = new MemoryDocumentStore();
     const staged: AuditEvent[] = [];
     const audit: AuditSink = { stage: (event) => { staged.push(event); return [{ kind: "put", item: { pk: `AUDIT#${event.eventId}`, sk: "EVENT", action: event.action } } satisfies TransactItem]; }, async record() {} };
-    expect(await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 900 }, expectedRevision: 0, companyOwnSignIn: false })).toMatchObject({ ok: true, revision: 1 });
-    expect(staged[0]).toMatchObject({ action: "setting.approval_sign_in_changed", actor: { id: "maya" }, details: { mode: "window", revision: 1 } });
+    expect(await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 900 }, expectedRevision: 0 })).toMatchObject({ ok: true, revision: 1 });
+    expect(staged[0]).toMatchObject({ action: "setting.approval_sign_in_changed", actor: { id: "maya" }, details: { mode: "window", seconds: 900, revision: 1 } });
     expect(await store.get({ pk: "AUDIT#setting:approval-sign-in:" + COMPANY + ":1", sk: "EVENT" })).toBeDefined();
-    expect(await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 60 }, expectedRevision: 0, companyOwnSignIn: false })).toEqual({ ok: false, reason: "stale" });
-    expect((await readApprovalSignInSetting(store, COMPANY, { companyOwnSignIn: false })).setting).toEqual({ mode: "window", seconds: 900 });
+    expect(await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 60 }, expectedRevision: 0 })).toEqual({ ok: false, reason: "stale" });
+    expect((await readApprovalSignInSetting(store, COMPANY, noSso)).setting).toEqual({ mode: "window", seconds: 900 });
+  });
+
+  it("the audit record of a change carries the new seconds and the value it replaced (review L4)", async () => {
+    const store = new MemoryDocumentStore();
+    const staged: AuditEvent[] = [];
+    const audit: AuditSink = { stage: (event) => { staged.push(event); return []; }, async record() {} };
+    await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 600 }, expectedRevision: 0 });
+    await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 86_400 }, expectedRevision: 1 });
+    await changeApprovalSignInSetting(deps(store, audit, true), { companyId: COMPANY, by: owner, setting: { mode: "any-active" }, expectedRevision: 2 });
+    expect(staged.map((event) => event.details)).toEqual([
+      { mode: "window", seconds: 600, revision: 1, previous: { mode: "window", seconds: 600, isDefault: true } },
+      { mode: "window", seconds: 86_400, revision: 2, previous: { mode: "window", seconds: 600, isDefault: false } },
+      { mode: "any-active", revision: 3, previous: { mode: "window", seconds: 86_400, isDefault: false } },
+    ]);
   });
 
   it("a stored row that cannot be read gives the default window, not 'no rule'", async () => {
     const store = new MemoryDocumentStore();
     await store.put({ item: { ...approvalSignInSettingKey(COMPANY), revision: 3, setting: { mode: "window", seconds: 5 } } });
-    expect(await readApprovalSignInSetting(store, COMPANY, { companyOwnSignIn: true })).toMatchObject({ setting: DEFAULT_APPROVAL_SIGN_IN_SETTING, revision: 3, isDefault: true });
+    expect(await readApprovalSignInSetting(store, COMPANY, sso)).toMatchObject({ setting: DEFAULT_APPROVAL_SIGN_IN_SETTING, revision: 3, isDefault: true });
   });
 });
 
@@ -304,8 +381,57 @@ describe("A1 and A3 on the merge press", () => {
     const low = { ...world.deps, approvers: plugin({ requirement: { strongMethods: [STEP_UP], signIn: { mode: "window", seconds: 60 } }, authTime: iso(86_400) }) };
     const prepared = await prepareMerge(low, { taskId: MERGE_TASK, requestId: world.requestId() });
     expect((await pressMerge(low, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared, { method: STEP_UP, token: TOKEN }) })).status).toBe("MERGED");
-    const high = await highRiskWorld(plugin());
-    expect((await press(high)).status).toBe("MERGED");
+  });
+
+  it("a plug-in that names no strong methods gets the gate's default for a high-risk merge: the local session, never a comment (review M2)", async () => {
+    const w = await highRiskWorld(plugin());
+    expect(await refused(() => press(w))).toContain("Nobody approved");
+    expect(await refused(() => press(w, CODE_HOST_COMMENT_METHOD))).toContain("Nobody approved");
+    expect(w.world.prs[0]!.model.getChangeRequest(String(w.world.prs[0]!.number)).state).toBe("open");
+    // The same plug-in, asked about a low-risk merge, is limited only by its own methods.
+    expect(strictMethodsFor("approve", "low", {})).toBeUndefined();
+    const sameAsGate = strictMethodsFor("approve", "high", {});
+    expect(sameAsGate).toEqual([LOCAL_SESSION_METHOD]);
+  });
+
+  it("any comment kind is refused for a high-risk merge, by name or by plug-in marking (review L1)", async () => {
+    const w = await highRiskWorld(plugin({ requirement: { methods: [STEP_UP, "slack-comment", "code-host-button"], strongMethods: [STEP_UP, "slack-comment", "code-host-button"], commentMethods: ["slack-comment"] } }));
+    for (const method of ["slack-comment", "code-host-button"]) expect(await refused(() => press(w, method))).toContain("Nobody approved");
+    expect((await press(w)).status).toBe("MERGED");
+  });
+
+  it("in Code a high-risk merge proved by a code host comment is refused, and the local session still merges it (review L5)", async () => {
+    const world = await mergeWorld();
+    await world.seedTracking();
+    await world.setWorkflow({ risk: { level: "high", reasons: ["auth"], candidateDigest: "c".repeat(64) } });
+    const approvers = createLocalOwnerApprovers({ owner: localOwnerPrincipal(), verifySession: (token) => token === OWNER_SESSION, ...commentReads(freshComment({ provider: "github", tenant: "", accountId: "priya" })) });
+    const deps = { ...world.deps, approvers };
+    const prepared = await prepareMerge(deps, { taskId: MERGE_TASK, requestId: world.requestId() });
+    expect(prepared.requirement.methods).toContain(CODE_HOST_COMMENT_METHOD);
+    const byComment = await refused(() => pressMerge(deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared, { method: CODE_HOST_COMMENT_METHOD, token: "comment-9001" }) }));
+    expect(byComment).toContain("Nobody approved");
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
+    expect((await pressMerge(deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared) })).status).toBe("MERGED");
+  });
+
+  it("the merge press also checks the identity capability for 'any active sign-in' (review M3), and a malformed window (review L3)", async () => {
+    const rule = { mode: "any-active" as const };
+    const recent = (w: Awaited<ReturnType<typeof highRiskWorld>>) => new Date(w.world.now.value - 60_000).toISOString();
+    for (const identity of [undefined, identityWith(false)]) {
+      const w = await highRiskWorld(plugin());
+      w.deps.approvers = plugin({ requirement: { strongMethods: [STEP_UP], signIn: rule }, authTime: recent(w) });
+      if (identity !== undefined) (w.deps as { identity?: unknown }).identity = identity;
+      expect(await refused(() => press(w))).toContain("recent sign-in");
+    }
+    const ok = await highRiskWorld(plugin());
+    ok.deps.approvers = plugin({ requirement: { strongMethods: [STEP_UP], signIn: rule }, authTime: recent(ok) });
+    (ok.deps as { identity?: unknown }).identity = identityWith(true);
+    expect((await press(ok)).status).toBe("MERGED");
+    for (const seconds of [Number.POSITIVE_INFINITY, 0]) {
+      const w = await highRiskWorld(plugin());
+      w.deps.approvers = plugin({ requirement: { strongMethods: [STEP_UP], signIn: { mode: "window", seconds } }, authTime: recent(w) });
+      expect(await refused(() => press(w))).toContain("recent sign-in");
+    }
   });
 
   it("Code's own approvers still merge a high-risk change with the local session", async () => {
@@ -351,6 +477,36 @@ describe("I1: the identity abilities", () => {
     const task = { taskId: "t", project: "web", startingRevision: 1, workspaceId: "w", ownerId: owner.personId, ownerName: "Owner" };
     expect(await people.requestersOf(COMPANY as never, task)).toEqual(["4711"]);
     expect(await people.requestersOf(COMPANY as never, { ...task, creatorId: "unlinked-person" })).toBe("unlinked");
+  });
+
+  it("a person with two code host accounts is excluded by BOTH: as a requester and as the presser (review M1)", async () => {
+    const requester = localOwnerPrincipal();
+    const second = { provider: "examplehost", tenant: "", accountId: "4712" };
+    const identity: IdentityProvider = {
+      capabilities: { interactiveSignIn: false, externalAccounts: true },
+      authenticate: async () => ({ ok: false, reason: "refused" }),
+      resolveExternalAccount: async (_company, account) => (["4711", "4712"].includes(account.accountId) ? requester : undefined),
+      getPrincipal: async () => undefined,
+      accountsOf: async () => [linked, second],
+    };
+    const people = createIdentityMergePeople(identity, { hostProvider: "examplehost" });
+    const task = { taskId: "t", project: "web", startingRevision: 1, workspaceId: "w", ownerId: requester.personId, ownerName: "Owner" };
+    // Both accounts are the requester's: approving with the second one is self-approval.
+    expect(await people.requestersOf(COMPANY as never, task)).toEqual(["4711", "4712"]);
+    expect(await people.hostAccountsOf!(COMPANY as never, requester.personId)).toEqual(["4711", "4712"]);
+    expect(await people.hostAccountOf(COMPANY as never, requester.personId)).toBe("4711");
+    // The presser rule in the readiness check: the only approver is the presser's SECOND account.
+    const approvals = new Map([["app#7", { approved: true as const, by: { githubUserId: "4712", login: "dana" }, commitId: "a".repeat(40), approvers: [{ githubUserId: "4712", login: "dana" }] }]]);
+    const ready = mergeReadiness({
+      pullRequests: [readinessFact()], approvals, workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING" }, recordedBases: new Map([["app#7", "main"]]),
+      presser: { githubUserId: "4711", otherGithubUserIds: ["4712"] }, requirePresserAccount: true, allowSelfApproval: false, requesterName: "Owner",
+    });
+    expect(ready).toMatchObject({ ready: false });
+    const sameWithoutOthers = mergeReadiness({
+      pullRequests: [readinessFact()], approvals, workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING" }, recordedBases: new Map([["app#7", "main"]]),
+      presser: { githubUserId: "4711" }, requirePresserAccount: true, allowSelfApproval: false, requesterName: "Owner",
+    });
+    expect(sameWithoutOthers).toMatchObject({ ready: true });
   });
 
   it("an identity that cannot say who has which account links nobody, as the sole-owner default does", async () => {
@@ -416,20 +572,46 @@ describe("I2: one neutral outside account, an open sign-in method, a legacy alia
     expect(DeveloperSummarySchema.safeParse({ ...base, slackUserId: "U0123ABCD" }).success).toBe(true);
     expect(DeveloperSummarySchema.safeParse({ ...base, account: { provider: "Bad", tenant: "", accountId: "1" } }).success).toBe(false);
   });
+
+  it("a summary whose account and slackUserId name different accounts is refused; one that agrees is fine (review L6)", () => {
+    const base = { id: "a".repeat(64), name: "Maya", provider: "company-sso" };
+    const account = { provider: "slack", tenant: "T0ABC", accountId: "U0123ABCD" };
+    expect(DeveloperSummarySchema.safeParse({ ...base, account, slackUserId: "U0123ABCD" }).success).toBe(true);
+    expect(DeveloperSummarySchema.safeParse({ ...base, account, slackUserId: "U0999OTHER" }).success).toBe(false);
+    expect(DeveloperSummarySchema.safeParse({ ...base, account: { provider: "examplechat", tenant: "", accountId: "U0123ABCD" }, slackUserId: "U0123ABCD" }).success).toBe(false);
+  });
 });
 
-describe("I3: any role name; the core acts only on the ones it knows", () => {
-  it("a role the core does not know is valid data, with no power", () => {
+describe("I3: role names; the core acts only on the ones it knows", () => {
+  it("the closed schema stays closed, so a check that parses a role never passes an unknown one (review M4)", () => {
     expect(KNOWN_ORG_ROLES).toEqual(["owner", "admin", "member"]);
-    for (const role of ["owner", "admin", "member", "auditor", "billing-contact"]) expect(OrgRoleSchema.safeParse(role).success).toBe(true);
-    for (const role of ["", "Owner", "a b", "9lives", "x".repeat(41)]) expect(OrgRoleSchema.safeParse(role).success).toBe(false);
+    for (const role of ["owner", "admin", "member"]) expect(OrgRoleSchema.safeParse(role).success).toBe(true);
+    for (const role of ["auditor", "billing-contact", "constructor", "", "Owner"]) expect(OrgRoleSchema.safeParse(role).success).toBe(false);
     expect(isKnownOrgRole("owner")).toBe(true);
     expect(isKnownOrgRole("auditor")).toBe(false);
-    expect(isKnownOrgRole("Owner")).toBe(false);
+    expect(isKnownOrgRole("constructor")).toBe(false);
+  });
+
+  it("the open name schema takes a role the core does not know, but never a name that is a property of every object", () => {
+    for (const role of ["owner", "auditor", "billing-contact"]) expect(OrgRoleNameSchema.safeParse(role).success).toBe(true);
+    for (const role of ["", "Owner", "a b", "9lives", "x".repeat(41), "constructor", "tostring", "__proto__", "valueof", "hasownproperty"]) {
+      // 'tostring' and the like are only refused when they are real property names; the regex lower-cases away the rest.
+      const real = role in Object.prototype;
+      expect(OrgRoleNameSchema.safeParse(role).success).toBe(!real && /^[a-z][a-z0-9_-]{0,39}$/.test(role));
+    }
+    expect(OrgRoleNameSchema.safeParse("constructor").success).toBe(false);
+  });
+
+  it("a table lookup by role uses the table's own keys, not its prototype", () => {
+    const rank = { owner: 3, admin: 2, member: 1 };
+    expect(ownRoleEntry(rank, "admin")).toBe(2);
+    expect(ownRoleEntry(rank, "auditor")).toBeUndefined();
+    for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty"]) expect(ownRoleEntry(rank, name)).toBeUndefined();
   });
 
   it("a shared answer about an auditor parses", () => {
     const answer = { csrf: undefined, developer: { id: "a".repeat(64), name: "Audra", orgRole: "auditor" }, org: { orgId: "org_00000000000000000000", name: "Acme", plan: "team" }, identities: [] };
     expect(AppMeResponseSchema.safeParse(answer).success).toBe(true);
+    expect(AppMeResponseSchema.safeParse({ ...answer, developer: { ...answer.developer, orgRole: "constructor" } }).success).toBe(false);
   });
 });

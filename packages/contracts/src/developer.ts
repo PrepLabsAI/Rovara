@@ -5,7 +5,7 @@ import { ProjectRoleSchema } from "./app-projects.js";
 import { EnvironmentNameSchema } from "./environments.js";
 export { normalizeEmail } from "./email.js";
 import { looseCopy } from "./loose.js";
-import { OrgRoleSchema } from "./company-scope.js";
+import { OrgRoleNameSchema } from "./company-scope.js";
 import { DeveloperTaskPolicySchema } from "./project-node.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
@@ -25,7 +25,7 @@ export const FRESH_SIGN_IN_SECONDS = 600;
 export const SLACK_OIDC_ISSUER = "https://slack.com";
 
 export { DeveloperSignInMethodSchema, type DeveloperSignInMethod } from "./developer-web.js";
-import { ExternalAccountRefSchema, SignInMethodIdSchema } from "./outside-account.js";
+import { ExternalAccountRefSchema, SignInMethodIdSchema, readExternalAccount } from "./outside-account.js";
 
 const LOOPBACK_REDIRECT = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/callback$/;
 
@@ -88,7 +88,10 @@ export const DeveloperSummarySchema = z.object({
   account: ExternalAccountRefSchema.optional(),
   email: z.string().email().optional(),
   /** The developer's role in their org; absent from a control plane that predates it. */
-  orgRole: OrgRoleSchema.optional(),
+  orgRole: OrgRoleNameSchema.optional(),
+}).refine((summary) => (summary.account === undefined || summary.slackUserId === undefined) || readExternalAccount(summary) !== undefined, {
+  // The neutral account and the legacy id must name one account: a reader never has to guess which of two was meant (lane P3, review L6).
+  message: "account and slackUserId name different accounts", path: ["account"],
 });
 export type DeveloperSummary = z.infer<typeof DeveloperSummarySchema>;
 
