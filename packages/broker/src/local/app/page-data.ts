@@ -34,6 +34,7 @@ import { proofReportOf } from "./proof-report.js";
 import { planGraphOf } from "../../core/work-breakdown/plan-graph.js";
 import { workBreakdownView, type WorkBreakdownView } from "../../core/work-breakdown/view.js";
 import { operationKey } from "../../core/task-flow/keys.js";
+import type { SecondReview } from "../../core/second-review/index.js";
 
 const PLAN_READ_MAX_BYTES = 200_000;
 const COMMENTS_MAX = 200;
@@ -67,6 +68,8 @@ export interface PageDataDeps {
   /** The owner of the install: the pages are the owner's. */
   owner: Principal;
   companyId: OrgId;
+  /** The second review. Absent: no second review page or lines. */
+  secondReview?: SecondReview;
 }
 
 /** The attention view with where the plan is posted: the attached thread and the project's repositories, only while a code host reads comments. */
@@ -87,6 +90,16 @@ async function attentionWithThread(deps: PageDataDeps, task: TaskRecord, view: A
   const project = await deps.flow.projects.revision(task.project, task.startingRevision);
   const attached = await deps.comments.attachedThread(task.taskId);
   return { ...view, thread: { ...(attached === undefined ? {} : { attached }), repositories: (project?.definition.repositories ?? []).map((repository) => repository.name) } };
+}
+
+/** The second review's lines for the plan page, and the acknowledgement the owner owes before a merge (Cloud's task view `secondReview`). */
+function secondReviewOfPlanPage(deps: PageDataDeps, task: TaskRecord): Pick<PlanPageView, "secondReview" | "secondReviewAck"> {
+  const second = deps.secondReview;
+  if (second === undefined || task.workflow === undefined) return {};
+  const view = second.taskView(task, task.workflow.candidate?.digest);
+  if (view === undefined) return {};
+  const ack = view.needsAcknowledgement && !view.acknowledged ? second.acknowledgement(task) : undefined;
+  return { secondReview: view, ...(ack === undefined ? {} : { secondReviewAck: ack.key }) };
 }
 
 export function createLocalPageData(deps: PageDataDeps): LocalPageData {
@@ -181,9 +194,11 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         ...(workflow.critique === undefined ? {} : { critique: critiqueLines(workflow.critique, task.project) }),
         // Rovara's ask, the pull request's state and any questions: fixed words, and the forms that answer them.
         attention: await attentionWithThread(deps, task, (await attentionOf(deps.flow, task)).view),
+        ...secondReviewOfPlanPage(deps, task),
       };
     },
 
+    async getSecondReview() { return deps.secondReview?.enabled() === true ? deps.secondReview.state() : undefined; },
     async getDesignReview() { return undefined; },
     async readMockup() { return undefined; },
     async listLessons() { return []; },
@@ -198,8 +213,29 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
 }
 
 /** The writes of the pages that the decision gate does not own: a comment on a plan, and the lessons (none here yet). */
-export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments">): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions" | "attachThread"> {
+export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview">): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "acknowledgeSecondReview"> {
   return {
+    async secondReview(input, context): Promise<LocalActionResult> {
+      if (deps.secondReview === undefined) return { ok: false, reason: "not_found", message: "That is no longer there." };
+      try {
+        await deps.secondReview.apply(deps.owner, input.action === "mode" && input.scope === "company" ? { action: "mode", scope: "company", mode: input.mode } : input, { fresh: context.fresh });
+        return { ok: true, message: "Saved." };
+      } catch (error) {
+        return refusalOf(error);
+      }
+    },
+    async acknowledgeSecondReview(input): Promise<LocalActionResult> {
+      const task = await readTask(deps.flow, input.taskId);
+      const workflow = task?.workflow;
+      if (deps.secondReview === undefined || task === undefined || task.companyId !== deps.companyId || workflow === undefined) return { ok: false, reason: "not_found", message: "That is no longer there." };
+      if (workflow.revision !== input.revision) return { ok: false, reason: "stale", message: "This changed since you read it. Read the latest and try again." };
+      const needed = deps.secondReview.acknowledgement(task);
+      if (needed === undefined || needed.key !== input.key) return { ok: false, reason: "stale", message: "This is out of date; read the task again." };
+      const result = await deps.secondReview.acknowledge(deps.owner, task);
+      if (result.ok) return { ok: true, message: "Acknowledged." };
+      if (result.reason === "audit_unavailable") return { ok: false, reason: "refused", message: "This needs the audit record, which is not available here." };
+      return result.reason === "not_required" ? { ok: false, reason: "invalid", message: "There is nothing to acknowledge for this code." } : { ok: false, reason: "stale", message: "This is out of date; read the task again." };
+    },
     async addComment(input): Promise<LocalActionResult> {
       const task = await readTask(deps.flow, input.taskId);
       const workflow = task?.workflow;
@@ -260,3 +296,13 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
   };
 }
 
+
+/** What a refused second-review change says: the fixed words of the refusal, and whether the page was out of date. */
+function refusalOf(error: unknown): LocalActionResult {
+  if (error instanceof Error && "code" in error) {
+    const code = String((error as { code: unknown }).code);
+    const message = error.message.replace(/^[A-Z_]+: /u, "");
+    return { ok: false, reason: code === "REAUTH_REQUIRED" ? "reauth" : code === "CHANGE_STALE" ? "stale" : code === "NOT_FOUND" ? "not_found" : code === "CONFIG_INVALID" ? "invalid" : "refused", message };
+  }
+  return { ok: false, reason: "refused", message: "That was not accepted." };
+}

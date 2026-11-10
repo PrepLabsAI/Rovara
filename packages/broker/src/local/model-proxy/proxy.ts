@@ -21,7 +21,7 @@ import {
   PROXY_PATH_API, RequestNotAllowed, checkRequestBody, checkRequestHeaders, upstreamTarget, type ProviderEndpoints,
 } from "./providers.js";
 import { SignInProblem, needsCredential, signCall } from "./sign-in.js";
-import { ModelTokenBook } from "./tokens.js";
+import { ModelTokenBook, type RouteLedger } from "./tokens.js";
 import type { ModelGrantSource, ModelProviderBook, ModelProxyEvent, ProxyApi, ProxyProvider, ProxyRoute } from "./types.js";
 import { UsageCollector, type TokenUsage } from "./usage.js";
 
@@ -311,9 +311,13 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
     if (ledger.inFlight >= maxConcurrent) throw new Refusal(429, "too_many_requests", "this task has too many model calls running", { "retry-after": "2" });
     ledger.inFlight += 1;
     let reserved = 0;
+    let routeReserved = 0;
+    let routeSlot: RouteLedger | undefined;
     const release = (): void => {
       ledger.reservedMicros -= reserved;
       reserved = 0;
+      if (routeSlot !== undefined) routeSlot.reservedMicros -= routeReserved;
+      routeReserved = 0;
     };
     const controller = new AbortController();
     let provider: ProxyProvider | undefined;
@@ -335,6 +339,11 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       if (settled || route === undefined || !requestSent || !(upstreamOk || controller.signal.aborted)) return;
       settled = true;
       const seen = complete ? collector.finish() : undefined;
+      // A capped route counts what the call used (or the most it could have) against its own cap, whatever the Metering port can price.
+      if (route.cap !== undefined && routeSlot !== undefined) {
+        const used = seen ?? worst, rates = route.cap.usdPerMTok;
+        routeSlot.spentMicros += Math.ceil(used.input * rates.input + used.output * rates.output + used.cacheRead * rates.cacheRead + used.cacheWrite * rates.cacheWrite);
+      }
       if (seen === undefined) tell({ event: "unmetered", code: "charged_maximum", operationId: token.operationId, provider: route.provider });
       await record(token, route, seen ?? worst, ledger).catch(() => tell({ event: "unmetered", code: "meter_failed", operationId: token.operationId, provider: route.provider }));
     };
@@ -374,6 +383,17 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
 
       // ---- the budget: the most this call could cost is held against it until the call settles to what it used
       worst = worstCaseUsage(body, raw.byteLength);
+      // A capped route (the second reviewer's model) has its own limit in this operation, priced from the route's own rates: the worst case of this call is held against it until the call settles, and a call that
+      // could not fit under the cap is refused as a spent budget. Nothing awaits between this check and the hold.
+      if (route.cap !== undefined) {
+        routeSlot = tokens.routeLedger(token.operationId, route.alias);
+        const capMicros = Math.round(route.cap.capUsd * 1_000_000);
+        const rates = route.cap.usdPerMTok;
+        const maximum = Math.ceil(worst.input * Math.max(rates.input, rates.cacheWrite) + worst.output * rates.output);
+        if (routeSlot.spentMicros + routeSlot.reservedMicros + maximum > capMicros) throw budgetRefusal();
+        routeReserved = maximum;
+        routeSlot.reservedMicros += routeReserved;
+      }
       if (token.budget !== undefined) {
         if (ledger.currency !== undefined && ledger.currency !== token.budget.currency) throw new Refusal(403, "model_not_allowed", "this task's budget is in another currency than its spend");
         const maximum = await worstCaseCost(route, worst);
@@ -437,6 +457,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       try {
         // redirect "manual": a redirect is never followed (the next address would get the key); it is an error.
         requestSent = true;
+        tokens.noteCall(token.operationId, route.alias);
         upstream = await transport(target.url, { method: "POST", headers: upstreamHeaders, body: forwardedText, redirect: "manual", signal: controller.signal });
       } catch {
         throw new Refusal(controller.signal.aborted ? 504 : 502, "provider_unreachable", `the ${route.provider} provider could not be reached`);

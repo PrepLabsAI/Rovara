@@ -12,6 +12,10 @@ import { join } from "node:path";
 import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import { LOCAL_MODEL_PROVIDER_ORDER, chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
+import { createSecondReview, type SecondReview } from "../../core/second-review/index.js";
+import { createLocalSecondReviewSeams } from "./second-review.js";
+import { SecondReviewerSchema } from "@agentx/contracts";
+import type { ProxyRoute } from "../model-proxy/types.js";
 import { capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
@@ -73,6 +77,8 @@ const LOCAL_OWNER_PERSON_ID = "local-owner";
 export interface LocalAppOptions {
   /** Tells the model proxy an operation ended (it frees the operation's tokens and spend record). Set by the runtime, which makes the proxy after the servers. */
   operationEnded?: (operationId: string) => void;
+  /** The model aliases an operation's calls went out on, from the model proxy: a second opinion counts only when its model was really called. Absent: the install cannot tell, and the opinion is taken as reported. */
+  modelCalls?: (operationId: string) => ReadonlySet<string> | undefined;
   /** The model a task step calls, fixed by the caller (tests). Absent: `modelSetting`, else the first provider with a key. */
   modelChoice?: LocalModelChoice;
   /** Lane L13: the owner's `model` setting from the config; see `chooseLocalModel` for the order. */
@@ -127,6 +133,8 @@ export interface LocalApp {
   readonly comments: LocalComments;
   /** The milestone hook: an adapter (chat, tracker, outbound events) registers a handler that is told each milestone after its commit, and again by the sweep when it failed. */
   readonly milestones: Pick<DocumentMilestones, "register" | "deliverDue">;
+  /** The second review by another AI company: its settings, state and the task flow's hooks. */
+  readonly secondReview: SecondReview;
   /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
   readonly modelGrants: ModelGrantSource;
   /** Script tokens: serving a request that carries one, and the settings the local pages and routes use. */
@@ -193,6 +201,13 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const modelRoute = async () => { const choice = await chosen(); return choice === undefined ? undefined : routeOf(choice).workerRoute; };
 
   const clock = (): Date => options.now?.() ?? new Date();
+  // The second review. It asks the install what it can serve (the providers with a key), reaches a model through the same proxy, and keeps its settings and evidence in the document store under Cloud's keys.
+  const projectSource = createStoreProjectSource(store, companyId);
+  const secondReview = createSecondReview({
+    store, companyId, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), admission: registry.require("admission"),
+    seams: createLocalSecondReviewSeams({ companyId, providers, keys, chosen, projects: projectSource }),
+    now: () => clock().getTime(), log,
+  });
   // Lane L12: the milestones ("fixing", "stuck", "ready") are rows and lines on the task's session, written in the transaction of the change that caused them.
   const timeline = sessionTimeline();
   // The milestone hook: rows and session lines in the change's transaction, delivered after the commit to the handlers an adapter registered (`app.milestones.register`); none by default.
@@ -204,8 +219,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs });
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
-    projects: createStoreProjectSource(store, companyId),
+    projects: projectSource,
     repositoryGrants: grants,
+    secondReview,
     callbackSigningKey: signingKey,
     understandFirst: true,
     ...(options.planFormat === undefined ? {} : { planFormat: options.planFormat }),
@@ -220,6 +236,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // Every step runs on the install's one model, so the plan check says the model that wrote the plan checked it.
     installModel: async () => { const choice = await chosen(); return choice === undefined ? undefined : { provider: choice.provider, modelId: choice.model }; },
     ...(options.operationEnded === undefined ? {} : { onOperationEnded: options.operationEnded }),
+    ...(options.modelCalls === undefined ? {} : { modelCalls: options.modelCalls }),
     startExtras: createSessionStartExtras(companyId),
     milestones,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
@@ -246,7 +263,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       if (choice === undefined) return undefined;
       const pointer = fromDocument<TaskPointerRecord>(await store.get(taskPointerKey(operation.workspaceId)));
       const task = pointer === undefined ? undefined : await readTask(flow.deps, pointer.taskId);
-      return { routes: [routeOf(choice).route], ...(task === undefined ? {} : { taskId: task.taskId, projectName: task.project }) };
+      // Second review: the models this REVIEW operation may also call are the ones the broker chose for its second reviewer (never the worker's say), each through its own route.
+      const operationRecord = await store.get(operationKey(operation.workspaceId, operation.operationId));
+      const second = SecondReviewerSchema.safeParse((operationRecord?.["dispatch"] as { payload?: Record<string, unknown> } | undefined)?.payload?.["workflowSecondReviewer"]);
+      const caps = (operationRecord?.["secondReviewPlan"] as { caps?: Record<string, ProxyRoute["cap"]> } | undefined)?.caps ?? {};
+      // Every extra route carries its own cap (never the first review's route): a second model is called within a limit of its own.
+      const extra: ProxyRoute[] = second.success ? second.data.candidates.flatMap((candidate) => (candidate.modelRoute === undefined ? [] : [{ alias: candidate.modelRoute.alias, provider: candidate.model.provider, model: candidate.model.modelId, api: candidate.modelRoute.api, ...(caps[candidate.modelRoute.alias] === undefined ? {} : { cap: caps[candidate.modelRoute.alias] }) }])) : [];
+      const own = routeOf(choice).route;
+      return { routes: [own, ...extra.filter((route) => route.alias !== own.alias)], ...(task === undefined ? {} : { taskId: task.taskId, projectName: task.project }) };
     },
     async holds(operation) {
       const [record, workspace] = await Promise.all([store.get(operationKey(operation.workspaceId, operation.operationId)), store.get(workspaceKey(operation.workspaceId))]);
@@ -308,11 +332,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   await scriptTokens.revokeAllForSwitchOff().catch((error: unknown) => log({ event: "local_app.script_tokens_switch_off_failed", error: error instanceof Error ? error.name : "unknown" }));
   const pages = await createLocalPagesServer({
     data: {
-      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments }),
+      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview }),
       listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
     },
     actions: {
-      decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments }),
+      decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview }),
       async createScriptToken(input) {
         try {
           return { ok: true, created: await scriptTokens.create(input) };
@@ -336,7 +360,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true ? { fresh: true } : {}) })), version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
     store, audit: registry.require("audit-sink"), admission: registry.require("admission"), enabled: options.ask ?? true, artifacts: blobs, readers: () => ({ diff: createAskDiffReader({ peek: createPeekClient(flow.deps) }) }), questionHashKey: deriveKey(rootKey, "ask-question"), log,
@@ -346,10 +370,13 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });
-  const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
+  const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
+
+  // The second review's track record is kept from the store's change feed (a store without one keeps none; nothing else depends on it).
+  const trackIndexer = await secondReview.startTrackIndexer().catch((error: unknown) => { log({ event: "local_app.second_review_track_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
   const logFailure = (event: string) => (error: unknown) => log({ event, error: error instanceof Error ? error.name : "unknown" });
   const tickCore = async (): Promise<void> => {
@@ -385,7 +412,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants, milestones, scriptTokens,
+    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants, secondReview, milestones, scriptTokens,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,
@@ -393,6 +420,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       for (const timer of timers) clearInterval(timer);
       await tracking.idle();
       await projector?.stop();
+      await trackIndexer?.stop();
       await pages.close();
     },
   };

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
-  agentSessionKey, canonicalPlanJson, change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
+  agentSessionKey, canonicalPlanJson, change, createCandidateManifest, projectMetaKey, secondReviewModelKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
@@ -23,7 +23,7 @@ import { OPENS_PER_MINUTE } from "../../packages/broker/src/local/app/routes.js"
 import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
 import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
 import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/local/app/host.js";
-import { registerOpenCommand } from "../../packages/cli/src/up/cli.js";
+import { registerOpenCommand, registerSecondReviewCommand } from "../../packages/cli/src/up/cli.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
@@ -42,6 +42,8 @@ import { recordedHeadOf } from "../../packages/broker/src/core/build-step/head-c
 import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
+import { secondReviewReplayKey, secondReviewVerdictKey } from "../../packages/broker/src/core/second-review/index.js";
+import { plain, replayRun, verdictFor } from "../support/second-review-world.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { startFakeProvider } from "../support/model-proxy-world.js";
 import { planAnswer, testedPlanDocument } from "../support/plan-documents.js";
@@ -3042,6 +3044,201 @@ describe("rovara up: ordered work and parts built side by side", () => {
     expect((await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_A, 1, "STARTED", base)] })).status).toBe(200);
     expect((await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_B, 2, "STARTED", base)] })).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
     expect((await t.record()).workflow.workflowDependenciesProgress).toHaveLength(1);
+
+  });
+});
+
+// ---- The second review by another AI company, on a laptop. Two model keys of different companies (Anthropic writes the code, OpenAI gives the second opinion), a fake worker that answers the REVIEW
+// job with both reviews and the second reviewer's report.
+const SECOND_KEYS = { ANTHROPIC_API_KEY: ["sk", "ant", "y".repeat(24)].join("-"), OPENAI_API_KEY: ["sk", "oai", "z".repeat(24)].join("-") };
+const secondReviewReport = (job: WorkerInvocation, tree: string, alias: string, status: "PASS" | "FINDINGS") => ({
+  tries: 1,
+  report: {
+    operationId: job.operationId, candidateDigest: createCandidateManifest(candidateOf(tree)).digest, role: "CRITIC", provider: "rovara-route", version: alias, status, readOnly: true, recordedAt: new Date().toISOString(),
+    findings: status === "PASS" ? [] : [{ text: "The retry loop never stops when the store stays down.", origin: "INTRODUCED", severity: "HIGH", file: "src/health.ts", line: 9 }],
+  },
+});
+const owner = localOwnerPrincipal({ companyId: IMPLICIT_COMPANY_ID });
+/** Blocking on, the way it is reached: a chosen model whose evidence holds (written beneath the page here), then the mode. */
+async function turnOn(h: Awaited<ReturnType<typeof launch>>): Promise<void> {
+  const store = h.runtime.registry.require("storage");
+  const gpt = { provider: "openai", modelId: "gpt-5.5" };
+  await h.runtime.app.secondReview.apply(owner, { action: "choose", primary: gpt });
+  await store.put({ item: { ...secondReviewReplayKey(IMPLICIT_COMPANY_ID, "run-1"), entityType: "SECOND_REVIEW_REPLAY", run: plain(replayRun(gpt)) } });
+  await store.put({ item: { ...secondReviewVerdictKey(IMPLICIT_COMPANY_ID, secondReviewModelKey(gpt)), entityType: "SECOND_REVIEW_VERDICT", verdict: plain(verdictFor(gpt)) } });
+  expect(await h.runtime.app.secondReview.apply(owner, { action: "mode", scope: "company", mode: "on" })).toMatchObject({ status: "applied", mode: "on" });
+}
+
+describe("rovara up: the second review by another AI company", () => {
+  it("shadow: the review job carries a model of the other company through its own route, the token may call it, and the opinion is kept beside the workflow and shown on the page", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const second = h.runtime.app.secondReview;
+    expect(await second.apply(owner, { action: "mode", scope: "company", mode: "shadow" })).toMatchObject({ status: "applied", mode: "shadow" });
+    // The coding run's token may call its own model and nothing else: the second reviewer's alias is granted to no other operation.
+    expect((await h.runtime.app.modelGrants.grant(coding.callbackCapability)).routes.map((route) => route.alias)).toEqual([expect.stringMatching(/^anthropic\//u)]);
+    expect((await h.callback(coding, "result", builtResult("d".repeat(40)))).status).toBe(200);
+    const review = await h.nextJob(workspaceId, seen);
+    const payload = review.payload as { workflowSecondReviewer?: { candidates: Array<{ model: { provider: string; modelId: string }; modelRoute?: { alias: string; api: string } }> } };
+    const candidate = payload.workflowSecondReviewer!.candidates[0]!;
+    // Another AI company than the one that writes the code, reached through the model proxy by its own alias.
+    expect(candidate.model.provider).toBe("openai");
+    expect(candidate.modelRoute).toMatchObject({ alias: `openai/${candidate.model.modelId}` });
+    // The operation's token may call the second reviewer's alias besides the task's own model, and nothing else.
+    const grant = await h.runtime.app.modelGrants.grant(review.callbackCapability);
+    expect(grant.routes.map((route) => route.alias)).toEqual([expect.stringMatching(/^anthropic\//u), ...payload.workflowSecondReviewer!.candidates.map((entry) => entry.modelRoute!.alias)]);
+    expect(grant.routes.every((route) => route.alias.startsWith(`${route.provider}/`))).toBe(true);
+    // The first review's own route has no cap; the second reviewer's routes each have one of their own, priced at the model's catalog rates.
+    expect(grant.routes[0]!.cap).toBeUndefined();
+    for (const route of grant.routes.slice(1)) expect(route.cap).toMatchObject({ capUsd: (expect.any(Number) as number), usdPerMTok: { input: (expect.any(Number) as number), output: (expect.any(Number) as number) } });
+    // The first review's other jobs (the coding run) carry none.
+    expect(coding.payload).not.toHaveProperty("workflowSecondReviewer");
+
+    const answered = reviewsOf(review, "d".repeat(40), "pass");
+    // The model proxy saw the second reviewer's call on its alias (the worker's word alone is not an opinion).
+    h.runtime.modelProxy.tokens.noteCall(review.operationId, candidate.modelRoute!.alias);
+    expect((await h.callback(review, "result", { ...answered, result: { ...answered.result, workflowSecondReview: secondReviewReport(review, "d".repeat(40), candidate.modelRoute!.alias, "FINDINGS") } })).status).toBe(200);
+    const after = await taskRecord(h, taskId) as { workflow: { stage: string; state: string }; secondOpinion?: { opinion: { mode: string; wouldHaveBlocked: boolean; blocked: boolean } } };
+    // Shadow never blocks: the pull request is due, and the opinion is on the record.
+    expect(after.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
+    expect(after.secondOpinion?.opinion).toMatchObject({ mode: "shadow", wouldHaveBlocked: true, blocked: false });
+    const page = await raw_(h, await h.browse(`/plan/${taskId}`));
+    expect(page.body).toContain("Second opinion (not blocking)");
+    expect(page.body).toContain("The retry loop never stops");
+    // The task as a tool reads it carries the same lines; nothing about it is a pull request line while shadow.
+    expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task).toMatchObject({ secondReview: { needsAcknowledgement: false, acknowledged: false } });
+  });
+
+  it("a second opinion the worker reports but the model proxy never saw a call for is no answer, and never blocks", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    await h.runtime.app.secondReview.apply(owner, { action: "mode", scope: "company", mode: "shadow" });
+    await h.callback(coding, "result", builtResult("d".repeat(40)));
+    const review = await h.nextJob(workspaceId, seen);
+    const alias = (review.payload as { workflowSecondReviewer: { candidates: Array<{ modelRoute: { alias: string } }> } }).workflowSecondReviewer.candidates[0]!.modelRoute.alias;
+    const answered = reviewsOf(review, "d".repeat(40), "pass");
+    // The report names the planned alias, with findings, but no call went out on it.
+    await h.callback(review, "result", { ...answered, result: { ...answered.result, workflowSecondReview: secondReviewReport(review, "d".repeat(40), alias, "FINDINGS") } });
+    const after = await taskRecord(h, taskId) as { workflow: { stage: string }; secondOpinion?: { opinion: { unavailable: boolean; unavailableReason?: string; wouldHaveBlocked: boolean } } };
+    expect(after.workflow).toMatchObject({ stage: "PULL_REQUEST" });
+    expect(after.secondOpinion?.opinion).toMatchObject({ unavailable: true, unavailableReason: "no-answer", wouldHaveBlocked: false });
+  });
+
+  it("with the mode off no operation's token carries more than its own route, and a review job has no second reviewer", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    const { workspaceId, seen, coding } = await toCoding(h);
+    expect((await h.runtime.app.modelGrants.grant(coding.callbackCapability)).routes).toHaveLength(1);
+    await h.callback(coding, "result", builtResult("d".repeat(40)));
+    const review = await h.nextJob(workspaceId, seen);
+    expect(review.payload).not.toHaveProperty("workflowSecondReviewer");
+    expect((await h.runtime.app.modelGrants.grant(review.callbackCapability)).routes).toHaveLength(1);
+  });
+
+  it("the owner reads the second review over the API but changes it only on its page; the evidence is page-only too", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    const state = await h.api("/v1/dev/second-review");
+    expect(state.status).toBe(200);
+    expect(state.body).toMatchObject({ mode: "off", models: (expect.any(Array) as unknown[]), current: { source: "default" } });
+    // A token never changes it: not the mode, not the model.
+    const refused = await h.api("/v1/dev/second-review", { method: "POST", body: { action: "mode", scope: "company", mode: "shadow" } });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error?.message).toContain("local page");
+    expect((await h.runtime.app.secondReview.state()).modes.company).toBe("off");
+    // The page is the owner's.
+    const link = await h.browse("/second-review");
+    const page = await raw_(h, link);
+    expect(page.status).toBe(200);
+    expect(page.body).toContain("Who reviews now");
+    // The evidence that lets a model block is the owner's act on the page, in a fresh page session: this token, which every local tool holds, never writes it.
+    const GPT_MODEL = { provider: "openai", modelId: "gpt-5.5" };
+    for (const path of ["/v1/admin/second-review/replay", "/v1/admin/second-review/verdict"]) {
+      const answer = await h.api(path, { method: "POST", body: path.endsWith("replay") ? { run: replayRun(GPT_MODEL) } : { model: GPT_MODEL, replayRunId: "run-1", startedAt: "2026-10-02T00:00:00.000Z", endedAt: "2026-11-01T00:00:00.000Z" } });
+      expect(answer.status).toBe(403);
+      expect(answer.body.error?.message).toContain("local page");
+    }
+    expect(await h.runtime.registry.require("storage").get({ pk: `ORG#${IMPLICIT_COMPANY_ID}`, sk: "SECONDREVIEW#REPLAY#run-1" })).toBeUndefined();
+  });
+
+  it("`rovara second-review` shows the state, `evidence` and `rovara open second-review` open its page; neither can change the model, the mode or the evidence", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    const printed: string[] = [];
+    const run = async (...args: string[]) => {
+      const program = new Command().exitOverride().option("--json");
+      registerSecondReviewCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
+      registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
+      await program.parseAsync(["node", "rovara", ...args]);
+    };
+    await run("second-review", "status", "--state-dir", h.stateDirectory);
+    expect(printed.join("")).toContain("Second review mode: off");
+    expect(printed.join("")).toContain("Change it on the page: rovara open second-review");
+    printed.length = 0;
+    await run("--json", "second-review", "status", "--state-dir", h.stateDirectory);
+    expect(JSON.parse(printed.join(""))).toMatchObject({ ok: true, data: { mode: "off" } });
+    // The page opens in the owner's browser (the running process opens it; no address is printed).
+    printed.length = 0;
+    await run("open", "second-review", "--state-dir", h.stateDirectory);
+    expect(printed.join("")).toBe("Opened in your browser.\n");
+    expect(printed.join("")).not.toMatch(/\/s\//);
+    const once = new URL(h.opened.at(-1)!);
+    const link = new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
+    expect(link.pathname).toMatch(/\/second-review$/u);
+    // The evidence is written on the page, in a fresh session: the command only opens it (and the old file commands are gone).
+    printed.length = 0;
+    await run("second-review", "evidence", "--state-dir", h.stateDirectory);
+    expect(printed.join("")).toContain("Opened the second review page");
+    expect(h.opened.at(-1)).toMatch(/\/s\/once\//u);
+    await expect(run("second-review", "replay", "x.json", "--state-dir", h.stateDirectory)).rejects.toThrow();
+    await h.runtime.stop();
+    await expect(run("second-review", "status", "--state-dir", h.stateDirectory)).rejects.toThrow(/not running/);
+  });
+
+  it("`on`, with evidence that holds: a blocking finding holds the review (Rovara sends it back); an `on` review that did not run asks the owner on the task's page, who acknowledges in the browser", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    const second = h.runtime.app.secondReview;
+    await turnOn(h);
+
+    // A review that did not run (an older worker, no second-review key).
+    const run = await toCoding(h);
+    await h.callback(run.coding, "result", builtResult("d".repeat(40)));
+    const review = await h.nextJob(run.workspaceId, run.seen);
+    expect(review.payload).toHaveProperty("workflowSecondReviewer");
+    expect((await h.callback(review, "result", reviewsOf(review, "d".repeat(40), "pass"))).status).toBe(200);
+    const after = await taskRecord(h, run.taskId) as { workflow: { stage: string; state: string }; secondOpinion?: { opinion: { unavailable: boolean; unavailableReason?: string } } };
+    expect(after.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
+    expect(after.secondOpinion?.opinion).toMatchObject({ unavailable: true, unavailableReason: "older-worker" });
+    expect(second.mergeWait((await taskRecord(h, run.taskId)) as never)).toContain("Second review did not run");
+    // The task as a tool reads it: asked, and only the page can answer.
+    expect((await h.api(`/v1/dev/tasks/${run.taskId}`)).body.task).toMatchObject({ secondReview: { needsAcknowledgement: true, acknowledged: false, canAcknowledge: true } });
+    const link = await h.browse(`/plan/${run.taskId}`);
+    const form = formOf((await raw_(h, link)).body, "/second-review-acknowledge");
+    const post = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody(form.fields), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(post.headers["location"]).toContain("n=acknowledged");
+    expect(second.mergeWait((await taskRecord(h, run.taskId)) as never)).toBeUndefined();
+  });
+});
+
+describe("rovara up: the second review on the pull request", () => {
+  it("an `on` second review that did not run puts its line in the pull request's description when it is opened, and keeps it when the changed files are read from the host", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now, environment: SECOND_KEYS });
+    await turnOn(h);
+    // The worker's REVIEW result has no second-review key (an older worker): `on` flags that it did not run.
+    const { cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    expect(openingBody).toContain("Second review did not run");
+    await h.runtime.tick();
+    // The description was rewritten with the files read from the host, and still says so.
+    expect(cr.body).toContain("1 file changed");
+    expect(cr.body).toContain("Second review did not run");
+  });
+
+  it("a shadow second review puts nothing in the description", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now, environment: SECOND_KEYS });
+    await h.runtime.app.secondReview.apply(owner, { action: "mode", scope: "company", mode: "shadow" });
+    const { cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    expect(openingBody).not.toContain("Second review");
+    await h.runtime.tick();
+    expect(cr.body).not.toContain("Second review");
   });
 });
 

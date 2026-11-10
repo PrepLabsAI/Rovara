@@ -450,12 +450,20 @@ const taskNextStep = (task: Pick<DeveloperTaskClientView, "statusView">): string
   return next === undefined ? undefined : plainText(next, "");
 };
 
+/** The second review's lines (reviewer text: data), and where the owner acknowledges that an `on` review did not run: on the task page, never through a tool. */
+function secondReviewText(task: DeveloperTaskClientView): string {
+  const second = task.secondReview;
+  if (second === undefined) return "";
+  const ask = second.needsAcknowledgement && !second.acknowledged ? " The task owner acknowledges this on the task's local page (rovara open); a tool cannot. Where Rovara holds the merge for it the acknowledgement releases the hold; Rovara does not merge on a laptop, so check the pull request's second-review line before merging." : "";
+  return ` Second review: ${second.lines.map((line) => plainText(line, "")).join(" ")}${ask}`;
+}
+
 function taskText(task: DeveloperTaskClientView, timedOut?: boolean): string {
   const failure = task.failure === undefined ? "" : ` (${task.failure.category}: ${task.failure.message})`;
   const waited = timedOut === true ? " The wait ended first; the task keeps running." : "";
   const summary = task.summary === undefined ? "" : ` Summary: ${task.summary}`;
   const link = taskSessionOutput(task).session_url;
-  return `Task ${task.taskId} "${task.title}" on ${task.project} is "${taskStatusWords(task)}"${failure}.${waited}${shareText(task)} ${nextFor(task)}${summary}${link === undefined ? "" : ` Open it in Rovara: ${link}`}`;
+  return `Task ${task.taskId} "${task.title}" on ${task.project} is "${taskStatusWords(task)}"${failure}.${waited}${shareText(task)} ${nextFor(task)}${secondReviewText(task)}${summary}${link === undefined ? "" : ` Open it in Rovara: ${link}`}`;
 }
 
 function instructions(value: unknown): string {
@@ -1292,6 +1300,24 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
           ? `The pull request for task ${taskId} is ${answer.pullRequest.url} (${answer.pullRequest.state}).`
           : `Opening a pull request for task ${taskId} (operation ${answer.operationId}, ${answer.operationStatus}). Check with agentx_get_task; its URL appears there once it is published.`,
       };
+    },
+  },
+  {
+    name: "agentx_get_second_review",
+    title: "Show the second review's settings",
+    description: "Shows who gives the second opinion on your tasks' code (a model of a different AI company than the one that wrote it), how it counts (off, shadow or on), the models that could, and any notice that the chosen model stopped qualifying. This only reads: the owner changes the model, the mode and the evidence on the local page (`rovara open second-review`), never through a tool.",
+    inputSchema: { project: z.string().min(1).max(64).optional().describe("a project name, to see the mode that applies to it"), builder: z.array(z.string().min(1).max(300)).max(5).optional().describe("models that write the code, as provider:modelId, to see which models fit; leave out to list every model with its maker") },
+    outputSchema: { mode: z.string(), company_mode: z.string(), reviewing_now: z.string().optional(), choice: z.array(z.string()), notice: z.array(z.string()), models: z.array(z.object({ model: z.string(), company: z.string(), eligible: z.boolean(), suggested: z.boolean(), cost_usd: z.number().optional() })) },
+    async handler(context, input) {
+      const state = await context.client.getSecondReview({ ...(input.project === undefined ? {} : { project: input.project as string }), ...(input.builder === undefined ? {} : { builder: input.builder as string[] }) });
+      const structured = {
+        mode: state.mode, company_mode: state.modes.company, ...(state.current.line === undefined ? {} : { reviewing_now: plainText(state.current.line, "") }),
+        choice: (state.choice?.models ?? []).map((model) => `${model.provider}:${model.modelId}`), notice: (state.notice?.lines ?? []).map((line) => plainText(line, "")),
+        models: state.models.slice(0, 40).map((entry) => ({ model: `${entry.model.provider}:${entry.model.modelId}`, company: entry.company, eligible: entry.eligible, suggested: entry.suggested, ...(entry.costUsd === undefined ? {} : { cost_usd: entry.costUsd }) })),
+      };
+      const text = [`Second review mode: ${state.mode} (company: ${state.modes.company}).`, ...(structured.reviewing_now === undefined ? [] : [structured.reviewing_now]), ...structured.notice,
+        ...(state.models.some((entry) => entry.suggested) ? [`Suggested: ${state.suggested.map((model) => model.modelId).join(", ")}.`] : []), "Change it on the local page: rovara open second-review."].join("\n");
+      return { structured, text };
     },
   },
   {

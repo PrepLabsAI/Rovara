@@ -12,6 +12,7 @@ import {
   DeveloperTaskResponseSchema,
   TASK_VIEW_HEADER,
   TASK_VIEW_VERSION,
+  SecondReviewStateReaderSchema,
   SessionListReaderSchema,
   SessionMessageSchema,
   SessionResponseReaderSchema,
@@ -90,6 +91,9 @@ export interface CallOptions {
   busyStep?: string;
 }
 
+/** The second review's state as a client reads it: a mode this build does not know reads `unknown` (forward-compatible reader). */
+export type SecondReviewStateRead = z.infer<typeof SecondReviewStateReaderSchema>;
+
 export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
   configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string; confirm?: AgentXConfigurationConfirm }>;
@@ -122,6 +126,8 @@ export interface ControlPlaneClient {
   openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
   /** Spec 025 FR-030: shares the task, or changes a shared task's mode (API 1.2). */
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
+  /** The second review's settings and state (read only: the owner changes them on the local page). Absent route: the install has no second review. */
+  getSecondReview(query: { project?: string; builder?: readonly string[] }): Promise<SecondReviewStateRead>;
   getTaskPeople(taskId: string): Promise<TaskPeopleView>;
   getTaskPeopleRequest(taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
   setTaskPerson(taskId: string, request: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
@@ -377,6 +383,12 @@ export function httpControlPlaneClient(options: {
     closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
+    getSecondReview: async (query) => {
+      const search = new URLSearchParams();
+      if (query.project !== undefined) search.set("project", query.project);
+      for (const builder of query.builder ?? []) search.append("builder", builder);
+      return call(SecondReviewStateReaderSchema, "GET", `/v1/dev/second-review${search.size === 0 ? "" : `?${search.toString()}`}`);
+    },
     getTaskPeople: async (taskId) => (await call(TaskPeopleViewResponseSchema, "GET", path(taskId, "/people"))).view,
     getTaskPeopleRequest: async (taskId, requestId) => (await call(TaskPeopleChangeResponseSchema, "GET", path(taskId, `/people/requests/${encodeURIComponent(requestId)}`))).change,
     setTaskPerson: async (taskId, request) => (await call(TaskPeopleChangeResponseSchema, "POST", path(taskId, "/people/role"), request)).change,

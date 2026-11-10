@@ -34,6 +34,7 @@ export * from "./project-learning.js";
 export * from "./how-we-work.js";
 export * from "./how-we-work-track-record.js";
 export * from "./second-review.js";
+export * from "./app-second-review.js";
 export * from "./rovara-code-node.js";
 export * from "./rovara-code-intent.js";
 export * from "./intake.js";

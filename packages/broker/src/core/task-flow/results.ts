@@ -73,6 +73,7 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
   if (ended === undefined || !isTerminalStatus(ended.status)) throw agentXError("WORKSPACE_BUSY", "could not record the result just now; send it again");
   // The model proxy frees the operation's tokens and spend record now, not at its next refused call (a repeat of the result does it again, harmlessly).
   try { deps.onOperationEnded?.(ended.id); } catch { /* a proxy's bookkeeping never fails a result */ }
+  await deps.secondReview?.operationEnded(ended);
   // The next move is made from what was RECORDED, never from a repeat's own words: a late retry cannot turn a failure into a success.
   const recorded = (ended.result as { outcome?: StepOutcome } | undefined)?.outcome;
   await onOperationEnded(deps, ended, { status: ended.status as OperationResult["status"], ...(ended.error === undefined ? {} : { error: ended.error }), ...(recorded === undefined ? {} : { outcome: recorded }) });

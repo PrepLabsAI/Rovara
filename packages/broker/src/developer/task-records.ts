@@ -1,5 +1,6 @@
 // Spec 025 phase 25b: a developer task's records, owner key, status and failure rules, event text
 // and audit records. No I/O; aws/developer-tasks.ts and the broker's result hook call these.
+import type { StoredSecondOpinion } from "../core/second-review/store.js";
 import { createHash } from "node:crypto";
 import {
   inertName,
@@ -112,6 +113,12 @@ export interface DeveloperTaskRecord {
   threadNotesFedFrom?: string;
   /** The owner's original request, redacted and cut to 4,000 characters; the first entry of each plan's "why". Tasks created earlier have none. */
   requestText?: string;
+  /**
+   * Second review by another AI company: kept BESIDE the workflow, never inside it, so a second review never reaches a first review's transition and an older build ignores these keys.
+   * `secondOpinion` is its result for one candidate; `secondReviewAcknowledged` holds the keys the task owner acknowledged (`secondReviewAcknowledgement`).
+   */
+  secondOpinion?: StoredSecondOpinion;
+  secondReviewAcknowledged?: string[];
 }
 
 /** C1: a shared task's thread, as the task record keeps it. */

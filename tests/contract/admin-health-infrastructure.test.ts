@@ -150,6 +150,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/script-tokens/rate.ts", "packages/broker/src/core/script-tokens/store.ts",
       // Sessions: thread notes and the live-message counters (session retention), followers and presence rows, and Ask's records, locks, request marks and rate rows.
       "packages/broker/src/core/sessions/followers.ts", "packages/broker/src/core/sessions/notes.ts", "packages/broker/src/core/sessions/ask.ts", "packages/broker/src/core/sessions/steer.ts",
+      // Second review: the track record rows (one per answered second opinion, and a pointer per task) expire after their retention (400 days).
+      "packages/broker/src/core/second-review/track.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

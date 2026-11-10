@@ -54,6 +54,60 @@ function untilSignal(): Promise<void> {
   });
 }
 
+/** One signed-in call to the running `rovara up`. A refusal is told in the server's own fixed words. */
+async function localCall(context: Pick<UpCommandContext, "home" | "fetch">, stateDir: string | undefined, method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
+  const { url, secret: token } = await requireLocalRuntime(context.home ?? homedir(), stateDir);
+  let response: Response;
+  try {
+    response = await context.fetch(`${url}${path}`, {
+      method, headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20_000),
+    });
+  } catch {
+    throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is not answering at its address. Start it again with `rovara up`.");
+  }
+  const answer = (await response.json().catch(() => ({}))) as { error?: { code?: unknown; message?: unknown } };
+  if (!response.ok) throw agentXError(response.status === 403 ? "FORBIDDEN" : response.status === 404 ? "NOT_FOUND" : response.status === 400 ? "CONFIG_INVALID" : "RUNTIME_UNAVAILABLE", typeof answer.error?.message === "string" ? answer.error.message : `Rovara answered HTTP ${String(response.status)}.`);
+  return answer;
+}
+
+/**
+ * `rovara second-review`: what the second review is doing (who gives the second opinion, how it counts). Choosing the model, the mode, withdrawing evidence and recording it happen on its local page
+ * (`rovara open second-review`): they are the owner's own acts in the browser, never a token's.
+ */
+export function registerSecondReviewCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
+  const secondReview = program.command("second-review").description("show the second review (a second opinion from a model of a different AI company); change it with `rovara open second-review`");
+  secondReview
+    .command("status", { isDefault: true })
+    .description("show who gives the second opinion, how it counts, and any notice")
+    .option("--project <name>", "show the mode that applies to one project")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (options: { project?: string; stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      const state = await localCall(context, options.stateDir, "GET", `/v1/dev/second-review${options.project === undefined ? "" : `?project=${encodeURIComponent(options.project)}`}`) as {
+        mode: string; modes: { company: string }; current: { line?: string; reason?: string }; notice: { lines: string[] } | null; choice: { models: Array<{ provider: string; modelId: string }> } | null; suggested: Array<{ modelId: string }>;
+      };
+      if (globals.json) { context.stdout.write(`${JSON.stringify({ ok: true, data: state })}\n`); return; }
+      context.stdout.write([
+        `Second review mode: ${state.mode} (company: ${state.modes.company}).`,
+        state.current.line ?? `Nothing qualifies${state.current.reason === undefined ? "" : ` (${state.current.reason})`}.`,
+        ...(state.choice === null ? [] : [`Chosen: ${state.choice.models.map((model) => `${model.provider}:${model.modelId}`).join(", then ")}.`]),
+        ...(state.notice === null ? [] : state.notice.lines),
+        ...(state.suggested.length === 0 ? [] : [`Suggested: ${state.suggested.map((model) => model.modelId).join(", ")}.`]),
+        "Change it on the page: rovara open second-review",
+      ].join("\n") + "\n");
+    });
+  secondReview
+    .command("evidence")
+    .description("record the evidence that lets a model block: opens the second review page, where you paste a replay run and name the shadow window")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (options: { stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      // The evidence is the owner's act on the page, in a page session opened just now: this command only opens the page; the token never writes it.
+      await localCall(context, options.stateDir, "POST", "/v1/local/pages/open", { path: "/second-review" });
+      context.stdout.write(globals.json ? `${JSON.stringify({ ok: true, data: { opened: true } })}\n` : "Opened the second review page in your browser. Record the replay run and the evidence under \"Evidence\" there, within ten minutes.\n");
+    });
+}
+
 /**
  * `rovara open [task]`: asks the running `rovara up` to open the review page in your browser (a task's plan, or the list of what waits for you). The address carries your page session and can
  * approve, so it is never sent here or printed: the running process opens the browser itself.
@@ -61,17 +115,17 @@ function untilSignal(): Promise<void> {
 export function registerOpenCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
   program
     .command("open [task]")
-    .description("open the local review page for a task (or for everything that waits for you) in your browser; `rovara up` must be running")
+    .description("open the local review page for a task (or for everything that waits for you, or `second-review`) in your browser; `rovara up` must be running")
     .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
     .action(async (task: string | undefined, options: { stateDir?: string }, command: Command) => {
       const globals = command.optsWithGlobals<{ json: boolean }>();
-      if (task !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), or leave it out");
+      if (task !== undefined && task !== "second-review" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), `second-review`, or leave it out");
       const { url, secret } = await requireLocalRuntime(context.home ?? homedir(), options.stateDir);
       let response: Response;
       try {
         response = await context.fetch(`${url}/v1/local/pages/open`, {
           method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
-          body: JSON.stringify({ path: task === undefined ? "/" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
+          body: JSON.stringify({ path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
         });
       } catch {
         throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is not answering at its address. Start it again with `rovara up`.");

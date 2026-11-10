@@ -21,6 +21,7 @@ import { revisePlanWithLiveMessage } from "../../core/sessions/live-steer-revise
 import { createLocalSessionControl } from "./host.js";
 import { answerUnderstandQuestions } from "./answers.js";
 import { developerTaskView } from "./task-view.js";
+import type { SecondReview } from "../../core/second-review/index.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 const SESSIONS = /^\/v1\/app\/sessions(?:\/([A-Za-z0-9_-]{1,100})(?:\/(stop|retry|messages|answers|revise-plan|follow|unfollow|presence|close))?)?$/u;
@@ -39,6 +40,8 @@ export interface SessionRoutesDeps {
   refresh?: ((orgId: OrgId, sessionId: SessionId) => Promise<unknown>) | undefined;
   /** Ask about this task; absent when the install cannot answer one. */
   ask?: ReturnType<typeof createAsk> | undefined;
+  /** The second review's lines on the task body. */
+  secondReview?: SecondReview;
 }
 
 function bodyOf(request: BrokerRequest): Record<string, unknown> {
@@ -72,7 +75,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
       approvals: [], followers: session.followerCount, viewingNow: await viewingNow(store, session, (flow.deps.now?.() ?? new Date()).getTime()),
       you: { level: "edit", owner: true, following: true, actions: SESSION_ACTIONS.filter((action) => snapshot.actions.includes(action as never) || action === "close") },
       link: `${deps.origin()}/v1/app/sessions/${session.sessionId}`, bindings: [], legs: session.legs, revision: session.revision, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
-      body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs) },
+      body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest)) },
     })) as Record<string, unknown>;
   };
 

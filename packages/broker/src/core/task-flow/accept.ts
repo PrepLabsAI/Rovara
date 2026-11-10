@@ -4,6 +4,7 @@
 import { INDEX_EXPIRY_ATTRIBUTE, agentXError, when, type Operation, type TransactItem, type WorkflowDependencyInvocation } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
 import { operationKey, operationRequestKey } from "./keys.js";
+import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { toDocument, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type WorkspaceRecord } from "./records.js";
 import { dispatchQueueName, hashJson, iso, newId } from "./support.js";
 
@@ -27,6 +28,8 @@ export interface AcceptInput {
   workflowDependencies?: WorkflowDependencyInvocation;
   /** A line for the operation's timeline, written with it as its first event (the worker's own events follow it). */
   firstEvent?: string;
+  /** A REVIEW operation's second-review plan (or the fixed reason none could run), recorded on the operation. */
+  secondReviewPlan?: SecondReviewOperationPlan;
   now?: string;
   /** Whether to write the request's idempotency record (a start does not: the start's own record covers it). */
   recordRequest?: boolean;
@@ -69,6 +72,7 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
     ...(input.publication === undefined ? {} : { publication: input.publication }),
     ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
     ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
+    ...(input.secondReviewPlan === undefined ? {} : { secondReviewPlan: input.secondReviewPlan }),
   };
   const message: DispatchMessage = { v: 1, workspaceId: input.workspace.id, operationId: id };
   const first: TransactItem[] = input.firstEvent === undefined ? [] : [{

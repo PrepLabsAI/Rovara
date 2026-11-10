@@ -28,6 +28,7 @@ import type { StepOutcome } from "./outcome.js";
 import type { CodeMilestones } from "../merge/seams.js";
 import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
+import type { SecondReview } from "../second-review/service.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
@@ -203,8 +204,15 @@ export interface TaskFlowDeps {
    * gets lists the `model-access` action. Undefined from `route()`: no provider key is set up, and the step gets neither (the worker then has no model access and fails with its own reason).
    */
   modelAccess?: { route(): Promise<InvocationModelRoute | undefined> };
+  /** The model aliases an operation's calls went out on, from the model proxy (the second opinion counts only when its model was really called). Present: an operation the proxy saw no call for has an empty answer. Absent: the install cannot tell. */
+  modelCalls?: (operationId: string) => ReadonlySet<string> | undefined;
   /** Called once an operation reached a terminal status (the model proxy frees its tokens and spend record). Never throws into the flow. */
   onOperationEnded?: (operationId: string) => void;
+  /**
+   * Second review by another AI company: asked when the REVIEW step starts (does this review carry a second reviewer?) and when it ends (what is the opinion of this code?). Absent: no second review, the
+   * review is exactly what it was. It only ADDS an opinion beside the reviews; it never changes what the first reviews decide, except that an `on` opinion that blocks holds the step.
+   */
+  secondReview?: Pick<SecondReview, "prepare" | "opinionOf" | "prLines" | "mergeWait" | "operationEnded" | "releaseHold">;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
   /** Whether a message to a running step is handed to the worker as it is sent (the kill switch, default on). Off: a message is a note, read by the next step. */

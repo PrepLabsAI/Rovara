@@ -18,6 +18,7 @@ import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { createLocalSessionControl, createSessionControlHost } from "./host.js";
 import { listProjects, registerProject } from "./projects.js";
 import { developerTaskListItem, developerTaskView } from "./task-view.js";
+import type { SecondReview } from "../../core/second-review/index.js";
 
 export const OPENS_PER_MINUTE = 5;
 /** The most pages of the task index one list reads to fill a filtered answer. */
@@ -31,6 +32,8 @@ export interface OwnerRoutesDeps {
   /** Opens a review page in the owner's browser, from this process. Resolves when the browser was asked; the address is not returned. */
   openPage: (path: string, options?: { fresh?: boolean }) => Promise<void>;
   version: string;
+  /** The second review. Absent: its route is not there. */
+  secondReview?: SecondReview;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -40,12 +43,16 @@ function bodyOf(request: BrokerRequest): unknown {
   try { return JSON.parse(request.body) as unknown; } catch { throw agentXError("CONFIG_INVALID", "the request body is not JSON"); }
 }
 
+export const SECOND_REVIEW_ON_THE_PAGE = "The second review's model, mode and evidence are changed on its local page, by you, in a page session opened within the last ten minutes. Run `rovara open second-review` to open it; an assistant cannot change them for you, and neither can this token.";
+export const SECOND_REVIEW_PATH = "/v1/dev/second-review";
+/** Cloud's staff routes for the evidence that lets a model block. Here they are refused with the page message: the evidence is written on the local page (see `SECOND_REVIEW_ON_THE_PAGE`). */
+export const SECOND_REVIEW_EVIDENCE_PATH = /^\/v1\/admin\/second-review\/(replay|verdict)$/u;
 export const ATTACH_ON_THE_PAGE = "Saying where a task's plan is posted is done on the task's page, in your browser (run `rovara open <task>`): it lets a comment there decide the plan, so a tool with the API token cannot do it.";
 const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|thread|workflow\/decision|workflow\/retry|continue))?$/u;
 
 /**
  * routes the MCP tools and the CLI call that have no core feature in Code yet (they wait on features not built yet: custom agents, approvals of connected systems, sharing and task people,
- * opening a pull request by hand, a second review, review of a candidate, PR feedback, parallel parts, a task's budget). Answered in plain words instead of the older handler's "route not found".
+ * opening a pull request by hand, review of a candidate, PR feedback, parallel parts, a task's budget). Answered in plain words instead of the older handler's "route not found".
  */
 const NOT_ON_THIS_INSTALL = /^\/v1\/app\/(?:agents|approvals)(?:\/|$)|^\/v1\/dev\/tasks\/[0-9a-f-]{36}\/(?:share|people|pull-requests|continue|workflow\/(?:review|send-back|review-findings|publish-retry|keep-pull-requests|feedback|feedback-decision|feedback-retry))(?:\/|$)/u;
 export const NOT_ON_THIS_INSTALL_MESSAGE = "That is not on this install yet: Rovara on this computer does not do it. It comes with a later release.";
@@ -61,7 +68,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
   const companyId = flow.deps.companyId;
   const viewOf = async (caller: TaskCaller, taskId: string): Promise<Record<string, unknown>> => {
     const task = await loadOwnedTask(flow.deps, caller, taskId);
-    return developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs);
+    return developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest));
   };
   const opens: number[] = [];
   let opening = false;
@@ -82,10 +89,24 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
   };
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
-    const isOurs = NOT_ON_THIS_INSTALL.test(path) || path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/open";
+    const isOurs = NOT_ON_THIS_INSTALL.test(path) || path === SECOND_REVIEW_PATH || SECOND_REVIEW_EVIDENCE_PATH.test(path) || path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/open";
     if (!isOurs) return undefined;
     try {
       if (NOT_ON_THIS_INSTALL.test(path)) throw agentXError("NOT_AVAILABLE_HERE", NOT_ON_THIS_INSTALL_MESSAGE);
+      if (SECOND_REVIEW_EVIDENCE_PATH.test(path)) {
+        if (deps.secondReview?.enabled() !== true) throw agentXError("NOT_FOUND", "route not found");
+        // The evidence that lets a model block is the owner's act on the local page, in a page session opened within ten minutes: this token is held by every local tool, so it never writes it.
+        throw agentXError("FORBIDDEN", SECOND_REVIEW_ON_THE_PAGE);
+      }
+      if (path === SECOND_REVIEW_PATH) {
+        if (deps.secondReview?.enabled() !== true) throw agentXError("NOT_FOUND", "route not found");
+        // Reading is for any holder of the token; changing is the owner's act on the local page (the same rule as approving a plan).
+        if (request.method === "GET") {
+          const query = new URL(request.path, "http://local").searchParams;
+          return json(200, await deps.secondReview.state({ ...(query.get("project") === null ? {} : { project: query.get("project") as string }), builder: query.getAll("builder") }));
+        }
+        throw agentXError("FORBIDDEN", SECOND_REVIEW_ON_THE_PAGE);
+      }
       if (path === "/v1/dev/projects" && request.method === "GET") {
         const principal: Principal = caller.principal;
         const projects = (await listProjects(flow.deps.store, companyId)).map((project) => ({ ...project, access: "granted" as const, channels: [], role: "maintainer" as const }));

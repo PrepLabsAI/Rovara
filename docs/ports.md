@@ -202,6 +202,8 @@ Each has a Code default (`policy-defaults.ts`) and a suite in `policy-conformanc
 | `IdentityProvider` (`authenticate`, `resolveExternalAccount`, `getPrincipal`; optional `beginSignIn`, `completeSignIn`, `signOut`, `listMembers`, `accountsOf`) | the local owner (lists itself, its linked accounts), plus outside accounts the owner linked in config | members and single sign-on |
 | `Metering` (`price`, `record`; every entry has an `entryId`, recorded once) | tokens times a price table | proxy key spend |
 
+**A reserving `Admission` adapter needs a reservation lifetime.** Some callers ask for an allowance, keep its `reservationId` on a record they write next, and give it back when that record's work ends (the second review does: it asks at the review step's start and releases when the operation ends). Every path that ends normally gives it back, and a restart is safe because the id is on the stored record. A crash between `admit` and the write of that record leaves a hold nothing can find: each start asks under a key of its own, so a retry does not reuse it. An adapter that really holds money must therefore expire a reservation by itself (a time to live, or its own sweep). Code's default holds nothing.
+
 **Approvals are bound.** An `ApprovalRequest` carries `requestId`, `revision`, `artifactDigest`, the project and an optional expiry. An
 `ApprovalProof` names the request, revision and digest it approves and carries a `token` that the method's issuer checks (the identity
 adapter's session; the code host's comment, looked up by id for its author, permission, target and text). `verify` never believes a

@@ -11,7 +11,10 @@ import type { TaskRecord } from "../../core/task-flow/records.js";
 /** The plan text a client may read: the waiting document, cut to what the tools carry (the whole document is on the local page). */
 const PLAN_CONTENT_MAX_BYTES = 32_768;
 
-export async function developerTaskView(task: TaskRecord, view: TaskView, blobs: ObjectStorage): Promise<Record<string, unknown>> {
+/** What the task view says of the second review: the lines, and whether the owner must acknowledge on the task page. The acknowledgement is the owner's act on the local page, never a token's. */
+export interface SecondReviewViewPart { lines: string[]; needsAcknowledgement: boolean; acknowledged: boolean }
+
+export async function developerTaskView(task: TaskRecord, view: TaskView, blobs: ObjectStorage, secondReview?: SecondReviewViewPart): Promise<Record<string, unknown>> {
   const workflow = task.workflow;
   let planContent: string | undefined;
   if (workflow !== undefined && workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
@@ -28,6 +31,7 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     ...(workflow === undefined ? {} : { workflow: { ...workflow, ...(planContent === undefined ? {} : { planContent }) } }),
     ...(view.failure === undefined ? {} : { failure: view.failure }),
     ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),
+    ...(secondReview === undefined || secondReview.lines.length === 0 ? {} : { secondReview: { ...secondReview, ...(secondReview.needsAcknowledgement && !secondReview.acknowledged ? { canAcknowledge: true } : {}) } }),
   })) as Record<string, unknown>;
 }
 

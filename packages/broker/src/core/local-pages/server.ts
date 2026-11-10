@@ -11,8 +11,8 @@ import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import type { ApprovalProof } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
-import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, type PageContext } from "./pages.js";
-import type { ApprovalOffer, LocalActionResult, LocalPageActions, LocalPageData } from "./views.js";
+import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, type PageContext } from "./pages.js";
+import type { ApprovalOffer, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
 
 export interface LocalPagesServer {
   /** `http://127.0.0.1:<port>`. */
@@ -63,6 +63,9 @@ const NOTICES: Record<string, string> = {
   lesson: "Lesson updated.",
   revoked: "That script token is revoked.",
   tokenfresh: "Making a token needs a page you opened in the last few minutes. Run `rovara token create` to open one.",
+  saved: "Saved.",
+  acknowledged: "Acknowledged and recorded.",
+  reauth: "That change needs a recent sign-in. Close this page and run `rovara open second-review` again, then make the change within ten minutes.",
   stale: "It changed while you were looking. Read it again, then decide.",
   refused: "That was not accepted.",
   invalid: "That was not understood.",
@@ -83,7 +86,51 @@ function noticeOf(url: URL): string | undefined {
   return code === null || !Object.hasOwn(NOTICES, code) ? undefined : NOTICES[code];
 }
 
-const outcomeCode = (result: LocalActionResult, success: string): string => (result.ok ? success : result.reason === "stale" ? "stale" : result.reason === "not_found" ? "missing" : result.reason === "invalid" ? "invalid" : "refused");
+const outcomeCode = (result: LocalActionResult, success: string): string => (result.ok ? success : result.reason === "stale" ? "stale" : result.reason === "not_found" ? "missing" : result.reason === "invalid" ? "invalid" : result.reason === "reauth" ? "reauth" : "refused");
+
+
+/** A model as a second-review form names it: `provider::modelId` (a provider id never holds a colon). */
+function modelRefOf(value: string | null | undefined): { provider: string; modelId: string } | undefined {
+  if (value === null || value === undefined) return undefined;
+  const at = value.indexOf("::");
+  const provider = value.slice(0, at), modelId = value.slice(at + 2);
+  return at > 0 && /^[a-z][a-z0-9-]{0,39}$/u.test(provider) && modelId.length > 0 && modelId.length <= 256 ? { provider, modelId } : undefined;
+}
+
+/** The change a second-review form asks for, or undefined when it is not one this page offers. */
+function secondReviewActionOf(op: string, form: URLSearchParams | undefined): SecondReviewPageAction | undefined {
+  const get = (name: string): string => form?.get(name) ?? "";
+  switch (op) {
+    case "choose": {
+      const primary = modelRefOf(get("primary"));
+      const backup = get("backup") === "" ? undefined : modelRefOf(get("backup"));
+      return primary === undefined || (get("backup") !== "" && backup === undefined) ? undefined : { action: "choose", primary, ...(backup === undefined ? {} : { backup }) };
+    }
+    case "clear": return { action: "clear" };
+    case "context": return get("context") === "change_only" || get("context") === "same_as_first" ? { action: "context", context: get("context") as "change_only" | "same_as_first" } : undefined;
+    case "mode": {
+      const mode = get("mode");
+      const scope = get("scope");
+      if (!(mode === "off" || mode === "shadow" || mode === "on" || (scope === "project" && mode === "inherit"))) return undefined;
+      if (scope === "company") return { action: "mode", scope, mode };
+      return scope === "project" && /^[A-Za-z0-9_.-]{1,64}$/u.test(get("project")) ? { action: "mode", scope, project: get("project"), mode } : undefined;
+    }
+    case "cancel-mode": return /^[A-Za-z0-9_-]{1,100}$/u.test(get("changeId")) ? { action: "cancel-mode", changeId: get("changeId") } : undefined;
+    case "withdraw": { const model = modelRefOf(get("model")); return model === undefined ? undefined : { action: "withdraw", model }; }
+    case "replay": {
+      const text = get("run");
+      if (text === "" || text.length > 30_000) return undefined;
+      try { return { action: "replay", run: JSON.parse(text) as unknown }; } catch { return undefined; }
+    }
+    case "verdict": {
+      const model = modelRefOf(get("model"));
+      const time = (name: string): string => { const value = get(name); return Number.isNaN(Date.parse(value)) ? "" : new Date(value).toISOString(); };
+      return model === undefined || !/^[A-Za-z0-9._:-]{1,64}$/u.test(get("run")) || time("from") === "" || time("to") === "" ? undefined : { action: "verdict", model, replayRunId: get("run"), startedAt: time("from"), endedAt: time("to") };
+    }
+    case "notice-seen": return /^[a-f0-9]{32}$/u.test(get("key")) ? { action: "notice-seen", key: get("key") } : undefined;
+    default: return undefined;
+  }
+}
 
 export async function createLocalPagesServer(options: LocalPagesOptions): Promise<LocalPagesServer> {
   const now = options.now ?? Date.now;
@@ -272,6 +319,30 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "tokens.revoke", subject: tokenId })) return redirect(`${request.base}/tokens?n=form`);
       const result = await options.actions.revokeScriptToken({ tokenId });
       return redirect(`${request.base}/tokens?n=${outcomeCode(result, "revoked")}`);
+    } },
+    { method: "GET", pattern: /^\/second-review$/, handle: async (request) => {
+      const state = await options.data.getSecondReview?.();
+      return state === undefined ? notFound() : page(request, (context) => renderSecondReview(context, state));
+    } },
+    { method: "POST", pattern: /^\/second-review\/act$/, handle: async (request) => {
+      const back = `${request.base}/second-review`;
+      const op = request.form?.get("op") ?? "";
+      const act = options.actions.secondReview?.bind(options.actions);
+      if (act === undefined || !/^[a-z-]{1,20}$/u.test(op)) return redirect(`${back}?n=invalid`);
+      if (!verified(request, { action: "second-review.act", subject: op })) return redirect(`${back}?n=form`);
+      const parsed = secondReviewActionOf(op, request.form);
+      if (parsed === undefined) return redirect(`${back}?n=invalid`);
+      // A change that needs a recent sign-in (lowering, withdrawing, the evidence) is good only in a page session opened within the last ten minutes (the same check as making a script token).
+      return redirect(`${back}?n=${outcomeCode(await act(parsed, { fresh: tokenPageIsFresh(request) }), "saved")}`);
+    } },
+    { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/second-review-acknowledge$`), handle: async (request, match) => {
+      const taskId = match[1] ?? "";
+      const revision = Number(request.form?.get("revision"));
+      const key = request.form?.get("key") ?? "";
+      if (!Number.isSafeInteger(revision) || !/^[a-f0-9]{64}$/u.test(key) || options.actions.acknowledgeSecondReview === undefined) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
+      if (!verified(request, { action: "second-review.acknowledge", taskId, revision, subject: key })) return redirect(`${request.base}/plan/${taskId}?n=form`);
+      const result = await options.actions.acknowledgeSecondReview({ taskId, revision, key });
+      return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "acknowledged")}`);
     } },
     { method: "GET", pattern: new RegExp(`^/proof/(${TASK_ID})$`), handle: async (request, match) => {
       const view = await options.data.getProofReport(match[1] ?? "");

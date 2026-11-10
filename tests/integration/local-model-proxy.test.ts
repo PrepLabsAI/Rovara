@@ -429,6 +429,69 @@ describe("the task's budget and limits", () => {
     expect(w.provider.calls).toHaveLength(1);
   });
 
+  it("a capped route (the second reviewer's model) has a cap of its own, priced at its own rates: calls run while the worst case fits, then it is refused as a spent budget, and the first review's route is not touched", async () => {
+    const w = await world();
+    // Ten thousandths of a dollar at $1 and $4 per million tokens: a call asking for 1,000 output tokens can cost about 4,000 millionths.
+    const capped = { ...w.routes.openai, cap: { capUsd: 0.01, usdPerMTok: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1 } } };
+    w.allowed.set(OPERATION, [w.routes.anthropic, capped]);
+    const token = await tokenOf(w);
+    const asked = () => w.send({ path: RESPONSES, headers: { authorization: `Bearer ${token}`, [WORKSPACE_HEADER]: WORKSPACE }, body: { model: "openai/gpt-test", input: [{ role: "user", content: "hi" }], max_output_tokens: 1_000, stream: false } });
+    let ok = 0;
+    let refused: Awaited<ReturnType<typeof asked>> | undefined;
+    for (let attempt = 0; attempt < 30 && refused === undefined; attempt += 1) {
+      const answer = await asked();
+      if (answer.status === 200) ok += 1; else refused = answer;
+    }
+    expect(ok).toBeGreaterThan(0);
+    expect(refused?.status).toBe(422);
+    expect(errorOf(refused!)).toMatchObject({ type: "budget_exceeded", message: "Budget has been exceeded! Key=task" });
+    // The provider saw exactly the calls that fit, nothing was left held, and what was spent is within the cap.
+    expect(w.provider.calls.filter((call) => call.path === "/v1/responses")).toHaveLength(ok);
+    const ledger = w.proxy.tokens.routeLedger(OPERATION, "openai/gpt-test");
+    expect(ledger.reservedMicros).toBe(0);
+    expect(ledger.spentMicros).toBeGreaterThan(0);
+    expect(ledger.spentMicros).toBeLessThanOrEqual(10_000);
+    // The operation's other route has no cap: it is unaffected, and the proxy remembers which aliases the operation called.
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(200);
+    expect([...w.proxy.tokens.calledAliases(OPERATION)!].sort()).toEqual(["anthropic/claude-test", "openai/gpt-test"]);
+    expect(w.proxy.tokens.calledAliases(OTHER_OPERATION)).toBeUndefined();
+    // The cap is forgotten with the operation's spend.
+    w.proxy.operationEnded(OPERATION);
+    expect(w.proxy.tokens.routeLedger(OPERATION, "openai/gpt-test").spentMicros).toBe(0);
+  });
+
+  it("a capped route is reserved at the dearer of the plain and the cache-write input rate: a call that fits at the plain rate but not at the cache-write rate is refused before it is sent", async () => {
+    const w = await world();
+    // A cap of one hundredth of a dollar. At $1 a million input tokens the call fits easily; at a $1,000 cache-write rate its request alone could cost more than the cap.
+    const capped = { ...w.routes.anthropic, cap: { capUsd: 0.01, usdPerMTok: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1_000 } } };
+    const plainRate = { ...w.routes.openai, alias: "openai/plain-rate", model: "plain-rate", cap: { capUsd: 0.01, usdPerMTok: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1 } } };
+    w.allowed.set(OPERATION, [capped, plainRate]);
+    const token = await tokenOf(w);
+    const body = { messages: [{ role: "user", content: "x".repeat(2_000) }], max_tokens: 1 };
+    const dear = await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody(body) });
+    expect(dear.status).toBe(422);
+    expect(errorOf(dear)).toMatchObject({ type: "budget_exceeded" });
+    expect(w.provider.calls).toHaveLength(0);
+    expect(w.proxy.tokens.routeLedger(OPERATION, "anthropic/claude-test")).toEqual({ spentMicros: 0, reservedMicros: 0 });
+    // The same request on a route whose cache-write rate is no dearer than its input rate fits under the same cap.
+    const cheap = await w.send({ path: RESPONSES, headers: { authorization: `Bearer ${token}`, [WORKSPACE_HEADER]: WORKSPACE }, body: { model: "openai/plain-rate", input: [{ role: "user", content: "x".repeat(2_000) }], max_output_tokens: 1, stream: false } });
+    expect(cheap.status).not.toBe(422);
+  });
+
+  it("a call that ends unclean (the provider's connection dies mid-answer) is charged the most it could have cost against the cap, not what little it reported", async () => {
+    const w = await world();
+    const capped = { ...w.routes.anthropic, cap: { capUsd: 5, usdPerMTok: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1 } } };
+    w.allowed.set(OPERATION, [capped]);
+    const token = await tokenOf(w);
+    w.provider.mode = "cut";
+    await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ max_tokens: 1_000 }) }).catch(() => undefined);
+    await until(() => w.proxy.tokens.routeLedger(OPERATION, "anthropic/claude-test").spentMicros > 0, "the cut call was charged");
+    const ledger = w.proxy.tokens.routeLedger(OPERATION, "anthropic/claude-test");
+    // The provider reported 1,000 input and 1 output tokens before it died (1,004 millionths); the worst case is the request's output limit, 1,000 x $4 (4,000 millionths) and more.
+    expect(ledger.reservedMicros).toBe(0);
+    expect(ledger.spentMicros).toBeGreaterThanOrEqual(4_000);
+  });
+
   it("holds the spend across new tokens for the same operation, so asking again does not reset the budget", async () => {
     const w = await world();
     w.budgets.set(OPERATION, { micros: 9_000, currency: "USD" });

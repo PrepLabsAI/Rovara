@@ -8,6 +8,7 @@ import type {
 } from "@agentx/contracts";
 import type { DeveloperTaskPointerRecord, DeveloperTaskRecord } from "../../developer/task-records.js";
 import type { WorkspaceCharge } from "./keys.js";
+import type { SecondReviewOperationPlan } from "../second-review/store.js";
 
 /** The task record: Cloud's `DEVTASK#<id>/META` item. `provider` is the identity adapter's name (a string), not Cloud's closed sign-in list. */
 export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
@@ -80,6 +81,11 @@ export interface OperationRecord extends Operation {
   maintenance?: MaintenanceExpectation;
   /** A publish operation's expectation (lane L10): what the worker may open a pull request with, fixed by the broker when the publication started. The pull request callback is held to it. */
   publication?: PublicationExpectation;
+  /**
+   * Second review: this REVIEW operation carries a second reviewer (another AI company's model, inside the same operation), or records why it could not: the candidate it is about and the plan (or the fixed
+   * reason it did not run). The one REVIEW end reads it (`secondOpinionFromReviewResult`); no other code does and nothing waits on it.
+   */
+  secondReviewPlan?: SecondReviewOperationPlan;
   /** The worker machine and delivery time, once the operation was handed to a machine. */
   deliveredAt?: string;
   machineId?: string;

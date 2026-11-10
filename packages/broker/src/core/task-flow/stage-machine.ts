@@ -41,6 +41,7 @@ import { structuredPlanContextOf } from "../plan/context.js";
 import { planUnreadablePrompt } from "../plan/process.js";
 import { readTask } from "./reads.js";
 import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
+import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
 import type { StepOutcome } from "./outcome.js";
 
@@ -109,6 +110,8 @@ export interface StepInput {
   firstEvent?: string;
   /** The people's messages this step was given (`acceptStepWithNotes` reads them): the task's mark moves past them in the step's own transaction, which holds only while the note count is the one read. */
   notes?: NotesForStep;
+  /** A REVIEW step's second-review plan, kept on the operation for the review end. */
+  secondReviewPlan?: SecondReviewOperationPlan;
 }
 
 /** Accepts the operation for one step. `STALE` and `WAITING` write nothing. */
@@ -141,6 +144,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
     ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
     ...(input.firstEvent === undefined ? {} : { firstEvent: input.firstEvent }),
+    ...(input.secondReviewPlan === undefined ? {} : { secondReviewPlan: input.secondReviewPlan }),
     dispatch: {
       kind: operationKind, projectRevision: workspace.projectRevision,
       payload: operationKind !== "task"

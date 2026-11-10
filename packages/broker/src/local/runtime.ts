@@ -500,6 +500,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // The model proxy is made after the servers (it is served on the callback listener); the app asks it, late, to forget an operation that ended.
     operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
     scriptTokensEnabled: () => scriptTokensEnabled(options.environment),
+    modelCalls: (operationId) => modelProxyHolder.current?.tokens.calledAliases(operationId),
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
     // Lane L13: the owner's model setting, read from the owner's own config only.

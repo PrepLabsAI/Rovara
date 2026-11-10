@@ -4,13 +4,14 @@
 //
 // The approved work breakdown (spec 059: parts built in order or side by side) is read here too (`../work-breakdown/results.ts`): an ordered run's result must be the run the owner approved.
 //
-// Left out on purpose (not part of Code's wave 1): the browser and API checks (E2E), a custom step sequence (a program), the
-// second review by another company, and the design review. A workflow that carries any of them is not one this install starts.
+// Left out on purpose (not part of Code's wave 1): the browser and API checks (E2E), a custom step sequence (a program), and the
+// design review. A workflow that carries any of them is not one this install starts. The second review by another company is here (`core/second-review`): the review step asks the service
+// at its start and at its end, and without one the review is exactly what it was.
 import {
   CheckReportSchema, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
   WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, WorkflowSnapshotSchema, blockWorkflow, createCandidateManifest, endWorkflowCiFixUnrelated, noChangeFindingsFrom, recordWorkflowVerification,
   submitWorkflowReview, workflowIsReviewOnly, workflowPullRequestTrees, workflowReviewRoles, workflowSelectedChecks,
-  type CandidateRepository, type TransactItem, type WorkflowSnapshot,
+  blockingFindings, change, secondReviewBlockFinding, type CandidateRepository, type TransactItem, type UpdateOp, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -18,7 +19,8 @@ import { isReapprovalStop, liveSteerChangeItems, liveSteerCodingStop, settleLive
 import { DISPATCH_EXHAUSTED_ERROR } from "../task-flow/dispatch.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import type { StepOutcome } from "../task-flow/outcome.js";
-import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
+import { toDocument, type OperationRecord, type TaskRecord } from "../task-flow/records.js";
+import type { StoredSecondOpinion } from "../second-review/store.js";
 import { blockTaskWorkflow, commitWorkflow, runDispatchRow } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
 import { checkCommandCouldNotRun, regressedCheckLabels } from "./check-results.js";
@@ -52,11 +54,11 @@ export function causeOfEnd(ended: Ended): "run-lost" | "dispatch-exhausted" | un
  * Commits the workflow `next` with the row of the step that follows it, then starts that step now (the row is also found by the sweep if this process dies first). A task that moved on while
  * the result was read changes nothing.
  */
-export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, now: string, cause?: "run-lost" | "dispatch-exhausted"): Promise<void> {
+export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, now: string, cause?: "run-lost" | "dispatch-exhausted", taskOps: readonly UpdateOp[] = []): Promise<void> {
   const following = next.stage === "REVIEW" && next.state === "WAITING" ? [dispatchRowItem(deps, task.taskId, next.revision, "REVIEW", now)]
     : next.stage === "PULL_REQUEST" && next.state === "READY" ? [dispatchRowItem(deps, task.taskId, next.revision, "PUBLISH", now)]
     : autofixRowFor(deps, task.taskId, next, now, cause);
-  const committed = await commitWorkflow(deps, task, next, following);
+  const committed = await commitWorkflow(deps, task, next, following, taskOps);
   const row = following[0];
   if (!committed || row === undefined || row.kind !== "put") return;
   const kind = row.item["kind"] as "REVIEW" | "PUBLISH" | "AUTOFIX";
@@ -235,6 +237,10 @@ export async function recordReviewed(deps: TaskFlowDeps, task: TaskRecord, opera
   const reported = recordOf(ended.outcome?.kind === "reviewed" ? ended.outcome.result : undefined);
   let reviewFailure = "independent candidate review was invalid, incomplete, or stale";
   let next: WorkflowSnapshot;
+  // Second review: the second reviewer ran INSIDE this operation. Its report is not among the reviews below (the worker writes it under its own result key), so it cannot clear or fail a first review.
+  // An `on` opinion that blocks is handed to the reviews' own transition, so it decides the move whenever the first reviews cleared. The opinion and the block are stored in this same write. `null`: an opinion of
+  // earlier code is dropped; undefined: nothing to write.
+  let secondOpinion: StoredSecondOpinion | null | undefined;
   try {
     const reviews = reported["workflowReviews"];
     if (!Array.isArray(reviews)) throw new Error("review result has an invalid report collection");
@@ -247,11 +253,17 @@ export async function recordReviewed(deps: TaskFlowDeps, task: TaskRecord, opera
       void _reported; void _failure;
       return report;
     });
-    const { blockReason: _earlier, ...base } = workflow;
-    void _earlier;
+    // A new review of this code starts without the earlier second review's block (the new opinion sets it again if it blocks).
+    const { blockReason: _earlier, secondReviewBlock: _earlierSecond, ...base } = workflow;
+    void _earlier; void _earlierSecond;
+    const opinion = deps.secondReview?.opinionOf({
+      recorded: operation.secondReviewPlan, operationId: operation.id, terminalStatus: ended.status, result: reported, ...(deps.modelCalls === undefined ? {} : { aliasesCalled: deps.modelCalls(operation.id) ?? new Set<string>() }), currentCandidateDigest: workflow.candidate?.digest, accepted: workflow.acceptedFindings, now,
+    });
+    secondOpinion = opinion ?? (task.secondOpinion === undefined ? undefined : null);
+    const secondBlocks = opinion?.opinion.blocked === true;
     for (const review of kept) {
       if (review["operationId"] !== operation.id) throw new Error("review result is stale, incomplete, or came from another operation");
-      submitWorkflowReview(base, review, now);
+      submitWorkflowReview(base, review, now, { secondReviewBlocks: secondBlocks });
     }
     // Exactly the reviews the step asks for: two of one kind would leave the stage waiting for the other.
     const roles = kept.map((review) => review["role"]).sort();
@@ -261,11 +273,18 @@ export async function recordReviewed(deps: TaskFlowDeps, task: TaskRecord, opera
       throw new Error("review result does not hold one code review and one security review");
     }
     next = base;
-    for (const review of kept) next = submitWorkflowReview(next, review, now);
+    for (const review of kept) next = submitWorkflowReview(next, review, now, { secondReviewBlocks: secondBlocks });
+    const blockedReport = opinion?.opinion.blocked === true ? opinion.opinion.report : undefined;
+    if (blockedReport !== undefined) {
+      // The block is kept IN the workflow (secondReviewBlock), so accepting the first review's findings can never clear it.
+      next = WorkflowSnapshotSchema.parse({ ...next, secondReviewBlock: { candidateDigest: candidate.digest, findings: blockingFindings(blockedReport, workflow.acceptedFindings).slice(0, 20).map(secondReviewBlockFinding) } });
+    }
   } catch {
+    secondOpinion = undefined;
     next = blockWorkflow(workflow, reviewFailure, now);
   }
-  await commitAndContinue(deps, task, next, now);
+  const opinionOps: UpdateOp[] = secondOpinion === undefined ? [] : secondOpinion === null ? [change.remove("secondOpinion")] : [change.set("secondOpinion", toDocument(secondOpinion))];
+  await commitAndContinue(deps, task, next, now, undefined, opinionOps);
 }
 
 export { blockTaskWorkflow };

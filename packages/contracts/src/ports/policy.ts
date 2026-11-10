@@ -59,7 +59,7 @@ export interface AdmissionRequest {
 export type AdmissionDecision =
   | {
       allowed: true;
-      /** Set when the decision holds some allowance back (a budget reservation). Pass it to `settle` or `release`. */
+      /** Set when the decision holds some allowance back (a budget reservation). Pass it to `settle` or `release`. An adapter that really holds one expires it by itself: a caller that crashes before it records the id cannot give it back. */
       reservationId?: string;
     }
   | {

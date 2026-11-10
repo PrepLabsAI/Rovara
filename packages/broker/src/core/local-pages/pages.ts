@@ -9,6 +9,7 @@ import { PART_STATE_WORDS } from "../work-breakdown/view.js";
 import type {
   ApprovalOffer, CommentView, DesignReviewView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView,
 } from "./views.js";
+import type { SecondReviewState } from "@agentx/contracts";
 
 /** What every page needs from the server that draws it. */
 export interface PageContext {
@@ -123,6 +124,20 @@ function breakdownHtml(view: NonNullable<PlanPageView["breakdown"]>): string {
   return `<section class="panel"><h2>Work in parts</h2><p class="muted">${esc(how)}${view.approved ? " The plan's approval covers these parts." : ""}</p><ol>${rows}</ol></section>`;
 }
 
+/** The second review of this code: its lines, and the owner's acknowledgement when an `on` review did not run (the merge waits for it). */
+function secondReviewHtml(context: PageContext, view: PlanPageView): string {
+  const second = view.secondReview;
+  if (second === undefined) return "";
+  const lines = second.lines.map((line) => `<p>${untrusted(line)}</p>`).join("");
+  const ask = second.needsAcknowledgement && !second.acknowledged && view.secondReviewAck !== undefined
+    ? `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/second-review-acknowledge">${hidden("revision", view.revision)}${hidden("key", view.secondReviewAck)}`
+      + `${hidden("ft", context.formToken({ action: "second-review.acknowledge", taskId: view.taskId, revision: view.revision, subject: view.secondReviewAck }))}`
+      + "<div class=\"row\"><button class=\"primary\" type=\"submit\">Acknowledge: I have seen this</button></div></form>"
+    : second.acknowledged ? "<p class=\"muted\">You acknowledged this.</p>" : "";
+  const note = ask === "" ? "" : "<p class=\"muted\">Where Rovara holds a merge for this, acknowledging releases it. Rovara does not merge on this computer: check the second-review line on the pull request before you merge.</p>";
+  return `<section class="panel" id="second-review"><h2>Second review</h2>${lines}${note}${ask}</section>`;
+}
+
 export async function renderPlanPage(context: PageContext, view: PlanPageView): Promise<string> {
   const current = view.versions.filter((version) => version.current);
   const older = view.versions.filter((version) => !version.current);
@@ -150,7 +165,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${attentionHtml(context, view)}${critiqueHtml(view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${critiqueHtml(view)}${secondReviewHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 
@@ -235,5 +250,47 @@ export function renderScriptTokens(context: PageContext, view: ScriptTokensPageV
     body: `<h1>Script tokens</h1><p>A script token lets your own scripts on this computer read your tasks and start tasks on the projects you choose, without your session. It can do nothing else: it cannot approve a plan, merge, or make another token. You can revoke it at any time.</p>`
       + `${created}<section class="panel" id="make"><h2>Make a token</h2>${form}</section>`
       + `${rows.length === 0 ? "<p class=\"muted\">You have no script tokens.</p>" : `<table><thead><tr><th>Token</th><th>Projects</th><th>May</th><th>State</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`}`,
+  });
+}
+
+// ---- second review settings
+
+const refValue = (model: { provider: string; modelId: string }): string => `${model.provider}::${model.modelId}`;
+const MODES: ReadonlyArray<{ value: string; label: string }> = [{ value: "off", label: "Off" }, { value: "shadow", label: "Shadow (shown as an opinion, never blocks)" }, { value: "on", label: "On (its blocking findings block)" }];
+
+/** The page where the owner chooses the model that gives the second opinion and how it counts. Everything the models say about themselves is Rovara's fixed words or the catalog's names; every change is one verified form. */
+export function renderSecondReview(context: PageContext, state: SecondReviewState): string {
+  const form = (op: string, inner: string, label: string, cls = ""): string =>
+    `<form class="decide" method="post" action="${esc(context.base)}/second-review/act">${hidden("op", op)}${hidden("ft", context.formToken({ action: "second-review.act", subject: op }))}${inner}<div class="row"><button${cls === "" ? "" : ` class="${cls}"`} type="submit">${esc(label)}</button></div></form>`;
+  const eligible = state.models.filter((entry) => entry.eligible);
+  const options = (selected?: string): string => eligible.map((entry) => `<option value="${esc(refValue(entry.model))}"${selected === refValue(entry.model) ? " selected" : ""}>${untrusted(entry.model.modelId)} (${untrusted(entry.model.provider)}${entry.costUsd === undefined ? "" : `, about $${entry.costUsd.toFixed(3)} a review`}${entry.suggested ? ", suggested" : ""})</option>`).join("");
+  const now = state.current.source === "none" ? `<p class="warn">${state.current.reason === undefined ? "Nothing qualifies." : untrusted(`Nothing qualifies (${state.current.reason}).`)}</p>`
+    : `<p>${untrusted(state.current.line ?? "")}</p>`;
+  const notice = state.notice === null ? "" : `<section class="panel"><h2>Notice</h2>${state.notice.lines.map((line) => `<p>${untrusted(line)}</p>`).join("")}${state.notice.seen ? "<p class=\"muted\">You have seen this.</p>" : form("notice-seen", hidden("key", state.notice.key), "I have seen it")}</section>`;
+  const pending = state.pending === undefined || state.pending.length === 0 ? "" : `<section class="panel"><h2>Waiting for a different person</h2><ul>${state.pending.map((change) => `<li>${esc(change.scope)}${change.project === undefined ? "" : ` ${untrusted(change.project)}`}: ${esc(change.from)} to ${esc(change.to)} ${form("cancel-mode", hidden("changeId", change.changeId), "Withdraw")}</li>`).join("")}</ul></section>`;
+  const modeNow = `<p>Company mode: <strong>${esc(state.modes.company)}</strong>.</p>`;
+  const evidence = state.evidence === null ? "<p class=\"muted\">No evidence is on record for the model that would review.</p>"
+    : `<p>${untrusted(state.evidence.model.modelId)}: the evidence ${state.evidence.holds ? "<span class=\"ok\">holds</span>, so it may block" : "<span class=\"warn\">does not hold yet</span>, so it can only give an opinion"}.${state.evidence.verdict === null ? "" : ` Shadow: ${esc(state.evidence.verdict.shadowFindings)} findings over ${esc(state.evidence.verdict.shadowDays)} days, ${esc(state.evidence.verdict.shadowAgreed)} agreed with.`}</p>`
+      + (state.evidence.verdict !== null && !state.evidence.verdict.withdrawn ? form("withdraw", hidden("model", refValue(state.evidence.model)), "Withdraw this evidence", "danger") : "");
+  const track = state.trackRecord === null ? "" : `<p class="muted">Track record (last 90 days): ${esc(state.trackRecord.reviews)} reviews, ${esc(state.trackRecord.findings)} findings, ${esc(state.trackRecord.agreed)} agreed with, ${esc(state.trackRecord.wrong)} not.</p>`;
+  const rows = state.models.map((entry) => `<tr><td>${untrusted(entry.model.modelId)}<br><span class="muted">${untrusted(entry.model.provider)} · ${untrusted(entry.company)}</span></td><td>${entry.costUsd === undefined ? "<span class=\"muted\">price unknown</span>" : `about $${entry.costUsd.toFixed(3)}`}</td>`
+    + `<td>${entry.eligible ? (entry.suggested ? `<span class="ok">suggested</span>${entry.suggestionReason === undefined ? "" : `<br><span class="muted">${untrusted(entry.suggestionReason)}</span>`}` : "fits") : `<span class="muted">${entry.ineligibleWhy === "same-company" ? "same AI company as the code" : "maker not known"}</span>`}${entry.notes.map((note) => `<br><span class="warn">${untrusted(note)}</span>`).join("")}${entry.trackRecord === undefined ? "" : `<br><span class="muted">${untrusted(entry.trackRecord)}</span>`}</td></tr>`);
+  const choose = eligible.length === 0 ? "<p class=\"muted\">No model can be chosen: connect a model key from a different AI company than the one that writes the code.</p>"
+    : form("choose", `<label>Reviewer<br><select name="primary">${options(state.choice?.models[0] === undefined ? undefined : refValue(state.choice.models[0]))}</select></label>`
+      + `<label>Backup (optional)<br><select name="backup"><option value="">None</option>${options(state.choice?.models[1] === undefined ? undefined : refValue(state.choice.models[1]))}</select></label>`, "Choose this reviewer", "primary")
+      + (state.choice === null ? "" : form("clear", "", "Go back to the default"));
+  return layout({
+    title: "Second review", nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
+    body: `<h1>Second review</h1><p class="muted">A second opinion on each task's code from a model of a different AI company than the one that wrote it. It never replaces the first review.</p>${notice}${pending}`
+      + `<section class="panel"><h2>Who reviews now</h2>${now}${choose}</section>`
+      + `<section class="panel"><h2>How it counts</h2>${modeNow}${form("mode", `${hidden("scope", "company")}<label>Mode<br><select name="mode">${MODES.map((mode) => `<option value="${esc(mode.value)}"${state.modes.company === mode.value ? " selected" : ""}>${esc(mode.label)}</option>`).join("")}</select></label>`, "Set the company mode", "primary")}`
+      + `${evidence}${track}</section>`
+      + `<section class="panel"><h2>What it sees</h2><p>${state.context === "same_as_first" ? "The change and what the first reviewer sees: the connected sources, lessons and step instructions." : "Only the change."}</p>`
+      + `${form("context", `<label>Context<br><select name="context"><option value="change_only"${state.context === "change_only" ? " selected" : ""}>Only the change</option><option value="same_as_first"${state.context === "same_as_first" ? " selected" : ""}>Same as the first reviewer</option></select></label>`, "Set what it sees")}</section>`
+      + `<section class="panel"><h2>One project</h2>${form("mode", `${hidden("scope", "project")}<label>Project name<br><input type="text" name="project" maxlength="64" required autocomplete="off"></label><label>Mode<br><select name="mode"><option value="inherit">Same as the company</option>${MODES.map((mode) => `<option value="${esc(mode.value)}">${esc(mode.label)}</option>`).join("")}</select></label>`, "Set the project's mode")}</section>`
+      + `<section class="panel" id="evidence"><h2>Evidence</h2><p class="muted">What lets a model block: a replay run from the quality suite and a shadow window counted from your own tasks. Recording or withdrawing it needs a page opened within the last ten minutes (run <code>rovara second-review evidence</code> to get one).</p>`
+      + `${form("replay", "<label>Replay run (JSON)<br><textarea name=\"run\" maxlength=\"30000\" required></textarea></label>", "Store the replay run")}`
+      + `${eligible.length === 0 ? "" : form("verdict", `<label>Model<br><select name="model">${options()}</select></label><label>Replay run id<br><input type="text" name="run" maxlength="64" required autocomplete="off"></label><label>Shadow window from (ISO time)<br><input type="text" name="from" maxlength="40" required autocomplete="off"></label><label>to<br><input type="text" name="to" maxlength="40" required autocomplete="off"></label>`, "Record the evidence")}</section>`
+      + `<section class="panel"><h2>Models</h2>${rows.length === 0 ? "<p class=\"muted\">No model is available.</p>" : `<table><thead><tr><th>Model</th><th>Cost of one review</th><th>Fit</th></tr></thead><tbody>${rows.join("")}</tbody></table>`}</section>`,
   });
 }

@@ -1,10 +1,10 @@
 // Lane L8: what the local review pages read and do. The pages know nothing about task records, the document store or a code host: the task flow
 // (lanes L6a and L6b) implements these two interfaces and hands them to `createLocalPagesServer`. Reads are plain view models; every write names
 // the exact revision and digest the person saw, and an approval carries a proof for the W0 `Approvers` seam to check.
-import type { ApprovalProof, CreatedScriptToken, PlanDocument, PlanEvidenceBundle, ScriptTokenView } from "@agentx/contracts";
+import type { ApprovalProof, CreatedScriptToken, PlanDocument, PlanEvidenceBundle, ScriptTokenView, SecondReviewContext, SecondReviewMode, SecondReviewModelRef, SecondReviewState } from "@agentx/contracts";
 
 /** Why a write did not happen, in words fit to show. `stale`: the content moved on since the page was drawn. */
-export type LocalActionResult = { ok: true; message?: string } | { ok: false; reason: "stale" | "refused" | "not_found" | "invalid"; message: string };
+export type LocalActionResult = { ok: true; message?: string } | { ok: false; reason: "stale" | "refused" | "not_found" | "invalid" | "reauth"; message: string };
 
 /** The approval a page offers. The id, revision and digest are what the person is looking at; the page signs them into its form. */
 import type { WorkBreakdownView } from "../work-breakdown/view.js";
@@ -79,6 +79,10 @@ export interface PlanPageView {
   critique?: string[];
   /** The parts of an ordered run (spec 059): what the plan lists and where each stands. Absent for a plan with no work breakdown. */
   breakdown?: WorkBreakdownView;
+  /** The second review of the code the task holds: its lines, and whether the owner must acknowledge that it did not run before the task can be merged. Absent: none to show. */
+  secondReview?: { lines: string[]; needsAcknowledgement: boolean; acknowledged: boolean };
+  /** The acknowledgement key the form carries (set only while the owner has to acknowledge). */
+  secondReviewAck?: string;
 }
 
 export interface DesignMockupView {
@@ -154,7 +158,22 @@ export interface LocalPageData {
   getProofReport(taskId: string): Promise<ProofReportView | undefined>;
   /** the owner's script tokens. Absent, or undefined: script tokens are off here and the page is not found. */
   listScriptTokens?(): Promise<ScriptTokensPageView | undefined>;
+  /** The second review's settings page: the model list, the choice, the mode, the evidence and the notice. Absent: the page is not there. */
+  getSecondReview?(): Promise<SecondReviewState | undefined>;
 }
+
+/** One change of the second review's settings, as the owner made it on the page (every one is the owner's own act, in this browser session). */
+export type SecondReviewPageAction =
+  | { action: "choose"; primary: SecondReviewModelRef; backup?: SecondReviewModelRef }
+  | { action: "clear" }
+  | { action: "context"; context: SecondReviewContext }
+  | { action: "mode"; scope: "company" | "project"; project?: string; mode: SecondReviewMode | "inherit" }
+  | { action: "narrow"; project: string; models: SecondReviewModelRef[] | null }
+  | { action: "cancel-mode"; changeId: string }
+  | { action: "withdraw"; model: SecondReviewModelRef }
+  | { action: "replay"; run: unknown }
+  | { action: "verdict"; model: SecondReviewModelRef; replayRunId: string; startedAt: string; endedAt: string }
+  | { action: "notice-seen"; key: string };
 
 /** What a page write names. `proof` is built by the server from the page session; the action hands it to the `Approvers` seam. */
 export interface PlanDecisionInput {
@@ -196,4 +215,8 @@ export interface LocalPageActions {
   createScriptToken?(input: { requestId: string; name: string; projects: string[]; permissions: string[]; days?: number }): Promise<LocalCreateTokenResult>;
   /** revokes a script token. */
   revokeScriptToken?(input: { tokenId: string }): Promise<LocalActionResult>;
+  /** A change of the second review's settings. Refused (with its fixed words) when the owner may not or the setting moved. */
+  secondReview?(input: SecondReviewPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
+  /** The owner acknowledges that an `on` second review did not run, so the merge may go ahead. `revision` is the task revision on the page; `key` is the acknowledgement the page showed. */
+  acknowledgeSecondReview?(input: { taskId: string; revision: number; key: string }): Promise<LocalActionResult>;
 }

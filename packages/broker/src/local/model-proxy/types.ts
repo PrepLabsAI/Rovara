@@ -12,8 +12,16 @@ export type ProxyProvider = string;
 /** The wire shape a call speaks; the same three the worker's model library speaks to a routed model. */
 export type ProxyApi = InvocationModelRoute["api"];
 
+/** What a route may spend in one operation: dollars, and the model's rates in dollars per million tokens (the catalog's). */
+export interface ProxyRouteCap {
+  capUsd: number;
+  usdPerMTok: { input: number; output: number; cacheRead: number; cacheWrite: number };
+}
+
 /** One model a token may call: the name the worker puts in its request (`alias`), and what the provider is really asked for. */
 export interface ProxyRoute {
+  /** A cap on what THIS route may spend in one operation, priced from the route's own rates (not the Metering table, which is empty on a laptop): the second reviewer's model, which the operation's own budget does not cover. */
+  cap?: ProxyRouteCap | undefined;
   alias: string;
   provider: ProxyProvider;
   /** The provider's own model id, put in the forwarded request in place of the alias. */

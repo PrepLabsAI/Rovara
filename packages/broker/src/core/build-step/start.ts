@@ -255,6 +255,8 @@ export async function startReview(deps: TaskFlowDeps, row: RowRef, options: { re
   };
   const plan = await reviewPlanOf(deps.artifacts, workflow);
   const checks = reviewChecksOf(workflow);
+  // Second review: does this review carry a second reviewer? It runs INSIDE this operation, so there is no second step, hold or row; with the feature off, or the mode `off`, this is nothing.
+  const second = deps.secondReview === undefined ? {} : await deps.secondReview.prepare({ task, reviewers: roles });
   const note = verification.reviewOnly === true ? AUTOMATIC_REVIEW_ONLY_NOTE : AUTOMATIC_REVIEW_NOTE;
   const payload = jsonOf({
     workflowReviewNote: note, ...baseOf(task, workflow),
@@ -262,11 +264,18 @@ export async function startReview(deps: TaskFlowDeps, row: RowRef, options: { re
     ...(plan === undefined ? {} : { workflowReviewPlan: plan }),
     ...(workflow.definitionVersion === "1.1.0" ? { workflowReviewRisk: true } : {}),
     ...(roles.length === 2 ? {} : { workflowReviewers: roles }),
+    ...(second.field === undefined ? {} : { workflowSecondReviewer: jsonOf(second.field) }),
   });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-auto-review", task.taskId, workflow.revision, candidate.digest), prompt: reviewPrompt({ candidateDigest: candidate.digest, roles }), workflowMode: "REVIEW",
-    workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
+    workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload, ...(second.record === undefined ? {} : { secondReviewPlan: second.record }),
     requires: ["task.workflowMode", "task.workflowReview", ...(checks === undefined ? [] : ["task.workflowReviewChecks"]), ...(plan === undefined ? [] : ["task.workflowReviewPlan"]), ...(payload["workflowReviewRisk"] === undefined ? [] : ["task.workflowReviewRisk"]), ...(roles.length === 2 ? [] : ["task.workflowReviewers"])],
+  }).catch(async (error: unknown) => {
+    // A start that threw carries no operation: the allowance held for its second review goes back before the error goes on.
+    await deps.secondReview?.releaseHold(second.record?.reservationId);
+    throw error;
   });
+  // The step did not start (the task moved on, the workspace was busy, or it repeats one that started): the allowance held for this start goes back now; a started step's own hold is released when it ends.
+  if (accepted.result !== "STARTED") await deps.secondReview?.releaseHold(second.record?.reservationId);
   return settled(deps, row, accepted.result);
 }

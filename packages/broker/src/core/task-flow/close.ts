@@ -52,6 +52,8 @@ export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: 
       throw error;
     }
     if (applied.applied) {
+      // The operation that was running is ended by this close (no result will come): the allowance held for its second review goes back here.
+      if (active !== undefined && !isTerminalStatus(active.status)) await deps.secondReview?.operationEnded(active);
       await deps.store.update({ key: taskIndexKey(task.developerId, task.createdAt, task.taskId), ops: [change.set("status", "CLOSED"), change.set("updatedAt", now)], condition: when.present() });
       // The workspace is read again once it is closed: a dispatch may have recorded a machine after the first read, and nothing records one on a closed workspace.
       const closed = await readWorkspace(deps, task.workspaceId);

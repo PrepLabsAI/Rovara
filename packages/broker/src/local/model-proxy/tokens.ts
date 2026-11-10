@@ -13,6 +13,8 @@ export const TOKEN_PREFIX = "rvm_";
 export const DEFAULT_TOKEN_TTL_SECONDS = 15 * 60;
 export const MIN_TOKEN_TTL_SECONDS = 150;
 const MAX_TOKENS = 2_000;
+/** How many operations' called aliases are remembered. */
+const CALLED_OPERATIONS_MAX = 500;
 /** The worker needs one live token per operation (it asks again a minute before expiry). Minting another beyond this revokes the oldest, so one operation can never fill the book. */
 export const MAX_LIVE_TOKENS_PER_OPERATION = 3;
 
@@ -39,6 +41,9 @@ export interface OperationLedger {
   inFlight: number;
 }
 
+/** What one capped route has spent in one operation, in millionths of a dollar: settled spend, and the worst case of the calls running now. */
+export interface RouteLedger { spentMicros: number; reservedMicros: number }
+
 const digest = (token: string): string => createHash("sha256").update(token).digest("hex");
 
 export type TokenLookup = { ok: true; record: TokenRecord } | { ok: false; reason: "unknown" | "expired" };
@@ -46,6 +51,9 @@ export type TokenLookup = { ok: true; record: TokenRecord } | { ok: false; reaso
 export class ModelTokenBook {
   readonly #tokens = new Map<string, TokenRecord>();
   readonly #ledgers = new Map<string, OperationLedger>();
+  readonly #routeLedgers = new Map<string, RouteLedger>();
+  /** The aliases each operation's calls were forwarded on. Kept after the operation's spend is forgotten (the broker reads it when the operation's result arrives), and bounded. */
+  readonly #called = new Map<string, Set<string>>();
   readonly #now: () => number;
   readonly #ttlMs: number;
 
@@ -92,6 +100,30 @@ export class ModelTokenBook {
     return ledger;
   }
 
+  /** Notes that a call of `operationId` was forwarded to the provider on `alias`. */
+  noteCall(operationId: string, alias: string): void {
+    let seen = this.#called.get(operationId);
+    if (seen === undefined) {
+      seen = new Set();
+      this.#called.set(operationId, seen);
+      while (this.#called.size > CALLED_OPERATIONS_MAX) this.#called.delete(this.#called.keys().next().value as string);
+    }
+    seen.add(alias);
+  }
+
+  /** The aliases this operation's calls went out on, or undefined when the proxy has no record of the operation (a restart, or one that made no call). */
+  calledAliases(operationId: string): ReadonlySet<string> | undefined {
+    return this.#called.get(operationId);
+  }
+
+  /** The spend of one capped route in one operation (made when first asked). */
+  routeLedger(operationId: string, alias: string): RouteLedger {
+    const key = `${operationId}\0${alias}`;
+    let ledger = this.#routeLedgers.get(key);
+    if (ledger === undefined) { ledger = { spentMicros: 0, reservedMicros: 0 }; this.#routeLedgers.set(key, ledger); }
+    return ledger;
+  }
+
   /** Ends every token of an operation (it finished, was cancelled, or lost its workspace). Its spend is kept for a later operation. */
   revokeOperation(operationId: string): number {
     let count = 0;
@@ -108,6 +140,7 @@ export class ModelTokenBook {
   forgetOperation(operationId: string): void {
     this.revokeOperation(operationId);
     this.#ledgers.delete(operationId);
+    for (const key of [...this.#routeLedgers.keys()]) if (key.startsWith(`${operationId}\0`)) this.#routeLedgers.delete(key);
   }
 
   /** How many operations have a spend record (a ledger is freed when its operation is seen to end: `forgetOperation`). */
