@@ -143,9 +143,12 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   for (const entry of hosts) {
     try {
       const record = await pullRequestRecordOf(deps, task.workspaceId, entry.repositoryId, entry.number);
+      const ref = changeRequestRef(entry.url, entry.number);
       beforeRequest?.();
-      const remote = await entry.host.getChangeRequest(changeRequestRef(entry.url, entry.number), { orgId: deps.companyId });
-      if (record === undefined || remote.body !== record.body) continue;
+      if (record === undefined || (await entry.host.getChangeRequest(ref, { orgId: deps.companyId })).body !== record.body) continue;
+      // Read again right before the write, so the time a person's edit could slip in between is as short as it can be made.
+      beforeRequest?.();
+      if ((await entry.host.getChangeRequest(ref, { orgId: deps.companyId })).body !== record.body) continue;
       await entry.host.updateChangeRequest({ repository: { url: entry.url }, id: String(entry.number), url: entry.url_ }, { body }, { orgId: deps.companyId });
       await deps.store.update({ key: pullRequestRecordKey(task.workspaceId, entry.repositoryId, entry.number), ops: [change.set("body", body), change.set("updatedAt", iso(deps))], condition: when.present() });
     } catch (error) {

@@ -31,6 +31,7 @@ import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispat
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
 import { shortDigest } from "../../packages/broker/src/core/pr-commands/comment-checks.js";
 import { approvalOfferOf } from "../../packages/broker/src/local/app/page-data.js";
+import { verifiedChangedFiles } from "../../packages/broker/src/core/build-step/changed-files.js";
 import { readyToMerge } from "../../packages/broker/src/local/app/attention.js";
 import { retryBlockedStep } from "../../packages/broker/src/local/app/retry.js";
 import { recordedHeadOf } from "../../packages/broker/src/core/build-step/head-check.js";
@@ -1702,6 +1703,36 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(proof.body).toContain("Changed files, read from the code host: 2");
     expect(proof.body).toContain("The worker reported 1 changed file");
     expect(proof.body).toContain("has not checked that list and does not use it");
+  });
+
+  it("N1: verifies nothing when the host shows another head than the one Rovara checked, and keeps the risk high (the head-moved guard)", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const { taskId, cr, workspaceId, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    // Someone pushes to the branch before the pass reads the files.
+    h.model.commit(cr.sourceBranch, { "src/sneaky.ts": "export const sneaky = 1;\n" });
+    await h.runtime.tick();
+    expect(await verifiedChangedFiles(h.runtime.app.flow.deps, workspaceId, ((await taskRecord(h, taskId)).workflow as unknown as { candidate: { digest: string } }).candidate.digest)).toBeUndefined();
+    expect(((await taskRecord(h, taskId)).workflow as unknown as { risk?: { level: string } }).risk?.level).toBe("high");
+    expect(cr.body).toBe(openingBody);
+  });
+
+  it("N2: a description a person edited is left as they left it, though the files are verified and the risk is judged", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const { taskId, cr } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    cr.body = "Dana's own words about this change.";
+    await h.runtime.tick();
+    expect(cr.body).toBe("Dana's own words about this change.");
+    expect(((await taskRecord(h, taskId)).workflow as unknown as { risk?: { level: string } }).risk?.level).not.toBe("high");
+    // An edit that lands between the first read and the write is caught by the read right before the write.
+    const g = await launch({ host: true, now: clock.now });
+    const other = await published(g, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    const original = g.host.getChangeRequest.bind(g.host);
+    let reads = 0;
+    g.host.getChangeRequest = async (...args) => { const answer = await original(...args); reads += 1; if (reads === 2) other.cr.body = "edited in between"; return answer; };
+    await g.runtime.tick();
+    expect(other.cr.body).toBe("edited in between");
   });
 
   it("reads a harmless change below high once the code host has listed its files, and keeps it high until then", async () => {
