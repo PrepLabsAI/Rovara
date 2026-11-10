@@ -22,6 +22,7 @@ import {
   type JsonValue,
   type Operation,
   type TransactItem,
+  type WorkflowDependencyInvocation,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
@@ -88,6 +89,10 @@ export interface StepInput {
   extraActions?: readonly string[];
   /** The id the operation is made with, when the caller needs it before the operation exists (a publication names its branch after it). */
   operationId?: string;
+  /** An ordered coding run's binding (spec 059), kept on the operation record. Its payload copy is in `payload.workflowDependencies`. */
+  workflowDependencies?: WorkflowDependencyInvocation;
+  /** A line for the operation's timeline (why parts run one after another, say), written with it as its first event. */
+  firstEvent?: string;
 }
 
 /** Accepts the operation for one step. `STALE` and `WAITING` write nothing. */
@@ -116,6 +121,8 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     ...(workflowRevision === undefined ? {} : { workflowRevision }),
     ...(input.publication === undefined ? {} : { publication: input.publication }),
     ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
+    ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
+    ...(input.firstEvent === undefined ? {} : { firstEvent: input.firstEvent }),
     dispatch: {
       kind: operationKind, projectRevision: workspace.projectRevision,
       payload: operationKind !== "task"

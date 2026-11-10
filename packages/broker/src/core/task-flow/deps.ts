@@ -134,6 +134,11 @@ export interface TaskFlowDeps {
   limits?: { member: number; organization: number };
   /** Whether a workflow task starts by understanding the request (workflow 1.1.0). Default: Cloud's `ROVARA_CODE_V2_FOR_NEW_ORGS`. */
   understandFirst?: boolean;
+  /**
+   * Whether a task on workflow version 1.0.0 may start its approved ordered plan (spec 059). Default off. A version 1.1.0 task (every task `rovara up` starts)
+   * does not need it: it exists only where the install started tasks on 1.1.0.
+   */
+  workflowDependenciesEnabled?: boolean;
   /** The queue operations are dispatched on. Default `task-dispatch`. */
   dispatchQueue?: string;
   now?: () => Date;

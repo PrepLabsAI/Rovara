@@ -8,9 +8,12 @@ import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
-  change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, when, type Check, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
+  canonicalPlanJson, change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { createHash } from "node:crypto";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
+import { createSessionControlHost } from "../../packages/broker/src/local/app/host.js";
+import { planDocument } from "../support/plan-documents.js";
 import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { Command } from "commander";
@@ -81,14 +84,14 @@ const classicToken = (seed: string): string => ["gh", "p_"].join("") + seed.repe
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string } } = {}) {
+async function launch(extra: { features?: readonly string[]; connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string } } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   if (extra.config !== undefined) await writeFile(join(stateDirectory, "config.json"), JSON.stringify(extra.config), { mode: 0o600 });
   for (const [name, text] of Object.entries(extra.files ?? {})) await writeFile(join(stateDirectory, name), text, { mode: 0o600 });
-  const machines = new FakeWorkerMachines({ startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] });
+  const machines = new FakeWorkerMachines({ startingChecks: 0, features: extra.features ?? [...WORKER_INVOCATION_FEATURES] });
   // A fake code host that holds the repository (lane L10): the build step reads the pushed branch and opens the pull request through its port.
   const hostedUrl = "https://github.com/example/demo.git";
   const model = extra.model ?? new FakeHostModel({ url: hostedUrl, id: "1", fullName: "example/demo" });
@@ -2630,6 +2633,378 @@ describe("rovara up: the L12 review's fixes (H1 to H3, M1 to M3, lows, decision 
     await poll(h, clock);
     store(h).query = query;
     expect(listings).toBeLessThanOrEqual(1);
+  });
+});
+
+// ---- ordered work (spec 059) and parts built side by side. A plan the owner approved with a work breakdown is coded as that breakdown; the worker's checkpoints are judged
+// against the approved run, and its result must be that run's. A worker's callbacks are forged here, which is what a faulty or hostile worker would send.
+const PART_A = "11111111-1111-4111-8111-111111111111";
+const PART_B = "22222222-2222-4222-8222-222222222222";
+const PART_C = "33333333-3333-4333-8333-333333333333";
+const tree = (digit: string): string => digit.repeat(40);
+
+/** A plan with a work breakdown (A and B independent, C after both) stored as the structured plan the owner is shown, in place of the Markdown plan the local Plan step keeps. */
+async function toStructuredPlan(h: Awaited<ReturnType<typeof launch>>, planned: { taskId: string }, breakdown: "valid" | "none" | "other-repository" = "valid") {
+  const blobs = h.runtime.registry.require("object-storage");
+  const store = h.runtime.registry.require("storage");
+  const graph = {
+    schemaVersion: 1 as const, taskId: planned.taskId, version: 1,
+    items: [
+      { id: PART_A, title: "Part A", description: "Build part A.", repository: breakdown === "other-repository" ? "elsewhere" : "demo", dependsOn: [] as string[] },
+      { id: PART_B, title: "Part B", description: "Build part B.", repository: breakdown === "other-repository" ? "elsewhere" : "demo", dependsOn: [] as string[] },
+      { id: PART_C, title: "Part C", description: "Build part C on A and B.", repository: breakdown === "other-repository" ? "elsewhere" : "demo", dependsOn: [PART_A, PART_B] },
+    ],
+  };
+  const text = canonicalPlanJson(planDocument(breakdown === "none" ? {} : { workBreakdown: graph }));
+  const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
+  const objectKey = `plans/${planned.taskId}/structured.json`;
+  await blobs.put(objectKey, new TextEncoder().encode(text), { contentType: "application/json", metadata: { sha256 }, retention: "task-document" });
+  const record = (await store.get({ pk: `DEVTASK#${planned.taskId}`, sk: "META" }))!;
+  const workflow = record["workflow"] as unknown as { artifacts: Array<Record<string, unknown>> };
+  const artifacts = workflow.artifacts.map((artifact, index) => (index === workflow.artifacts.length - 1 ? { ...artifact, sha256, objectKey, format: "structured" } : artifact));
+  await store.update({ key: { pk: `DEVTASK#${planned.taskId}`, sk: "META" }, ops: [change.set("workflow", JSON.parse(JSON.stringify({ ...workflow, artifacts })) as JsonValue)] });
+  return { graph, digest: taskGraphDigest(graph) };
+}
+
+/** The error a callback answered, with its sentence. */
+const errorOf = (answer: { body: unknown }) => (answer.body as { error?: { code?: string; message?: string } }).error;
+
+const progressEvent = (job: WorkerInvocation, approval: { graphDigest: string; runId: string }, itemId: string, sequence: number, state: string, baseTreeSha: string, extra: Record<string, unknown> = {}) => ({
+  type: "progress", timestamp: new Date(Date.UTC(2026, 9, 26, 12, 0, sequence)).toISOString(),
+  payload: { workItemProgress: { schemaVersion: 1, graphDigest: approval.graphDigest, runId: approval.runId, itemId, sequence, state, operationId: job.operationId, baseTreeSha, at: new Date(Date.UTC(2026, 9, 26, 12, 0, sequence)).toISOString(), producer: "agentx-worker", ...extra } },
+});
+
+/** A task with a work breakdown, approved on the review page, with the fake worker waiting for the ordered coding run. */
+async function toOrderedCoding(h: Awaited<ReturnType<typeof launch>>, breakdown: "valid" | "none" | "other-repository" = "valid") {
+  const planned = await toPlanReview(h);
+  const graph = await toStructuredPlan(h, planned, breakdown);
+  await approvePlan(h, planned.taskId);
+  const record = async () => (await taskRecord(h, planned.taskId)) as unknown as { workflow: { stage: string; state: string; blockReason?: string; revision: number; workflowDependenciesApproval?: { graphDigest: string; runId: string; artifactDigest: string }; workflowDependenciesProgress?: Array<{ itemId: string; sequence: number; state: string; producer: string; candidateTreeSha?: string }>; workflowDependenciesOperationId?: string; decisions: Array<{ decision: string; workBreakdownDigest?: string }> } };
+  return { ...planned, ...graph, record };
+}
+
+describe("rovara up: ordered work and parts built side by side", () => {
+  it("approves a plan WITH its work breakdown, binds the digest of the graph in the document the approval names, and codes it as that breakdown with the parts setting", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const workflow = (await t.record()).workflow;
+    // The approval carries the graph's digest (derived from the stored document the decision's own digest names) and the engine recorded the run.
+    expect(workflow.decisions.find((decision) => decision.decision === "APPROVE")?.workBreakdownDigest).toBe(t.digest);
+    expect(workflow.workflowDependenciesApproval).toMatchObject({ graphDigest: t.digest });
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const ordered = (coding.payload as { workflowDependencies?: { graph: { items: unknown[] }; approval: { graphDigest: string; runId: string }; parallel?: { max: number }; sequenceStart: number } }).workflowDependencies;
+    expect(ordered).toMatchObject({ approval: { graphDigest: t.digest }, sequenceStart: 0, parallel: { max: 3 } });
+    expect(ordered?.graph.items).toHaveLength(3);
+    // The operation keeps the binding, and the workflow names the operation that carries the graph.
+    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }))!;
+    expect(operation["workflowDependencies"]).toMatchObject({ approval: { graphDigest: t.digest } });
+    expect((await t.record()).workflow.workflowDependenciesOperationId).toBe(coding.operationId);
+    // The plan page lists the parts and where each stands.
+    const link = await h.browse(`/plan/${t.taskId}`);
+    const page = (await raw_(h, link)).body;
+    expect(page).toContain("Work in parts");
+    expect(page).toContain("Up to 3 parts at a time");
+    expect(page).toContain("Part C");
+  });
+
+  it("a plan with no breakdown is coded as before, with no graph and no run bound", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h, "none");
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    expect((coding.payload as Record<string, unknown>)["workflowDependencies"]).toBeUndefined();
+    expect((await t.record()).workflow.workflowDependenciesApproval).toBeUndefined();
+  });
+
+  it("refuses the approval of a plan whose graph names a repository the task is not pinned to", async () => {
+    const h = await launch({ host: true });
+    const planned = await toPlanReview(h);
+    await toStructuredPlan(h, planned, "other-repository");
+    const link = await h.browse(`/plan/${planned.taskId}`);
+    const page = await raw_(h, link);
+    const form = formOf(page.body, "/decide");
+    const post = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody({ ...form.fields, decision: "approve" }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(post.headers["location"]).not.toContain("n=approved");
+    expect((await taskRecord(h, planned.taskId)).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+  });
+
+  it("accepts two starts before any finish, then a part that starts on the tree both were merged into, and records each checkpoint in the workflow", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const approval = (await t.record()).workflow.workflowDependenciesApproval!;
+    const base = h.model.revision(h.base).tree;
+    const send = (...events: ReturnType<typeof progressEvent>[]) => h.callback(coding, "events", { events });
+    expect((await send(progressEvent(coding, approval, PART_A, 1, "STARTED", base), progressEvent(coding, approval, PART_B, 2, "STARTED", base))).status).toBe(200);
+    expect((await send(progressEvent(coding, approval, PART_B, 3, "IMPLEMENTED", base, { candidateTreeSha: tree("1"), integratedTreeSha: tree("1") }))).status).toBe(200);
+    expect((await send(progressEvent(coding, approval, PART_A, 4, "IMPLEMENTED", base, { candidateTreeSha: tree("2"), integratedTreeSha: tree("3") }))).status).toBe(200);
+    expect((await send(progressEvent(coding, approval, PART_C, 5, "STARTED", tree("3")))).status).toBe(200);
+    const stored = (await t.record()).workflow.workflowDependenciesProgress!;
+    expect(stored.map((entry) => `${entry.itemId.slice(0, 2)}:${entry.state}`)).toEqual(["11:STARTED", "22:STARTED", "22:IMPLEMENTED", "11:IMPLEMENTED", "33:STARTED"]);
+    // The coding run still reads as the run the workflow waits for after its checkpoints moved the workflow's revision.
+    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }))!;
+    expect(operation["workflowRevision"]).toBe((await t.record()).workflow.revision);
+    // An exact repeat of an acknowledged checkpoint is fine; the same number with other content is refused.
+    expect((await send(progressEvent(coding, approval, PART_A, 1, "STARTED", base))).status).toBe(200);
+    expect((await send(progressEvent(coding, approval, PART_A, 1, "STARTED", tree("9")))).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+  });
+
+  it("refuses a checkpoint that does not continue the approved run: a tree that is not the run's, a part before what it waits for, a finish with no start, another run's id", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const approval = (await t.record()).workflow.workflowDependenciesApproval!;
+    const base = h.model.revision(h.base).tree;
+    const refused = async (event: ReturnType<typeof progressEvent>) => expect((await h.callback(coding, "events", { events: [event] })).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    await refused(progressEvent(coding, approval, PART_C, 1, "STARTED", base));
+    await refused(progressEvent(coding, approval, PART_A, 1, "IMPLEMENTED", base, { candidateTreeSha: tree("1"), integratedTreeSha: tree("1") }));
+    await refused(progressEvent(coding, approval, PART_A, 1, "STARTED", tree("9")));
+    await refused(progressEvent(coding, { ...approval, runId: "00000000-0000-4000-8000-000000000000" }, PART_A, 1, "STARTED", base));
+    await refused(progressEvent({ ...coding, operationId: "00000000-0000-4000-8000-000000000000" }, approval, PART_A, 1, "STARTED", base));
+    expect((await t.record()).workflow.workflowDependenciesProgress ?? []).toEqual([]);
+    // A start is accepted; a finish that names another base tree than its start is not.
+    expect((await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_A, 1, "STARTED", base)] })).status).toBe(200);
+    await refused(progressEvent(coding, approval, PART_A, 2, "IMPLEMENTED", tree("4"), { candidateTreeSha: tree("1"), integratedTreeSha: tree("1") }));
+  });
+
+  it("refuses a checkpoint whose sequence number jumps, and one that arrives when the cursor no longer matches the operation's start", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const approval = (await t.record()).workflow.workflowDependenciesApproval!;
+    const base = h.model.revision(h.base).tree;
+    const send = (event: ReturnType<typeof progressEvent>) => h.callback(coding, "events", { events: [event] });
+    expect((await send(progressEvent(coding, approval, PART_A, 1, "STARTED", base))).status).toBe(200);
+    // Sequence 3 after 1: a checkpoint was skipped, so this one does not continue the acknowledged run.
+    const jumped = errorOf(await send(progressEvent(coding, approval, PART_B, 3, "STARTED", base)));
+    expect(jumped?.code).toBe("CALLBACK_FORBIDDEN");
+    expect(jumped?.message).toContain("out of sequence");
+    expect((await send(progressEvent(coding, approval, PART_B, 2, "STARTED", base))).status).toBe(200);
+    // The cursor (where the history ended) must be where the operation was told to start plus what it has recorded: a record that moved on its own is not continued.
+    await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }, ops: [change.set(["workflowDependencies", "sequenceStart"], 5)] });
+    const moved = errorOf(await send(progressEvent(coding, approval, PART_B, 3, "IMPLEMENTED", base, { candidateTreeSha: tree("1"), integratedTreeSha: tree("1") })));
+    expect(moved?.code).toBe("CALLBACK_FORBIDDEN");
+    expect(moved?.message).toContain("cursor");
+    expect((await t.record()).workflow.workflowDependenciesProgress).toHaveLength(2);
+  });
+
+  it("refuses a checkpoint once the task is closed, the owner's approval on the task is not the run's, or the workspace is held by another operation, each for its own reason", async () => {
+    const cases: Array<[string, (h: Awaited<ReturnType<typeof launch>>, t: Awaited<ReturnType<typeof toOrderedCoding>>, coding: WorkerInvocation) => Promise<void>, string]> = [
+      ["the task is closed", async (h, t) => { await h.runtime.registry.require("storage").update({ key: { pk: `DEVTASK#${t.taskId}`, sk: "META" }, ops: [change.set("closedAt", "2026-11-10T12:00:00.000Z")] }); }, "no longer matches the current task"],
+      ["another run's approval is on the task", async (h, t) => { await h.runtime.registry.require("storage").update({ key: { pk: `DEVTASK#${t.taskId}`, sk: "META" }, ops: [change.set(["workflow", "workflowDependenciesApproval", "runId"], "00000000-0000-4000-8000-000000000000")] }); }, "no longer matches the current task"],
+      ["the workspace is no longer busy", async (h, t) => { await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: "META" }, ops: [change.set("status", "READY")] }); }, "stale workspace operation"],
+      ["the workspace is held by another operation", async (h, t) => { await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: "META" }, ops: [change.set("activeOperationId", "00000000-0000-4000-8000-000000000000")] }); }, "stale workspace operation"],
+    ];
+    for (const [label, spoil, message] of cases) {
+      const h = await launch({ host: true });
+      const t = await toOrderedCoding(h);
+      const coding = await h.nextJob(t.workspaceId, t.seen);
+      const approval = (await t.record()).workflow.workflowDependenciesApproval!;
+      await spoil(h, t, coding);
+      const answer = await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_A, 1, "STARTED", h.model.revision(h.base).tree)] });
+      expect(errorOf(answer)?.code, label).toBe("CALLBACK_FORBIDDEN");
+      expect(errorOf(answer)?.message, label).toContain(message);
+    }
+  });
+
+  it("does not resume from an operation whose binding names another run than the approval", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    expect((await h.callback(coding, "result", { status: "FAILED", error: "RUNTIME_UNAVAILABLE: compute was lost" })).status).toBe(200);
+    await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }, ops: [change.set(["workflowDependencies", "approval", "runId"], "00000000-0000-4000-8000-000000000000")] });
+    await retryBlockedStep(h.runtime.app.flow.deps, t.taskId, (await t.record()).workflow.revision);
+    expect((await t.record()).workflow).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED" });
+    expect((await t.record()).workflow.blockReason).toContain("no matching operation binding");
+  });
+
+  it("marks every part still running when the operation failed as unknown, in the order they started, and blocks the task; Retry resumes only from what was acknowledged", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const approval = (await t.record()).workflow.workflowDependenciesApproval!;
+    const base = h.model.revision(h.base).tree;
+    await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_A, 1, "STARTED", base), progressEvent(coding, approval, PART_B, 2, "STARTED", base), progressEvent(coding, approval, PART_B, 3, "IMPLEMENTED", base, { candidateTreeSha: tree("1"), integratedTreeSha: tree("1") })] });
+    expect((await h.callback(coding, "result", { status: "FAILED", error: "RUNTIME_UNAVAILABLE: compute was lost" })).status).toBe(200);
+    const blocked = (await t.record()).workflow;
+    expect(blocked).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED" });
+    expect(blocked.workflowDependenciesProgress!.map((entry) => `${entry.itemId.slice(0, 2)}:${entry.state}:${entry.sequence}`)).toEqual(["11:STARTED:1", "22:STARTED:2", "22:IMPLEMENTED:3", "11:UNKNOWN:4"]);
+    expect(blocked.workflowDependenciesProgress!.at(-1)).toMatchObject({ producer: "agentx-broker-terminal" });
+    // Retry runs the ordered plan again from the checkpoints the history acknowledged: part B is built, part A is unknown (it is built again).
+    await retryBlockedStep(h.runtime.app.flow.deps, t.taskId, blocked.revision);
+    const again = await h.nextJob(t.workspaceId, t.seen);
+    const resumed = (again.payload as { workflowDependencies?: { resumeProgress?: Array<{ itemId: string; state: string }>; sequenceStart: number; resumeTreeSha?: string } }).workflowDependencies;
+    expect(resumed?.resumeProgress?.map((entry) => `${entry.itemId.slice(0, 2)}:${entry.state}`)).toEqual(["11:UNKNOWN", "22:IMPLEMENTED"]);
+    expect(resumed).toMatchObject({ sequenceStart: 4, resumeTreeSha: tree("1") });
+  });
+
+  it("stopping an ordered run marks the item it was on as unknown in the write that blocks the task", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const approval = (await t.record()).workflow.workflowDependenciesApproval!;
+    await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_A, 1, "STARTED", h.model.revision(h.base).tree)] });
+    await createSessionControlHost(h.runtime.app.flow.deps).cancelTask(t.taskId, "");
+    const stopped = (await t.record()).workflow;
+    expect(stopped).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", blockReason: "You stopped this step. Retry to run it again." });
+    expect(stopped.workflowDependenciesProgress!.map((entry) => `${entry.itemId.slice(0, 2)}:${entry.state}`)).toEqual(["11:STARTED", "11:UNKNOWN"]);
+  });
+
+  /** Runs the parts to completion on the fake worker (A and B side by side, then C on the tree both were merged into) and gives the ordered result the worker would send with the code it ends on. */
+  async function finishParts(h: Awaited<ReturnType<typeof launch>>, t: Awaited<ReturnType<typeof toOrderedCoding>>, coding: WorkerInvocation, finalTree: string, commit: string) {
+    const approval = (await t.record()).workflow.workflowDependenciesApproval! as unknown as { graphDigest: string; runId: string; workflowRevision: number };
+    const base = h.model.revision(h.base).tree;
+    const events = [
+      progressEvent(coding, approval, PART_A, 1, "STARTED", base), progressEvent(coding, approval, PART_B, 2, "STARTED", base),
+      progressEvent(coding, approval, PART_B, 3, "IMPLEMENTED", base, { candidateTreeSha: tree("1"), integratedTreeSha: tree("1") }),
+      progressEvent(coding, approval, PART_A, 4, "IMPLEMENTED", base, { candidateTreeSha: tree("2"), integratedTreeSha: tree("3") }),
+      progressEvent(coding, approval, PART_C, 5, "STARTED", tree("3")),
+      progressEvent(coding, approval, PART_C, 6, "IMPLEMENTED", tree("3"), { candidateTreeSha: finalTree, integratedTreeSha: finalTree }),
+    ];
+    expect((await h.callback(coding, "events", { events })).status).toBe(200);
+    const stored = (await t.record()).workflow.workflowDependenciesProgress! as unknown as Array<{ itemId: string; state: string }>;
+    // The items of the result are the acknowledged terminal checkpoints, in the plan's order.
+    const items = taskGraphOrder(t.graph).map((id) => stored.filter((entry) => entry.itemId === id && entry.state !== "STARTED").at(-1)!);
+    const candidate = candidateOf(finalTree, h.base, commit);
+    const orderedResult = (overrides: Record<string, unknown> = {}) => ({
+      schemaVersion: 1, taskId: t.taskId, graphDigest: approval.graphDigest, runId: approval.runId, operationId: coding.operationId, workflowRevision: approval.workflowRevision, status: "SUCCEEDED",
+      candidateDigest: createCandidateManifest(candidate).digest, items, at: new Date().toISOString(), ...overrides,
+    });
+    const resultOf = (ordered: unknown, repositories: unknown = candidate) => ({
+      status: "SUCCEEDED", result: { conversationId: "conversation", checks: CHECK_REPORT, workflowCandidateRepositories: repositories, workflowCheckCandidateRepositories: repositories, workflowDependenciesResult: ordered },
+    });
+    return { orderedResult, resultOf, candidate };
+  }
+
+  it("records the ordered run's code when its result is the approved run's (the acknowledged items, in the plan's order, binding the final candidate), and starts the reviews", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const commit = h.model.commit("work", { "src/parts.ts": "export const parts = 3;\n" });
+    const finalTree = h.model.revision(commit).tree;
+    const { orderedResult, resultOf } = await finishParts(h, t, coding, finalTree, commit);
+    expect((await h.callback(coding, "result", resultOf(orderedResult()))).status).toBe(200);
+    expect((await t.record()).workflow).toMatchObject({ stage: "REVIEW", state: "RUNNING" });
+    expect(await h.nextJob(t.workspaceId, t.seen)).toMatchObject({ payload: { workflowMode: "REVIEW" } });
+  });
+
+  it("does not believe a result that leaves out an item, names another run, binds another candidate or another final tree, or reports the parts as not all built", async () => {
+    const reasons: Array<[string, (ordered: Record<string, unknown>) => Record<string, unknown>, string]> = [
+      ["a result with an item missing", (ordered) => ({ ...ordered, items: (ordered["items"] as unknown[]).slice(0, 2) }), "approved work breakdown result is missing, stale or incomplete"],
+      ["an item whose content is not the acknowledged checkpoint's", (ordered) => ({ ...ordered, items: (ordered["items"] as Array<Record<string, unknown>>).map((item, index) => (index === 1 ? { ...item, candidateTreeSha: tree("7"), integratedTreeSha: tree("7") } : item)) }), "approved work breakdown result is missing, stale or incomplete"],
+      ["a result for another run", (ordered) => ({ ...ordered, runId: "00000000-0000-4000-8000-000000000000" }), "approved work breakdown result is missing, stale or incomplete"],
+      ["a result for another operation", (ordered) => ({ ...ordered, operationId: "00000000-0000-4000-8000-000000000000" }), "approved work breakdown result is missing, stale or incomplete"],
+      ["a result that says it failed", (ordered) => ({ ...ordered, status: "FAILED" }), "approved work breakdown result is missing, stale or incomplete"],
+      ["a result that binds another candidate", (ordered) => ({ ...ordered, candidateDigest: "f".repeat(64) }), "work breakdown result does not bind the final combined candidate"],
+    ];
+    for (const [label, mutate, reason] of reasons) {
+      const h = await launch({ host: true });
+      const t = await toOrderedCoding(h);
+      const coding = await h.nextJob(t.workspaceId, t.seen);
+      const commit = h.model.commit("work", { "src/parts.ts": "export const parts = 3;\n" });
+      const { orderedResult, resultOf } = await finishParts(h, t, coding, h.model.revision(commit).tree, commit);
+      expect((await h.callback(coding, "result", resultOf(mutate(orderedResult())))).status, label).toBe(200);
+      expect((await t.record()).workflow, label).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: reason });
+    }
+    // The code the run leaves must be the code of the last part: another tree than the one C ended on is refused.
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const commit = h.model.commit("work", { "src/parts.ts": "export const parts = 3;\n" });
+    const otherCommit = h.model.commit("other", { "src/other.ts": "export const other = 1;\n" });
+    const { orderedResult, resultOf } = await finishParts(h, t, coding, h.model.revision(commit).tree, commit);
+    const otherCandidate = candidateOf(h.model.revision(otherCommit).tree, h.base, otherCommit);
+    const ordered = orderedResult({ candidateDigest: createCandidateManifest(otherCandidate).digest });
+    expect((await h.callback(coding, "result", resultOf(ordered, otherCandidate))).status).toBe(200);
+    expect((await t.record()).workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "work breakdown final item does not bind the final combined candidate tree" });
+  });
+
+  it("a send-back after reviews found something runs the whole approved plan again over the code the workspace holds, and the second run's result is read against the second run", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const commit = h.model.commit("work", { "src/parts.ts": "export const parts = 3;\n" });
+    const finalTree = h.model.revision(commit).tree;
+    const first = await finishParts(h, t, coding, finalTree, commit);
+    expect((await h.callback(coding, "result", first.resultOf(first.orderedResult()))).status).toBe(200);
+    const review = await h.nextJob(t.workspaceId, t.seen);
+    expect((await h.callback(review, "result", reviewsOf(review, finalTree, "findings", h.base, commit))).status).toBe(200);
+    // Rovara's own send-back: the coding run that follows carries the plan again, with nothing retained, the cursor where the history ended and the tree the workspace holds.
+    const again = await h.nextJob(t.workspaceId, t.seen);
+    const restarted = (again.payload as { workflowDependencies?: { resumeProgress?: unknown[]; sequenceStart: number; resumeTreeSha?: string; approval: { graphDigest: string } } }).workflowDependencies;
+    expect(restarted).toMatchObject({ resumeProgress: [], sequenceStart: 6, resumeTreeSha: finalTree, approval: { graphDigest: t.digest } });
+    expect((await t.record()).workflow.workflowDependenciesOperationId).toBe(again.operationId);
+    // The second run's checkpoints continue the cursor, and its result is read against the second run.
+    const approval = (await t.record()).workflow.workflowDependenciesApproval! as { graphDigest: string; runId: string };
+    const run2 = [
+      progressEvent(again, approval, PART_A, 7, "STARTED", finalTree), progressEvent(again, approval, PART_A, 8, "IMPLEMENTED", finalTree, { candidateTreeSha: tree("5"), integratedTreeSha: tree("5") }),
+      progressEvent(again, approval, PART_B, 9, "STARTED", finalTree),
+    ];
+    expect((await h.callback(again, "events", { events: run2 })).status).toBe(200);
+    expect((await t.record()).workflow.workflowDependenciesProgress!.map((entry) => entry.sequence)).toEqual([6, 7, 8, 9]);
+    // An exact copy of a checkpoint the history holds from the FIRST run is not a repeat of this run's: it is refused, though its content matches what is stored.
+    const kept = (await t.record()).workflow.workflowDependenciesProgress!.find((entry) => entry.sequence === 6)!;
+    expect((await h.callback(again, "events", { events: [{ type: "progress", timestamp: new Date().toISOString(), payload: { workItemProgress: { ...kept, operationId: coding.operationId } } }] })).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    // A checkpoint of the FIRST run is refused now: that operation is not the one the workflow names.
+    expect((await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_C, 7, "STARTED", tree("3"))] })).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+  });
+
+  it("an ordered run whose result carries no graph result at all is not believed", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    const commit = h.model.commit("work", { "src/parts.ts": "export const parts = 3;\n" });
+    const finalTree = h.model.revision(commit).tree;
+    expect((await h.callback(coding, "result", builtResult(finalTree, h.base, commit))).status).toBe(200);
+    expect((await t.record()).workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "approved work breakdown result is missing, stale or incomplete" });
+  });
+
+  it("sends a worker that cannot build side by side the plan without the parts setting, and refuses to send it progress that parallel parts left (B built, A not)", async () => {
+    const older = [...WORKER_INVOCATION_FEATURES].filter((feature) => feature !== "task.workflowParallelParts");
+    const h = await launch({ host: true, features: older });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    expect((coding.payload as { workflowDependencies?: Record<string, unknown> }).workflowDependencies).not.toHaveProperty("parallel");
+    // The broker's record keeps the setting it chose; the checkpoints are judged by the parallel rules, so the parts the older worker builds one after another are accepted.
+    const operation = (await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }))!;
+    expect(operation["workflowDependencies"]).toMatchObject({ parallel: { max: 3 } });
+    const approval = (await t.record()).workflow.workflowDependenciesApproval!;
+    const base = h.model.revision(h.base).tree;
+    await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_B, 1, "STARTED", base), progressEvent(coding, approval, PART_B, 2, "IMPLEMENTED", base, { candidateTreeSha: tree("1"), integratedTreeSha: tree("1") })] });
+    expect((await h.callback(coding, "result", { status: "FAILED", error: "RUNTIME_UNAVAILABLE: compute was lost" })).status).toBe(200);
+    // B is built and A is not: not a prefix of the plan's order, so the older worker cannot take it over; the retry's step ends with the worker-outdated sentence instead of being sent.
+    await retryBlockedStep(h.runtime.app.flow.deps, t.taskId, (await t.record()).workflow.revision);
+    await h.nextJob(t.workspaceId, t.seen).catch(() => undefined);
+    const ended = (await taskRecord(h, t.taskId)).workflow;
+    expect(ended).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED" });
+    const operations = await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${t.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    expect(operations.items.map((item) => item["error"]).filter((error) => error !== undefined)).toContain("This agent needs a newer worker. Ask an admin to upgrade Rovara.");
+  });
+
+  it("a plain coding run of an approved plan with a breakdown (its operation carries no graph) is refused, not believed", async () => {
+    const h = await launch({ host: true });
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    // The operation the broker started carried the graph; one that did not (a worker run that was never bound to it) is refused whatever it reports.
+    await h.runtime.registry.require("storage").update({ key: { pk: `WORKSPACE#${t.workspaceId}`, sk: `OPERATION#${coding.operationId}` }, ops: [change.remove("workflowDependencies")] });
+    const commit = h.model.commit("work", { "src/parts.ts": "export const parts = 3;\n" });
+    expect((await h.callback(coding, "result", builtResult(h.model.revision(commit).tree, h.base, commit))).status).toBe(200);
+    expect((await t.record()).workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "approved work breakdown was not carried into this implementation" });
+  });
+
+  it("holds the parts back to one at a time when the person's workspaces are in use, says why on the operation's timeline, and refuses a second part running at once", async () => {
+    const h = await launch({ host: true });
+    h.runtime.app.flow.deps.limits = { member: 1, organization: 100 };
+    const t = await toOrderedCoding(h);
+    const coding = await h.nextJob(t.workspaceId, t.seen);
+    expect((coding.payload as { workflowDependencies?: { parallel?: { max: number } } }).workflowDependencies?.parallel).toEqual({ max: 1 });
+    const events = await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${t.workspaceId}`, sk: { op: "beginsWith", prefix: `EVENT#${coding.operationId}#` } });
+    expect(JSON.stringify(events.items)).toContain("Running parts one at a time: 1 of 1 of your workspaces are in use.");
+    // Only one part may run: a second start while the first is open is refused, though its dependencies are met.
+    const approval = (await t.record()).workflow.workflowDependenciesApproval!;
+    const base = h.model.revision(h.base).tree;
+    expect((await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_A, 1, "STARTED", base)] })).status).toBe(200);
+    expect((await h.callback(coding, "events", { events: [progressEvent(coding, approval, PART_B, 2, "STARTED", base)] })).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect((await t.record()).workflow.workflowDependenciesProgress).toHaveLength(1);
   });
 });
 

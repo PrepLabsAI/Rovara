@@ -6,14 +6,14 @@
 import type { ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  queryAll, when, type OrgId, type Principal, type WorkflowArtifact, type WorkflowSnapshot,
+  queryAll, taskGraphDigest, when, type OrgId, type Principal, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { CHANGED_OUTSIDE_NOTE, checkPullRequestHeads } from "../../core/build-step/head-check.js";
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { ApprovalOffer, AttentionView, CommentView, LocalActionResult, LocalPageActions, LocalPageData, PendingItemView, PlanPageView, PlanVersionView, ProofReportView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { listTasks, readTask } from "../../core/task-flow/reads.js";
-import type { TaskRecord } from "../../core/task-flow/records.js";
+import { fromDocument, type OperationRecord, type TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
 import type { LocalComments } from "./comments.js";
@@ -25,6 +25,9 @@ import { createLocalSessionControl } from "./host.js";
 import { NOTHING_TO_RETRY_STEP, retryBlockedStep } from "./retry.js";
 import { stepOf } from "./facts.js";
 import { proofReportOf } from "./proof-report.js";
+import { planGraphOf } from "../../core/work-breakdown/plan-graph.js";
+import { workBreakdownView, type WorkBreakdownView } from "../../core/work-breakdown/view.js";
+import { operationKey } from "../../core/task-flow/keys.js";
 
 const PLAN_READ_MAX_BYTES = 200_000;
 const COMMENTS_MAX = 200;
@@ -61,6 +64,18 @@ export interface PageDataDeps {
 }
 
 /** The attention view with where the plan is posted: the attached thread and the project's repositories, only while a code host reads comments. */
+/** The parts of the plan's work breakdown and where each stands, from the acknowledged checkpoints. Undefined for a plan that has none (or a Markdown plan). */
+async function breakdownOf(flow: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<WorkBreakdownView | undefined> {
+  const artifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
+  if (artifact === undefined || artifact.format !== "structured") return undefined;
+  const graph = await planGraphOf(flow.artifacts, artifact).catch(() => undefined);
+  if (graph === undefined) return undefined;
+  const approval = workflow.workflowDependenciesApproval;
+  const approved = approval !== undefined && approval.artifactDigest === artifact.sha256 && approval.graphDigest === taskGraphDigest(graph);
+  const bound = approved && workflow.workflowDependenciesOperationId !== undefined ? fromDocument<OperationRecord>(await flow.store.get(operationKey(task.workspaceId, workflow.workflowDependenciesOperationId))) : undefined;
+  return workBreakdownView(graph, approved ? workflow.workflowDependenciesProgress ?? [] : [], approved, bound?.workflowDependencies?.parallel?.max);
+}
+
 async function attentionWithThread(deps: PageDataDeps, task: TaskRecord, view: AttentionView): Promise<AttentionView> {
   if (deps.comments === undefined || task.closedAt !== undefined || !deps.comments.available()) return view;
   const project = await deps.flow.projects.revision(task.project, task.startingRevision);
@@ -117,6 +132,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         });
       }
       const approval = approvalOfferOf(taskId, workflow);
+      const breakdown = await breakdownOf(deps.flow, task, workflow);
       // A pull request whose head is no longer the one Rovara checked says so here (the stop-gap until merge tracking runs on a timer).
       const outside = new Map((await checkPullRequestHeads(deps.flow, task).catch(() => [])).filter((entry) => entry.changedOutside).map((entry) => [`${entry.repository}#${String(entry.number)}`, true]));
       return {
@@ -124,7 +140,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         checks: (workflow.checkPolicy?.proposed ?? []).map((check) => ({ label: check.label, status: "proposed" as const })),
         findings: [],
         pullRequests: (workflow.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state.toLowerCase(), ...(outside.has(`${pullRequest.repositoryId}#${String(pullRequest.number)}`) ? { note: CHANGED_OUTSIDE_NOTE } : {}) })),
-        comments: await commentsOf(taskId), ...(approval === undefined ? {} : { approval }),
+        comments: await commentsOf(taskId), ...(approval === undefined ? {} : { approval }), ...(breakdown === undefined ? {} : { breakdown }),
         // Rovara's ask, the pull request's state and any questions: fixed words, and the forms that answer them.
         attention: await attentionWithThread(deps, task, (await attentionOf(deps.flow, task)).view),
       };

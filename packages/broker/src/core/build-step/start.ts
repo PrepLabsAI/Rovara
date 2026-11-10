@@ -3,8 +3,8 @@
 // the candidate, so a recovered or repeated row is the first one's duplicate.
 import { createHash } from "node:crypto";
 import {
-  EVIDENCE_CAPTURE_FEATURE, abandonWorkflowFix, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
-  type JsonValue, type ProjectDefinition, type WorkflowReviewChecks, type WorkflowSnapshot,
+  AgentXError, EVIDENCE_CAPTURE_FEATURE, abandonWorkflowFix, blockWorkflow, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
+  type JsonValue, type ProjectDefinition, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
 import { conflictFixPrompt } from "../branch-sync/branch-sync.js";
@@ -14,7 +14,8 @@ import { resolveRowItem } from "../task-flow/dispatch-rows.js";
 import { readTask } from "../task-flow/reads.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
 import { acceptStep, commitWorkflow, readWorkspace, type StepStart } from "../task-flow/stage-machine.js";
-import { iso, log } from "../task-flow/support.js";
+import { iso, log, newId } from "../task-flow/support.js";
+import { firstGraphInvocation, restartedGraphInvocation, resumeGraphInvocation, workflowWithCurrentGraphOperation } from "../work-breakdown/invocation.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { approvedCodingPlan, reviewPlanOf } from "./plan-input.js";
 import {
@@ -128,16 +129,42 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   }
   const startFrom = fixStartHead(workflow);
   const readiness = selectedCheckCommands(workflow).readiness;
+  // Ordered work (spec 059): a plan the owner approved with a work breakdown is coded as that breakdown, never as plain coding. A fix round (CI, a conflict, feedback) carries none (the worker protocol forbids it): it
+  // works on the code the ordered run left.
+  let graph: { invocation: WorkflowDependencyInvocation; note?: string } | undefined;
+  if (workflow.workflowDependenciesApproval !== undefined && workflow.fixSource === undefined) {
+    try {
+      if (workflow.workflowDependenciesOperationId === undefined) graph = await firstGraphInvocation(deps, task);
+      else {
+        // A run that goes on from an earlier one: a retry resumes from the checkpoints the history acknowledged; a send-back runs the whole plan again over the code the workspace holds.
+        const resumed = await resumeGraphInvocation(deps, task);
+        if (resumed !== undefined) graph = { invocation: found2.length > 0 ? restartedGraphInvocation(resumed, workflow) : resumed };
+      }
+    } catch (error) {
+      if (!(error instanceof AgentXError)) throw error;
+      // A refusal is the plan's, not a hiccup of the machine: it blocks the task with its sentence instead of being tried until the row is given up on.
+      log(deps, { event: "build_step.work_breakdown_refused", taskId: task.taskId, code: error.code });
+      await commitWorkflow(deps, task, blockWorkflow(workflow, error.message.replace(`${error.code}: `, "").slice(0, 500), receivedAt));
+      return settled(deps, row, "STALE");
+    }
+  }
+  const operationId = graph === undefined ? undefined : newId(deps);
   const payload = jsonOf({
     ...(readiness === undefined ? {} : { readiness }),
     ...baseOf(task, workflow),
     ...(workflow.fixSource === undefined ? {} : { workflowFix: { source: workflow.fixSource, ...(startFrom === undefined ? {} : { startFrom }) } }),
+    ...(graph === undefined ? {} : { workflowDependencies: graph.invocation }),
   });
   const accepted = await acceptStep(deps, {
-    task, workspace, requestId, prompt: withTestRule(prompt, next), workflowMode: "IMPLEMENT", workflow: { current: workflow, next },
+    task, workspace, requestId, prompt: withTestRule(prompt, next), workflowMode: "IMPLEMENT",
+    workflow: { current: workflow, next: operationId === undefined ? next : workflowWithCurrentGraphOperation(next, operationId, graph?.invocation) },
     extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
-    requires: ["task.workflowMode", ...(readiness === undefined ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(workflow.fixSource === undefined ? [] : ["task.workflowFix"])],
+    requires: [
+      "task.workflowMode", ...(readiness === undefined ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(workflow.fixSource === undefined ? [] : ["task.workflowFix"]),
+      ...(graph === undefined ? [] : ["task.workflowDependencies"]),
+    ],
     extraActions: ["candidate-export", "candidate-build-source", "baseline-source"],
+    ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId, ...(graph.note === undefined ? {} : { firstEvent: graph.note }) }),
   });
   return settled(deps, row, accepted.result);
 }

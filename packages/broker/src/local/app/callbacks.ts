@@ -18,6 +18,7 @@ import { acknowledgeUpload } from "./candidate-export.js";
 import { openPullRequest } from "../../core/build-step/publish.js";
 import { updatePullRequest } from "../../core/build-step/maintain.js";
 import { readTask } from "../../core/task-flow/reads.js";
+import { recordWorkItemProgress } from "../../core/work-breakdown/progress.js";
 import type { StepOutcome } from "../../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
 import { isTerminalStatus, recordOperationResult } from "../../core/task-flow/results.js";
@@ -131,6 +132,9 @@ async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body
     if (record === null || typeof record !== "object" || typeof record["type"] !== "string" || typeof record["timestamp"] !== "string") throw agentXError("CONFIG_INVALID", "an event needs a type and a timestamp");
     return { type: record["type"], timestamp: record["timestamp"], payload: record["payload"] ?? null };
   });
+  // The work item checkpoints of an ordered run (spec 059) are judged against the approved run and written into the task's workflow BEFORE the batch is acknowledged: the worker goes on to the next item only
+  // when this returns, so what a retry resumes from is what was durably recorded. A checkpoint that does not continue the approved run is refused (the worker then fails the operation).
+  await recordWorkItemProgress(deps.flow, operation, parsed);
   // The operation's counter hands out the sequence numbers, so events keep their order whichever batch they arrived in.
   const counted = await deps.flow.store.update({ key: operationKey(operation.workspaceId, operation.id), ops: [change.add("eventSequence", parsed.length)], condition: when.present(), return: "new" });
   const item = counted.applied ? counted.item : undefined;

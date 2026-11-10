@@ -27,6 +27,18 @@ export const WORKFLOW_BUTTON_OUT_OF_DATE = "That button is out of date. Use the 
 export const WORKFLOW_APPROVAL_OUT_OF_DATE = "That approval is out of date. Use the latest message in this thread.";
 
 /**
+ * The refusals of an approval of a coding plan with an ordered work breakdown, by their exact text. They are kept apart from WORKFLOW_ACTIONABLE_REFUSALS (Slack says those as
+ * they are); the task page says its own words for each (see `decideOnPage`).
+ */
+export const WORKFLOW_BREAKDOWN_REFUSALS = Object.freeze({
+  digestMissing: "approve this exact ordered work plan by refreshing the plan and submitting its work breakdown digest",
+  digestChanged: "the work breakdown changed; refresh the plan before deciding",
+  noBreakdown: "the current plan has no work breakdown to approve",
+  notEnabled: "ordered work plans are saved but this broker is not enabled to start them",
+  onePinnedRepository: "ordered work is available only when this task is pinned to one registered repository",
+});
+
+/**
  * Refusals of an approval or a retry that name what the presser does next, by their exact text. The task page and the API say them as they are, and so does Slack
  * (instead of "out of date", which fits only a press that no longer matches the task). The text lives here so the refusing code and Slack's wording cannot drift apart.
  */

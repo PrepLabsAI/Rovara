@@ -4,6 +4,7 @@ import type { PlanDocumentKind } from "@agentx/contracts";
 import { renderPlanDocument, type PlanAnchor } from "../../aws/plan-page/render-plan.js";
 import { esc, externalLink, layout, untrusted } from "./html.js";
 import type { FormBinding } from "./guard.js";
+import { PART_STATE_WORDS } from "../work-breakdown/view.js";
 import type {
   ApprovalOffer, CommentView, DesignReviewView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView,
 } from "./views.js";
@@ -99,6 +100,13 @@ function attentionHtml(context: PageContext, view: PlanPageView): string {
   return parts.join("");
 }
 
+/** The parts of an ordered run, in the order they run, each with where it stands. Titles are the plan's words (untrusted); the state words are Rovara's. */
+function breakdownHtml(view: NonNullable<PlanPageView["breakdown"]>): string {
+  const rows = view.parts.map((part) => `<li><span class="status ${part.state === "done" ? "approved" : "pending"}">${esc(PART_STATE_WORDS[part.state])}</span> ${untrusted(part.title)}${part.waitsFor.length === 0 ? "" : ` <span class="muted">after ${part.waitsFor.map((title) => untrusted(title)).join(", ")}</span>`}</li>`).join("");
+  const how = view.atOnce === undefined ? "One part at a time, in this order." : `Up to ${esc(view.atOnce)} parts at a time; a part waits for the parts it follows.`;
+  return `<section class="panel"><h2>Work in parts</h2><p class="muted">${esc(how)}${view.approved ? " The plan's approval covers these parts." : ""}</p><ol>${rows}</ol></section>`;
+}
+
 export async function renderPlanPage(context: PageContext, view: PlanPageView): Promise<string> {
   const current = view.versions.filter((version) => version.current);
   const older = view.versions.filter((version) => !version.current);
@@ -119,12 +127,13 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   const checks = view.checks.length === 0 ? "" : `<section class="panel"><h2>Checks</h2><ul>${view.checks.map((check) => `<li>${untrusted(check.label)}: <span class="${STATUS_CLASS[check.status]}">${STATUS_WORD[check.status]}</span></li>`).join("")}</ul></section>`;
   const findings = view.findings.length === 0 ? "" : `<section class="panel"><h2>Review findings</h2><ul>${view.findings.map((finding) => `<li><span class="tag">${esc(finding.role)}</span> ${untrusted(finding.text)}${finding.file === undefined ? "" : ` <span class="muted">${untrusted(finding.file)}${finding.line === undefined ? "" : `:${esc(finding.line)}`}</span>`}</li>`).join("")}</ul></section>`;
   const prs = view.pullRequests.length === 0 ? "" : `<section class="panel"><h2>Pull requests</h2><ul>${view.pullRequests.map((pr) => `<li>${externalLink(pr.url, `#${pr.number}`)} <span class="muted">${untrusted(pr.state)}</span>${pr.note === undefined ? "" : ` <strong class="bad">${untrusted(pr.note)}</strong>`}</li>`).join("")}</ul></section>`;
+  const breakdown = view.breakdown === undefined ? "" : breakdownHtml(view.breakdown);
   const documents = (await Promise.all(current.map(one))).join("");
   const olderHtml = older.length === 0 ? "" : `<details><summary>${older.length} older ${older.length === 1 ? "version" : "versions"}</summary>${(await Promise.all(older.map(one))).join("")}</details>`;
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${attentionHtml(context, view)}${decideHtml(context, view)}${documents}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 

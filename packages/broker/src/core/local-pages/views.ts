@@ -7,6 +7,8 @@ import type { ApprovalProof, PlanDocument, PlanEvidenceBundle } from "@agentx/co
 export type LocalActionResult = { ok: true; message?: string } | { ok: false; reason: "stale" | "refused" | "not_found" | "invalid"; message: string };
 
 /** The approval a page offers. The id, revision and digest are what the person is looking at; the page signs them into its form. */
+import type { WorkBreakdownView } from "../work-breakdown/view.js";
+
 export interface ApprovalOffer {
   /** The decision card or approval request this answers (the `requestId` of the W0 `ApprovalRequest`). */
   requestId: string;
@@ -67,6 +69,8 @@ export interface PlanPageView {
   approval?: ApprovalOffer;
   /** Rovara's ask, the merge state and any questions (lane L12). */
   attention?: AttentionView;
+  /** The parts of an ordered run (spec 059): what the plan lists and where each stands. Absent for a plan with no work breakdown. */
+  breakdown?: WorkBreakdownView;
 }
 
 export interface DesignMockupView {

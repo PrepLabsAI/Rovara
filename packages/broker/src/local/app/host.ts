@@ -1,13 +1,14 @@
 // Lane L9-wire: the task flow's side of a session's stop, retry and message (L6b's `SessionControlHost`). Each runs only after the sessions module checked who is asking.
-import { INDEX_EXPIRY_ATTRIBUTE, change, when } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, WorkflowSnapshotSchema, WorkflowTransitionError, blockWorkflow, change, when } from "@agentx/contracts";
 import { createSessionControl, type SessionControlHost } from "../../core/sessions/control.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { operationKey, workspaceKey } from "../../core/task-flow/keys.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { fromDocument, type OperationRecord, type WorkspaceRecord } from "../../core/task-flow/records.js";
 import { recordOperationResult } from "../../core/task-flow/results.js";
-import { blockTaskWorkflow } from "../../core/task-flow/stage-machine.js";
+import { blockTaskWorkflow, commitWorkflow } from "../../core/task-flow/stage-machine.js";
 import { iso } from "../../core/task-flow/support.js";
+import { progressAfterStoppedRun } from "../../core/work-breakdown/results.js";
 import { retryBlockedStep } from "./retry.js";
 
 /** A person may message a session this many times an hour (a token bucket), and a task keeps this many messages: a live message can mean paid model work. */
@@ -35,8 +36,21 @@ export function createSessionControlHost(deps: TaskFlowDeps, options: { expected
       if (workspace.machine !== undefined) await deps.machines.stop(workspace.machine.machineId).catch(() => undefined);
       await recordOperationResult(deps, { workspaceId: workspace.id, operationId: operation.id, fence: operation.fence, status: "CANCELLED" });
       // A workflow step that was stopped has nothing running: it waits for the owner's Retry.
-      const workflow = (await readTask(deps, taskId))?.workflow;
-      if (workflow !== undefined && (workflow.state === "RUNNING" || workflow.state === "READY")) await blockTaskWorkflow(deps, taskId, workflow.revision, "You stopped this step. Retry to run it again.");
+      const after = await readTask(deps, taskId);
+      const workflow = after?.workflow;
+      if (after !== undefined && workflow !== undefined && (workflow.state === "RUNNING" || workflow.state === "READY")) {
+        const reason = "You stopped this step. Retry to run it again.";
+        // An ordered run (spec 059) that was stopped marks the item it was on as unknown in the same write that blocks the task, so Retry resumes only from what was acknowledged as done.
+        const now = iso(deps);
+        const marked = operation.workflowMode === "IMPLEMENT" && workflow.stage === "IMPLEMENT" ? progressAfterStoppedRun(workflow, operation, now) : undefined;
+        if (marked !== undefined && marked.length > (workflow.workflowDependenciesProgress ?? []).length) {
+          try {
+            await commitWorkflow(deps, after, WorkflowSnapshotSchema.parse({ ...blockWorkflow(workflow, reason, now), workflowDependenciesProgress: marked }));
+          } catch (error) {
+            if (!(error instanceof WorkflowTransitionError)) throw error;
+          }
+        } else await blockTaskWorkflow(deps, taskId, workflow.revision, reason);
+      }
       return { nothingRunning: false };
     },
 

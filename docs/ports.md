@@ -618,4 +618,6 @@ claim, and the single merge path that re-reads the code host and merges at the c
 - **Seams the neighbouring lanes fill** (`seams.ts`): the task record (`MergeTask`, read by `MergeHost.loadTask`), the session timeline (`SessionTimeline`), the milestone hook
   (`CodeMilestones`), the session bindings, the project's code settings (`CodeSettingsReader`; Code's default has self-approval ON, one owner), the reverse link from a change request
   to its task, and `MergePeople` (who a person is on the code host). Cloud's members, its track record and its reviewer reminders plug into the same seams and hooks.
+  `CodeMilestones` is filled by `core/milestones`: the items are Cloud's `CODE_MILESTONE#<kind>#<n>` rows (with the sweep's due-time attributes under `CODE_MILESTONE`) and a session line, committed with the change; `register` takes the handlers an adapter
+  supplies, `deliver` tells them after the commit and `deliverDue` (the app's timer) tells again one that failed, at most 5 times (the per-handler `tries_`, `done_` and `lease_` attributes are Cloud's). It needs the dispatch rows' `workflow-dispatch-due` index.
 - **Keys are Cloud's** (`mergeTrackingKey`, `prHeadKey`, `mergeCommitIndexKey`, the task's own partition), so Cloud consumes the same layout with no migration.

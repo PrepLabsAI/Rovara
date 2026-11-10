@@ -7,6 +7,7 @@
 // operation id. The consumer therefore only moves an operation forward and never undoes a state a result has set.
 import {
   AGENTX_PROTOCOL_VERSION,
+  AGENT_WORKER_OUTDATED,
   AgentXError,
   MachineError,
   WorkerInvocationSchema,
@@ -18,7 +19,9 @@ import {
   type Queue,
   type ReceivedMessage,
   type WorkerInvocation,
+  type WorkflowDependencyInvocation,
 } from "@agentx/contracts";
+import { serialWorkerCanResume } from "../work-breakdown/parallel-parts.js";
 import { CallbackCapabilities, type CallbackAction } from "../../callbacks.js";
 import { admit, releaseAdmission } from "./admission.js";
 import type { DispatchMessage } from "./accept.js";
@@ -154,7 +157,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // The claim: in one transaction, the workspace is still held by this operation at its fence and is not closing, and the operation is handed over.
     // Nothing is issued to the worker (no grant, no capability) before it applies.
     if (!(await claimDispatch(deps, operation, handle.machineId))) return abandon(deps, queue, message, operation, handle.machineId, reservationId ?? workspace.machineReservationId);
-    const invocation = await buildInvocation(deps, operation, workspace);
+    const invocation = await buildInvocation(deps, operation, workspace, health.features);
     if (typeof invocation === "string") return endAndAck("FAILED", invocation);
     await deps.machines.deliver(handle.machineId, invocation);
     await queue.ack(message.receiptHandle);
@@ -208,7 +211,7 @@ async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessag
 }
 
 /** Builds the worker's invocation, or a sentence saying why this operation cannot be sent to this worker. */
-async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord): Promise<WorkerInvocation | string> {
+async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, features: readonly string[]): Promise<WorkerInvocation | string> {
   const spec = operation.dispatch;
   const secret = Buffer.from(deps.callbackSigningKey);
   const modelRoute = spec.kind === "task" ? await deps.modelAccess?.route() : undefined;
@@ -217,6 +220,15 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
   let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }) };
+  // An approved plan's parts for a worker that does not list "task.workflowParallelParts": it would reject the `parallel` setting, and it builds the parts one after another, which the checkpoint rules accept and which
+  // costs no more (only time). The setting is the one field of an ordered run that is withheld rather than refused, and only when the older worker can take over the retained progress; otherwise the run is refused.
+  const ordered = spec.kind === "task" ? payload["workflowDependencies"] as WorkflowDependencyInvocation | undefined : undefined;
+  if (ordered?.parallel !== undefined && !features.includes("task.workflowParallelParts")) {
+    if (!serialWorkerCanResume(ordered)) return AGENT_WORKER_OUTDATED;
+    const { parallel: _parallel, ...serial } = ordered;
+    void _parallel;
+    payload = { ...payload, workflowDependencies: serial };
+  }
   // The worker's copy of the project can refuse (an external check nothing runs): that is a failed operation with its sentence, never an uncaught throw that redelivers until the attempts run out (review M2).
   const toWorker = <D extends object>(definition: D): ReturnType<typeof workerProjectDefinition<D>> | string => {
     try {

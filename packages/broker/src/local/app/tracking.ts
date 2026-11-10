@@ -13,14 +13,15 @@
 //
 // Decision 51: nothing here names a provider; the code host is whatever the repository's record names, and a host that cannot read a merge (`mergeObservation`) is simply never seen merged.
 import {
-  blockWorkflow, CodeMilestoneSchema, CODE_MILESTONES_BEFORE_PR, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, codeMilestoneKey, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, sessionEventId, when,
-  type CodeMilestone, type OrgId, type ReadBudget, type RegistryView, type StoredDocument, type TransactItem,
+  blockWorkflow, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, when,
+  type OrgId, type ReadBudget, type RegistryView, type TransactItem,
 } from "@agentx/contracts";
 import { SWEEP_INTERVAL_MS, type MergeRecoveryResult } from "../../core/merge/budget.js";
 import { fixedCodeSettings } from "../../core/merge/defaults.js";
 import { changeRequestRef } from "../../core/merge/host-port.js";
 import { storeLinkedChangeRequests } from "../../core/merge/linked.js";
 import { mergedMilestoneItems, mergedStateItems } from "../../core/merge/merged.js";
+import { createDocumentMilestones, type DocumentMilestones } from "../../core/milestones/milestones.js";
 import { reconcileTrackingTask, type MergeTrackingDependencies, type TrackingReconcileDependencies } from "../../core/merge/merge-tracking.js";
 import { soleOwnerPeople } from "../../core/merge/people.js";
 import { registryRepositoryResolver } from "../../core/merge/resolver.js";
@@ -45,8 +46,6 @@ export const SWEEP_MAX_MS = 20_000;
 /** What the task says when its pull request ended at a head Rovara did not check. */
 export const MERGED_OUTSIDE = "The pull request was merged with commits Rovara did not check, so this is not a merge of the code Rovara checked. Look at what was merged, then close this task.";
 export const CLOSED_OUTSIDE = "The pull request was closed on the code host with commits Rovara did not check. Look at it there, then close this task.";
-/** A milestone is kept this long after it happened. */
-const MILESTONE_RETENTION_SECONDS = 30 * 86_400;
 
 type Log = (entry: Record<string, unknown>) => void;
 
@@ -59,36 +58,14 @@ export function sessionTimeline(): SessionTimeline {
   };
 }
 
-/** Whether a milestone of this kind is written for a task of this definition version (before the pull request only for 1.1.0, as in Cloud). */
-function writtenFor(kind: CodeMilestone["kind"], definitionVersion: string): boolean {
-  return definitionVersion !== "1.0.0" || !CODE_MILESTONES_BEFORE_PR.includes(kind);
-}
-
 /**
- * The milestone hook for a laptop: the items of one milestone are a row in the task's partition (written only if absent, so a repeat of the same occurrence adds nothing) and a line on the task's session. There is
- * no one to tell on a laptop but the owner at the page, and the session carries the line there; `deliver` has no outside handlers (a `channel` adapter reads the session's change, `core/notify`).
+ * The milestone hook for a laptop (Cloud's `milestones.ts` on the document store, `core/milestones`): the items of one milestone are a row in the task's partition (written only if absent, so a
+ * repeat of the same occurrence adds nothing) and a line on the task's session, in the transaction of the change that caused it. `deliver` tells the handlers an adapter registered after the commit; none are registered by
+ * default (a `channel` adapter reads the session's change, `core/notify`), and the sweep (`deliverDue`, run by the app's tick) tells again a handler that was not told.
  */
-export function createLocalMilestones(timeline: SessionTimeline = sessionTimeline()): CodeMilestones {
-  return {
-    items(milestone, n, options = {}): TransactItem[] {
-      const clean = CodeMilestoneSchema.parse(milestone);
-      // Fail closed: a milestone before the pull request needs the task's definition version, so a caller that does not say which version the task is does not get to guess.
-      if (options.definitionVersion === undefined && CODE_MILESTONES_BEFORE_PR.includes(clean.kind)) throw new Error(`a ${clean.kind} milestone needs the task's definition version`);
-      if (options.definitionVersion !== undefined && !writtenFor(clean.kind, options.definitionVersion)) return [];
-      const key = codeMilestoneKey(clean.taskId, clean.kind, n);
-      const at = Date.parse(clean.at);
-      const row: StoredDocument = JSON.parse(JSON.stringify({ ...key, entityType: "CODE_MILESTONE", n, ...clean, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(at / 1000) + MILESTONE_RETENTION_SECONDS })) as StoredDocument;
-      const items: TransactItem[] = [{ kind: "put", item: row, condition: when.absent() }];
-      if (clean.sessionId !== undefined) {
-        items.push(timeline.statusLine({ orgId: clean.orgId, sessionId: clean.sessionId }, { eventId: sessionEventIdOf(clean, n), at: clean.at, text: clean.text }));
-      }
-      return items;
-    },
-    async deliver(): Promise<void> { /* nobody else to tell on a laptop */ },
-  };
+export function createLocalMilestones(options: Parameters<typeof createDocumentMilestones>[0]): DocumentMilestones {
+  return createDocumentMilestones(options);
 }
-
-const sessionEventIdOf = (milestone: CodeMilestone, n: number): string => sessionEventId("code_milestone", `${milestone.taskId}\n${milestone.kind}\n${String(n)}`);
 
 // ---- the task as the merge core reads it
 

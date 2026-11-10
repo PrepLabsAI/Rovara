@@ -312,6 +312,24 @@ tails are content-addressed, and the pack is the one object a re-check of the sa
   the proof page shows it only as "reported by the worker, not checked", and it can never lower the risk. A host that cannot list the files leaves the risk high and is asked again. It has a **Lessons used** section that says none were used (lessons are not on this install).
 - **Not done:** the owner's answers to a *structured* plan's decisions. The worker's Plan step saves a Markdown plan here, so there is no structured plan to answer; when one arrives, `approvedCodingPlan` already honours the answers a decision carries.
 
+## Ordered work and parts built side by side (spec 059, Rovara Code v2)
+
+A coding plan can list the pieces of the work and what each waits for (a "work breakdown": 1 to 8 pieces in the task's one repository, at most 12 dependency links). Approving the plan approves its graph: the decision binds the graph's digest,
+read by Rovara from the stored plan the approval's own digest names (every surface that approves gets the same digest, so none can bind a graph the person was not shown), and the engine records the approval. A plan whose graph is invalid,
+names another repository than the one the task is pinned to, is refused at approval. (A task on the older workflow version 1.0.0 would also need an install switch, `workflowDependenciesEnabled` of the task flow; `rovara up` has no setting for it because it only starts tasks on version 1.1.0, so ordered work is always allowed there.)
+
+- **The coding run carries the graph.** `core/build-step/start.ts` sends the worker the graph, the approval it was bound by, the progress cursor and, for a retry, the checkpoints to resume from (`workflowDependencies` in the payload, kept on the operation record). The worker must list `task.workflowDependencies`; one that does not is refused the step.
+- **Parts side by side.** `rovara up` starts tasks on workflow version 1.1.0, so a plan's independent parts are built together on the task's one machine: up to 3 at once, held to the free slots of the owner (`task.charge`: the flow's `limits`, 10 a person and 100 in all by default; the task holds one slot itself). When the room is less than the plan could use, the operation's first timeline line says why ("Running parts one at a time: 10 of 10 of your workspaces are in use."). A worker that does not list `task.workflowParallelParts` is sent the plan without the setting and builds the parts one after another, when it can take over the progress so far; otherwise the step is refused.
+- **Checkpoints are acknowledged before the worker goes on.** Each part's start and end arrives as a `progress` event; `core/work-breakdown/progress.ts` judges it against the approved run (the operation, the sequence number, the item and the tree it starts from; the run's first tree is read from the code host for the base commit the task recorded) and writes it into the task's workflow before the batch is acknowledged. A checkpoint that does not continue the approved run is refused (`CALLBACK_FORBIDDEN`).
+- **The result must be the approved run's.** A successful coding run's `workflowDependenciesResult` must name this operation, graph and approval, hold exactly the acknowledged items in the plan's order and bind the final combined candidate and its tree. Anything else blocks the step (the sentences are in `core/work-breakdown/results.ts`); a coding run of an approved plan that carries no graph is refused too (a CI, conflict or feedback fix is the one run that carries none).
+- **A stopped run is resumed, not repeated.** A run that failed, was lost or was stopped (the owner's Stop) marks every part still running as unknown, written with the block. Retry resumes from the parts acknowledged as built; a send-back runs the whole plan again over the code the workspace holds.
+- **The plan page** (`/plan/<task>`) lists the parts in the order they run and where each stands ("waiting", "being built", "built", "failed", "stopped, will be checked again").
+
+Milestones (`core/milestones`): a milestone ("questions", "plan_ready", "pr_ready", "merged", ...) is a row in the task's partition and a line on its session, written in the change's transaction. After the commit the handlers an adapter registered
+(`app.milestones.register`) are told; one that failed is told again by the timer's sweep, up to 5 times. None is registered by default on a laptop.
+
+**Not part of Rovara Code:** complex work (stacked milestone pull requests, step gates) and a per-company workspace limits setting. The limits are the flow's fixed ones.
+
 ## Not wired yet
 
 - **Merge from `rovara up`.** A person merges a draft pull request on the code host (or with their proof); merge tracking never presses Merge (owner decision 1). The owner's own Merge button on the local page is not built;

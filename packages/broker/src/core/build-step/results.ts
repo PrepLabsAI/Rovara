@@ -2,11 +2,13 @@
 // three modes) written on the document store: each reads what the worker reported against the schemas and the task's own record of where it started, applies the engine's pure transition
 // (`recordWorkflowVerification`, `submitWorkflowReview`) and commits the new workflow, with the dispatch row of the step that follows, in one transaction.
 //
-// Left out on purpose (not part of Code's wave 1): the browser and API checks (E2E), the approved work breakdown (parts built in order or side by side), a custom step sequence (a program), the
+// The approved work breakdown (spec 059: parts built in order or side by side) is read here too (`../work-breakdown/results.ts`): an ordered run's result must be the run the owner approved.
+//
+// Left out on purpose (not part of Code's wave 1): the browser and API checks (E2E), a custom step sequence (a program), the
 // second review by another company, and the design review. A workflow that carries any of them is not one this install starts.
 import {
   CheckReportSchema, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
-  WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, blockWorkflow, createCandidateManifest, endWorkflowCiFixUnrelated, noChangeFindingsFrom, recordWorkflowVerification,
+  WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, WorkflowSnapshotSchema, blockWorkflow, createCandidateManifest, endWorkflowCiFixUnrelated, noChangeFindingsFrom, recordWorkflowVerification,
   submitWorkflowReview, workflowIsReviewOnly, workflowPullRequestTrees, workflowReviewRoles, workflowSelectedChecks,
   type CandidateRepository, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -19,6 +21,7 @@ import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
 import { blockTaskWorkflow, commitWorkflow, runDispatchRow } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
 import { checkCommandCouldNotRun, regressedCheckLabels } from "./check-results.js";
+import { GRAPH_NOT_CARRIED, GRAPH_RESULT_UNUSABLE, graphCandidateProblem, judgeGraphResult, progressAfterStoppedRun } from "../work-breakdown/results.js";
 
 export interface Ended { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }
 
@@ -100,7 +103,11 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
   if (ended.status !== "SUCCEEDED") {
     // A coding run that left the code as it was reports what it found (redacted and bounded again here); it is kept only with that stop.
     const reason = blockReasonOfFailedRun(mode, ended);
-    await commitAndContinue(deps, task, blockWorkflow(workflow, reason, now, { noChangeFindings: noChangeFindingsFrom(reported["noChangeFindings"]) }), now, causeOfEnd(ended));
+    let blocked = blockWorkflow(workflow, reason, now, { noChangeFindings: noChangeFindingsFrom(reported["noChangeFindings"]) });
+    // An ordered run that stopped marks the item it was on as unknown, so a retry resumes only from what was acknowledged as done.
+    const marked = mode === "IMPLEMENT" ? progressAfterStoppedRun(workflow, operation, now) : workflow.workflowDependenciesProgress ?? [];
+    if (marked.length > (workflow.workflowDependenciesProgress ?? []).length) blocked = WorkflowSnapshotSchema.parse({ ...blocked, workflowDependenciesProgress: marked });
+    await commitAndContinue(deps, task, blocked, now, causeOfEnd(ended));
     return;
   }
 
@@ -111,7 +118,16 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
   let detail: string | undefined;
   let regressedChecks: string[] | undefined;
   let next: WorkflowSnapshot;
+  // Ordered work (spec 059): the run's result must be the approved run's, item by item, before any of its code is believed.
+  const judged = mode === "IMPLEMENT" ? judgeGraphResult(operation, workflow, reported) : undefined;
   try {
+    if (judged?.binding !== undefined && (!judged.valid || !judged.complete)) { failure = GRAPH_RESULT_UNUSABLE; throw new Error(failure); }
+    // The one run that may go without a graph is a CI, conflict or feedback fix (the worker protocol forbids a fix to carry one), and then only when the workflow names a different run as carrying the graph.
+    // Every start that carries a binding writes that run's id onto the workflow in the same transaction as the operation, so a fix keeps the first build's id. Any other unbound run still blocks.
+    if (mode === "IMPLEMENT" && judged?.binding === undefined && workflow.workflowDependenciesApproval !== undefined && workflow.stage === "IMPLEMENT"
+      && !(workflow.fixSource !== undefined && workflow.workflowDependenciesOperationId !== undefined && workflow.workflowDependenciesOperationId !== operation.id)) {
+      failure = GRAPH_NOT_CARRIED; throw new Error(failure);
+    }
     if (mode === "CHECKS" && workflow.stage !== "VERIFY") { failure = WORKFLOW_BLOCK_REASONS.checkRetryStale; throw new Error("verification retry stage changed"); }
     if (!checks.success) { failure = WORKFLOW_BLOCK_REASONS.checkReportUnreadable; throw new Error("invalid check report"); }
     // Review only: the approved plan and the project select no check, so "no checks ran" is the expected report. A task with no stored policy is never this.
@@ -130,6 +146,9 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     const expectedRepositories = project.definition.repositories.map((repository) => repository.name).sort();
     const candidate = createCandidateManifest((Array.isArray(reported["workflowCandidateRepositories"]) ? reported["workflowCandidateRepositories"] : []) as CandidateRepository[]);
     const checkedCandidate = createCandidateManifest((Array.isArray(reported["workflowCheckCandidateRepositories"]) ? reported["workflowCheckCandidateRepositories"] : []) as CandidateRepository[]);
+    // The result must bind the final combined candidate: its digest, and the tree of the last item (in parallel, of the last part merged).
+    const graphProblem = judged === undefined ? undefined : graphCandidateProblem(judged, candidate);
+    if (graphProblem !== undefined) { failure = graphProblem; throw new Error(failure); }
     if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositories.join("\n")) { failure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete; throw new Error("candidate repositories are incomplete"); }
     // A rerun of the checks is of the code the task already has: other code under the same checks (the merge of the base the host shows is not the code the worker's workspace holds, say) is not it.
     if (mode === "CHECKS" && workflow.candidate !== undefined && candidate.digest !== workflow.candidate.digest) { failure = CHECKED_OTHER_CODE_REASON; throw new Error("the checks ran on other code than the candidate"); }

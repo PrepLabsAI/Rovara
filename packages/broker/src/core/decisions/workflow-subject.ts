@@ -13,6 +13,7 @@ import {
   IMPLICIT_COMPANY_ID, WorkflowDecisionRequestSchema, WorkflowSnapshotSchema, WorkflowTransitionError, change, decideWorkflow, when,
   type DecisionRisk, type DocumentKey, type DocumentStore, type PolicySubject, type Principal, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../developer/workflow-actions.js";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "./approval-gate.js";
 
 export const WORKFLOW_DOCUMENT_KIND = "workflow-document";
@@ -51,6 +52,11 @@ export interface WorkflowSubjectOptions {
   onDecided?: (context: { taskId: string; task: Record<string, unknown>; before: WorkflowSnapshot; after: WorkflowSnapshot; attempt: DecisionAttempt; approver: Principal; at: string }) => readonly TransactItem[] | Promise<readonly TransactItem[]>;
   /** Whether a verified repository collaborator may decide as a project approver (decision 45.3). Default true. Ignored when `actorFor` is given. */
   collaboratorsMayDecide?: boolean;
+  /**
+   * The work breakdown (spec 059) an approval of the plan waiting now would bind: the graph's digest, read from the stored document the approval's own digest names, or the sentence that refuses the approval
+   * (not enabled, not one pinned repository, an invalid graph). Absent: no breakdown is bound. With it, every surface that approves a plan binds the same graph: the one in the document it approved.
+   */
+  breakdown?: (input: { task: Record<string, unknown>; workflow: WorkflowSnapshot; artifactDigest: string }) => Promise<{ digest?: string | undefined; refusal?: string | undefined }>;
   /** The identity provider whose `owner` is the owner of every task (default: Code's local owner). Ignored when `actorFor` is given. */
   ownerProvider?: string;
   /** The id the engine knows a person by. Default: the local owner decides as the task's owner (a one-developer install owns every task). */
@@ -134,12 +140,28 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       const approver = approvers[0]!;
       const details = (attempt.details ?? {}) as WorkflowDecisionDetails;
       const decision = attempt.outcome === "approve" ? "APPROVE" : attempt.outcome === "reject" ? "REJECT" : "REQUEST_CHANGES";
+      // The work breakdown of the plan being approved (spec 059): derived from the stored document the approval binds by its digest. A digest the surface sent must be that one; a plan with none takes none.
+      let workBreakdownDigest = details.workBreakdownDigest;
+      // A repeat of an approval the workflow already holds keeps the digest it was recorded with, so the engine answers it as the repeat it is.
+      const prior = workflow.decisions.find((entry) => entry.requestId === attempt.requestId);
+      if (attempt.outcome === "approve" && prior?.decision === "APPROVE" && prior.workBreakdownDigest !== undefined) workBreakdownDigest = prior.workBreakdownDigest;
+      else if (attempt.outcome === "approve" && options.breakdown !== undefined && currentDocumentType(workflow) === "plan") {
+        const found = await options.breakdown({ task, workflow, artifactDigest: attempt.seen.artifactDigest });
+        if (found.refusal !== undefined) throw new SubjectRefusal("invalid_outcome", found.refusal);
+        if (found.digest !== undefined) {
+          if (workBreakdownDigest !== undefined && workBreakdownDigest !== found.digest) throw new SubjectRefusal("invalid_outcome", WORKFLOW_BREAKDOWN_REFUSALS.digestChanged);
+          workBreakdownDigest = found.digest;
+        } else if (workBreakdownDigest !== undefined) throw new SubjectRefusal("invalid_outcome", WORKFLOW_BREAKDOWN_REFUSALS.noBreakdown);
+      } else if (options.breakdown === undefined && workBreakdownDigest !== undefined) {
+        // Nothing here can say which graph a plan carries, so a digest a surface sent cannot be checked: it is refused, not passed to the engine as if it were.
+        throw new SubjectRefusal("invalid_outcome", WORKFLOW_BREAKDOWN_REFUSALS.digestChanged);
+      }
       const request = WorkflowDecisionRequestSchema.safeParse({
         requestId: attempt.requestId, expectedRevision: attempt.seen.revision, decision, artifactDigest: attempt.seen.artifactDigest,
         reason: attempt.reason ?? (decision === "APPROVE" ? "Approved." : decision === "REJECT" ? "Rejected." : "Changes requested."),
         ...(details.answers === undefined ? {} : { answers: details.answers }), ...(details.includedCommentIds === undefined ? {} : { includedCommentIds: details.includedCommentIds }),
         ...(details.selectedOptionalCheckIds === undefined ? {} : { selectedOptionalCheckIds: details.selectedOptionalCheckIds }),
-        ...(details.workBreakdownDigest === undefined ? {} : { workBreakdownDigest: details.workBreakdownDigest }),
+        ...(workBreakdownDigest === undefined ? {} : { workBreakdownDigest }),
         ...(details.closeAsAnswered === undefined ? {} : { closeAsAnswered: details.closeAsAnswered }),
         ...(details.acknowledgedRunLimitUsd === undefined ? {} : { acknowledgedRunLimitUsd: details.acknowledgedRunLimitUsd }),
       });
@@ -149,7 +171,7 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
         after = decideWorkflow(workflow, request.data, actor, {
           now: at, allowedSkipStages: [], ...(details.via === undefined ? {} : { via: details.via }),
           ...(details.planDecisions === undefined ? {} : { decisions: details.planDecisions }),
-          ...(details.workBreakdownDigest === undefined ? {} : { workBreakdownDigest: details.workBreakdownDigest }),
+          ...(workBreakdownDigest === undefined ? {} : { workBreakdownDigest }),
           ...(details.noChangeNeeded === undefined ? {} : { noChangeNeeded: details.noChangeNeeded as never }),
         });
       } catch (error) {

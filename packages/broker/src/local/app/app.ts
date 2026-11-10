@@ -20,6 +20,7 @@ import { createWorkflowDocumentSubject, currentDocumentType } from "../../core/d
 import type { LocalPageSessions } from "../../core/local-pages/guard.js";
 import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-pages/server.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
+import { breakdownForApproval } from "../../core/work-breakdown/plan-graph.js";
 import { gradePlanRisk } from "../../core/decisions/plan-risk.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { WorkflowArtifactSchema } from "@agentx/contracts";
@@ -48,6 +49,7 @@ import { createCallbackHandler } from "./callbacks.js";
 import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
+import type { DocumentMilestones } from "../../core/milestones/milestones.js";
 import { createTaskFactsSource } from "./facts.js";
 import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
@@ -100,6 +102,8 @@ export interface LocalApp {
   readonly evidence: LocalEvidence;
   /** Pull request comment commands on this laptop: polled, fetched by the code host and checked by the core (lane L12, decision 66). */
   readonly comments: LocalComments;
+  /** The milestone hook: an adapter (chat, tracker, outbound events) registers a handler that is told each milestone after its commit, and again by the sweep when it failed. */
+  readonly milestones: Pick<DocumentMilestones, "register" | "deliverDue">;
   /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
   readonly modelGrants: ModelGrantSource;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
@@ -166,7 +170,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const clock = (): Date => options.now?.() ?? new Date();
   // Lane L12: the milestones ("fixing", "stuck", "ready") are rows and lines on the task's session, written in the transaction of the change that caused them.
   const timeline = sessionTimeline();
-  const milestones = createLocalMilestones(timeline);
+  // The milestone hook: rows and session lines in the change's transaction, delivered after the commit to the handlers an adapter registered (`app.milestones.register`); none by default.
+  const milestones = createLocalMilestones({ store, now: () => clock().getTime(), log: (event, fields) => log({ component: "milestones", event, ...fields }) });
 
   const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
 
@@ -240,6 +245,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
         const estimate = (task["runEstimate"] as { highUsd?: unknown } | undefined)?.highUsd;
         return gradePlanRisk({ loaded, workflow, requestText: typeof task["requestText"] === "string" ? task["requestText"] : undefined, ...(typeof estimate === "number" ? { costHighUsd: estimate } : {}) });
       },
+      // A plan with a work breakdown (spec 059) is approved WITH its graph: every surface that approves binds the graph in the stored document the approval's digest names.
+      breakdown: ({ task, workflow, artifactDigest }) => breakdownForApproval(flow.deps, { taskId: String(task["taskId"]), project: String(task["project"]), startingRevision: Number(task["startingRevision"]) }, workflow, artifactDigest),
       onDecided: ({ taskId, before, after, attempt, at }) => {
         // The plan was approved: coding starts with no one asking, as a row like every automatic step.
         if (after.stage === "IMPLEMENT" && after.state === "READY" && before.stage !== "IMPLEMENT") return [dispatchRowItem(flow.deps, taskId, after.revision, "IMPLEMENT", at)];
@@ -275,6 +282,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await flow.relayOnce().catch(logFailure("local_app.relay_failed"));
     await flow.dispatchOnce({ maxMessages: 10 }).catch(logFailure("local_app.dispatch_failed"));
     await flow.sweepOnce().catch(logFailure("local_app.sweep_failed"));
+    await milestones.deliverDue().catch(logFailure("local_app.milestones_failed"));
     await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
   };
   // Reading pull requests asks the code host over the network and may take seconds, so the timer runs it apart from the dispatch (a slow host never holds a step back); a test's `tick()` runs both in order.
@@ -303,7 +311,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants,
+    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants, milestones,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,
