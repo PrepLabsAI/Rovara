@@ -846,7 +846,7 @@ describe("versions (FR-048, R23, ruling S1)", () => {
     const mcp = await connect({ projects }, { compatibility: async () => ({ env: "staging", apiVersion: "1.2", notice: "a newer AgentX CLI is available" }), adminSignedIn: async () => true });
     const result = await mcp.callTool({ name: "agentx_whoami", arguments: {} });
     expect(result.structuredContent).toEqual({
-      environment: "staging", developer_name: "Maya Chen", sign_in_method: "slack", slack_user: "U0MAYA001", admin: true,
+      environment: "staging", developer_name: "Maya Chen", sign_in_method: "slack", channel_user: "U0MAYA001", slack_user: "U0MAYA001", admin: true,
       server_version: "0.4.0", control_plane_api_version: "1.2", upgrade_notice: "a newer AgentX CLI is available",
     });
     expect(text(result)).toContain("admin sign-in");

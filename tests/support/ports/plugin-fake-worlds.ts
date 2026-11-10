@@ -9,7 +9,7 @@ import type { TrackerWorld } from "./tracker-conformance.js";
 
 export const REPO_URL = "https://git.example.test/acme/app";
 export const OTHER_URL = "https://git.example.test/acme/other";
-export const SCOPE = { system: "private-install" } as const;
+export const SCOPE = { system: "install" } as const;
 
 export const newModel = () => new FakeHostModel({ url: REPO_URL, id: "4242", fullName: "acme/app" });
 

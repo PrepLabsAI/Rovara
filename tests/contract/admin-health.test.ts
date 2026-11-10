@@ -30,6 +30,10 @@ describe("GET /v1/admin/health (FR-030, A13)", () => {
       alarmsCheck: { status: "warn", detail: "1 alarm in ALARM" },
       deadLetterQueues: [{ name: "dispatch", depth: 0 }, { name: "slack-requests", depth: 2 }],
       deadLetterQueuesCheck: { status: "warn", detail: "1 queue holds messages" },
+      plugins: [
+        { point: "channel", name: "slack", status: "ok", detail: "the bot token works for team T0BSHLLUGBD" },
+        { point: "code-host", name: "github", status: "ok", detail: "installed on 1 account" },
+      ],
       slack: { status: "ok", detail: "the bot token works for team T0BSHLLUGBD" },
       github: { status: "ok", detail: "installed on 1 account" },
       workerModes: [{ mode: "ec2-ebs", configured: true, latestDispatchFailure: { at, operationId: "11111111-1111-4111-8111-111111111111", error: "RUNTIME_UNAVAILABLE: no capacity" } }],

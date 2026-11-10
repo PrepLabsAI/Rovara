@@ -127,6 +127,9 @@ export async function adminHealth(deps: AdminReadDependencies, identity: Authent
   const [alarms, deadLetterQueues, slack, github, state] = await Promise.all([alarmsPart(), queuesPart(), slackPart(), githubPart(), statePart()]);
   return {
     version: { developerApi: DEVELOPER_API_VERSION, adminApi: ADMIN_API_VERSION, ...(probes.release === undefined ? {} : { release: probes.release }) },
-    ...alarms, ...deadLetterQueues, slack, github, ...state,
+    ...alarms, ...deadLetterQueues,
+    // H3: the plug-in rows are the answer; `slack` and `github` stay one release for clients that read them.
+    plugins: [{ point: "channel", name: "slack", ...slack }, { point: "code-host", name: "github", ...github }],
+    slack, github, ...state,
   };
 }

@@ -19,7 +19,7 @@ const OTHER_TASK = "00000000-0000-4000-8000-0000000000b2";
 const MERGE = "1".repeat(40);
 const URL7 = "https://github.com/acme/payments/pull/7";
 const REPO: RepositoryRef = { url: "https://github.com/acme/payments" };
-const SCOPE = { system: "private-install" } as const;
+const SCOPE = { system: "install" } as const;
 const NOW = "2026-11-09T12:00:00.000Z";
 
 describe("the neutral identity of a repository", () => {

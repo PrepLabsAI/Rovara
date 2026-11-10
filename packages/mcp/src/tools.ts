@@ -109,7 +109,7 @@ const TaskShape = {
   share_reason: z.string().optional(), share_mode_reason: z.string().optional(),
   channel: z.object({ id: z.string(), name: z.string().optional() }).optional(),
   thread_url: z.string().optional(), share_posting: z.boolean().optional(), share_post_failed: z.boolean().optional(),
-  channel_turns: z.array(z.object({ author: z.string(), slack_user: z.string(), at: z.string(), request: z.string(), outcome: z.string() })).optional(),
+  channel_turns: z.array(z.object({ author: z.string(), channel_user: z.string(), slack_user: z.string().describe("deprecated, the same as channel_user; removed after one release"), at: z.string(), request: z.string(), outcome: z.string() })).optional(),
   closing: z.boolean().optional(), created_at: z.string(), updated_at: z.string().describe("when the latest request on this task started; share changes do not move it"),
   events: z.array(z.object({ at: z.string(), kind: z.string(), text: z.string() })),
   summary: z.string().optional(),
@@ -206,7 +206,7 @@ function taskOutput(shown: DeveloperTaskClientView, timedOut?: boolean): Record<
     }),
     ...(task.channelTurns === undefined ? {} : {
       // Final review M7: a teammate's display name is marked inert, as TASK_BUSY marks it.
-      channel_turns: task.channelTurns.map((turn) => ({ author: turn.author.name === undefined ? turn.author.slackUserId : inertName(turn.author.name), slack_user: turn.author.slackUserId, at: turn.at, request: turn.request, outcome: turn.outcome })),
+      channel_turns: task.channelTurns.map((turn) => ({ author: turn.author.name === undefined ? turn.author.slackUserId : inertName(turn.author.name), channel_user: turn.author.slackUserId, slack_user: turn.author.slackUserId, at: turn.at, request: turn.request, outcome: turn.outcome })),
     }),
     ...(task.closing === true ? { closing: true } : {}),
     created_at: task.createdAt, updated_at: task.updatedAt, events: task.events,
@@ -475,11 +475,28 @@ export function requestIdFor(context: ToolContext, call: ToolCall, input: Record
 }
 const optional = (value: unknown) => value ?? null;
 /**
+ * H3: how a start says "post the task in the project's chat channel". The neutral field is `channel`: true posts it in the project's channel, false does not, and a name or ID
+ * picks which bound channel (a name alone never starts a share; it is read as before). `share_to_channel` is the older boolean, still read for one release; a start that gives both
+ * must give the same answer. The same answer under either spelling is the same start (it hashes alike).
+ */
+const shareFields = (input: Record<string, unknown>): { shareToChannel?: boolean; channel?: string } => {
+  const channel = input.channel as boolean | string | undefined;
+  const older = input.share_to_channel as boolean | undefined;
+  if (typeof channel === "boolean") {
+    if (older !== undefined && older !== channel) throw new ToolError("INVALID_REQUEST", "channel and share_to_channel disagree: give channel only (share_to_channel is the older name for channel: true or false)");
+    return { shareToChannel: channel };
+  }
+  return { ...(older === undefined ? {} : { shareToChannel: older }), ...(channel === undefined ? {} : { channel }) };
+};
+const channelInput = z.union([z.boolean(), z.string().min(1).max(80)]).optional().describe(
+  "post the task in the project's chat channel: true to share it there, false (the default) to keep it private; or the name or ID of the bound channel to use when the project has several (a name alone does not start a share: also give true)",
+);
+/**
  * Review M9: what makes a start the same start, for agentx_start and its aliases alike, so a retry under another of the start tools' names is the same start (never a second task).
  * `workflowPath` is QUICK, FULL or absent; an agent run is told apart by its own content.
  */
 const startContent = (input: Record<string, unknown>, text: string, workflowPath: "QUICK" | "FULL" | undefined): readonly unknown[] =>
-  ["agentx_start", input.project, text, optional(workflowPath), optional(input.title), optional(input.share_to_channel), optional(input.share_mode), optional(input.channel), optional(input.agent), optional(input.input)];
+  ["agentx_start", input.project, text, optional(workflowPath), optional(input.title), optional(shareFields(input).shareToChannel), optional(input.share_mode), optional(shareFields(input).channel), optional(input.agent), optional(input.input)];
 const agentRunContent = (agentId: unknown, project: unknown, text: string, context: unknown, version: unknown): readonly unknown[] =>
   ["agentx_start", "run_agent", agentId, project, text, optional(context), optional(version)];
 /** Issue 196: the statuses a cancel answers with only when the task had already finished. */
@@ -602,10 +619,10 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_whoami",
     title: "Who am I in AgentX",
     description:
-      "Shows which AgentX environment this computer is signed in to and as whom: your name, how you signed in, your linked Slack user, whether this computer also holds an unexpired admin sign-in, and the server and AgentX API versions, with a notice when a newer AgentX CLI is available. Use it to check the setup, or when another AgentX tool says to sign in or upgrade.",
+      "Shows which AgentX environment this computer is signed in to and as whom: your name, how you signed in, your linked chat user (channel_user), whether this computer also holds an unexpired admin sign-in, and the server and AgentX API versions, with a notice when a newer AgentX CLI is available. Use it to check the setup, or when another AgentX tool says to sign in or upgrade.",
     inputSchema: {},
     outputSchema: {
-      environment: z.string(), developer_name: z.string(), sign_in_method: z.string(), slack_user: z.string().optional(), admin: z.boolean(),
+      environment: z.string(), developer_name: z.string(), sign_in_method: z.string(), channel_user: z.string().optional(), slack_user: z.string().optional().describe("deprecated, the same as channel_user; removed after one release"), admin: z.boolean(),
       server_version: z.string(), control_plane_api_version: z.string(), upgrade_notice: z.string().optional(),
     },
     async handler(context) {
@@ -615,7 +632,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       return {
         structured: {
           environment: compatibility.env, developer_name: developer.name, sign_in_method: developer.provider,
-          ...(developer.slackUserId === undefined ? {} : { slack_user: developer.slackUserId }), admin,
+          ...(developer.slackUserId === undefined ? {} : { channel_user: developer.slackUserId, slack_user: developer.slackUserId }), admin,
           server_version: context.serverVersion, control_plane_api_version: compatibility.apiVersion,
           ...(compatibility.notice === undefined ? {} : { upgrade_notice: compatibility.notice }),
         },
@@ -671,9 +688,9 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       agent: agentInput,
       run_agent: z.boolean().optional().describe("start an agent run of agent (needs agent) instead of a task; false by default"),
       input: runInputInput,
-      share_to_channel: z.boolean().optional().describe("post the task in the project's Slack channel; false by default"),
+      channel: channelInput,
+      share_to_channel: z.boolean().optional().describe("deprecated, the same as channel: true or false; removed after one release"),
       share_mode: z.enum(["view", "continue"]).optional(),
-      channel: z.string().min(1).max(80).optional().describe("which bound channel to share in, by name or ID; needed only when the project has several"),
       wait_seconds: waitInput(0).optional().describe("seconds to wait for the task to end, 0 to 600; 0 (answer at once) by default"),
       request_id: requestIdInput,
     },
@@ -702,9 +719,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
         ...(workflowPath === undefined ? {} : { workflow: true as const, workflowPath }),
         ...(input.title === undefined ? {} : { title: input.title as string }),
         ...(context.clientName === undefined ? {} : { client: context.clientName.slice(0, 200) }),
-        ...(input.share_to_channel === undefined ? {} : { shareToChannel: input.share_to_channel as boolean }),
+        ...shareFields(input),
         ...(input.share_mode === undefined ? {} : { shareMode: input.share_mode as "view" | "continue" }),
-        ...(input.channel === undefined ? {} : { channel: input.channel as string }),
       });
       return afterAction(context, call, "agentx_start", task, wait, id);
     },
@@ -718,9 +734,9 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       project: z.string().min(1).max(200).describe("the project's exact name, from agentx_list_projects"),
       instructions: instructionsInput,
       title: z.string().max(120).optional().describe("a short title, at most 120 characters; the first line of the instructions when left out"),
-      share_to_channel: z.boolean().optional().describe("post the task in the project's Slack channel, where AgentX replies as it runs; false by default"),
+      channel: channelInput,
+      share_to_channel: z.boolean().optional().describe("deprecated, the same as channel: true or false; removed after one release"),
       share_mode: z.enum(["view", "continue"]).optional().describe("view (the channel watches) or continue (channel members may mention AgentX in the thread to steer the task); the project's default when left out, and view when the project does not allow continue"),
-      channel: z.string().min(1).max(80).optional().describe("which bound channel to share in, by name or ID; needed only when the project has several"),
       agent: agentInput,
       input: runInputInput,
       wait_seconds: waitInput(0).optional().describe("seconds to wait for the task to end, 0 to 600; 0 (answer at once) by default"),
@@ -739,9 +755,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
         ...(input.title === undefined ? {} : { title: input.title as string }),
         // R25: sent as it came; the broker maps it to one of four fixed names.
         ...(context.clientName === undefined ? {} : { client: context.clientName.slice(0, 200) }),
-        ...(input.share_to_channel === undefined ? {} : { shareToChannel: input.share_to_channel as boolean }),
+        ...shareFields(input),
         ...(input.share_mode === undefined ? {} : { shareMode: input.share_mode as "view" | "continue" }),
-        ...(input.channel === undefined ? {} : { channel: input.channel as string }),
       });
       return afterAction(context, call, "agentx_start_task", task, (input.wait_seconds as number | undefined) ?? 0, id);
     },
@@ -754,9 +769,9 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       project: z.string().min(1).max(200).describe("the project's exact name, from agentx_list_projects"),
       instructions: instructionsInput,
       title: z.string().max(120).optional(),
-      share_to_channel: z.boolean().optional(),
+      channel: channelInput,
+      share_to_channel: z.boolean().optional().describe("deprecated, the same as channel: true or false; removed after one release"),
       share_mode: z.enum(["view", "continue"]).optional(),
-      channel: z.string().min(1).max(80).optional(),
       workflow_path: z.enum(["quick", "full"]).describe("required approval sequence: quick asks once for the coding plan; full asks separately for requirements, design, and coding steps"),
       agent: agentInput,
       input: runInputInput,
@@ -773,9 +788,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
         requestId: id, project: input.project as string, instructions: text, workflow: true, workflowPath,
         ...(input.title === undefined ? {} : { title: input.title as string }),
         ...(context.clientName === undefined ? {} : { client: context.clientName.slice(0, 200) }),
-        ...(input.share_to_channel === undefined ? {} : { shareToChannel: input.share_to_channel as boolean }),
+        ...shareFields(input),
         ...(input.share_mode === undefined ? {} : { shareMode: input.share_mode as "view" | "continue" }),
-        ...(input.channel === undefined ? {} : { channel: input.channel as string }),
       });
       return afterAction(context, call, "agentx_start_workflow", task, (input.wait_seconds as number | undefined) ?? 0, id);
     },
@@ -1208,9 +1222,9 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
   },
   {
     name: "agentx_share_task",
-    title: "Share an AgentX task to its Slack channel",
+    title: "Share an AgentX task to its chat channel",
     description:
-      `Shares one of your tasks to its project's Slack channel, or changes how a shared task is shared. view lets the channel watch while you drive the task from here; continue also lets channel members mention AgentX in the thread to steer it, one request at a time. On a shared task it changes the mode, within the project's policy; the channel cannot change. Answers at once: AgentX posts the thread within seconds, and agentx_get_task then shows its link. Switching to view makes channel messages that are still waiting get a notice instead of running. ${RETRY}.`,
+      `Shares one of your tasks to its project's chat channel, or changes how a shared task is shared. view lets the channel watch while you drive the task from here; continue also lets channel members mention AgentX in the thread to steer it, one request at a time. On a shared task it changes the mode, within the project's policy; the channel cannot change. Answers at once: AgentX posts the thread within seconds, and agentx_get_task then shows its link. Switching to view makes channel messages that are still waiting get a notice instead of running. ${RETRY}.`,
     inputSchema: {
       task_id: taskIdInput,
       share_mode: z.enum(["view", "continue"]).optional().describe("view or continue; for a new share, the project's default when left out"),

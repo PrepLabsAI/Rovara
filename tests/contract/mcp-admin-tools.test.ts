@@ -116,6 +116,23 @@ describe("the admin read tools (FR-030)", () => {
     expect(olderResult.structuredContent).not.toHaveProperty("dead_letter_queues_check");
   });
 
+  it("lists the plug-ins as rows, keeps slack and github one release, and builds rows from an older answer (item H3)", async () => {
+    const base = {
+      version: { developerApi: "1.2", adminApi: "1.0" }, alarms: [], alarmsCheck: { status: "ok" as const }, deadLetterQueues: [],
+      workerModes: [], workspaces: {}, workspacesTruncated: false,
+    };
+    const rows = [{ point: "channel", name: "teams", status: "ok" as const }, { point: "code-host", name: "gitlab", status: "failed" as const, detail: "token refused" }];
+    const neutral = await (await connect({ health: async () => ({ ...base, plugins: rows }) })).callTool({ name: "agentx_admin_health", arguments: {} });
+    expect(neutral.structuredContent).toMatchObject({ plugins: rows });
+    expect(neutral.structuredContent).not.toHaveProperty("slack");
+    expect(JSON.stringify(neutral.content)).toContain("Plug-ins: teams ok, gitlab failed.");
+    const older = await (await connect({ health: async () => ({ ...base, slack: { status: "ok" as const }, github: { status: "warn" as const, detail: "no installs" } }) })).callTool({ name: "agentx_admin_health", arguments: {} });
+    expect(older.structuredContent).toMatchObject({
+      plugins: [{ point: "channel", name: "slack", status: "ok" }, { point: "code-host", name: "github", status: "warn", detail: "no installs" }],
+      slack: { status: "ok" }, github: { status: "warn" },
+    });
+  });
+
   it("names missing alarms in the text beside firing ones, never only \"none firing\" (issue 206)", async () => {
     const health = {
       version: { developerApi: "1.2", adminApi: "1.0" },

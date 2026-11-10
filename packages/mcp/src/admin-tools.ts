@@ -4,7 +4,7 @@
 // the server's redaction and caps (FR-029, A16).
 import {
   ADMIN_FAILURES_DEFAULT_LIMIT, ADMIN_LIST_MAX, ADMIN_WORKSPACES_DEFAULT_LIMIT, AdminUsageGroupBySchema, MISSING_ALARM_STATE, WorkspaceStatusSchema, inertName,
-  type AdminRequester, type AdminUsageGroupBy,
+  type AdminHealthResponse, type AdminRequester, type AdminUsageGroupBy,
 } from "@agentx/contracts";
 import { z } from "zod";
 import { ADMIN_SIGN_IN_STEP, type AdminControlPlaneClient } from "./admin-client.js";
@@ -31,6 +31,15 @@ function secretNameOf(secretName: string): string {
   return SECRET_ARN.exec(secretName)?.[1] ?? secretName;
 }
 
+/** H3: the plug-in rows of a health answer. An older control plane sends `slack` and `github` only; they become the chat and code-host rows. */
+function pluginHealth(health: AdminHealthResponse): ReadonlyArray<{ point: string; name: string; status: string; detail?: string | undefined }> {
+  if (health.plugins !== undefined) return health.plugins;
+  return [
+    ...(health.slack === undefined ? [] : [{ point: "channel", name: "slack", ...health.slack }]),
+    ...(health.github === undefined ? [] : [{ point: "code-host", name: "github", ...health.github }]),
+  ];
+}
+
 function requesterText(requester: AdminRequester): string {
   if (requester.kind === "slack") return `Slack member ${requester.userId}`;
   if (requester.kind === "developer") return `${requester.name === undefined ? requester.developerId.slice(0, 12) : inertName(requester.name)} (developer)`;
@@ -41,7 +50,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_admin_health",
     title: "Check AgentX health",
-    description: "Shows whether AgentX is healthy: the API versions, the environment's alarms and their states, dead-letter queue depths, whether the Slack bot token and the GitHub App work, the worker mode and its latest dispatch failure, and open workspaces by status. Use it first when something seems wrong; then look at agentx_admin_failed_tasks for what failed.",
+    description: "Shows whether AgentX is healthy: the API versions, the environment's alarms and their states, dead-letter queue depths, whether each installed plug-in (chat tool, code host) works, the worker mode and its latest dispatch failure, and open workspaces by status. Use it first when something seems wrong; then look at agentx_admin_failed_tasks for what failed.",
     inputSchema: {},
     outputSchema: {
       version: z.object({ developer_api: z.string(), admin_api: z.string(), release: z.string().optional() }),
@@ -49,7 +58,9 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
       dead_letter_queues: z.array(z.object({ name: z.string(), depth: z.number().nullable() })),
       // Ruling R18: the queues' own check; absent from an older control plane's answer.
       dead_letter_queues_check: z.object({ status: z.string(), detail: z.string().optional() }).optional(),
-      slack: z.object({ status: z.string(), detail: z.string().optional() }), github: z.object({ status: z.string(), detail: z.string().optional() }),
+      plugins: z.array(z.object({ point: z.string(), name: z.string(), status: z.string(), detail: z.string().optional() })).describe("one row per installed plug-in: the plug-in point (channel, code-host), its name, and whether it works"),
+      // Deprecated for one release (use plugins): the chat and code-host rows under their old names.
+      slack: z.object({ status: z.string(), detail: z.string().optional() }).optional(), github: z.object({ status: z.string(), detail: z.string().optional() }).optional(),
       worker_modes: z.array(z.object({ mode: z.string(), configured: z.boolean(), latest_dispatch_failure: z.object({ at: z.string(), operation_id: z.string(), error: z.string() }).optional() })),
       workspaces: z.record(z.string(), z.number()), workspaces_truncated: z.boolean(),
     },
@@ -63,11 +74,12 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
           version: given({ developer_api: health.version.developerApi, admin_api: health.version.adminApi, release: health.version.release }),
           alarms: health.alarms, alarms_check: health.alarmsCheck, dead_letter_queues: health.deadLetterQueues,
           ...(health.deadLetterQueuesCheck === undefined ? {} : { dead_letter_queues_check: health.deadLetterQueuesCheck }),
-          slack: health.slack, github: health.github,
+          plugins: pluginHealth(health).map(given),
+          ...(health.slack === undefined ? {} : { slack: health.slack }), ...(health.github === undefined ? {} : { github: health.github }),
           worker_modes: health.workerModes.map((mode) => given({ mode: mode.mode, configured: mode.configured, latest_dispatch_failure: mode.latestDispatchFailure === undefined ? undefined : { at: mode.latestDispatchFailure.at, operation_id: mode.latestDispatchFailure.operationId, error: mode.latestDispatchFailure.error } })),
           workspaces: health.workspaces, workspaces_truncated: health.workspacesTruncated,
         },
-        text: `AgentX API ${health.version.developerApi}, admin API ${health.version.adminApi}. Alarms: ${firing.length === 0 ? "none firing" : `in ALARM: ${firing.join(", ")}`}${missing.length === 0 ? "" : `; missing: ${missing.join(", ")}`}. Dead-letter queues: ${health.deadLetterQueuesCheck?.status ?? "not reported by this AgentX"}. Slack: ${health.slack.status}. GitHub App: ${health.github.status}. Open workspaces: ${Object.entries(health.workspaces).map(([status, count]) => `${status} ${count}`).join(", ") || "none"}.`,
+        text: `AgentX API ${health.version.developerApi}, admin API ${health.version.adminApi}. Alarms: ${firing.length === 0 ? "none firing" : `in ALARM: ${firing.join(", ")}`}${missing.length === 0 ? "" : `; missing: ${missing.join(", ")}`}. Dead-letter queues: ${health.deadLetterQueuesCheck?.status ?? "not reported by this AgentX"}. Plug-ins: ${pluginHealth(health).map((row) => `${row.name} ${row.status}`).join(", ") || "none reported"}. Open workspaces: ${Object.entries(health.workspaces).map(([status, count]) => `${status} ${count}`).join(", ") || "none"}.`,
       };
     },
   },

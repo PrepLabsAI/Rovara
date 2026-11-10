@@ -436,7 +436,7 @@ export const githubClientChecks: readonly GitHubClientConformanceCheck[] = [
       world.net.clear();
       const expected = { installationId: world.installationId, repositoryId: world.repositoryId };
       for (const page of [0, -1, 1_001, 1.5]) expect((await attempt(() => world.client.listWorkingBranches(world.repositoryUrl, expected, world.scope, page))).ok, `page ${String(page)}`).toBe(false);
-      expect((await attempt(() => world.client.listWorkingBranches(world.repositoryUrl, expected, { system: "private-install" } as never, 1))).ok).toBe(false);
+      expect((await attempt(() => world.client.listWorkingBranches(world.repositoryUrl, expected, { system: "install" } as never, 1))).ok).toBe(false);
       expect(world.net.tokenRequests()).toEqual([]);
     },
   },
