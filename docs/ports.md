@@ -217,8 +217,8 @@ adapter only FETCHES a comment (`CodeHost.comments`: text, author, times, the ch
 store (`ANTHROPIC_API_KEY`), a file store (JSON, refused unless only the owner can read it), a layered store and a memory store. Cloud
 adapts the port to its secret store and proxy. On a laptop the keys are READ through the `secrets` point (next section): `rovara up`'s `model-keys`
 adapter asks for `{ "env": "<PROVIDER>_API_KEY" }` and then `{ "key": "<provider>" }`, in that order, so the environment still wins over `keys.json`, and
-`keys.json` keeps its rule (mode 0600, no link). Which providers have a key is the environment's and the file's own listing, because the socket reads one reference at a time.
-A worker never holds a key (the model proxy below reads it through this point).
+`keys.json` keeps its rule (mode 0600, no link). Which providers have a key is the same store's answer for each of `anthropic`, `openai` and `openrouter` (the socket reads one reference at a time, so the listing asks it per provider), so `keys.json` entries for other
+names are not listed. A worker never holds a key (the model proxy below reads it through this point).
 
 ## Secrets (owner decision 60, item R2)
 
@@ -231,16 +231,29 @@ and asks the point; it does not write its own reader.
   `{ "key": "provider" }` (an entry of the owner's `keys.json`, the key file alone). `SecretSource` (`{ env }` or `{ file }`, `packages/broker/src/plugins/module-support.ts`) is Code's
   reference format for plug-in settings: it is a `SecretRef` that Code's adapter knows. Cloud's adapter later reads its secret service with its own kind (for example `{ "secretService": "<name>" }`);
   a kind an adapter does not know answers `undefined`, so one config can name sources for more than one install.
-- **Failure is quiet**: no secret is `undefined`. A source that exists but must not be used (a key file other users can read, a link, a file over 64 KiB) or a reference that is not valid is an error with a FIXED sentence that
-  never quotes a path, a variable's value or file content. A caller that wants one sentence for all of it (`secretReader`) says "the secret is not available".
-- **The company comes with each call**, as in every shared port. Code ignores it.
+- **Failure is quiet**: no secret is `undefined`. A source that exists but must not be used or a reference that is not valid is an error with a FIXED sentence that
+  never quotes a path, a variable's value or file content. Code's readers throw `LocalSecretError`: its message is safe to show, and it carries at most the system error CODE (never the system error, whose text quotes the path).
+  Callers show only a `LocalSecretError`'s text; any other error from a `secrets` plug-in is replaced by a sentence of the caller's own (for the GitHub token: "the secrets adapter could not read the GitHub token (source kind: key)").
+  A caller that wants one sentence for all of it (`secretReader`) says "the secret is not available".
+- **A `{ file }` is held to these rules**: an absolute path with no link in ANY part of it (a system's own link such as `/var` on a Mac counts: name the real path; the last part is also opened with `O_NOFOLLOW`), a plain file (not a pipe or a device),
+  owned by the current user, not readable by group or others (mode 0600) where the system has modes, and at most 64 KiB (at most that plus one byte is read, so a file that grows after the check is still refused).
+- **Every answer is a `SecretValue`**: `createRegistrySecretStore`, `createSecretModelKeyStore` and `contextSecretReader` pass each answer through `asSecretValue`, which wraps an object that has `reveal()` and refuses anything else (a bare string would print), so `[secret]`
+  masking always applies, even for a plug-in written without the class.
+- **The company comes with each call**, as in every shared port. Code ignores it. `contextSecretReader` (a plug-in's own settings, such as a webhook secret) reads under the config's `defaultCompanyId`, which in Code is the one implicit company.
+  That is right for an install-wide secret only: Cloud, which serves many companies, must read a company's own secret with `SecretStore.read(<the caller's company>, ref)`, or change the helper to take the company per call.
 - **Read when used.** Nothing caches in the adapter, so a rotated key or token is picked up at once. The GitHub code host keeps a token for 30 seconds; the model proxy reads per request.
 - **A plug-in uses it** through `contextSecretReader(context, source)`: the read goes to the registry's `secrets` adapter, looked up on every read (so it does not matter where in the config a `secrets` plug-in sits), and falls back to
   Code's own adapter when none is registered. `createRegistrySecretStore(registry)` is the same lookup as a `SecretStore`.
 - **What moved behind it** (`rovara up`): the model keys (`createLocalModelKeyStore`), the laptop GitHub token (`resolveGithubAccess` asks `{ "key": "github" }`, then `GH_TOKEN`, `GITHUB_TOKEN` and the GitHub CLI as before) and a plug-in's
   `webhookSecret`. The rules stay: the key file must be owner-only; the model proxy is the only reader of a model key and a worker never holds one; a token that reaches every repository its owner can is not given to a worker unless
   `allowBroadTokenForWorker` is true. Both stay in the adapters that apply them, not in the secrets adapter.
-- **Replacing it**: a `secrets` plug-in (or `registerAdapters`) replaces Code's. The model keys and the GitHub token then come from that adapter, so it must answer the `{ env }` and `{ key }` references (or the install finds no key: `rovara up --check` says so).
+- **A configured `secrets` plug-in is the source of truth**, everywhere, as `rovara up` and `rovara up --check` use it:
+  the GitHub code host is registered only after the config's plug-ins are loaded, and only if the registry's `secrets` adapter (the plug-in, else Code's) or `GH_TOKEN`, `GITHUB_TOKEN` or the GitHub CLI gives a sign-in; the model providers listed (and so the model chosen) are the ones the plug-in has a key for;
+  and `rovara up --check` loads the same plug-in and says which source answered ("the key file", "the environment", or `the "<name>" secrets plug-in`). With a plug-in, `keys.json` and the model-key environment variables are NOT read unless the plug-in reads them.
+  It must answer the `{ env }` and `{ key }` references, or the install finds no key and `--check` says so.
+- **Trust model of a `secrets` plug-in.** Only the owner names one: it comes from the plug-in config, which must sit in the owner's state folder (never a repository or a task workspace), and it runs in the broker with the owner's rights, like every
+  config-loaded plug-in. It sees every reference asked, and so can answer, and so choose, every model key and the GitHub token; it is trusted as much as the broker itself. Task input and project files cannot name a reference.
+  Install a `secrets` plug-in only from a source you trust as you would trust the broker.
 - A conformance suite for every adapter is `tests/support/ports/secret-store-conformance.ts`.
 
 ## Object storage (lane L9a, PROVISIONAL: owner decision 58, until Pratik agrees)

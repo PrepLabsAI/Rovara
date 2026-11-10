@@ -92,7 +92,7 @@ describe("rovara up --check", () => {
     expect(loose.out).toContain("chmod 600");
     expect(loose.out).not.toContain("SECRET");
     const good = await run(["up", "--check", "--worker-image", "worker:test"], { environment: {}, keysFile: { text: '{"anthropic":"sk-test-SECRET"}', mode: 0o600 } });
-    expect(good.out).toContain("A model key is set for anthropic.");
+    expect(good.out).toContain("A model key is set for anthropic (from the key file).");
   });
 
   it("reports the provider and model a task step will use, and what to set when none can be chosen (L13)", async () => {

@@ -16,6 +16,8 @@ export interface LocalGithubCodeHostInput {
   fetch?: typeof fetch | undefined;
   /** Where the stored token is read (the `secrets` socket; `{ key: "github" }`). Default: Code's own adapter over the key file and the environment. */
   secrets?: SecretStore | undefined;
+  /** How to say where the stored token came from (default "the key file"; with a `secrets` plug-in: its name). */
+  secretsWords?: string | undefined;
   /** The key file alone (the file store, never the layered model-key store), for the default `secrets`. Default: `<state folder>/keys.json`. */
   keyFile?: ModelKeyStore | undefined;
   /** The addresses of the repositories the company registered; the token is used for these only. Default: none (a doctor run uses no repository). */
@@ -31,6 +33,7 @@ export function createLocalGithubCodeHost(input: LocalGithubCodeHostInput): Code
     secrets: input.secrets ?? createLocalSecretStore({ environment: input.environment, keyFile: input.keyFile ?? createFileModelKeyStore(keyFilePath) }),
     environment: input.environment,
     keyFilePath,
+    ...(input.secretsWords === undefined ? {} : { secretsWords: input.secretsWords }),
     registeredRepositories: input.registeredRepositories ?? (() => []),
     allowBroadTokenForWorker: input.allowBroadTokenForWorker === true,
     ...(input.gh === undefined ? {} : { gh: input.gh }),

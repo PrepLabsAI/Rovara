@@ -3,7 +3,7 @@
 import { createServer } from "node:net";
 import { lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, type ModelKeyStore } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PluginRegistryError, type ModelKeyStore, type SecretStore } from "@agentx/contracts";
 import {
   KEYS_FILE_NAME,
   LOCAL_MODEL_PROVIDERS,
@@ -12,7 +12,10 @@ import {
   LOCAL_HOST,
   assertStateDirectoryLocation,
   createLocalCodeHosts,
+  createLocalSecrets,
   createLocalModelKeyStore,
+  loadConfiguredSecrets,
+  modelKeySources,
   parsePluginConfigText,
   readOwnerFile,
   resolveConfigLocation,
@@ -93,24 +96,63 @@ async function readOwnerConfig(services: UpCheckServices): Promise<ReturnType<ty
   }
 }
 
+/** The secrets store the install will use: Code's own, or the `secrets` plug-in the config names. Loaded once per check run. A plug-in that cannot be loaded is reported, not thrown. */
+const secretsCache = new WeakMap<UpCheckServices, Promise<{ store: SecretStore; plugin?: string } | { error: string }>>();
+function secretsFor(services: UpCheckServices): Promise<{ store: SecretStore; plugin?: string } | { error: string }> {
+  let held = secretsCache.get(services);
+  if (held === undefined) {
+    held = (async () => {
+      const config = await readOwnerConfig(services);
+      if (config === undefined) return { store: createLocalSecrets(services.stateDirectory, services.environment) };
+      const location = resolveConfigLocation({ stateDirectory: services.stateDirectory, configPath: services.configPath, cwd: services.cwd ?? process.cwd() });
+      try {
+        return await loadConfiguredSecrets({ stateDirectory: services.stateDirectory, configPath: location.path, config, environment: services.environment });
+      } catch (error) {
+        return { error: error instanceof PluginRegistryError ? error.message : "the secrets plug-in could not be loaded" };
+      }
+    })();
+    secretsCache.set(services, held);
+  }
+  return held;
+}
+
+const SOURCE_KIND_WORDS: Record<string, string> = { env: "the environment", key: "the key file", file: "a secret file" };
+const sourceWords = (kind: string, plugin: string | undefined): string => (plugin === undefined ? SOURCE_KIND_WORDS[kind] ?? kind : `the "${plugin}" secrets plug-in (${kind})`);
+
 async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
-  const keys = services.keys ?? createLocalModelKeyStore(services.stateDirectory, services.environment);
   const keyFile = join(services.stateDirectory, KEYS_FILE_NAME);
+  let keys: ModelKeyStore;
+  let plugin: string | undefined;
+  let store: SecretStore | undefined;
+  if (services.keys !== undefined) {
+    keys = services.keys;
+  } else {
+    const secrets = await secretsFor(services);
+    if ("error" in secrets) return { id: "model-key", status: "fail", summary: secrets.error, fix: "Fix the secrets plug-in entry in your config, or remove it to use the environment and keys.json." };
+    plugin = secrets.plugin;
+    store = secrets.store;
+    keys = createLocalModelKeyStore(services.stateDirectory, services.environment, secrets.store);
+  }
   let found: string[];
   try {
     found = (await keys.providers(IMPLICIT_COMPANY_ID)).filter((provider) => (LOCAL_MODEL_PROVIDERS as readonly string[]).includes(provider));
   } catch (error) {
-    // The key store's messages never quote the file; they say what is wrong with it.
-    return { id: "model-key", status: "fail", summary: error instanceof Error ? error.message : "the model key file could not be read", fix: `Fix the file's permissions with \`chmod 600 ${keyFile}\`, or keep the key in the ANTHROPIC_API_KEY environment variable instead.` };
+    // Code's own readers never quote the file; they say what is wrong with it. A plug-in's text is not shown.
+    if (plugin !== undefined || !(error instanceof Error)) return { id: "model-key", status: "fail", summary: "The model key could not be read from the secrets plug-in.", fix: "Check the secrets plug-in in your config: it must answer the { \"env\": \"<PROVIDER>_API_KEY\" } and { \"key\": \"<provider>\" } references." };
+    return { id: "model-key", status: "fail", summary: error.message, fix: `Fix the file's permissions with \`chmod 600 ${keyFile}\`, or keep the key in the ANTHROPIC_API_KEY environment variable instead.` };
   }
   // Lane L13: the same rule the task flow uses (the config's `model` setting, else Anthropic, OpenAI, OpenRouter), so this says what a task step will call.
   const picked = chooseLocalModel(found, (await readOwnerConfig(services))?.model);
   if (picked.ok) {
     const why = picked.source === "setting" ? "the \"model\" setting in your config" : `the default for ${found.length === 1 ? "the only key found" : "the first key found"}`;
-    return { id: "model-key", status: "ok", summary: `A model key is set for ${found.join(", ")}. Task steps will use ${picked.provider} ${picked.model} (${why}).` };
+    // Which source answered, for each provider (never the key).
+    const sources = store === undefined ? [] : await modelKeySources(store, IMPLICIT_COMPANY_ID).catch(() => []);
+    const named = found.map((provider) => { const entry = sources.find((candidate) => candidate.provider === provider); return entry === undefined ? provider : `${provider} (from ${sourceWords(entry.kind, plugin)})`; });
+    return { id: "model-key", status: "ok", summary: `A model key is set for ${named.join(", ")}. Task steps will use ${picked.provider} ${picked.model} (${why}).` };
   }
   if (picked.problem === "setting-without-key") return { id: "model-key", status: "fail", summary: picked.summary, fix: picked.fix };
-  return { id: "model-key", status: "fail", summary: "No model key was found.", fix: `${picked.fix} A key file goes at ${keyFile} as {"anthropic": "<your key>"} (or "openai", "openrouter"); then run \`chmod 600 ${keyFile}\`.` };
+  const where = plugin === undefined ? `A key file goes at ${keyFile} as {"anthropic": "<your key>"} (or "openai", "openrouter"); then run \`chmod 600 ${keyFile}\`.` : `Your secrets plug-in "${plugin}" has no key for them.`;
+  return { id: "model-key", status: "fail", summary: "No model key was found.", fix: `${picked.fix} ${where}` };
 }
 
 /**
@@ -123,7 +165,15 @@ async function broadTokenAllowed(services: UpCheckServices): Promise<boolean> {
 }
 
 async function checkGithub(services: UpCheckServices): Promise<UpCheck> {
-  const hosts = createLocalCodeHosts({ allowBroadTokenForWorker: await broadTokenAllowed(services), stateDirectory: services.stateDirectory, environment: services.environment, fetch: services.fetch, ...(services.keys === undefined ? {} : { keyFile: services.keys }), ...(services.gh === undefined ? {} : { gh: services.gh }) });
+  // The same secrets store `rovara up` uses (a configured `secrets` plug-in, else Code's), unless a test hands a key store of its own.
+  const secrets = services.keys === undefined ? await secretsFor(services) : undefined;
+  if (secrets !== undefined && "error" in secrets) return { id: "github", status: "fail", summary: secrets.error, fix: "Fix the secrets plug-in entry in your config, or remove it to use the environment and keys.json." };
+  const hosts = createLocalCodeHosts({
+    allowBroadTokenForWorker: await broadTokenAllowed(services), stateDirectory: services.stateDirectory, environment: services.environment, fetch: services.fetch,
+    ...(services.keys === undefined ? {} : { keyFile: services.keys }),
+    ...(secrets === undefined || "error" in secrets ? {} : { secrets: secrets.store, ...(secrets.plugin === undefined ? {} : { secretsWords: `the "${secrets.plugin}" secrets plug-in` }) }),
+    ...(services.gh === undefined ? {} : { gh: services.gh }),
+  });
   const results: UpCheck[] = [];
   for (const host of hosts) {
     if (services.verifyGithub && host.checkAccess !== undefined) {

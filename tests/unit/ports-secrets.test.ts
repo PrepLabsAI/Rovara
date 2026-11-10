@@ -1,22 +1,27 @@
 // Owner decision 60 (item R2): the `secrets` socket. Code's adapter reads the environment, a file and the owner's key file; the model keys and the
 // laptop GitHub token are read through it; `keys.json` keeps working, with its permission rule; a `secrets` plug-in replaces Code's.
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { inspect } from "node:util";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
-import { createAdapterRegistry, createFileModelKeyStore, createLocalSecretStore, createRegistrySecretStore, createSecretModelKeyStore, SECRET_FILE_MAX_BYTES } from "../../packages/broker/src/ports/index.js";
+import { createAdapterRegistry, LocalSecretError, asSecretValue, createFileModelKeyStore, createLocalSecretStore, createRegistrySecretStore, createSecretModelKeyStore, SECRET_FILE_MAX_BYTES } from "../../packages/broker/src/ports/index.js";
 import { contextSecretReader } from "../../packages/broker/src/plugins/index.js";
 import { createLocalModelKeyStore, createLocalSecrets } from "../../packages/broker/src/local/runtime.js";
+import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";
 import { resolveGithubAccess } from "../../packages/broker/src/plugins/code-host/github/token-access.js";
 import { runSecretStoreConformance } from "../support/ports/secret-store-conformance.js";
 
 const folders: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const folder of folders.splice(0)) await rm(folder, { recursive: true, force: true });
 });
 async function tempFolder(): Promise<string> {
-  const folder = await mkdtemp(join(tmpdir(), "rovara-p4-"));
+  // The real path: a link in any part of a secret file's path is refused (and /var is one on a Mac).
+  const folder = await realpath(await mkdtemp(join(tmpdir(), "rovara-p4-")));
   folders.push(folder);
   return folder;
 }
@@ -104,7 +109,7 @@ describe("Code's secrets adapter", () => {
     expect((loose as Error).message).not.toContain(value);
     await chmod(file, 0o600);
     await symlink(file, join(dir, "link"));
-    await expect(store.read(IMPLICIT_COMPANY_ID, { file: join(dir, "link") })).rejects.toThrow(/plain file, not a link/);
+    await expect(store.read(IMPLICIT_COMPANY_ID, { file: join(dir, "link") })).rejects.toThrow(/must not go through a link/);
     await writeFile(join(dir, "big"), "x".repeat(SECRET_FILE_MAX_BYTES + 1), { mode: 0o600 });
     await expect(store.read(IMPLICIT_COMPANY_ID, { file: join(dir, "big") })).rejects.toThrow(/too big/);
     await mkdir(join(dir, "folder"));
@@ -155,13 +160,13 @@ describe("the model keys and the GitHub token are read through the socket", () =
     expect(String(await keys.get(IMPLICIT_COMPANY_ID, "openai"))).toBe("[secret]");
   });
 
-  it("keeps keys.json working with its owner-only rule, and lists the providers of the environment and the file", async () => {
+  it("keeps keys.json working with its owner-only rule, and lists the model providers that have a key", async () => {
     const state = await tempFolder();
     await writeFile(join(state, "keys.json"), JSON.stringify({ openai: "from-file", github: "gh-from-file" }), { mode: 0o600 });
     const keys = createLocalModelKeyStore(state, { ANTHROPIC_API_KEY: "from-env" });
     expect((await keys.get(IMPLICIT_COMPANY_ID, "openai"))?.reveal()).toBe("from-file");
     expect((await keys.get(IMPLICIT_COMPANY_ID, "anthropic"))?.reveal()).toBe("from-env");
-    expect(await keys.providers(IMPLICIT_COMPANY_ID)).toEqual(["anthropic", "github", "openai"]);
+    expect(await keys.providers(IMPLICIT_COMPANY_ID)).toEqual(["anthropic", "openai"]);
     await chmod(join(state, "keys.json"), 0o644);
     await expect(keys.get(IMPLICIT_COMPANY_ID, "openai")).rejects.toThrow(/readable by other users/);
     // An environment key still answers without touching the loose file, as before.
@@ -182,7 +187,7 @@ describe("the model keys and the GitHub token are read through the socket", () =
 
   it("builds a model key store on any secrets adapter (the shape Cloud's will use)", async () => {
     const held = new Map([["key-anthropic", "cloud-key"]]);
-    const keys = createSecretModelKeyStore({ secrets: memorySecrets(held), refs: (provider) => [{ named: `key-${provider}` }], providers: async () => ["anthropic"] });
+    const keys = createSecretModelKeyStore({ secrets: memorySecrets(held), refs: (provider) => [{ named: `key-${provider}` }], providers: ["anthropic"] });
     expect((await keys.get(IMPLICIT_COMPANY_ID, "anthropic"))?.reveal()).toBe("cloud-key");
     expect(await keys.get(IMPLICIT_COMPANY_ID, "openai")).toBeUndefined();
     expect(await keys.providers(IMPLICIT_COMPANY_ID)).toEqual(["anthropic"]);
@@ -203,5 +208,193 @@ describe("a plug-in reads its secrets through the registry's adapter", () => {
 
   it("answers undefined before any adapter is registered", async () => {
     expect(await createRegistrySecretStore(createAdapterRegistry()).read(IMPLICIT_COMPANY_ID, { env: "ANY" })).toBeUndefined();
+  });
+});
+
+describe("a {file} secret (review L5, L2, L7)", () => {
+  const store = createLocalSecretStore({ environment: {} });
+  const refused = async (file: string): Promise<Error> => {
+    const error = await store.read(IMPLICIT_COMPANY_ID, { file }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(LocalSecretError);
+    return error as Error;
+  };
+
+  it("refuses a link in ANY part of the path, not only the last", async () => {
+    const dir = await tempFolder();
+    await mkdir(join(dir, "real"));
+    await writeFile(join(dir, "real", "secret"), value, { mode: 0o600 });
+    await symlink(join(dir, "real"), join(dir, "alias"));
+    expect((await store.read(IMPLICIT_COMPANY_ID, { file: join(dir, "real", "secret") }))?.reveal()).toBe(value);
+    expect((await refused(join(dir, "alias", "secret"))).message).toMatch(/must not go through a link/);
+  });
+
+  it("refuses a file that belongs to someone else", async () => {
+    if (process.platform === "win32" || typeof process.getuid !== "function") return;
+    const dir = await tempFolder();
+    const file = join(dir, "secret");
+    await writeFile(file, value, { mode: 0o600 });
+    vi.spyOn(process, "getuid").mockReturnValue(process.getuid() + 1);
+    expect((await refused(file)).message).toBe("the secret file must belong to you");
+  });
+
+  it("takes a file of exactly the cap and refuses one byte more", async () => {
+    const dir = await tempFolder();
+    await writeFile(join(dir, "exact"), "x".repeat(SECRET_FILE_MAX_BYTES), { mode: 0o600 });
+    await writeFile(join(dir, "over"), "x".repeat(SECRET_FILE_MAX_BYTES + 1), { mode: 0o600 });
+    expect((await store.read(IMPLICIT_COMPANY_ID, { file: join(dir, "exact") }))?.reveal().length).toBe(SECRET_FILE_MAX_BYTES);
+    expect((await refused(join(dir, "over"))).message).toBe("the secret file is too big");
+  });
+
+  it("refuses a pipe and a device without waiting on them", async () => {
+    if (process.platform === "win32") return;
+    const dir = await tempFolder();
+    const pipe = join(dir, "pipe");
+    execFileSync("mkfifo", [pipe]);
+    expect((await refused(pipe)).message).toBe("the secret file must be a plain file");
+    expect((await refused("/dev/null")).message).toBe("the secret file must be a plain file");
+  });
+
+  it("never quotes the path or the content, in the message, the inspected error or its cause, and keeps only a system error code", async () => {
+    const dir = await tempFolder();
+    const secretName = "distinct-secret-file-name";
+    const file = join(dir, secretName);
+    await writeFile(file, value, { mode: 0o600 });
+    const cases: string[] = [];
+    await chmod(file, 0o644);
+    cases.push(file);
+    const noRead = join(dir, `${secretName}-noread`);
+    await writeFile(noRead, value, { mode: 0o000 });
+    cases.push(noRead);
+    await symlink(file, join(dir, `${secretName}-link`));
+    cases.push(join(dir, `${secretName}-link`));
+    await writeFile(join(dir, `${secretName}-big`), "x".repeat(SECRET_FILE_MAX_BYTES + 1), { mode: 0o600 });
+    cases.push(join(dir, `${secretName}-big`));
+    for (const path of cases) {
+      const error = await refused(path);
+      for (const text of [error.message, inspect(error), String(error.stack ?? ""), JSON.stringify({ ...error })]) {
+        expect(text).not.toContain(secretName);
+        expect(text).not.toContain(dir);
+        expect(text).not.toContain(value);
+      }
+      expect(error.cause).toBeUndefined();
+    }
+    if (process.getuid?.() !== 0) expect(((await refused(noRead)) as LocalSecretError).code).toBe("EACCES");
+  });
+});
+
+describe("what an adapter answers is always a SecretValue (review L3)", () => {
+  it("wraps an object that has reveal(), refuses a bare string, and passes a SecretValue through", async () => {
+    const registry = createAdapterRegistry();
+    let answer: unknown;
+    registry.register("secrets", "loose", { read: async () => answer as never }, { isDefault: true });
+    const store = createRegistrySecretStore(registry);
+    answer = { reveal: () => value, extra: "visible" };
+    const wrapped = await store.read(IMPLICIT_COMPANY_ID, { env: "ANY" });
+    expect(wrapped).toBeInstanceOf(SecretValue);
+    expect(inspect(wrapped)).not.toContain(value);
+    expect(JSON.stringify({ wrapped })).not.toContain(value);
+    answer = value;
+    await expect(store.read(IMPLICIT_COMPANY_ID, { env: "ANY" })).rejects.toThrow("the secrets adapter gave an answer that is not a secret value");
+    const real = new SecretValue(value);
+    answer = real;
+    expect(await store.read(IMPLICIT_COMPANY_ID, { env: "ANY" })).toBe(real);
+    answer = undefined;
+    expect(await store.read(IMPLICIT_COMPANY_ID, { env: "ANY" })).toBeUndefined();
+    expect(asSecretValue(null)).toBeUndefined();
+  });
+
+  it("also masks a plug-in's loose answer on the model-key and plug-in-setting paths", async () => {
+    const loose: SecretStore = { read: async () => ({ reveal: () => value }) as never };
+    const keys = createSecretModelKeyStore({ secrets: loose, refs: () => [{ env: "X" }], providers: ["anthropic"] });
+    expect(inspect(await keys.get(IMPLICIT_COMPANY_ID, "anthropic"))).toBe("[secret]");
+    expect(await keys.providers(IMPLICIT_COMPANY_ID)).toEqual(["anthropic"]);
+    const registry = createAdapterRegistry();
+    registry.register("secrets", "loose", loose, { isDefault: true });
+    expect(await contextSecretReader({ registry, defaultCompanyId: IMPLICIT_COMPANY_ID }, { env: "X" })()).toBe(value);
+  });
+});
+
+describe("the GitHub token read through a plug-in (review L1)", () => {
+  const host = (secrets: SecretStore, extra: Record<string, unknown> = {}) => githubTokenCodeHost({
+    companyId: IMPLICIT_COMPANY_ID, secrets, environment: {}, gh: async () => undefined, registeredRepositories: () => [], ...extra,
+  });
+
+  it("shows a fixed sentence naming the kind of source, never the plug-in's own text, and does not blame keys.json", async () => {
+    const leaky = "arn:aws:example:::secret/some-name-and-content";
+    const broken: SecretStore = { read: async () => { throw new Error(leaky); } };
+    const found = await host(broken).resolveCredentials!();
+    expect(found.found).toBe(false);
+    const checked = await host(broken).checkAccess!();
+    for (const text of [JSON.stringify(found), JSON.stringify(checked)]) {
+      expect(text).not.toContain(leaky);
+      expect(text).not.toContain("chmod");
+      expect(text).not.toContain("keys.json");
+    }
+    expect(found.summary).toBe("the secrets adapter could not read the GitHub token (source kind: key)");
+  });
+
+  it("still shows Code's own key file sentence with the chmod fix, and names the plug-in as the source when one answers", async () => {
+    const dir = await tempFolder();
+    const path = join(dir, "keys.json");
+    await writeFile(path, "{}", { mode: 0o644 });
+    const local = await githubTokenCodeHost({ companyId: IMPLICIT_COMPANY_ID, secrets: createLocalSecretStore({ environment: {}, keyFile: createFileModelKeyStore(path) }), environment: {}, keyFilePath: path, registeredRepositories: () => [] }).resolveCredentials!();
+    expect(local.summary).toMatch(/readable by other users/);
+    expect(local.fix).toContain(`chmod 600 ${path}`);
+    const answering: SecretStore = { read: async () => new SecretValue("t") };
+    const named = await host(answering, { secretsWords: 'the "svc" secrets plug-in' }).resolveCredentials!();
+    expect(named.found).toBe(true);
+    expect(named.summary).toContain('the "svc" secrets plug-in');
+  });
+});
+
+describe("rovara up --check uses the same secrets store (review M1)", () => {
+  const dockerDown = { run: async () => ({ exitCode: 1, stdout: "", stderr: "not installed" }) } as never;
+  async function checks(options: { plugin?: SecretStore; environment?: NodeJS.ProcessEnv; keys?: Record<string, string> }) {
+    const state = await tempFolder();
+    await chmod(state, 0o700);
+    if (options.keys !== undefined) await writeFile(join(state, "keys.json"), JSON.stringify(options.keys), { mode: 0o600 });
+    if (options.plugin !== undefined) {
+      (globalThis as { __p4Secrets?: SecretStore }).__p4Secrets = options.plugin;
+      await writeFile(join(state, "secrets-plugin.mjs"), 'export const plugin = { point: "secrets", name: "svc", create: () => globalThis.__p4Secrets };\n', { mode: 0o600 });
+      await writeFile(join(state, "config.json"), JSON.stringify({ version: 1, plugins: [{ point: "secrets", name: "svc", module: "./secrets-plugin.mjs" }] }), { mode: 0o600 });
+    }
+    const { runUpChecks } = await import("../../packages/cli/src/up/checks.js");
+    const result = await runUpChecks({ docker: dockerDown, environment: options.environment ?? {}, stateDirectory: state, workerImage: "w", fetch: (async () => new Response("{}", { status: 401 })), verifyGithub: false, gh: async () => undefined });
+    return { text: JSON.stringify(result), byId: Object.fromEntries(result.map((check) => [check.id, check])) };
+  }
+  afterEach(() => { delete (globalThis as { __p4Secrets?: unknown }).__p4Secrets; });
+
+  it("says which source answered when Code's own adapter is used", async () => {
+    const { byId } = await checks({ environment: { OPENAI_API_KEY: "e" }, keys: { anthropic: "k", github: "t" } });
+    expect(byId["model-key"]!.summary).toContain("anthropic (from the key file)");
+    expect(byId["model-key"]!.summary).toContain("openai (from the environment)");
+    expect(byId.github!.summary).toContain("the key file");
+  });
+
+  it("asks the configured plug-in, names it, and ignores the environment and keys.json", async () => {
+    const plugin: SecretStore = { read: async (_c, ref) => (ref.key === "openrouter" || ref.key === "github" ? new SecretValue("x") : undefined) };
+    const { byId, text } = await checks({ plugin, environment: { ANTHROPIC_API_KEY: "e" }, keys: { anthropic: "k" } });
+    expect(byId["model-key"]!.status).toBe("ok");
+    expect(byId["model-key"]!.summary).toContain('openrouter (from the "svc" secrets plug-in (key))');
+    expect(byId["model-key"]!.summary).not.toContain("anthropic (");
+    expect(byId.github!.summary).toContain('the "svc" secrets plug-in');
+    expect(text).not.toContain("keys.json\"");
+  });
+
+  it("fails with a plain sentence, not the plug-in's text, when the plug-in cannot read", async () => {
+    const leaky = "arn:aws:example:::secret/leaky";
+    const { byId, text } = await checks({ plugin: { read: async () => { throw new Error(leaky); } } });
+    expect(byId["model-key"]!.status).toBe("fail");
+    expect(byId["model-key"]!.summary).toBe("The model key could not be read from the secrets plug-in.");
+    expect(byId.github!.status).toBe("fail");
+    expect(text).not.toContain(leaky);
+    expect(text).not.toContain("chmod");
+  });
+
+  it("says no key was found when the plug-in has none, without telling the owner to make a key file", async () => {
+    const { byId } = await checks({ plugin: { read: async () => undefined }, keys: { anthropic: "k" } });
+    expect(byId["model-key"]!.summary).toBe("No model key was found.");
+    expect(byId["model-key"]!.fix).toContain('secrets plug-in "svc"');
+    expect(byId["model-key"]!.fix).not.toContain("chmod");
   });
 });

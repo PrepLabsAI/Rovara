@@ -1,4 +1,5 @@
 // Owner decision 60 (item R2): the conformance suite every `secrets` adapter must pass: Code's own adapter now, Cloud's secret-service adapter later.
+import { format, inspect } from "node:util";
 import { describe, expect, it } from "vitest";
 import { SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
 
@@ -37,6 +38,8 @@ export function runSecretStoreConformance(name: string, harness: SecretStoreHarn
       expect(read?.reveal()).toBe(value);
       expect(String(read)).toBe("[secret]");
       expect(JSON.stringify({ read })).not.toContain(value);
+      // Every way a value gets printed: util.inspect (what console.log uses), util.format with %s, %j and %o, and a template string.
+      for (const text of [inspect(read), inspect({ nested: { read } }, { depth: 5 }), format("%s %j %o %O", read, read, read, read), `${String(read)}`]) expect(text).not.toContain(value);
     }));
 
     it("answers undefined, not an error, when there is no secret", () => withStore(async (under) => {

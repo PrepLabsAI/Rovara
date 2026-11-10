@@ -2,7 +2,7 @@
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, PluginRegistryError, SecretValue, type AdapterRegistry } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PluginRegistryError, SecretValue, type AdapterRegistry, type SecretStore } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
@@ -10,6 +10,7 @@ import { FakeDocker } from "../support/local/fake-docker.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  delete (globalThis as { __p4Secrets?: unknown }).__p4Secrets;
   while (cleanup.length > 0) await cleanup.pop()!();
 });
 
@@ -85,7 +86,7 @@ describe("rovara up runtime", () => {
     expect((await keys.get(IMPLICIT_COMPANY_ID, "anthropic"))?.reveal()).toBe("from-env");
     expect((await keys.get(IMPLICIT_COMPANY_ID, "openai"))?.reveal()).toBe("from-file");
     expect(String(await keys.get(IMPLICIT_COMPANY_ID, "anthropic"))).toBe("[secret]");
-    expect(await keys.providers(IMPLICIT_COMPANY_ID)).toEqual(["anthropic", "github", "openai"]);
+    expect(await keys.providers(IMPLICIT_COMPANY_ID)).toEqual(["anthropic", "openai"]);
 
     const loose = await launch({ files: { "keys.json": JSON.stringify({ openai: "x" }) } });
     await (await import("node:fs/promises")).chmod(join(loose.stateDirectory, "keys.json"), 0o644);
@@ -106,6 +107,52 @@ describe("rovara up runtime", () => {
     expect(await keys.get(IMPLICIT_COMPANY_ID, "anthropic")).toBeUndefined();
     expect(asked).toContainEqual({ env: "ANTHROPIC_API_KEY" });
     expect(asked).toContainEqual({ key: "openai" });
+  });
+
+  // Owner decision 60 (review M1, L7): a `secrets` plug-in named in the CONFIG (a module file in the state folder) is the source of truth everywhere.
+  const secretsConfig = { version: 1, plugins: [{ point: "secrets", name: "svc", module: "./secrets-plugin.mjs" }] };
+  const secretsModule = 'export const plugin = { point: "secrets", name: "svc", create: () => globalThis.__p4Secrets };\n';
+  const answering = (answers: Record<string, string>): SecretStore => ({
+    async read(_company, ref) { const [kind, name] = Object.entries(ref)[0]!; const found = answers[`${kind}:${name}`]; return found === undefined ? undefined : new SecretValue(found); },
+  });
+
+  it("uses a configured secrets plug-in for the GitHub code host decision, the model providers and the keys", async () => {
+    (globalThis as { __p4Secrets?: SecretStore }).__p4Secrets = answering({ "key:github": "plug-in-token", "key:openai": "plug-in-openai" });
+    const withPlugin = await launch({
+      environment: { ANTHROPIC_API_KEY: "env-key-the-plug-in-does-not-know" },
+      config: secretsConfig,
+      files: { "secrets-plugin.mjs": secretsModule, "keys.json": JSON.stringify({ anthropic: "file-key" }) },
+    });
+    // The plug-in's token alone registers the code host (it is decided after the plug-ins load), and the plug-in names where it came from.
+    expect(withPlugin.runtime.wiring()["code-host"]).toEqual(["github"]);
+    expect(withPlugin.runtime.wiring().secrets).toEqual(["svc"]);
+    const found = await withPlugin.runtime.registry.require("code-host", "github").resolveCredentials!();
+    expect(found).toMatchObject({ found: true });
+    // Only the providers the plug-in has a key for are listed: the environment's and keys.json's anthropic keys do not count.
+    const keys = withPlugin.runtime.registry.require("model-keys");
+    expect(await keys.providers(IMPLICIT_COMPANY_ID)).toEqual(["openai"]);
+    expect(await keys.get(IMPLICIT_COMPANY_ID, "anthropic")).toBeUndefined();
+    expect((await keys.get(IMPLICIT_COMPANY_ID, "openai"))?.reveal()).toBe("plug-in-openai");
+  });
+
+  it("does not register the GitHub code host from keys.json when the configured secrets plug-in has no token", async () => {
+    (globalThis as { __p4Secrets?: SecretStore }).__p4Secrets = answering({});
+    const { runtime } = await launch({
+      config: secretsConfig,
+      files: { "secrets-plugin.mjs": secretsModule, "keys.json": JSON.stringify({ github: "file-token" }) },
+    });
+    expect(runtime.wiring()["code-host"]).toBeUndefined();
+  });
+
+  it("still registers the GitHub code host from keys.json when no secrets plug-in is configured", async () => {
+    const { runtime } = await launch({ files: { "keys.json": JSON.stringify({ github: "file-token" }) } });
+    expect(runtime.wiring()["code-host"]).toEqual(["github"]);
+  });
+
+  it("lets a configured code-host plug-in keep its place: no default is registered over it", async () => {
+    const { runtime } = await launch({ environment: { GH_TOKEN: "from-env" }, registerAdapters: (registry) => registry.register("code-host", "github", { kind: "github" } as never) });
+    expect(runtime.registry.require("code-host", "github")).toMatchObject({ kind: "github" });
+    expect((runtime.registry.require("code-host", "github") as { resolveCredentials?: unknown }).resolveCredentials).toBeUndefined();
   });
 
   it("lets a configured storage plug-in replace the default, and seals the registry afterwards", async () => {

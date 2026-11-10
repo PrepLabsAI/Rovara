@@ -4,8 +4,9 @@
 //   - `checkAccess`: "test my connection": one `GET /user` with the token, in plain words.
 // The token is read when it is used (kept for 30 seconds), so a new `gh auth login` or an edited key file is picked up without a restart.
 import { agentXError, type CodeHost, type CodeHostAccessCheck, type CodeHostSignInResult, type SecretStore, type SecretValue } from "@agentx/contracts";
+import { LocalSecretError } from "../../../ports/secret-error.js";
 import { githubCodeHost, GITHUB_CODE_HOST_CAPABILITIES } from "./index.js";
-import { resolveGithubAccess, type GhRunner, type GithubAccess, type GithubTokenSource } from "./token-access.js";
+import { GITHUB_TOKEN_REF, resolveGithubAccess, type GhRunner, type GithubAccess, type GithubTokenSource } from "./token-access.js";
 import { boundToCompany, describeTokenAccount, githubTokenClient, githubTokenReach } from "./token-client.js";
 
 /** The credential reference of the laptop's one GitHub sign-in. */
@@ -17,6 +18,8 @@ export interface GitHubTokenCodeHostOptions {
   companyId: string;
   /** Where the stored token is read (the `secrets` socket; see `resolveGithubAccess`). */
   secrets: SecretStore;
+  /** How to say where the stored token came from, after "from" (default "the key file"; with a `secrets` plug-in: its name). */
+  secretsWords?: string;
   environment: NodeJS.ProcessEnv;
   /** Runs the GitHub CLI; injectable for tests. */
   gh?: GhRunner;
@@ -34,13 +37,29 @@ const FINE_GRAINED_ADVICE = "Make a fine-grained personal access token limited t
 
 const SOURCE_WORDS: Record<GithubTokenSource, string> = { "gh-cli": "the GitHub CLI", environment: "the environment", "key-store": "the key file" };
 
+/** A `secrets` adapter other than Code's failed to read the token. Its own text is never shown (it may quote a name or content); this sentence names the kind of source asked. */
+class ForeignSecretsError extends Error {
+  constructor() {
+    super(`the secrets adapter could not read the GitHub token (source kind: ${Object.keys(GITHUB_TOKEN_REF)[0]})`);
+    this.name = "ForeignSecretsError";
+  }
+}
+
 export function githubTokenCodeHost(options: GitHubTokenCodeHostOptions): CodeHost {
   const now = options.now ?? Date.now;
   const fetchImplementation = options.fetch ?? fetch;
   const keyFileWords = options.keyFilePath ?? "keys.json";
-  const resolve = (reveal: boolean): Promise<GithubAccess | undefined> => resolveGithubAccess({
-    companyId: options.companyId, secrets: options.secrets, environment: options.environment, reveal, ...(options.gh === undefined ? {} : { gh: options.gh }),
-  });
+  const sourceWords = (source: GithubTokenSource): string => (source === "key-store" && options.secretsWords !== undefined ? options.secretsWords : SOURCE_WORDS[source]);
+  const resolve = async (reveal: boolean): Promise<GithubAccess | undefined> => {
+    try {
+      return await resolveGithubAccess({
+        companyId: options.companyId, secrets: options.secrets, environment: options.environment, reveal, ...(options.gh === undefined ? {} : { gh: options.gh }),
+      });
+    } catch (error) {
+      // Code's own readers throw fixed sentences. Anything else comes from a plug-in and is replaced.
+      throw error instanceof LocalSecretError ? error : new ForeignSecretsError();
+    }
+  };
 
   let cached: { at: number; token: SecretValue } | undefined;
   const getToken = async (): Promise<SecretValue> => {
@@ -62,11 +81,10 @@ export function githubTokenCodeHost(options: GitHubTokenCodeHostOptions): CodeHo
     summary: "No GitHub access was found.",
     fix: 'Run `gh auth login` (https://cli.github.com), or put a personal access token in GH_TOKEN, or in keys.json as {"github": "<token>"}.',
   });
-  const unreadable = (error: unknown): { summary: string; fix: string } => ({
-    // The key file's messages say what is wrong with it and never quote it.
-    summary: error instanceof Error && error.message !== "" ? error.message : "the key file could not be read",
-    fix: `Fix the file's permissions with \`chmod 600 ${keyFileWords}\`.`,
-  });
+  const unreadable = (error: unknown): { summary: string; fix: string } => error instanceof LocalSecretError
+    // Code's key file messages say what is wrong with it and never quote it.
+    ? { summary: error.message, fix: `Fix the file's permissions with \`chmod 600 ${keyFileWords}\`.` }
+    : { summary: error instanceof ForeignSecretsError ? error.message : "the GitHub token could not be read", fix: `Check the secrets plug-in in your config: it must answer ${JSON.stringify(GITHUB_TOKEN_REF)}, or set GH_TOKEN instead.` };
 
   return {
     ...base,
@@ -82,7 +100,7 @@ export function githubTokenCodeHost(options: GitHubTokenCodeHostOptions): CodeHo
         return { found: false, ...unreadable(error) };
       }
       if (access === undefined) return noAccess();
-      const source = SOURCE_WORDS[access.source];
+      const source = sourceWords(access.source);
       return { found: true, source, summary: `A GitHub token is available from ${source}.` };
     },
 
@@ -97,7 +115,7 @@ export function githubTokenCodeHost(options: GitHubTokenCodeHostOptions): CodeHo
         const none = noAccess();
         return { status: "fail", summary: none.summary, fix: none.fix! };
       }
-      const where = SOURCE_WORDS[access.source];
+      const where = sourceWords(access.source);
       try {
         const account = await describeTokenAccount(access.token.reveal(), fetchImplementation);
         if (account.status === "rejected") {

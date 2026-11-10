@@ -3,7 +3,7 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { IMPLICIT_COMPANY_ID, PluginRegistryError, type JsonObject, type PluginContext, type SecretValue } from "@agentx/contracts";
-import { createLocalSecretStore } from "../ports/secret-stores.js";
+import { asSecretValue, createLocalSecretStore } from "../ports/secret-stores.js";
 
 /** Parses a module's settings. The error lists field paths and the schema's own messages, never the values. */
 export function readPluginSettings<T extends z.ZodType>(schema: T, settings: JsonObject, label: string): z.infer<T> {
@@ -30,10 +30,10 @@ export { SECRET_FILE_MAX_BYTES } from "../ports/secret-stores.js";
 
 const unavailable = (): Error => new Error("the secret is not available");
 
-async function revealed(read: () => Promise<SecretValue | undefined>): Promise<string> {
+async function revealed(read: () => Promise<unknown>): Promise<string> {
   let value: SecretValue | undefined;
   try {
-    value = await read();
+    value = asSecretValue(await read());
   } catch {
     throw unavailable();
   }
@@ -55,6 +55,8 @@ export function secretReader(source: SecretSource, environment: NodeJS.ProcessEn
 /**
  * The same reader for a plug-in: the read goes to the registry's `secrets` adapter (owner decision 60), looked up on every read, so an adapter the config names is used
  * whatever its place in the config; with none registered it falls back to Code's own. A module uses this instead of writing a reader of its own.
+ * A plug-in's settings secret is INSTALL-WIDE: it is read under the config's company (`defaultCompanyId`, the one implicit company in Code). A multi-company host (Cloud) must either read a
+ * per-company secret by the caller's company with `SecretStore.read` itself, or change this helper to take the company per call; it must not rely on the default company for a secret that is a company's own.
  */
 export function contextSecretReader(context: Pick<PluginContext, "registry" | "defaultCompanyId">, source: SecretSource, environment: NodeJS.ProcessEnv = process.env): (options?: { refresh?: boolean }) => Promise<string> {
   const fallback = createLocalSecretStore({ environment });
