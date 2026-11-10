@@ -94,6 +94,7 @@ export * from "./swebench.js";
 export * from "./eval-batch.js";
 export * from "./eval-stats.js";
 export * from "./eval-memory.js";
+export * from "./eval-replay-measure.js";
 export * from "./e2e-node.js";
 export * from "./e2e-runtime-capabilities.js";
 export * from "./e2e-runtime-registration.js";
@@ -262,6 +263,7 @@ export * from "./test-environment-wire.js";
 export * from "./service-mock-additions.js";
 export * from "./test-env-nightly.js";
 export * from "./nightly-run.js";
+export * from "./eval-files.js";
 export * from "./system-owner.js";
 export * from "./test-id.js";
 export * from "./verification-result.js";
@@ -270,6 +272,7 @@ export * from "./e2e-model-spend.js";
 // Learning v2: the Team record and lessons (R1).
 export * from "./lessons.js";
 export * from "./app-lessons.js";
+export * from "./app-lessons-repo-file.js";
 export * from "./spec-target.js";
 
 // Setup and test health: saved environments (SH3).

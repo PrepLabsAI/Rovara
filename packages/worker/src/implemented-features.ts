@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -84,5 +84,9 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   DESIGN_REVIEW_WORKER_FEATURE,
   // NH-1: the nightly run (nightly-run.ts): the Prove sequence over the approved environment, with one rerun of failures and the coverage map, reported through the nightly action.
   NIGHTLY_RUN_FEATURE,
+  // Standing instructions: the broker-built block of company rules and "How we work", placed in the system prompt of every session (pi-session.ts, run-agent-step.ts, verification/review.ts).
+  STANDING_INSTRUCTIONS_FEATURE,
+  // Lessons replay, the file arm: places a replay copy's lessons file and pointer in its checkout, out of the candidate (eval-files.ts).
+  EVAL_FILES_FEATURE,
   // Test services (`task.testServices.v1`) is NOT listed here: it is advertised only by a worker that has a test-services configuration (test-services-run.ts `testServicesAdvertisedFeatures`, added in main.ts).
 ] as const satisfies readonly WorkerInvocationFeature[];

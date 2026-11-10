@@ -139,6 +139,11 @@ export interface PiSessionInput {
    */
   agentRun?: AgentRunSession;
   /**
+   * Standing instructions: the broker-built block of the company's rules and "How we work". It goes in the SYSTEM prompt, in the addendum right after AgentX's own preamble and before
+   * the repository's context files and the skills list. Placed as given: the worker adds, removes and rewords nothing. An agent step carries it inside its own system prompt instead (`agentStepSystemPrompt`).
+   */
+  standingInstructions?: string;
+  /**
    * Lane E: the project's MCP context sources as tools (`src_<id>_<tool>` and `search_team_knowledge`), for an Understand, Plan, Plan-check or Review session
    * only. They run in the worker and call the broker; a session in Build (IMPLEMENT) or an agent run is refused them (assertContextToolsAllowed).
    */
@@ -222,6 +227,8 @@ export async function createWorkspacePiSession(
     agentTools?: readonly string[];
     skills?: readonly AgentSkillFile[];
     agentRun?: AgentRunSession;
+    /** Standing instructions (see PiSessionInput.standingInstructions). */
+    standingInstructions?: string;
     /** Lane E: the context-source tools and the note that tells the model about them (see PiSessionInput.contextTools). */
     contextTools?: readonly ToolDefinition[];
     contextNote?: string;
@@ -284,6 +291,7 @@ export async function createWorkspacePiSession(
     ...(input.agentTools === undefined ? {} : { agentTools: input.agentTools }),
     ...(mergeSkills(input.skills, knowledgeLoad?.skills ?? []) === undefined ? {} : { skills: mergeSkills(input.skills, knowledgeLoad?.skills ?? [])! }),
     ...(input.agentRun === undefined ? {} : { agentRun: input.agentRun }),
+    ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
@@ -312,6 +320,8 @@ export async function openRegisteredWorkspacePiSession(
     extensionFactories?: InlineExtension[];
     agentTools?: readonly string[];
     skills?: readonly AgentSkillFile[];
+    /** Standing instructions (see PiSessionInput.standingInstructions). */
+    standingInstructions?: string;
     /** Lane E, as for `createWorkspacePiSession`. */
     contextTools?: readonly ToolDefinition[];
     contextNote?: string;
@@ -361,6 +371,7 @@ export async function openRegisteredWorkspacePiSession(
     ...(input.onDiagnostic === undefined ? {} : { onDiagnostic: input.onDiagnostic }),
     ...(input.agentTools === undefined ? {} : { agentTools: input.agentTools }),
     ...(mergeSkills(input.skills, knowledgeLoad?.skills ?? []) === undefined ? {} : { skills: mergeSkills(input.skills, knowledgeLoad?.skills ?? [])! }),
+    ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
@@ -654,6 +665,8 @@ export async function createWorkerResources(
     loadedSkills?: readonly Skill[];
     /** An agent step's system prompt (Task 23), in place of the coding worker's; with it, neither Pi's discovered context files nor AgentX's coding preamble are added. */
     systemPrompt?: string;
+    /** The standing-instructions block (see PiSessionInput.standingInstructions); ignored when `systemPrompt` is given: an agent step carries the block inside its own system prompt. */
+    standingInstructions?: string;
   },
 ): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
   const skills = input.loadedSkills ?? [];
@@ -675,6 +688,7 @@ export async function createWorkerResources(
   settingsManager.setThemePaths([]);
   settingsManager.setShellPath(undefined);
   settingsManager.setShellCommandPrefix(undefined);
+  const standing = input.systemPrompt === undefined && input.standingInstructions !== undefined && input.standingInstructions !== "" ? input.standingInstructions : undefined;
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.cwd,
     agentDir: input.agentDirectory,
@@ -694,10 +708,12 @@ export async function createWorkerResources(
     // A step's skills are listed after it, naming read_skill: Pi's own list would point at the file and the read tool.
     systemPromptOverride: () => {
       const base = input.systemPrompt ?? AGENTX_WORKER_PROMPT;
-      return skills.length === 0 ? base : `${base}\n\n${skillsPromptSection(skills)}`;
+      // With a standing-instructions block the skills list moves after it (below the company's rules, as the layer order says); without one the prompt is what it always was.
+      return skills.length === 0 || standing !== undefined ? base : `${base}\n\n${skillsPromptSection(skills)}`;
     },
     // Spec 051 FR-001/FR-010: the same preamble for coding tasks and eval runs, rendered as Pi's <addendum>. An agent step writes no code.
-    appendSystemPrompt: input.systemPrompt === undefined ? [AGENTX_PREAMBLE] : [],
+    // Standing instructions: the block follows the preamble in the same addendum (so it sits after AgentX's own prompt and before Pi's project context, the repository's files), then the skills list.
+    appendSystemPrompt: input.systemPrompt === undefined ? [AGENTX_PREAMBLE, ...(standing === undefined ? [] : [standing, ...(skills.length === 0 ? [] : [skillsPromptSection(skills)])])] : [],
   });
   await resourceLoader.reload({ resolveProjectTrust: async () => false });
   // Last, after every write and reload: each of them merges the stored settings files again, which drops an in-memory override.

@@ -79,6 +79,13 @@ export function isSlugOrPath(value: string): boolean {
  * with a short number after it allowed), a digit id of 3 digits or more, a hex id of 8 characters or more, or a version (`v2`). A short piece (`Ko`, `7`, `dl`) says nothing.
  */
 const CAMEL_WORD = /^[A-Za-z][a-z]{2,}(?:[A-Z][a-z]{2,})*\d{0,4}$/;
+/** Three-letter words that routes and file systems really use (`/api/...`, `/app/...`, `/usr/bin`; only words with a vowel, the rest are never path segments anyway): firm evidence, unlike other 3-letter pieces, which random characters make about as often. */
+const COMMON_SHORT_PATH_WORDS = new Set(["api", "app", "web", "org", "run", "dev", "new", "top", "all", "get", "set", "log", "img", "lib", "bin", "usr", "var", "etc", "doc", "eng", "key", "tag", "job", "tmp",
+  "pub", "cli", "ids", "map", "opt", "dir", "env", "zip", "raw", "old", "ops", "geo", "tab", "cat", "pet", "ads", "tax", "pay", "buy", "tel", "net"]);
+/** A word of exactly 3 letters that is not a common path word (`Qoy`, `fyk`): too easy for random characters to make, so it never carries a path on its own. */
+function isShortWord(segment: string): boolean {
+  return segment.length === 3 && CAMEL_WORD.test(segment) && !COMMON_SHORT_PATH_WORDS.has(segment.toLowerCase());
+}
 function isPathSegment(segment: string): boolean {
   return /^\d{3,}$/.test(segment) || /^[0-9a-fA-F]{8,}$/.test(segment) || /^v\d{1,2}$/.test(segment)
     || (CAMEL_WORD.test(segment) && (segment.match(/[A-Z]?[a-z]{2,}/g) ?? []).every((part) => /[aeiouy]/i.test(part)));
@@ -87,12 +94,26 @@ function isPathSegment(segment: string): boolean {
  * A value with `/` in it whose segments are recognisably ids and words (`/api/userProfiles/8423/orderItems/12345`, `/Users/8423/Orders/12345`, `/files/<upper-case hex>`): a path, however its case
  * is mixed. A random standard-base64 token has a few random characters between its slashes; they are almost never a word, a digit id or a hex id. One short piece never decides: with two segments
  * both must say "path"; with more, at least three and half of them.
+ *
+ * Two weaker pieces of evidence never carry a path alone. A 3-letter word that is not a common path word is one (random base64 pieces of 3 letters often read as a word: `Qoy`, `fyk`, `Ipt`,
+ * `qwi`); and a piece of 4 characters or more that is NOT recognisable and has only base64 characters (`vkv7zesoatRb5eCCFKuVPauoWV74ODe`, `4e7m`, `v8d6M5s9IYdZecY5Rc2`; a file name or a slug has a
+ * `.`, `-` or `_`, and a prefixed number such as `mcpone000001` is an id) is an opaque piece. A value with opaque pieces is a path only when it has firm segments (a digit id, a hex id, a version,
+ * a common 3-letter path word, or a word of 4 letters or more) to vouch for them: at least two, more than the opaque pieces, and one more for each uncommon 3-letter word. `939/Qoy/vkv7zesoatRb5eCCFKuVPauoWV74ODe/fyk` has one firm segment
+ * and one opaque piece. A route with ids (`/api/users/aB3dE5fG7hI9jK1lM2nO/posts`) and a path whose pieces are all recognisable (`/api/orders/12345`) stay paths.
+ * Known limit: a strictly alternating `/<resource>/<id>/<resource>/<id>` route with ids of 4+ base64 characters has as many opaque pieces as firm ones and is not a path; and a random token
+ * of three or more 4+ letter pseudo-words with two opaque pieces (`Hbihmpi/Lygm/v8d6M5s9IYdZecY5Rc2/0pEXA/Datg`, about 1 in 10 million) cannot be told from a route by counting segments.
  */
 export function isPathLike(value: string): boolean {
   const segments = value.split("/").filter((segment) => segment.length > 0);
   if (segments.length < 2) return false;
   const meaningful = segments.filter(isPathSegment).length;
-  return segments.length === 2 ? meaningful === 2 : meaningful >= 3 && meaningful / segments.length >= 0.5;
+  if (segments.length === 2) return meaningful === 2;
+  if (meaningful < 3 || meaningful / segments.length < 0.5) return false;
+  const opaque = segments.filter((segment) => segment.length >= 4 && /^[A-Za-z0-9+=]+$/.test(segment) && !/^[A-Za-z]{3,}\d{4,}$/.test(segment) && !isPathSegment(segment)).length;
+  if (opaque === 0) return true;
+  const firm = segments.filter((segment) => isPathSegment(segment) && !isShortWord(segment)).length;
+  // Each uncommon 3-letter word beside an opaque piece is a sign of randomness, not of a route: it asks for one more firm segment.
+  return firm >= Math.max(2, opaque + 1) + segments.filter((segment) => isPathSegment(segment) && isShortWord(segment)).length;
 }
 
 /** A single long base64, base64url or hex run with a letter and a digit that is not a UUID, a path or a slug. */

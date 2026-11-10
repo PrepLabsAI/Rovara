@@ -535,6 +535,9 @@ export const MERGE_NOT_READY_MESSAGES = {
   /** Where the repository has a CODEOWNERS file that covers changed paths, a code owner has to approve (owner decision 2026-10-27). `owners` are the logins and teams, as the file names them. */
   needsCodeOwner: (owners: string): string => `A code owner has to approve the files this pull request changes (${owners}).`,
   codeOwnersUnreadable: "Rovara couldn't read this repository's code owners, so it can't tell whether a code owner approved. Try again in a minute.",
+  /** Lessons in the repo (decision 50.4): `.rovara/lessons.md` is the team's file and changes only through Rovara's own weekly lessons pull request, never through a task's. */
+  touchesLessonsFile: "This pull request changes .rovara/lessons.md, which only the team's weekly lessons pull request may change. Take that file out of this pull request.",
+  lessonsFileUnreadable: "Rovara couldn't read the full list of files this pull request changes, so it can't tell whether it leaves .rovara/lessons.md alone. Try again in a minute.",
   riskChanged: (level: "low" | "medium" | "high"): string => `The risk of this pull request is now ${level}. Check it and press Merge again.`,
 } as const;
 

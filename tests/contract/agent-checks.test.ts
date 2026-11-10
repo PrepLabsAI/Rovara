@@ -2,14 +2,14 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  AGENTX_PREAMBLE, AGENTX_PREAMBLE_VERSION, AGENTX_WORKER_PROMPT, agentxPreambleSha256, CheckReportSchema, isPipedTestCommand,
+  AGENTX_PREAMBLE, AGENTX_PREAMBLE_VERSION, AGENTX_WORKER_PROMPT, STANDING_INSTRUCTIONS_WORDING, agentxPreambleSha256, CheckReportSchema, isPipedTestCommand,
   classifyCheck, matchTestCommand, parseAgentClaim, reportStatus, scanTestCommands, taskResultChecks, withoutOutputTail,
 } from "@agentx/contracts";
 
 describe("the AgentX preamble (spec 051 FR-001)", () => {
   it("is versioned and hashed together with the worker prompt", () => {
-    expect(AGENTX_PREAMBLE_VERSION).toBe("4");
-    expect(agentxPreambleSha256()).toBe(createHash("sha256").update(`${AGENTX_WORKER_PROMPT}\n\n${AGENTX_PREAMBLE}`).digest("hex"));
+    expect(AGENTX_PREAMBLE_VERSION).toBe("5");
+    expect(agentxPreambleSha256()).toBe(createHash("sha256").update(`${AGENTX_WORKER_PROMPT}\n\n${AGENTX_PREAMBLE}\n\n${Object.values(STANDING_INSTRUCTIONS_WORDING).join("\n")}`).digest("hex"));
   });
   it("tells the agent each rule, and the final line (P-5)", () => {
     for (const phrase of ["Reproduce the problem", "before and after", "your own regression", "old behaviour the task asks you to change", "Never edit or delete a test to make it pass", "Fix your change, not the test", "never claim", "AgentX result: done", "AgentX result: not done"]) {

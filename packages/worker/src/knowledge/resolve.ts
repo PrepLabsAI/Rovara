@@ -13,7 +13,7 @@
 // stores rule text, logs a path, or reads outside the sources it is handed.
 import { createHash } from "node:crypto";
 import type { MetaSkillSnapshot } from "@agentx/contracts";
-import { agentXError } from "@agentx/contracts";
+import { COMPANY_RULES_EXCEED_BUDGET_MESSAGE, agentXError, assertCompanyRulesWithinBudget } from "@agentx/contracts";
 import { inertContextText, inertLabel } from "../context-text.js";
 import { applyBudget } from "./budget.js";
 import { firstMatchingPattern } from "./glob.js";
@@ -41,7 +41,8 @@ import { rovaraRulesReader } from "./rovara-rules.js";
 import type { MetaSkillSkip } from "./skills.js";
 import type { DirectoryEntry, KnowledgeFileSource } from "./source.js";
 
-export const COMPANY_RULES_EXCEED_BUDGET_MESSAGE = "Company rules exceed the size budget";
+// The company rules' limits and the refusal's first words are the contracts' (decision 57.6: 30 rules, 600 characters each, 12,000 in all); the broker checks the same ones before it sends a step.
+export { COMPANY_RULES_EXCEED_BUDGET_MESSAGE };
 
 const MAX_FILES_IN_PLAY = 1_000;
 const MAX_NOTICES = 20;
@@ -420,6 +421,8 @@ export async function resolveKnowledge(input: ResolveKnowledgeInput): Promise<Re
   const pendingMatches: KnowledgeItem[] = [];
   const autoCatalog: AutoCatalogEntry[] = [];
 
+  // Company rules (decision 57.6): 30 rules, 600 characters each, 12,000 in all. Over the limit the stage fails closed with a clear error; no rule is ever cut or dropped to fit.
+  assertCompanyRulesWithinBudget((input.external ?? []).filter((item) => item.layer === "company"));
   for (const external of input.external ?? []) toLoad.push({ item: external, why: external.locked === true ? { kind: "required" } : { kind: "always" } });
 
   for (const entry of input.sources) {

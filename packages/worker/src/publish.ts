@@ -19,6 +19,7 @@ import {
 import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME } from "./git.js";
 import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository, type CredentialedGitRunner } from "./git-auth.js";
 import { CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, candidateLayout, snapshotTree, withIsolatedGit } from "./isolated-git.js";
+import { assertLessonsFileUntouched } from "./lessons-file-guard.js";
 import { assertWorkspaceIsPlain, runIsolatedGit, withIsolatedRepository } from "./isolated-repository.js";
 import { stopWorkspaceProcesses } from "./workspace-processes.js";
 import { sweepWorkspaceContainers } from "./workspace-containers.js";
@@ -246,6 +247,10 @@ export async function publishWorkspace(
       credential: await fetchCredential(),
     });
   }
+
+  // Owner decision 50.4: a task never pushes a change to the team's lessons file. Checked on the commit about to go, before any readiness check or credential. A workflow publication's commits are the task's own on its pinned
+  // base; any other publication is one commit on the latest base, so its first parent is the base.
+  await assertLessonsFileUntouched(git, commit, candidateTreeSha !== undefined && invocation.payload.publicationMode === "COMMITTED_HEAD" ? (invocation.payload.workflowBaseCommit ?? manifestRepository.resolvedCommit) : undefined);
 
   // A workflow publication runs no project command here: its checks already ran, on this same tree, before its reviews,
   // and the tree is checked again above. Only an ordinary publication runs the project's readiness checks.

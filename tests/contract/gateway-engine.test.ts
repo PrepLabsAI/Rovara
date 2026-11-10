@@ -11,6 +11,7 @@ import {
   McpUnauthorized,
   CredentialUnavailable,
   ConnectorNotConnected,
+  ToolRefusal,
   type ConnectorContext,
   type ConnectorDefinition,
   type Guard,
@@ -456,5 +457,64 @@ describe("credentials that are missing or rejected", () => {
     const result = await openConnection(f.connector, f.context, "read", ["list_items"], AbortSignal.timeout(20_000), { connect: f.connect });
     expect(result.credential.token).toBe("key-2");
     expect(f.connect.mock.calls.map(([options]) => options.token)).toEqual(["key-1", "key-2"]);
+  });
+});
+
+describe("a durable call of a tool approved for reading (the approval path)", () => {
+  it("claims and finishes the ledger when told to, so a repeat replays the result and the vendor is asked once", async () => {
+    const f = fixture();
+    const request = f.request("list_items", { state: "open" });
+    const first = await executeTool(request, f.connector, f.context, { connect: f.connect, ledger: f.ledger, durable: true });
+    expect(first).toMatchObject({ status: "SUCCEEDED", replayed: false });
+    expect(f.records.get(request.requestId)?.result.status).toBe("SUCCEEDED");
+    const again = await executeTool(request, f.connector, f.context, { connect: f.connect, ledger: f.ledger, durable: true });
+    expect(again).toMatchObject({ status: "SUCCEEDED", replayed: true });
+    expect(f.call).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers UNKNOWN, not FAILED, when the vendor call breaks, because the vendor may have acted", async () => {
+    const f = fixture();
+    f.call.mockRejectedValueOnce(new Error("connection reset"));
+    const request = f.request("list_items", { state: "open" });
+    expect(await executeTool(request, f.connector, f.context, { connect: f.connect, ledger: f.ledger, durable: true })).toMatchObject({ status: "UNKNOWN" });
+    expect(f.records.get(request.requestId)?.result.status).toBe("UNKNOWN");
+  });
+
+  it("leaves a plain read out of the ledger", async () => {
+    const f = fixture();
+    const request = f.request("list_items", { state: "open" });
+    await executeTool(request, f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(f.records.size).toBe(0);
+  });
+});
+
+
+describe("a native connector's own refusal and the tools a scope cannot use (fake tool source)", () => {
+  it("returns a ToolRefusal's own words and reason as the call's failure, for a read and for a write, never as UNKNOWN", async () => {
+    const read = fixture();
+    read.call.mockRejectedValueOnce(new ToolRefusal("The data source is not set up.", "vendor_error"));
+    expect(await executeTool(read.request("list_items", { state: "open" }), read.connector, read.context, { connect: read.connect, ledger: read.ledger }))
+      .toMatchObject({ status: "FAILED", text: "The data source is not set up.", reason: "vendor_error" });
+    // After a write was attempted a plain break is UNKNOWN; a refusal the connector wrote itself is still its own FAILED answer.
+    const write = fixture();
+    write.call.mockRejectedValueOnce(new ToolRefusal("This tool is not allowed here."));
+    expect(await executeTool(write.request("create_item", { title: "Bug" }), write.connector, write.context, { connect: write.connect, ledger: write.ledger }))
+      .toMatchObject({ status: "FAILED", text: "This tool is not allowed here.", reason: "policy_denied" });
+    const broken = fixture();
+    broken.call.mockRejectedValueOnce(new Error("connection reset"));
+    expect(await executeTool(broken.request("create_item", { title: "Bug" }), broken.connector, broken.context, { connect: broken.connect, ledger: broken.ledger }))
+      .toMatchObject({ status: "UNKNOWN" });
+  });
+
+  it("lists a tool the scope cannot use with the connector's reason, and leaves it out of the offered catalog", () => {
+    const f = fixture();
+    const connector: ConnectorDefinition<TrackerScope> = { ...f.connector, unavailableTools: () => [{ tool: "list_items", reason: "this scope has no data source" }] };
+    const review = reviewTools({ tools: f.tools }, connector, f.context);
+    expect(review.skipped).toContainEqual({ tool: "list_items", reason: "this scope has no data source" });
+    expect(review.tools.map((tool) => tool.name)).not.toContain("list_items");
+    expect(review.tools.map((tool) => tool.name)).toContain("create_item");
+    expect(approveTools({ tools: f.tools }, connector, f.context).map((tool) => tool.name)).not.toContain("list_items");
+    // Without the hook nothing changes.
+    expect(reviewTools({ tools: f.tools }, f.connector, f.context).tools.map((tool) => tool.name)).toContain("list_items");
   });
 });

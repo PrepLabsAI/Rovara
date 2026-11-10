@@ -20,6 +20,8 @@ import { WorkflowFixPayloadSchema } from "./rovara-code.js";
 import { LiveSteerPayloadSchema } from "./live-steer.js";
 import { PREPARE_PINS_FEATURE, PreparePinsSchema, SETUP_AGENT_FEATURE, SetupAgentWireSchema } from "./setup-run.js";
 import { NIGHTLY_RUN_FEATURE, NightlyRunPayloadSchema } from "./nightly-run.js";
+import { STANDING_INSTRUCTIONS_FEATURE, StandingInstructionsPayloadSchema } from "./standing-instructions.js";
+import { EVAL_FILES_FEATURE, EvalFilesPayloadSchema } from "./eval-files.js";
 import { SETUP_RECIPES_FEATURE, SETUP_RECIPE_OFFERS_MAX, SetupRecipeOfferSchema } from "./setup-recipe.js";
 import { PrepareMetaSchema } from "./meta-project.js";
 import { PREPARE_REGISTRIES_FEATURE, PrepareRegistriesSchema } from "./project-registries.js";
@@ -49,7 +51,7 @@ export const SECOND_REVIEWER_FEATURE = "task.workflowSecondReviewer.v1" as const
 /** DR5: the design-review form of the PLAN_CRITIQUE operation (`designReview` binding). A worker without it is never sent the binding; the broker refuses delivery instead (ec2-delivery.ts). */
 export const DESIGN_REVIEW_WORKER_FEATURE = "task.designReview.v1" as const;
 export const WORKER_INVOCATION_FEATURES = ["task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "model.route", "task.workflowUnderstand", "task.workflowPlanCritique", "task.workflowParallelParts", "task.workflowFix", "task.workflowFeedbackAutonomy", "maintain.workflowSync", "task.setupDraft", "task.setupProposal.v2", "publish.branchOnly", "close.trashBundle", "task.workflowReviewRisk", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.learnedContext.v1", OWNER_REDIRECT_FEATURE, PEEK_FEATURE, "publish.attribution", DIAGNOSIS_WORKER_FEATURE, EVIDENCE_CAPTURE_FEATURE, TEST_ENV_DETECT_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, PREPARE_REGISTRIES_FEATURE, PREPARE_SAVED_ENV_FEATURE, PREPARE_SAVED_ENV_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_CREDENTIAL_KINDS_FEATURE, SECOND_REVIEWER_FEATURE, DESIGN_REVIEW_WORKER_FEATURE,
-  NIGHTLY_RUN_FEATURE] as const;
+  NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** An agent step's payload (`agentStep`) goes only to a worker that lists this; the agent kind also needs AGENT_RUN_FEATURE. */
 export const AGENT_STEP_FEATURE = "task.agentStep" as const;
@@ -470,6 +472,11 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         readiness: z.array(ProjectCommandSchema).max(64).optional(),
         /** What the agent's recipe adds to this operation, or the agent step it is. Sent only to a worker that lists "task.agentStep"; never dropped. */
         agentStep: AgentStepPayloadSchema.optional(),
+        /**
+         * Standing instructions: the company's rules and the project's "How we work" for this step, as one text the worker puts in the SYSTEM prompt, after Rovara's own prompt and preamble and before the
+         * repository's files and the skills. Sent only to a worker that lists "task.standingInstructions.v1"; never dropped (an older worker is refused the step at delivery).
+         */
+        standingInstructions: StandingInstructionsPayloadSchema.optional(),
         /** The model proxy alias to use in place of the install's default route. Sent only to a worker that lists "model.route"; never dropped. */
         modelRoute: ModelRouteSchema.optional(),
         /** Governed tasks require broker authorization before any worker-side replacement; never dropped. */
@@ -484,6 +491,11 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * to a worker, so no lesson text sits in an outbox row, a queue message or a dead-letter copy.
          */
         learnedRefs: LearnedRefsSchema.optional(),
+        /**
+         * Lessons replay, the file arm (DECISIONS 50.5, 68): the lessons file and its pointer the worker places in a replay copy's checkout before the agent starts, kept out of any diff. Built by the dispatcher at
+         * delivery for a replay copy only; never stored or queued. Sent only to a worker that lists "task.evalFiles.v1"; never dropped (an older worker is refused the step).
+         */
+        evalFiles: EvalFilesPayloadSchema.optional(),
         /**
          * Live interaction, Stop & redirect (keep the plan): the owner's instruction that stopped the previous run of this coding step. The worker records it as taken from the owner (so the re-approval stop applies) and
          * puts it in the prompt, framed and untrusted. Implementation mode only. Sent only to a worker whose /ping lists "task.ownerRedirect.v1"; never dropped, because an older worker would run the step

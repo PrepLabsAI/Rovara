@@ -245,6 +245,24 @@ export const CANDIDATE_EXCLUDE_PATHSPEC = ":(exclude,glob)**/.agentx-file-ops-*"
 export const CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC = ":(top,exclude,literal).agentx-python";
 
 /**
+ * Lessons replay, the file arm: top-level paths of a work tree that every candidate snapshot leaves out, whether the path is tracked or not. Registered only by `eval-files.ts`, which places a replay copy's lessons file
+ * and pointer; nothing else registers, so an ordinary task's snapshot is unchanged. A hidden path keeps the entry the commit has (or none): edits to it are not part of the candidate. Kept in the worker process; the broker
+ * sends the files again with every stage of a copy, so a restarted worker registers them again before the agent starts.
+ */
+const hiddenFromCandidate = new Map<string, Set<string>>();
+export const HIDDEN_WORK_TREES_MAX = 64;
+/** For a test: how many work trees hold hidden paths now. */
+export const hiddenWorkTreeCount = (): number => hiddenFromCandidate.size;
+export function hideFromCandidate(workTree: string, path: string): void {
+  // A work tree is one task's checkout (its path is per workspace), so the entries are few; the oldest are dropped past a bound so a long-lived worker never grows the map.
+  if (!hiddenFromCandidate.has(workTree) && hiddenFromCandidate.size >= HIDDEN_WORK_TREES_MAX) hiddenFromCandidate.delete(hiddenFromCandidate.keys().next().value!);
+  const paths = hiddenFromCandidate.get(workTree) ?? new Set<string>();
+  paths.add(path);
+  hiddenFromCandidate.set(workTree, paths);
+}
+const hiddenPathspecs = (workTree: string): string[] => [...(hiddenFromCandidate.get(workTree) ?? [])].map((path) => `:(top,exclude,literal)${path}`);
+
+/**
  * The tree of `commit` plus the work tree as it is now, computed in `git`'s temporary index (never the candidate's real one): `read-tree`, then `add --all`, then
  * `write-tree`, with the nested-repository and Git LFS refusals in between. Git runs in the throwaway repository, so no filter, driver or hook of the candidate's
  * config exists for it to run. A nested repository's own config is out of that protection, so Git is kept away from every tracked gitlink: a gitlink path is
@@ -270,10 +288,11 @@ export async function addWorkTree(git: IsolatedGit, index: IndexKind, gitlinks: 
       throw agentXError("CONFIG_INVALID", `the repository has a submodule at ${path} that is no longer a directory. AgentX tasks do not yet support changes to a project's submodules.`);
     }
   }
-  if (gitlinks.length === 0) await git.text(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC], { index, maxBuffer: 1024 * 1024 });
+  const hidden = hiddenPathspecs(git.layout.workTree);
+  if (gitlinks.length === 0) await git.text(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...hidden], { index, maxBuffer: 1024 * 1024 });
   else {
     const pathspecs = join(git.scratch, "pathspecs");
-    await writeFile(pathspecs, [".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
+    await writeFile(pathspecs, [".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...hidden, ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
     await git.text(["add", "--all", `--pathspec-from-file=${pathspecs}`, "--pathspec-file-nul"], { index, maxBuffer: 1024 * 1024 });
   }
 }

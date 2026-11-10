@@ -109,6 +109,8 @@ export async function runWorkflowFeedbackReview(input: {
   fileTools?: FileOpsTarget;
   /** A coding step's instruction section: added after this review's own rules, before the data it judges. */
   promptSection?: string;
+  /** Standing instructions: the broker-built block, placed in the reviewer's SYSTEM prompt (the company's rules, and the step's layers a reviewing stage may see). */
+  standingInstructions?: string;
   /** The step's skills, which the reviewer reads through read_skill. */
   skills?: readonly AgentSkillFile[];
   /** The step's tool list, which only narrows the reviewer's read-only tools. */
@@ -172,7 +174,8 @@ export async function runWorkflowFeedbackReview(input: {
         baseCommits: input.ruleFileBaseCommits,
         ...(input.fileTools === undefined ? {} : { fileTools: input.fileTools }),
         ...(input.tools === undefined ? {} : { agentTools: input.tools }),
-        ...(input.skills === undefined ? {} : { skills: input.skills }) }, input.piAdapter);
+        ...(input.skills === undefined ? {} : { skills: input.skills }),
+        ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }) }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;
       version = actualModel.modelId;
@@ -718,6 +721,10 @@ export async function runWorkflowReviews(input: {
   fileTools?: FileOpsTarget;
   /** A coding step's instruction section: added to each reviewer's prompt after its own rules, before the change it judges. */
   promptSection?: string;
+  /** Standing instructions: the broker-built block for each reviewer's SYSTEM prompt. */
+  standingInstructions?: string;
+  /** The company part of that block alone: the second reviewer that is shown only the change (`change_only`) still gets the company's rules (decision 57.2), and nothing else of the block. */
+  companyStandingInstructions?: string;
   /** Learning v2: the labelled block of approved review lessons (and what the planner and coder were told), rendered by the worker. Inert advice: it grants no tool and changes no rule. */
   learnedBlock?: string;
   /** The step's skills, which each reviewer reads through read_skill. */
@@ -767,7 +774,7 @@ export async function runWorkflowReviews(input: {
   const linkStop = () => secondStop.abort();
   if (input.secondReviewer !== undefined) { if (input.signal?.aborted === true) secondStop.abort(); else input.signal?.addEventListener("abort", linkStop, { once: true }); }
   const secondRun: Promise<{ result: SecondReviewResult; fatal?: unknown }> | undefined = input.secondReviewer === undefined || !roles.includes("CRITIC") ? undefined : (async () => {
-    const { secondReviewer, onSecondReview: _onSecond, reviewSpec: _spec, onSpecReview: _onSpec, reviewers: _reviewers, model: _model, piAdapter: _adapter, onUsage, sources, learnedBlock, promptSection, skills, ...rest } = input;
+    const { secondReviewer, onSecondReview: _onSecond, reviewSpec: _spec, onSpecReview: _onSpec, reviewers: _reviewers, model: _model, piAdapter: _adapter, onUsage, sources, learnedBlock, promptSection, skills, standingInstructions, companyStandingInstructions, ...rest } = input;
     void _onSecond; void _spec; void _onSpec; void _reviewers; void _model; void _adapter;
     const deadline = Date.now() + timeoutMs;
     const tries: SecondReviewTry[] = [];
@@ -778,7 +785,8 @@ export async function runWorkflowReviews(input: {
       const number = tries.length + 1;
       let report: (typeof reports)[number] | undefined;
       try {
-        [report] = await runWorkflowReviews({ ...rest, ...(secondReviewer!.context === "same_as_first" ? { ...(sources === undefined ? {} : { sources }), ...(learnedBlock === undefined ? {} : { learnedBlock }), ...(promptSection === undefined ? {} : { promptSection }), ...(skills === undefined ? {} : { skills }) } : {}), model: chosen.model, ...(chosen.piAdapter === undefined ? {} : { piAdapter: chosen.piAdapter }),
+        const secondStanding = secondReviewer!.context === "same_as_first" ? standingInstructions : companyStandingInstructions;
+        [report] = await runWorkflowReviews({ ...rest, ...(secondStanding === undefined ? {} : { standingInstructions: secondStanding }), ...(secondReviewer!.context === "same_as_first" ? { ...(sources === undefined ? {} : { sources }), ...(learnedBlock === undefined ? {} : { learnedBlock }), ...(promptSection === undefined ? {} : { promptSection }), ...(skills === undefined ? {} : { skills }) } : {}), model: chosen.model, ...(chosen.piAdapter === undefined ? {} : { piAdapter: chosen.piAdapter }),
           reviewers: ["CRITIC"], secondReviewTry: number, signal: secondStop.signal, timeoutMs: Math.max(1, deadline - Date.now()),
           ...(onUsage === undefined ? {} : { onUsage: (usage) => onUsage({ ...usage, secondReviewTry: number }) }) });
       } catch (error) {
@@ -820,6 +828,7 @@ export async function runWorkflowReviews(input: {
         ...(input.fileTools === undefined ? {} : { fileTools: input.fileTools }),
         ...(input.tools === undefined ? {} : { agentTools: input.tools }),
         ...(input.skills === undefined ? {} : { skills: input.skills }),
+        ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
         contextFilesAt: "base-commit",
         baseCommits: input.ruleFileBaseCommits,
         ...(input.sources === undefined ? {} : { contextTools: input.sources.tools, contextNote: input.sources.note }),

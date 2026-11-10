@@ -75,6 +75,11 @@ export interface ReviewSessionOptions {
   /** The model and adapter of one session. The default builds them from the binding's model and the key slot's proxy. */
   runtimeFor(open: OpenDesignReviewSession): { model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter | undefined; keyId?: (() => Promise<string | undefined>) | undefined };
   onDiagnostic?: (message: string) => void;
+  /**
+   * Standing instructions (decision 57.2): the company's rules (and the plan check's own layers) the broker sent, added to the system text AFTER the role prompt, so the text still BEGINS with the role
+   * prompt (`sentAsRendered`) and the addition is counted in `harnessSystemChars` like Pi's own sections.
+   */
+  standingInstructions?: string | undefined;
 }
 
 /** A new pi session for one reviewer or the merge step, behind the orchestration's port. */
@@ -92,7 +97,7 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
       ...(options.fileTools === undefined ? {} : { fileTools: options.fileTools }),
       ...(options.localFileTools === undefined ? {} : { localFileTools: options.localFileTools }),
       agentTools: [...open.tools],
-      agentRun: { systemPrompt: open.system, tools: [] },
+      agentRun: { systemPrompt: options.standingInstructions === undefined || options.standingInstructions === "" ? open.system : `${open.system}\n\n${options.standingInstructions}`, tools: [] },
     }, runtime.piAdapter);
     let lastOutcome: AssistantOutcome | undefined;
     let lastText: string | undefined;

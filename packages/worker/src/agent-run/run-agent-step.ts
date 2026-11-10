@@ -62,6 +62,8 @@ export interface RunAgentStepInput {
   modelAccess: { model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter };
   /** The step's pinned skills, from the broker's snapshot. */
   skills?: readonly AgentSkillFile[];
+  /** The broker-built standing-instructions block for this step (company rules); placed in the system prompt after the preamble, before the agent's own instructions. */
+  standingInstructions?: string;
   eventSink: EventBatchSink;
   artifactSink: ArtifactSink;
   cancellationController?: WorkerCancellationController;
@@ -71,9 +73,13 @@ export interface RunAgentStepInput {
   call?: ConnectorBridgeCall;
 }
 
-/** The system prompt: the preamble, then the step's instruction block when it has one (the skills list follows, from the session). */
-export function agentStepSystemPrompt(instructions: string): string {
-  return instructions.trim() === "" ? AGENT_STEP_PREAMBLE : `${AGENT_STEP_PREAMBLE}\n\n${instructions}`;
+/**
+ * The system prompt: the preamble, then the standing-instructions block when the broker sent one (the company's rules rank above the agent's own instructions), then the step's instruction block when it
+ * has one (the skills list follows, from the session).
+ */
+export function agentStepSystemPrompt(instructions: string, standingInstructions?: string): string {
+  const standing = standingInstructions === undefined || standingInstructions.trim() === "" ? [] : [standingInstructions];
+  return [AGENT_STEP_PREAMBLE, ...standing, ...(instructions.trim() === "" ? [] : [instructions])].join("\n\n");
 }
 
 /**
@@ -162,7 +168,7 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
       ...(workspace.localFileTools === undefined ? {} : { localFileTools: workspace.localFileTools }),
       agentTools: payload.workspace === "read" ? [...READ_ONLY_TOOLS] : [],
       ...(input.skills === undefined || input.skills.length === 0 ? {} : { skills: input.skills }),
-      agentRun: { systemPrompt: agentStepSystemPrompt(payload.instructions), tools },
+      agentRun: { systemPrompt: agentStepSystemPrompt(payload.instructions, input.standingInstructions), tools },
     }, input.modelAccess.piAdapter);
 
     const handle = session;

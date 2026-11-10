@@ -44,6 +44,7 @@ import { pinnedSkills, withStepTimeout, type AgentSkillFile } from "./agent-step
 import { loadedKnowledgePayload } from "./knowledge/manifest.js";
 import { LEARNED_LOAD_REPORT_FIELD, type NightlyResultCallbackBody, type SecondReviewContext, type SecondReviewResult } from "@agentx/contracts";
 import { prepareLearnedContext, withLearnedBlock } from "./learned-run.js";
+import { placeEvalFiles } from "./eval-files.js";
 import { runAgentStep, type AgentStepResult, type RunAgentStepInput } from "./agent-run/run-agent-step.js";
 import {
   createWorkspacePiSession,
@@ -290,9 +291,13 @@ async function runTask(
     stepSkills = pinnedSkills(await dependencies.agentSkills(), step.skills);
   }
   // What a step adds to every session of the operation, the reviewers' too; nothing without agentStep.
+  // Standing instructions: the broker-built block goes in the SYSTEM prompt of every session of the operation, the reviewers' too; the company part alone is for the second reviewer shown only the change.
+  const standingInstructions = invocation.payload.standingInstructions?.text;
+  const companyStandingInstructions = invocation.payload.standingInstructions?.company?.text;
   const stepSession = {
     ...(agentStep?.tools === undefined ? {} : { agentTools: agentStep.tools }),
     ...(stepSkills === undefined ? {} : { skills: stepSkills }),
+    ...(standingInstructions === undefined ? {} : { standingInstructions }),
   };
   // The step's own time limit replaces the default one of each review.
   const reviewTimeoutMs = agentStep?.timeoutMs ?? dependencies.timeouts?.reviewMs;
@@ -390,6 +395,7 @@ async function runTask(
       workspace: { rootPath: dependencies.rootPath, ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}) },
       modelAccess: { model: dependencies.model, ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }) },
       ...(stepSkills === undefined ? {} : { skills: stepSkills }),
+      ...(standingInstructions === undefined ? {} : { standingInstructions }),
       eventSink: dependencies.eventSink, artifactSink: dependencies.artifactSink,
       ...(dependencies.cancellationController === undefined ? {} : { cancellationController: dependencies.cancellationController }),
       ...hooks,
@@ -429,6 +435,7 @@ async function runTask(
         ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
         ...(feedbackTimeoutMs === undefined ? {} : { timeoutMs: feedbackTimeoutMs }),
         ...(agentStep?.promptSection === undefined ? {} : { promptSection: agentStep.promptSection }),
+        ...(standingInstructions === undefined ? {} : { standingInstructions }),
         ...(agentStep?.tools === undefined ? {} : { tools: agentStep.tools }),
         ...(stepSkills === undefined ? {} : { skills: stepSkills }),
         ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
@@ -964,6 +971,8 @@ async function runTask(
     if (dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
     // Learning v2: the approved lessons the broker chose for this stage, re-checked against the base commit and framed as labelled, inert advice (learned-run.ts). Absent, or for an older broker's
     // invocation, there is nothing: the stage runs as it would without memory. The report says which lessons reached the prompt; a failure to send it loses only a counter.
+    // Lessons replay, the file arm: the lessons file and pointer the broker built for this test copy are placed in its checkout, kept out of the candidate. Only a replay copy's stage carries them.
+    if (invocation.payload.evalFiles !== undefined) await placeEvalFiles(invocation.payload.evalFiles, candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase));
     const learned = await prepareLearnedContext({ raw: invocation.payload.learnedContext, mode: payloadMode, repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase) });
     if (learned.report !== undefined) await emit("progress", { [LEARNED_LOAD_REPORT_FIELD]: learned.report }).catch(() => undefined);
     // Stop & redirect (steer-invocation.ts): the owner's instruction that stopped the previous run is taken from the owner and framed after the broker's prompt (coding only; absent for every other step).
@@ -1286,7 +1295,7 @@ async function runTask(
           binding: designReviewBinding, artifactSink,
           ports: {
             loadPacket: designReview.loadPacket,
-            openSession: createReviewSessionOpener({ rootPath: dependencies.rootPath, ...reviewFileToolsOf(fileTools), runtimeFor: designReview.runtimeFor(designReviewBinding), onDiagnostic }),
+            openSession: createReviewSessionOpener({ rootPath: dependencies.rootPath, ...reviewFileToolsOf(fileTools), runtimeFor: designReview.runtimeFor(designReviewBinding), onDiagnostic, ...(companyStandingInstructions === undefined ? {} : { standingInstructions: companyStandingInstructions }) }),
             progress: async (message) => { await emit("progress", { message }); },
           },
           options: { signal: verificationStop.signal },
@@ -1555,6 +1564,8 @@ async function runTask(
           ...(dependencies.secondReviewer === undefined || invocation.payload.workflowSecondReviewer === undefined ? {} : { secondReviewer: dependencies.secondReviewer, onSecondReview: (result: SecondReviewResult) => { secondReview = result; } }),
           ...(reviewTimeoutMs === undefined ? {} : { timeoutMs: reviewTimeoutMs }),
           ...(agentStep?.promptSection === undefined ? {} : { promptSection: agentStep.promptSection }),
+          ...(standingInstructions === undefined ? {} : { standingInstructions }),
+          ...(companyStandingInstructions === undefined ? {} : { companyStandingInstructions }),
           ...(agentStep?.tools === undefined ? {} : { tools: agentStep.tools }),
           ...(stepSkills === undefined ? {} : { skills: stepSkills }),
           signal: verificationStop.signal,

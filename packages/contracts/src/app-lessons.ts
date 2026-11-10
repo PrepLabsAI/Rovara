@@ -92,6 +92,8 @@ export const LessonViewSchema = z.object({
   reviewRequired: z.literal(true).optional(), contradicts: z.string().max(64).optional(), retireProposed: z.literal(true).optional(), supersedes: z.string().max(64).optional(),
   /** The lesson this one may duplicate (kept apart from it, never merged): a person decides to merge, keep both or reject. */
   possibleDuplicate: z.string().max(64).optional(),
+  /** Set on a possible-duplicate card that cannot be merged into the other lesson: this one came only from the repository's own reviews, the other did not, and a merge would take that away. Approve (keep both) or reject. */
+  mergeBlocked: z.literal(true).optional(),
   rejectedReason: z.string().max(200).optional(),
   /** What this viewer may do with it, worked out by the server (the routes check again when asked). */
   canApprove: z.boolean(), canReject: z.boolean(), canRetire: z.boolean(),
