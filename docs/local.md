@@ -258,7 +258,7 @@ merge of the base. **It never merges**: a person does, on the code host. A pull 
 - **Milestones and the session.** `fixing`, `stuck`, `pr_ready`, `approved` and `merged` are a row in the task's partition and a line on the task's session, written in the transaction of the change that caused them. There is no one else to tell on a laptop.
 - **Cadence and limits.** A row is first due when the pull request opens, then every 60 s; each pass in which nothing changed doubles the wait up to 5 minutes, and a change starts again at 60 s. A pass has a request allowance (32 plus 20 for each further pull
   request); a sweep reads at most 10 rows, 256 requests and 20 s. A failing pass waits 60 s times its failures, up to 15 minutes. A code host that says "slow down" (`HostRateLimitError`) pauses every row until the time it names.
-- **The due time is a number.** A tracking row's `nextAttemptAt` is milliseconds since the epoch. The publish step first wrote an ISO text; a row written that way is never due (it is not read as a time). There are none outside builds of this lane, so nothing migrates them; delete such a row and the task is enrolled again by its next push or `wake`.
+- **The due time is a number.** A tracking row's `nextAttemptAt` is milliseconds since the epoch. The publish step first wrote an ISO text; a row written that way is never due (it is not read as a time). There are none outside builds of this lane, so nothing migrates them.
 - **The clock** is the app's (`LocalRuntimeOptions.now`), so a test moves it and a restart picks the schedule up from the rows.
 
 ## Pull request comment commands (lane L12, owner decision 66)
