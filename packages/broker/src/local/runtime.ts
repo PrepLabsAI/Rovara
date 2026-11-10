@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint, type SecretRef, type SecretStore } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, assertModelProvider, modelPriceRows, type AdapterRegistry, type ModelKeyStore, type ModelPrice, type PluginConfig, type PluginPoint, type SecretRef, type SecretStore } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
@@ -21,7 +21,7 @@ import {
   createRegistrySecretStore,
   createSecretModelKeyStore,
   secretsPluginWords,
-  environmentVariableFor,
+  modelKeyVariable,
   type ModuleImporter,
   loadAdapters,
   parsePluginConfig,
@@ -50,7 +50,8 @@ import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { assertGithubRepositoryAddress, type GhRunner } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
-import { createLocalModelProxy, type LocalModelProxy, type ModelGrantSource, type ProviderEndpoints } from "./model-proxy/index.js";
+import { assertBuiltinIdsKept, registerBuiltinModelProviders } from "../plugins/model-provider/builtin.js";
+import { createLocalModelProxy, registryModelProviderBook, type LocalModelProxy, type ModelGrantSource, type ProviderEndpoints } from "./model-proxy/index.js";
 import { modelProxyWorkerUrl } from "./docker-worker-machines.js";
 import {
   KEYS_FILE_NAME,
@@ -70,9 +71,9 @@ import { THIS_MACHINE_ADAPTER_NAME, ThisMachineWorkerMachines } from "./this-mac
 
 /** The model providers whose keys `rovara up` looks for (the environment variable is `<PROVIDER>_API_KEY`). */
 export const LOCAL_MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
-/** Where a model key may be, in order: the environment, then the owner's key file. */
+/** Where a model key may be, in order: the environment (the built-ins' long-standing names, `ROVARA_MODEL_<ID>_API_KEY` for any other provider), then the owner's key file. */
 export function modelKeyRefs(provider: string): SecretRef[] {
-  return [{ env: environmentVariableFor(provider) }, { key: provider }];
+  return [{ env: modelKeyVariable(provider) }, { key: provider }];
 }
 
 /**
@@ -80,12 +81,12 @@ export function modelKeyRefs(provider: string): SecretRef[] {
  * decision 60: `modelKeyRefs`); `secrets` is Code's own adapter unless the caller hands another (`rovara up` hands the registry's, so a configured `secrets` plug-in is the source of truth). Which
  * providers have a key is the same store's answer for each of `LOCAL_MODEL_PROVIDERS`, so a plug-in that has no key for a provider lists none, whatever `keys.json` holds.
  */
-export function createLocalModelKeyStore(stateDirectory: string, environment: NodeJS.ProcessEnv, secrets?: SecretStore): ModelKeyStore {
+export function createLocalModelKeyStore(stateDirectory: string, environment: NodeJS.ProcessEnv, secrets?: SecretStore, providers: readonly string[] = LOCAL_MODEL_PROVIDERS): ModelKeyStore {
   const keyFile = createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME));
   return createSecretModelKeyStore({
     secrets: secrets ?? createLocalSecretStore({ environment, keyFile }),
     refs: modelKeyRefs,
-    providers: LOCAL_MODEL_PROVIDERS,
+    providers,
   });
 }
 
@@ -354,7 +355,11 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const comments: { current?: Pick<LocalComments, "fetchComment" | "contextOf" | "available"> } = {};
   // Owner decision 60 (R2): secrets are read through the `secrets` point. The model keys and the GitHub token ask the registry each time, so a configured `secrets` plug-in replaces Code's.
   const registrySecrets = createRegistrySecretStore(registry);
-  const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment, registrySecrets);
+  // The providers whose key is looked for (item K2): the built-ins, then each `model-provider` plug-in once the config is loaded (below). The array is read at each call.
+  const keyedProviders: string[] = [...LOCAL_MODEL_PROVIDERS];
+  const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment, registrySecrets, keyedProviders);
+  // Item K2: what each provider costs comes from its plug-in. The table is filled after the config is loaded; the metering port reads it at each call.
+  const priceTable: { currency: string; models: Record<string, ModelPrice> } = { currency: "USD", models: {} };
   registerCodeDefaults(registry, {
     secrets: createLocalSecrets(stateDirectory, options.environment),
     ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
@@ -368,9 +373,11 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       commentsOn: () => comments.current?.available() === true,
     },
     modelKeys,
-    // Nothing is priced until a price table is configured: usage is recorded as "unknown", never guessed.
-    priceTable: { currency: "USD", models: {} },
+    // Nothing is priced until a `model-provider` plug-in brings a price table: usage is recorded as "unknown", never guessed.
+    priceTable,
   });
+  // Item K2: the model providers. The three Code has always known are rows; a configured `model-provider` plug-in of the same name replaces one.
+  registerBuiltinModelProviders(registry);
 
   // Storage and queue: one SQLite file in the state folder (lane L3's adapters), unless the config names its own. The store keeps the indexes the task flow needs.
   const closers: Array<() => Promise<void> | void> = [];
@@ -424,6 +431,20 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const registeredRepositories = async (): Promise<string[]> => (await registeredRepositoryRecords()).map((repository) => repository.url);
   options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
+  // Item K2: each provider is checked as a whole (an address that is not https, a header the proxy owns, a vertex variant on the wrong format), then its prices join the metering table.
+  const providerRows = registry.names("model-provider").map((name) => registry.require("model-provider", name));
+  for (const provider of providerRows) {
+    try {
+      assertModelProvider(provider);
+      assertBuiltinIdsKept(provider);
+    } catch (error) {
+      throw new LocalStateError(`${error instanceof Error ? error.message : "a model provider is not valid"}`);
+    }
+    if (!keyedProviders.includes(provider.kind)) keyedProviders.push(provider.kind);
+  }
+  const priced = modelPriceRows(providerRows);
+  priceTable.currency = priced.currency ?? "USD";
+  Object.assign(priceTable.models, priced.models);
   // Owner decision 60 (M1): a configured `secrets` plug-in is the source of truth, so this runs AFTER the config's adapters are loaded: a host is registered when the registry's `secrets` adapter (the plug-in, else
   // Code's) says there is a sign-in, and a host a plug-in or `registerAdapters` already registered under that kind is left alone.
   for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, secrets: registrySecrets, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
@@ -536,6 +557,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(secretsPluginWords(registry) === undefined ? {} : { keySource: secretsPluginWords(registry) }),
     metering: registry.require("metering"),
     companyId: config.companyId ?? IMPLICIT_COMPANY_ID,
+    providers: registryModelProviderBook(registry),
     // What a worker may call is the task flow's decision (the grants over the flow's operations); a caller's own source (tests) replaces it.
     grants: options.modelGrants ?? app.modelGrants,
     workerUrl: modelProxyWorkerUrl(),

@@ -3,25 +3,17 @@
 // Mirrors Cloud's proxy guard (`rovara_guard.py` in packages/model-proxy, which Code does not carry because it is Python): a per-route allow-list of
 // request fields (anything else is refused, fallbacks and credential-bearing names included), a refusal of billing and proxy-control headers, an
 // allow-list for `anthropic-beta`, and no following of redirects. The allow-lists are Cloud's, field for field.
-import type { InvocationModelRoute } from "@agentx/contracts";
+import type { InvocationModelRoute, ModelProviderAdapter, ModelProviderFormat } from "@agentx/contracts";
+import { BUILTIN_MODEL_PROVIDERS } from "../../plugins/model-provider/builtin.js";
 import type { ProxyApi, ProxyProvider, ProxyRoute } from "./types.js";
 
-export interface ProviderEndpoints {
-  anthropic: string;
-  openai: string;
-  openrouter: string;
-}
+/** Where each provider is, by provider id. Set by the owner's own code (tests point them at a fake), never by a request. A provider with no entry is at its `address`. */
+export type ProviderEndpoints = Readonly<Record<string, string>>;
 
-/** Where each provider is. Set by the owner's own code (tests point them at a fake), never by a request. */
-export const DEFAULT_PROVIDER_ENDPOINTS: ProviderEndpoints = {
-  anthropic: "https://api.anthropic.com",
-  openai: "https://api.openai.com",
-  openrouter: "https://openrouter.ai/api",
-};
+/** The built-in providers' addresses (their `model-provider` rows hold them; this is the same table for callers that only need the address). */
+export const DEFAULT_PROVIDER_ENDPOINTS: ProviderEndpoints = Object.fromEntries(BUILTIN_MODEL_PROVIDERS.map((provider) => [provider.kind, provider.address]));
 
-const PROVIDER_API: Record<ProxyProvider, ProxyApi> = { anthropic: "anthropic-messages", openai: "openai-responses", openrouter: "openai-completions" };
-
-/** The path on the provider for each wire shape. OpenRouter speaks the chat shape only. */
+/** The path on the provider for each wire shape, unless the provider's format entry overrides it. */
 const UPSTREAM_PATH: Record<ProxyApi, string> = {
   "anthropic-messages": "/v1/messages",
   "openai-responses": "/v1/responses",
@@ -35,19 +27,45 @@ export const PROXY_PATH_API: Readonly<Record<string, ProxyApi>> = {
   "/v1/chat/completions": "openai-completions",
 };
 
-/** The route for a model the owner chose: its proxy alias and the worker's route for it. */
-export function localRoute(provider: ProxyProvider, model: string): { route: ProxyRoute; workerRoute: InvocationModelRoute } {
-  const api = PROVIDER_API[provider];
-  const alias = `${provider}/${model}`;
-  return { route: { alias, provider, model, api }, workerRoute: { alias, api, catalog: model } };
+/** The request format a built-in provider speaks (its first format), for callers that name a built-in only. */
+function builtinFormat(provider: ProxyProvider): ProxyApi | undefined {
+  return BUILTIN_MODEL_PROVIDERS.find((entry) => entry.kind === provider)?.formats[0].format;
 }
 
+/**
+ * The route for a model the owner chose: its proxy alias and the worker's route for it. `api` is the request format; absent, a built-in provider's own. Any other provider
+ * must be given its format (the app takes it from the provider's row).
+ */
+export function localRoute(provider: ProxyProvider, model: string, api?: ProxyApi): { route: ProxyRoute; workerRoute: InvocationModelRoute } {
+  const format = api ?? builtinFormat(provider);
+  if (format === undefined) throw new Error(`the request format of model provider ${provider.slice(0, 40)} is not known; name it`);
+  const alias = `${provider}/${model}`;
+  return { route: { alias, provider, model, api: format }, workerRoute: { alias, api: format, catalog: model } };
+}
+
+/** What the proxy sends and where, for one call. */
+export interface UpstreamTarget {
+  url: string;
+  /** `vertex`: the model is in the address and `anthropic_version` is in the body. */
+  variant?: "vertex" | undefined;
+}
+
+/**
+ * The address of a call, or undefined when the provider does not speak the route's format (a configuration mistake, not a request to forward). `address` replaces the
+ * provider's own (tests, and the owner's own code).
+ */
+export function upstreamTarget(provider: ModelProviderAdapter, format: ModelProviderFormat, model: string, stream: boolean, address?: string): UpstreamTarget {
+  const base = (address ?? provider.address).replace(/\/+$/u, "");
+  if (format.variant === "vertex") return { url: `${base}/${encodeURIComponent(model)}:${stream ? "streamRawPredict" : "rawPredict"}`, variant: "vertex" };
+  return { url: base + (format.pathOverride ?? UPSTREAM_PATH[format.format]) };
+}
+
+/** Compatibility for the built-in providers: where `api` is served, or undefined when the built-in does not speak it. */
 export function upstreamUrl(endpoints: ProviderEndpoints, provider: ProxyProvider, api: ProxyApi): string | undefined {
-  // OpenRouter has no Anthropic or Responses shape; a route that asks for one is a configuration mistake, not a request to forward.
-  if (provider === "openrouter" && api !== "openai-completions") return undefined;
-  if (provider === "anthropic" && api !== "anthropic-messages") return undefined;
-  if (provider === "openai" && api === "anthropic-messages") return undefined;
-  return endpoints[provider].replace(/\/+$/u, "") + UPSTREAM_PATH[api];
+  const row = BUILTIN_MODEL_PROVIDERS.find((entry) => entry.kind === provider);
+  const format = row?.formats.find((entry) => entry.format === api);
+  if (row === undefined || format === undefined) return undefined;
+  return upstreamTarget(row, format, "", false, endpoints[provider]).url;
 }
 
 /** The request fields each wire shape may carry (Cloud's `ROUTE_FIELDS`). */

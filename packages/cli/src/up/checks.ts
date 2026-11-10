@@ -14,6 +14,7 @@ import {
   createLocalCodeHosts,
   createLocalSecrets,
   createLocalModelKeyStore,
+  describeBedrockSettings,
   loadConfiguredSecrets,
   modelKeySources,
   parsePluginConfigText,
@@ -143,7 +144,21 @@ async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
     return { id: "model-key", status: "fail", summary: error.message, fix: `Fix the file's permissions with \`chmod 600 ${keyFile}\`, or keep the key in the ANTHROPIC_API_KEY environment variable instead.` };
   }
   // Lane L13: the same rule the task flow uses (the config's `model` setting, else Anthropic, OpenAI, OpenRouter), so this says what a task step will call.
-  const picked = chooseLocalModel(found, (await readOwnerConfig(services))?.model);
+  const config = await readOwnerConfig(services);
+  const setting = config?.model;
+  // Item K2: a `model-provider` plug-in named in the config is not loaded by this check (naming a module runs its code); `rovara up` loads it and says what is wrong with its sign-in.
+  const entry = setting === undefined || LOCAL_MODEL_PROVIDERS.includes(setting.provider as (typeof LOCAL_MODEL_PROVIDERS)[number])
+    ? undefined : config?.plugins.find((candidate) => candidate.enabled && candidate.point === "model-provider" && candidate.name === setting.provider);
+  if (setting !== undefined && entry !== undefined) {
+    // Bedrock signs with an AWS identity the owner must name (review M1): say which, and that its models are unpriced unless prices are set.
+    if (entry.name === "amazon-bedrock") {
+      const described = describeBedrockSettings(entry.settings);
+      if (!described.ok) return { id: "model-key", status: "fail", summary: `The amazon-bedrock settings in your config are not valid: ${described.problem}.`, fix: 'Name one AWS identity in the amazon-bedrock settings: "profile": "<an AWS profile>", "roleArn": "<a role>", or "allowAmbientAwsCredentials": true.' };
+      return { id: "model-key", status: "ok", summary: `Task steps will use amazon-bedrock ${setting.id} (the "model" setting in your config). Bedrock will sign with ${described.identity}.${described.priced ? "" : " Bedrock models are unpriced until you set prices, so a task with a budget is refused."} The sign-in itself is checked when rovara up starts.` };
+    }
+    return { id: "model-key", status: "ok", summary: `Task steps will use ${setting.provider} ${setting.id} (the "model" setting in your config). ${setting.provider} is a model-provider plug-in: its sign-in is checked when rovara up starts.` };
+  }
+  const picked = chooseLocalModel(found, setting);
   if (picked.ok) {
     const why = picked.source === "setting" ? "the \"model\" setting in your config" : `the default for ${found.length === 1 ? "the only key found" : "the first key found"}`;
     // Which source answered, for each provider (never the key).
@@ -151,7 +166,7 @@ async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
     const named = found.map((provider) => { const entry = sources.find((candidate) => candidate.provider === provider); return entry === undefined ? provider : `${provider} (from ${sourceWords(entry.kind, plugin)})`; });
     return { id: "model-key", status: "ok", summary: `A model key is set for ${named.join(", ")}. Task steps will use ${picked.provider} ${picked.model} (${why}).` };
   }
-  if (picked.problem === "setting-without-key") return { id: "model-key", status: "fail", summary: picked.summary, fix: picked.fix };
+  if (picked.problem !== "no-key") return { id: "model-key", status: "fail", summary: picked.summary, fix: picked.fix };
   const where = plugin === undefined ? `A key file goes at ${keyFile} as {"anthropic": "<your key>"} (or "openai", "openrouter"); then run \`chmod 600 ${keyFile}\`.` : `Your secrets plug-in "${plugin}" has no key for them.`;
   return { id: "model-key", status: "fail", summary: "No model key was found.", fix: `${picked.fix} ${where}` };
 }

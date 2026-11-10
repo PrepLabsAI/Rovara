@@ -81,12 +81,13 @@ const classicToken = (seed: string): string => ["gh", "p_"].join("") + seed.repe
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string } } = {}) {
+async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string } } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   if (extra.config !== undefined) await writeFile(join(stateDirectory, "config.json"), JSON.stringify(extra.config), { mode: 0o600 });
+  for (const [name, text] of Object.entries(extra.files ?? {})) await writeFile(join(stateDirectory, name), text, { mode: 0o600 });
   const machines = new FakeWorkerMachines({ startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] });
   // A fake code host that holds the repository (lane L10): the build step reads the pushed branch and opens the pull request through its port.
   const hostedUrl = "https://github.com/example/demo.git";
@@ -850,6 +851,59 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     // A setting naming a provider with no key is the owner's order: no other provider is used in its place.
     const missing = await launch({ environment: { ANTHROPIC_API_KEY: anthropicKey }, config: { version: 1, plugins: [], model: { provider: "openrouter", id: "anthropic/claude-sonnet-4.6" } } });
     expect((await understandStep(missing)).payload).not.toHaveProperty("modelRoute");
+  });
+
+  it("a model-provider plug-in named in the model setting gives the step its route, with the format the owner chose, and one that needs no key needs no key file entry (item K2)", async () => {
+    const gateway = (kind: string, signIn: string, address: string) => `export const plugin = { point: "model-provider", name: "${kind}", create() { return { kind: "${kind}", name: "Gateway", address: "${address}", signIn: ${signIn},
+      formats: [{ format: "openai-completions", pathOverride: "/chat/completions", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "none", reasoningReturned: false, promptCaching: false, streamUsage: true } },
+        { format: "openai-responses", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "effort", reasoningReturned: true, promptCaching: false, streamUsage: true } }] }; } };\n`;
+    const keyed = await launch({
+      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" },
+      files: { "gateway.mjs": gateway("company-gateway", '{ kind: "bearer-key" }', "https://models.example.test/v1") },
+      config: { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model: { provider: "company-gateway", id: "house-model" } },
+    });
+    expect((await understandStep(keyed)).payload).toMatchObject({ modelRoute: { alias: "company-gateway/house-model", api: "openai-completions", catalog: "house-model" } });
+    const responses = await launch({
+      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" },
+      files: { "gateway.mjs": gateway("company-gateway", '{ kind: "bearer-key" }', "https://models.example.test/v1") },
+      config: { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model: { provider: "company-gateway", api: "openai-responses", id: "house-model" } },
+    });
+    expect((await understandStep(responses)).payload).toMatchObject({ modelRoute: { api: "openai-responses" } });
+    const open = await launch({
+      files: { "local.mjs": gateway("local-llm", '{ kind: "none" }', "http://127.0.0.1:11434") },
+      config: { version: 1, plugins: [{ point: "model-provider", name: "local-llm", module: "./local.mjs" }], model: { provider: "local-llm", id: "tiny" } },
+    });
+    expect((await understandStep(open)).payload).toMatchObject({ modelRoute: { alias: "local-llm/tiny" } });
+    // The same provider with a key to give and none given: no route, as for a built-in.
+    const noKey = await launch({
+      files: { "gateway.mjs": gateway("company-gateway", '{ kind: "bearer-key" }', "https://models.example.test/v1") },
+      config: { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model: { provider: "company-gateway", id: "house-model" } },
+    });
+    expect((await understandStep(noKey)).payload).not.toHaveProperty("modelRoute");
+  });
+
+  it("never asks a provider that is installed but not chosen for its credential (review L1), and asks the chosen one only", async () => {
+    const asks = `globalThis.__p5Asks = globalThis.__p5Asks ?? { aws: 0 };`;
+    const aws = `${asks}\nexport const plugin = { point: "model-provider", name: "aws-gateway", create() { return { kind: "aws-gateway", name: "AWS gateway", address: "https://bedrock-runtime.us-west-2.amazonaws.com",
+      signIn: { kind: "aws-sigv4", region: "us-west-2", service: "bedrock" }, defaultModel: "m",
+      formats: [{ format: "anthropic-messages", capabilities: { forcedToolChoice: false, parallelToolCalls: true, reasoning: "thinking", reasoningReturned: true, promptCaching: true, streamUsage: true } }],
+      async credential() { globalThis.__p5Asks.aws += 1; return undefined; } }; } };\n`;
+    const globals = globalThis as unknown as { __p5Asks?: { aws: number } };
+    const chosen = await launch({
+      environment: { ANTHROPIC_API_KEY: ["sk", "ant", "y".repeat(24)].join("-") },
+      files: { "aws.mjs": aws },
+      config: { version: 1, plugins: [{ point: "model-provider", name: "aws-gateway", module: "./aws.mjs" }] },
+    });
+    expect((await understandStep(chosen)).payload).toMatchObject({ modelRoute: { api: "anthropic-messages" } });
+    expect(globals.__p5Asks?.aws ?? 0).toBe(0);
+    // Named by the setting, it is asked (and has none here, so no route).
+    const named = await launch({
+      files: { "aws.mjs": aws },
+      config: { version: 1, plugins: [{ point: "model-provider", name: "aws-gateway", module: "./aws.mjs" }], model: { provider: "aws-gateway", id: "m" } },
+    });
+    expect((await understandStep(named)).payload).not.toHaveProperty("modelRoute");
+    expect(globals.__p5Asks?.aws ?? 0).toBeGreaterThan(0);
+    delete globals.__p5Asks;
   });
 });
 

@@ -221,10 +221,11 @@ ports and not each other, and this is the only place that knows all of them.
    ```json
    { "version": 1, "plugins": [], "model": { "provider": "openrouter", "id": "anthropic/claude-sonnet-4.6" } }
    ```
-   `provider` is `anthropic`, `openai` or `openrouter`; `id` is the model as that provider lists it (for OpenRouter, `vendor/model`). It is read only from your own config (like the rest of the
+   `provider` is `anthropic`, `openai`, `openrouter` or the name of a `model-provider` plug-in (see "Model providers" below); `id` is the model as that provider lists it (for OpenRouter, `vendor/model`).
+   A provider that speaks several formats takes an optional `"api"` (`anthropic-messages`, `openai-completions` or `openai-responses`); without it, the provider's first format is used. It is read only from your own config (like the rest of the
    config, never from a project), and a project or a task cannot change it. If the setting names a provider with no key, no model is chosen (the step gets no model access) and `rovara up --check` fails and names the key to set: your setting is
    never quietly replaced by another provider.
-2. Else the first provider with a key, in the order Anthropic, OpenAI, OpenRouter, with that provider's default model: `claude-sonnet-4-6`, `gpt-5.4`, and for OpenRouter `anthropic/claude-sonnet-4.6` (the same Claude Sonnet as the Anthropic
+2. Else the first of the three built-in providers with a key, in the order Anthropic, OpenAI, OpenRouter (a plug-in provider is chosen only by the setting, so adding one never changes what an install uses), with that provider's default model: `claude-sonnet-4-6`, `gpt-5.4`, and for OpenRouter `anthropic/claude-sonnet-4.6` (the same Claude Sonnet as the Anthropic
    default, under OpenRouter's id; it is in the installed Pi model catalog, and a test keeps it there).
 
 With only an OpenRouter key and no setting, tasks run on `anthropic/claude-sonnet-4.6` through OpenRouter. The worker speaks the chat-completions shape to the broker's model proxy (alias `openrouter/<model id>`), and the proxy's OpenRouter rules apply
@@ -321,13 +322,55 @@ tails are content-addressed, and the pack is the one object a re-check of the sa
   written. The routes work with `Authorization: Bearer <session token>`.
 - **A message to a running step** is saved and reported as not delivered; the step does not take it.
 
+### Model providers (lane P5, item K2, owner decisions 60 and 61)
+
+A model provider is a plug-in of the `model-provider` point (`packages/contracts/src/ports/model-provider.ts`). Its name is its provider id, which is open text. It states:
+
+| What | Values |
+| --- | --- |
+| name, address | `https://host[/base]`; plain `http` only for this computer; no user name, query or fragment |
+| sign-in | `bearer-key`, `named-header` (`x-api-key`, `api-key`), `aws-sigv4` (region, service), `google-oauth`, `microsoft-entra` (scope), `none` (an address on this computer only) |
+| request format, per entry | `anthropic-messages`, `openai-completions` (chat), `openai-responses`; an optional path override; the `vertex` variant of messages |
+| capabilities, per format | forced tool choice, parallel tool calls, how reasoning is controlled, reasoning returned, prompt caching, usage in the stream |
+| prices | per million tokens, keyed by the provider's model id; they reach the `metering` port as `<provider>/<model>` |
+| `credential()` (optional) | the AWS credential, Google token or Entra token, resolved at each call |
+
+Code registers `anthropic`, `openai` and `openrouter` as defaults, with the addresses, sign-in and format the proxy always used. A module for a company's own gateway is a few lines
+(`modelProviderPlugin({...})`, `packages/broker/src/plugins/model-provider/plugin.ts`); the config entry names it (`{ "point": "model-provider", "name": "company-gateway", "module": "./gateway.mjs",
+"settings": { "address": "...", "defaultModel": "...", "prices": {...} } }`), and the settings may change only the name, address, default model and prices. Its key is the provider's entry in `keys.json`
+or an environment variable (the three built-ins keep `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`; any other provider reads `ROVARA_MODEL_<ID>_API_KEY`, hyphens becoming underscores, so a provider called `linear` can never read `LINEAR_API_KEY`), never the config. `rovara up` refuses to start with a provider that is not well formed (an `http` address to another machine, a sign-in header
+the proxy owns, the vertex variant on another format, a price of 0, an `aws-sigv4` provider whose address is not https `*.amazonaws.com` in its region, an id that belongs to another part of Rovara such as `github` or
+`linear`, a plug-in that moves a built-in provider's id to another address or sign-in) and names the provider and the rule. A price of 0 is refused unless the model is marked `"free": true` (and then every price is 0), so a task budget cannot be passed by accident.
+
+**Which credential is used** (the same for every provider, tested): (1) sign-in `none` has none; (2) the key store's entry for the provider (the environment variable, then `keys.json`) always wins; (3) the provider's own `credential()` is used only
+when the key store has no entry. A model choice asks only the provider that could be chosen (the `model` setting's, else the default order of the three built-ins) for a credential, never every installed provider.
+
+- **Bedrock** is `bedrockModelProviderPlugin()` (provider id `amazon-bedrock`): SigV4 for service `bedrock`, Claude through the messages format on `/anthropic/v1/messages`, open models through chat completions on
+  `/openai/v1/chat/completions`. **It never signs with the AWS identity your shell happens to have, unless you say so.** The settings must name exactly one identity: `"profile": "<a named AWS profile>"` (give it only
+  `bedrock:InvokeModel*`; that is what we recommend), or `"roleArn": "<a role>"` (assumed for a 15-minute session; the default chain is used only to call AssumeRole), or `"allowAmbientAwsCredentials": true` (the default
+  chain, whatever this shell has). With none of them Rovara refuses to start and says which to set. An `amazon-bedrock` entry in `keys.json` holding `{"accessKeyId","secretAccessKey","sessionToken"?}` wins over all
+  three. The credential provider is built once and the credential cached until a minute before it expires. `rovara up --check` says which identity Bedrock will use. Bedrock models are **unpriced unless you set `prices`**,
+  and a task with a budget is refused for an unpriced model. A missing SDK module is reported as "AWS credential module missing". A "signature expired" answer is reported as "check your computer's clock". The paths and the
+  capability rows (Claude on Bedrock does not honour a forced tool choice) are from the research (designs-2026-10-30/MODEL-PROVIDER-FORMATS-RESEARCH.md) and have not been tried on a live account.
+- **Open checks (staging or a live account, nothing built depends on them being true).** (1) Does Bedrock's Claude really refuse a forced `tool_choice` (`any` or `tool`)? The row says it does not honour one; if it does, set
+  `forcedToolChoice: true` for the messages format. (2) Does Vertex accept a model id with `@` sent as `%40` in the path (`claude-...@2025...:rawPredict`)? One live call. (3) Is a clock skew of more than five minutes
+  reported by AWS in words the clock-skew message catches (`Signature expired`, `RequestTimeTooSkewed`)? Also: whether `/anthropic/v1/messages` on `bedrock-runtime` wants an `anthropic-version` header or body field, and whether Bedrock accepts the `store: false` field Rovara now sends on every chat-completions call (if it answers 400, drop the field for that provider).
+- **Claude on Google Cloud** is the messages format with `variant: "vertex"`: `address` is the models collection, the call goes to `<address>/<model>:rawPredict` (`:streamRawPredict` when streaming), the model leaves the body
+  and `anthropic_version: "vertex-2023-10-16"` enters it. Google and Microsoft sign-ins send an access token as a bearer token; refreshing it is the plug-in's `credential()`, not the proxy's (no refresher ships in Code).
+- **Calls are always stateless.** The proxy forwards `store: false` on every Responses and chat-completions call, whatever the worker asked, and `previous_response_id` and `conversation` are not allowed fields, so the full history
+  is sent every time and nothing depends on state kept at the provider.
+- **Same rules for every provider.** The request guard (field allow-lists, function tools only, header bans, `anthropic-beta` allow-list, no redirects, key cut from answers) runs before a provider is looked at; a
+  provider's capability row can only add a refusal (a forced tool choice at a provider that ignores it is answered 400 by name, not dropped), and the SigV4 secret key and session token are cut from answers like a key.
+- A model the worker's catalog does not know (a gateway's own model) runs with the worker's conservative defaults for an unlisted routed model.
+- `rovara up --check` does not load plug-ins (naming a module runs its code): for a `model` setting that names a configured `model-provider` it says the sign-in is checked when `rovara up` starts.
+
 ### Model calls: the worker holds no key (lane L9a, provisional until Pratik agrees, owner decision 58)
 
 The broker serves a small model proxy on the same callback listener (`packages/broker/src/local/model-proxy/`). A worker is given the proxy's
 address (`AGENTX_MODEL_PROXY_URL`, an address, not a secret) and asks the broker for a token with its callback capability
 (`GET /v1/internal/model-access`). The token lasts 15 minutes, is good for one workspace and one operation, and names the models the broker chose for
 that operation. The worker sends its model calls to `<proxy>/v1/messages`, `/v1/responses` or `/v1/chat/completions` with the token where a key would
-go; the proxy reads the real key from the `model-keys` port (the environment, then `keys.json`), calls Anthropic, OpenAI or OpenRouter, passes the
+go; the proxy reads the real key from the `model-keys` port (the environment, then `keys.json`) or the provider's own credential, signs the call as the provider's sign-in says, calls the provider (Anthropic, OpenAI and OpenRouter, or any `model-provider` plug-in), passes the
 answer back, and records what it used through the `metering` port. The egress gateway relays only those three routes and the token request, stamps
 the worker's own workspace on each, and removes any such header the worker sent, so a token taken from one worker is refused from another.
 
@@ -358,7 +401,7 @@ Wiring checklist for the task flow (nothing below happens until it is wired): pa
 dispatch capability's `extraActions`; put `localRoute(...).workerRoute` in the invocation payload as `modelRoute`; give the grant the task's REMAINING budget; call
 `runtime.modelProxy.operationEnded(operationId)` when an operation settles; give the folder object storage a folder on a local disk (it needs hard links, and says so with
 `FolderHardLinksUnsupportedError` when the file system has none).
-- Not here: Bedrock (it needs the computer's AWS sign-in; list it in the 51 gaps) and design-review key slots.
+- Not here: design-review key slots. Bedrock is a `model-provider` plug-in (below).
 - The task flow turns it on: its dispatch lists the `model-access` action in the worker's capability and gives `startLocalRuntime` a
   `modelGrants` source (`capabilityModelGrants`) that says which models and what budget an operation has (`localRoute` makes a model's route).
 

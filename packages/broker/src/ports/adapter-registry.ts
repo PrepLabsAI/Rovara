@@ -24,8 +24,8 @@ import {
   type RegistryView,
 } from "@agentx/contracts";
 
-/** The points whose adapters carry a `kind` that is also their registry name (a code host called `github` has kind `github`). */
-const KIND_NAMED_POINTS: ReadonlySet<PluginPoint> = new Set<PluginPoint>(["code-host", "tracker", "check-runner"]);
+/** The points whose adapters carry a `kind` that is also their registry name (a code host called `github` has kind `github`; a model provider's kind is its provider id). */
+const KIND_NAMED_POINTS: ReadonlySet<PluginPoint> = new Set<PluginPoint>(["code-host", "tracker", "check-runner", "model-provider"]);
 
 interface Entry {
   adapter: unknown;
