@@ -137,6 +137,36 @@ describe("A3: the approvers plug-in names its strong methods", () => {
     expect(await widened.gate.decide(attempt({ credentials: [{ method: "emailed-link", token: TOKEN }] }))).toMatchObject({ reason: "method_not_allowed" });
   });
 
+  it("a policy is intersected with the default too when the plug-in names no set, so it never admits a method the default leaves out (review N2)", async () => {
+    expect(strictMethodsFor("approve", "high", {}, { highRiskMethods: [STEP_UP] })).toEqual([]);
+    expect(strictMethodsFor("approve", "high", {}, { highRiskMethods: [STEP_UP, LOCAL_SESSION_METHOD] })).toEqual([LOCAL_SESSION_METHOD]);
+    expect(strictMethodsFor("reject", "low", {}, { rejectMethods: [STEP_UP] })).toEqual([]);
+    expect(strictMethodsFor("request_changes", "low", {}, { changesMethods: [STEP_UP, CODE_HOST_COMMENT_METHOD] })).toEqual([CODE_HOST_COMMENT_METHOD]);
+    const { gate, ready, store } = world(plugin(), { policy: { highRiskMethods: [STEP_UP] } });
+    await ready;
+    expect(await gate.decide(attempt())).toMatchObject({ reason: "method_not_allowed" });
+    expect(await revisionOf(store)).toBe(R0);
+  });
+
+  it("a policy that can only lock the gate out is refused when the gate is built (comment methods only) or at startup (disjoint from the plug-in) (review N2)", async () => {
+    const build = (policy: NonNullable<Parameters<typeof createDecisionGate>[0]["policy"]>, approvers: Approvers = plugin()) =>
+      createDecisionGate({ store: new MemoryDocumentStore(), approvers, audit: createNoopAuditSink(), subjects: [], policy });
+    expect(() => build({ highRiskMethods: [CODE_HOST_COMMENT_METHOD] })).toThrow(/highRiskMethods names only comment methods/);
+    expect(() => build({ rejectMethods: ["code-host-comment", "code-host-button"] })).toThrow(/rejectMethods names only comment methods/);
+    expect(() => build({ highRiskMethods: [LOCAL_SESSION_METHOD, CODE_HOST_COMMENT_METHOD] })).not.toThrow();
+    expect(() => build({ highRiskMethods: [] })).not.toThrow();
+    // Disjoint from what the plug-in names: found by the startup check, before the first decision.
+    const named = plugin({ requirement: { strongMethods: [STEP_UP], rejectMethods: [STEP_UP] } });
+    await expect(build({ highRiskMethods: [LOCAL_SESSION_METHOD] }, named).verifyPolicy(COMPANY)).rejects.toThrow(/highRiskMethods.*always be refused/);
+    await expect(build({ highRiskMethods: [STEP_UP], rejectMethods: [LOCAL_SESSION_METHOD] }, named).verifyPolicy(COMPANY)).rejects.toThrow(/rejectMethods/);
+    await expect(build({ highRiskMethods: [STEP_UP, LOCAL_SESSION_METHOD], rejectMethods: [STEP_UP] }, named).verifyPolicy(COMPANY)).resolves.toBeUndefined();
+    // With no named set, a policy outside the default is found too.
+    const offersSession = plugin({ requirement: { methods: [LOCAL_SESSION_METHOD, STEP_UP] } });
+    await expect(build({ highRiskMethods: [STEP_UP] }, offersSession).verifyPolicy(COMPANY)).rejects.toThrow(/highRiskMethods/);
+    // No policy: nothing to check, and a gate with an empty set the plug-in itself made is not the policy's fault.
+    await expect(createDecisionGate({ store: new MemoryDocumentStore(), approvers: named, audit: createNoopAuditSink(), subjects: [] }).verifyPolicy(COMPANY)).resolves.toBeUndefined();
+  });
+
   it("a comment is recognised by KIND, not one exact name: code-host-* and the plug-in's own commentMethods are never strong or a rejection (review L1)", async () => {
     expect(isCommentMethod("code-host-comment")).toBe(true);
     expect(isCommentMethod("code-host-review-button")).toBe(true);

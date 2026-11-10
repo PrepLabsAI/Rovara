@@ -11,12 +11,13 @@
 //   - the change to the subject carries the condition the subject loaded it under (its revision and that it still waits), so a concurrent change loses; the whole decision is one transaction.
 //   - policy on top of the seam, which only narrows what it allows: a high-risk approval and every rejection accept only the methods the approvers plug-in names as strong (`ApprovalRequirement.strongMethods`,
 //     `rejectMethods`; default the local session) and NEVER a comment method (`strong-methods.ts`: `code-host-comment`, any `code-host-*`, the plug-in's `commentMethods`), whatever is named (a comment is an approval of a change
-//     request, and says nothing about a rejection); a request for changes accepts the methods the plug-in names (default the local session or a comment); the gate's policy option can only narrow the plug-in's sets; when the plug-in sets a sign-in rule (`ApprovalRequirement.signIn`, a company setting) the approver's sign-in time must satisfy it for a
+//     request, and says nothing about a rejection); a request for changes accepts the methods the plug-in names (default the local session or a comment); the gate's policy option can only narrow the plug-in's sets (or the default when it names none; `createDecisionGate` refuses a policy of only comment methods for a strong set, and `verifyPolicy` refuses one that
+//     is disjoint from the plug-in's sets, instead of a silent lock-out); when the plug-in sets a sign-in rule (`ApprovalRequirement.signIn`, a company setting) the approver's sign-in time must satisfy it for a
 //     high-risk approval and a rejection; a request that does not allow self-approval refuses the person who asked; `minApprovers` distinct approvers are needed.
 //   - nothing a caller can send widens it: an unknown kind, subject or method is a refusal, not a default.
 // It never throws for a refusal (a refusal is an answer); it throws only for a fault of the store.
 import { createHash, randomUUID } from "node:crypto";
-import { strictMethodsFor } from "./strong-methods.js";
+import { isCommentMethod, strictMethodsFor } from "./strong-methods.js";
 
 export { isCommentMethod, strictMethodsFor } from "./strong-methods.js";
 import {
@@ -210,13 +211,27 @@ function recordDocument(companyId: string, record: ApprovalRecord, expires: numb
   };
 }
 
+const POLICY_SETS = [["highRiskMethods", "approve", "high"], ["rejectMethods", "reject", "low"], ["changesMethods", "request_changes", "low"]] as const;
+
 export interface DecisionGate {
   decide(attempt: DecisionAttempt): Promise<GateResult>;
+  /**
+   * A startup check for a gate built with a `policy`: asks the approvers plug-in what it requires and throws a clear error when the policy would leave a set empty that the plug-in made non-empty (every high-risk approval, rejection or
+   * request for changes would then be refused, silently). Call it once when the install starts. Does nothing when no policy limits a set.
+   */
+  verifyPolicy(companyId: string): Promise<void>;
   /** What the person can present for this subject now, so a surface offers the right way to answer (never decides anything). */
   requirement(companyId: string, kind: string, subjectId: string): Promise<{ requirement: ApprovalRequirement; risk: string; revision: number; artifactDigest: string } | undefined>;
 }
 
 export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate {
+  // A policy that can only ever lock the gate out is a mistake in the install's code: it stops here, not at the first decision. A strong set (high risk, reject) never takes a comment method, so a non-empty policy of only those is empty.
+  for (const name of ["highRiskMethods", "rejectMethods"] as const) {
+    const named = deps.policy?.[name];
+    if (named !== undefined && named.length > 0 && named.every((method) => isCommentMethod(method))) {
+      throw new Error(`The approval gate's policy ${name} names only comment methods (${named.join(", ")}), which this gate never accepts for that answer, so every such decision would be refused.`);
+    }
+  }
   const now = deps.now ?? (() => new Date());
   const subjects = new Map(deps.subjects.map((subject) => [subject.kind, subject]));
   const highRiskMethods = deps.policy?.highRiskMethods;
@@ -261,6 +276,17 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   }
 
   return {
+    async verifyPolicy(companyId) {
+      if (deps.policy === undefined) return;
+      const requirement = await deps.approvers.requirement({
+        companyId, requestId: "policy-probe", kind: "policy-probe", subject: { type: "policy", id: "probe" }, revision: 1, artifactDigest: "0".repeat(64), risk: "high",
+      });
+      const offered = (methods: readonly string[] | undefined): readonly string[] => (methods ?? []).filter((method) => requirement.methods.includes(method));
+      const policy = { highRiskMethods, rejectMethods, changesMethods };
+      const empty = POLICY_SETS.filter(([name, outcome, risk]) => policy[name] !== undefined && offered(strictMethodsFor(outcome, risk, requirement)).length > 0 && offered(strictMethodsFor(outcome, risk, requirement, policy)).length === 0).map(([name]) => name);
+      if (empty.length > 0) throw new Error(`The approval gate's policy (${empty.join(", ")}) leaves no method the approvers plug-in accepts, so those decisions would always be refused.`);
+    },
+
     async requirement(companyId, kind, subjectId) {
       const subject = subjects.get(kind);
       const loaded = subject === undefined ? undefined : await subject.load(companyId, subjectId);
