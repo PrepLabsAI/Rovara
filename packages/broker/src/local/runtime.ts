@@ -20,6 +20,7 @@ import {
   createModuleImporter,
   createRegistrySecretStore,
   createSecretModelKeyStore,
+  secretsPluginWords,
   environmentVariableFor,
   type ModuleImporter,
   loadAdapters,
@@ -111,12 +112,15 @@ export function createLocalSecrets(stateDirectory: string, environment: NodeJS.P
  * The secrets store `rovara up` will use for this config, for the doctor (`rovara up --check`) which starts nothing else: Code's own, or the `secrets` plug-in the config names (loaded the way `rovara up` loads it,
  * into a registry of its own). `plugin` is the plug-in's name when one is configured. A plug-in that cannot be loaded throws the registry's fixed sentence.
  */
-export async function loadConfiguredSecrets(input: { stateDirectory: string; configPath: string; config: PluginConfig; environment: NodeJS.ProcessEnv }): Promise<{ store: SecretStore; plugin?: string }> {
+export async function loadConfiguredSecrets(input: { stateDirectory: string; configPath: string; config: PluginConfig; environment: NodeJS.ProcessEnv }): Promise<{ store: SecretStore; plugin?: string; dispose?: () => Promise<void> }> {
   const entries = input.config.plugins.filter((entry) => entry.enabled && entry.point === "secrets");
   if (entries.length === 0) return { store: createLocalSecrets(input.stateDirectory, input.environment) };
+  // The doctor starts nothing, so the plug-in gets a registry with only itself in it: a `secrets` plug-in that needs another plug-in (a storage, say) cannot be created here and is checked when `rovara up` starts.
   const registry = createAdapterRegistry();
   await loadAdapters({ ...input.config, plugins: entries }, { registry, importModule: createLocalModuleImporter(input.stateDirectory, dirname(input.configPath)) });
-  return { store: createRegistrySecretStore(registry), plugin: registry.names("secrets")[0]! };
+  const adapter = registry.require("secrets");
+  // Whatever the plug-in holds (a connection, a timer) is let go after the check, or the command would not exit.
+  return { store: createRegistrySecretStore(registry), plugin: registry.names("secrets")[0]!, dispose: async () => { await adapter.close?.(); } };
 }
 
 /**
@@ -435,6 +439,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     registry.register("object-storage", "document", createDocumentObjectStorage(registry.require("storage"), { companyId: config.companyId ?? IMPLICIT_COMPANY_ID }), { isDefault: true });
   }
   registry.seal();
+  // A `secrets` plug-in lets go of what it holds when the process stops.
+  closers.push(() => registry.require("secrets").close?.());
 
   const identity = registry.require("identity");
   const serverUrl = { current: "http://127.0.0.1" };
@@ -523,6 +529,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // Lane L9a (K1): the model proxy is served on that same listener, so a worker reaches it only through its own egress gateway.
   const modelProxy = createLocalModelProxy({
     keys: registry.require("model-keys"),
+    ...(secretsPluginWords(registry) === undefined ? {} : { keySource: secretsPluginWords(registry) }),
     metering: registry.require("metering"),
     companyId: config.companyId ?? IMPLICIT_COMPANY_ID,
     // What a worker may call is the task flow's decision (the grants over the flow's operations); a caller's own source (tests) replaces it.

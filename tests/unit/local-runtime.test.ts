@@ -135,6 +135,15 @@ describe("rovara up runtime", () => {
     expect((await keys.get(IMPLICIT_COMPANY_ID, "openai"))?.reveal()).toBe("plug-in-openai");
   });
 
+  it("lets go of a configured secrets plug-in when the runtime stops", async () => {
+    let closed = 0;
+    (globalThis as { __p4Secrets?: SecretStore }).__p4Secrets = { ...answering({}), close: () => { closed += 1; } };
+    const { runtime } = await launch({ config: secretsConfig, files: { "secrets-plugin.mjs": secretsModule } });
+    expect(closed).toBe(0);
+    await runtime.stop();
+    expect(closed).toBe(1);
+  });
+
   it("does not register the GitHub code host from keys.json when the configured secrets plug-in has no token", async () => {
     (globalThis as { __p4Secrets?: SecretStore }).__p4Secrets = answering({});
     const { runtime } = await launch({

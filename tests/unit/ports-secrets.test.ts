@@ -1,13 +1,13 @@
 // Owner decision 60 (item R2): the `secrets` socket. Code's adapter reads the environment, a file and the owner's key file; the model keys and the
 // laptop GitHub token are read through it; `keys.json` keeps working, with its permission rule; a `secrets` plug-in replaces Code's.
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { inspect } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
-import { createAdapterRegistry, LocalSecretError, asSecretValue, createFileModelKeyStore, createLocalSecretStore, createRegistrySecretStore, createSecretModelKeyStore, SECRET_FILE_MAX_BYTES } from "../../packages/broker/src/ports/index.js";
+import { createAdapterRegistry, LocalSecretError, asSecretValue, modelKeyReadError, secretsPluginWords, createFileModelKeyStore, createLocalSecretStore, createRegistrySecretStore, createSecretModelKeyStore, SECRET_FILE_MAX_BYTES } from "../../packages/broker/src/ports/index.js";
 import { contextSecretReader } from "../../packages/broker/src/plugins/index.js";
 import { createLocalModelKeyStore, createLocalSecrets } from "../../packages/broker/src/local/runtime.js";
 import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";
@@ -245,6 +245,25 @@ describe("a {file} secret (review L5, L2, L7)", () => {
     expect((await refused(join(dir, "over"))).message).toBe("the secret file is too big");
   });
 
+  it("reads at most the cap plus one byte: a file that grows after the size check is refused", async () => {
+    const dir = await tempFolder();
+    const file = join(dir, "secret");
+    await writeFile(file, "small", { mode: 0o600 });
+    // The size check sees 5 bytes; the read then returns more than the cap (as a file that grew in between would).
+    const probe = await open(file);
+    const proto = Object.getPrototypeOf(probe) as { read: (...args: unknown[]) => Promise<unknown> };
+    await probe.close();
+    const asked: number[] = [];
+    vi.spyOn(proto, "read").mockImplementation(async (...args: unknown[]) => {
+      const [buffer, offset, length] = args as [Buffer, number, number];
+      asked.push(length);
+      buffer.fill(0x78, offset, offset + length);
+      return { bytesRead: length, buffer };
+    });
+    expect((await refused(file)).message).toBe("the secret file is too big");
+    expect(asked[0]).toBe(SECRET_FILE_MAX_BYTES + 1);
+  });
+
   it("refuses a pipe and a device without waiting on them", async () => {
     if (process.platform === "win32") return;
     const dir = await tempFolder();
@@ -303,6 +322,15 @@ describe("what an adapter answers is always a SecretValue (review L3)", () => {
     expect(asSecretValue(null)).toBeUndefined();
   });
 
+  it("answers a bare string from a plug-in with the fixed sentence through contextSecretReader, not a TypeError", async () => {
+    const registry = createAdapterRegistry();
+    registry.register("secrets", "bare", { read: async () => value as never }, { isDefault: true });
+    const error = await contextSecretReader({ registry, defaultCompanyId: IMPLICIT_COMPANY_ID }, { env: "X" })().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).constructor).toBe(Error);
+    expect((error as Error).message).toBe("the secret is not available");
+  });
+
   it("also masks a plug-in's loose answer on the model-key and plug-in-setting paths", async () => {
     const loose: SecretStore = { read: async () => ({ reveal: () => value }) as never };
     const keys = createSecretModelKeyStore({ secrets: loose, refs: () => [{ env: "X" }], providers: ["anthropic"] });
@@ -311,6 +339,27 @@ describe("what an adapter answers is always a SecretValue (review L3)", () => {
     const registry = createAdapterRegistry();
     registry.register("secrets", "loose", loose, { isDefault: true });
     expect(await contextSecretReader({ registry, defaultCompanyId: IMPLICIT_COMPANY_ID }, { env: "X" })()).toBe(value);
+  });
+});
+
+describe("the owner is shown fixed words when the model keys cannot be read from a plug-in (round 3)", () => {
+  it("keeps Code's own fixed sentence, replaces any other text, and names the plug-in", () => {
+    const own = new LocalSecretError("the model key file must not be readable by other users (chmod 600)");
+    expect(modelKeyReadError(own, undefined)).toBe(own);
+    const replaced = modelKeyReadError(new Error("arn:aws:example:::secret/leaky"), 'the "svc" secrets plug-in');
+    expect(replaced).toBeInstanceOf(LocalSecretError);
+    expect(replaced.message).toBe('the model keys could not be read from the "svc" secrets plug-in');
+    expect(modelKeyReadError("a string", undefined).message).toBe("the model keys could not be read from the secrets adapter");
+  });
+
+  it("names a plug-in other than Code's own, and nothing for Code's", () => {
+    const registry = createAdapterRegistry();
+    expect(secretsPluginWords(registry)).toBeUndefined();
+    registry.register("secrets", "local", memorySecrets(new Map()), { isDefault: true });
+    expect(secretsPluginWords(registry)).toBeUndefined();
+    const other = createAdapterRegistry();
+    other.register("secrets", "svc", memorySecrets(new Map()));
+    expect(secretsPluginWords(other)).toBe('the "svc" secrets plug-in');
   });
 });
 
@@ -349,13 +398,13 @@ describe("the GitHub token read through a plug-in (review L1)", () => {
 
 describe("rovara up --check uses the same secrets store (review M1)", () => {
   const dockerDown = { run: async () => ({ exitCode: 1, stdout: "", stderr: "not installed" }) } as never;
-  async function checks(options: { plugin?: SecretStore; environment?: NodeJS.ProcessEnv; keys?: Record<string, string> }) {
+  async function checks(options: { plugin?: SecretStore; environment?: NodeJS.ProcessEnv; keys?: Record<string, string>; module?: string }) {
     const state = await tempFolder();
     await chmod(state, 0o700);
     if (options.keys !== undefined) await writeFile(join(state, "keys.json"), JSON.stringify(options.keys), { mode: 0o600 });
     if (options.plugin !== undefined) {
       (globalThis as { __p4Secrets?: SecretStore }).__p4Secrets = options.plugin;
-      await writeFile(join(state, "secrets-plugin.mjs"), 'export const plugin = { point: "secrets", name: "svc", create: () => globalThis.__p4Secrets };\n', { mode: 0o600 });
+      await writeFile(join(state, "secrets-plugin.mjs"), options.module ?? 'export const plugin = { point: "secrets", name: "svc", create: () => globalThis.__p4Secrets };\n', { mode: 0o600 });
       await writeFile(join(state, "config.json"), JSON.stringify({ version: 1, plugins: [{ point: "secrets", name: "svc", module: "./secrets-plugin.mjs" }] }), { mode: 0o600 });
     }
     const { runUpChecks } = await import("../../packages/cli/src/up/checks.js");
@@ -389,6 +438,20 @@ describe("rovara up --check uses the same secrets store (review M1)", () => {
     expect(byId.github!.status).toBe("fail");
     expect(text).not.toContain(leaky);
     expect(text).not.toContain("chmod");
+  });
+
+  it("lets go of the plug-in after the check (its close is called once), so the command can exit", async () => {
+    let closed = 0;
+    const plugin: SecretStore = { read: async () => undefined, close: () => { closed += 1; } };
+    await checks({ plugin });
+    expect(closed).toBe(1);
+  });
+
+  it("says a plug-in that needs other plug-ins is only fully checked at start, without quoting why it failed", async () => {
+    const { byId, text } = await checks({ plugin: { read: async () => undefined }, module: 'export const plugin = { point: "secrets", name: "svc", create: () => { throw new Error("arn:aws:example:::secret/leaky"); } };\n' });
+    expect(byId["model-key"]!.status).toBe("fail");
+    expect(byId["model-key"]!.summary).toContain("only fully checked when `rovara up` starts");
+    expect(text).not.toContain("leaky");
   });
 
   it("says no key was found when the plug-in has none, without telling the owner to make a key file", async () => {

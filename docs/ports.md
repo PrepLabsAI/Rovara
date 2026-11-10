@@ -251,6 +251,10 @@ and asks the point; it does not write its own reader.
   the GitHub code host is registered only after the config's plug-ins are loaded, and only if the registry's `secrets` adapter (the plug-in, else Code's) or `GH_TOKEN`, `GITHUB_TOKEN` or the GitHub CLI gives a sign-in; the model providers listed (and so the model chosen) are the ones the plug-in has a key for;
   and `rovara up --check` loads the same plug-in and says which source answered ("the key file", "the environment", or `the "<name>" secrets plug-in`). With a plug-in, `keys.json` and the model-key environment variables are NOT read unless the plug-in reads them.
   It must answer the `{ env }` and `{ key }` references, or the install finds no key and `--check` says so.
+- **Failures are named, not quoted.** When the model keys cannot be read, the task-start error and the model proxy's 503 say where to look: `~/.rovara/keys.json` for Code's own adapter, or `the "<name>" secrets plug-in` for a configured one; a plug-in's own error text is replaced by a fixed sentence
+  (`the model keys could not be read from the "<name>" secrets plug-in`).
+- **`SecretStore.close?()`** is optional: the adapter lets go of what it holds (connections, timers). `rovara up` calls it when it stops, and `rovara up --check`, which loads a configured plug-in only to ask it, calls it after the check so the command exits.
+  The doctor loads the plug-in into a registry holding only itself, so a `secrets` plug-in that needs another plug-in (a storage, say) cannot be created there; `--check` says it is then only fully checked when `rovara up` starts.
 - **Trust model of a `secrets` plug-in.** Only the owner names one: it comes from the plug-in config, which must sit in the owner's state folder (never a repository or a task workspace), and it runs in the broker with the owner's rights, like every
   config-loaded plug-in. It sees every reference asked, and so can answer, and so choose, every model key and the GitHub token; it is trusted as much as the broker itself. Task input and project files cannot name a reference.
   Install a `secrets` plug-in only from a source you trust as you would trust the broker.

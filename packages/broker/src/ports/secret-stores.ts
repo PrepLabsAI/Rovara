@@ -12,7 +12,12 @@ export const SECRET_FILE_MAX_BYTES = 65_536;
 const ENVIRONMENT_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
 const KEY_NAME = /^[a-z][a-z0-9-]{0,63}$/;
 
-/** Refuses a path with a link in any part of it. (A system's own links, such as `/var` on a Mac, count: name the real path.) */
+/**
+ * Refuses a path with a link in any part of it. (A system's own links, such as `/var` on a Mac, count: name the real path.)
+ * Known window: the parts are checked one by one and the file is opened afterwards, and only the LAST part is opened without following a link, so a directory in the middle that is swapped for a link
+ * between the check and the open is followed. That needs someone who can already write inside the owner's own secret folder, and only the owner's config names the path; the check is a guard against
+ * a mistake and a stray link, not against that attacker. The file itself is still checked (plain file, owner, mode, size) through the handle that was opened.
+ */
 async function assertNoLinkInPath(path: string): Promise<void> {
   const parts = path.split(sep).filter((part) => part !== "");
   let walked = parse(path).root;
@@ -128,6 +133,20 @@ export function createRegistrySecretStore(registry: { names(point: "secrets"): s
       return registry.names("secrets").length === 0 ? undefined : asSecretValue(await registry.require("secrets").read(companyId, ref));
     },
   };
+}
+
+/**
+ * How to name where the secrets come from when a `secrets` plug-in other than Code's own `local` adapter is registered: `the "<name>" secrets plug-in`; `undefined` for Code's own (the key file and
+ * the environment). For words shown to the owner.
+ */
+export function secretsPluginWords(registry: { names(point: "secrets"): string[] }): string | undefined {
+  const name = registry.names("secrets")[0];
+  return name === undefined || name === "local" ? undefined : `the "${name}" secrets plug-in`;
+}
+
+/** An error from reading model keys as the owner may see it: Code's own fixed sentence as it is, anything else (a plug-in's text may quote a name or content) replaced by a sentence naming the source. */
+export function modelKeyReadError(error: unknown, pluginWords: string | undefined): LocalSecretError {
+  return error instanceof LocalSecretError ? error : new LocalSecretError(`the model keys could not be read from ${pluginWords ?? "the secrets adapter"}`);
 }
 
 export interface SecretModelKeyStoreOptions {

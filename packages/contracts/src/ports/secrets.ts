@@ -31,4 +31,9 @@ export interface SecretStore {
    * or when the reference is not valid. The value is read on every call, so a rotation takes effect at once; a caller that wants it cached caches the `SecretValue`.
    */
   read(companyId: string, ref: SecretRef): Promise<SecretValue | undefined>;
+  /**
+   * Optional. Lets go of what the adapter holds (connections, timers) so the process can exit. Called once, when the process is done with the adapter: at the end of `rovara up`, and after
+   * `rovara up --check` has loaded a configured one. Reads after it are not made.
+   */
+  close?(): Promise<void> | void;
 }

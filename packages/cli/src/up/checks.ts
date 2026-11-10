@@ -97,8 +97,8 @@ async function readOwnerConfig(services: UpCheckServices): Promise<ReturnType<ty
 }
 
 /** The secrets store the install will use: Code's own, or the `secrets` plug-in the config names. Loaded once per check run. A plug-in that cannot be loaded is reported, not thrown. */
-const secretsCache = new WeakMap<UpCheckServices, Promise<{ store: SecretStore; plugin?: string } | { error: string }>>();
-function secretsFor(services: UpCheckServices): Promise<{ store: SecretStore; plugin?: string } | { error: string }> {
+const secretsCache = new WeakMap<UpCheckServices, Promise<{ store: SecretStore; plugin?: string; dispose?: () => Promise<void> } | { error: string }>>();
+function secretsFor(services: UpCheckServices): Promise<{ store: SecretStore; plugin?: string; dispose?: () => Promise<void> } | { error: string }> {
   let held = secretsCache.get(services);
   if (held === undefined) {
     held = (async () => {
@@ -108,7 +108,8 @@ function secretsFor(services: UpCheckServices): Promise<{ store: SecretStore; pl
       try {
         return await loadConfiguredSecrets({ stateDirectory: services.stateDirectory, configPath: location.path, config, environment: services.environment });
       } catch (error) {
-        return { error: error instanceof PluginRegistryError ? error.message : "the secrets plug-in could not be loaded" };
+        const needsMore = error instanceof PluginRegistryError && error.code === "create_failed" ? " A secrets plug-in that needs other plug-ins (a storage, say) is only fully checked when `rovara up` starts." : "";
+        return { error: `${error instanceof PluginRegistryError ? error.message : "the secrets plug-in could not be loaded"}.${needsMore}`.replace(/\.\.$/u, ".") };
       }
     })();
     secretsCache.set(services, held);
@@ -214,8 +215,14 @@ async function checkConfig(services: UpCheckServices): Promise<UpCheck> {
 }
 
 export async function runUpChecks(services: UpCheckServices): Promise<UpCheck[]> {
-  const [docker, key, github, port, config] = await Promise.all([checkDocker(services), checkModelKey(services), checkGithub(services), checkPort(services), checkConfig(services)]);
-  return [...docker, key, github, port, config];
+  try {
+    const [docker, key, github, port, config] = await Promise.all([checkDocker(services), checkModelKey(services), checkGithub(services), checkPort(services), checkConfig(services)]);
+    return [...docker, key, github, port, config];
+  } finally {
+    // A configured secrets plug-in was loaded for the check: let go of what it holds, or the command would not exit.
+    const loaded = await secretsCache.get(services);
+    if (loaded !== undefined && "dispose" in loaded) await loaded.dispose?.().catch(() => undefined);
+  }
 }
 
 const LABEL: Record<UpCheckStatus, string> = { ok: "ok  ", warn: "warn", fail: "FAIL" };
