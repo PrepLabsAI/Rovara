@@ -144,6 +144,10 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/local/app/callbacks.ts", "packages/broker/src/local/app/host.ts", "packages/broker/src/local/runtime.ts",
       // L12: the milestone rows (30 days) merge tracking writes with a session line, and the comment poll's thread and cursor rows (30 days).
       "packages/broker/src/local/app/tracking.ts", "packages/broker/src/local/app/comments.ts",
+      // Parallel parts: the first progress line of a coding run (event rows, kept as long as the other event rows) and the milestone rows (their retention).
+      "packages/broker/src/core/task-flow/accept.ts", "packages/broker/src/core/milestones/milestones.ts",
+      // Script tokens: the rate window rows, and a token's rows and request marks, which expire after the token's life plus a grace period.
+      "packages/broker/src/core/script-tokens/rate.ts", "packages/broker/src/core/script-tokens/store.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
