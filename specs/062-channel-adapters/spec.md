@@ -2,7 +2,7 @@
 
 **Feature Branch**: `claude/062-channel-adapters`
 **Created**: 2026-11-08
-**Status**: Phases 1–2 merged (#424), Phase 3 merged (#425), Phase 4a merged (#426); Phase 4b in progress
+**Status**: Phases 1–2 merged (#424), Phase 3 merged (#425), Phase 4a merged (#426), Phase 4b merged (#427); Phase 5a in progress
 **Issue**: #423
 **Input**: "We need a way to trigger Rovara through a third-party trigger, like Slack today. I should be able to
 do it through WhatsApp or anything, as long as it conforms to the protocol through a lightweight adapter."
@@ -154,7 +154,9 @@ phase. A thread started before the change resumes its workspace after it.
 
 - **FR-050:** Slack's signature check and event parsing run in the Slack adapter, which reaches the core only
   through the channel API.
-- **FR-051:** `agentx channel add` registers an adapter and `agentx channel bind` binds a space to a project.
+- **FR-051:** `agentx adapter add` registers or changes an adapter (and `--rotate` replaces its secret), `adapter bind`
+  and `adapter unbind` bind a space to a project, `adapter unlink` removes an actor's link, and `adapter list` and
+  `adapter remove` manage adapters. `agentx channel add` stays the Slack channel binding.
 - **FR-052:** A WhatsApp adapter maps a chat to a conversation, uses at most 3 reply buttons, and uses an
   approved template when it may not message first.
 
