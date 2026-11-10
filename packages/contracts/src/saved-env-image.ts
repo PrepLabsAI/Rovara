@@ -70,7 +70,7 @@ export const savedEnvRolePrefix = (env: string): string => `agentx-${EnvName.par
 export const savedEnvPushRoleName = (env: string): string => `agentx-${EnvName.parse(env)}-img-push`;
 export const savedEnvPullRoleName = (env: string): string => `agentx-${EnvName.parse(env)}-img-pull`;
 export const savedEnvManageRoleName = (env: string): string => `agentx-${EnvName.parse(env)}-img-manage`;
-/** The role ECR assumes to create a repository from the creation template. Fixed too, so Enterprise can name it in its own key policy BEFORE the install is deployed (the ARN is `arn:<partition>:iam::<account>:role/agentx/<env>/<this name>`). */
+/** The role ECR assumes to create a repository from the creation template. Fixed too, so a company install can name it in its own key policy BEFORE the install is deployed (the ARN is `arn:<partition>:iam::<account>:role/agentx/<env>/<this name>`). */
 export const savedEnvCreateRoleName = (env: string): string => `agentx-${EnvName.parse(env)}-img-create`;
 
 export interface SavedEnvAccountScope { partition: string; region: string; account: string }

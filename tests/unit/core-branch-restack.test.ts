@@ -209,7 +209,7 @@ describe("whether a head builds on a base", () => {
     },
   });
   const repo = { url: "https://github.com/acme/payments" };
-  const scope = { system: "private-install" } as const;
+  const scope = { system: "install" } as const;
 
   it("is true for the base itself and for a head whose first-parent chain reaches it", async () => {
     expect(await headBuildsOnBase(hostOf({}), repo, BASE, BASE, scope)).toBe(true);

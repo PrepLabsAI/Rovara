@@ -242,8 +242,8 @@ export type PluginConfigEntry = z.infer<typeof PluginConfigEntrySchema>;
 /** The config file's content. Entries are created in order, so list a queue's store before the queue. */
 export const PluginConfigSchema = z.object({
   version: z.literal(PLUGIN_CONFIG_VERSION),
-  /** The company Code runs as (decision 45.6). Absent: the implicit company. It has the shape of Cloud's organization id, because plug-in calls carry it as their scope (`HostScope`). */
-  companyId: z.string().regex(/^org_[0-9a-z]{20}$/, "a company id looks like org_ and 20 lower-case letters or digits (the id Cloud uses; code-host and tracker calls are scoped by it)").optional(),
+  /** The company Code runs as (decision 45.6). Absent: the implicit company. It has the shape of an organization id (`org_` and 20 characters), because plug-in calls carry it as their scope (`HostScope`). */
+  companyId: z.string().regex(/^org_[0-9a-z]{20}$/, "a company id looks like org_ and 20 lower-case letters or digits (the same shape a hosted install uses; code-host and tracker calls are scoped by it)").optional(),
   /**
    * Port lane L11 (laptop only, owner-set): a worker may be given the owner's own code-host token even when that token reaches every repository its owner can (a classic token, the GitHub CLI's).
    * Absent or false: such a token is refused for a worker, and a fine-grained token limited to the project's repositories is required. A cloud install ignores it.

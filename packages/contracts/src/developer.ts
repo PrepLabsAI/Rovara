@@ -60,7 +60,7 @@ export const AgentXConfigurationSchema = z.object({
   methods: z.object({
     slack: z.boolean(),
     oidc: z.object({ displayName: z.string().min(1).max(40) }).nullable(),
-    /** SAML single sign-on, on Enterprise installs whose administrator saved and enabled the identity provider's settings; absent from an older server. */
+    /** SAML single sign-on, on installs whose administrator saved and enabled the identity provider's settings; absent from an older server. */
     saml: z.object({ displayName: z.string().min(1).max(40) }).nullable().optional(),
     /** The hosted Rovara sign-in, which creates an org on first sign-in; absent from an older server. */
     cloud: z.object({ displayName: z.string().min(1).max(40) }).nullable().optional(),

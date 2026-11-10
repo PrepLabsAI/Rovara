@@ -1,4 +1,4 @@
-// Enterprise foundations, task P6: the GitHub webhook normaliser. It turns one GitHub delivery into neutral code host events (`CodeHostEvent`), and it is what
+// Plug-in foundations, task P6: the GitHub webhook normaliser. It turns one GitHub delivery into neutral code host events (`CodeHostEvent`), and it is what
 // `githubCodeHost(...).events.normalise` is.
 //
 // Order is fixed and tested: (1) the body's size, (2) the signature over the raw body, (3) the delivery id header, and only then (4) the JSON is read. A delivery that

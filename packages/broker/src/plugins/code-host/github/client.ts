@@ -41,10 +41,10 @@ export interface GitHubInstallation {
 
 /**
  * Whose work a token is minted for (Plan 2, Task 15). An org's own work names the org: on a cloud install the installation must be bound to
- * that org, active, at the moment of every mint. `webhook` (a signed delivery GitHub sent) and `private-install` (the install's one org, which
- * has no bindings) name no org and are never checked.
+ * that org, active, at the moment of every mint. `webhook` (a signed delivery GitHub sent) and `install` (the install's own work, for an install that runs as one company and has
+ * no bindings) name no org and are never checked.
  */
-export type SystemTokenScope = { system: "webhook" | "private-install" };
+export type SystemTokenScope = { system: "webhook" | "install" };
 export type GitHubTokenScope = { orgId: OrgId } | SystemTokenScope;
 
 export interface GitHubAppCredentialProviderOptions {
@@ -60,7 +60,7 @@ export interface GitHubAppCredentialProviderOptions {
   getAppSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /**
    * Cloud installs only: refuses (GITHUB_NOT_CONNECTED) unless the installation is bound to `orgId` and active. Called before every mint for
-   * an `orgId` scope. Absent on a private install.
+   * an `orgId` scope. Absent on a single-company install.
    */
   requireInstallationBound?: (orgId: OrgId, installationId: number, repository?: { owner: string; name: string }) => Promise<void>;
   /**
@@ -2020,7 +2020,7 @@ export class GitHubAppCredentialProvider {
 
   private async workingBranchRead(input: WorkingBranchInput, branch?: string, lookup?: () => Promise<{ id: number; login: string }>): Promise<{ installationId: number; repositoryId: number; commit?: string }> {
     try {
-      // Unlike older private-install APIs, this optional reader requires an explicit org policy.
+      // Unlike the older system-scope APIs, this optional reader requires an explicit org policy.
       const check = this.options.requireInstallationBound;
       if (check === undefined) throw agentXError("GITHUB_NOT_CONNECTED", "Repository connection unavailable.");
       const connected = async () => {
@@ -2389,7 +2389,7 @@ export class GitHubAppCredentialProvider {
     retried = false,
     options: AgentTokenOptions = {},
     minting = false,
-    /** Receives the expiry GitHub states for the minted token (Enterprise foundations M-7), when the caller wants it. */
+    /** Receives the expiry GitHub states for the minted token (Plug-in foundations M-7), when the caller wants it. */
     expiry?: { expiresAt?: string },
   ): Promise<string> {
     const installed = "installationId" in repository ? repository : await this.installed(repository, scope);

@@ -1,4 +1,4 @@
-// Enterprise foundations, task P3: GitHub's words to the neutral ones, and back. Pure functions: no I/O, and `github-app.ts` is not edited. Every untrusted
+// Plug-in foundations, task P3: GitHub's words to the neutral ones, and back. Pure functions: no I/O, and `github-app.ts` is not edited. Every untrusted
 // text from GitHub is cut to the port's bounds here, so a long comment never fails a read that was otherwise fine.
 import { agentXError, type Check, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFile, type ChangeRequestRef, type ChangeRequestStatus, type HostScope, type MergeResult } from "@agentx/contracts";
 import type {

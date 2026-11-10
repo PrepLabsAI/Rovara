@@ -62,7 +62,7 @@ describe("share fields in task results (FR-030, C21)", () => {
     expect(result.structuredContent).toMatchObject({
       share_mode: "continue", thread_url: "https://slack.com/archives/C0123456789/p1695500000000100",
       // Final review M7: the name reaches the AI tool inert, as in TASK_BUSY.
-      channel_turns: [{ author: "`Priya`", slack_user: "U0PRIYA001", at: "2026-09-29T10:05:00.000Z", request: "run the linter", outcome: "answered" }],
+      channel_turns: [{ author: "`Priya`", channel_user: "U0PRIYA001", slack_user: "U0PRIYA001", at: "2026-09-29T10:05:00.000Z", request: "run the linter", outcome: "answered" }],
     });
     expect(result.structuredContent).not.toHaveProperty("share_reason");
     expect(result.structuredContent).not.toHaveProperty("share_posting");
@@ -217,5 +217,61 @@ describe("agentx_share_task (FR-030)", () => {
     const error = toolError(await mcp.callTool({ name: "agentx_share_task", arguments: { task_id: TASK, share_mode: "view" } }));
     expect(error).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: UPGRADE_AGENTX_STEP });
     expect(shareTask).not.toHaveBeenCalled();
+  });
+});
+
+describe("neutral channel fields (item H3, old names kept one release)", () => {
+  const startOf = async (args: Record<string, unknown>, tool = "agentx_start_task") => {
+    const startTask = vi.fn<(request: Record<string, unknown>) => Promise<DeveloperTaskView>>(async () => view());
+    const mcp = await connect({ startTask });
+    const result = await mcp.callTool({ name: tool, arguments: { project: "payments", instructions: "Fix it", ...args } });
+    return { startTask, result };
+  };
+
+  it("reads share: true like the older share_to_channel: true, on every start tool", async () => {
+    for (const tool of ["agentx_start", "agentx_start_task", "agentx_start_workflow"]) {
+      const extra = tool === "agentx_start_workflow" ? { workflow_path: "quick" } : {};
+      const neutral = await startOf({ share: true, ...extra }, tool);
+      const older = await startOf({ share_to_channel: true, ...extra }, tool);
+      expect(neutral.startTask.mock.calls[0]?.[0]).toMatchObject({ shareToChannel: true });
+      expect(neutral.startTask.mock.calls[0]?.[0]).not.toHaveProperty("channel");
+      // The same start under either spelling is the same request.
+      expect(older.startTask.mock.calls[0]?.[0]).toEqual(neutral.startTask.mock.calls[0]?.[0]);
+    }
+  });
+
+  it("hashes the two spellings alike: one connection, a counting request id, and the retry under the older name gets the same id (L1)", async () => {
+    const startTask = vi.fn<(request: Record<string, unknown>) => Promise<DeveloperTaskView>>(async () => view());
+    let next = 0;
+    const mcp = await connect({ startTask }, { newRequestId: () => `33333333-3333-4333-8333-${String(++next).padStart(12, "0")}` });
+    const call = (extra: Record<string, unknown>) => mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix it", ...extra } });
+    await call({ share: true });
+    await call({ share_to_channel: true });
+    await call({ share: false });
+    await call({});
+    const ids = startTask.mock.calls.map(([request]) => request.requestId);
+    expect(ids[1]).toBe(ids[0]);
+    // share: false is a different start from one that says nothing, so it is not folded into it.
+    expect(ids[2]).not.toBe(ids[3]);
+    expect(ids[2]).not.toBe(ids[0]);
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  it("keeps a channel name a string: sent, and not a share by itself", async () => {
+    const named = await startOf({ channel: "payments-dev" });
+    expect(named.startTask.mock.calls[0]?.[0]).toMatchObject({ channel: "payments-dev" });
+    expect(named.startTask.mock.calls[0]?.[0]).not.toHaveProperty("shareToChannel");
+    const both = await startOf({ share: true, channel: "payments-dev" });
+    expect(both.startTask.mock.calls[0]?.[0]).toMatchObject({ shareToChannel: true, channel: "payments-dev" });
+    // A boolean is no longer a channel.
+    expect((await startOf({ channel: true })).result).toMatchObject({ isError: true });
+  });
+
+  it("refuses share and share_to_channel that disagree, and calls nothing", async () => {
+    const refused = await startOf({ share: false, share_to_channel: true });
+    expect(refused.result).toMatchObject({ isError: true });
+    expect(refused.startTask).not.toHaveBeenCalled();
+    const agree = await startOf({ share: false, share_to_channel: false });
+    expect(agree.startTask.mock.calls[0]?.[0]).toMatchObject({ shareToChannel: false });
   });
 });

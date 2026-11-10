@@ -134,7 +134,7 @@ describe("loading code hosts, trackers and check runners from the plug-in config
       const host = codeHostForKind(registry, "github");
       expect(host.kind).toBe("github");
       expect("normalise" in host.events).toBe(true);
-      expect(await host.repositoryIdentity({ url: GITHUB_REPO_URL }, { system: "private-install" })).toMatchObject({ fullName: "acme/app" });
+      expect(await host.repositoryIdentity({ url: GITHUB_REPO_URL }, { system: "install" })).toMatchObject({ fullName: "acme/app" });
       expect(checkRunnerForKind(registry, "github-actions", { allowedRepositories: [] }).capabilities.logTail).toBe(true);
     } finally {
       delete process.env[environment];
@@ -172,7 +172,7 @@ describe("loading code hosts, trackers and check runners from the plug-in config
     expect(built).toEqual(["gateway"]);
     const runner = checkRunnerForKind(registry, "codebuild", { allowedRepositories: [REPO_URL] });
     expect(runner.capabilities.start).toBe(true);
-    await expect(runner.start!({ repository: { url: "https://x.example.test/other" }, revision: "a".repeat(40), gate: "unit", project: "p", timeoutMinutes: 5, idempotencyKey: "k" }, { system: "private-install" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(runner.start!({ repository: { url: "https://x.example.test/other" }, revision: "a".repeat(40), gate: "unit", project: "p", timeoutMinutes: 5, idempotencyKey: "k" }, { system: "install" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     await expect(loadAdapters(entries(["check-runner", "codebuild", "./cb.js"]), { registry: createAdapterRegistry(), importModule: importerOf({ "./cb.js": codeBuildPlugin({ createGateway: () => ({}) as never }) }) })).rejects.toMatchObject({ code: "create_failed" });
   });
 
@@ -247,5 +247,15 @@ describe("the company the config names is the scope of the plug-in calls", () =>
     for (const companyId of ["acme", "org_abc", "ORG_AAAAAAAAAAAAAAAAAAAA", "org_aaaaaaaaaaaaaaaaaaaa#x"]) {
       expect(() => parsePluginConfig({ version: 1, companyId, plugins: [] })).toThrowError(expect.objectContaining({ code: "bad_config" }));
     }
+  });
+});
+
+describe("the system scope of a plug-in call (public names, item R1)", () => {
+  it("names the install's own work `install`, and still reads the older `private-install` as `install`", () => {
+    expect(HostScopeSchema.parse({ system: "install" })).toEqual({ system: "install" });
+    expect(HostScopeSchema.parse({ system: "webhook" })).toEqual({ system: "webhook" });
+    expect(HostScopeSchema.parse({ system: "private-install" })).toEqual({ system: "install" });
+    expect(HostScopeSchema.safeParse({ system: "other" }).success).toBe(false);
+    expect(HostScopeSchema.safeParse({ system: "install", orgId: "org_aaaaaaaaaaaaaaaaaaaa" }).success).toBe(false);
   });
 });

@@ -241,8 +241,8 @@ export function secondReviewShadowPassed(result: SecondReviewShadowResult): bool
 
 /**
  * The evidence that lets a model run in `on`. It holds NO verdict flag: whether the replay check passed and whether the shadow phase passed are recomputed by the broker every time, from the stored replay run
- * (`summarizeSecondReviewReplay`) and the shadow window's timestamps and counts (`secondReviewVerdictHolds`). No route writes a pass; a record is created only by Rovara staff in Public or by the install in
- * Enterprise (never by a project), and an admin can only WITHDRAW it (`withdrawnAt`).
+ * (`summarizeSecondReviewReplay`) and the shadow window's timestamps and counts (`secondReviewVerdictHolds`). No route writes a pass; a record is created only by Rovara staff on the hosted service or by the install
+ * itself (never by a project), and an admin can only WITHDRAW it (`withdrawnAt`).
  */
 export const SecondReviewVerdictSchema = z.object({
   /** `secondReviewModelKey` of the candidate: the exact revision, so a verdict on v1 never covers v2. */
@@ -254,7 +254,7 @@ export const SecondReviewVerdictSchema = z.object({
   shadow: z.object({ startedAt: z.string().datetime(), endedAt: z.string().datetime(), findings: z.number().int().min(0).max(1_000_000), agreed: z.number().int().min(0).max(1_000_000), reviews: z.number().int().min(0).max(1_000_000).optional() }).strict()
     .refine((window) => window.agreed <= window.findings, { message: "agreed findings are a part of the findings", path: ["agreed"] }),
   createdAt: z.string().datetime(),
-  /** Who recorded it: a Rovara staff member (Public) or the install (Enterprise); never a project member. */
+  /** Who recorded it: a Rovara staff member (hosted) or the install itself; never a project member. */
   createdBy: z.string().min(1).max(128),
   withdrawnAt: z.string().datetime().optional(),
   withdrawnBy: z.string().min(1).max(128).optional(),
