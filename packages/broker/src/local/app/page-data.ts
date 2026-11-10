@@ -30,6 +30,10 @@ import { attentionOf, retryableBlock } from "./attention.js";
 import { createLocalSessionControl } from "./host.js";
 import { NOTHING_TO_RETRY_STEP, retryBlockedStep } from "./retry.js";
 import { stepOf } from "./facts.js";
+import { loadDesignProof } from "../../core/design-review/design-proof.js";
+import { designProofLine } from "../../core/design-review/proof-line.js";
+import { designChoiceDigest } from "../../core/design-review/choice-subject.js";
+import { designPanelOf, designQuestionsOf } from "../../core/design-review/panel.js";
 import { proofReportOf } from "./proof-report.js";
 import { planGraphOf } from "../../core/work-breakdown/plan-graph.js";
 import { workBreakdownView, type WorkBreakdownView } from "../../core/work-breakdown/view.js";
@@ -65,6 +69,8 @@ export interface PageDataDeps {
   evidence?: Pick<LocalEvidence, "packOf">;
   /** Lane L12: comment commands, so the page can show and attach the thread a plan is posted on. */
   comments?: Pick<LocalComments, "attachThread" | "attachedThread" | "available">;
+  /** The design review: whether the project allows skipping, for the cost hold's choices. */
+  designReview?: { allowSkip(project: string): Promise<boolean>; unpricedNote(): string };
   blobs: ObjectStorage;
   /** The owner of the install: the pages are the owner's. */
   owner: Principal;
@@ -196,7 +202,9 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         // A design that went through no review says so beside the design itself, so nobody takes it for a reviewed one.
         ...(designNotRunLine(workflow.designReview) === undefined ? {} : { designNote: designNotRunLine(workflow.designReview)! }),
         // Rovara's ask, the pull request's state and any questions: fixed words, and the forms that answer them.
-        attention: await attentionWithThread(deps, task, (await attentionOf(deps.flow, task)).view),
+        attention: designQuestionsOf(workflow) === undefined ? await attentionWithThread(deps, task, (await attentionOf(deps.flow, task)).view) : { ...await attentionWithThread(deps, task, (await attentionOf(deps.flow, task)).view), questions: designQuestionsOf(workflow)! },
+        // The design review's panel: how it went, what is open, and what waits for the owner.
+        ...(workflow.designReview === undefined ? {} : { designReview: designPanelOf(workflow, { allowSkip: await (deps.designReview?.allowSkip(task.project) ?? Promise.resolve(false)), ...(deps.designReview === undefined ? {} : { unpricedNote: deps.designReview.unpricedNote() }), ...(designChoiceDigest(workflow) === undefined ? {} : { holdOffer: { requestId: approvalRequestId(taskId, workflow.revision, designChoiceDigest(workflow)!), revision: workflow.revision, artifactDigest: designChoiceDigest(workflow)! } }) })! }),
         ...secondReviewOfPlanPage(deps, task),
       };
     },
@@ -210,13 +218,16 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
       const workflow = task?.workflow;
       if (task === undefined || workflow === undefined) return undefined;
       const pack = workflow.candidate === undefined ? undefined : await deps.evidence?.packOf(task, workflow.candidate.digest);
-      return proofReportOf(task, workflow, pack, { verified: await verifiedChangedFiles(deps.flow, task.workspaceId, workflow.candidate?.digest), reported: await reportedChangedFiles(deps.flow, task.workspaceId) });
+      const report = proofReportOf(task, workflow, pack, { verified: await verifiedChangedFiles(deps.flow, task.workspaceId, workflow.candidate?.digest), reported: await reportedChangedFiles(deps.flow, task.workspaceId) });
+      // The design's part (when it went through design review and was approved): one line of counts, the approver and the reason, and a row for it.
+      const design = workflow.designReview === undefined ? undefined : await loadDesignProof({ store: deps.flow.store, artifacts: deps.flow.artifacts }, taskId, workflow);
+      return design === undefined ? report : { ...report, summary: `${designProofLine(design)} ${report.summary}`, rows: [{ claim: "Design review", check: "fresh-context reviewers", status: design.approval.openBlockers === 0 ? "passed" : "not_run", detail: `approved by ${design.approval.approverLabel}` }, ...report.rows] };
     },
   };
 }
 
 /** The writes of the pages that the decision gate does not own: a comment on a plan, and the lessons (none here yet). */
-export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview">): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "acknowledgeSecondReview"> {
+export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "acknowledgeSecondReview"> {
   return {
     async secondReview(input, context): Promise<LocalActionResult> {
       if (deps.secondReview === undefined) return { ok: false, reason: "not_found", message: "That is no longer there." };
@@ -285,6 +296,9 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
       return { ok: true, message: "That thread is attached." };
     },
     async answerQuestions(input): Promise<LocalActionResult> {
+      // While a design review waits for answers, the owner's answers are to ITS question card (the same form), not Understand's.
+      const waiting = (await readTask(deps.flow, input.taskId))?.workflow;
+      if (waiting?.designReview?.status === "waiting_answers" && deps.designAnswers !== undefined) return deps.designAnswers({ taskId: input.taskId, revision: input.revision, answers: input.answers });
       try {
         await answerUnderstandQuestions(deps.flow, { taskId: input.taskId, round: input.round, answers: input.answers, by: { name: deps.owner.displayName }, source: "app", expectedRevision: input.revision });
       } catch (error) {

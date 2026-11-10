@@ -138,9 +138,25 @@ function secondReviewHtml(context: PageContext, view: PlanPageView): string {
   return `<section class="panel" id="second-review"><h2>Second review</h2>${lines}${note}${ask}</section>`;
 }
 
-/** The line that says a design's review did not run (fixed words), in front of the approval form. */
+/** The line that says a design's review did not run (fixed words), in front of the approval form. The review's own panel carries it when there is one. */
 function designNoteHtml(view: PlanPageView): string {
-  return view.designNote === undefined ? "" : `<p class="panel" id="design-not-run"><strong>${esc(view.designNote)}</strong></p>`;
+  return view.designNote === undefined || view.designReview !== undefined ? "" : `<p class="panel" id="design-not-run"><strong>${esc(view.designNote)}</strong></p>`;
+}
+
+const SEVERITY_TAG = { blocker: "bad", major: "warn", nit: "muted" } as const;
+
+/** The design review's panel: how it went, what is open, and the forms for what waits for the owner. Findings are model words and are shown as untrusted text. */
+function designReviewHtml(context: PageContext, view: PlanPageView): string {
+  const review = view.designReview;
+  if (review === undefined) return "";
+  const findings = review.findings.length === 0 ? "<p class=\"muted\">The reviewers raised nothing.</p>"
+    : `<ul>${review.findings.map((finding) => `<li><span class="tag ${SEVERITY_TAG[finding.severity]}">${esc(finding.severity)}</span> <span class="muted">${untrusted(finding.section)} · ${untrusted(finding.from)}</span> ${untrusted(finding.text)}${finding.resolution === undefined ? "" : ` <span class="muted">(${untrusted(finding.resolution)})</span>`}${finding.open ? "" : " <span class=\"muted\">settled</span>"}</li>`).join("")}</ul>`;
+  const hold = review.hold === undefined ? "" : `<section class="panel" id="design-hold"><h2>${untrusted(review.hold.why)}</h2><p>Nothing runs until you choose.</p>${review.hold.note === undefined ? "" : `<p class="muted">${esc(review.hold.note)}</p>`}<div class="row">${review.hold.choices.map((choice) =>
+    `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/design-choice">${approvalFields(context, "design.choice", view.taskId, review.hold!.offer)}${hidden("choice", choice.choice)}<button type="submit"${choice.choice === "run_unpriced" ? " class=\"primary\"" : ""}>${untrusted(choice.label)}</button></form>`).join("")}</div></section>`;
+  const parked = review.parked === undefined ? "" : `<section class="panel" id="design-parked"><h2>Paused</h2><p>This waited a week, so nothing is running or spending. Pick it up again when you are ready.</p>`
+    + `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/design-resume">${hidden("revision", review.parked.revision)}${hidden("ft", context.formToken({ action: "design.resume", taskId: view.taskId, revision: review.parked.revision }))}<div class="row"><button class="primary" type="submit">Pick it up again</button></div></form></section>`;
+  const reason = review.blockerReasonNeeded === true ? "<p class=\"bad\">A blocker is still open. To approve this design, say in one line why in the box below (the box that asks what to change).</p>" : "";
+  return `<section class="panel" id="design-review"><h2>Design review</h2><p>${untrusted(review.status)}</p>${review.facts.length === 0 ? "" : `<ul>${review.facts.map((fact) => `<li>${untrusted(fact)}</li>`).join("")}</ul>`}${reason}<h3>Findings</h3>${findings}</section>${hold}${parked}`;
 }
 
 export async function renderPlanPage(context: PageContext, view: PlanPageView): Promise<string> {
@@ -170,7 +186,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${attentionHtml(context, view)}${critiqueHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${critiqueHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${designReviewHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 

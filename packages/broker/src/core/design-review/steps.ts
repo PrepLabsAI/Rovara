@@ -15,10 +15,11 @@ import { commitWorkflow, runDispatchRow } from "../task-flow/stage-machine.js";
 import { resolveRowItem } from "../task-flow/dispatch-rows.js";
 import { iso, log } from "../task-flow/support.js";
 import { designReviewOutcome } from "./outcome.js";
+import { designProofContextOf } from "./design-proof.js";
+import { designWaitArmItems } from "./wait.js";
 import { designResolveDue, designResolveOutcome, designResolveRunning, startDesignResolveRun } from "./resolve-run.js";
 import { startDesignReviewRound } from "./round-start.js";
 import type { DesignReviewRuntime } from "./round-ports.js";
-import { designProofContextOf } from "./design-proof.js";
 import { ROVARA_CODE_PROGRAM } from "../plan/program.js";
 import { designTemplateInstructions } from "./template.js";
 import { designReviewEnabled } from "./switch.js";
@@ -37,14 +38,14 @@ export function designRowItem(deps: Pick<TaskFlowDeps, "companyId">, taskId: str
   return costApprovedBy === undefined ? row : { ...row, item: { ...row.item, costApprovedBy } };
 }
 
-export function createDesignReviewSteps(runtime: DesignReviewRuntime): DesignReviewSteps {
+export function createDesignReviewSteps(runtime: DesignReviewRuntime): Omit<DesignReviewSteps, "retryBlocked" | "designFirst"> {
   const withWorkflow = (task: TaskRecord): (TaskRecord & { workflow: WorkflowSnapshot }) | undefined => (task.workflow === undefined ? undefined : task as TaskRecord & { workflow: WorkflowSnapshot });
 
   /** Commits the move an end made, with the row it makes due, and runs that row. A task that moved on is left alone. */
   async function commitEnd(deps: TaskFlowDeps, task: TaskRecord & { workflow: WorkflowSnapshot }, next: WorkflowSnapshot, extra: readonly TransactItem[]): Promise<void> {
     if (next === task.workflow) return;
     const row = designRowFor(next);
-    const committed = await commitWorkflow(deps, task, next, [...extra, ...(row === undefined ? [] : [designRowItem(deps, task.taskId, next.revision, row, iso(deps))])]);
+    const committed = await commitWorkflow(deps, task, next, [...extra, ...(row === undefined ? [] : [designRowItem(deps, task.taskId, next.revision, row, iso(deps))]), ...designWaitArmItems(deps, task.taskId, next, Date.parse(iso(deps)))]);
     if (committed && row !== undefined) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: row }).catch((error: unknown) => log(deps, { event: "design_review.row_not_run", error: error instanceof Error ? error.name : "unknown" }));
   }
 

@@ -8,7 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DesignReviewBindingSchema, IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, WorkflowSnapshotSchema, closeDesignReview, decideWorkflow, enableDesignReview, recordIntentAssessment, startWorkflowPlanAfterUnderstand, startWorkflowUnderstand,
-  submitWorkflowArtifact, type WorkflowSnapshot,
+  designWaitOf, submitWorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { approvalRecordKey } from "../../packages/broker/src/core/decisions/approval-gate.js";
@@ -19,7 +19,8 @@ import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/
 import { CALLBACK_KEY_FILE_NAME } from "../../packages/broker/src/local/state-directory.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
-import { waitingWithBlocker, world as flowWorld } from "../support/design-review-flow-world.js";
+import { sweepDesignWaits } from "../../packages/broker/src/core/design-review/wait.js";
+import { taskOf, toRound, waitingWithBlocker, world as flowWorld } from "../support/design-review-flow-world.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -133,6 +134,21 @@ async function seedReviewedDesign(w: World): Promise<WorkflowSnapshot> {
   return waiting;
 }
 
+/** A review made on the task flow's fakes, its workflow and documents put on the launched task (the owner is the launched install's). */
+async function seedFromFlow(w: World, make: (source: Awaited<ReturnType<typeof flowWorld>>) => Promise<WorkflowSnapshot>, options: Parameters<typeof flowWorld>[0] = {}): Promise<WorkflowSnapshot> {
+  const source = await flowWorld(options);
+  const reviewed = await make(source);
+  const blobs = w.runtime.registry.require("object-storage");
+  for (const artifact of reviewed.artifacts) {
+    const text = source.blobs.get(artifact.objectKey)!;
+    await blobs.put(artifact.objectKey, new TextEncoder().encode(text), { contentType: "text/markdown", metadata: { sha256: artifact.sha256, name: "doc" }, retention: "task-document" });
+  }
+  const own = WorkflowSnapshotSchema.parse((await w.store.get({ pk: `DEVTASK#${w.taskId}`, sk: "META" }))!["workflow"]);
+  const seeded = { ...reviewed, taskId: w.taskId, ownerId: own.ownerId };
+  await w.store.update({ key: { pk: `DEVTASK#${w.taskId}`, sk: "META" }, ops: [{ op: "set", path: ["workflow"], value: JSON.parse(JSON.stringify(seeded)) as never }] });
+  return seeded;
+}
+
 describe("the approval of a reviewed design, through the owner's page and the approval gate", () => {
   it("is graded by the review's own facts (a design that touches the data model is high even though its text names nothing alarming), and leaves its record in the decision's transaction", async () => {
     const w = await launch();
@@ -155,17 +171,14 @@ describe("the approval of a reviewed design, through the owner's page and the ap
   it("needs a one-line reason when a blocker is open, through the page and the gate: without it nothing is approved; with it the reason goes on the approval record", async () => {
     const w = await launch();
     // The review that left a blocker open is made on the task flow's fakes, and its workflow and documents are put on this task.
-    const source = await flowWorld();
-    const reviewed = await waitingWithBlocker(source);
-    const blobs = w.runtime.registry.require("object-storage");
-    for (const artifact of reviewed.artifacts) {
-      const text = source.blobs.get(artifact.objectKey)!;
-      await blobs.put(artifact.objectKey, new TextEncoder().encode(text), { contentType: "text/markdown", metadata: { sha256: artifact.sha256, name: "doc" }, retention: "task-document" });
-    }
-    const own = WorkflowSnapshotSchema.parse((await w.store.get({ pk: `DEVTASK#${w.taskId}`, sk: "META" }))!["workflow"]);
-    const seeded = { ...reviewed, taskId: w.taskId, ownerId: own.ownerId };
-    await w.store.update({ key: { pk: `DEVTASK#${w.taskId}`, sk: "META" }, ops: [{ op: "set", path: ["workflow"], value: JSON.parse(JSON.stringify(seeded)) as never }] });
+    const reviewed = await seedFromFlow(w, async (source) => waitingWithBlocker(source));
     const link = await w.browse(`/plan/${w.taskId}`);
+    const shown = await raw(w.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
+    // The page shows the review: how it went and the finding that is still open, with the blocker's own word and the reason it asks for.
+    expect(shown.body).toContain("Design review");
+    expect(shown.body).toContain("Nothing bounds the retry.");
+    expect(shown.body).toContain("blocker");
+    expect(shown.body).toContain("A blocker is still open");
     const decide = async (note: string) => {
       const page = await raw(w.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
       const form = formOf(page.body, "/decide");
@@ -177,5 +190,64 @@ describe("the approval of a reviewed design, through the owner's page and the ap
     expect(await decide("The plan sets the retry limit.")).toContain("n=approved");
     const digest = reviewed.artifacts.filter((artifact) => artifact.type === "design").at(-1)!.sha256;
     expect(await w.store.get(designApprovalKey(w.taskId, digest))).toMatchObject({ openBlockers: 1, proofReason: "The plan sets the retry limit." });
+  });
+});
+
+describe("the cost hold on the owner's page", () => {
+  it("shows what waits for the owner and takes the choice through the approval gate: Skip ends the review as not run and the design goes to the owner", async () => {
+    const w = await launch();
+    await seedFromFlow(w, async (source) => { await toRound(source); return (await taskOf(source)).workflow; }, { price: false, holdAnswerable: true });
+    const link = await w.browse(`/plan/${w.taskId}`);
+    const page = await raw(w.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
+    expect(page.body).toContain("design-hold");
+    expect(page.body).toContain("Run it anyway");
+    expect(page.body).toContain("Skip design review");
+    // The hold says how an accepted run is counted, and that the real bill can differ.
+    expect(page.body).toContain("counts it at $15 and $75 per million tokens");
+    expect(page.body).toContain("A dearer model can cost more than the limit.");
+    const form = formOf(page.body, "/design-choice");
+    const post = await raw(w.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody({ ...form.fields, choice: "skip" }), headers: { host: link.host, origin: w.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(String(post.headers["location"])).not.toContain("n=invalid");
+    const after = WorkflowSnapshotSchema.parse((await w.store.get({ pk: `DEVTASK#${w.taskId}`, sk: "META" }))!["workflow"]);
+    expect(after).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", designReview: { status: "not_run", notRunReason: "skipped" } });
+    // The choice went through the gate: it left a decision record.
+    expect(await w.store.get(approvalRecordKey(IMPLICIT_COMPANY_ID, form.fields["requestId"]!))).toMatchObject({ kind: "design-review-choice", outcome: "approve" });
+  });
+});
+
+describe("the forms of the cost hold and of a paused review", () => {
+  const postForm = (w: World, link: URL, action: string, fields: Record<string, string>) =>
+    raw(w.runtime.pagesUrl, { method: "POST", path: action, body: formBody(fields), headers: { host: link.host, origin: w.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+  const workflowOfTask = async (w: World) => WorkflowSnapshotSchema.parse((await w.store.get({ pk: `DEVTASK#${w.taskId}`, sk: "META" }))!["workflow"]);
+
+  it("refuse a cost choice whose form was not signed for this request: nothing is decided", async () => {
+    const w = await launch();
+    await seedFromFlow(w, async (source) => { await toRound(source); return (await taskOf(source)).workflow; }, { price: false, holdAnswerable: true });
+    const link = await w.browse(`/plan/${w.taskId}`);
+    const page = await raw(w.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
+    const form = formOf(page.body, "/design-choice");
+    const forged = await postForm(w, link, form.action, { ...form.fields, ft: "f".repeat(64), choice: "skip" });
+    expect(String(forged.headers["location"])).toContain("n=form");
+    expect(await workflowOfTask(w)).toMatchObject({ stage: "PLAN_CRITIQUE", state: "WAITING", designReview: { status: "waiting_cost" } });
+  });
+
+  it("refuse picking a paused review up again when the form was not signed for this task and revision; the signed form picks it up", async () => {
+    const w = await launch();
+    await seedFromFlow(w, async (source) => {
+      await toRound(source);
+      source.h.clock.advance(8 * 86_400);
+      await sweepDesignWaits({ flow: source.h.deps, reader: source.runtime.reader, env: source.runtime.env, releaseKeys: async () => undefined });
+      return (await taskOf(source)).workflow;
+    }, { price: false, holdAnswerable: true });
+    const link = await w.browse(`/plan/${w.taskId}`);
+    const page = await raw(w.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
+    expect(page.body).toContain("design-parked");
+    const form = formOf(page.body, "/design-resume");
+    const forged = await postForm(w, link, form.action, { ...form.fields, ft: "f".repeat(64) });
+    expect(String(forged.headers["location"])).toContain("n=form");
+    expect(designWaitOf(await workflowOfTask(w))?.parkedAt).toBeDefined();
+    const signed = await postForm(w, link, form.action, form.fields);
+    expect(String(signed.headers["location"])).toContain("n=resumed");
+    expect(designWaitOf(await workflowOfTask(w))?.parkedAt).toBeUndefined();
   });
 });

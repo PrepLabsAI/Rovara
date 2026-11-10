@@ -9,7 +9,6 @@ import { readSlotKeyRecord } from "../../packages/broker/src/core/design-review/
 import { checkDesignApproval, designApprovalRecordItems, designRiskOf, gradeApprovalRisk } from "../../packages/broker/src/core/design-review/decision.js";
 import { SubjectRefusal } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { gradePlanRisk } from "../../packages/broker/src/core/decisions/plan-risk.js";
-import { createLocalDesignReview } from "../../packages/broker/src/local/app/design-review.js";
 import { NO_LESSONS_USED } from "../../packages/broker/src/core/build-step/changed-files.js";
 import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { proofDesignOf } from "../../packages/broker/src/core/design-review/design-proof.js";
@@ -17,7 +16,9 @@ import { designNotRunLine } from "../../packages/broker/src/core/design-review/n
 import { designProofLine } from "../../packages/broker/src/core/design-review/proof-line.js";
 import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { COMPANY, SIGNING_KEY } from "../support/task-flow-harness.js";
-import { answerRound, design, finish, mintKeys, nextJob, taskOf, toDesignPhase, toRound, waitingWithBlocker, world, planned, type World } from "../support/design-review-flow-world.js";
+import { runDueDispatches } from "../../packages/broker/src/core/task-flow/stage-machine.js";
+import { UNPRICED_REFERENCE_PRICE, unpricedNoteOf, unpricedReferencePriceOf } from "../../packages/broker/src/local/app/design-review.js";
+import { answerRound, choose, localDesignReview, design, finish, mintKeys, nextJob, taskOf, toDesignPhase, toRound, waitingWithBlocker, world, planned, type World } from "../support/design-review-flow-world.js";
 
 const CAPABILITY = "x-agentx-callback-capability";
 const STAMP = "x-rovara-workspace";
@@ -101,18 +102,7 @@ describe("the packet route", () => {
   });
 });
 
-/** The slot grants as `rovara up` builds them, over the harness's flow and a spy for what the model proxy is told to close. */
-function slotGrants(w: World, options: { model?: string; priced?: boolean } = {}) {
-  const closed: string[] = [];
-  const local = createLocalDesignReview({
-    flow: w.h.deps, blobs: {} as never, registry: { get: () => undefined, names: () => [] } as never, companyId: COMPANY, environment: { ROVARA_DESIGN_REVIEW: "1" },
-    chosen: async () => ({ provider: "anthropic", model: options.model ?? "m1" }),
-    routeOf: (choice) => ({ route: { alias: `${choice.provider}/${choice.model}`, provider: choice.provider, model: choice.model, api: "anthropic-messages" }, workerRoute: { alias: `${choice.provider}/${choice.model}`, api: "anthropic-messages", catalog: choice.model } }),
-    provider: () => (options.priced === false ? undefined : { prices: { currency: "USD", models: { m1: { inputMicrosPerMillionTokens: 3_000_000, outputMicrosPerMillionTokens: 15_000_000 } } } }),
-    slotKeys: () => ({ closeKeys: (ids) => { closed.push(...ids); }, spendUsd: () => 0 }),
-  });
-  return { local, closed };
-}
+const slotGrants = localDesignReview;
 
 describe("a reviewer's model key", () => {
   it("is minted once: a second ask for the slot is refused, and the first key is blocked at the proxy", async () => {
@@ -223,6 +213,44 @@ describe("the tier a reviewed design is approved at", () => {
   });
 });
 
+describe("a reviewer's model key when the model has no price here", () => {
+  it("is not given unless the owner accepted \"price unknown\" at the cost hold: a model nobody priced and nobody accepted gets no key", async () => {
+    const w = await world();
+    const { round, binding } = await dispatched(w);
+    const { local } = slotGrants(w, { priced: false });
+    const operation = { workspaceId: w.workspaceId, operationId: round.operation.id, fence: round.operation.fence };
+    expect(await local.slotGrants.describeSlot(operation, binding.reviewers[0]!.keySlot)).toBeUndefined();
+  });
+
+  it("is bounded by an assumed price once the owner accepted: the review runs on a laptop with an unpriced model, and its ceiling is held at the dearest public class", async () => {
+    const w = await world({ price: false, holdAnswerable: true });
+    await toRound(w);
+    expect((await taskOf(w)).workflow.designReview).toMatchObject({ status: "waiting_cost" });
+    expect(await choose(w, "run_unpriced")).toMatchObject({ status: "decided" });
+    await runDueDispatches(w.h.deps);
+    const round = await nextJob(w);
+    const binding = DesignReviewBindingSchema.parse(round.operation.designReview);
+    const { local } = slotGrants(w, { priced: false });
+    const operation = { workspaceId: w.workspaceId, operationId: round.operation.id, fence: round.operation.fence };
+    const grant = await local.slotGrants.describeSlot(operation, binding.reviewers[0]!.keySlot);
+    expect(grant).toMatchObject({ assumedPrice: UNPRICED_REFERENCE_PRICE, routes: [{ alias: "anthropic/m1" }], budget: { currency: "USD" } });
+    expect(grant!.budget!.micros).toBeGreaterThan(0);
+    expect(UNPRICED_REFERENCE_PRICE).toEqual({ inputMicrosPerMillionTokens: 15_000_000, outputMicrosPerMillionTokens: 75_000_000 });
+    // A priced model never carries one.
+    const priced = slotGrants(w, { priced: true }).local;
+    expect((await priced.slotGrants.describeSlot(operation, binding.reviewers[1]?.keySlot ?? binding.reviewers[0]!.keySlot))).not.toHaveProperty("assumedPrice");
+  });
+});
+
+describe("the figure an unpriced run is counted at", () => {
+  it("is $15 and $75 per million tokens unless the install states another, and a figure that is not two positive numbers is ignored", () => {
+    expect(unpricedReferencePriceOf({})).toEqual(UNPRICED_REFERENCE_PRICE);
+    expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: "150, 600" })).toEqual({ inputMicrosPerMillionTokens: 150_000_000, outputMicrosPerMillionTokens: 600_000_000 });
+    for (const bad of ["", "15", "15,75,1", "a,b", "0,75", "-1,5", "15,Infinity", "1000000,5"]) expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: bad })).toEqual(UNPRICED_REFERENCE_PRICE);
+    expect(unpricedNoteOf(UNPRICED_REFERENCE_PRICE)).toBe("If you run it anyway, Rovara counts it at $15 and $75 per million tokens (input and output). A dearer model can cost more than the limit.");
+  });
+});
+
 describe("the hold nobody can answer", () => {
   it("ends the review as not run with a plain word, and the design goes to the owner: a task is never stranded at a cost choice it cannot be asked", async () => {
     const w = await world({ price: false });
@@ -232,9 +260,9 @@ describe("the hold nobody can answer", () => {
 });
 
 describe("the cost hold on this install", () => {
-  it("is not answerable in the local wiring: the runtime says so, so a hold ends the review as not run instead of waiting for a choice nobody can make", async () => {
+  it("is answerable in the local wiring: the owner's page offers the choices, so a hold waits for the owner instead of ending the review", async () => {
     const { local } = slotGrants(await world());
-    expect(local.runtime.holdAnswerable).not.toBe(true);
+    expect(local.runtime.holdAnswerable).toBe(true);
   });
 });
 

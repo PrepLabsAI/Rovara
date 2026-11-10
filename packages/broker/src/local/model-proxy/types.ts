@@ -42,6 +42,11 @@ export interface ModelGrant {
    * and a budget that is the slot's allocated ceiling, so no reviewer spends another's money and the broker can measure what each cost.
    */
   slot?: string | undefined;
+  /**
+   * A design-review slot whose model has no price on this computer, run because the owner accepted "price unknown". The proxy cannot hold a budget to an unpriced model, so it bounds the slot with this ASSUMED
+   * price instead: a call is reserved and settled at it, so the slot's ceiling holds for a model that costs no more than that price (a dearer one can cost more; the owner is told so). It counts for the slot only; the cost ledger still records an unpriced call as unknown.
+   */
+  assumedPrice?: { inputMicrosPerMillionTokens: number; outputMicrosPerMillionTokens: number } | undefined;
   /** The only models a token for this operation may call. */
   routes: readonly ProxyRoute[];
   /** The most this operation may spend. Absent: no limit is held. */

@@ -254,7 +254,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   // The design review stage (a Full task's design is read by fresh reviewers before anyone approves it). It fills `flow.deps.designReview`; with the switch off no task enters it.
   const designReview = createLocalDesignReview({
-    flow: flow.deps, blobs, registry, companyId, environment: options.environment ?? {}, chosen, routeOf, provider: (id) => providers.get(id), slotKeys: () => options.slotKeys?.(),
+    flow: flow.deps, blobs, registry, companyId, environment: options.environment ?? {}, chosen, routeOf, provider: (id) => providers.get(id), slotKeys: () => options.slotKeys?.(), timeline,
   });
 
   // Lane L12: merge tracking by polling. The publish step enrols a task's tracking row; a timer reads the due rows and calls the core's pass for each (pull request status, CI fix, branch sync, ready for review).
@@ -339,9 +339,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
           dispatchRowItem(flow.deps, taskId, after.revision, "PLAN", at),
         ];
       },
-    })],
+    }), designReview.choiceSubject],
     ...(options.now === undefined ? {} : { now: options.now }),
   });
+  const designPageActions = designReview.pageActions({ gate, owner });
   const decisionActions = createDecisionActions({ gate, companyId });
   const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
@@ -351,11 +352,12 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   await scriptTokens.revokeAllForSwitchOff().catch((error: unknown) => log({ event: "local_app.script_tokens_switch_off_failed", error: error instanceof Error ? error.name : "unknown" }));
   const pages = await createLocalPagesServer({
     data: {
-      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview }),
+      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview }),
       listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
     },
     actions: {
-      decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview }),
+      decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume,
+      ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       async createScriptToken(input) {
         try {
           return { ok: true, created: await scriptTokens.create(input) };
@@ -403,6 +405,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await flow.dispatchOnce({ maxMessages: 10 }).catch(logFailure("local_app.dispatch_failed"));
     await flow.sweepOnce().catch(logFailure("local_app.sweep_failed"));
     await milestones.deliverDue().catch(logFailure("local_app.milestones_failed"));
+    await designReview.sweepWaits().catch(logFailure("local_app.design_wait_sweep_failed"));
     await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
   };
   // Reading pull requests asks the code host over the network and may take seconds, so the timer runs it apart from the dispatch (a slow host never holds a step back); a test's `tick()` runs both in order.

@@ -30,6 +30,8 @@ export interface TokenRecord {
   budget: Cost | undefined;
   /** A design review's key slot, when this token is one reviewer's. */
   slot: string | undefined;
+  /** The bound used for a slot whose model has no price (see `ModelGrant.assumedPrice`). */
+  assumedPrice: ModelGrant["assumedPrice"];
   /** The id of the key (the token's SHA-256): what the broker records and the worker reports. */
   keyId: string;
   /** The spend record this token adds to: the operation's own, or (for a slot) the slot's. */
@@ -86,7 +88,7 @@ export class ModelTokenBook {
     const ledgerId = grant.slot === undefined ? grant.operationId : `${grant.operationId}#${keyId}`;
     this.#tokens.set(keyId, {
       workspaceId: grant.workspaceId, operationId: grant.operationId, fence: grant.fence, taskId: grant.taskId, projectName: grant.projectName,
-      routes: new Map(grant.routes.map((route) => [route.alias, route])), budget: grant.budget, slot: grant.slot, keyId, ledgerId, expiresAt,
+      routes: new Map(grant.routes.map((route) => [route.alias, route])), budget: grant.budget, slot: grant.slot, assumedPrice: grant.assumedPrice, keyId, ledgerId, expiresAt,
     });
     if (!this.#ledgers.has(ledgerId)) this.#ledgers.set(ledgerId, { currency: undefined, spentMicros: 0, reservedMicros: 0, unpriced: 0, inFlight: 0 });
     if (grant.slot !== undefined) {

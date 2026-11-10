@@ -60,6 +60,8 @@ const NOTICES: Record<string, string> = {
   retried: "Rovara is running that step again.",
   attached: "That thread is attached. A writer's comment there can decide this plan.",
   answered: "Your answers were sent.",
+  chosen: "Done. Rovara carries on with the design review.",
+  resumed: "Picked up again.",
   lesson: "Lesson updated.",
   revoked: "That script token is revoked.",
   tokenfresh: "Making a token needs a page you opened in the last few minutes. Run `rovara token create` to open one.",
@@ -241,6 +243,24 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       }
       const result = await options.actions.answerQuestions({ taskId, revision, round, answers });
       return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "answered")}`);
+    } },
+    // Design review: a choice at the cost hold, through the approval gate (the page signs the proof over this request, revision and digest), and picking a paused review up again.
+    { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/design-choice$`), handle: async (request, match) => {
+      const taskId = match[1] ?? "";
+      const offer = offerOf(request, "design");
+      const choice = request.form?.get("choice");
+      if (offer === undefined || options.actions.designChoice === undefined || (choice !== "run_unpriced" && choice !== "raise_cap" && choice !== "lower_tier" && choice !== "skip")) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
+      if (!verified(request, { action: "design.choice", taskId, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })) return redirect(`${request.base}/plan/${taskId}?n=form`);
+      const result = await options.actions.designChoice({ taskId, choice, approval: offer, proof: proofFor(request, offer) });
+      return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "chosen")}`);
+    } },
+    { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/design-resume$`), handle: async (request, match) => {
+      const taskId = match[1] ?? "";
+      const revision = Number(request.form?.get("revision"));
+      if (!Number.isSafeInteger(revision) || options.actions.designResume === undefined) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
+      if (!verified(request, { action: "design.resume", taskId, revision })) return redirect(`${request.base}/plan/${taskId}?n=form`);
+      const result = await options.actions.designResume({ taskId, revision });
+      return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "resumed")}`);
     } },
     { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/comment$`), handle: async (request, match) => {
       const taskId = match[1] ?? "";

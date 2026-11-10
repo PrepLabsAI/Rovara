@@ -56,6 +56,15 @@ export interface DocumentDecisionStoreDependencies {
 
 const partition = (who: DecisionWho) => `DECISION#${who.orgId}#${who.developerId}`;
 
+/** The stored row of a decision, in the layout both installs share. */
+export function decisionRecordDocument(record: DecisionRecord, nowMs: number): StoredDocument {
+  return {
+    pk: partition(record), sk: `DECIDED#${record.requestId}`, entityType: "DECISION_RECORD", orgId: record.orgId, developerId: record.developerId, cardId: record.cardId, kind: record.kind, risk: record.risk, outcome: record.outcome,
+    ...(record.reason === undefined ? {} : { reason: record.reason }), ...(record.tab === undefined ? {} : { tab: record.tab }), requestId: record.requestId, createdAt: record.createdAt,
+    ...(record.openedAt === undefined ? {} : { openedAt: record.openedAt }), decidedAt: record.decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + DECISION_RECORD_TTL_DAYS * 86_400,
+  };
+}
+
 /** The document-store form. Rows expire by the store's time-to-live attribute (`INDEX_EXPIRY_ATTRIBUTE`, epoch seconds). */
 export function documentDecisionStore(deps: DocumentDecisionStoreDependencies): DecisionStore {
   return {
@@ -82,13 +91,8 @@ export function documentDecisionStore(deps: DocumentDecisionStoreDependencies): 
       return { orgId: who.orgId, developerId: who.developerId, cardId, kind: kind as DecisionKind, risk: risk as DecisionRisk, outcome, requestId, createdAt, decidedAt, ...(reason === undefined ? {} : { reason }), ...(tab === "requirements" || tab === "design" ? { tab } : {}) };
     },
     async recordDecision(record) {
-      const item: StoredDocument = {
-        pk: partition(record), sk: `DECIDED#${record.requestId}`, entityType: "DECISION_RECORD", orgId: record.orgId, developerId: record.developerId, cardId: record.cardId, kind: record.kind, risk: record.risk, outcome: record.outcome,
-        ...(record.reason === undefined ? {} : { reason: record.reason }), ...(record.tab === undefined ? {} : { tab: record.tab }), requestId: record.requestId, createdAt: record.createdAt,
-        ...(record.openedAt === undefined ? {} : { openedAt: record.openedAt }), decidedAt: record.decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(deps.now() / 1000) + DECISION_RECORD_TTL_DAYS * 86_400,
-      };
       // Once per request id: a repeat is a lost condition, which is an ordinary answer and not an error.
-      await deps.store.put({ item, condition: when.absent() });
+      await deps.store.put({ item: decisionRecordDocument(record, deps.now()), condition: when.absent() });
     },
   };
 }

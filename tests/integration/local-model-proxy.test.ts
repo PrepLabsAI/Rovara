@@ -188,6 +188,41 @@ describe("asking for model access", () => {
     expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(422);
   });
 
+  it("holds a slot whose model has no price to an assumed price: the call is reserved and settled at it, the slot's ceiling holds, and a call is not charged the whole ceiling for being unpriced", async () => {
+    const w = await world();
+    w.slots.set(`${OPERATION}:r1-critic`, 500_000);
+    w.assumedSlots.add(`${OPERATION}:r1-critic`);
+    const asked = await w.send({ method: "GET", path: "/v1/internal/model-access?slot=r1-critic", headers: { [CAPABILITY_HEADER]: w.capability() } });
+    const token = apiKeyOf(asked);
+    const keyId = w.mintedSlots[0]!.keyId;
+    // The model has no price at all: nothing can be priced before the call (its reservation) or after it (its record), so both halves run at the assumed price.
+    w.meterUnpriced.on = true;
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(200);
+    // The slot's own record counts the call at the assumed price (6,400 input tokens at $15 and 200 output tokens at $75 per million): not nothing, and not the whole ceiling, so the next call is served.
+    const spent = w.proxy.slotKeys.spendUsd([keyId])!;
+    expect(spent).toBeCloseTo(0.111, 6);
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(200);
+    // The reservation is made at the assumed price too: a call whose worst case alone (60,000 output tokens at $75 per million is $4.50) is over the $0.50 ceiling is refused before it is made. Reserved at nothing, it would be served.
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ max_tokens: 60_000 }) })).status).toBe(422);
+    expect(w.provider.calls).toHaveLength(2);
+  });
+
+  it("lets a reviewer of an accepted unpriced run make its calls at the default settings: a slot of $3.75 admits a reviewer's call with a 16,000-token output limit and a 40 KB prompt, and refuses one with no output limit", async () => {
+    const w = await world();
+    w.slots.set(`${OPERATION}:r1-critic`, 3_750_000);
+    w.assumedSlots.add(`${OPERATION}:r1-critic`);
+    const asked = await w.send({ method: "GET", path: "/v1/internal/model-access?slot=r1-critic", headers: { [CAPABILITY_HEADER]: w.capability() } });
+    const token = apiKeyOf(asked);
+    w.meterUnpriced.on = true;
+    const packet = "x".repeat(40_000);
+    const call = (over: Record<string, unknown>) => w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ messages: [{ role: "user", content: packet }], ...over }) });
+    // The reservation is the prompt (a token to a byte, at $15 per million: $0.60) and the output limit ($1.20): $1.80, under the $3.75 the slot holds. A reviewer's second turn fits beside what the first used.
+    expect((await call({ max_tokens: 16_000 })).status).toBe(200);
+    expect((await call({ max_tokens: 16_000 })).status).toBe(200);
+    // A request that names no output limit is assumed to use 64,000 tokens ($4.80 at the assumed price): the reason the worker gives a reviewer a limit of its own.
+    expect((await call({ max_tokens: undefined })).status).toBe(422);
+  });
+
   it("answers a GET on the design review's packet path only (the callback server): any other GET, and a packet path with another query, is refused before the broker sees it", async () => {
     const w = await world();
     const get = (path: string) => w.send({ method: "GET", path, headers: { [CAPABILITY_HEADER]: w.capability() } });

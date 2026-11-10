@@ -59,6 +59,22 @@ export interface AttentionView {
   questions?: { round: number; items: Array<{ id: string; text: string; options: Array<{ id: string; label: string }> }> };
 }
 
+/** The design review of a task, as the plan page shows it: how the review went, the findings that are still open or contested, what is waiting for the owner and the forms that answer it. Fixed words and model words (shown as untrusted text). */
+export interface DesignReviewPanelView {
+  /** One line: where the review stands, in Rovara's words. */
+  status: string;
+  /** Counts and facts: reviewers that ran, open blockers, disagreements, the cost. */
+  facts: string[];
+  /** The latest round's findings that are not settled, then the settled ones, each with who raised it and what the planner said. */
+  findings: Array<{ severity: "blocker" | "major" | "nit"; section: string; text: string; from: string; resolution?: string; open: boolean }>;
+  /** The cost hold: the choices the owner may make (each a request through the approval gate). */
+  hold?: { why: string; /** How an accepted run with no price is counted, and that the real bill can differ. */ note?: string; offer: ApprovalOffer; choices: Array<{ choice: "run_unpriced" | "raise_cap" | "lower_tier" | "skip"; label: string }> };
+  /** The review is paused (waited a week): the owner picks it up again. */
+  parked?: { revision: number };
+  /** A design with an open blocker is approved only with a one-line reason: the page says so beside the approval. */
+  blockerReasonNeeded?: boolean;
+}
+
 export interface PlanPageView {
   taskId: string;
   title: string;
@@ -85,6 +101,8 @@ export interface PlanPageView {
   secondReviewAck?: string;
   /** One plain line when the design's review did not run ("Design review did not run: ..."). Fixed words. Absent when it ran or there was none. */
   designNote?: string;
+  /** Design review: present when the task has one. */
+  designReview?: DesignReviewPanelView;
 }
 
 export interface DesignMockupView {
@@ -208,7 +226,11 @@ export interface LocalPageActions {
   retry?(input: { taskId: string; revision: number }): Promise<LocalActionResult>;
   /** Lane L12: the owner says a task's plan is posted on an issue or pull request, so a writer's comment there can decide it. */
   attachThread?(input: { taskId: string; revision: number; repository: string; number: number }): Promise<LocalActionResult>;
-  /** Lane L12: the owner's answers to Understand's questions. */
+  /** Design review: a choice at the cost hold, through the approval gate. The proof is the page's (a signed local-session proof). */
+  designChoice?(input: { taskId: string; choice: "run_unpriced" | "raise_cap" | "lower_tier" | "skip"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
+  /** Design review: picks a paused review up again. */
+  designResume?(input: { taskId: string; revision: number }): Promise<LocalActionResult>;
+  /** The owner's answers to Understand's questions (and, while a design review waits for them, to its question card). */
   answerQuestions?(input: { taskId: string; revision: number; round: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }): Promise<LocalActionResult>;
   /**
    * makes a script token. The server calls it only for a verified form on a page session opened a few minutes ago; the secret in the answer is shown once on the page that answers the form.

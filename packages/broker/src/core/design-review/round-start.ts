@@ -34,6 +34,7 @@ import { designSourcesOf, pinsOf } from "./round-inputs.js";
 import type { DesignReviewResolved, DesignReviewRoundPorts, DesignReviewRuntime } from "./round-ports.js";
 import { allocateSlotBudgets } from "./slot-keys.js";
 import { designReviewStillOn } from "./switch.js";
+import { designWaitArmItems } from "./wait.js";
 
 type NotRunReason = (typeof DESIGN_REVIEW_NOT_RUN_REASONS)[number];
 
@@ -200,7 +201,7 @@ async function applyStop(deps: TaskFlowDeps, task: DeveloperTaskRecord, workflow
   const next = stop.kind === "hold" ? (workflow.state === "WAITING" ? reholdDesignReviewForCost : holdDesignReviewForCost)(workflow, { expectedRevision, ...(stop.estimateUsd === undefined ? {} : { estimateUsd: stop.estimateUsd }), now })
     : stop.kind === "at_cap" ? closeDesignReview(workflow, { expectedRevision, outcome: "stopped_at_cap", now })
       : closeDesignReview(workflow, { expectedRevision, outcome: "not_run", notRunReason: stop.reason, now });
-  const applied = await commitWorkflow(deps, task, next, [resolveRowItem(deps, task.taskId, workflow.revision)]);
+  const applied = await commitWorkflow(deps, task, next, [resolveRowItem(deps, task.taskId, workflow.revision), ...designWaitArmItems(deps, task.taskId, next, Date.parse(now))]);
   if (!applied) return "STALE";
   log(deps, { event: "design_review.round_stopped", taskId: task.taskId, kind: stop.kind, ...(stop.kind === "not_run" ? { reason: stop.reason } : {}) });
   return "STARTED";

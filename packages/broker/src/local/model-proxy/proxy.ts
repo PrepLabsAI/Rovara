@@ -10,7 +10,7 @@
 //      real key from the `model-keys` port, calls the provider with it, passes the answer back, and records what the call used through the `metering` port.
 // The key is a `SecretValue` until the moment the provider's request header is built. It is not logged, not stored, not put in any answer, and an answer
 // that contains it is cut off. A provider's error text is never passed on as it came (OpenAI's 401 repeats part of the key); it is shortened and scrubbed.
-// Not here: Bedrock (it needs the computer's AWS sign-in; listed as a decision 51 gap) and design-review key slots.
+// Not here: Bedrock (it needs the computer's AWS sign-in).
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { TASK_BUDGET_EXCEEDED_PREFIX, providerFormat, type AdapterRegistry, type AgentXError, type Cost, type Metering, type ModelKeyStore, type ModelProviderAdapter } from "@agentx/contracts";
@@ -22,7 +22,7 @@ import {
 } from "./providers.js";
 import { SignInProblem, needsCredential, signCall } from "./sign-in.js";
 import { ModelTokenBook, type RouteLedger } from "./tokens.js";
-import type { ModelGrantSource, ModelProviderBook, ModelProxyEvent, ProxyApi, ProxyProvider, ProxyRoute } from "./types.js";
+import type { ModelGrant, ModelGrantSource, ModelProviderBook, ModelProxyEvent, ProxyApi, ProxyProvider, ProxyRoute } from "./types.js";
 import { UsageCollector, type TokenUsage } from "./usage.js";
 
 export const MODEL_ACCESS_PATH = "/v1/internal/model-access";
@@ -32,6 +32,10 @@ export const WORKSPACE_HEADER = "x-rovara-workspace";
 export const CAPABILITY_HEADER = "x-agentx-callback-capability";
 /** A design-review slot's token lives past the whole stage (the stage limit is 40 minutes): 60 minutes. It is blocked when the round is recorded. */
 export const SLOT_TOKEN_SECONDS = 60 * 60;
+/** The cost of a call at an assumed price, rounded up: input and cache tokens at the input price. */
+export function assumedCost(price: NonNullable<ModelGrant["assumedPrice"]>, tokens: { input: number; output: number }): Cost {
+  return { micros: Math.ceil((tokens.input * price.inputMicrosPerMillionTokens + tokens.output * price.outputMicrosPerMillionTokens) / 1_000_000), currency: "USD" };
+}
 export const MODEL_PROXY_REQUEST_MAX_BYTES = 8 * 1_048_576;
 const WHOLE_ANSWER_MAX_BYTES = 32 * 1_048_576;
 const ERROR_BODY_MAX_BYTES = 65_536;
@@ -199,10 +203,10 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
   };
 
   /** The most a call could cost, or null when its model has no price. Input is priced at the dearer of the plain and the cache-write rate. */
-  async function worstCaseCost(route: ProxyRoute, worst: TokenUsage): Promise<Cost | null> {
+  async function worstCaseCost(route: ProxyRoute, worst: TokenUsage, assumed?: ModelGrant["assumedPrice"]): Promise<Cost | null> {
     const plain = await options.metering.price({ provider: route.provider, modelId: route.model, tokens: worst });
     const written = await options.metering.price({ provider: route.provider, modelId: route.model, tokens: { input: 0, output: worst.output, cacheRead: 0, cacheWrite: worst.input } });
-    if (plain === null || written === null) return null;
+    if (plain === null || written === null) return assumed === undefined ? null : assumedCost(assumed, { input: worst.input + worst.cacheRead + worst.cacheWrite, output: worst.output });
     return { micros: Math.max(plain.micros, written.micros), currency: plain.currency };
   }
 
@@ -358,7 +362,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
         routeSlot.spentMicros += Math.ceil(used.input * rates.input + used.output * rates.output + used.cacheRead * rates.cacheRead + used.cacheWrite * rates.cacheWrite);
       }
       if (seen === undefined) tell({ event: "unmetered", code: "charged_maximum", operationId: token.operationId, provider: route.provider });
-      await record(token, route, seen ?? worst, ledger).catch(() => {
+      await record(token, route, seen ?? worst, ledger, token.assumedPrice).catch(() => {
         tell({ event: "unmetered", code: "meter_failed", operationId: token.operationId, provider: route.provider });
         failClosed(token, ledger);
       });
@@ -412,7 +416,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       }
       if (token.budget !== undefined) {
         if (ledger.currency !== undefined && ledger.currency !== token.budget.currency) throw new Refusal(403, "model_not_allowed", "this task's budget is in another currency than its spend");
-        const maximum = await worstCaseCost(route, worst);
+        const maximum = await worstCaseCost(route, worst, token.assumedPrice);
         if (maximum === null) throw new Refusal(403, "model_not_allowed", "this model has no price on this computer, so the task budget cannot be held");
         if (maximum.currency !== token.budget.currency) throw new Refusal(403, "model_not_allowed", "this model is priced in another currency than the task's budget");
         // Nothing awaits between this check and the reservation below. A budget that is spent, or cannot pay for this call even with nothing else running, ends the task (422).
@@ -532,7 +536,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
   }
 
   /** Records what the call used and adds its cost to the operation's spend. Recording the same entry twice counts once (the port's rule). */
-  async function record(token: { operationId: string; taskId: string | undefined; projectName: string | undefined; budget: Cost | undefined; slot?: string | undefined }, route: ProxyRoute, usage: TokenUsage, ledger: { currency: string | undefined; spentMicros: number; unpriced: number }): Promise<void> {
+  async function record(token: { operationId: string; taskId: string | undefined; projectName: string | undefined; budget: Cost | undefined; slot?: string | undefined }, route: ProxyRoute, usage: TokenUsage, ledger: { currency: string | undefined; spentMicros: number; unpriced: number }, assumed?: ModelGrant["assumedPrice"]): Promise<void> {
     const result = await options.metering.record({
       companyId: options.companyId,
       entryId: `${token.operationId}:${randomUUID()}`,
@@ -541,6 +545,12 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       ...(token.taskId === undefined ? {} : { taskId: token.taskId }),
       ...(token.projectName === undefined ? {} : { projectName: token.projectName }),
     });
+    if (result.cost === null && assumed !== undefined) {
+      // An unpriced slot the owner accepted: the slot's own record counts the call at the assumed price (an upper bound); the cost ledger above recorded it as unknown.
+      ledger.currency = "USD";
+      ledger.spentMicros += assumedCost(assumed, { input: usage.input + usage.cacheRead + usage.cacheWrite, output: usage.output }).micros;
+      return;
+    }
     if (result.cost === null || (ledger.currency !== undefined && ledger.currency !== result.cost.currency)) {
       ledger.unpriced += 1;
       failClosed(token, ledger);

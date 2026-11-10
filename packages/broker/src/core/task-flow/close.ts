@@ -9,41 +9,71 @@ import { releaseItems } from "./limits.js";
 import { chargeMarkerKey, operationKey, taskIndexKey, taskKey, taskPointerKey, workspaceKey } from "./keys.js";
 import { loadOwnedTask, readTask, taskViewOf, type TaskView } from "./reads.js";
 import { isTerminalStatus, readOperation, syncTaskIndex } from "./results.js";
+import type { OperationRecord, TaskRecord, WorkspaceRecord } from "./records.js";
 import { readWorkspace } from "./stage-machine.js";
 import { iso, log } from "./support.js";
 import { DocumentStoreError } from "@agentx/contracts";
 
 const CLOSE_ATTEMPTS = 3;
+type ChangeOp = ReturnType<typeof change.set>;
+
+/** Who closes the task, for the audit record. */
+export type CloseActor = { type: "person" | "system"; id: string };
+
+/** What closing a task writes besides the task's own `closedAt`: the task's own ops, and the items for its slot, pointer, workspace, running operation and audit. Nothing is written by building it. */
+export interface CloseParts {
+  taskOps: ChangeOp[];
+  items: TransactItem[];
+  workspace: WorkspaceRecord | undefined;
+  /** The operation that was running, if any: this close ends it (no result will come). */
+  active: OperationRecord | undefined;
+}
+
+export async function closeParts(deps: TaskFlowDeps, task: TaskRecord, now: string, actor: CloseActor): Promise<CloseParts> {
+  const workspace = await readWorkspace(deps, task.workspaceId);
+  const active = workspace?.activeOperationId == null ? undefined : await readOperation(deps, workspace.id, workspace.activeOperationId);
+  // The slot goes back once: the marker of the charge must still be there. A task with none (its slot was released, or it was charged in Cloud's
+  // older form) is closed all the same, and has no slot to give back.
+  const holdsSlot = task.releasedAt === undefined && await deps.store.get(chargeMarkerKey(task.charge, task.taskId)) !== undefined;
+  if (!holdsSlot && task.releasedAt === undefined) log(deps, { event: "task_flow.close_without_slot", taskId: task.taskId });
+  const items: TransactItem[] = [
+    ...(holdsSlot ? releaseItems(task.charge, task.taskId) : []),
+    { kind: "update", key: taskPointerKey(task.workspaceId), ops: [change.set("cancelledAt", now), change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")] },
+    ...stageAudit(deps, { eventId: `task.closed:${task.taskId}`, actor, action: "task.closed", subject: { type: "task", id: task.taskId }, details: { project: task.project } }),
+  ];
+  if (workspace !== undefined) {
+    items.push({
+      kind: "update", key: workspaceKey(workspace.id),
+      ops: [change.set("status", "CLOSED"), change.set("activeOperationId", null), change.set("closedAt", now), change.set("fence", workspace.fence + 1), change.set("updatedAt", now)],
+      condition: when.eq("fence", workspace.fence),
+    });
+  }
+  if (active !== undefined && !isTerminalStatus(active.status)) {
+    items.push({
+      kind: "update", key: operationKey(active.workspaceId, active.id), ops: [change.set("status", "INTERRUPTED"), change.set("error", "the task was closed"), change.set("updatedAt", now)],
+      condition: when.and(when.eq("status", active.status), when.eq("fence", active.fence)),
+    });
+  }
+  return { taskOps: [change.set("closedAt", now), change.set("updatedAt", now), ...(holdsSlot ? [change.set("releasedAt", now)] : [])], items, workspace, active };
+}
+
+/** After a close was committed: the task index shows it closed, and the machines and the allowances held for the task are given back. */
+export async function finishClose(deps: TaskFlowDeps, task: TaskRecord, parts: Pick<CloseParts, "workspace" | "active">, now: string): Promise<void> {
+  const { workspace, active } = parts;
+  // The operation that was running is ended by this close (no result will come): the allowance held for its second review goes back here.
+  if (active !== undefined && !isTerminalStatus(active.status)) await deps.secondReview?.operationEnded(active);
+  await deps.store.update({ key: taskIndexKey(task.developerId, task.createdAt, task.taskId), ops: [change.set("status", "CLOSED"), change.set("updatedAt", now)], condition: when.present() });
+  // The workspace is read again once it is closed: a dispatch may have recorded a machine after the first read, and nothing records one on a closed workspace.
+  const closed = await readWorkspace(deps, task.workspaceId);
+  await stopMachines(deps, [workspace?.machine?.machineId, closed?.machine?.machineId], [workspace?.machineReservationId, closed?.machineReservationId, task.admissionReservationId]);
+}
 
 export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskView> {
   let task = await loadOwnedTask(deps, caller, taskId);
   for (let attempt = 1; task.closedAt === undefined && attempt <= CLOSE_ATTEMPTS; attempt += 1) {
     const now = iso(deps);
-    const workspace = await readWorkspace(deps, task.workspaceId);
-    const active = workspace?.activeOperationId == null ? undefined : await readOperation(deps, workspace.id, workspace.activeOperationId);
-    // The slot goes back once: the marker of the charge must still be there. A task with none (its slot was released, or it was charged in Cloud's
-    // older form) is closed all the same, and has no slot to give back.
-    const holdsSlot = task.releasedAt === undefined && await deps.store.get(chargeMarkerKey(task.charge, task.taskId)) !== undefined;
-    if (!holdsSlot && task.releasedAt === undefined) log(deps, { event: "task_flow.close_without_slot", taskId: task.taskId });
-    const items: TransactItem[] = [
-      { kind: "update", key: taskKey(task.taskId), ops: [change.set("closedAt", now), change.set("updatedAt", now), ...(holdsSlot ? [change.set("releasedAt", now)] : [])], condition: when.notExists("closedAt") },
-      ...(holdsSlot ? releaseItems(task.charge, task.taskId) : []),
-      { kind: "update", key: taskPointerKey(task.workspaceId), ops: [change.set("cancelledAt", now), change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")] },
-      ...stageAudit(deps, { eventId: `task.closed:${task.taskId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.closed", subject: { type: "task", id: task.taskId }, details: { project: task.project } }),
-    ];
-    if (workspace !== undefined) {
-      items.push({
-        kind: "update", key: workspaceKey(workspace.id),
-        ops: [change.set("status", "CLOSED"), change.set("activeOperationId", null), change.set("closedAt", now), change.set("fence", workspace.fence + 1), change.set("updatedAt", now)],
-        condition: when.eq("fence", workspace.fence),
-      });
-    }
-    if (active !== undefined && !isTerminalStatus(active.status)) {
-      items.push({
-        kind: "update", key: operationKey(active.workspaceId, active.id), ops: [change.set("status", "INTERRUPTED"), change.set("error", "the task was closed"), change.set("updatedAt", now)],
-        condition: when.and(when.eq("status", active.status), when.eq("fence", active.fence)),
-      });
-    }
+    const parts = await closeParts(deps, task, now, { type: "person", id: caller.principal.personId });
+    const items: TransactItem[] = [{ kind: "update", key: taskKey(task.taskId), ops: parts.taskOps, condition: when.notExists("closedAt") }, ...parts.items];
     let applied;
     try {
       applied = await deps.store.transact(items);
@@ -51,14 +81,7 @@ export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: 
       if (error instanceof DocumentStoreError && error.code === "conflict") throw agentXError("WORKSPACE_BUSY", "Rovara could not close the task just now; try again");
       throw error;
     }
-    if (applied.applied) {
-      // The operation that was running is ended by this close (no result will come): the allowance held for its second review goes back here.
-      if (active !== undefined && !isTerminalStatus(active.status)) await deps.secondReview?.operationEnded(active);
-      await deps.store.update({ key: taskIndexKey(task.developerId, task.createdAt, task.taskId), ops: [change.set("status", "CLOSED"), change.set("updatedAt", now)], condition: when.present() });
-      // The workspace is read again once it is closed: a dispatch may have recorded a machine after the first read, and nothing records one on a closed workspace.
-      const closed = await readWorkspace(deps, task.workspaceId);
-      await stopMachines(deps, [workspace?.machine?.machineId, closed?.machine?.machineId], [workspace?.machineReservationId, closed?.machineReservationId, task.admissionReservationId]);
-    }
+    if (applied.applied) await finishClose(deps, task, parts, now);
     const fresh = await readTask(deps, taskId);
     if (fresh === undefined) throw agentXError("TASK_NOT_FOUND", "no such task");
     task = fresh;

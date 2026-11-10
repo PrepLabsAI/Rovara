@@ -142,6 +142,10 @@ export interface DesignReviewSteps {
   rowFor(workflow: WorkflowSnapshot): "CRITIQUE" | "CRITIC_REPLAN" | undefined;
   /** What the planner is told beside its prompt while the design review is on and the phase is the design (the fixed template), or undefined. */
   planInstructions(workflow: WorkflowSnapshot): string | undefined;
+  /** The owner's Retry of a blocked review step. True when it was the review's (a round, or the planner's answer to the findings); false: not this review's, the ordinary retry applies. */
+  retryBlocked(deps: TaskFlowDeps, task: TaskRecord, expectedRevision: number | undefined): Promise<boolean>;
+  /** The `design first:` prefix of a request, read only while the stage exists for the company. `rest` is the request without it. */
+  designFirst(text: string): Promise<{ designFirst: boolean; rest: string }>;
   /** Whether this operation is the planner's answer to the reviewers' findings (a PLAN run while the review is resolving): its saved file is read by `onEnded`, not as a plan. */
   isResolveRun(workflow: WorkflowSnapshot | undefined, operation: Pick<OperationRecord, "workflowMode">): boolean;
   /** The Proof section's input when the task's design was approved (the design line, and the links to the approved design), or undefined: the pull request is then described as for any task. Informational; never throws. */
@@ -219,7 +223,7 @@ export interface TaskFlowDeps {
    * a fault or a slow store changes nothing about the task. Absent: no evidence is kept.
    */
   keepEvidence?: (input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<unknown>;
-  /** Lane the design review: the design review stage. Absent: no task enters it. */
+  /** The design review stage. Absent: no task enters it. */
   designReview?: DesignReviewSteps;
   /** Lane L10: the steps after the plan is approved. `createTaskFlow` fills it with the build step when absent. */
   buildSteps?: BuildSteps;

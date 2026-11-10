@@ -52,8 +52,11 @@ function parseRequest(value: unknown): StartDeveloperTaskRequest {
 }
 
 export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: unknown): Promise<StartResult> {
-  const request = parseRequest(value);
+  const parsedRequest = parseRequest(value);
   const { principal } = caller;
+  // `design first:` at the start of a request asks for the design to be reviewed before any code. Read only while the stage exists for the company; the instructions are then the request without the prefix.
+  const designFirst = parsedRequest.workflow === true ? await deps.designReview?.designFirst(parsedRequest.instructions) : undefined;
+  const request = designFirst?.designFirst === true ? { ...parsedRequest, instructions: designFirst.rest } : parsedRequest;
   if (principal.companyId !== deps.companyId) throw agentXError("FORBIDDEN", "this person belongs to another company");
   const developerId = principal.personId;
   // A script token's task always has the fixed client "Script token": the body cannot choose that text, and the token's own name never reaches a pull request footer or a turn record (the audit names the token).
@@ -143,6 +146,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     client, project: request.project, title, workspaceId, ownerKey, conversationId, startingRevision: revision, charge, shared: false,
     // A workflow task quotes the request in each plan's "why".
     ...(asWorkflow ? { requestText } : {}),
+    ...(designFirst?.designFirst === true ? { designFirst: { by: developerId, at: receivedAt } } : {}),
     createdAt: receivedAt, updatedAt: receivedAt,
     ...(extras?.sessionId === undefined ? {} : { sessionId: extras.sessionId }),
     ...(asWorkflow ? { workflow: createWorkflowSnapshot({

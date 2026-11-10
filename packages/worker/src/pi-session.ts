@@ -251,6 +251,8 @@ export async function createWorkspacePiSession(
     knowledge?: SessionKnowledgeOptions;
     /** Called with what the resolver loaded and skipped, once per session; the worker reports it as the stage's "what the agent loaded" record. */
     onKnowledgeLoaded?: (resolved: ResolvedKnowledge) => void;
+    /** The most output tokens one model turn may produce (see PiSessionInput.maxOutputTokens). */
+    maxOutputTokens?: number;
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -282,6 +284,7 @@ export async function createWorkspacePiSession(
     contextFiles,
     ...(input.contextFilesAt === undefined ? {} : { contextFilesAt: input.contextFilesAt }),
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
+    ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
     ...(input.devcontainerPaths === undefined ? {} : { devcontainerPaths: input.devcontainerPaths }),
     ...(input.fileTools === undefined ? {} : { fileTools: input.fileTools }),

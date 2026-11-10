@@ -17,6 +17,11 @@ const CAPABILITY_HEADER = "x-agentx-callback-capability";
 const PACKET_PATH = "/v1/internal/design-review/packet";
 const PACKET_TIMEOUT_MS = 60_000;
 const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
+/**
+ * The most output tokens one reviewer turn may produce. A reviewer answers with findings, not a document; a limit of its own keeps the broker's worst-case reservation for a call (the output limit at the output price) inside the
+ * reviewer's key budget, so a model whose own limit is very high does not make its first call unaffordable.
+ */
+export const DESIGN_REVIEW_MAX_OUTPUT_TOKENS = 16_000;
 
 /** Whether this operation is the design-review form of the plan check. Plan check without the binding is unchanged. */
 export function designReviewBindingOf(payload: { workflowMode?: string | undefined; designReview?: DesignReviewBinding | undefined }): DesignReviewBinding | undefined {
@@ -97,6 +102,7 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
       ...(options.fileTools === undefined ? {} : { fileTools: options.fileTools }),
       ...(options.localFileTools === undefined ? {} : { localFileTools: options.localFileTools }),
       agentTools: [...open.tools],
+      maxOutputTokens: DESIGN_REVIEW_MAX_OUTPUT_TOKENS,
       agentRun: { systemPrompt: options.standingInstructions === undefined || options.standingInstructions === "" ? open.system : `${open.system}\n\n${options.standingInstructions}`, tools: [] },
     }, runtime.piAdapter);
     let lastOutcome: AssistantOutcome | undefined;

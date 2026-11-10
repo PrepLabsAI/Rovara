@@ -152,8 +152,12 @@ export interface ModelProxyWorld {
   meterFault: { on: boolean };
   /** Switched on, the meter answers every call with no cost (a model nobody priced). */
   meterNoCost: { on: boolean };
+  /** Switched on, the model has no price at all: the proxy cannot price a call before it is made (the reservation) or after it (the record). */
+  meterUnpriced: { on: boolean };
   /** Design-review key slots by `<operation>:<slot>` (a slot absent here is not served): the slot's budget in micros. */
   slots: Map<string, number>;
+  /** Slots (by `<operation>:<slot>`) whose model counts as unpriced and is bounded by an assumed price (the dearest public class). */
+  assumedSlots: Set<string>;
   /** The slot tokens that were minted, as the grant source recorded them (ids only). */
   mintedSlots: Array<{ slot: string; keyId: string; expiresAt: number }>;
   /** The models an operation may call (default: all three). */
@@ -183,8 +187,9 @@ export async function startModelProxyWorld(options: { ttlSeconds?: number; now?:
   const priced = createPriceTableMetering(PRICES, (entry, result) => { metered.push({ entry, result }); });
   const meterFault = { on: false };
   const meterNoCost = { on: false };
+  const meterUnpriced = { on: false };
   /** The meter, with a fault a test can switch on: recording a call then fails, as a failing store would. */
-  const metering: typeof priced = { ...priced, async record(entry) { if (meterFault.on) throw new Error("the meter is down"); const result = await priced.record(entry); return meterNoCost.on ? { ...result, cost: null } : result; } };
+  const metering: typeof priced = { ...priced, async price(usage) { return meterUnpriced.on ? null : priced.price(usage); }, async record(entry) { if (meterFault.on) throw new Error("the meter is down"); const result = await priced.record(entry); return meterNoCost.on || meterUnpriced.on ? { ...result, cost: null } : result; } };
   const secret = randomBytes(32);
   const capabilities = new CallbackCapabilities(secret);
   const routes = { anthropic: localRoute("anthropic", "claude-test").route, openai: localRoute("openai", "gpt-test").route, openrouter: localRoute("openrouter", "vendor/model-test").route };
@@ -192,6 +197,7 @@ export async function startModelProxyWorld(options: { ttlSeconds?: number; now?:
   const budgets = new Map<string, Cost>();
   const allowed = new Map<string, ProxyRoute[]>();
   const slots = new Map<string, number>();
+  const assumedSlots = new Set<string>();
   const mintedSlots: Array<{ slot: string; keyId: string; expiresAt: number }> = [];
   const events: ModelProxyEvent[] = [];
   const proxy = createLocalModelProxy({
@@ -206,7 +212,7 @@ export async function startModelProxyWorld(options: { ttlSeconds?: number; now?:
         const ceiling = slots.get(`${operation.operationId}:${slot}`);
         if (ceiling === undefined) return undefined;
         if (mintedSlots.some((entry) => entry.slot === slot)) throw agentXError("FORBIDDEN", "asked again");
-        return { routes: [routes.anthropic], budget: { micros: ceiling, currency: "USD" }, taskId: "task-1", projectName: "demo" };
+        return { routes: [routes.anthropic], budget: { micros: ceiling, currency: "USD" }, taskId: "task-1", projectName: "demo", ...(assumedSlots.has(`${operation.operationId}:${slot}`) ? { assumedPrice: { inputMicrosPerMillionTokens: 15_000_000, outputMicrosPerMillionTokens: 75_000_000 } } : {}) };
       },
       slotMinted: async (_operation, slot, minted) => { mintedSlots.push({ slot, ...minted }); },
       describe: async (operation) => ({
@@ -239,7 +245,7 @@ export async function startModelProxyWorld(options: { ttlSeconds?: number; now?:
     outgoing.end(body);
   });
   return {
-    provider, proxy, callback, keys, events, metered, routes, active, budgets, allowed, slots, mintedSlots, meterFault, meterNoCost, keyStore, send, directory,
+    provider, proxy, callback, keys, events, metered, routes, active, budgets, allowed, slots, assumedSlots, mintedSlots, meterFault, meterNoCost, meterUnpriced, keyStore, send, directory,
     capability: (operation = {}) => capabilities.issue({
       workspaceId: operation.workspaceId ?? WORKSPACE, operationId: operation.operationId ?? OPERATION, fence: operation.fence ?? 1,
       actions: (operation.actions ?? ["model-access"]) as Parameters<CallbackCapabilities["issue"]>[0]["actions"], expiresInSeconds: operation.expiresInSeconds ?? 3_600,
