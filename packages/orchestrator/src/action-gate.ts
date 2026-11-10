@@ -45,7 +45,7 @@ export interface GateDecision {
   usage?: ClassifierUsage;
 }
 
-/** One Slack turn's gate state. The Slack service sets it up; the gate fills in asks and decisions. */
+/** One turn's gate state. The orchestrator service sets it up; the gate fills in asks and decisions. */
 export interface GateSession {
   requesterId: string;
   approvals: GateApproval[];
@@ -134,11 +134,14 @@ export function memberMessages(entries: readonly unknown[]): string[] {
   });
 }
 
-const SLACK_ESCAPES: Readonly<Record<string, string>> = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+const ENTITY_ESCAPES: Readonly<Record<string, string>> = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
 
-/** Text safe inside a Slack message: one line, no backticks, and no mentions or links it could smuggle in. */
-function slackSafe(text: string, limit: number): string {
-  const flat = text.replace(/[`\s]+/gu, " ").replace(/[&<>]/gu, (character) => SLACK_ESCAPES[character] ?? character).trim();
+/**
+ * Inert text for a confirmation: one line, no backticks, and `&`, `<` and `>` entity-escaped, so it can carry no
+ * mention or link on any surface. Slack shows the entities as the characters; a plain-text surface unescapes them.
+ */
+function inertText(text: string, limit: number): string {
+  const flat = text.replace(/[`\s]+/gu, " ").replace(/[&<>]/gu, (character) => ENTITY_ESCAPES[character] ?? character).trim();
   // A cut never leaves half an escape such as `&am`.
   return flat.length > limit ? `${flat.slice(0, limit - 1).replace(/&[a-z]{0,3}$/u, "")}…` : flat;
 }
@@ -156,7 +159,7 @@ export function describeCall(tool: string, args: Record<string, unknown>): strin
   });
   const more = entries.length > SHOWN_ARGUMENTS ? `, and ${entries.length - SHOWN_ARGUMENTS} more` : "";
   const where = typeof target === "string" ? ` in ${target}` : "";
-  return slackSafe(`${tool}${where}${shown.length > 0 ? `: ${shown.join(", ")}${more}` : ""}`, 300);
+  return inertText(`${tool}${where}${shown.length > 0 ? `: ${shown.join(", ")}${more}` : ""}`, 300);
 }
 
 const PROMPT_SHOWN = 200;
@@ -224,7 +227,7 @@ function shownArgument(key: string, value: unknown): string {
  */
 export function describeAction(tool: string, args: Record<string, unknown>): string {
   const inHouse = inHouseAction(tool, args);
-  if (inHouse !== undefined) return slackSafe(inHouse, 300);
+  if (inHouse !== undefined) return inertText(inHouse, 300);
   const { target, ...rest } = args;
   const entries = Object.entries(rest).filter(([, value]) => value !== undefined && value !== null);
   const shown = entries.slice(0, SHOWN_ARGUMENTS).map(([key, value]) => shownArgument(key, value));
@@ -233,7 +236,7 @@ export function describeAction(tool: string, args: Record<string, unknown>): str
   const split = tool.indexOf("__");
   // An in-house tool not described above is never named, even in words.
   const action = split > 0 ? `Use ${tool.slice(0, split)} to ${words(tool.slice(split + 2))}` : tool.startsWith("agentx_") ? "Run an AgentX action" : `Run ${words(tool)}`;
-  return slackSafe(`${action}${where}${shown.length > 0 ? `: ${shown.join(", ")}${more}` : ""}`, 300);
+  return inertText(`${action}${where}${shown.length > 0 ? `: ${shown.join(", ")}${more}` : ""}`, 300);
 }
 
 /** Told to the model when the gate itself could not decide or record a call: fixed words, no error text. */
@@ -250,7 +253,7 @@ export function blockReason(decision: GateDecision): string {
     return `Not run: ${decision.reason}. An administrator's rule blocks this action; do not retry it. Tell the member why.`;
   }
   const again = decision.differsFromConfirmation ? " Its arguments differ from the call they confirmed, so AgentX asked again." : "";
-  return "Not run yet: AgentX has already posted a confirmation request for this action to the member in the Slack thread, with Approve and Cancel buttons." +
+  return "Not run yet: AgentX has already posted a confirmation request for this action to the member in this conversation." +
     `${again} Do not call this tool again or try another way in this turn. ` +
     "Do not restate, summarise or mention this action, its details or the confirmation in your reply: the member already sees the request. " +
     "Report only anything else you did or found in this turn.";

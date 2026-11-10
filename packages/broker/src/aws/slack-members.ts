@@ -1,3 +1,4 @@
+import { slackWebFetch } from "./slack-web.js";
 const MEMBER_TTL_MS = 60 * 60 * 1_000;
 const LOOKUP_TIMEOUT_MS = 1_500;
 const MEMBER_CACHE_CAP = 5_000;
@@ -37,10 +38,7 @@ export function createSlackMemberCheck(options: {
     let body: unknown;
     try {
       const token = await raceAgainstAbort(options.token(), controller.signal);
-      const response = await fetchFn(`https://slack.com/api/users.info?user=${encodeURIComponent(userId)}`, {
-        headers: { authorization: `Bearer ${token}` },
-        signal: controller.signal,
-      });
+      const response = await slackWebFetch("users.info", token, { query: { user: userId }, signal: controller.signal }, fetchFn);
       body = await response.json();
     } catch (error) {
       return { outcome: "failed", error: error instanceof Error && error.name === "TimeoutError" ? "timeout" : "request_failed" };

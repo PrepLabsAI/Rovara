@@ -10,7 +10,7 @@ import {
 import { createGateSession, type GateApproval, type GateSession } from "@agentx/orchestrator/action-gate";
 import { deterministicUuid } from "./ids.js";
 import type { ServiceLog } from "./processor.js";
-import { escapeText } from "./slack-format.js";
+import { SLACK_FORMAT, type ConversationFormat } from "./conversation-format.js";
 
 export interface ConfirmationStore {
   /** The thread's confirmation, a tombstone included. */
@@ -41,20 +41,23 @@ const KIND_NOTES: Readonly<Record<PendingConfirmation["calls"][number]["kind"], 
 };
 
 /** The message text: every blocked action and its target, and how to answer with or without the buttons. */
-export function confirmationMessage(confirmation: PendingConfirmation): string {
+export function confirmationMessage(confirmation: PendingConfirmation, format: ConversationFormat = SLACK_FORMAT): string {
+  const escapeText = format.escape;
+  const mention = format.mention(confirmation.requesterId);
   return [
-    `<@${confirmation.requesterId}>, before I go ahead, please confirm:`,
+    mention === "" ? "Before I go ahead, please confirm:" : `${mention}, before I go ahead, please confirm:`,
     // The gate's summary is already Slack-safe; escaping again (idempotently) keeps a stored or
     // hand-written summary from mentioning or linking anyone. The classifier's reason is never shown.
     ...confirmation.calls.map((call) => {
       const note = KIND_NOTES[call.kind];
       return `• ${escapeText(call.summary)}${note === undefined ? "" : ` (${note})`}`;
     }),
-    "Press Approve, or reply `@AgentX yes`, to run exactly these. Press Cancel, or reply `@AgentX cancel`, to drop them. This expires in 24 hours.",
+    `Press Approve, or ${format.replyYes}, to run exactly these. Press Cancel, or ${format.replyCancel}, to drop them. This expires in 24 hours.`,
   ].join("\n");
 }
 
-export const YES_TO_ALL_TEXT = "OK. For the next 24 hours in this thread I'll stop asking you when I'm unsure you asked for something. I'll still ask before destructive actions, large changes and anything an administrator requires.";
+export const yesToAllText = (format: ConversationFormat) => `OK. For the next 24 hours in ${format.here} I'll stop asking you when I'm unsure you asked for something. I'll still ask before destructive actions, large changes and anything an administrator requires.`;
+export const YES_TO_ALL_TEXT = yesToAllText(SLACK_FORMAT);
 export const NO_LONGER_PENDING_TEXT = "That confirmation is no longer pending, so nothing was run.";
 export const ALREADY_USED_BY_THIS_REQUEST_TEXT = "An earlier attempt of this request already used that confirmation, so I didn't run anything again. It may already have run; ask me to check, or ask again.";
 export const CANCELLED_TEXT = "Cancelled. Nothing was run.";
@@ -121,7 +124,10 @@ export async function checkConfirmation(input: {
   answer?: ConfirmationAnswer;
   /** Spec 062 FR-032: false for a confirmation this channel may not approve; absent, every one may be. */
   mayApprove?: (confirmation: PendingConfirmation) => boolean;
+  /** Spec 062 FR-040: how the replies are written; Slack's when absent. */
+  format?: ConversationFormat;
 }): Promise<ConfirmationCheck> {
+  const format = input.format ?? SLACK_FORMAT;
   const { message, subject, store, post, log } = input;
   const click = input.answer !== undefined
     ? { confirmationId: input.answer.confirmationId, click: input.answer.reply === "yes" ? "approve" as const : "cancel" as const }
@@ -171,7 +177,7 @@ export async function checkConfirmation(input: {
     // "Yes to all" stands on its own (R7): without a live confirmation it only grants.
     await store.grantYesToAll(subject, message.userId);
     log("gate.yes_to_all", { eventId: message.eventId });
-    await post(YES_TO_ALL_TEXT);
+    await post(yesToAllText(format));
     return { run: false, answered: "yes_to_all" };
   }
   if (!pending) return { run: true, session: session() };
@@ -186,12 +192,13 @@ export async function checkConfirmation(input: {
     return click !== undefined || redelivery ? refuse("not_pending", NO_LONGER_PENDING_TEXT) : { run: true, session: session() };
   }
   if (pending.requesterId !== message.userId) {
+    const asker = format.mention(pending.requesterId);
     return pending.replacedRequesterId === message.userId
-      ? refuse("replaced", `The pending confirmation is <@${pending.requesterId}>'s; yours was replaced. Nothing was run.`)
-      : refuse("other_member", `Only <@${pending.requesterId}> can confirm what they asked for. Nothing was run.`);
+      ? refuse("replaced", asker === "" ? "Someone else's confirmation replaced yours. Nothing was run." : `The pending confirmation is ${asker}'s; yours was replaced. Nothing was run.`)
+      : refuse("other_member", asker === "" ? "Only the person who asked can confirm it. Nothing was run." : `Only ${asker} can confirm what they asked for. Nothing was run.`);
   }
   if (Date.parse(message.receivedAt) <= Date.parse(pending.postedAt)) {
-    return refuse("before_request", "Your reply arrived before I asked for confirmation, so I didn't treat it as one. Press Approve or reply `@AgentX yes` again to confirm.");
+    return refuse("before_request", `Your reply arrived before I asked for confirmation, so I didn't treat it as one. Press Approve or ${format.replyYes} again to confirm.`);
   }
   if (reply === "cancel") {
     await store.retire(subject, pending.confirmationId, message.eventId);
@@ -231,6 +238,7 @@ export async function settleConfirmations(input: {
   postConfirmation: (confirmation: PendingConfirmation, text: string) => Promise<void>;
   log: ServiceLog;
   now: number;
+  format?: ConversationFormat;
 }): Promise<SettleOutcome> {
   const { check, message, subject, store } = input;
   const retired = check.claim?.confirmationId ?? check.superseded;
@@ -268,7 +276,7 @@ export async function settleConfirmations(input: {
   // answerable, and the caller tells the member.
   await store.save(subject, { ...confirmation, retiredAt: confirmation.postedAt, usedBy: UNPOSTED_MARK });
   try {
-    await input.postConfirmation(confirmation, confirmationMessage(confirmation));
+    await input.postConfirmation(confirmation, confirmationMessage(confirmation, input.format));
   } catch (error) {
     input.log("gate.confirmation_post_failed", { eventId: message.eventId });
     throw error;

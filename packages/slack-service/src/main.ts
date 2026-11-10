@@ -27,7 +27,8 @@ import { processSlackRequest, type ProcessorMessage, type ServiceLog, type Threa
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { createEvalBatchWatchApi, createThreadApi } from "./thread-api.js";
-import { SlackApiError, runEvalBatchWatcher } from "./eval-batch-watcher.js";
+import { runEvalBatchWatcher } from "./eval-batch-watcher.js";
+import { createSlackWebClient } from "./slack-web.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { createChoiceOffer, routeSlackRequest } from "./request-routing.js";
@@ -110,53 +111,12 @@ function slackBotToken(): Promise<string> {
 
 const slackUserName = createSlackUserNames({ token: slackBotToken });
 
+// Spec 062 FR-042: the service's Slack Web API calls are all in slack-web.ts.
+const slackWeb = createSlackWebClient({ token: slackBotToken });
+
 /** Posts in a thread, or with no thread a new message in the channel; answers the message's timestamp. */
-async function postToSlack(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[], signal?: AbortSignal): Promise<string | undefined> {
-  const response = await fetch("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    ...(signal === undefined ? {} : { signal }),
-    headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel, ...(threadTs === undefined ? {} : { thread_ts: threadTs }), text, unfurl_links: false, ...(blocks === undefined ? {} : { blocks }) }),
-  });
-  const result = await response.json() as { ok?: boolean; error?: string; ts?: string };
-  if (!response.ok || result.ok !== true) throw new SlackApiError("chat.postMessage", result.error ?? `HTTP ${response.status}`);
-  return result.ts;
-}
-
-/** A message only `user` sees, in the thread (chat.postEphemeral). */
-async function postEphemeralToSlack(channel: string, threadTs: string, user: string, text: string): Promise<void> {
-  const response = await fetch("https://slack.com/api/chat.postEphemeral", {
-    method: "POST",
-    signal: AbortSignal.timeout(10_000),
-    headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel, thread_ts: threadTs, user, text }),
-  });
-  const result = await response.json() as { ok?: boolean; error?: string };
-  if (!response.ok || result.ok !== true) throw new SlackApiError("chat.postEphemeral", result.error ?? `HTTP ${response.status}`);
-}
-
-/** Issue 219: edits the bot's own message (a long task's progress note). */
-async function updateInSlack(channel: string, ts: string, text: string): Promise<void> {
-  const response = await fetch("https://slack.com/api/chat.update", {
-    method: "POST",
-    // A progress edit that Slack does not answer is given up, never left waiting.
-    signal: AbortSignal.timeout(10_000),
-    headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel, ts, text }),
-  });
-  const result = await response.json() as { ok?: boolean; error?: string };
-  if (!response.ok || result.ok !== true) throw new SlackApiError("chat.update", result.error ?? `HTTP ${response.status}`);
-}
-
-/** Spec 052 Ruling 19: removes the bot's own message (a batch thread's opener that lost a race). */
-async function deleteFromSlack(channel: string, ts: string): Promise<void> {
-  const response = await fetch("https://slack.com/api/chat.delete", {
-    method: "POST",
-    headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel, ts }),
-  });
-  const result = await response.json() as { ok?: boolean; error?: string };
-  if (!response.ok || result.ok !== true) throw new SlackApiError("chat.delete", result.error ?? `HTTP ${response.status}`);
+function postToSlack(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[], signal?: AbortSignal): Promise<string | undefined> {
+  return slackWeb.postMessage(channel, threadTs, text, { ...(blocks === undefined ? {} : { blocks }), ...(signal === undefined ? {} : { signal }) });
 }
 
 function threadApi(message: Pick<SlackRequestMessage, "thread" | "userId">): ThreadServiceApi {
@@ -430,7 +390,7 @@ const batchWatcher = runEvalBatchWatcher({
       if (ts === undefined) throw new Error("Slack chat.postMessage answered no message timestamp");
       return ts;
     },
-    delete: deleteFromSlack,
+    delete: (channel, ts) => slackWeb.delete(channel, ts),
   },
   log,
   logError: (event, fields) => console.error(JSON.stringify({ component: "slack-orchestrator", level: "error", event, ...fields })),
@@ -473,7 +433,7 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
     ...(requestRouter === undefined ? {} : { route: requestRouter }),
     answer: (question) => runTaskAnswer(message, taskQuestion, question, { api: threadApi(message), runTurn, ...(context.handoff === undefined ? {} : { handoff: context.handoff }) }),
     post: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
-    postPrivate: (thread, userId, text) => postEphemeralToSlack(thread.channelId, thread.threadTs, userId, text),
+    postPrivate: (thread, userId, text) => slackWeb.postEphemeral(thread.channelId, thread.threadTs, userId, text),
     markAnswered: async (input) => {
       const api = threadApi(message);
       if (api.markThreadNoteAnswered === undefined) throw new Error("marking a note answered is unavailable in this deployment");
@@ -520,7 +480,7 @@ function processRequest(message: SlackRequestMessage, context: Parameters<typeof
     postWithBlocks: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
     // Issue 219: a progress post Slack does not answer is given up after ten seconds.
     postProgress: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text, undefined, AbortSignal.timeout(10_000)),
-    updateMessage: (thread, ts, text) => updateInSlack(thread.channelId, ts, text),
+    updateMessage: (thread, ts, text) => slackWeb.update(thread.channelId, ts, text),
     turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
     userName: slackUserName,
   }, context);

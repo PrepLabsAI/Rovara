@@ -41,7 +41,7 @@ import {
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
 import { createAwsSlackInteractivityHandler } from "./slack-interactivity.js";
-import { chatPostEphemeral, chatUpdate } from "./slack-web.js";
+import { chatPostEphemeral, chatUpdate, slackWebFetch } from "./slack-web.js";
 import { chatGptCommandReply, chatGptSlackCommand, isHandedOffChatGptFinish, readBrokerAnswer, type BrokerAnswer, type ChatGptSlackCommand, type HandedOffChatGptFinish } from "./slack-chatgpt.js";
 import {
   SlackWorkflowStartError,
@@ -908,11 +908,9 @@ export async function postSlackMessage(
   input: { channel: string; threadTs: string; text: string; blocks?: Array<Record<string, unknown>> },
   fetchImplementation: typeof fetch = fetch,
 ): Promise<{ ts?: string }> {
-  const response = await fetchImplementation("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    headers: { authorization: `Bearer ${botToken}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel: input.channel, thread_ts: input.threadTs, text: input.text, ...(input.blocks === undefined ? {} : { blocks: input.blocks }), unfurl_links: false }),
-  });
+  const response = await slackWebFetch("chat.postMessage", botToken, {
+    body: { channel: input.channel, thread_ts: input.threadTs, text: input.text, ...(input.blocks === undefined ? {} : { blocks: input.blocks }), unfurl_links: false },
+  }, fetchImplementation);
   const result = asRecord(await response.json());
   if (!response.ok || result.ok !== true) {
     throw new Error(`Slack chat.postMessage failed: ${typeof result.error === "string" ? result.error : `HTTP ${response.status}`}`);

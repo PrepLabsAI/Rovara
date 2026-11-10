@@ -69,7 +69,7 @@ import {
   CHATGPT_OPEN_ACTION, CHATGPT_PASTE_ACTION, CHATGPT_PASTE_SUBMISSION, chatGptPasteModal, chatGptSubmission, isHandedOffChatGptFinish, runHandedOffChatGptFinish,
   type HandedOffChatGptFinish,
 } from "./slack-chatgpt.js";
-import { chatPostEphemeral } from "./slack-web.js";
+import { chatPostEphemeral, slackWebFetch } from "./slack-web.js";
 import { PROJECT_TASKS_DISABLED_TEXT, WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
 
@@ -730,13 +730,7 @@ export function confirmationActionHandler(dependencies: ConfirmationClickDepende
 export async function slackApi(
   token: string, method: string, body: unknown, fetchImplementation: typeof fetch = fetch, timeoutMs = SLACK_FETCH_TIMEOUT_MILLISECONDS,
 ): Promise<void> {
-  const response = await fetchImplementation(`https://slack.com/api/${method}`, {
-    method: "POST",
-    signal: AbortSignal.timeout(timeoutMs),
-    redirect: "error",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify(body),
-  });
+  const response = await slackWebFetch(method, token, { body, signal: AbortSignal.timeout(timeoutMs), redirect: "error" }, fetchImplementation);
   const result = asRecord(await response.json());
   if (!response.ok || result.ok !== true) throw new Error(`Slack ${method} failed: ${typeof result.error === "string" ? result.error : `HTTP ${response.status}`}`);
 }

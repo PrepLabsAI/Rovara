@@ -7,7 +7,10 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import { NO_LONGER_PENDING_TEXT, STEP_UP_TEXT, checkConfirmation, confirmationApprovalKind, confirmationDigest } from "../../packages/slack-service/src/confirmations.js";
-import { SLACK_ONLY_COMMAND_TEXT, channelRequestHandler, channelTurn, plainText, readChannelQueueItem } from "../../packages/slack-service/src/channel-requests.js";
+import { SLACK_ONLY_COMMAND_TEXT, channelRequestHandler, channelTurn, readChannelQueueItem } from "../../packages/slack-service/src/channel-requests.js";
+import { PLAIN_FORMAT, SLACK_FORMAT } from "../../packages/slack-service/src/conversation-format.js";
+import { confirmationMessage } from "../../packages/slack-service/src/confirmations.js";
+import { limitMessage, preparationFailedMessage } from "../../packages/slack-service/src/messages.js";
 import type { TurnInput } from "../../packages/slack-service/src/processor.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -33,7 +36,7 @@ const decision = (value: "APPROVE" | "REJECT", confirmation: PendingConfirmation
   },
 });
 
-function harness(runTurn: (input: TurnInput) => Promise<string> = async () => "Nothing is *open*. See <https://example.com/x|the tracker>.") {
+function harness(runTurn: (input: TurnInput) => Promise<string> = async () => "Nothing is *open*. See https://example.com/x for the tracker.") {
   const db = new FakeDynamoDb();
   const confirmations = createDynamoConfirmationStore(db, "threads", () => postedAt + 180_000);
   const events: ChannelEvent[] = [];
@@ -66,7 +69,8 @@ describe("an adapter message", () => {
     expect(turns).toHaveLength(1);
     expect(turns[0]).toMatchObject({ subject, plainReplies: true, message: { userId: actor.userId, thread: conversation, text: "list open items" } });
     expect(events.map((event) => event.type)).toEqual(["message", "done"]);
-    expect(events[0]).toMatchObject({ channel: "whatsapp", conversation, data: { text: "Nothing is *open*. See the tracker (https://example.com/x)." } });
+    // The model was asked for plain text, and the processor passes it through as written.
+    expect(events[0]).toMatchObject({ channel: "whatsapp", conversation, data: { text: "Nothing is *open*. See https://example.com/x for the tracker." } });
     expect(events[1]).toMatchObject({ data: { inReplyTo: "wamid.HBgL1" } });
   });
 
@@ -160,7 +164,15 @@ describe("helpers", () => {
     expect(channelTurn(decision("REJECT", pending("destructive")))).toMatchObject({ message: { text: "cancel", userId: actor.userId }, answer: { reply: "cancel" } });
   });
 
-  it("turns Slack markup into plain text", () => {
-    expect(plainText("<@U0123456789>, done &amp; dusted: <https://a.example/b|link> and <https://c.example> in <#C0123|general> &lt;x&gt;")).toBe("Done & dusted: link (https://a.example/b) and https://c.example in #general <x>");
+  it("writes the processor's texts in plain words for an adapter and leaves Slack's exactly as they were (FR-040)", () => {
+    const confirmation = { ...pending("destructive"), calls: [{ ...pending("destructive").calls[0]!, summary: "tracker__close_item: title=a &lt;b&gt; &amp; c" }] };
+    const plain = confirmationMessage(confirmation, PLAIN_FORMAT);
+    expect(plain).toMatch(/^Before I go ahead, please confirm:\n• tracker__close_item: title=a <b> & c \(destructive\)\n/);
+    expect(plain).toContain("reply `yes`");
+    expect(plain).not.toMatch(/<@|@AgentX|Slack/);
+    expect(confirmationMessage(confirmation)).toBe(confirmationMessage(confirmation, SLACK_FORMAT));
+    expect(confirmationMessage(confirmation)).toMatch(/^<@\+919876544821>, before I go ahead/);
+    expect(preparationFailedMessage("FAILED", undefined, PLAIN_FORMAT)).toBe("AgentX could not set up this conversation's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Message me again in this conversation to start fresh.");
+    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [] }, PLAIN_FORMAT)).toBe("You already have 3 AgentX workspaces, the most one person can have, so I can't start a new one. Send `close this workspace` in a conversation you no longer need, or ask an administrator to raise the limit.");
   });
 });

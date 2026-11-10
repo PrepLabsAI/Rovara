@@ -136,3 +136,25 @@ Leave `ChannelAdapters` disabled, or revert: the orchestrator ignores the channe
 empty. A revert after adapter conversations were prepared leaves their workspace charges held, since only this code
 gives them back; close those workspaces first.
 
+## Phase 4b: the core names no surface
+
+| Layer | Change |
+|---|---|
+| orchestrator | The classifier prompt, the gate's block reason and the close instruction say "conversation", not "Slack thread". `slackSafe` is `inertText` (entity-escaped, so a summary carries no mention or link anywhere). `ReplySurface` is `"slack"` or `"plain"`; `PLAIN_REPLY_INSTRUCTIONS` asks for plain text and full URLs. |
+| orchestrator service | `conversation-format.ts`: `SLACK_FORMAT` and `PLAIN_FORMAT` (escape, reply, split, mention, and the words for "this thread", "mention me again", "reply yes"). The processor, confirmations, workspace messages, the lazy worker and the model commands write through the format; Slack's texts are unchanged. The channel consumer uses `PLAIN_FORMAT`, and Phase 4a's `plainText` converter is gone. `slack-web.ts` holds every Slack Web API call the service makes. |
+| broker | `slackWebFetch` in `slack-web.ts` is the one transport; ingress, interactivity, member lookup and the directory call through it, each keeping its own error handling. |
+
+### Decisions
+
+- **Slack's texts are pinned, not rewritten.** Each text is a function of the format, and Slack's constants are that
+  function with `SLACK_FORMAT`, so the existing Slack tests prove the texts did not move.
+- **Confirmation summaries stay entity-escaped in storage.** They are made inert once, by the gate; Slack shows the
+  entities as characters and the plain format unescapes them.
+- **Slack-only paths keep Slack words.** Shared tasks, task answers, SWE-bench and eval batches never reach an adapter
+  conversation (FR-038), so their texts are unchanged.
+- **Schemas stay.** Slack types in the broker and processor go when Slack itself is an adapter (Phase 5).
+
+### Rollback
+
+No stored data or wire format changes; revert the PR.
+

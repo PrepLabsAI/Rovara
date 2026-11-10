@@ -9,6 +9,7 @@ import {
   type PendingConfirmation,
 } from "@agentx/contracts";
 import { confirmationApprovalKind, confirmationDigest, type ConfirmationAnswer } from "./confirmations.js";
+import { PLAIN_FORMAT } from "./conversation-format.js";
 import type { RequestHandler } from "./consumer.js";
 import { processSlackRequest, type ProcessorDependencies, type ProcessorMessage, type ServiceLog } from "./processor.js";
 
@@ -40,27 +41,10 @@ export function channelTurn(item: ChannelQueueItem): { message: ProcessorMessage
   };
 }
 
-/**
- * Slack markup to plain text, for an adapter. The core still writes Slack's markup (spec 062 Phase 4b moves formatting
- * into each adapter); until then mentions are dropped, links show their address, and Slack's escapes are undone.
- */
-export function plainText(text: string): string {
-  const plain = text
-    .replace(/<@[^>|]+(?:\|[^>]*)?>,?\s?/g, "")
-    .replace(/<#[^>|]+\|([^>]*)>/g, "#$1")
-    .replace(/<(https?:[^>|]+)\|([^>]*)>/g, "$2 ($1)")
-    .replace(/<(https?:[^>]+)>/g, "$1")
-    .replace(/`@AgentX /g, "`")
-    .replace(/@AgentX /g, "")
-    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
-    .trim();
-  return plain.length === 0 ? plain : `${plain.charAt(0).toUpperCase()}${plain.slice(1)}`;
-}
-
 export interface ChannelRequestDependencies {
   /** Everything the processor needs that is not about how replies reach the conversation. */
   processor: Omit<ProcessorDependencies<ConversationRef>, "post" | "postConfirmation" | "postWithBlocks" | "postProgress" | "updateMessage"
-    | "subjectOf" | "plainReplies" | "slackOnlyCommandText" | "mayApprove" | "turnRecords">;
+    | "subjectOf" | "plainReplies" | "format" | "slackOnlyCommandText" | "mayApprove" | "turnRecords">;
   /** Queues an event for the adapter; the event sender signs and delivers it. */
   send(event: ChannelEvent): Promise<void>;
   now?: () => number;
@@ -75,14 +59,15 @@ export function channelRequestHandler(deps: ChannelRequestDependencies): Request
     const conversation = message.thread;
     const event = <T extends ChannelEvent["type"]>(type: T, data: Extract<ChannelEvent, { type: T }>["data"]): ChannelEvent =>
       ({ version: 1, id: channelEventId(), channel: conversation.channel, conversation, createdAt: new Date(now()).toISOString(), type, data }) as ChannelEvent;
-    // Each reply is queued as it is posted, so what the processor counts as said has reached the queue.
+    // Each reply is queued as it is posted, so what the processor counts as said has reached the queue. The processor
+    // writes in the plain format, so the text is already the adapter's to format.
     const post = async (_thread: ConversationRef, text: string) => {
-      const plain = plainText(text);
-      if (plain.length > 0) await deps.send(event("message", { text: plain }));
+      const trimmed = text.trim();
+      if (trimmed.length > 0) await deps.send(event("message", { text: trimmed }));
     };
     const postConfirmation = async (_thread: ConversationRef, confirmation: PendingConfirmation, text: string) => {
       await deps.send(event("approval_request", {
-        text: plainText(text),
+        text,
         kind: confirmationApprovalKind(confirmation),
         requestId: confirmation.confirmationId,
         expectedRevision: 1,
@@ -96,6 +81,7 @@ export function channelRequestHandler(deps: ChannelRequestDependencies): Request
       postConfirmation,
       subjectOf: conversationSubject,
       plainReplies: true,
+      format: PLAIN_FORMAT,
       slackOnlyCommandText: SLACK_ONLY_COMMAND_TEXT,
       // FR-032: the step-up set the adapter had when the channel API accepted the item.
       mayApprove: (confirmation) => adapterMayDecide({ stepUp: item.stepUp }, confirmationApprovalKind(confirmation)),
