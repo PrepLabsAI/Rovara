@@ -16,6 +16,8 @@ import type {
   TransactionalOutbox,
   WorkerMachines,
   WorkflowPath,
+  WorkflowIntent,
+  WorkflowReviewPhase,
   WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { RepositoryGrantService } from "../../repository-access.js";
@@ -62,10 +64,19 @@ export interface TaskAccess {
   checkStep(task: { taskId: string; developerId: string; project: string }): Promise<StepVerdict>;
 }
 
-/** The text of the first request to each step. Cloud builds these in `rovara-code/understand.ts` and `developer-tasks/workflow-inputs.ts` (not ported yet: a 51 gap). */
+/**
+ * The text of the first request to each step. Understand's is Cloud's (`rovara-code/understand.ts`, ported); the plan's asks for the Markdown document Code keeps (`step-prompts.ts`).
+ * `intent` is the workflow's stored understanding (its answers and what Understand found); `phase` is the Full path's current document.
+ */
 export interface StepPrompts {
-  understand(input: { requestText: string }): string;
-  plan(input: { requestText: string; path: WorkflowPath; restatement?: string; assumptions?: readonly string[]; /** What the owner asked to change in the earlier plans, oldest first (lane L9-wire writes them with the decision). */ feedback?: readonly string[] }): string;
+  understand(input: { requestText: string; intent?: WorkflowIntent | undefined }): string;
+  plan(input: {
+    requestText: string; path: WorkflowPath; phase?: WorkflowReviewPhase | undefined; restatement?: string; assumptions?: readonly string[];
+    /** What the owner asked to change in the earlier plans, oldest first (lane L9-wire writes them with the decision). */ feedback?: readonly string[];
+    intent?: WorkflowIntent | undefined;
+    /** The documents of earlier phases the owner approved (a Full task's design is written from its requirements), oldest first. */ earlier?: ReadonlyArray<{ kind: "requirements" | "design" | "plan"; markdown: string }>;
+    /** The earlier version of the document being written again after the owner asked for changes. */ previous?: string | undefined;
+  }): string;
 }
 
 /**

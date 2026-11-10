@@ -24,6 +24,8 @@ import {
   type TransactItem,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
+import { textReaderOf } from "../build-step/plan-input.js";
 import { buildOperation, assertPromptFits } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js";
@@ -187,6 +189,36 @@ export async function planFeedbackOf(deps: Pick<TaskFlowDeps, "store">, taskId: 
   return page.items.reverse().flatMap((item) => (typeof item["text"] === "string" ? [item["text"]] : []));
 }
 
+type PlanKind = "requirements" | "design" | "plan";
+
+/**
+ * What a planning run is given besides the request: the documents of the earlier phases the owner approved (a Full task's design is written from its requirements), and the earlier version of
+ * the document being written again after a request for changes. A document that cannot be read (missing, or no longer matching its digest) is left out; the run then plans without it.
+ */
+export async function planContextOf(deps: Pick<TaskFlowDeps, "artifacts">, workflow: Pick<WorkflowSnapshot, "path" | "reviewPhase" | "artifacts">): Promise<{ earlier: Array<{ kind: PlanKind; markdown: string }>; previous?: string }> {
+  if (deps.artifacts === undefined) return { earlier: [] };
+  const current: PlanKind = workflow.path === "QUICK" || workflow.reviewPhase === "IMPLEMENTATION_PLAN" ? "plan" : workflow.reviewPhase === "DESIGN" ? "design" : "requirements";
+  const order: PlanKind[] = ["requirements", "design", "plan"];
+  const read = async (kind: PlanKind): Promise<string | undefined> => {
+    const artifact = workflow.artifacts.filter((entry) => entry.type === kind).at(-1);
+    if (artifact === undefined) return undefined;
+    try {
+      return (await loadWorkflowDocument(textReaderOf(deps.artifacts), artifact, { answers: "recommended" }))?.markdown;
+    } catch {
+      return undefined;
+    }
+  };
+  const earlier: Array<{ kind: PlanKind; markdown: string }> = [];
+  if (workflow.path === "FULL") {
+    for (const kind of order.slice(0, order.indexOf(current))) {
+      const markdown = await read(kind);
+      if (markdown !== undefined) earlier.push({ kind, markdown });
+    }
+  }
+  const previous = await read(current);
+  return { earlier, ...(previous === undefined ? {} : { previous }) };
+}
+
 /** Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`, on the ports. */
 export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<StepStart> {
   // Any step after the plan (coding, reviews, the publication, a sync of the branch, Rovara's own fix of a block) is the build step's (lane L10).
@@ -213,7 +245,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
     if (row.kind === "UNDERSTAND") {
       if (workflow.stage !== "UNDERSTAND" || workflow.state !== "READY") return stale();
       next = startWorkflowUnderstand(workflow, iso(deps));
-      prompt = prompts.understand({ requestText: task.requestText ?? "" });
+      prompt = prompts.understand({ requestText: task.requestText ?? "", intent: workflow.intent });
       mode = "UNDERSTAND";
       requestId = workflowRequestId("agentx-understand", task.taskId, workflow.revision);
     } else {
@@ -221,7 +253,11 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
       if (workflow.stage !== "PLAN" || workflow.state !== "READY" || assessment?.kind !== "ready") return stale();
       next = startWorkflowPlanAfterUnderstand(workflow, iso(deps));
       const feedback = await planFeedbackOf(deps, task.taskId);
-      prompt = prompts.plan({ requestText: task.requestText ?? "", path: workflow.path, restatement: assessment.restatement, assumptions: assessment.assumptions, ...(feedback.length === 0 ? {} : { feedback }) });
+      const context = await planContextOf(deps, workflow);
+      prompt = prompts.plan({
+        requestText: task.requestText ?? "", path: workflow.path, phase: workflow.reviewPhase, restatement: assessment.restatement, assumptions: assessment.assumptions, intent: workflow.intent,
+        ...(feedback.length === 0 ? {} : { feedback }), ...(context.earlier.length === 0 ? {} : { earlier: context.earlier }), ...(context.previous === undefined ? {} : { previous: context.previous }),
+      });
       mode = "PLAN";
       requestId = workflowRequestId("agentx-plan-after-understand", task.taskId, workflow.revision);
     }

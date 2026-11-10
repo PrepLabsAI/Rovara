@@ -1,7 +1,7 @@
-// Lane L6a, task flow core: small shared helpers (clock, ids, log, hashing, the default prompts).
+// Lane L6a, task flow core: small shared helpers (clock, ids, log, hashing; the default prompts are in step-prompts.ts).
 import { createHash, randomUUID } from "node:crypto";
 import { PLAN_WHY_REQUEST_MAX_CHARS, canonicalJson, redactText, taskTitle } from "@agentx/contracts";
-import { DEFAULT_DISPATCH_QUEUE, DEFAULT_LIMITS, type StepPrompts, type TaskFlowDeps } from "./deps.js";
+import { DEFAULT_DISPATCH_QUEUE, DEFAULT_LIMITS, type TaskFlowDeps } from "./deps.js";
 
 export const iso = (deps: Pick<TaskFlowDeps, "now">): string => (deps.now?.() ?? new Date()).toISOString();
 export const newId = (deps: Pick<TaskFlowDeps, "newId">): string => (deps.newId ?? randomUUID)();
@@ -14,16 +14,7 @@ export function hashJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
-export const DEFAULT_PROMPTS: StepPrompts = {
-  understand: ({ requestText }) => `Read the request and the code, then say what is being asked and what you assume. Change nothing.\n\nRequest:\n${requestText}`,
-  plan: ({ requestText, path, restatement, assumptions, feedback }) => [
-    path === "FULL" ? "Write the requirements for this request." : "Write a plan for this request.",
-    ...(restatement === undefined ? [] : [`Understood as: ${restatement}`]),
-    ...(assumptions === undefined || assumptions.length === 0 ? [] : ["Assumptions:", ...assumptions.map((line) => `- ${line}`)]),
-    ...(feedback === undefined || feedback.length === 0 ? [] : ["The owner read an earlier plan and asked for these changes. Make them:", ...feedback.map((line) => `- ${line}`)]),
-    `Request:\n${requestText}`,
-  ].join("\n\n"),
-};
+export { DEFAULT_PROMPTS } from "./step-prompts.js";
 
 /**
  * Redacted first, so the cut cannot leave half a token. Cut to at most `max` UTF-16 code units, never between the two halves of a
