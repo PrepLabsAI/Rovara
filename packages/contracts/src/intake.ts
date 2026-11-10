@@ -13,6 +13,7 @@ import { z } from "zod";
 
 // ---- channels, standing, the external reference
 
+// CLOSED ON PURPOSE (owner decision 62, item E1): no new entry. A tracker that is not here uses the `tracker` channel and names its own `system` (`IntakeSystemSchema` is open).
 export const INTAKE_CHANNELS = ["web", "cli", "slack", "linear", "jira", "github_issue", "tracker", "session", "offer"] as const;
 export const IntakeChannelSchema = z.enum(INTAKE_CHANNELS);
 export type IntakeChannel = z.infer<typeof IntakeChannelSchema>;

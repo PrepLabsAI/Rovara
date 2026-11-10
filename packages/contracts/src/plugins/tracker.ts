@@ -2,6 +2,8 @@
 // Reading an item's text for context is the MCP sources design (read-only, per project); this port only starts tasks and writes status back.
 import { z } from "zod";
 import type { ChangeRequestRef } from "./code-host.js";
+import type { EventSourceRegistration } from "../open-ids.js";
+import type { SubjectCommentsPage } from "./comment-source.js";
 import { ExternalIdSchema, HttpsUrlOrEmptySchema, ISO_TIME, PluginKindSchema, type HostScope, type PluginKind, type UntrustedText } from "./common.js";
 
 export const TrackerCapabilitiesSchema = z.object({
@@ -64,4 +66,15 @@ export interface Tracker {
   setStatus?(ref: TrackerItemRef, status: NeutralStatus, scope: HostScope): Promise<void>;
   link?(ref: TrackerItemRef, changeRequest: ChangeRequestRef, scope: HostScope): Promise<void>;
   readonly events?: TrackerEvents;
+  /**
+   * Optional (port lane P6, item E1; interface only, nothing reads it yet): the comments on an item, oldest first, created or edited since `since`, 100 a page. FETCH ONLY, like `CodeHost.comments`
+   * (decision 66): the adapter says what was written, by whom, when and on which item; whether it is a command and whether its author may give one is decided in Rovara's core. An adapter without it has no
+   * comment commands on its items.
+   */
+  comments?(ref: TrackerItemRef, options: { since?: string; page?: number }, scope: HostScope): Promise<SubjectCommentsPage>;
+  /**
+   * Optional (port lane P6, item E1): the event types this tracker can start work from, and the keys a trigger may filter each on. The source id is this tracker's `kind`. A tracker registers here instead
+   * of being added to the fixed `EVENT_SOURCES` list, which takes no new entry (owner decision 62). See `open-ids.ts`.
+   */
+  readonly eventSource?: EventSourceRegistration;
 }

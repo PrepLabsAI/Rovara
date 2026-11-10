@@ -6,5 +6,6 @@ export * from "./fake-worker-machines.js";
 export * from "./memory-document-store.js";
 export * from "./memory-queue.js";
 export * from "./model-key-stores.js";
+export * from "./outbound-events.js";
 export * from "./policy-defaults.js";
 export * from "./transactional-outbox.js";

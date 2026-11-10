@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, and `object-storage` (provisional, below) and `company-instructions` (read-only company rules, below). A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, and `object-storage` (provisional, below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -227,6 +227,12 @@ Code's adapter (`FileCompanyInstructions`, plug-in `@agentx/local-adapters/compa
 heading is Required, a line it cannot place is refused (naming the line) instead of being dropped, and the file must be a plain file owned by the user and not writable by others. The version is the SHA-256 of the file's bytes, so it is also the hash a task records.
 The file is outside every repository on purpose: a repository's writers cannot edit the company's rules.
 
+### Team-record sources: the unknown-source rule (lane P6, item T1)
+
+The `team-record-source` point is still a name only; its interface is defined when the team record moves to the plug-in. The rule it must keep is already shared (`record-trust.ts`): a source id that nothing registered is never read as
+"everyone in the project". `audienceForSource(row, knownSources)` keeps the audience a registered source declared; for an unregistered source a declared `project` audience becomes `unknownSourceAudience` (restricted to the project's
+maintainers, `MAINTAINERS_GROUP`), and a declared restricted audience is kept, never widened. `knownSources` is the ids of the registered `team-record-source` adapters and of the recorders built in.
+
 ## Model key store
 
 `ModelKeyStore.get(companyId, provider)` returns a `SecretValue` (it prints as `[secret]` in text, JSON and the console). Code has an environment
@@ -388,6 +394,33 @@ A `build-system` adapter is a way of building code that the built-in detectors d
 read from the registry with `collectBuildSystemProfiles`) puts the profiles into the worker's start-up environment as `ROVARA_BUILD_SYSTEMS`, a name a machine spec cannot set. The worker reads it once at boot and refuses to start on a value it cannot
 read. The worker also refuses an absolute module path that lies inside its workspace, where repositories are checked out. No line of the worker job (`operation.ts`, `protocol.ts`) is added or changed (decision 65). A profile that is not valid,
 or that carries a name other than the adapter's, stops the machine from starting. The internal build-system detector stays an optional plug-in package outside the core (decision 45.11).
+
+## Open ids for trackers and events, and the comment seam (lane P6, item E1)
+
+Event sources, event types, intake channels and connection types were fixed lists (`EVENT_SOURCES`/`EVENT_TYPES` in `trigger-specs.ts`, `INTAKE_CHANNELS` in `intake.ts`, `ConnectionTypeSchema` in `connections.ts`). They are **closed on purpose** now
+(owner decision 62): they keep the entries they have, a test (`tests/unit/open-ids.test.ts`) holds them, and a new tracker or monitoring source does not add to them. It registers itself instead:
+
+- A tracker declares `eventSource: { types: { "item.created": ["label"], ... } }` (event types, with the keys a trigger may filter each on). The source id is the tracker's `kind`. `open-ids.ts` has the open id shapes (`OpenSourceIdSchema`,
+  `OpenEventTypeSchema`), `eventSourceCatalog(registered)` (the built-in sources plus the registered ones; a registration cannot take a built-in id) and `checkEventTrigger(spec, registered)` (an unknown source, type or filter key is refused,
+  never read as "any"). Chains and triggers are not switched on in Code (decision 45.10), so nothing reads the fixed lists through these yet; whoever switches them on uses `checkEventTrigger`.
+- The intake side already had an open way in: the `tracker` channel names its own `system` (`IntakeSystemSchema`). Opening the connection-type union (a stored connection for a tracker that registers itself) is built with the triggers.
+- **Comment commands on an item (interface only).** `Tracker.comments?` mirrors `CodeHost.comments?` (fetch only, decision 66): `CommentSubject` is `{ kind: "change-request", ref }` or `{ kind: "item", ref }`, `SubjectComment` is a comment with its
+  subject, `CommentSource` is the one interface keyed on a subject, and `commentSubjectKey` is a stable key for claims. `subjectCommentFromHost` turns a code host's comment into the same shape. Nothing calls them yet; the handler in
+  `core/pr-commands/` stays keyed on a pull request until chains are switched on.
+
+## Outbound events (lane P6, item R3)
+
+`outbound-events` is a plug-in point that holds many adapters. Rovara emits an `OutboundEvent` for what happens to a task, with references to its artifacts (never their content), so a lightweight adapter (an internal issue tracker, a dashboard) needs no
+change to Rovara. **It is the same signed format as Pratik's channel events** (decision 61): Standard Webhooks, the `webhook-id` header is the event's `id`, `webhook-timestamp` is in seconds, `webhook-signature` is
+`v1,<base64 HMAC-SHA256 of "<id>.<timestamp>.<body>">` with the adapter's `whsec_` secret, the envelope has the same `version`, `evt_` id (stable across retries) and `createdAt`. `signOutboundEvent` and `verifyOutboundEvent` are thin over
+`webhookHeaders` and `verifyWebhook`, so a receiver that checks a channel event checks this one with the same code.
+
+An event is `{ version: 1, id, type, company, project?, subject?, createdAt, data, artifacts }`. `type` is an open dotted lower-case id; the task milestones are `task.<milestone>` (`outboundEventTypeOfMilestone`). `data` is flat JSON up to 16 KiB; `artifacts` are
+references (`kind`, `id`, optional `digest`, optional https `url`), up to 50. An adapter implements `deliver(event)` (AT LEAST ONCE: a receiver drops a repeat of an `id`) and may implement `accepts(type)`. `publishOutboundEvent(registry, event)` sends one
+event to every adapter that wants it; a failing adapter is reported by name and error kind (no text) and never stops the others or the caller.
+
+Not here yet: an HTTP sender (an adapter, with its own address and secret rules), retries and a dead-letter queue, who may register an adapter, and the visibility rule that events follow a task's live visibility. The scheduler (timers), realtime push and
+email notices stay names only (decision 61): they are not points until a lane needs them.
 
 ## The task flow core (lane L6a)
 

@@ -17,6 +17,7 @@ import type { DocumentStore } from "./document-store.js";
 import type { JsonObject } from "./json.js";
 import type { ModelKeyStore } from "./model-keys.js";
 import type { ObjectStorage } from "./object-storage.js";
+import type { OutboundEventsAdapter } from "./outbound-events.js";
 import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
 import type { AuditSink } from "./audit-sink.js";
@@ -48,6 +49,8 @@ export const PLUGIN_POINTS = [
   "object-storage",
   /** Owner decisions 57 and 60 (item L1): the company's standing rules, read-only. Code: a local file; Cloud: its store. */
   "company-instructions",
+  /** Owner decisions 40 and 61 (item R3): signed events out, in the format of Pratik's channel events. */
+  "outbound-events",
 ] as const;
 export const PluginPointSchema = z.enum(PLUGIN_POINTS);
 export type PluginPoint = z.infer<typeof PluginPointSchema>;
@@ -76,6 +79,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   "model-keys": "one",
   "object-storage": "one",
   "company-instructions": "one",
+  "outbound-events": "many",
 };
 
 /**
@@ -142,6 +146,7 @@ export interface PluginPointTypes {
   "model-keys": ModelKeyStore;
   "object-storage": ObjectStorage;
   "company-instructions": CompanyInstructionsSource;
+  "outbound-events": OutboundEventsAdapter;
 }
 
 export type AdapterOf<P extends PluginPoint> = PluginPointTypes[P];

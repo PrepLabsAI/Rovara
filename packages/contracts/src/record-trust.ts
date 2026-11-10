@@ -53,3 +53,35 @@ export type Audience = z.infer<typeof AudienceSchema>;
 
 /** A project name (the AgentX name pattern). */
 export const RecordProjectSchema = z.string().regex(/^[a-z][a-z0-9-]{0,62}$/);
+
+/**
+ * Port lane P6 (item T1, owner decision 60): an UNKNOWN source is the narrowest audience, never "everyone in the project". A row's permission snapshot names the adapter that captured it (`source`). The
+ * `team-record-source` point is still a name only (its interface is defined when the team record moves to the plug-in), but this rule is shared now so that neither edition reads a source it does not
+ * know as visible to the whole project. The narrowest audience is the project's maintainers (`MAINTAINERS_GROUP`), the same fail-closed audience a source gets before its admin has said "visible to all
+ * project members".
+ */
+export function unknownSourceAudience(input: { source: string; scope?: string | undefined; capturedAt: string }): Audience {
+  const source = RecordSourceIdSchema.safeParse(input.source);
+  return {
+    kind: "restricted",
+    acl: {
+      // A source id that is not even well formed cannot be stored in a snapshot; the row keeps a fixed word instead of the text it was given.
+      source: source.success ? source.data : "unknown",
+      scope: input.scope !== undefined && input.scope.length >= 1 && input.scope.length <= 300 ? input.scope : "unknown-source",
+      groups: [MAINTAINERS_GROUP],
+      capturedAt: input.capturedAt,
+      liveCheck: "none",
+    },
+  };
+}
+
+/**
+ * The audience a row is given. A source that is registered (`knownSources`: the ids of the registered `team-record-source` adapters and of the recorders built in) keeps the audience it declared. A source
+ * that is not registered NEVER gives the whole project: a declared `project` audience becomes the narrowest one (`unknownSourceAudience`), because nothing vouches for what that source's permissions mean.
+ * A declared restricted audience is already no wider than that, so it is kept (never widened, and its source-native principals are not re-read as anyone else).
+ */
+export function audienceForSource(input: { source: string; declared: Audience; capturedAt: string }, knownSources: Iterable<string>): Audience {
+  if (RecordSourceIdSchema.safeParse(input.source).success && new Set(knownSources).has(input.source)) return input.declared;
+  if (input.declared.kind === "restricted") return input.declared;
+  return unknownSourceAudience({ source: input.source, capturedAt: input.capturedAt });
+}

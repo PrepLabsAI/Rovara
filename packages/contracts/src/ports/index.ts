@@ -11,5 +11,6 @@ export * from "./build-system.js";
 export * from "./company-instructions.js";
 export * from "./model-keys.js";
 export * from "./object-storage.js";
+export * from "./outbound-events.js";
 export * from "./plugin-adapters.js";
 export * from "./plugin-points.js";
