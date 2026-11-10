@@ -39,6 +39,7 @@ import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions
 import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
+import { startFakeProvider } from "../support/model-proxy-world.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -80,11 +81,12 @@ const classicToken = (seed: string): string => ["gh", "p_"].join("") + seed.repe
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number } = {}) {
+async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string } } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+  if (extra.config !== undefined) await writeFile(join(stateDirectory, "config.json"), JSON.stringify(extra.config), { mode: 0o600 });
   const machines = new FakeWorkerMachines({ startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] });
   // A fake code host that holds the repository (lane L10): the build step reads the pushed branch and opens the pull request through its port.
   const hostedUrl = "https://github.com/example/demo.git";
@@ -110,6 +112,7 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
   const runtime: LocalRuntime = await startLocalRuntime({
     stateDirectory, cwd: join(root, "project"), environment: extra.environment ?? {}, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false,
     registerAdapters, openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }), ...(extra.now === undefined ? {} : { now: extra.now }), ...(extra.commentThreadsPerPoll === undefined ? {} : { commentThreadsPerPoll: extra.commentThreadsPerPoll }),
+    ...(extra.modelProviderEndpoints === undefined ? {} : { modelProviderEndpoints: extra.modelProviderEndpoints }),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
@@ -751,6 +754,78 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect(after.status).toBeGreaterThanOrEqual(400);
     expect(after.text).not.toContain(key);
     // A step the worker cannot route (no model.route) is not sent at all: a route is never dropped.
+  });
+
+  /** The first model-bearing step (Understand) of a new task, with the worker's own way of asking the broker for model access. */
+  async function understandStep(h: Awaited<ReturnType<typeof launch>>) {
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "31313131-3131-4313-8313-313131313131", project: "payments", instructions: "x", workflow: true } })).body.task.taskId;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
+    return h.nextJob(workspaceId, seen);
+  }
+  /** What the worker's egress gateway does with a call to the broker's listener: the broker's name for the host, the worker's own workspace stamped on it. */
+  const viaListener = (h: Awaited<ReturnType<typeof launch>>, job: WorkerInvocation, method: string, path: string, headers: Record<string, string>, body?: unknown) => new Promise<{ status: number; text: string }>((resolve, reject) => {
+    const text = body === undefined ? undefined : JSON.stringify(body);
+    const req = httpRequest({
+      host: "127.0.0.1", port: h.runtime.callbackPort, method, path, setHost: false,
+      headers: { host: `host.docker.internal:${h.runtime.callbackPort}`, "x-rovara-workspace": job.workspaceId, ...(text === undefined ? {} : { "content-type": "application/json" }), ...headers },
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => resolve({ status: response.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("error", reject);
+    req.end(text);
+  });
+
+  it("with only an OpenRouter key, a step is routed to OpenRouter's default Claude model through the proxy, and the key never reaches the worker (L13)", async () => {
+    const provider = await startFakeProvider();
+    cleanup.push(() => provider.close());
+    // A key-shaped value built at runtime (the public repository refuses one in a file).
+    const key = ["sk", "or", "v1", "y".repeat(24)].join("-");
+    const h = await launch({ environment: { OPENROUTER_API_KEY: key }, modelProviderEndpoints: { openrouter: provider.url } });
+    const understand = await understandStep(h);
+    const route = (understand.payload as { modelRoute?: { alias: string; api: string; catalog: string } }).modelRoute;
+    expect(route).toEqual({ alias: "openrouter/anthropic/claude-sonnet-4.6", api: "openai-completions", catalog: "anthropic/claude-sonnet-4.6" });
+    // Everything the worker was handed (the job, its payload and capability) is free of the key.
+    expect(JSON.stringify(understand)).not.toContain(key);
+
+    const minted = await viaListener(h, understand, "GET", "/v1/internal/model-access", { "x-agentx-callback-capability": understand.callbackCapability });
+    expect(minted.status, minted.text).toBe(200);
+    const access = JSON.parse(minted.text) as { baseUrl: string; apiKey: string };
+    expect(access.apiKey).not.toBe(key);
+    expect(minted.text).not.toContain(key);
+
+    // The worker's model call: the chat shape, to the proxy, with the token where a key would go.
+    const reply = await viaListener(h, understand, "POST", "/v1/internal/model-proxy/v1/chat/completions", { authorization: `Bearer ${access.apiKey}` },
+      { model: route!.alias, messages: [{ role: "user", content: "hi" }], stream: false });
+    expect(reply.status, reply.text).toBe(200);
+    expect(reply.text).not.toContain(key);
+    // The fake OpenRouter saw the real key and the provider's own model id; the alias is the worker's name for it.
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.calls[0]).toMatchObject({ provider: "openrouter", path: "/v1/chat/completions", body: { model: "anthropic/claude-sonnet-4.6" } });
+    expect(provider.calls[0]!.headers["authorization"]).toBe(`Bearer ${key}`);
+    // A model the step was not granted is refused before any provider is called.
+    const other = await viaListener(h, understand, "POST", "/v1/internal/model-proxy/v1/chat/completions", { authorization: `Bearer ${access.apiKey}` },
+      { model: "openrouter/anthropic/claude-opus-4.7", messages: [], stream: false });
+    expect(other.status).toBeGreaterThanOrEqual(400);
+    expect(provider.calls).toHaveLength(1);
+    expect(h.bodies.join("")).not.toContain(key);
+  });
+
+  it("the model setting in the owner's config wins over the key order, and a setting whose provider has no key gives the step no model (L13)", async () => {
+    const anthropicKey = ["sk", "ant", "z".repeat(24)].join("-");
+    const orKey = ["sk", "or", "v1", "w".repeat(24)].join("-");
+    const chosen = await launch({ environment: { ANTHROPIC_API_KEY: anthropicKey, OPENROUTER_API_KEY: orKey }, config: { version: 1, plugins: [], model: { provider: "openrouter", id: "anthropic/claude-sonnet-5.5" } } });
+    expect((await understandStep(chosen)).payload).toMatchObject({ modelRoute: { alias: "openrouter/anthropic/claude-sonnet-5.5", api: "openai-completions" } });
+    // Without the setting the same two keys pick Anthropic.
+    const unset = await launch({ environment: { ANTHROPIC_API_KEY: anthropicKey, OPENROUTER_API_KEY: orKey } });
+    expect((await understandStep(unset)).payload).toMatchObject({ modelRoute: { api: "anthropic-messages" } });
+    // A setting naming a provider with no key is the owner's order: no other provider is used in its place.
+    const missing = await launch({ environment: { ANTHROPIC_API_KEY: anthropicKey }, config: { version: 1, plugins: [], model: { provider: "openrouter", id: "anthropic/claude-sonnet-4.6" } } });
+    expect((await understandStep(missing)).payload).not.toHaveProperty("modelRoute");
   });
 });
 

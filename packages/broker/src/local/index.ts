@@ -6,6 +6,7 @@ export * from "./github-access.js";
 export * from "./github-code-host.js";
 export * from "./http-server.js";
 export * from "./invoke-signer.js";
+export * from "./model-choice.js";
 export * from "./model-proxy/index.js";
 export * from "./runtime.js";
 export * from "./state-directory.js";

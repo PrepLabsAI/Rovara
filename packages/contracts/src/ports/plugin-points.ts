@@ -249,6 +249,14 @@ export const PluginConfigSchema = z.object({
    * Absent or false: such a token is refused for a worker, and a fine-grained token limited to the project's repositories is required. A cloud install ignores it.
    */
   allowBroadTokenForWorker: z.boolean().optional(),
+  /**
+   * Port lane L13 (laptop only, owner-set): the model a task step calls, e.g. `{ "provider": "openrouter", "id": "anthropic/claude-sonnet-4.6" }`. Absent: the install's first provider with a key
+   * (Anthropic, then OpenAI, then OpenRouter) and that provider's default model. Read only from the owner's own config; a project or a task cannot set it.
+   */
+  model: z.object({
+    provider: z.enum(["anthropic", "openai", "openrouter"]),
+    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/~-]{0,199}$/u, "a model id is plain characters, as the provider lists it (for OpenRouter, vendor/model)"),
+  }).strict().optional(),
   plugins: z.array(PluginConfigEntrySchema).max(64),
 }).strict().superRefine((config, context) => {
   const seen = new Set<string>();

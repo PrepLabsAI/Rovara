@@ -396,6 +396,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
+    // Lane L13: the owner's model setting, read from the owner's own config only.
+    ...(config.model === undefined ? {} : { modelSetting: config.model }),
     // A worker's clone or push credential comes from the registered code host's own `issueGitCredential`, so its rules always apply: only registered projects' repositories, a push only where the token can push,
     // and a token that reaches every repository its owner can only when the config allows it. The address rules below (github.com, plain characters) run first.
     resolveRepositoryCredential: async (_credentialRef, repositoryUrl, accessKind) => {

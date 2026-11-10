@@ -8,10 +8,10 @@
 // Decision 51: nothing here names a provider; it asks the registry for `storage`, `queue`, `worker-machines`, `admission`, `audit-sink`, `approvers`, `identity` and `metering`.
 // Decision 53: artifacts live in the registry's `object-storage` adapter (lane L9a); a worker's model calls go through the model proxy (lane L9a), which the task flow grants per operation.
 import { createHmac, randomBytes } from "node:crypto";
-import { DEFAULT_DIRECT_MODELS } from "@agentx/model-runtime/config";
 import { join } from "node:path";
 import { IMPLICIT_COMPANY_ID, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
+import { chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
 import { capabilityModelGrants, localRoute, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
@@ -61,8 +61,10 @@ const LOCAL_OWNER_PERSON_ID = "local-owner";
 export interface LocalAppOptions {
   /** Tells the model proxy an operation ended (it frees the operation's tokens and spend record). Set by the runtime, which makes the proxy after the servers. */
   operationEnded?: (operationId: string) => void;
-  /** The model a task step calls: absent, the first of Anthropic and OpenAI that has a key. Tests and a later settings file say otherwise. */
-  modelChoice?: { provider: "anthropic" | "openai"; model: string };
+  /** The model a task step calls, fixed by the caller (tests). Absent: `modelSetting`, else the first provider with a key. */
+  modelChoice?: LocalModelChoice;
+  /** Lane L13: the owner's `model` setting from the config; see `chooseLocalModel` for the order. */
+  modelSetting?: LocalModelSetting;
   registry: AdapterRegistry;
   stateDirectory: string;
   pageSessions: LocalPageSessions;
@@ -138,13 +140,13 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const signingKey = deriveKey(rootKey, "callback-capability");
   const grants = new RepositoryGrantService(deriveKey(rootKey, "repository-grant"), options.resolveRepositoryCredential ?? (async () => { throw new Error("no GitHub access is set up: run `gh auth login` or set GH_TOKEN"); }));
 
-  // The model a task step calls: the owner's choice, else the first provider (Anthropic, then OpenAI) that has a key. No key: no route, and the worker has no model access.
+  // The model a task step calls: the owner's `model` setting, else the first provider (Anthropic, OpenAI, then OpenRouter) that has a key (`chooseLocalModel`, which `rovara up --check` also asks).
+  // No key: no route, and the worker has no model access.
   const keys = registry.require("model-keys");
-  const chosen = async (): Promise<{ provider: "anthropic" | "openai"; model: string } | undefined> => {
+  const chosen = async (): Promise<LocalModelChoice | undefined> => {
     if (options.modelChoice !== undefined) return options.modelChoice;
-    const have = await keys.providers(companyId);
-    const provider = (["anthropic", "openai"] as const).find((candidate) => have.includes(candidate));
-    return provider === undefined ? undefined : { provider, model: DEFAULT_DIRECT_MODELS[provider].worker };
+    const picked = chooseLocalModel(await keys.providers(companyId), options.modelSetting);
+    return picked.ok ? { provider: picked.provider, model: picked.model } : undefined;
   };
   const modelRoute = async () => { const choice = await chosen(); return choice === undefined ? undefined : localRoute(choice.provider, choice.model).workerRoute; };
 

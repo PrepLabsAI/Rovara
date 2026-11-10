@@ -95,6 +95,32 @@ describe("rovara up --check", () => {
     expect(good.out).toContain("A model key is set for anthropic.");
   });
 
+  it("reports the provider and model a task step will use, and what to set when none can be chosen (L13)", async () => {
+    const check = (options: Parameters<typeof run>[1]) => run(["up", "--check", "--worker-image", "worker:test"], options);
+    // The only key is OpenRouter's: its default Claude model.
+    const onlyRouter = await check({ environment: { OPENROUTER_API_KEY: "or-test-value" } });
+    expect(onlyRouter.code).toBe(0);
+    expect(onlyRouter.out).toContain("Task steps will use openrouter anthropic/claude-sonnet-4.6 (the default for the only key found).");
+    expect(onlyRouter.out).not.toContain("or-test-value");
+    // Several keys: Anthropic first.
+    const several = await check({ environment: { OPENROUTER_API_KEY: "or-test-value", ANTHROPIC_API_KEY: "an-test-value" } });
+    expect(several.out).toContain("Task steps will use anthropic claude-sonnet-4-6 (the default for the first key found).");
+    // The config's setting wins.
+    const config = JSON.stringify({ version: 1, plugins: [], model: { provider: "openrouter", id: "anthropic/claude-sonnet-5.5" } });
+    const chosen = await check({ environment: { OPENROUTER_API_KEY: "or-test-value", ANTHROPIC_API_KEY: "an-test-value" }, config });
+    expect(chosen.out).toContain('Task steps will use openrouter anthropic/claude-sonnet-5.5 (the "model" setting in your config).');
+    // A setting whose provider has no key fails, and says which key to set.
+    const missing = await check({ environment: { ANTHROPIC_API_KEY: "an-test-value" }, config });
+    expect(missing.code).not.toBe(0);
+    expect(missing.out).toContain("FAIL  model-key");
+    expect(missing.out).toContain("The config names openrouter (anthropic/claude-sonnet-5.5) as the model, but no openrouter key was found.");
+    expect(missing.out).toContain("OPENROUTER_API_KEY");
+    // No key at all: the fix names the three keys and the setting.
+    const none = await check({ environment: {} });
+    expect(none.out).toContain("OPENROUTER_API_KEY");
+    expect(none.out).toContain('"model"');
+  });
+
   it("says how to get GitHub access, and when GitHub rejects the token", async () => {
     const none = await run(["up", "--check", "--worker-image", "worker:test"], { gh: undefined });
     expect(none.out).toContain("No GitHub access was found.");

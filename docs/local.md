@@ -21,7 +21,7 @@ You need:
 | --- | --- |
 | Docker | Docker Desktop, or Colima (`brew install colima docker && colima start`). Set `DOCKER_HOST` if the socket is elsewhere. |
 | The worker image | `docker build -f environments/base/Dockerfile -t rovara-worker:local .` from a Rovara checkout. Another image: `--worker-image <ref>` or `ROVARA_WORKER_IMAGE`. (No image is published yet.) |
-| A model key | `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`, `OPENROUTER_API_KEY`) in the environment, or `~/.rovara/keys.json`. |
+| A model key | `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`, `OPENROUTER_API_KEY`) in the environment, or `~/.rovara/keys.json`. One OpenRouter key is enough: see "Choosing the model" below. |
 | GitHub access | `gh auth login`, or `GH_TOKEN` / `GITHUB_TOKEN`, or `{"github": "<token>"}` in `keys.json`. The first one found wins, in the order key file, environment, `gh` (asked for github.com's token by name). The check sends the token to api.github.com only. The sign-in belongs to the GitHub code host adapter (`resolveCredentials`, `checkAccess`), and `rovara up` registers that adapter as the `code-host` named `github` when it finds one. A `code-host/github` entry in the config replaces it. |
 
 ## What lives in `~/.rovara`
@@ -215,9 +215,24 @@ ports and not each other, and this is the only place that knows all of them.
 | Merge tracking | lane L12 (`app/tracking.ts`): a timer polls the due tracking rows and calls the core's `reconcileTrackingTask`; see "Merge tracking by polling" below |
 | Owner routes | `/v1/dev/projects`, `/v1/admin/projects`, `/v1/dev/tasks...` and `/v1/app/sessions...`, behind the session token (the routes the MCP tools and the CLI's `session` commands call) |
 
+**Choosing the model (lane L13).** A task step calls one model, chosen by one rule (`chooseLocalModel`, used by the task flow and by `rovara up --check`):
+
+1. The `model` setting in `~/.rovara/config.json` wins, if the key for its provider is there:
+   ```json
+   { "version": 1, "plugins": [], "model": { "provider": "openrouter", "id": "anthropic/claude-sonnet-4.6" } }
+   ```
+   `provider` is `anthropic`, `openai` or `openrouter`; `id` is the model as that provider lists it (for OpenRouter, `vendor/model`). It is read only from your own config (like the rest of the
+   config, never from a project), and a project or a task cannot change it. If the setting names a provider with no key, no model is chosen (the step gets no model access) and `rovara up --check` fails and names the key to set: your setting is
+   never quietly replaced by another provider.
+2. Else the first provider with a key, in the order Anthropic, OpenAI, OpenRouter, with that provider's default model: `claude-sonnet-4-6`, `gpt-5.4`, and for OpenRouter `anthropic/claude-sonnet-4.6` (the same Claude Sonnet as the Anthropic
+   default, under OpenRouter's id; it is in the installed Pi model catalog, and a test keeps it there).
+
+With only an OpenRouter key and no setting, tasks run on `anthropic/claude-sonnet-4.6` through OpenRouter. The worker speaks the chat-completions shape to the broker's model proxy (alias `openrouter/<model id>`), and the proxy's OpenRouter rules apply
+(`provider.allow_fallbacks` must be `false` if routing is sent at all, no fallback fields, function tools only). `rovara up --check` prints the provider and model a step will use, and what to set when none can be chosen.
+
 **One `rovara up` per state folder** (a lock file, `up.lock`, holds the pid; a lock whose process is gone is replaced). **Worker output** is taken only while an operation runs: an artifact is kept once (the same bytes again are the same artifact, other bytes are refused), nothing but a repeat of the result is taken after the operation ends, and a plan is shown only if its bytes match the digest the approval binds. An artifact name is kept once per operation (Understand and Plan post each name once; a name a later step may post again must be listed as replaceable in `app/callbacks.ts` when that step is wired). The two kinds of signed token (callback capabilities, repository grants) use different keys derived from `callback-key`.
 
-**Models.** A task step is told the install's model route (the first of Anthropic and OpenAI that has a key) and its capability lists `model-access`; the worker asks the broker's model proxy (lane L9a) for a token, bound to its workspace and operation, and the proxy adds the key. The flow requires the worker to list `model.route`, calls `modelProxy.operationEnded` when an operation settles, and grants no budget yet (no run limit exists before a price table). Plan and Understand documents are kept in the `object-storage` point under a retention class that never expires them.
+**Models.** A task step is told the install's model route (the `model` setting in the config, else the first of Anthropic, OpenAI and OpenRouter that has a key; see "Choosing the model") and its capability lists `model-access`; the worker asks the broker's model proxy (lane L9a) for a token, bound to its workspace and operation, and the proxy adds the key. The flow requires the worker to list `model.route`, calls `modelProxy.operationEnded` when an operation settles, and grants no budget yet (no run limit exists before a price table). Plan and Understand documents are kept in the `object-storage` point under a retention class that never expires them.
 
 **Projects.** `POST /v1/admin/projects` (the owner) registers a project definition on the store; a repeat of the latest revision is a 200, a change is the next
 revision. A code host adapter is not needed to start a task: with none registered a start does not check the repository's host (and no pull request can be opened yet).
@@ -300,7 +315,7 @@ tails are content-addressed, and the pack is the one object a re-check of the sa
   a merge made on the host is seen by the next tracking pass and recorded (see "Merge tracking by polling").
 - **A GitHub client for the laptop.** No `GitHubCodeHostProvider` exists for a personal token or `gh` (L7A-4): Cloud's client is a GitHub App client. Until one passes
   `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself, given only for a repository on github.com over https and only to clone (no push credential is given yet; lane L11 brings a scoped one).
-- **A budget on the model proxy.** The task flow grants a step the install's model (the first of Anthropic and OpenAI with a key) and no budget: the flow has no run limit before a price table exists, and Code's price table is empty. See "Model calls" below; `operationEnded` is called when an operation settles.
+- **A budget on the model proxy.** The task flow grants a step the install's model (see "Choosing the model") and no budget: the flow has no run limit before a price table exists, and Code's price table is empty. See "Model calls" below; `operationEnded` is called when an operation settles.
 - **Lessons** and **design review** answer "nothing there"; **notifications** need a `channel` adapter (none on a laptop).
 - **A CLI sign-in to the local runtime.** The CLI and the MCP server sign in the way a hosted install does (an environment and refresh tokens); a local profile for them is not
   written. The routes work with `Authorization: Bearer <session token>`.

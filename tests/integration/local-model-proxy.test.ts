@@ -7,6 +7,7 @@ import type { Context } from "@earendil-works/pi-ai";
 import { ROUTE_PROVIDER, createModelRuntimeWithFallback } from "../../packages/model-runtime/src/index.js";
 import { modelAccessSource } from "../../packages/worker/src/model-access.js";
 import { CAPABILITY_HEADER, MODEL_PROXY_PREFIX, WORKSPACE_HEADER, localRoute } from "../../packages/broker/src/local/model-proxy/index.js";
+import { defaultModelOf } from "../../packages/broker/src/local/model-choice.js";
 import {
   OPERATION, OTHER_OPERATION, OTHER_WORKSPACE, WORKSPACE, askForToken, loadGatewayRelay, startModelProxyWorld, type ModelProxyWorld,
 } from "../support/model-proxy-world.js";
@@ -474,6 +475,31 @@ describe("through the worker's egress gateway, with the worker's own client", ()
     expect(w.metered).toHaveLength(1);
     expect(w.metered[0]!.result.cost?.micros).toBeGreaterThan(0);
     expect(everythingVisible(w, { text: JSON.stringify(reply) })).not.toContain(w.keys.anthropic);
+  });
+
+  it("runs the worker's model library against OpenRouter's default Claude model in the chat shape, and the key never reaches the worker (L13)", async () => {
+    const w = await world();
+    const gateway = await throughGateway(w);
+    const source = modelAccessSource({ controlPlaneUrl: gateway.url, capability: w.capability() });
+    const model = defaultModelOf("openrouter");
+    const { route, workerRoute } = localRoute("openrouter", model);
+    w.allowed.set(OPERATION, [route]);
+    const environment: NodeJS.ProcessEnv = { AGENTX_MODEL_PROXY_URL: `${gateway.url}${MODEL_PROXY_PREFIX}` };
+    const resolved = await createModelRuntimeWithFallback({ provider: "openrouter", modelId: model }, "worker", {
+      environment, proxy: { baseUrl: environment.AGENTX_MODEL_PROXY_URL!, apiKey: async () => (await source()).apiKey, route: workerRoute },
+    });
+    expect(resolved.model).toMatchObject({ provider: ROUTE_PROVIDER, modelId: route.alias });
+    const context: Context = { messages: [{ role: "user", content: "say hello", timestamp: 0 }], tools: [{ name: "read_file", description: "Read a file", parameters: Type.Object({ path: Type.String() }) }] };
+    const reply = await resolved.runtime.completeSimple(resolved.runtime.getModel(resolved.model.provider, resolved.model.modelId)!, context);
+    expect(JSON.stringify(reply.content)).toContain("hello");
+    // The proxy's guard accepted everything the worker's client sent, and OpenRouter saw the provider's own model id and the owner's key.
+    expect(w.provider.calls).toHaveLength(1);
+    expect(w.provider.calls[0]).toMatchObject({ provider: "openrouter", path: "/v1/chat/completions" });
+    expect(w.provider.calls[0]!.body.model).toBe(model);
+    expect(w.provider.calls[0]!.headers["authorization"]).toBe(`Bearer ${w.keys.openrouter}`);
+    expect(w.provider.calls[0]!.body).not.toHaveProperty("fallbacks");
+    expect(JSON.stringify(reply)).not.toContain(w.keys.openrouter);
+    expect(everythingVisible(w, { text: JSON.stringify(reply) })).not.toContain(w.keys.openrouter);
   });
 
   it("stamps the worker's own workspace on every call, whatever the worker sends, so another worker's token is refused", async () => {

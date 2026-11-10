@@ -7,6 +7,7 @@ import { IMPLICIT_COMPANY_ID, type ModelKeyStore } from "@agentx/contracts";
 import {
   KEYS_FILE_NAME,
   LOCAL_MODEL_PROVIDERS,
+  chooseLocalModel,
   LOCAL_WORKER_IMAGE_BUILD_HINT,
   LOCAL_HOST,
   assertStateDirectoryLocation,
@@ -81,22 +82,35 @@ async function checkDocker(services: UpCheckServices): Promise<UpCheck[]> {
   return checks;
 }
 
+/** The owner's config, read without writing anything; a config that cannot be read is `undefined` (the config check says why). */
+async function readOwnerConfig(services: UpCheckServices): Promise<ReturnType<typeof parsePluginConfigText> | undefined> {
+  try {
+    const location = resolveConfigLocation({ stateDirectory: services.stateDirectory, configPath: services.configPath, cwd: services.cwd ?? process.cwd() });
+    const file = await readOwnerFile(location.path, { private: false, label: "plug-in config" });
+    return file === undefined ? undefined : parsePluginConfigText(file.text);
+  } catch {
+    return undefined;
+  }
+}
+
 async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
   const keys = services.keys ?? createLocalModelKeyStore(services.stateDirectory, services.environment);
   const keyFile = join(services.stateDirectory, KEYS_FILE_NAME);
+  let found: string[];
   try {
-    const found = (await keys.providers(IMPLICIT_COMPANY_ID)).filter((provider) => (LOCAL_MODEL_PROVIDERS as readonly string[]).includes(provider));
-    if (found.length > 0) return { id: "model-key", status: "ok", summary: `A model key is set for ${found.join(", ")}.` };
+    found = (await keys.providers(IMPLICIT_COMPANY_ID)).filter((provider) => (LOCAL_MODEL_PROVIDERS as readonly string[]).includes(provider));
   } catch (error) {
     // The key store's messages never quote the file; they say what is wrong with it.
     return { id: "model-key", status: "fail", summary: error instanceof Error ? error.message : "the model key file could not be read", fix: `Fix the file's permissions with \`chmod 600 ${keyFile}\`, or keep the key in the ANTHROPIC_API_KEY environment variable instead.` };
   }
-  return {
-    id: "model-key",
-    status: "fail",
-    summary: "No model key was found.",
-    fix: `Set ANTHROPIC_API_KEY (or OPENAI_API_KEY, OPENROUTER_API_KEY) in your environment, or put {"anthropic": "<your key>"} in ${keyFile} and run \`chmod 600 ${keyFile}\`.`,
-  };
+  // Lane L13: the same rule the task flow uses (the config's `model` setting, else Anthropic, OpenAI, OpenRouter), so this says what a task step will call.
+  const picked = chooseLocalModel(found, (await readOwnerConfig(services))?.model);
+  if (picked.ok) {
+    const why = picked.source === "setting" ? "the \"model\" setting in your config" : `the default for ${found.length === 1 ? "the only key found" : "the first key found"}`;
+    return { id: "model-key", status: "ok", summary: `A model key is set for ${found.join(", ")}. Task steps will use ${picked.provider} ${picked.model} (${why}).` };
+  }
+  if (picked.problem === "setting-without-key") return { id: "model-key", status: "fail", summary: picked.summary, fix: picked.fix };
+  return { id: "model-key", status: "fail", summary: "No model key was found.", fix: `${picked.fix} A key file goes at ${keyFile} as {"anthropic": "<your key>"} (or "openai", "openrouter"); then run \`chmod 600 ${keyFile}\`.` };
 }
 
 /**
@@ -105,13 +119,7 @@ async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
  */
 /** The owner's `allowBroadTokenForWorker` setting, read without writing anything; a config that cannot be read means "not allowed" (the config check says why). */
 async function broadTokenAllowed(services: UpCheckServices): Promise<boolean> {
-  try {
-    const location = resolveConfigLocation({ stateDirectory: services.stateDirectory, configPath: services.configPath, cwd: services.cwd ?? process.cwd() });
-    const file = await readOwnerFile(location.path, { private: false, label: "plug-in config" });
-    return file !== undefined && parsePluginConfigText(file.text).allowBroadTokenForWorker === true;
-  } catch {
-    return false;
-  }
+  return (await readOwnerConfig(services))?.allowBroadTokenForWorker === true;
 }
 
 async function checkGithub(services: UpCheckServices): Promise<UpCheck> {
