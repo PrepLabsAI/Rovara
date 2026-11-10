@@ -335,6 +335,8 @@ describe("the company's sign-in setting", () => {
   });
 });
 
+const refusedMessage = async (run: () => Promise<unknown>): Promise<string> => { try { await run(); } catch (error) { const e = error as { code?: string; message: string }; return e.code !== undefined && e.message.startsWith(`${e.code}: `) ? e.message.slice(e.code.length + 2) : e.message; } return "merged"; };
+
 describe("A1 and A3 on the merge press", () => {
   async function highRiskWorld(approvers: Approvers) {
     const world = await mergeWorld();
@@ -412,6 +414,29 @@ describe("A1 and A3 on the merge press", () => {
     expect(byComment).toContain("Nobody approved");
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
     expect((await pressMerge(deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared) })).status).toBe("MERGED");
+  });
+
+  it("the presser half of M1 end to end: a presser whose SECOND account is the only approver cannot press Merge (review N1)", async () => {
+    const world = await mergeWorld({ allowSelfApproval: false });
+    await world.seedTracking();
+    const priya = world.prs[0]!.model.accounts.get("priya")!.hostUserId;
+    const people = (accounts: string[]) => ({
+      requestersOf: async () => ["requester-account"],
+      linkedAmong: async (_org: unknown, ids: readonly string[]) => new Set(ids),
+      nonWritersAmong: async () => new Set<string>(),
+      hostAccountOf: async () => accounts[0],
+      hostAccountsOf: async () => accounts,
+    });
+    const press = async (accounts: string[]) => {
+      const deps = { ...world.deps, people: people(accounts) as never };
+      const prepared = await prepareMerge(deps, { taskId: MERGE_TASK, requestId: world.requestId(), presserPersonId: "presser-1" });
+      return pressMerge(deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared), presserPersonId: "presser-1" });
+    };
+    // The presser's accounts are "999" and the approver's: refused, nothing merged.
+    expect(await refusedMessage(() => press(["999", priya!]))).toBe("You approved this pull request, so someone else must press Merge.");
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
+    // Control: the presser has only "999" (a different person from the approver): it merges.
+    expect((await press(["999"])).status).toBe("MERGED");
   });
 
   it("the merge press also checks the identity capability for 'any active sign-in' (review M3), and a malformed window (review L3)", async () => {
