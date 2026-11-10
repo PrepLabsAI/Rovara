@@ -36,6 +36,8 @@ const POLL_PAGES_MAX = 10;
 const THREADS_PK = "COMMENT_THREADS";
 const CURSORS_PK = "COMMENT_CURSOR";
 const NOTICES_PK = "COMMENT_NOTICE";
+/** A thread whose read fails waits this many poll intervals for each failure, up to this long. */
+const FAILURE_BACKOFF_MAX_MS = 15 * 60_000;
 /** A cursor is kept this long after the last poll of its thread. */
 const CURSOR_KEEP_SECONDS = 30 * 86_400;
 
@@ -288,7 +290,8 @@ export function createLocalComments(options: LocalCommentsOptions): LocalComment
       const workflow = task?.workflow;
       const offer = task === undefined || workflow === undefined ? undefined : approvalOfferOf(task.taskId, workflow);
       if (offer === undefined) continue;
-      const key = { pk: NOTICES_PK, sk: `${thread.taskId}#${offer.artifactDigest}` };
+      // The claim is for this version ON THIS thread: a thread the owner moved the plan to gets its own notice (N6).
+      const key = { pk: NOTICES_PK, sk: `${thread.taskId}#${offer.artifactDigest}#${thread.repositoryKey}#${String(thread.number)}` };
       const claimed = await store.put({ item: jsonOf({ ...key, entityType: "COMMENT_NOTICE", taskId: thread.taskId, repositoryKey: thread.repositoryKey, number: thread.number, at: iso(), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(now() / 1000) + CURSOR_KEEP_SECONDS }), condition: when.absent() });
       if (!claimed.applied) continue;
       const short = shortDigest(offer.artifactDigest);
@@ -346,7 +349,8 @@ export function createLocalComments(options: LocalCommentsOptions): LocalComment
         // Round-robin: the threads read longest ago go first, so with more threads than one poll can read every thread is reached in turn.
         const cursors = new Map((await queryAll(store, { pk: CURSORS_PK })).map((row) => [String(row["sk"]), row]));
         const ordered = [...unique.values()].sort((left, right) => Number(cursors.get(`${left.repositoryKey}#${String(left.number)}`)?.["polledAt"] ?? 0) - Number(cursors.get(`${right.repositoryKey}#${String(right.number)}`)?.["polledAt"] ?? 0));
-        for (const thread of ordered.slice(0, options.threadsPerPoll ?? POLL_MAX_THREADS)) {
+        const due = ordered.filter((thread) => Number(cursors.get(`${thread.repositoryKey}#${String(thread.number)}`)?.["retryAfter"] ?? 0) <= at);
+        for (const thread of due.slice(0, options.threadsPerPoll ?? POLL_MAX_THREADS)) {
           if (budget.signal.aborted) break;
           result.threads += 1;
           const cursor = cursors.get(`${thread.repositoryKey}#${String(thread.number)}`);
@@ -370,8 +374,11 @@ export function createLocalComments(options: LocalCommentsOptions): LocalComment
           } catch (error) {
             const limitedUntil = hostRateLimitRetryAt(error);
             if (limitedUntil !== undefined) { options.pauseUntil?.(limitedUntil); break; }
-            // A comment whose command failed is given back (the handler removes its claim) and is read again by the next poll: the cursor stays before it.
+            // A comment whose command failed is given back (the handler removes its claim) and is read again by the next poll: the cursor stays before it. But the thread is marked as read now, and waits
+            // longer after each failure, so a thread that always fails goes to the back of the line and cannot starve the others (N5).
             log({ component: "pr_comments", event: "poll.thread_failed", error: error instanceof Error ? error.name : "unknown" });
+            const failures = Number(cursor?.["failures"] ?? 0) + 1;
+            await store.put({ item: jsonOf({ ...cursorKey(thread), entityType: "COMMENT_CURSOR", since, polledAt: at, failures, retryAfter: at + Math.min(failures * pollMs, FAILURE_BACKOFF_MAX_MS), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(now() / 1000) + CURSOR_KEEP_SECONDS }) }).catch(() => undefined);
             continue;
           } finally {
             seen.clear();

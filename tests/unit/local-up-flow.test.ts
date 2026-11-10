@@ -2296,6 +2296,57 @@ describe("rovara up: the L12 review's fixes (H1 to H3, M1 to M3, lows, decision 
     expect(repliesOn(cr)).toEqual(["Stopped the work on this change."]);
   });
 
+  it("N5: a thread whose read fails is marked as read and waits longer each time, so it cannot starve the others", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now, commentThreadsPerPoll: 1 });
+    h.model.setAccount("dana", "write");
+    const older = await toPlanReview(h, "11111111-1111-4111-8111-1111111111a7");
+    const newer = await toPlanReview(h, "11111111-1111-4111-8111-1111111111b8");
+    const good = thread(h, "good-thread");
+    const bad = thread(h, "bad-thread");
+    await attachThreadOnPage(h, older.taskId, Number(good.id));
+    await attachThreadOnPage(h, newer.taskId, Number(bad.id));
+    at(h, clock, 5_000);
+    h.model.addDiscussionComment(good.id, "dana", "/rovara changes: change the older one");
+    // The newer task's thread is first in line and its read always fails.
+    const original = h.host.comments.bind(h.host);
+    let badReads = 0;
+    h.host.comments = async (ref, options, scope, budget) => { if (ref.id === bad.id) { badReads += 1; throw new Error("the host failed"); } return original(ref, options, scope, budget); };
+    await poll(h, clock);
+    expect(badReads).toBe(1);
+    const row = await store(h).get({ pk: "COMMENT_CURSOR", sk: `example/demo#${bad.id}` });
+    expect(row).toMatchObject({ failures: 1 });
+    expect(typeof row?.["polledAt"]).toBe("number");
+    // The next poll reaches the thread that works (with one thread a poll, the failing one would otherwise be first for ever) and the failing one waits.
+    await poll(h, clock);
+    expect((await taskRecord(h, older.taskId)).workflow).toMatchObject({ stage: "PLAN" });
+    expect(badReads).toBe(1);
+    // A thread that reads again is back in line and forgets its failures.
+    h.host.comments = original;
+    clock.advance(10 * MINUTE);
+    await poll(h, clock);
+    await poll(h, clock);
+    expect((await store(h).get({ pk: "COMMENT_CURSOR", sk: `example/demo#${bad.id}` }))?.["failures"]).toBeUndefined();
+  });
+
+  it("N6: the notice of a version is claimed for the task, the version AND the thread, so a thread the plan moved to gets its own notice", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const planned = await toPlanReview(h);
+    const first = thread(h, "first-thread");
+    const second = thread(h, "second-thread");
+    const short = shortDigest((await offerOf(h, planned.taskId)).artifactDigest);
+    await attachThreadOnPage(h, planned.taskId, Number(first.id));
+    await poll(h, clock);
+    expect(repliesOn(first)).toEqual([noticeOf(short)]);
+    // The owner moves the plan to another thread: the same version is announced there, once.
+    expect(await attachThreadOnPage(h, planned.taskId, Number(second.id))).toContain("n=attached");
+    await poll(h, clock);
+    await poll(h, clock);
+    expect(repliesOn(second)).toEqual([noticeOf(short)]);
+    expect(repliesOn(first)).toEqual([noticeOf(short)]);
+  });
+
   it("51: a bot's comment is not a command (the adapter says isBot), and the merge observation names a neutral source", async () => {
     const clock = movingClock();
     const h = await launch({ host: true, now: clock.now });
