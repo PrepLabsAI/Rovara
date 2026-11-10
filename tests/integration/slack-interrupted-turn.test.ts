@@ -1,6 +1,7 @@
 // Issue 157: a deploy that stops the Slack service mid-turn. The old task hands the turn off, and
 // the redelivered message re-attaches to the worker operation instead of running the model again.
 import { describe, expect, it, vi } from "vitest";
+import { SLACK_FORMAT } from "../../packages/slack-service/src/slack-format.js";
 import {
   CONFIRMATION_TTL_MS,
   type PendingConfirmation,
@@ -15,7 +16,7 @@ import {
   ABANDONED_TASK_CANCEL_FAILED_TEXT, ABANDONED_TASK_FINISHED_TEXT, ABANDONED_TASK_TEXT, CONTINUE_TEXT, HANDOFF_APPROVED_TEXT, HANDOFF_FINAL_CANCEL_FAILED_TEXT,
   HANDOFF_FINAL_FINISHED_TEXT, HANDOFF_FINAL_IDLE_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, type ActiveTurn, type TurnNote,
 } from "../../packages/slack-service/src/interrupted-turn.js";
-import { processSlackRequest, type CancelOutcome, type ProcessorDependencies, type ThreadServiceApi, type ThreadState, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type CancelOutcome, type ProcessorDependencies, type ThreadServiceApi, type ThreadState, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { agentXError } from "../../packages/contracts/src/index.js";
 import { preparationFailedMessage } from "../../packages/slack-service/src/messages.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -385,8 +386,8 @@ describe("after the hand-off (review fixes)", () => {
     finishSetup("FAILED");
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(posts).toEqual(before);
-    expect(posts).not.toContain(preparationFailedMessage("FAILED"));
-    expect(posts).not.toContain(preparationFailedMessage("FAILED", setupError));
+    expect(posts).not.toContain(preparationFailedMessage("FAILED", undefined, SLACK_FORMAT));
+    expect(posts).not.toContain(preparationFailedMessage("FAILED", setupError, SLACK_FORMAT));
     expect(logs).toContainEqual({ event: "turn.post_after_handoff", fields: { eventId: "EvWORK000031" } });
   });
 

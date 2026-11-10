@@ -1,17 +1,18 @@
 // Spec 062 Phase 4: what the channel API queued runs through the Slack processor; replies leave as adapter events, a
 // decision answers exactly one confirmation, and a stepped-up confirmation is never approved from the adapter.
 import { describe, expect, it, vi } from "vitest";
+import { SLACK_FORMAT } from "../../packages/slack-service/src/slack-format.js";
 import {
   CONFIRMATION_TTL_MS, ChannelEventSchema, conversationSubject,
   type ChannelEvent, type ChannelQueueItem, type PendingConfirmation, type SlackThreadWorkspaceResult,
 } from "../../packages/contracts/src/index.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import { NO_LONGER_PENDING_TEXT, STEP_UP_TEXT, checkConfirmation, confirmationApprovalKind, confirmationDigest } from "../../packages/slack-service/src/confirmations.js";
-import { SLACK_ONLY_COMMAND_TEXT, channelRequestHandler, channelTurn, readChannelQueueItem } from "../../packages/slack-service/src/channel-requests.js";
-import { PLAIN_FORMAT, SLACK_FORMAT } from "../../packages/slack-service/src/conversation-format.js";
+import { CHATGPT_ELSEWHERE_TEXT, SLACK_ONLY_COMMAND_TEXT, channelRequestHandler, channelTurn, readChannelQueueItem } from "../../packages/slack-service/src/channel-requests.js";
+import { PLAIN_FORMAT } from "../../packages/slack-service/src/conversation-format.js";
 import { confirmationMessage } from "../../packages/slack-service/src/confirmations.js";
 import { limitMessage, preparationFailedMessage } from "../../packages/slack-service/src/messages.js";
-import type { TurnInput } from "../../packages/slack-service/src/processor.js";
+import type { TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const conversation = { channel: "whatsapp", tenant: "+14155550100", space: "group=AbC-12_x", thread: "main" };
@@ -98,6 +99,16 @@ describe("an adapter message", () => {
   });
 });
 
+describe("ChatGPT commands in an adapter conversation (FR-041)", () => {
+  it.each(["connect chatgpt", "ChatGPT status", "disconnect my chatgpt."])("answers %s with the CLI commands, says nothing about the connection, and runs no turn", async (text) => {
+    const { events, turns, run } = harness();
+    await run({ ...message, message: { ...message.message, text } });
+    expect(turns).toEqual([]);
+    expect(events.map((event) => event.type)).toEqual(["message", "done"]);
+    expect(events[0]).toMatchObject({ data: { text: CHATGPT_ELSEWHERE_TEXT } });
+  });
+});
+
 describe("an adapter decision (FR-032)", () => {
   it("approves the confirmation it names and runs the confirmed calls", async () => {
     const { confirmations, turns, run } = harness(async () => "Closed TRK-9.");
@@ -142,7 +153,7 @@ describe("an adapter decision (FR-032)", () => {
     const store = createDynamoConfirmationStore(db, "threads", () => postedAt + 180_000);
     await store.save(subject, pending("admin"));
     const posts: string[] = [];
-    const check = await checkConfirmation({
+    const check = await checkConfirmation({ format: SLACK_FORMAT,
       message: { eventId: "wamid.HBgL3", text: "yes", userId: actor.userId, receivedAt: "2026-11-08T10:02:00.000Z" },
       subject, store, post: async (text) => { posts.push(text); }, log: () => undefined, now: postedAt + 180_000,
       mayApprove: (confirmation) => confirmationApprovalKind(confirmation) !== "admin",
@@ -170,8 +181,8 @@ describe("helpers", () => {
     expect(plain).toMatch(/^Before I go ahead, please confirm:\n• tracker__close_item: title=a <b> & c \(destructive\)\n/);
     expect(plain).toContain("reply `yes`");
     expect(plain).not.toMatch(/<@|@AgentX|Slack/);
-    expect(confirmationMessage(confirmation)).toBe(confirmationMessage(confirmation, SLACK_FORMAT));
-    expect(confirmationMessage(confirmation)).toMatch(/^<@\+919876544821>, before I go ahead/);
+    expect(confirmationMessage(confirmation, SLACK_FORMAT)).toBe(confirmationMessage(confirmation, SLACK_FORMAT));
+    expect(confirmationMessage(confirmation, SLACK_FORMAT)).toMatch(/^<@\+919876544821>, before I go ahead/);
     expect(preparationFailedMessage("FAILED", undefined, PLAIN_FORMAT)).toBe("AgentX could not set up this conversation's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Message me again in this conversation to start fresh.");
     expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [] }, PLAIN_FORMAT)).toBe("You already have 3 AgentX workspaces, the most one person can have, so I can't start a new one. Send `close this workspace` in a conversation you no longer need, or ask an administrator to raise the limit.");
   });

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { SlackThreadWorkspaceResultSchema, type SlackRequestMessage } from "../../packages/contracts/src/slack.js";
 import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-api.js";
-import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/slack-processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createFixtureDirectory } from "../fixtures/index.js";

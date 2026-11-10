@@ -5,9 +5,9 @@ import {
   SlackPageCommentMessageSchema, SlackRequestMessageSchema, pageCommentEventId, type SlackCommentAnsweredRequest, type SlackPageCommentMessage, type SlackThreadWorkspaceResult,
 } from "../../packages/contracts/src/index.js";
 import { NO_TEXT_RESPONSE } from "../../packages/orchestrator/src/orchestrator.js";
-import { processGroup, type QueueClient } from "../../packages/slack-service/src/consumer.js";
+import { processGroup, type QueueClient } from "../../packages/slack-service/src/slack-consumer.js";
 import { handlePageComment, PAGE_COMMENT_ANSWER_MAX_CHARS } from "../../packages/slack-service/src/page-comment.js";
-import type { ThreadServiceApi, TurnInput } from "../../packages/slack-service/src/processor.js";
+import type { ThreadServiceApi, TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { runTaskAnswer } from "../../packages/slack-service/src/task-question.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
 

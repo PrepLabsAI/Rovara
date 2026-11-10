@@ -10,7 +10,7 @@ import type {
   ProjectModelOptions,
   SlackRequestMessage,
 } from "../../packages/contracts/src/index.js";
-import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/slack-processor.js";
 import {
   EVAL_BATCH_CLAIM_MS,
   EVAL_BATCH_FAILURE_BACKOFF_MS,

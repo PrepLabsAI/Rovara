@@ -4,8 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SLACK_QUEUED_BEHIND_ATTRIBUTE, queuedBehindAttributes, queuedBehindOf, type SlackRequestMessage, type SlackThreadWorkspaceResult,
 } from "../../packages/contracts/src/index.js";
-import { processGroup, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/consumer.js";
-import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+import { processGroup, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/slack-consumer.js";
+import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/slack-processor.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
 const workspaceId = "11111111-1111-4111-8111-111111111111";
