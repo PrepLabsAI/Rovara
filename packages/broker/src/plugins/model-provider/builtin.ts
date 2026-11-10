@@ -58,7 +58,12 @@ export function assertBuiltinIdsKept(provider: ModelProviderAdapter): void {
       throw new ModelProviderError(provider.kind, "a built-in provider's id cannot point at another address or sign in another way; use another provider id");
     }
   }
-  if (provider.kind === "amazon-bedrock" && (provider.signIn.kind !== "aws-sigv4" || !new URL(provider.address).hostname.startsWith("bedrock-runtime."))) {
-    throw new ModelProviderError(provider.kind, "the id amazon-bedrock is for AWS sign-in to a Bedrock runtime address; use another provider id");
+  if (provider.kind === "amazon-bedrock") {
+    // A strict host: bedrock-runtime (or its fips name) in the signing region, nothing in between (`bedrock-runtime.s3.amazonaws.com` is not Bedrock).
+    const region = provider.signIn.kind === "aws-sigv4" ? provider.signIn.region.replaceAll(/[^a-z0-9-]/gu, "") : "";
+    const strict = new RegExp(`^bedrock-runtime(-fips)?\\.${region}\\.amazonaws\\.com(\\.cn)?$`, "u");
+    if (provider.signIn.kind !== "aws-sigv4" || !strict.test(new URL(provider.address).hostname)) {
+      throw new ModelProviderError(provider.kind, "the id amazon-bedrock is for AWS sign-in to a Bedrock runtime address in the signing region; use another provider id");
+    }
   }
 }

@@ -16,7 +16,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { TASK_BUDGET_EXCEEDED_PREFIX, providerFormat, type AdapterRegistry, type AgentXError, type Cost, type Metering, type ModelKeyStore, type ModelProviderAdapter } from "@agentx/contracts";
 import type { BrokerResponse } from "../../handler.js";
 import { BUILTIN_MODEL_PROVIDERS } from "../../plugins/model-provider/builtin.js";
-import { credentialFix, credentialOf, hasCredential } from "./credentials.js";
+import { credentialFix, hasCredential } from "./credentials.js";
 import {
   PROXY_PATH_API, RequestNotAllowed, checkRequestBody, checkRequestHeaders, upstreamTarget, type ProviderEndpoints,
 } from "./providers.js";

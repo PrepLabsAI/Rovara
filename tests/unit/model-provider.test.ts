@@ -281,6 +281,29 @@ describe("the AWS credential source (review L1, L2)", () => {
     }
   });
 
+  it("resolves a profile identity through the profile loader, and not through the role or the default chain", async () => {
+    const calls = { built: [] as string[], asked: 0 };
+    const source = createAwsCredentialSource({ kind: "profile", profile: "rovara-bedrock" }, "us-west-2", { loaders: loaders(calls, async () => value()) });
+    await expect(source.resolve()).resolves.toMatchObject({ accessKeyId: "AKIAEXAMPLE" });
+    expect(calls.built).toEqual(["profile:rovara-bedrock"]);
+  });
+
+  it("shares one refresh between calls that find the credential expired together (single flight)", async () => {
+    let now = 5_000_000;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const calls = { built: [] as string[], asked: 0 };
+    const source = createAwsCredentialSource({ kind: "role", roleArn: "arn:aws:iam::123456789012:role/r" }, "us-west-2", { loaders: loaders(calls, async () => { await gate; return value(new Date(now + 15 * 60_000)); }), now: () => now });
+    const together = Promise.all([source.resolve(), source.resolve(), source.resolve(), source.resolve()]);
+    release();
+    await together;
+    expect(calls.asked).toBe(1);
+    now += 15 * 60_000;
+    release();
+    await Promise.all([source.resolve(), source.resolve()]);
+    expect(calls.asked).toBe(2);
+  });
+
   it("is what the Bedrock provider reports as its problem", async () => {
     const provider = bedrockModelProvider({ region: "us-west-2", identity: { kind: "profile", profile: "p" }, loaders: loaders({ built: [], asked: 0 }, async () => { throw new Error("x"); }) });
     expect(await provider.credential!()).toBeUndefined();
@@ -313,6 +336,12 @@ describe("provider ids and AWS hosts (review L4, L6)", () => {
     expect(() => assertBuiltinIdsKept({ ...ANTHROPIC_PROVIDER, address: "https://elsewhere.example.test" })).toThrow(/another address/u);
     expect(() => assertBuiltinIdsKept({ ...OPENAI_PROVIDER, signIn: { kind: "named-header", header: "api-key" } })).toThrow(/another way/u);
     expect(() => assertBuiltinIdsKept({ ...gateway, kind: "amazon-bedrock" })).toThrow(/Bedrock/u);
+    const aws = (address: string): ModelProviderAdapter => ({ ...gateway, kind: "amazon-bedrock", address, signIn: { kind: "aws-sigv4", region: "us-west-2", service: "bedrock" } });
+    expect(() => assertBuiltinIdsKept(aws("https://bedrock-runtime.us-west-2.amazonaws.com"))).not.toThrow();
+    expect(() => assertBuiltinIdsKept(aws("https://bedrock-runtime-fips.us-west-2.amazonaws.com"))).not.toThrow();
+    for (const address of ["https://bedrock-runtime.s3.us-west-2.amazonaws.com", "https://bedrock-runtime.evil.us-west-2.amazonaws.com", "https://bedrock-runtime.us-east-1.amazonaws.com", "https://x.bedrock-runtime.us-west-2.amazonaws.com"]) {
+      expect(() => assertBuiltinIdsKept(aws(address)), address).toThrow(/signing region/u);
+    }
     expect(() => assertBuiltinIdsKept(bedrockModelProvider({ region: "us-west-2", credentials: async () => ({ accessKeyId: "A", secretAccessKey: "S" }) }))).not.toThrow();
   });
 
@@ -328,7 +357,7 @@ describe("provider ids and AWS hosts (review L4, L6)", () => {
     const aws = (address: string, region = "us-west-2"): ModelProviderAdapter => ({ ...gateway, kind: "aws-gateway", address, signIn: { kind: "aws-sigv4", region, service: "bedrock" } });
     expect(() => assertModelProvider(aws("https://bedrock-runtime.us-west-2.amazonaws.com"))).not.toThrow();
     expect(() => assertModelProvider(aws("https://bedrock-runtime.cn-north-1.amazonaws.com.cn", "cn-north-1"))).not.toThrow();
-    for (const address of ["https://models.example.test", "https://amazonaws.com.example.test", "https://bedrock-runtime.us-east-1.amazonaws.com", "http://127.0.0.1:9", "https://evil-amazonaws.com"]) {
+    for (const address of ["https://models.example.test", "https://amazonaws.com.example.test", "https://bedrock-runtime.us-east-1.amazonaws.com", "http://127.0.0.1:9", "https://evil-amazonaws.com", "https://bedrock-runtime.us-west-2.example.test"]) {
       expect(() => assertModelProvider(aws(address)), address).toThrow();
     }
   });

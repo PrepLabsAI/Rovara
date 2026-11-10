@@ -85,6 +85,7 @@ export function createAwsCredentialSource(identity: AwsIdentity, region: string,
   const now = options.now ?? Date.now;
   let built: Promise<AwsCredentialProvider> | undefined;
   let cached: { value: AwsCredentialValue; until: number } | undefined;
+  let inflight: Promise<AwsCredentialValue> | undefined;
   let problem: string | undefined;
   const build = (): Promise<AwsCredentialProvider> => {
     if (identity.kind === "profile") return loaders.profile(identity.profile);
@@ -93,20 +94,26 @@ export function createAwsCredentialSource(identity: AwsIdentity, region: string,
   };
   return {
     problem: () => problem,
-    async resolve() {
-      if (cached !== undefined && cached.until > now()) return cached.value;
-      try {
-        // Built once. A build that failed (a missing module) is tried again on the next call.
-        built ??= build().catch((error: unknown) => { built = undefined; throw error; });
-        const value = await (await built)();
-        cached = { value, until: value.expiration === undefined ? now() + NO_EXPIRY_CACHE_MS : value.expiration.getTime() - REFRESH_BEFORE_MS };
-        problem = undefined;
-        return value;
-      } catch (error) {
-        cached = undefined;
-        problem = error instanceof AwsCredentialSetupError ? error.message : failureSentence(identity);
-        throw new AwsCredentialSetupError(problem);
-      }
+    resolve() {
+      if (cached !== undefined && cached.until > now()) return Promise.resolve(cached.value);
+      // Single flight: calls that find the credential expired at the same time share one refresh (one AssumeRole), not one each.
+      inflight ??= (async () => {
+        try {
+          // Built once. A build that failed (a missing module) is tried again on the next call.
+          built ??= build().catch((error: unknown) => { built = undefined; throw error; });
+          const value = await (await built)();
+          cached = { value, until: value.expiration === undefined ? now() + NO_EXPIRY_CACHE_MS : value.expiration.getTime() - REFRESH_BEFORE_MS };
+          problem = undefined;
+          return value;
+        } catch (error) {
+          cached = undefined;
+          problem = error instanceof AwsCredentialSetupError ? error.message : failureSentence(identity);
+          throw new AwsCredentialSetupError(problem);
+        } finally {
+          inflight = undefined;
+        }
+      })();
+      return inflight;
     },
   };
 }
