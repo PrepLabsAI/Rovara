@@ -36,8 +36,8 @@ export function parseRovaraComment(body: string): RovaraComment {
     return { kind: "file", numbers };
   }
   if (keyword === "approve") {
-    // `/rovara approve`, `/rovara approve <digest>`, `/rovara approve owner/name`, `/rovara approve owner/name <digest>` (the digest is 6 to 12 hex characters).
-    const parts = /^(?:\s+`?([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})`?)?(?:\s+`?([0-9a-fA-F]{6,12})`?)?\s*$/u.exec(match[2] ?? "");
+    // `/rovara approve`, `/rovara approve <digest>`, `/rovara approve owner/name`, `/rovara approve owner/name <digest>` (the digest is 8 to 12 hex characters).
+    const parts = /^(?:\s+`?([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})`?)?(?:\s+`?([0-9a-fA-F]{8,12})`?)?\s*$/u.exec(match[2] ?? "");
     if (parts === null) return { kind: "approve" };
     return { kind: "approve", ...(parts[1] === undefined ? {} : { repo: parts[1] }), ...(parts[2] === undefined ? {} : { digest: parts[2].toLowerCase() }) };
   }

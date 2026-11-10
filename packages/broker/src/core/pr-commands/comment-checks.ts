@@ -7,7 +7,7 @@
 //   - it is as it was first written: a comment the host records an edit of is never a command                              -> `comment_edited`
 //   - it is a command of the right kind for the answer: `/rovara approve` for an approval, `/rovara changes: ...` for a request for changes -> `no_approving_comment`
 //   - it names, if it names a repository, this one                                                                         -> `comment_on_other_change`
-//   - an approval names the version it approves (`/rovara approve 3f2a9c`: the first characters of the digest of the version
+//   - an approval names the version it approves (`/rovara approve 3f2a9c00`: the first characters of the digest of the version
 //     Rovara posted a notice for), so it approves the version the person read and not a newer one                          -> `comment_wrong_version`
 //   - its author is a person (not a bot) and not Rovara itself (the reply marker)                                          -> `no_approving_comment`
 //   - its author may write to the repository (the Approvers seam checks `permission`), and the comment is spent once (the gate marks it used)
@@ -67,10 +67,11 @@ export function checkCommentProof(input: {
   return { ok: true };
 }
 
-/** The short form of a version's digest that Rovara names in its notice and a person types back: the first 6 characters. */
-export const shortDigest = (artifactDigest: string): string => artifactDigest.replace(/^sha256[-:]/u, "").slice(0, 6).toLowerCase();
+/** The short form of a version's digest that Rovara names in its notice and a person types back: the first 8 hex characters (a true prefix, 32 bits). */
+export const SHORT_DIGEST_CHARS = 8;
+export const shortDigest = (artifactDigest: string): string => artifactDigest.replace(/^sha256[-:]/u, "").slice(0, SHORT_DIGEST_CHARS).toLowerCase();
 
-/** Whether what a person typed names this version: at least 6 hex characters, and the start of the digest. */
+/** Whether what a person typed names this version: at least 8 hex characters, and the start of the digest. */
 export function digestNamed(typed: string | undefined, artifactDigest: string): boolean {
-  return typed !== undefined && typed.length >= 6 && artifactDigest.replace(/^sha256[-:]/u, "").toLowerCase().startsWith(typed.toLowerCase());
+  return typed !== undefined && typed.length >= SHORT_DIGEST_CHARS && artifactDigest.replace(/^sha256[-:]/u, "").toLowerCase().startsWith(typed.toLowerCase());
 }

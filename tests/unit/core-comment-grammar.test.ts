@@ -4,13 +4,14 @@ import { describe, expect, it } from "vitest";
 import { ROVARA_REPLY_MARKER, isRovareReplyComment, parseRovaraComment } from "@agentx/contracts";
 
 describe("/rovara approve names the version", () => {
-  it("reads an optional repository and an optional digest of 6 to 12 hex characters", () => {
+  it("reads an optional repository and an optional digest of 8 to 12 hex characters", () => {
     expect(parseRovaraComment("/rovara approve")).toEqual({ kind: "approve" });
-    expect(parseRovaraComment("/rovara approve 3F2A9C")).toEqual({ kind: "approve", digest: "3f2a9c" });
+    expect(parseRovaraComment("/rovara approve 3F2A9C00")).toEqual({ kind: "approve", digest: "3f2a9c00" });
     expect(parseRovaraComment("/rovara approve example/repo")).toEqual({ kind: "approve", repo: "example/repo" });
     expect(parseRovaraComment("/rovara approve example/repo 3f2a9c0123")).toEqual({ kind: "approve", repo: "example/repo", digest: "3f2a9c0123" });
     // Too short or not hex: no digest was named.
     expect(parseRovaraComment("/rovara approve 3f2a")).toEqual({ kind: "approve" });
+    expect(parseRovaraComment("/rovara approve 3f2a9c")).toEqual({ kind: "approve" });
     expect(parseRovaraComment("/rovara approve please")).toEqual({ kind: "approve" });
   });
 });
@@ -20,7 +21,7 @@ describe("Rovara's own reply is one exact shape (L11's L1)", () => {
     expect(isRovareReplyComment(`Approved.\n\n${ROVARA_REPLY_MARKER}`)).toBe(true);
     expect(isRovareReplyComment(`Approved.\r\n\r\n${ROVARA_REPLY_MARKER}\n`)).toBe(true);
     // A person who quotes the reply, or puts a command above it, wrote their own comment.
-    expect(isRovareReplyComment(`/rovara approve 3f2a9c\n\nApproved.\n\n${ROVARA_REPLY_MARKER}`)).toBe(false);
+    expect(isRovareReplyComment(`/rovara approve 3f2a9c00\n\nApproved.\n\n${ROVARA_REPLY_MARKER}`)).toBe(false);
     expect(isRovareReplyComment(`> Approved.\n>\n> ${ROVARA_REPLY_MARKER}`)).toBe(false);
     expect(isRovareReplyComment(`thanks @dana\n\n${ROVARA_REPLY_MARKER}`)).toBe(false);
     expect(isRovareReplyComment(ROVARA_REPLY_MARKER)).toBe(false);

@@ -5,7 +5,7 @@ export const THREAD = { repository: "example/repo", number: 12 } as const;
 export const POSTED_AT = "2026-11-09T10:00:00.000Z";
 export const WRITTEN_AT = "2026-11-09T10:05:00.000Z";
 
-/** A digest whose short form is 3f2a9c, for tests that call the checks directly. */
+/** A digest whose short form is 3f2a9c00, for tests that call the checks directly. */
 export const ARTIFACT_DIGEST = `3f2a9c${"0".repeat(58)}`;
 /** The words of a comment that approves "the version the request holds": the placeholder is the request's own short digest (an approval names the version it approves). */
 export const APPROVE_WORDS = "/rovara approve __DIGEST__";
