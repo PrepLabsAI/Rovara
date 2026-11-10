@@ -5,7 +5,7 @@
 //     (a half-pinned file does not parse). It returns a `VerifiedCatalog`, the only type `resolveCatalogImage` accepts.
 //   - Each image has a signed STATEMENT (id, repository, the index digest, and for EVERY platform its child manifest digest, SBOM hash and scan time): the evidence the build keeps beside the catalog. A statement for one
 //     image or one digest verifies for no other, and one that leaves a platform out is not the statement the build signed.
-//   - The company-registry check (owner Q9, Enterprise): a customer's internal registry must serve the exact digest. The manifest is fetched BY DIGEST and its bytes are hashed here, so a registry that answers with
+//   - The company-registry check (owner Q9, company installs): a customer's internal registry must serve the exact digest. The manifest is fetched BY DIGEST and its bytes are hashed here, so a registry that answers with
 //     other bytes (a tag followed, a rebuilt image, a proxy) is a mismatch that stops that image only.
 import { createHash, verify } from "node:crypto";
 import { z } from "zod";

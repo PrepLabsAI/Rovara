@@ -658,7 +658,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          */
         workflowBaseCommit: z.string().regex(/^[a-f0-9]{40}$/).optional(),
         /**
-         * Enterprise foundations I3: who asked for the work and who approved its plan, written as `Requested-by` / `Approved-by` trailers on the commit the worker makes. Built by the broker from its
+         * Plug-in foundations I3: who asked for the work and who approved its plan, written as `Requested-by` / `Approved-by` trailers on the commit the worker makes. Built by the broker from its
          * own records (a person who was erased is "a former member", never named). Sent only to a worker whose /ping lists "publish.attribution"; never dropped for an older one, because a
          * publication that was meant to say whose it was must not go out saying nothing.
          */

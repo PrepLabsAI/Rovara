@@ -66,7 +66,7 @@ export const LessonNeedsSchema = z.object({
   have: z.number().int().min(0).max(5),
   /** Who approved first, and when. */
   first: LessonPersonSchema.optional(), firstAt: z.number().optional(),
-  /** Named groups that must still be among the approvers (Enterprise). */
+  /** Named groups that must still be among the approvers (where the install has groups). */
   groups: z.array(z.string().min(1).max(100)).max(10),
 }).strict();
 

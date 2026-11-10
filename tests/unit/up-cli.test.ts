@@ -92,7 +92,7 @@ describe("rovara up --check", () => {
     expect(loose.out).toContain("chmod 600");
     expect(loose.out).not.toContain("SECRET");
     const good = await run(["up", "--check", "--worker-image", "worker:test"], { environment: {}, keysFile: { text: '{"anthropic":"sk-test-SECRET"}', mode: 0o600 } });
-    expect(good.out).toContain("A model key is set for anthropic.");
+    expect(good.out).toContain("A model key is set for anthropic (from the key file).");
   });
 
   it("reports the provider and model a task step will use, and what to set when none can be chosen (L13)", async () => {
@@ -161,18 +161,18 @@ describe("rovara up --check", () => {
     const gh = vi.fn(async () => "gho_from_cli");
     const state = await mkdtemp(join(tmpdir(), "rovara-l4-cli-"));
     cleanup.push(() => rm(state, { recursive: true, force: true }));
-    const { resolveGithubAccess, createLocalGithubKeyStore } = await import("../../packages/broker/src/local/index.js");
-    const keyFile = createLocalGithubKeyStore(state);
-    expect((await resolveGithubAccess({ companyId: "c", keyFile, environment: { GH_TOKEN: "from-env" }, gh }))?.source).toBe("environment");
+    const { resolveGithubAccess, createLocalSecrets } = await import("../../packages/broker/src/local/index.js");
+    const secrets = createLocalSecrets(state, {});
+    expect((await resolveGithubAccess({ companyId: "c", secrets, environment: { GH_TOKEN: "from-env" }, gh }))?.source).toBe("environment");
     await writeFile(join(state, "keys.json"), '{"github":"from-file"}', { mode: 0o600 });
-    expect((await resolveGithubAccess({ companyId: "c", keyFile, environment: { GH_TOKEN: "from-env" }, gh }))?.source).toBe("key-store");
+    expect((await resolveGithubAccess({ companyId: "c", secrets, environment: { GH_TOKEN: "from-env" }, gh }))?.source).toBe("key-store");
     expect(gh).not.toHaveBeenCalled();
     // The CLI is asked for github.com's token by name, so GH_HOST cannot send another server's token to api.github.com.
     await rm(join(state, "keys.json"));
-    await resolveGithubAccess({ companyId: "c", keyFile, environment: {}, gh });
+    await resolveGithubAccess({ companyId: "c", secrets, environment: {}, gh });
     expect(gh).toHaveBeenCalledWith(["auth", "token", "--hostname", "github.com"]);
     // The environment's GITHUB_API_KEY (the model-key store's name for provider github) does not count.
-    expect((await resolveGithubAccess({ companyId: "c", keyFile, environment: { GITHUB_API_KEY: "x" }, gh: async () => undefined }))).toBeUndefined();
+    expect((await resolveGithubAccess({ companyId: "c", secrets, environment: { GITHUB_API_KEY: "x" }, gh: async () => undefined }))).toBeUndefined();
   });
 
   it("says when the port is taken", async () => {

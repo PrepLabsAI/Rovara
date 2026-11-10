@@ -3,6 +3,7 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { SecretValue, type ModelKeyStore } from "@agentx/contracts";
+import { LocalSecretError } from "./secret-error.js";
 
 const PROVIDER = /^[a-z][a-z0-9-]{0,63}$/;
 
@@ -51,19 +52,19 @@ export function createFileModelKeyStore(path: string): ModelKeyStore {
       handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-      throw new Error("the model key file could not be opened (it must be a plain file, not a link)", { cause: error });
+      throw new LocalSecretError("the model key file could not be opened (it must be a plain file, not a link)", (error as NodeJS.ErrnoException).code);
     }
     try {
       const details = await handle.stat();
-      if (!details.isFile()) throw new Error("the model key file must be a plain file");
-      if (process.platform !== "win32" && (details.mode & 0o077) !== 0) throw new Error("the model key file must not be readable by other users (chmod 600)");
+      if (!details.isFile()) throw new LocalSecretError("the model key file must be a plain file");
+      if (process.platform !== "win32" && (details.mode & 0o077) !== 0) throw new LocalSecretError("the model key file must not be readable by other users (chmod 600)");
       let parsed: unknown;
       try {
         parsed = JSON.parse(await handle.readFile("utf8"));
       } catch {
-        throw new Error("the model key file is not valid JSON");
+        throw new LocalSecretError("the model key file is not valid JSON");
       }
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("the model key file must hold a JSON object");
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new LocalSecretError("the model key file must hold a JSON object");
       return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim() !== "" && PROVIDER.test(entry[0])).map(([provider, key]) => [provider, key.trim()]));
     } finally {
       await handle.close();

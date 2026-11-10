@@ -11,6 +11,8 @@ import {
   modelProviderPlugin, registerBuiltinModelProviders,
 } from "../../packages/broker/src/plugins/model-provider/index.js";
 import { AWS_MODULE_MISSING, AwsCredentialSetupError, createAwsCredentialSource, describeBedrockSettings, assertBuiltinIdsKept, type AwsCredentialLoaders } from "../../packages/broker/src/plugins/model-provider/index.js";
+import { createLocalModelKeyStore, modelKeyRefs } from "../../packages/broker/src/local/runtime.js";
+import { credentialOf } from "../../packages/broker/src/local/model-proxy/credentials.js";
 import { DEFAULT_PROVIDER_ENDPOINTS, upstreamTarget, upstreamUrl } from "../../packages/broker/src/local/model-proxy/index.js";
 
 const gateway: ModelProviderAdapter = {
@@ -340,5 +342,31 @@ describe("environment variables for provider keys (review L4)", () => {
     expect(await store.providers("org")).toEqual(["anthropic", "company-gateway"]);
     expect((await store.get("org", "company-gateway"))?.reveal()).toBe("right-never-real");
     expect(await store.get("org", "linear")).toBeUndefined();
+  });
+});
+
+describe("model keys go through the secrets socket (P4 merge)", () => {
+  it("asks the socket for the namespaced variable, then the key file entry, for a plug-in provider; the built-ins keep their names", async () => {
+    expect(modelKeyRefs("anthropic")).toEqual([{ env: "ANTHROPIC_API_KEY" }, { key: "anthropic" }]);
+    expect(modelKeyRefs("company-gateway")).toEqual([{ env: "ROVARA_MODEL_COMPANY_GATEWAY_API_KEY" }, { key: "company-gateway" }]);
+    const asked: string[] = [];
+    const secrets = { async read(_company: string, ref: Readonly<Record<string, string>>) { asked.push(JSON.stringify(ref)); return ref.env === "ROVARA_MODEL_COMPANY_GATEWAY_API_KEY" ? new SecretValue("key-never-real") : undefined; } };
+    const providers = ["anthropic"];
+    const keys = createLocalModelKeyStore("/nowhere", {}, secrets, providers);
+    expect(await keys.providers("org")).toEqual([]);
+    providers.push("company-gateway");
+    expect(await keys.providers("org")).toEqual(["company-gateway"]);
+    expect(asked).toContain('{"env":"ROVARA_MODEL_COMPANY_GATEWAY_API_KEY"}');
+    expect(asked).not.toContain('{"env":"COMPANY_GATEWAY_API_KEY"}');
+  });
+
+  it("makes the socket's answer win over the provider's own credential()", async () => {
+    let ran = 0;
+    const provider: ModelProviderAdapter = { ...gateway, signIn: { kind: "google-oauth" }, credential: async () => { ran += 1; return new SecretValue("refreshed"); } };
+    const keys = createLocalModelKeyStore("/nowhere", {}, { async read(_c, ref) { return ref.env === "ROVARA_MODEL_COMPANY_GATEWAY_API_KEY" ? new SecretValue("stored") : undefined; } }, ["company-gateway"]);
+    expect((await credentialOf(provider, keys, "org"))?.reveal()).toBe("stored");
+    expect(ran).toBe(0);
+    const none = createLocalModelKeyStore("/nowhere", {}, { async read() { return undefined; } }, ["company-gateway"]);
+    expect((await credentialOf(provider, none, "org"))?.reveal()).toBe("refreshed");
   });
 });

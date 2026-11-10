@@ -40,6 +40,7 @@ import { isTerminalStatus } from "../../core/task-flow/results.js";
 import { planFeedbackKey } from "../../core/task-flow/stage-machine.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { localOwnerPrincipal } from "../../ports/policy-defaults.js";
+import { modelKeyReadError, secretsPluginWords } from "../../ports/secret-stores.js";
 import { RepositoryGrantService, type RepositoryCredential } from "../../repository-access.js";
 import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
@@ -149,7 +150,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     if (options.modelChoice !== undefined) return options.modelChoice;
     // Only the providers that could be chosen are asked for a credential: the setting's provider, else the default order. A provider that is installed but not chosen (Bedrock, with Anthropic chosen) is never asked.
     const candidates = options.modelSetting === undefined ? LOCAL_MODEL_PROVIDER_ORDER : [options.modelSetting.provider];
-    const picked = chooseLocalModel(await readyProviders(providers, keys, companyId, candidates), options.modelSetting, providers);
+    // A `secrets` plug-in's error text is never passed on: Code's own fixed sentences are, anything else becomes a sentence naming the plug-in.
+    const ready = await readyProviders(providers, keys, companyId, candidates).catch((error: unknown) => { throw modelKeyReadError(error, secretsPluginWords(registry)); });
+    const picked = chooseLocalModel(ready, options.modelSetting, providers);
     return picked.ok ? { provider: picked.provider, model: picked.model, ...(picked.api === undefined ? {} : { api: picked.api }) } : undefined;
   };
   /** The route of the chosen model: the request format the owner named, else the provider's first. */

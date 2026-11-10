@@ -7,18 +7,21 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, assertModelProvider, modelPriceRows, type AdapterRegistry, type ModelKeyStore, type ModelPrice, type PluginConfig, type PluginPoint } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, assertModelProvider, modelPriceRows, type AdapterRegistry, type ModelKeyStore, type ModelPrice, type PluginConfig, type PluginPoint, type SecretRef, type SecretStore } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
 import { OperationStore } from "../operations.js";
 import {
   createAdapterRegistry,
-  createEnvironmentModelKeyStore,
-  modelKeyVariable,
   createFileModelKeyStore,
-  createLayeredModelKeyStore,
+  asSecretValue,
+  createLocalSecretStore,
   createModuleImporter,
+  createRegistrySecretStore,
+  createSecretModelKeyStore,
+  secretsPluginWords,
+  modelKeyVariable,
   type ModuleImporter,
   loadAdapters,
   parsePluginConfig,
@@ -68,15 +71,57 @@ import { THIS_MACHINE_ADAPTER_NAME, ThisMachineWorkerMachines } from "./this-mac
 
 /** The model providers whose keys `rovara up` looks for (the environment variable is `<PROVIDER>_API_KEY`). */
 export const LOCAL_MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
+/** Where a model key may be, in order: the environment (the built-ins' long-standing names, `ROVARA_MODEL_<ID>_API_KEY` for any other provider), then the owner's key file. */
+export function modelKeyRefs(provider: string): SecretRef[] {
+  return [{ env: modelKeyVariable(provider) }, { key: provider }];
+}
+
 /**
- * Where Code's model keys come from: the environment first, then `<state folder>/keys.json` (refused unless only the owner can read it). `providers` lists the providers whose
- * environment variable is looked for: the three built-ins, and any `model-provider` plug-in added later (the array is read at each call, so a caller may extend it).
+ * Where Code's model keys come from: the environment first, then `<state folder>/keys.json` (refused unless only the owner can read it). The keys are READ through the `secrets` socket (owner
+ * decision 60: `modelKeyRefs`); `secrets` is Code's own adapter unless the caller hands another (`rovara up` hands the registry's, so a configured `secrets` plug-in is the source of truth). Which
+ * providers have a key is the same store's answer for each of `LOCAL_MODEL_PROVIDERS`, so a plug-in that has no key for a provider lists none, whatever `keys.json` holds.
  */
-export function createLocalModelKeyStore(stateDirectory: string, environment: NodeJS.ProcessEnv, providers: readonly string[] = LOCAL_MODEL_PROVIDERS): ModelKeyStore {
-  return createLayeredModelKeyStore([
-    createEnvironmentModelKeyStore(environment, providers, modelKeyVariable),
-    createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME)),
-  ]);
+export function createLocalModelKeyStore(stateDirectory: string, environment: NodeJS.ProcessEnv, secrets?: SecretStore, providers: readonly string[] = LOCAL_MODEL_PROVIDERS): ModelKeyStore {
+  const keyFile = createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME));
+  return createSecretModelKeyStore({
+    secrets: secrets ?? createLocalSecretStore({ environment, keyFile }),
+    refs: modelKeyRefs,
+    providers,
+  });
+}
+
+/** Which kind of source answered for each model provider that has a key (`env`, `key`, or a plug-in's own kind). Never the keys. For `rovara up --check`. */
+export async function modelKeySources(secrets: SecretStore, companyId: string): Promise<Array<{ provider: string; kind: string }>> {
+  const found: Array<{ provider: string; kind: string }> = [];
+  for (const provider of LOCAL_MODEL_PROVIDERS) {
+    for (const ref of modelKeyRefs(provider)) {
+      if (asSecretValue(await secrets.read(companyId, ref)) !== undefined) {
+        found.push({ provider, kind: Object.keys(ref)[0]! });
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+/** Code's `secrets` adapter for this laptop: `{ env }`, `{ file }` and `{ key }` (an entry of `<state folder>/keys.json`, the key file alone). */
+export function createLocalSecrets(stateDirectory: string, environment: NodeJS.ProcessEnv): SecretStore {
+  return createLocalSecretStore({ environment, keyFile: createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME)) });
+}
+
+/**
+ * The secrets store `rovara up` will use for this config, for the doctor (`rovara up --check`) which starts nothing else: Code's own, or the `secrets` plug-in the config names (loaded the way `rovara up` loads it,
+ * into a registry of its own). `plugin` is the plug-in's name when one is configured. A plug-in that cannot be loaded throws the registry's fixed sentence.
+ */
+export async function loadConfiguredSecrets(input: { stateDirectory: string; configPath: string; config: PluginConfig; environment: NodeJS.ProcessEnv }): Promise<{ store: SecretStore; plugin?: string; dispose?: () => Promise<void> }> {
+  const entries = input.config.plugins.filter((entry) => entry.enabled && entry.point === "secrets");
+  if (entries.length === 0) return { store: createLocalSecrets(input.stateDirectory, input.environment) };
+  // The doctor starts nothing, so the plug-in gets a registry with only itself in it: a `secrets` plug-in that needs another plug-in (a storage, say) cannot be created here and is checked when `rovara up` starts.
+  const registry = createAdapterRegistry();
+  await loadAdapters({ ...input.config, plugins: entries }, { registry, importModule: createLocalModuleImporter(input.stateDirectory, dirname(input.configPath)) });
+  const adapter = registry.require("secrets");
+  // Whatever the plug-in holds (a connection, a timer) is let go after the check, or the command would not exit.
+  return { store: createRegistrySecretStore(registry), plugin: registry.names("secrets")[0]!, dispose: async () => { await adapter.close?.(); } };
 }
 
 /**
@@ -308,12 +353,15 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const registry = createAdapterRegistry();
   // The comment reads of the approvers (a comment proves an approval only after Rovara's own checks, `core/pr-commands/comment-checks.ts`) need the app, which is made after the registry is sealed.
   const comments: { current?: Pick<LocalComments, "fetchComment" | "contextOf" | "available"> } = {};
-  // The providers whose environment variable is looked for: the built-ins, then each `model-provider` plug-in once the config is loaded (below).
+  // Owner decision 60 (R2): secrets are read through the `secrets` point. The model keys and the GitHub token ask the registry each time, so a configured `secrets` plug-in replaces Code's.
+  const registrySecrets = createRegistrySecretStore(registry);
+  // The providers whose key is looked for (item K2): the built-ins, then each `model-provider` plug-in once the config is loaded (below). The array is read at each call.
   const keyedProviders: string[] = [...LOCAL_MODEL_PROVIDERS];
-  const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment, keyedProviders);
+  const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment, registrySecrets, keyedProviders);
   // Item K2: what each provider costs comes from its plug-in. The table is filled after the config is loaded; the metering port reads it at each call.
   const priceTable: { currency: string; models: Record<string, ModelPrice> } = { currency: "USD", models: {} };
   registerCodeDefaults(registry, {
+    secrets: createLocalSecrets(stateDirectory, options.environment),
     ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     displayName: ownerName(),
     isValidSession: (value) => constantTimeEqual(value, sessionToken),
@@ -370,8 +418,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   if (options.machines !== undefined) registry.register("worker-machines", INJECTED_ADAPTER_NAME, options.machines);
   registry.register("worker-machines", THIS_MACHINE_ADAPTER_NAME, new ThisMachineWorkerMachines({ enabled: options.thisMachine === true }));
 
-  // Port lane L11: each code host the owner has a sign-in for (a GitHub token from the key file, GH_TOKEN or the GitHub CLI) is registered under its own kind; a configured `code-host` plug-in of that name
-  // replaces it. The repositories a host may be used for are the registered projects' (the store the app registers them in, read when asked, so a plug-in storage works too).
+  // Port lane L11: each code host the owner has a sign-in for (a GitHub token from the secrets adapter, GH_TOKEN or the GitHub CLI) is registered under its own kind (below, after the plug-ins load); a configured `code-host` plug-in of that name
+  // is used instead. The repositories a host may be used for are the registered projects' (the store the app registers them in, read when asked, so a plug-in storage works too).
   const companyOrg = OrgIdSchema.parse(config.companyId ?? IMPLICIT_COMPANY_ID);
   const registeredRepositories = async (): Promise<string[]> => {
     const store = registry.require("storage");
@@ -379,10 +427,6 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     const latest = await Promise.all((await listProjects(store, companyOrg)).map((project) => source.latest(project.name)));
     return latest.flatMap((revision) => (revision === undefined || revision.archived === true ? [] : revision.definition.repositories.map((repository) => repository.url)));
   };
-  for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
-    if ((await host.resolveCredentials?.())?.found === true) registry.register("code-host", host.kind, host, { isDefault: true });
-  }
-
   options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
   // Item K2: each provider is checked as a whole (an address that is not https, a header the proxy owns, a vertex variant on the wrong format), then its prices join the metering table.
@@ -399,6 +443,12 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const priced = modelPriceRows(providerRows);
   priceTable.currency = priced.currency ?? "USD";
   Object.assign(priceTable.models, priced.models);
+  // Owner decision 60 (M1): a configured `secrets` plug-in is the source of truth, so this runs AFTER the config's adapters are loaded: a host is registered when the registry's `secrets` adapter (the plug-in, else
+  // Code's) says there is a sign-in, and a host a plug-in or `registerAdapters` already registered under that kind is left alone.
+  for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, secrets: registrySecrets, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
+    if (registry.get("code-host", host.kind) !== undefined) continue;
+    if ((await host.resolveCredentials?.())?.found === true) registry.register("code-host", host.kind, host, { isDefault: true });
+  }
   // Every record the core writes expires by `indexExpiresAt`. A store that sweeps another attribute (the SQLite plug-in's own default is `expiresAt`) would keep them for ever without a word,
   // so such a store is refused here, saying what to set.
   const storeTtl = registry.require("storage").ttlAttribute;
@@ -410,6 +460,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     registry.register("object-storage", "document", createDocumentObjectStorage(registry.require("storage"), { companyId: config.companyId ?? IMPLICIT_COMPANY_ID }), { isDefault: true });
   }
   registry.seal();
+  // A `secrets` plug-in lets go of what it holds when the process stops.
+  closers.push(() => registry.require("secrets").close?.());
 
   const identity = registry.require("identity");
   const serverUrl = { current: "http://127.0.0.1" };
@@ -498,6 +550,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // Lane L9a (K1): the model proxy is served on that same listener, so a worker reaches it only through its own egress gateway.
   const modelProxy = createLocalModelProxy({
     keys: registry.require("model-keys"),
+    ...(secretsPluginWords(registry) === undefined ? {} : { keySource: secretsPluginWords(registry) }),
     metering: registry.require("metering"),
     companyId: config.companyId ?? IMPLICIT_COMPANY_ID,
     providers: registryModelProviderBook(registry),

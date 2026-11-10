@@ -18,14 +18,15 @@ export async function credentialOf(provider: ModelProviderAdapter, keys: ModelKe
   return provider.credential?.();
 }
 
-/** Whether a call to the provider could be signed now (no value is read out of the secret). A credential that cannot be read counts as missing. */
+/**
+ * Whether a call to the provider could be signed now (no value is read out of the secret). A key store that cannot be read THROWS (the caller names the source, never the error's words);
+ * a provider's own `credential()` that fails only counts as "no credential".
+ */
 export async function hasCredential(provider: ModelProviderAdapter, keys: ModelKeyStore, companyId: string): Promise<boolean> {
   if (!needsCredential(provider)) return true;
-  try {
-    return (await credentialOf(provider, keys, companyId)) !== undefined;
-  } catch {
-    return false;
-  }
+  if ((await keys.get(companyId, provider.kind)) !== undefined) return true;
+  if (provider.credential === undefined) return false;
+  return provider.credential().then((value) => value !== undefined, () => false);
 }
 
 /**

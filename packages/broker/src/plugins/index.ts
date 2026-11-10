@@ -1,7 +1,7 @@
 // Port lane L2: the adapters and routing for the code-host, tracker and check-runner plug-in points. The registry itself is `../ports/adapter-registry.ts`.
 // The GitHub client types in `code-host/github/provider.ts` are not re-exported here: their names are the ones `github-app.ts` already exports.
 export * from "./routing.js";
-export { readPluginSettings, secretReader, SecretSourceSchema, type SecretSource } from "./module-support.js";
+export { contextSecretReader, readPluginSettings, secretReader, SecretSourceSchema, type SecretSource } from "./module-support.js";
 export { githubCodeHost, GITHUB_CODE_HOST_CAPABILITIES, GITHUB_HOST_KIND, type GitHubCodeHostOptions } from "./code-host/github/index.js";
 export { githubCodeHostPlugin, type GitHubCodeHostPluginOptions } from "./code-host/github/plugin.js";
 export { GITHUB_CODE_HOST_PROVIDER_METHODS, missingGitHubProviderMethods, type GitHubCodeHostProvider, type GitHubActionsProvider } from "./code-host/github/provider.js";

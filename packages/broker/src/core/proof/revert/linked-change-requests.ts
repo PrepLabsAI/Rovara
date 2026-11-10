@@ -1,4 +1,4 @@
-// P6 (Enterprise foundations): the reverse link from a published change request to its task, keyed by the neutral repository identity.
+// P6 (Plug-in foundations): the reverse link from a published change request to its task, keyed by the neutral repository identity.
 //
 // A link has a neutral key, `CODEHOST_CR#<kind>#<repository key>` / `CR#<id>`, and every reader reads BOTH: the neutral row first, then (for GitHub only) the old row `GITHUB_PR#<owner/repo>` / `PR#<number>`
 // (developer/task-records.ts `githubWorkflowPullRequestKey`). The writer is the task flow's (lane L6a), which publishes the change request; this module reads, and builds the step for a host other than GitHub.

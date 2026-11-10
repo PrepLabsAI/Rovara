@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `object-storage` (provisional, below) and `model-provider` (below). A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below) and `model-provider` (below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -215,7 +215,50 @@ adapter only FETCHES a comment (`CodeHost.comments`: text, author, times, the ch
 
 `ModelKeyStore.get(companyId, provider)` returns a `SecretValue` (it prints as `[secret]` in text, JSON and the console). Code has an environment
 store (`ANTHROPIC_API_KEY`), a file store (JSON, refused unless only the owner can read it), a layered store and a memory store. Cloud
-adapts the port to its secret store and proxy.
+adapts the port to its secret store and proxy. On a laptop the keys are READ through the `secrets` point (next section): `rovara up`'s `model-keys`
+adapter asks for `{ "env": "<PROVIDER>_API_KEY" }` and then `{ "key": "<provider>" }`, in that order, so the environment still wins over `keys.json`, and
+`keys.json` keeps its rule (mode 0600, no link). Which providers have a key is the same store's answer for each of `anthropic`, `openai` and `openrouter` (the socket reads one reference at a time, so the listing asks it per provider), so `keys.json` entries for other
+names are not listed. A worker never holds a key (the model proxy below reads it through this point).
+
+## Secrets (owner decision 60, item R2)
+
+The `secrets` point (one adapter) is where any adapter's secret is read: a code host's token, a webhook's signing secret, a model key. `SecretStore` in
+`packages/contracts/src/ports/secrets.ts` has one method, `read(companyId, ref)`, which returns a `SecretValue` or `undefined`. An adapter names WHERE to read a secret
+and asks the point; it does not write its own reader.
+
+- **A reference is plain data**: an object with exactly one entry, whose key is the kind of source and whose value says which one (`SecretRef`, `SecretRefSchema`). A config file holds
+  references, never the secret. The kinds belong to the adapter. Code's adapter (`createLocalSecretStore`) knows `{ "env": "NAME" }`, `{ "file": "/absolute/path" }` and
+  `{ "key": "provider" }` (an entry of the owner's `keys.json`, the key file alone). `SecretSource` (`{ env }` or `{ file }`, `packages/broker/src/plugins/module-support.ts`) is Code's
+  reference format for plug-in settings: it is a `SecretRef` that Code's adapter knows. Cloud's adapter later reads its secret service with its own kind (for example `{ "secretService": "<name>" }`);
+  a kind an adapter does not know answers `undefined`, so one config can name sources for more than one install.
+- **Failure is quiet**: no secret is `undefined`. A source that exists but must not be used or a reference that is not valid is an error with a FIXED sentence that
+  never quotes a path, a variable's value or file content. Code's readers throw `LocalSecretError`: its message is safe to show, and it carries at most the system error CODE (never the system error, whose text quotes the path).
+  Callers show only a `LocalSecretError`'s text; any other error from a `secrets` plug-in is replaced by a sentence of the caller's own (for the GitHub token: "the secrets adapter could not read the GitHub token (source kind: key)").
+  A caller that wants one sentence for all of it (`secretReader`) says "the secret is not available".
+- **A `{ file }` is held to these rules**: an absolute path with no link in ANY part of it (a system's own link such as `/var` on a Mac counts: name the real path; the last part is also opened with `O_NOFOLLOW`), a plain file (not a pipe or a device),
+  owned by the current user, not readable by group or others (mode 0600) where the system has modes, and at most 64 KiB (at most that plus one byte is read, so a file that grows after the check is still refused).
+- **Every answer is a `SecretValue`**: `createRegistrySecretStore`, `createSecretModelKeyStore` and `contextSecretReader` pass each answer through `asSecretValue`, which wraps an object that has `reveal()` and refuses anything else (a bare string would print), so `[secret]`
+  masking always applies, even for a plug-in written without the class.
+- **The company comes with each call**, as in every shared port. Code ignores it. `contextSecretReader` (a plug-in's own settings, such as a webhook secret) reads under the config's `defaultCompanyId`, which in Code is the one implicit company.
+  That is right for an install-wide secret only: Cloud, which serves many companies, must read a company's own secret with `SecretStore.read(<the caller's company>, ref)`, or change the helper to take the company per call.
+- **Read when used.** Nothing caches in the adapter, so a rotated key or token is picked up at once. The GitHub code host keeps a token for 30 seconds; the model proxy reads per request.
+- **A plug-in uses it** through `contextSecretReader(context, source)`: the read goes to the registry's `secrets` adapter, looked up on every read (so it does not matter where in the config a `secrets` plug-in sits), and falls back to
+  Code's own adapter when none is registered. `createRegistrySecretStore(registry)` is the same lookup as a `SecretStore`.
+- **What moved behind it** (`rovara up`): the model keys (`createLocalModelKeyStore`), the laptop GitHub token (`resolveGithubAccess` asks `{ "key": "github" }`, then `GH_TOKEN`, `GITHUB_TOKEN` and the GitHub CLI as before) and a plug-in's
+  `webhookSecret`. The rules stay: the key file must be owner-only; the model proxy is the only reader of a model key and a worker never holds one; a token that reaches every repository its owner can is not given to a worker unless
+  `allowBroadTokenForWorker` is true. Both stay in the adapters that apply them, not in the secrets adapter.
+- **A configured `secrets` plug-in is the source of truth**, everywhere, as `rovara up` and `rovara up --check` use it:
+  the GitHub code host is registered only after the config's plug-ins are loaded, and only if the registry's `secrets` adapter (the plug-in, else Code's) or `GH_TOKEN`, `GITHUB_TOKEN` or the GitHub CLI gives a sign-in; the model providers listed (and so the model chosen) are the ones the plug-in has a key for;
+  and `rovara up --check` loads the same plug-in and says which source answered ("the key file", "the environment", or `the "<name>" secrets plug-in`). With a plug-in, `keys.json` and the model-key environment variables are NOT read unless the plug-in reads them.
+  It must answer the `{ env }` and `{ key }` references, or the install finds no key and `--check` says so.
+- **Failures are named, not quoted.** When the model keys cannot be read, the task-start error and the model proxy's 503 say where to look: `~/.rovara/keys.json` for Code's own adapter, or `the "<name>" secrets plug-in` for a configured one; a plug-in's own error text is replaced by a fixed sentence
+  (`the model keys could not be read from the "<name>" secrets plug-in`).
+- **`SecretStore.close?()`** is optional: the adapter lets go of what it holds (connections, timers). `rovara up` calls it when it stops, and `rovara up --check`, which loads a configured plug-in only to ask it, calls it after the check so the command exits.
+  The doctor loads the plug-in into a registry holding only itself, so a `secrets` plug-in that needs another plug-in (a storage, say) cannot be created there; `--check` says it is then only fully checked when `rovara up` starts.
+- **Trust model of a `secrets` plug-in.** Only the owner names one: it comes from the plug-in config, which must sit in the owner's state folder (never a repository or a task workspace), and it runs in the broker with the owner's rights, like every
+  config-loaded plug-in. It sees every reference asked, and so can answer, and so choose, every model key and the GitHub token; it is trusted as much as the broker itself. Task input and project files cannot name a reference.
+  Install a `secrets` plug-in only from a source you trust as you would trust the broker.
+- A conformance suite for every adapter is `tests/support/ports/secret-store-conformance.ts`.
 
 ## Object storage (lane L9a, PROVISIONAL: owner decision 58, until Pratik agrees)
 
@@ -336,9 +379,10 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
   rule and the issue-created mapping) because Cloud's adapter imports the trigger framework, which is not ported. The install gives the
   adapter what it may do (read an issue, post a comment, the hook's signing secret); what it is not given, it does not offer.
 
-Two comments in the copied contracts are out of date for Code: `plugins/common.ts` says adapters are "registered at build time; never loaded from
-outside". Code loads the adapters its owner's config names (decision 40). The file stays identical to the hosted product's copy so lane L1 has no
-conflict; read those comments as superseded by this page.
+**Public names (decision 58-60, item R1).** The plug-in contracts are public API, so their words are neutral. `HostScope`'s system caller is `webhook` or
+`install` (the install's own work); `private-install`, the name the first copy used, still parses and reads as `install` for one release, then goes. The
+company id keeps the `org_` shape (Code's implicit company already uses it). The comments that said adapters are "never loaded from outside" or came from
+"Enterprise foundations" are fixed: Code loads the adapters its owner's config names (decision 40), and nothing is Enterprise-only.
 
 Not ported with these points (they are in Cloud's `plugins/` and belong to later lanes): the event intake and poller
 (`events/`, which keep their state in DynamoDB and move onto the document store), the tracker start path (`tracker/start.ts`, which feeds
@@ -352,6 +396,22 @@ and, for in-process adapters, `start(sink)`. The sink applies the same binding, 
 registered by an HTTP call is not yet visible to other processes. The follow-up is a record-backed source that wraps each stored
 `ChannelAdapterRecord` as a webhook `ChannelAdapter` (signing in `deliver`), and a rule that refuses a config name already used by a
 record. Slack is not a `channel` adapter yet: spec 062's `AdapterChannelIdSchema` refuses the id `slack`.
+
+### Neutral MCP names (item H3)
+
+The MCP tools an AI tool calls use chat-neutral names, so a second chat adapter needs no schema change. The old names still work for **one release**, then go:
+
+| Neutral name | Replaces | Where |
+| --- | --- | --- |
+| `share` (boolean: `true` posts the task in the project's chat channel, `false` keeps it private) | `share_to_channel` | `agentx_start`, `agentx_start_task`, `agentx_start_workflow`. `channel` stays the string that names which bound channel to use; a name alone does not ask for a share (a project that requires sharing shares anyway, as before). The two spellings must agree when both are given. |
+| `channel_user` | `slack_user` | `agentx_whoami`, and each entry of `channel_turns` in a task answer (both names are sent) |
+| `plugins`: one row `{ point, name, status, detail? }` per plug-in set up on the install (a chat or code-host adapter with no probe has no row) | `slack`, `github` | `agentx_admin_health` and `GET /v1/admin/health` (both old fields are still sent, with status unknown when not set up; an older server's answer is turned into rows) |
+| `sign_in_provider` and `sign_in_kind` (`chat` or `company`) | `sign_in_method` | `agentx_whoami` |
+| `source` (`chat` or `ai_tool`) | `origin` (`slack` means `chat`) | `agentx_admin_failed_tasks`, `agentx_admin_list_workspaces` and the turn records of `agentx_admin_turns` (output, both sent); `agentx_admin_turns` input (`origin` is read as before, the two must agree) |
+| `channel_team_id`, `channel_user_id`, `channel_user_name` | `slack_team_id`, `slack_user_id`, `slack_name` | `owner` in `agentx_admin_list_workspaces` (both sent) |
+
+Wording only: the tools' descriptions and the fallback name of a task person with no name now say "chat" where they said Slack (`Chat user`, and the requester text `chat member <id>`).
+**Not renamed (internal REST bodies and values, a later lane with I2):** `slackUserId` on the developer principal, task people and turn authors, `shareToChannel` on the start request, `origin: "slack"` in the control plane's records, the `slack_unavailable` notice code, `AdminRequester.kind "slack"`, and the group keys of `agentx_admin_usage` when grouped by origin.
 
 ## The task flow core (lane L6a)
 
@@ -411,6 +471,13 @@ and the build step reads it against the contracts' schemas and the task's own re
   moved (a person's push) is never overwritten. Both are `maintain` operations with the `pull-request-update` callback.
 - The uploads a coding run makes besides its result (`candidate-export` and friends) feed only the browser and API checks (E2E), which Code does not run yet: they are shape-checked and not kept.
 
+## Shared names Cloud imports, not copies (owner decision 60, item R4)
+
+Some contract files are in Code (signing keys, editions, run estimates, task budgets, record trust, the port types above). The hosted product has copies of some of them. The rule for the step where Cloud
+consumes Code: **Cloud imports every shared name from Code's contracts (`@agentx/contracts`); it does not keep a second copy.** Two packages exporting the same name is a bug, because a type or a constant
+that drifts in one of them is a silent break. When a name must change, it changes in Code first (the old name kept as an alias for one release where the item says so), and Cloud follows in its next consume step.
+Cloud's own files keep only what is Cloud's (its adapters, its policies, its data). Nothing in this repository changes for this rule; it is written down so a Cloud change that adds a copy is caught in review.
+
 ## What is not here
 
 - **Artifact (object) storage** now has a provisional port (`object-storage`, above). Cloud's S3 adapter is not in Code.
@@ -419,9 +486,11 @@ and the build step reads it against the contracts' schemas and the task's own re
 - **Sets with `contains`, list append with `size`, `attribute_type`, binary attributes.** Cloud's limit and budget code uses them
   (`developer/limits.ts`, `org/budget.ts`, `spend/admission.ts`, `aws/sessions.ts`, `lessons/dynamo-vectors.ts`). They must be
   rewritten before that code sits on this port: one marker item per charged task with `when.absent()` instead of a set, a counter
-  instead of a list length, base64 text instead of bytes. That changes the stored format, so it is a decision for both owners.
-- **Secrets, a scheduler, realtime push and email notices.** Each is a provider dependency of the core
-  today and has no port yet (object storage has a provisional one). The relay "from a timer" is the caller's timer.
+  instead of a list length, base64 text instead of bytes. That changes the stored format, so it needs a one-time data migration in Cloud. Owner decision 60 settles it (item S2; this replaces
+  "a decision for both owners"): **the document store stays small.** Sets and list append are NOT added to the port or to SQLite. Cloud's budget, limit and session code moves to one row per item
+  (a marker row per charged task, a counter row) with a one-time migration on the Cloud side. L6a's workspace limits already use that pattern.
+- **A scheduler, realtime push and email notices.** Each is a provider dependency of the core
+  today and has no port yet (object storage has a provisional one, and secrets have the `secrets` point above). The relay "from a timer" is the caller's timer.
 - **Sign-in flows.** `IdentityProvider` answers who a credential is; begin/complete/sign-out, authentication freshness and member
   listing for single sign-on are interface additions for the lane that needs them.
 - A SQLite adapter must use UTF-8 text with BINARY collation for the code-point order and refuse lone surrogates in keys.

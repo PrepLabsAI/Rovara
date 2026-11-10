@@ -59,6 +59,8 @@ export function builtinModelProviderBook(): ModelProviderBook {
 export interface LocalModelProxyOptions {
   /** Where the real keys are (the `model-keys` port). Read per call; never kept. */
   keys: ModelKeyStore;
+  /** Where the keys come from, in words for the owner, when it is not the key file and the environment (`the "svc" secrets plug-in`). */
+  keySource?: string | undefined;
   /** Prices and records what each call used (the `metering` port). */
   metering: Metering;
   companyId: string;
@@ -235,12 +237,15 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
         return { provider, has: row !== undefined && (await hasCredential(row, options.keys, options.companyId)) };
       }));
     } catch {
-      // The key file could not be read (wrong mode, not JSON). The words of that error can quote the file, so none are passed on.
-      return { statusCode: 503, headers: { ...JSON_HEADERS }, body: JSON.stringify({ error: { code: "MODEL_PROXY_UNAVAILABLE", message: "the model keys on this computer could not be read; check ~/.rovara/keys.json" } }) };
+      // The keys could not be read (wrong mode, not JSON, or a secrets plug-in failed). The words of that error can quote the file or the plug-in's data, so none are passed on; the source is named.
+      return { statusCode: 503, headers: { ...JSON_HEADERS }, body: JSON.stringify({ error: { code: "MODEL_PROXY_UNAVAILABLE", message: `the model keys on this computer could not be read; check ${options.keySource ?? "~/.rovara/keys.json"}` } }) };
     }
     if (!held.some((entry) => entry.has)) {
       const first = book.get(providers[0]!);
-      return notAllowed(first === undefined ? `the model provider ${providers[0]!.slice(0, 40)} is not set up on this computer` : `no ${providers.join(" or ")} ${first.signIn.kind === "bearer-key" || first.signIn.kind === "named-header" ? "key" : "sign-in"} is set on this computer; ${credentialFix(first)} and restart rovara up`);
+      if (first === undefined) return notAllowed(`the model provider ${providers[0]!.slice(0, 40)} is not set up on this computer`);
+      const keyed = first.signIn.kind === "bearer-key" || first.signIn.kind === "named-header";
+      const fix = keyed && options.keySource !== undefined ? `put it in a place ${options.keySource} reads` : credentialFix(first);
+      return notAllowed(`no ${providers.join(" or ")} ${keyed ? "key" : "sign-in"} is set on this computer; ${fix} and restart rovara up`);
     }
     const ledger = tokens.ledger(grant.operationId);
     if (grant.budget !== undefined) {
@@ -382,13 +387,15 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
         ledger.reservedMicros += reserved;
       }
 
-      // ---- the credential, only now
+      // ---- the credential, only now: the key store's entry (read through the `secrets` socket) wins, the provider's own `credential()` is the fallback
+      // A failing key store (or a secrets plug-in) ends the call with a fixed sentence naming the source, never its own text.
       let secret;
-      try {
-        secret = await credentialOf(row, options.keys, options.companyId);
-      } catch {
-        // The provider's own credential could not be resolved (a role that expired, a token that could not be refreshed). Its words can quote a setting, so none are passed on.
-        throw new Refusal(502, "provider_sign_in_failed", signInFailure(row));
+      if (needsCredential(row)) {
+        secret = await options.keys.get(options.companyId, route.provider).catch(() => { throw new Refusal(503, "model_proxy_unavailable", `the model key could not be read from ${options.keySource ?? "the key file"}`); });
+        if (secret === undefined && row.credential !== undefined) {
+          // The provider's own credential could not be resolved (a role that expired, a token that could not be refreshed). Its words can quote a setting, so none are passed on.
+          secret = await row.credential().catch(() => { throw new Refusal(502, "provider_sign_in_failed", signInFailure(row)); });
+        }
       }
       if (needsCredential(row) && secret === undefined) throw new Refusal(403, "model_not_allowed", `no ${route.provider} ${row.signIn.kind === "bearer-key" || row.signIn.kind === "named-header" ? "key" : "sign-in"} is set on this computer${row.credentialProblem?.() === undefined ? "" : ` (${row.credentialProblem()!})`}`);
 

@@ -85,6 +85,38 @@ describe("asking for model access", () => {
     expect(error.message).toMatch(/no anthropic or openai or openrouter key is set on this computer/u);
   });
 
+  it("names the key file when the keys cannot be read, and the secrets plug-in when one is configured, and never passes on the failure's own text", async () => {
+    const leaky = "arn:aws:example:::secret/leaky-name";
+    for (const [keySource, named] of [[undefined, "~/.rovara/keys.json"], ['the "svc" secrets plug-in', 'the "svc" secrets plug-in']] as const) {
+      const w = await world(keySource === undefined ? {} : { keySource });
+      w.keyStore.failWith(new Error(leaky));
+      const answer = await w.send({ method: "GET", path: "/v1/internal/model-access", headers: { [CAPABILITY_HEADER]: w.capability() } });
+      expect(answer.status).toBe(503);
+      expect(errorOf(answer).message).toBe(`the model keys on this computer could not be read; check ${named}`);
+      expect(answer.text).not.toContain(leaky);
+    }
+  });
+
+  it("says where to put a key in the plug-in's words when the task's models have none", async () => {
+    const w = await world({ keySource: 'the "svc" secrets plug-in' });
+    for (const provider of ["anthropic", "openai", "openrouter"]) w.keyStore.remove(provider);
+    const message = errorOf(await w.send({ method: "GET", path: "/v1/internal/model-access", headers: { [CAPABILITY_HEADER]: w.capability() } })).message;
+    expect(message).toContain('a place the "svc" secrets plug-in reads');
+    expect(message).not.toContain("keys.json");
+  });
+
+  it("ends a model call with a fixed sentence naming the source when the key store fails at call time", async () => {
+    const leaky = "arn:aws:example:::secret/leaky-name";
+    const w = await world({ keySource: 'the "svc" secrets plug-in' });
+    const token = await tokenOf(w);
+    w.keyStore.failWith(new Error(leaky));
+    const answer = await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() });
+    expect(answer.status).toBe(503);
+    expect(errorOf(answer).message).toBe('the model key could not be read from the "svc" secrets plug-in');
+    expect(answer.text).not.toContain(leaky);
+    expect(w.provider.calls).toHaveLength(0);
+  });
+
   it("serves a task that has a key for at least one of its models, and refuses a design-review slot it does not serve yet", async () => {
     const w = await world();
     w.keyStore.remove("openai");

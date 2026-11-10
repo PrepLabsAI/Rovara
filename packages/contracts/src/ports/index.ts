@@ -9,6 +9,7 @@ export * from "./policy.js";
 export * from "./audit-sink.js";
 export * from "./model-keys.js";
 export * from "./model-provider.js";
+export * from "./secrets.js";
 export * from "./object-storage.js";
 export * from "./plugin-adapters.js";
 export * from "./plugin-points.js";

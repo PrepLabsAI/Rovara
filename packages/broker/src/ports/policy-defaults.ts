@@ -21,6 +21,7 @@ import {
   type MeterResult,
   type Metering,
   type ModelKeyStore,
+  type SecretStore,
   type ModelUsage,
   type Principal,
   type PriceTable,
@@ -207,6 +208,8 @@ export interface CodeDefaultsOptions extends LocalOwnerIdentityOptions {
   onMeter?: (entry: MeterEntry, result: MeterResult) => void | Promise<void>;
   /** Code's model keys (environment, file). Absent: none is registered and the caller must configure one. */
   modelKeys?: ModelKeyStore;
+  /** Code's secrets adapter (owner decision 60). Absent: none is registered. */
+  secrets?: SecretStore;
 }
 
 /** Registers Code's policy defaults. Config-named adapters replace them. */
@@ -221,4 +224,5 @@ export function registerCodeDefaults(registry: AdapterRegistry, options: CodeDef
   registry.register("identity", LOCAL_OWNER_PROVIDER, createLocalOwnerIdentity(options), { isDefault: true });
   registry.register("metering", "price-table", createPriceTableMetering(options.priceTable, options.onMeter), { isDefault: true });
   if (options.modelKeys !== undefined) registry.register("model-keys", "local", options.modelKeys, { isDefault: true });
+  if (options.secrets !== undefined) registry.register("secrets", "local", options.secrets, { isDefault: true });
 }

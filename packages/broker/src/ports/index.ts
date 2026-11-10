@@ -6,4 +6,6 @@ export * from "./memory-document-store.js";
 export * from "./memory-queue.js";
 export * from "./model-key-stores.js";
 export * from "./policy-defaults.js";
+export * from "./secret-error.js";
+export * from "./secret-stores.js";
 export * from "./transactional-outbox.js";
