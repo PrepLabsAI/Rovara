@@ -18,6 +18,7 @@ import type { JsonObject } from "./json.js";
 import type { ModelKeyStore } from "./model-keys.js";
 import type { ObjectStorage } from "./object-storage.js";
 import type { OutboundEventsAdapter } from "./outbound-events.js";
+import type { SecretStore } from "./secrets.js";
 import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
 import type { AuditSink } from "./audit-sink.js";
@@ -51,6 +52,8 @@ export const PLUGIN_POINTS = [
   "company-instructions",
   /** Owner decisions 40 and 61 (item R3): signed events out, in the format of Pratik's channel events. */
   "outbound-events",
+  /** Owner decision 60 (R2): where an adapter's secrets are read (`read(ref)` returns a `SecretValue`). */
+  "secrets",
 ] as const;
 export const PluginPointSchema = z.enum(PLUGIN_POINTS);
 export type PluginPoint = z.infer<typeof PluginPointSchema>;
@@ -80,6 +83,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   "object-storage": "one",
   "company-instructions": "one",
   "outbound-events": "many",
+  secrets: "one",
 };
 
 /**
@@ -147,6 +151,7 @@ export interface PluginPointTypes {
   "object-storage": ObjectStorage;
   "company-instructions": CompanyInstructionsSource;
   "outbound-events": OutboundEventsAdapter;
+  secrets: SecretStore;
 }
 
 export type AdapterOf<P extends PluginPoint> = PluginPointTypes[P];
@@ -211,7 +216,7 @@ export interface PluginModule<P extends PluginPoint = PluginPoint> {
 export interface PluginContext {
   /** The company Code runs as. Cloud serves many companies, so an adapter takes the company from each call, not from here. */
   defaultCompanyId: string;
-  /** This adapter's block of the config file. Never holds a secret in clear: name where to read it (a file, an environment variable). */
+  /** This adapter's block of the config file. Never holds a secret in clear: name where to read it (a file, an environment variable: a `SecretRef`), and read it through the `secrets` point. */
   settings: JsonObject;
   registry: RegistryView;
   now: () => Date;

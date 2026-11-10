@@ -4,7 +4,7 @@
 //
 // The adapter that uses it is `token-code-host.ts` (`resolveCredentials` and `checkAccess` on the code host).
 import { execFile } from "node:child_process";
-import { SecretValue, agentXError, type ModelKeyStore } from "@agentx/contracts";
+import { SecretValue, agentXError, type SecretRef, type SecretStore } from "@agentx/contracts";
 
 export type GithubTokenSource = "key-store" | "environment" | "gh-cli";
 
@@ -23,12 +23,15 @@ export const runGh: GhRunner = (args) =>
 
 const GITHUB_HOST = ["--hostname", "github.com"] as const;
 
+/** Where the owner's stored GitHub token is: the `github` entry of the key file. (Read through the `secrets` socket, owner decision 60.) */
+export const GITHUB_TOKEN_REF: SecretRef = { key: "github" };
+
 /**
- * `keyFile` must be the key FILE alone, not the layered store: the environment's `GITHUB_API_KEY` would otherwise win over the
- * file. With `reveal: false` the token is not fetched from `gh` (only whether it is logged in), for a check that only reports.
+ * The stored token is read through the `secrets` socket with `GITHUB_TOKEN_REF`, which names the key FILE alone, not the layered model-key store: the
+ * environment's `GITHUB_API_KEY` must not win over the file. With `reveal: false` the token is not fetched from `gh` (only whether it is logged in), for a check that only reports.
  */
-export async function resolveGithubAccess(input: { companyId: string; keyFile: ModelKeyStore; environment: NodeJS.ProcessEnv; gh?: GhRunner; reveal?: boolean }): Promise<GithubAccess | undefined> {
-  const stored = await input.keyFile.get(input.companyId, "github");
+export async function resolveGithubAccess(input: { companyId: string; secrets: SecretStore; environment: NodeJS.ProcessEnv; gh?: GhRunner; reveal?: boolean }): Promise<GithubAccess | undefined> {
+  const stored = await input.secrets.read(input.companyId, GITHUB_TOKEN_REF);
   if (stored !== undefined) return { token: stored, source: "key-store" };
   for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) {
     const value = input.environment[name]?.trim();

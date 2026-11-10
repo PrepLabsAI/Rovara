@@ -130,6 +130,8 @@ export * from "./e2e-agent-models.js";
 export * from "./e2e-replay.js";
 export * from "./workflow-publication-context.js";
 export * from "./company-scope.js";
+export * from "./outside-account.js";
+export * from "./approval-sign-in.js";
 export * from "./run-estimate.js";
 export * from "./record-trust.js";
 export * from "./open-ids.js";

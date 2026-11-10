@@ -9,15 +9,20 @@
 //   - a proof is single use: the marker `approvalProofKey(proof)` is written with `when.absent()` in the SAME transaction as the decision, so two racing requests cannot both succeed even across processes. One request id
 //     is decided once, by the same rule (the decision record is written with `when.absent()`).
 //   - the change to the subject carries the condition the subject loaded it under (its revision and that it still waits), so a concurrent change loses; the whole decision is one transaction.
-//   - policy on top of the seam, which only narrows what it allows: a high-risk approval, and every rejection or request for changes, accept only the local session (a comment is an approval of a change request, and
-//     says nothing about a rejection); a request that does not allow self-approval refuses the person who asked; `minApprovers` distinct approvers are needed.
+//   - policy on top of the seam, which only narrows what it allows: a high-risk approval and every rejection accept only the methods the approvers plug-in names as strong (`ApprovalRequirement.strongMethods`,
+//     `rejectMethods`; default the local session) and NEVER a comment method (`strong-methods.ts`: `code-host-comment`, any `code-host-*`, the plug-in's `commentMethods`), whatever is named (a comment is an approval of a change
+//     request, and says nothing about a rejection); a request for changes accepts the methods the plug-in names (default the local session or a comment); the gate's policy option can only narrow the plug-in's sets (or the default when it names none; `createDecisionGate` refuses a policy of only comment methods for a strong set, and `verifyPolicy` refuses one that
+//     is disjoint from the plug-in's sets, instead of a silent lock-out); when the plug-in sets a sign-in rule (`ApprovalRequirement.signIn`, a company setting) the approver's sign-in time must satisfy it for a
+//     high-risk approval and a rejection; a request that does not allow self-approval refuses the person who asked; `minApprovers` distinct approvers are needed.
 //   - nothing a caller can send widens it: an unknown kind, subject or method is a refusal, not a default.
 // It never throws for a refusal (a refusal is an answer); it throws only for a fault of the store.
 import { createHash, randomUUID } from "node:crypto";
-import { CODE_HOST_COMMENT_METHOD } from "../../ports/policy-defaults.js";
+import { isCommentMethod, strictMethodsFor } from "./strong-methods.js";
+
+export { isCommentMethod, strictMethodsFor } from "./strong-methods.js";
 import {
-  INDEX_EXPIRY_ATTRIBUTE, approvalProofKey, companyScoped, when,
-  type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type Approvers, type AuditSink, type Condition, type DocumentKey, type DocumentStore, type ExternalAccountRef, type Principal,
+  INDEX_EXPIRY_ATTRIBUTE, approvalProofKey, checkApprovalSignIn, companyScoped, when,
+  type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type Approvers, type AuditSink, type Condition, type DocumentKey, type DocumentStore, type ExternalAccountRef, type IdentityProvider, type Principal,
   type StoredDocument, type TransactItem, type UpdateOp,
 } from "@agentx/contracts";
 
@@ -89,7 +94,7 @@ export interface DecisionAttempt {
 export type GateRefusalReason =
   | "unsupported" | "invalid" | "not_found" | "not_waiting" | "stale" | "expired"
   | "method_not_allowed" | "not_approved" | "self_approval_not_allowed" | "needs_more_approvers"
-  | "proof_already_used" | "request_id_reused" | "not_the_approver" | "invalid_outcome";
+  | "proof_already_used" | "request_id_reused" | "not_the_approver" | "invalid_outcome" | "sign_in_not_fresh";
 
 export interface ApprovalRecord {
   requestId: string;
@@ -104,7 +109,8 @@ export interface ApprovalRecord {
   subjectType: string;
   approvalKind: string;
   projectName?: string;
-  approvers: ReadonlyArray<{ provider: string; personId: string; method: string }>;
+  /** `authTime` is the approver's sign-in time when the identity adapter knew it (lane P3, item A1). Code records it and does not use it. */
+  approvers: ReadonlyArray<{ provider: string; personId: string; method: string; authTime?: string }>;
   reason?: string;
 }
 
@@ -115,11 +121,11 @@ export type GateResult =
   | { status: "refused"; reason: GateRefusalReason; /** The Approvers seam's own reason, or a fixed sentence. Never a token. */ detail: string };
 
 export interface DecisionGatePolicy {
-  /** The only methods that may approve a high-risk request. Default: the local session. */
+  /** Limits the methods that may approve a high-risk request to these, among the ones the approvers plug-in names (`strongMethods`; when it names none, among the local session). Narrows only. A comment method is never accepted. */
   highRiskMethods?: readonly string[];
-  /** The only methods that may reject. Default: the local session. */
+  /** Limits the methods that may reject to these, among the plug-in's `rejectMethods`. Narrows only. A comment method is never accepted. */
   rejectMethods?: readonly string[];
-  /** The only methods that may ask for changes. Default: the local session, or a repository writer's comment (owner decision 62, A3: asking for changes by comment is allowed; rejecting is not). */
+  /** The only methods that may ask for changes. Overrides the plug-in's `changesMethods`. Default: what the plug-in names, else the local session or a repository writer's comment (owner decision 62, A3: asking for changes by comment is allowed; rejecting is not). */
   changesMethods?: readonly string[];
   /** How long the used-proof markers are kept. Default: 400 days. */
   proofKeepSeconds?: number;
@@ -136,6 +142,8 @@ export interface DecisionGateDependencies {
   audit: AuditSink;
   subjects: readonly DecisionSubject[];
   policy?: DecisionGatePolicy;
+  /** The identity adapter, for its capabilities: a sign-in rule of `any-active` is honoured only when `capabilities.companySignIn` is true (lane P3, decision 62). Absent: it is not. */
+  identity?: Pick<IdentityProvider, "capabilities">;
   now?: () => Date;
 }
 
@@ -187,7 +195,7 @@ function recordOf(document: StoredDocument): ApprovalRecord | undefined {
     requestId, kind, subjectId, outcome, revision, artifactDigest, risk, decidedAt, subjectType: text("subjectType") ?? "task", approvalKind: text("approvalKind") ?? kind,
     ...(text("projectName") === undefined ? {} : { projectName: text("projectName")! }),
     approvers: approvers.flatMap((entry) => (typeof entry === "object" && entry !== null && !Array.isArray(entry) && typeof entry["provider"] === "string" && typeof entry["personId"] === "string" && typeof entry["method"] === "string"
-      ? [{ provider: entry["provider"], personId: entry["personId"], method: entry["method"] }] : [])),
+      ? [{ provider: entry["provider"], personId: entry["personId"], method: entry["method"], ...(typeof entry["authTime"] === "string" ? { authTime: entry["authTime"] } : {}) }] : [])),
     ...(reason === undefined ? {} : { reason }),
   };
 }
@@ -198,23 +206,37 @@ function recordDocument(companyId: string, record: ApprovalRecord, expires: numb
     ...approvalRecordKey(companyId, record.requestId), entityType: "APPROVAL_DECISION", companyId, requestId: record.requestId, kind: record.kind, subjectId: record.subjectId, outcome: record.outcome,
     revision: record.revision, artifactDigest: record.artifactDigest, risk: record.risk, decidedAt: record.decidedAt, subjectType: record.subjectType, approvalKind: record.approvalKind,
     ...(record.projectName === undefined ? {} : { projectName: record.projectName }),
-    approvers: record.approvers.map((entry) => ({ provider: entry.provider, personId: entry.personId, method: entry.method })),
+    approvers: record.approvers.map((entry) => ({ provider: entry.provider, personId: entry.personId, method: entry.method, ...(entry.authTime === undefined ? {} : { authTime: entry.authTime }) })),
     ...(record.reason === undefined ? {} : { reason: record.reason }), [INDEX_EXPIRY_ATTRIBUTE]: expires,
   };
 }
 
+const POLICY_SETS = [["highRiskMethods", "approve", "high"], ["rejectMethods", "reject", "low"], ["changesMethods", "request_changes", "low"]] as const;
+
 export interface DecisionGate {
   decide(attempt: DecisionAttempt): Promise<GateResult>;
+  /**
+   * A startup check for a gate built with a `policy`: asks the approvers plug-in what it requires and throws a clear error when the policy would leave a set empty that the plug-in made non-empty (every high-risk approval, rejection or
+   * request for changes would then be refused, silently). Call it once when the install starts. Does nothing when no policy limits a set.
+   */
+  verifyPolicy(companyId: string): Promise<void>;
   /** What the person can present for this subject now, so a surface offers the right way to answer (never decides anything). */
   requirement(companyId: string, kind: string, subjectId: string): Promise<{ requirement: ApprovalRequirement; risk: string; revision: number; artifactDigest: string } | undefined>;
 }
 
 export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate {
+  // A policy that can only ever lock the gate out is a mistake in the install's code: it stops here, not at the first decision. A strong set (high risk, reject) never takes a comment method, so a non-empty policy of only those is empty.
+  for (const name of ["highRiskMethods", "rejectMethods"] as const) {
+    const named = deps.policy?.[name];
+    if (named !== undefined && named.length > 0 && named.every((method) => isCommentMethod(method))) {
+      throw new Error(`The approval gate's policy ${name} names only comment methods (${named.join(", ")}), which this gate never accepts for that answer, so every such decision would be refused.`);
+    }
+  }
   const now = deps.now ?? (() => new Date());
   const subjects = new Map(deps.subjects.map((subject) => [subject.kind, subject]));
-  const highRiskMethods = deps.policy?.highRiskMethods ?? [LOCAL_SESSION_METHOD_NAME];
-  const rejectMethods = deps.policy?.rejectMethods ?? [LOCAL_SESSION_METHOD_NAME];
-  const changesMethods = deps.policy?.changesMethods ?? [LOCAL_SESSION_METHOD_NAME, CODE_HOST_COMMENT_METHOD];
+  const highRiskMethods = deps.policy?.highRiskMethods;
+  const rejectMethods = deps.policy?.rejectMethods;
+  const changesMethods = deps.policy?.changesMethods;
   const proofKeepSeconds = deps.policy?.proofKeepSeconds ?? PROOF_KEEP_SECONDS;
   const reusableMethods = deps.policy?.reusableMethods ?? [LOCAL_SESSION_METHOD_NAME];
   const markerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
@@ -254,6 +276,17 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   }
 
   return {
+    async verifyPolicy(companyId) {
+      if (deps.policy === undefined) return;
+      const requirement = await deps.approvers.requirement({
+        companyId, requestId: "policy-probe", kind: "policy-probe", subject: { type: "policy", id: "probe" }, revision: 1, artifactDigest: "0".repeat(64), risk: "high",
+      });
+      const offered = (methods: readonly string[] | undefined): readonly string[] => (methods ?? []).filter((method) => requirement.methods.includes(method));
+      const policy = { highRiskMethods, rejectMethods, changesMethods };
+      const empty = POLICY_SETS.filter(([name, outcome, risk]) => policy[name] !== undefined && offered(strictMethodsFor(outcome, risk, requirement)).length > 0 && offered(strictMethodsFor(outcome, risk, requirement, policy)).length === 0).map(([name]) => name);
+      if (empty.length > 0) throw new Error(`The approval gate's policy (${empty.join(", ")}) leaves no method the approvers plug-in accepts, so those decisions would always be refused.`);
+    },
+
     async requirement(companyId, kind, subjectId) {
       const subject = subjects.get(kind);
       const loaded = subject === undefined ? undefined : await subject.load(companyId, subjectId);
@@ -289,7 +322,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
       const request: ApprovalRequest = { ...loaded.request, companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), outcome: attempt.outcome };
       const requirement = await deps.approvers.requirement(request);
       const risk = loaded.request.risk ?? "high";
-      const policyMethods = attempt.outcome === "reject" ? rejectMethods : attempt.outcome === "request_changes" ? changesMethods : risk === "high" ? highRiskMethods : undefined;
+      const policyMethods = strictMethodsFor(attempt.outcome, risk, requirement, { highRiskMethods, rejectMethods, changesMethods });
       const allowed = requirement.methods.filter((method) => policyMethods === undefined || policyMethods.includes(method));
       const presented = new Set<string>();
       for (const credential of attempt.credentials) {
@@ -317,6 +350,13 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
       }
       const distinct = new Set(approvers.map((approver) => `${approver.provider}\u0000${approver.personId}`));
       if (distinct.size < Math.max(1, requirement.minApprovers)) return refuse("needs_more_approvers", `This needs ${String(requirement.minApprovers)} different approvers.`);
+      // The company's sign-in rule (decision 62), set by the approvers plug-in, for the answers that need a strong proof. Code sets none.
+      if (requirement.signIn !== undefined && policyMethods !== undefined && attempt.outcome !== "request_changes") {
+        for (const person of approvers) {
+          const fresh = checkApprovalSignIn(requirement.signIn, person, at.getTime(), { companySignIn: deps.identity?.capabilities.companySignIn === true });
+          if (!fresh.ok) return refuse("sign_in_not_fresh", fresh.reason === "no_sign_in_time" ? "Sign in again to do this: Rovara has no record of when you signed in." : fresh.reason === "sign_in_too_old" ? "Sign in again to do this: your sign-in is too old." : "Sign in again to do this: your sign-in cannot be checked.");
+        }
+      }
       const requester = request.requestedBy;
       if (!requirement.selfApprovalAllowed && requester !== undefined && approvers.some((approver) => approver.provider === requester.provider && approver.personId === requester.personId)) {
         return refuse("self_approval_not_allowed", "The person who asked cannot approve their own request.");
@@ -338,7 +378,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
       const record: ApprovalRecord = {
         requestId: attempt.requestId, kind: attempt.kind, subjectId: attempt.subjectId, outcome: attempt.outcome, revision: attempt.seen.revision, artifactDigest: attempt.seen.artifactDigest, risk, decidedAt,
         subjectType: request.subject.type, approvalKind: request.kind, ...(request.projectName === undefined ? {} : { projectName: request.projectName }),
-        approvers: approvers.map((entry, index) => ({ provider: entry.provider, personId: entry.personId, method: proofs[index]!.method })),
+        approvers: approvers.map((entry, index) => ({ provider: entry.provider, personId: entry.personId, method: proofs[index]!.method, ...(entry.authTime === undefined ? {} : { authTime: entry.authTime }) })),
         ...(reason === undefined ? {} : { reason }),
       };
       const expires = Math.floor(at.getTime() / 1000) + proofKeepSeconds;
