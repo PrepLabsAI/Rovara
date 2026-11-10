@@ -28,8 +28,13 @@ import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js
 import { installCiFixDecider } from "../../core/ci-fix/ci-fix.js";
 import { registerMergeActionDecider } from "../../core/merge/merge-tracking.js";
 import { startSessionProjector } from "../../core/sessions/projector.js";
+import { createAsk } from "../../core/sessions/ask.js";
+import { createAskDiffReader, createPeekClient } from "../../core/sessions/peek.js";
+import { settleSteerDeliveriesFor } from "../../core/sessions/steer.js";
+import { createLocalAskModel } from "../ask-model.js";
+import type { ProviderEndpoints } from "../model-proxy/providers.js";
 import { sweepOpenSessions } from "../../core/sessions/sweep.js";
-import type { SummaryDependencies } from "../../core/sessions/summary.js";
+import { refreshSessionSummary, type SummaryDependencies } from "../../core/sessions/summary.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import { createTaskFlowFromRegistry, TASK_FLOW_INDEXES, type TaskFlow } from "../../core/task-flow/flow.js";
@@ -83,6 +88,16 @@ export interface LocalAppOptions {
   origin?: () => string;
   /** Opens an address in the owner's browser (default: the system browser). Tests give a recorder, which then stands for the browser. */
   openBrowser?: BrowserOpener;
+  /** Where each model provider is, for the Ask's own model call (the runtime's `modelProviderEndpoints`; tests point it at a fake provider). */
+  modelProviderEndpoints?: Partial<ProviderEndpoints> | undefined;
+  /** The transport of the Ask's model call (tests). */
+  askFetch?: typeof fetch | undefined;
+  /** Whether a message to a running step is handed to the worker as it is sent. The runtime sets it from `ROVARA_LIVE_STEER` (`0` turns it off); default on. */
+  liveSteer?: boolean;
+  /** Whether the planning, understanding and coding steps read the people's notes. The runtime sets it from `ROVARA_STEP_NOTES` (`0` turns it off); default on. */
+  stepNotes?: boolean;
+  /** Whether Ask about a task is served. The runtime sets it from `ROVARA_ASK` (`0` turns it off); default on. */
+  ask?: boolean;
   /** Port of the review pages (0: a free one). */
   pagesPort?: number;
   /** The most pull request threads one comment poll reads (default 20): a test lowers it to see the rotation. */
@@ -189,6 +204,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     repositoryGrants: grants,
     callbackSigningKey: signingKey,
     understandFirst: true,
+    liveSteer: options.liveSteer ?? true,
+    stepNotes: options.stepNotes ?? true,
     ...(options.machinesName === undefined ? {} : { machinesName: options.machinesName }),
     // No code host adapter registered (none is set up on a fresh laptop): a start is not refused for a host nobody knows, and publishing a pull request is simply not offered.
     checkCodeHosts: registry.names("code-host").length > 0,
@@ -235,6 +252,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     cost: { async costUsd(company, taskId) { return costUsdOf(await ledger.taskCost(company, taskId)) ?? 0; } },
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
+    // A step that read a message's note settles the message `delivered`; a session that ended closes the ones no step took.
+    afterRefresh: (orgId, sessionId) => settleSteerDeliveriesFor({ store, ...(options.now === undefined ? {} : { now: options.now }), log }, orgId, sessionId),
   };
 
   // Decisions: the one gate, over the workflow document of the task. A change request starts planning again with the owner's words (L9-wire writes them where the planner's prompt reads them).
@@ -304,7 +323,16 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
   const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true ? { fresh: true } : {}) })), version: options.version });
-  const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, origin: options.origin ?? (() => "http://127.0.0.1") });
+  // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
+  const ask = createAsk({
+    store, audit: registry.require("audit-sink"), admission: registry.require("admission"), enabled: options.ask ?? true, artifacts: blobs, readers: () => ({ diff: createAskDiffReader({ peek: createPeekClient(flow.deps) }) }), questionHashKey: deriveKey(rootKey, "ask-question"), log,
+    answerer: createLocalAskModel({ choice: chosen, keys, companyId, providers, ...(options.modelProviderEndpoints === undefined ? {} : { endpoints: options.modelProviderEndpoints }), ...(options.askFetch === undefined ? {} : { fetch: options.askFetch }) }),
+    recordUsage: async ({ taskId, entryId, usage }) => ledger.recordUsage({
+      companyId, entryId, at: (options.now?.() ?? new Date()).toISOString(), taskId, usage: { provider: usage.provider, modelId: usage.modelId, tokens: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite } },
+    }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+  const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });

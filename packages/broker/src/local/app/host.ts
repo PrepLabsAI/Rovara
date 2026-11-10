@@ -1,7 +1,11 @@
 // Lane L9-wire: the task flow's side of a session's stop, retry and message (L6b's `SessionControlHost`). Each runs only after the sessions module checked who is asking.
-import { INDEX_EXPIRY_ATTRIBUTE, WorkflowSnapshotSchema, WorkflowTransitionError, blockWorkflow, change, when } from "@agentx/contracts";
-import { createSessionControl, type SessionControlHost } from "../../core/sessions/control.js";
+import { INDEX_EXPIRY_ATTRIBUTE, WORKFLOW_THREAD_NOTES_MAX, WorkflowSnapshotSchema, WorkflowTransitionError, blockWorkflow, change, when, type TransactItem } from "@agentx/contracts";
+import { createSessionControl, type MessagePlan, type SessionControlHost } from "../../core/sessions/control.js";
+import { sendLiveSteer } from "../../core/sessions/live-steer.js";
+import { noteKey, sessionNoteItems } from "../../core/sessions/notes.js";
+import { PLAIN_TASK_REASON, SESSION_ENDED_REASON, TASK_FULL_REASON, routeOfTask } from "../../core/sessions/steer.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
+import { closeTask } from "../../core/task-flow/close.js";
 import { operationKey, workspaceKey } from "../../core/task-flow/keys.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { fromDocument, type OperationRecord, type WorkspaceRecord } from "../../core/task-flow/records.js";
@@ -13,9 +17,7 @@ import { retryBlockedStep } from "./retry.js";
 
 /** A person may message a session this many times an hour (a token bucket), and a task keeps this many messages: a live message can mean paid model work. */
 export const MESSAGES_PER_HOUR = 20;
-export const MESSAGES_PER_TASK = 200;
-
-export const MESSAGE_NOT_PASSED_ON = "Rovara does not pass messages to a running step on this computer yet. Your message is saved on the session.";
+export const MESSAGES_PER_TASK = WORKFLOW_THREAD_NOTES_MAX;
 export const MESSAGE_RATE_LIMITED = "You have sent a lot of messages to this task in the last hour. Wait a little, then try again.";
 
 export function createSessionControlHost(deps: TaskFlowDeps, options: { expectedRevision?: number } = {}): SessionControlHost {
@@ -54,40 +56,51 @@ export function createSessionControlHost(deps: TaskFlowDeps, options: { expected
       return { nothingRunning: false };
     },
 
+    async closeTask(taskId, _requestId, principal) {
+      await closeTask(deps, { principal, client: "app" }, taskId);
+    },
+
     async retryWorkflow(taskId) {
       await retryBlockedStep(deps, taskId, options.expectedRevision);
     },
 
-    async deliverMessage(taskId, message) {
-      const pk = `DEVTASK#${taskId}`;
-      const messageKey = { pk, sk: `MESSAGE#${message.messageId}` };
-      const answer = { state: "not_delivered" as const, reason: MESSAGE_NOT_PASSED_ON };
-      // A repeat of a message already saved is answered again and not counted.
-      if ((await deps.store.get(messageKey)) !== undefined) return answer;
-      const bucketKey = { pk, sk: "MESSAGE_BUCKET" };
-      const totalKey = { pk, sk: "MESSAGE_TOTAL" };
-      // A token bucket: MESSAGES_PER_HOUR messages at most, refilled evenly over the hour (so no burst of twice the limit across an hour boundary). The write is conditioned on the
-      // bucket as it was read, so two messages racing cannot both take the last token.
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        const now = (deps.now?.() ?? new Date()).getTime();
-        const bucket = await deps.store.get(bucketKey);
-        const tokens = bucket === undefined ? MESSAGES_PER_HOUR : Math.min(MESSAGES_PER_HOUR, Number(bucket["tokens"]) + ((now - Number(bucket["at"])) * MESSAGES_PER_HOUR) / 3_600_000);
-        if (!(tokens >= 1)) return { state: "not_delivered" as const, reason: MESSAGE_RATE_LIMITED };
-        const counted = await deps.store.transact([
-          { kind: "put", item: { ...bucketKey, entityType: "MESSAGE_BUCKET", tokens: tokens - 1, at: now, version: bucket === undefined ? 1 : Number(bucket["version"]) + 1, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(now / 1000) + 2 * 3_600 }, condition: bucket === undefined ? when.absent() : when.eq("version", Number(bucket["version"])) },
-          { kind: "update", key: totalKey, ops: [change.add("count", 1)], condition: when.or(when.notExists("count"), when.lt("count", MESSAGES_PER_TASK)) },
-          // The saved message expires with the rest of a task's short-lived records.
-          { kind: "put", item: { ...messageKey, entityType: "TASK_MESSAGE", messageId: message.messageId, text: message.text, createdAt: iso(deps), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(now / 1000) + MESSAGE_KEEP_SECONDS }, condition: when.absent() },
-        ]);
-        if (counted.applied) return answer;
-        if ((await deps.store.get(messageKey)) !== undefined) return answer;
-      }
-      return { state: "not_delivered" as const, reason: MESSAGE_RATE_LIMITED };
+    /**
+     * Where a message goes: the task keeps it as a note (`NOTE#<messageId>`, the count on the task) that its next step reads, and a step that is running now takes it live through the worker (when the
+     * worker lists `task.liveSteer.v1`). The rate limit is L9-wire's, unchanged: a token bucket of `MESSAGES_PER_HOUR`, and at most `WORKFLOW_THREAD_NOTES_MAX` notes a task. The note, the count and the token go in the message's own
+     * transaction (the items), so nothing is counted for a message that is not saved.
+     */
+    async planMessage(taskId, message): Promise<MessagePlan> {
+      const task = await readTask(deps, taskId);
+      const route = routeOfTask({ sessionId: message.sessionId }, task);
+      if (route.kind === "ended") return { state: "not_delivered", reason: SESSION_ENDED_REASON };
+      if (route.kind === "not_delivered") return { state: "not_delivered", reason: route.reason };
+      const nowMs = (deps.now?.() ?? new Date()).getTime();
+      // A repeat of a message already saved (a crash between its note and its session message) is answered again and not counted.
+      const saved = await deps.store.get(noteKey(taskId, message.messageId));
+      if (saved !== undefined) return { state: saved["liveDeliveredAt"] === undefined ? "queued" : "delivered" };
+      const bucketKey = { pk: `DEVTASK#${taskId}`, sk: "MESSAGE_BUCKET" };
+      const bucket = await deps.store.get(bucketKey);
+      // A token bucket: MESSAGES_PER_HOUR messages at most, refilled evenly over the hour (so no burst of twice the limit across an hour boundary). The write is conditioned on the bucket as it was read, so two messages racing
+      // cannot both take the last token (the loser's transaction fails and the message is planned again).
+      const tokens = bucket === undefined ? MESSAGES_PER_HOUR : Math.min(MESSAGES_PER_HOUR, Number(bucket["tokens"]) + ((nowMs - Number(bucket["at"])) * MESSAGES_PER_HOUR) / 3_600_000);
+      if (!(tokens >= 1)) return { state: "not_delivered", reason: MESSAGE_RATE_LIMITED };
+      const built = sessionNoteItems(task, { taskId, source: "app", developerId: message.author.developerId, name: message.author.name, isOwner: message.owner, sessionId: message.sessionId, messageId: message.messageId, text: message.text }, nowMs);
+      if (built.outcome === "refused") return { state: "not_delivered", reason: built.reason === "full" ? TASK_FULL_REASON : built.reason === "closed" ? SESSION_ENDED_REASON : PLAIN_TASK_REASON };
+      const token: TransactItem = {
+        kind: "put", item: { ...bucketKey, entityType: "MESSAGE_BUCKET", tokens: tokens - 1, at: nowMs, version: bucket === undefined ? 1 : Number(bucket["version"]) + 1, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + 2 * 3_600 },
+        condition: bucket === undefined ? when.absent() : when.eq("version", Number(bucket["version"])),
+      };
+      return {
+        state: "queued", items: [token, ...built.items],
+        async goLive() {
+          const sent = await sendLiveSteer({ ...deps, ...(deps.liveSteer === undefined ? {} : { enabled: deps.liveSteer }) }, { taskId, messageId: message.messageId, text: message.text, owner: message.owner, developerId: message.author.developerId });
+          if (sent !== "steered") return { taken: false };
+          return { taken: true, items: [{ kind: "update", key: noteKey(taskId, message.messageId), ops: [change.set("liveDeliveredAt", (deps.now?.() ?? new Date()).toISOString())] }] };
+        },
+      };
     },
   };
 }
-
-const MESSAGE_KEEP_SECONDS = 30 * 86_400;
 
 /** The session control (who may stop, retry or message; the request recorded once under its id, with the event and the audit step) over this install's flow. Every route that stops or retries uses this one. */
 export function createLocalSessionControl(deps: TaskFlowDeps, options: { expectedRevision?: number } = {}) {

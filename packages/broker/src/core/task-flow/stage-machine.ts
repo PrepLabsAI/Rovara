@@ -8,6 +8,7 @@
 import {
   AgentXError,
   agentXError,
+  WORKFLOW_BLOCK_REASONS,
   WorkflowTransitionError,
   answerWorkflowIntent,
   blockWorkflow,
@@ -26,6 +27,9 @@ import {
   type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
+import { isReapprovalStop, settleLiveSteerReapproval } from "../sessions/live-steer-reapproval.js";
+import { clearLiveDeliveredSince } from "../sessions/steer.js";
+import { notesFedUpdate, stepNotes, type NotesForStep } from "../sessions/notes.js";
 import { textReaderOf } from "../build-step/plan-input.js";
 import { buildOperation, assertPromptFits } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
@@ -93,6 +97,8 @@ export interface StepInput {
   workflowDependencies?: WorkflowDependencyInvocation;
   /** A line for the operation's timeline (why parts run one after another, say), written with it as its first event. */
   firstEvent?: string;
+  /** The people's messages this step was given (`acceptStepWithNotes` reads them): the task's mark moves past them in the step's own transaction, which holds only while the note count is the one read. */
+  notes?: NotesForStep;
 }
 
 /** Accepts the operation for one step. `STALE` and `WAITING` write nothing. */
@@ -113,6 +119,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     return { result: "STALE" };
   }
   const now = iso(deps);
+  const fed = input.notes === undefined ? undefined : notesFedUpdate(input.notes);
   const workflowRevision = input.workflow?.next.revision ?? task.workflow?.revision;
   const built = buildOperation(deps, {
     workspace: { id: workspace.id, ownerKey: workspace.ownerKey, fence: workspace.fence + 1 },
@@ -137,8 +144,8 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     {
       kind: "update",
       key: taskKey(task.taskId),
-      ops: [...(input.workflow === undefined ? [] : [change.set("workflow", toDocument(input.workflow.next))]), change.set("updatedAt", now)],
-      condition: when.and(when.notExists("closedAt"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision)])),
+      ops: [...(input.workflow === undefined ? [] : [change.set("workflow", toDocument(input.workflow.next))]), change.set("updatedAt", now), ...(fed === undefined ? [] : fed.ops)],
+      condition: when.and(when.notExists("closedAt"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision)]), ...(fed === undefined ? [] : [fed.condition])),
     },
     holdWorkspaceItem(workspace, built.operation.id, now),
     ...built.items,
@@ -156,6 +163,25 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
   const fresh = await readWorkspace(deps, workspace.id);
   if (fresh !== undefined && (fresh.status !== "READY" || fresh.activeOperationId !== null || fresh.fence !== workspace.fence) && fresh.status !== "CLOSED" && fresh.status !== "PREPARATION_FAILED") return { result: "WAITING" };
   return { result: "STALE" };
+}
+
+/**
+ * `acceptStep` for a step that reads the people's messages (understanding, planning, coding): the notes no step has been given are put after the prompt, and the task's mark moves past them in the step's own
+ * transaction. A note saved between the read and the commit fails that transaction on the note count, and the step is then read again with it (up to three times); any other refusal is `acceptStep`'s.
+ */
+export async function acceptStepWithNotes(deps: TaskFlowDeps, input: StepInput): Promise<{ result: StepStart; operation?: OperationRecord }> {
+  // The flip-back setting: with step notes off a step reads none (the notes are still saved), exactly as before notes were read.
+  if (deps.stepNotes === false) return acceptStep(deps, input);
+  let task = input.task;
+  for (let attempt = 1; ; attempt += 1) {
+    const notes = await stepNotes(deps.store, task, input.requestId);
+    const accepted = await acceptStep(deps, { ...input, task, prompt: `${input.prompt}${notes.suffix}`, notes });
+    if (accepted.result !== "STALE" || attempt >= 3) return accepted;
+    const fresh = await readTask(deps, task.taskId);
+    // Only a note saved meanwhile is worth another read: the workflow is as it was and the count moved.
+    if (fresh?.workflow === undefined || fresh.workflow.revision !== task.workflow?.revision || fresh.threadNoteCount === notes.noteCount) return accepted;
+    task = fresh;
+  }
 }
 
 /** Applies one workflow transition with no operation (a result recorded, a block), fenced on the revision it was computed from. False when the task moved on. */
@@ -274,7 +300,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
   }
   // The machine is still being set up (or another step holds the workspace): the step runs when it is ready, not before.
   if (workspace.status === "PREPARING") return "WAITING";
-  const accepted = await acceptStep(deps, { task, workspace, requestId, prompt, workflowMode: mode, workflow: { current: workflow, next }, extra: [resolve()], requires: ["task.workflowMode"] });
+  const accepted = await acceptStepWithNotes(deps, { task, workspace, requestId, prompt, workflowMode: mode, workflow: { current: workflow, next }, extra: [resolve()], requires: ["task.workflowMode"] });
   if (accepted.result === "DUPLICATE") await deps.store.transact([resolve()]);
   return accepted.result;
 }
@@ -375,6 +401,9 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
     return;
   }
 
+  // A step that took live messages and did not succeed runs again without them: their notes stop saying "already given" so the re-run reads them as new (scoped to this attempt; never throws).
+  if (!succeeded && operation.kind === "task") await clearLiveDeliveredSince({ store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }), ...(deps.log === undefined ? {} : { log: deps.log }) }, task.taskId, operation.createdAt);
+
   // The steps after the plan: coding, a rerun of the checks, the reviews, the publication and the push of a fix (lane L10).
   if (operation.kind === "publish" || operation.kind === "maintain" || operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS" || operation.workflowMode === "REVIEW") {
     if (deps.buildSteps !== undefined) await deps.buildSteps.onEnded(deps, task, operation, ended);
@@ -387,7 +416,10 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
   if (!succeeded) {
     if (ended.status === "CANCELLED") return;
     const what = operation.workflowMode === "UNDERSTAND" ? "reading the request" : "planning";
-    await blockTaskWorkflow(deps, task.taskId, workflow.revision, `Rovara stopped while ${what}${ended.error === undefined ? "" : `: ${ended.error}`}`.slice(0, 500));
+    // The step stopped because the owner's live message asks for a change outside the approved plan: the owner decides (Retry plans again with that message), and each message says so on its row.
+    const reapproval = isReapprovalStop(ended.error);
+    await blockTaskWorkflow(deps, task.taskId, workflow.revision, reapproval ? WORKFLOW_BLOCK_REASONS.liveSteerReapproval : `Rovara stopped while ${what}${ended.error === undefined ? "" : `: ${ended.error}`}`.slice(0, 500));
+    if (reapproval) await settleLiveSteerReapproval({ store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }), ...(deps.log === undefined ? {} : { log: deps.log }) }, task, ended.error);
     return;
   }
   const outcome = ended.outcome;

@@ -13,21 +13,42 @@ import {
   type AgentSessionRecord, type AuditSink, type DocumentStore, type IdentityProvider, type OrgId, type PresentedCredential, type Principal, type SessionEvent, type SessionId, type SessionMessage, type TransactItem,
 } from "@agentx/contracts";
 import { developerIdOf } from "./create.js";
+import { answerMessage, queuedSteersItem } from "./steer.js";
 import { SessionStore, jsonOf, sessionEventItem } from "./store.js";
 
 /** What the task flow does for a session's task. Each is called only after this module checked the person. Without a host, the action answers `unavailable` and writes nothing. */
 export interface SessionControlHost {
   /** The task's own cancel, idempotent by `requestId`. */
   cancelTask(taskId: string, requestId: string): Promise<{ nothingRunning: boolean; message?: string } | void>;
+  /** Closes the task (the task flow's own close, as the person who asked), idempotent by `requestId`. */
+  closeTask?(taskId: string, requestId: string, principal: Principal): Promise<void>;
   /** The task's own workflow retry, at the task's revision now; idempotent by `requestId`. Throws when the workflow is not blocked. */
   retryWorkflow(taskId: string, requestId: string): Promise<void>;
   /**
    * Gives a person's message to the agent: live to the running step when the worker takes one (through the worker machines port), else as a note the next step reads. Answers where it went. Idempotent by
    * `messageId`. Never carries authority: the text is information.
    */
-  deliverMessage(taskId: string, message: { messageId: string; text: string }): Promise<{ state: "queued" | "delivered" | "not_delivered"; reason?: string }>;
+  deliverMessage?(taskId: string, message: { messageId: string; text: string }): Promise<{ state: "queued" | "delivered" | "not_delivered"; reason?: string }>;
+  /**
+   * The two-step form of `deliverMessage` that a host with notes uses: it decides where the message goes and answers the items to write in the message's OWN transaction (the note, the note count,
+   * the rate token), so a queued message is never without its note and a note never without its message; `goLive` then hands a queued message to a step that is running (after the transaction applied). When
+   * the host has it, `deliverMessage` is not called. A plan whose transaction lost a race (a rate token, the note count) is made again. A host has one of the two.
+   */
+  planMessage?(taskId: string, message: MessageToDeliver): Promise<MessagePlan>;
   // REQUIREMENT on the host (the hosted product's STEER_RATE and note cap are not in this module): it limits how often one person may message a session in an hour and how many notes a task keeps, and answers
   // `not_delivered` with a reason when a limit is hit. A live message can mean paid model work.
+}
+
+/** What a host is told of a message to deliver: the text is already cleaned, redacted and cut. */
+export interface MessageToDeliver { messageId: string; text: string; sessionId: SessionId; author: { developerId: string; name: string }; owner: boolean }
+
+export interface MessagePlan {
+  state: "queued" | "delivered" | "not_delivered";
+  reason?: string;
+  /** Written in the message's transaction. */
+  items?: readonly TransactItem[];
+  /** Hands a queued message to the running step. `taken` says it did; `items` are written with the answer (the note's `liveDeliveredAt`). Never throws. */
+  goLive?: () => Promise<{ taken: boolean; items?: readonly TransactItem[] }>;
 }
 
 export interface ControlDependencies {
@@ -37,7 +58,7 @@ export interface ControlDependencies {
   /** Needed to act with a raw credential (`{ credential }`) instead of a principal the surface already authenticated. */
   identity?: IdentityProvider | undefined;
   /** Whether this person may act on this session. Default: the company's owner. */
-  authorize?: (principal: Principal, session: AgentSessionRecord, action: "stop" | "retry" | "tell") => boolean | Promise<boolean>;
+  authorize?: (principal: Principal, session: AgentSessionRecord, action: "stop" | "retry" | "tell" | "close") => boolean | Promise<boolean>;
   /** Recomputes the session's summary after the action (the sweep does it anyway). A failure is logged, never thrown. */
   refresh?: (orgId: OrgId, sessionId: SessionId) => Promise<unknown>;
   now?: () => Date;
@@ -54,6 +75,8 @@ export type ControlResult<T = unknown> =
   | { status: "refused"; reason: ControlRefusal; message: string };
 
 const KEEP_SECONDS = 400 * 86_400;
+/** How many times a message is planned again after it lost a race on a rate token or the note count. */
+const TELL_ATTEMPTS = 4;
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const refuse = (reason: ControlRefusal, message: string): { status: "refused"; reason: ControlRefusal; message: string } => ({ status: "refused", reason, message });
 
@@ -62,14 +85,14 @@ export const NOTHING_TO_RETRY = "There is nothing to retry: the task is not bloc
 export const FAILED_TASK_NEEDS_NEW_TASK = "This task failed and has ended. Start a new task.";
 
 /** What a stop, retry or message answered, kept under its request id on the session so a repeat answers it again and writes nothing. */
-interface ControlRequest { action: "stop" | "retry" | "tell"; by: string; at: string; messageId?: string; nothingRunning?: boolean; message?: string }
+interface ControlRequest { action: "stop" | "retry" | "tell" | "close"; by: string; at: string; messageId?: string; nothingRunning?: boolean; message?: string }
 
 const requestKey = (session: { orgId: OrgId; sessionId: SessionId }, requestId: string) => agentSessionKey(session.orgId, session.sessionId, `REQUEST#${requestId}`);
 
 function requestOf(document: Record<string, unknown> | undefined): ControlRequest | undefined {
   if (document === undefined) return undefined;
   const { action, by, at } = document;
-  if ((action !== "stop" && action !== "retry" && action !== "tell") || typeof by !== "string" || typeof at !== "string") return undefined;
+  if ((action !== "stop" && action !== "retry" && action !== "tell" && action !== "close") || typeof by !== "string" || typeof at !== "string") return undefined;
   return {
     action, by, at, ...(typeof document["messageId"] === "string" ? { messageId: document["messageId"] } : {}),
     ...(document["nothingRunning"] === true ? { nothingRunning: true } : {}), ...(typeof document["message"] === "string" ? { message: document["message"] } : {}),
@@ -92,7 +115,7 @@ export function createSessionControl(deps: ControlDependencies) {
   }
 
   /** The session the person may act on, or the refusal. A session of another company reads as absent. */
-  async function open(principal: Principal, orgId: OrgId, sessionId: SessionId, action: "stop" | "retry" | "tell"): Promise<{ session: AgentSessionRecord } | ReturnType<typeof refuse>> {
+  async function open(principal: Principal, orgId: OrgId, sessionId: SessionId, action: "stop" | "retry" | "tell" | "close"): Promise<{ session: AgentSessionRecord } | ReturnType<typeof refuse>> {
     if (principal.companyId !== orgId) return refuse("not_found", "There is no such session.");
     const session = await sessions.get(orgId, sessionId);
     if (session === undefined) return refuse("not_found", "There is no such session.");
@@ -108,6 +131,12 @@ export function createSessionControl(deps: ControlDependencies) {
 
   /** Records the request, its event and the audit in one transaction. A lost race (the request is there now) answers the stored request. */
   async function commit(session: AgentSessionRecord, requestId: string, request: ControlRequest, extra: readonly TransactItem[], event: SessionEvent, audit: { action: string; person: Principal }): Promise<ControlRequest | undefined> {
+    const result = await commitOnce(session, requestId, request, extra, event, audit);
+    return result.applied ? undefined : result.prior;
+  }
+
+  /** `commit`, saying whether it applied: a transaction that did not apply with no request stored lost a race on one of the `extra` items (a rate token, a note count), and the caller may plan again. */
+  async function commitOnce(session: AgentSessionRecord, requestId: string, request: ControlRequest, extra: readonly TransactItem[], event: SessionEvent, audit: { action: string; person: Principal }): Promise<{ applied: true } | { applied: false; prior: ControlRequest | undefined }> {
     const at = now();
     const items: TransactItem[] = [
       { kind: "put", item: { ...requestKey(session, requestId), entityType: "AGENT_SESSION_REQUEST", orgId: session.orgId, sessionId: session.sessionId, requestId, ...jsonOf(request), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(at.getTime() / 1000) + KEEP_SECONDS }, condition: when.absent() },
@@ -116,9 +145,9 @@ export function createSessionControl(deps: ControlDependencies) {
       ...deps.audit.stage({ eventId: `session:${session.sessionId}:${request.action}:${requestId}`, companyId: session.orgId, at: at.toISOString(), actor: { type: "person", id: audit.person.personId }, action: audit.action, subject: { type: "session", id: session.sessionId } }),
     ];
     const result = await deps.store.transact(items);
-    if (result.applied) return undefined;
+    if (result.applied) return { applied: true };
     // The request is there: another call with this id got in first (or the event is already told). Answer what it answered.
-    return requestOf(await deps.store.get(requestKey(session, requestId)));
+    return { applied: false, prior: requestOf(await deps.store.get(requestKey(session, requestId))) };
   }
 
   const nameOf = (principal: Principal) => cleanSessionName(principal.displayName) ?? "Someone";
@@ -172,6 +201,26 @@ export function createSessionControl(deps: ControlDependencies) {
       return { status: "done", session, repeated: repeated !== undefined };
     },
 
+    /** Closes a session's task through the task flow's own close, after the same checks as a stop. The session ends with it; a closed session has nothing to close. Idempotent by `requestId`; the request, the event and the audit are one transaction. */
+    async close(actor: ControlActor, orgId: OrgId, sessionId: SessionId, input: { requestId: string }): Promise<ControlResult> {
+      if (!REQUEST_ID.test(input.requestId)) return refuse("invalid", "The request ID is not valid.");
+      const principal = await principalOf(actor);
+      if (principal === undefined) return refuse("not_found", "There is no such session.");
+      const found = await open(principal, orgId, sessionId, "close");
+      if ("status" in found) return found;
+      const { session } = found;
+      const prior = requestOf(await deps.store.get(requestKey(session, input.requestId)));
+      if (prior !== undefined) return prior.action === "close" ? { status: "done", session, repeated: true } : refuse("request_id_reused", "That request ID was already used for something else.");
+      if (isEnded(session)) return refuse("ended", SESSION_ENDED_MESSAGE);
+      if (session.subject.kind !== "task" || deps.host?.closeTask === undefined) return refuse("unavailable", NOT_AVAILABLE);
+      await deps.host.closeTask(session.subject.taskId, input.requestId, principal);
+      const request: ControlRequest = { action: "close", by: developerIdOf(principal), at: now().toISOString() };
+      const event: SessionEvent = { eventId: sessionEventId("status", `closed-${input.requestId}`), at: request.at, type: "status", actor: actorOf(principal), text: `${nameOf(principal)} closed this.` };
+      const repeated = await commit(session, input.requestId, request, [], event, { action: "session.closed", person: principal });
+      if (repeated === undefined) await afterControl(session);
+      return { status: "done", session, repeated: repeated !== undefined };
+    },
+
     /** Gives the agent a message. It is information, kept with its fate; a session that has ended takes none. Idempotent by `requestId` (the same id is the same message). */
     async tell(actor: ControlActor, orgId: OrgId, sessionId: SessionId, input: { requestId: string; text: string }): Promise<ControlResult<{ message: SessionMessage }>> {
       if (!REQUEST_ID.test(input.requestId)) return refuse("invalid", "The request ID is not valid.");
@@ -192,21 +241,43 @@ export function createSessionControl(deps: ControlDependencies) {
       }
       if (isEnded(session)) return refuse("ended", SESSION_ENDED_MESSAGE);
       if (session.subject.kind !== "task" || deps.host === undefined) return refuse("unavailable", NOT_AVAILABLE);
-      const at = now().toISOString();
-      const fate = await deps.host.deliverMessage(session.subject.taskId, { messageId, text });
-      const message: SessionMessage = SessionMessageSchema.parse({
-        messageId, sessionId: session.sessionId, kind: "steer", source: "app", author: { developerId: developerIdOf(principal), name: nameOf(principal) }, text, createdAt: at, rev: 1,
-        delivery: { state: fate.state, at, ...(fate.reason === undefined ? {} : { reason: fate.reason.slice(0, 200) }) },
-      });
-      const event: SessionEvent = {
-        eventId: sessionEventId("steer", messageId), at, type: fate.state === "not_delivered" ? "steer_not_delivered" : fate.state === "delivered" ? "steer_delivered" : "steer", actor: actorOf(principal), source: "app", messageId,
-        // The event never holds the message's text.
-        text: fate.state === "not_delivered" ? `${nameOf(principal)} sent a message; it was not delivered${fate.reason === undefined ? "" : `: ${fate.reason}`}.` : `${nameOf(principal)} sent a message to the agent.`,
-      };
-      const request: ControlRequest = { action: "tell", by: developerIdOf(principal), at, messageId };
-      const stored: TransactItem = { kind: "put", item: { ...key, entityType: "AGENT_SESSION_MESSAGE", orgId: session.orgId, ...jsonOf(message), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(at) / 1000) + KEEP_SECONDS }, condition: when.absent() };
-      const repeated = await commit(session, input.requestId, request, [stored], event, { action: "session.message_sent", person: principal });
-      return { status: "done", session, repeated: repeated !== undefined, message };
+      const { host } = deps;
+      const taskId = session.subject.taskId;
+      if (host.planMessage === undefined && host.deliverMessage === undefined) return refuse("unavailable", NOT_AVAILABLE);
+      const principalName = nameOf(principal);
+      const author = { developerId: developerIdOf(principal), name: principalName };
+      for (let attempt = 1; attempt <= TELL_ATTEMPTS; attempt += 1) {
+        const at = now().toISOString();
+        // A host with notes plans the message (its items join the message's transaction); any other host answers where it went.
+        const plan: MessagePlan = host.planMessage !== undefined
+          ? await host.planMessage(taskId, { messageId, text, sessionId: session.sessionId, author, owner: session.owner.developerId === author.developerId })
+          : await host.deliverMessage!(taskId, { messageId, text });
+        const message: SessionMessage = SessionMessageSchema.parse({
+          messageId, sessionId: session.sessionId, kind: "steer", source: "app", author, text, createdAt: at, rev: 1,
+          delivery: { state: plan.state, at, ...(plan.reason === undefined ? {} : { reason: plan.reason.slice(0, 200) }) },
+        });
+        const event: SessionEvent = {
+          eventId: sessionEventId("steer", messageId), at, type: plan.state === "not_delivered" ? "steer_not_delivered" : plan.state === "delivered" ? "steer_delivered" : "steer", actor: actorOf(principal), source: "app", messageId,
+          // The event never holds the message's text.
+          text: plan.state === "not_delivered" ? `${principalName} sent a message; it was not delivered${plan.reason === undefined ? "" : `: ${plan.reason}`}.` : `${principalName} sent a message to the agent.`,
+        };
+        const request: ControlRequest = { action: "tell", by: developerIdOf(principal), at, messageId };
+        const stored: TransactItem = { kind: "put", item: { ...key, entityType: "AGENT_SESSION_MESSAGE", orgId: session.orgId, ...jsonOf(message), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(at) / 1000) + KEEP_SECONDS }, condition: when.absent() };
+        const extra: TransactItem[] = [stored, ...(plan.items ?? []), ...(plan.state === "queued" ? [queuedSteersItem(session, 1, Date.parse(at))] : [])];
+        const committed = await commitOnce(session, input.requestId, request, extra, event, { action: "session.message_sent", person: principal });
+        if (!committed.applied && committed.prior === undefined && attempt < TELL_ATTEMPTS) continue;
+        if (!committed.applied && committed.prior === undefined) return refuse("unavailable", "That message could not be saved just now. Try again.");
+        if (committed.applied && plan.state === "queued" && plan.goLive !== undefined) {
+          // Handed to the step that is running, when there is one; otherwise it stays queued and the next step reads its note.
+          const live = await plan.goLive();
+          if (live.taken) {
+            const answered = await answerMessage({ store: deps.store, now, log }, session, message, { state: "delivered" }, live.items ?? []);
+            return { status: "done", session, repeated: false, message: answered.message ?? message };
+          }
+        }
+        return { status: "done", session, repeated: !committed.applied, message };
+      }
+      return refuse("unavailable", "That message could not be saved just now. Try again.");
     },
   };
 }

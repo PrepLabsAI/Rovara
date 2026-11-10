@@ -44,6 +44,8 @@ export interface SummaryDependencies {
   now?: () => Date;
   log?: Log;
   onChange?: readonly SessionChangeHook[];
+  /** Run after every refresh of a session that exists, whether or not its summary changed (the messages a step took are settled here). A failure is logged, never thrown. */
+  afterRefresh?: (orgId: OrgId, sessionId: SessionId) => Promise<void>;
 }
 
 // ---- digest and small helpers
@@ -224,6 +226,14 @@ function tileOf(session: AgentSessionRecord, summary: SessionSummary, revision: 
  * its retention. An ended session never reopens, and keeps the status it ended with while its cost catches up.
  */
 export async function refreshSessionSummary(deps: SummaryDependencies, orgId: OrgId, sessionId: SessionId): Promise<"unchanged" | "updated"> {
+  const result = await refreshSessionSummaryOnce(deps, orgId, sessionId);
+  if (deps.afterRefresh !== undefined) {
+    try { await deps.afterRefresh(orgId, sessionId); } catch (error) { (deps.log ?? ((entry) => console.log(JSON.stringify({ component: "broker", ...entry }))))({ event: "agent_session.after_refresh_failed", sessionId, error: error instanceof Error ? error.name : "unknown" }); }
+  }
+  return result;
+}
+
+async function refreshSessionSummaryOnce(deps: SummaryDependencies, orgId: OrgId, sessionId: SessionId): Promise<"unchanged" | "updated"> {
   const sessions = new SessionStore(deps.store);
   const log: Log = deps.log ?? ((entry) => console.log(JSON.stringify({ component: "broker", ...entry })));
   for (let attempt = 0; attempt < 2; attempt += 1) {

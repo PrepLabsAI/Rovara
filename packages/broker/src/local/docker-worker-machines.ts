@@ -25,6 +25,7 @@ import {
   createGateway, createGuard, dockerRun, ensureNetworks, gatewayAddresses, isolationNames, type IsolationNames, type Run,
 } from "./isolation/stack.js";
 import {
+  ANSWERED_INVOCATION_KINDS,
   BUILD_SYSTEM_PROFILES_ENV,
   MachineError,
   WORKER_PING_FEATURES_FIELD,
@@ -62,6 +63,27 @@ const SANDBOX_WORKSPACE_LABEL = "agentx.workspace";
 const MACHINE_NAME = /^rovara-worker-[0-9a-f]{24}$/;
 const MACHINE_KEY = /^[A-Za-z0-9._-]{1,128}$/;
 const COMPANY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const ANSWER_MAX_BYTES = 1_048_576;
+
+/** A JSON body of at most `limit` bytes; anything else (too long, not JSON, an array) reads as an empty answer. */
+async function readBoundedJson(response: Response, limit: number): Promise<Record<string, unknown>> {
+  if (response.body === null) return {};
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = (await reader.read().catch(() => ({ done: true as const, value: undefined }))) as { done: boolean; value: Uint8Array | undefined };
+    if (done) break;
+    size += value?.byteLength ?? 0;
+    if (size > limit) { await reader.cancel().catch(() => undefined); return {}; }
+    if (value !== undefined) chunks.push(value);
+  }
+  try {
+    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch { return {}; }
+}
+
 const MAX_INVOCATION_BYTES = 1_048_576;
 export const LOCAL_WORKER_IMAGE_BUILD_HINT = "build it from a Rovara checkout: docker build -f environments/base/Dockerfile -t rovara-worker:local .";
 
@@ -424,8 +446,11 @@ export class DockerWorkerMachines implements WorkerMachines {
     if (response.status === 401) throw new MachineError("unauthorized", "the worker refused the job's credentials");
     if (response.status === 400 || response.status === 409 || response.status === 413) throw new MachineError("rejected", `the worker refused the job (HTTP ${response.status})`);
     if (!response.ok) throw new MachineError("unavailable", `the worker answered HTTP ${response.status}`);
-    const answer = (await response.json().catch(() => ({}))) as { duplicate?: unknown };
-    return { duplicate: answer.duplicate === true };
+    // The worker's answer is read at most `ANSWER_MAX_BYTES` (a peek's patch is bounded to 128 KiB by its own schema, a steer answer is a few words): a worker that sends more is not buffered whole.
+    const answer = await readBoundedJson(response, ANSWER_MAX_BYTES) as { duplicate?: unknown };
+    // A live steer and a peek are answered on this request: the broker reads the answer with the kind's own schema.
+    const answered = (ANSWERED_INVOCATION_KINDS as readonly string[]).includes(invocation.kind) && typeof answer === "object" && answer !== null && !Array.isArray(answer);
+    return { duplicate: answer.duplicate === true, ...(answered ? { answer: answer } : {}) };
   }
 
   /** Stops every running worker of this state folder (not another folder's) (what `rovara up` does on Ctrl-C). Volumes are kept. */

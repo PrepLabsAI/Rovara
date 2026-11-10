@@ -515,6 +515,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(options.timers === undefined ? {} : { timers: options.timers }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.commentThreadsPerPoll === undefined ? {} : { commentThreadsPerPoll: options.commentThreadsPerPoll }),
+    ...(options.modelProviderEndpoints === undefined ? {} : { modelProviderEndpoints: options.modelProviderEndpoints }),
+    // The flip-back settings of the session features (`0` turns one off; anything else leaves it on).
+    liveSteer: options.environment["ROVARA_LIVE_STEER"] !== "0", stepNotes: options.environment["ROVARA_STEP_NOTES"] !== "0", ask: options.environment["ROVARA_ASK"] !== "0",
   });
 
   comments.current = app.comments;

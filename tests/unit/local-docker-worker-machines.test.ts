@@ -188,6 +188,33 @@ describe("local docker worker machines", () => {
     expect(receipt).toEqual({ duplicate: false });
   });
 
+  it("passes a steer or peek answer on, bounded: an oversized or non-object answer reads as none, and a job's answer is never passed on", async () => {
+    const docker = new FakeDocker();
+    const signer = createEphemeralInvokeSigner();
+    const real = docker.fetch;
+    const answer: { body: string } = { body: JSON.stringify({ accepted: true, outcome: "steered" }) };
+    const first = await build({ docker, signer });
+    const machines = new DockerWorkerMachines({
+      image: "worker:test", stateDirectory: first.stateDirectory, callback: () => ({ tcpPort: 1234 }), signer, docker,
+      fetch: (async (url: string, init?: RequestInit) => (url.endsWith("/invocations") ? new Response(answer.body, { status: 200 }) : real(url, init))) as typeof fetch,
+    });
+    const { machineId } = await machines.start({ machineKey: "ws-a", companyId: COMPANY });
+    await machines.health(machineId);
+    const workspaceId = workspaceIdFor(COMPANY, "ws-a");
+    const steer = WorkerInvocationSchema.parse({
+      protocolVersion: AGENTX_PROTOCOL_VERSION, kind: "steer", operationId: randomUUID(), workspaceId, fence: 1, projectRevision: 1, callbackCapability: "c".repeat(48),
+      payload: { targetOperationId: randomUUID(), messageId: `msg_${"1".repeat(20)}`, step: "PLAN", authority: "owner_instruction", sender: "person p_abcdef", text: "hi" },
+    });
+    expect(await machines.deliver(machineId, steer)).toEqual({ duplicate: false, answer: { accepted: true, outcome: "steered" } });
+    answer.body = `{"accepted":true,"pad":"${"x".repeat(1_100_000)}"}`;
+    expect(await machines.deliver(machineId, steer)).toEqual({ duplicate: false, answer: {} });
+    answer.body = "[1,2]";
+    expect(await machines.deliver(machineId, steer)).toEqual({ duplicate: false, answer: {} });
+    // A job's answer is its receipt only.
+    answer.body = JSON.stringify({ accepted: true, duplicate: true, secret: "no" });
+    expect(await machines.deliver(machineId, invocationFor(workspaceId, randomUUID()))).toEqual({ duplicate: true });
+  });
+
   it("maps a worker that refuses the signature to unauthorized", async () => {
     const docker = new FakeDocker();
     const { machines } = await build({ docker });

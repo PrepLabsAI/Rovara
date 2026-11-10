@@ -13,7 +13,7 @@ import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { resolveRowItem } from "../task-flow/dispatch-rows.js";
 import { readTask } from "../task-flow/reads.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
-import { acceptStep, commitWorkflow, readWorkspace, type StepStart } from "../task-flow/stage-machine.js";
+import { acceptStep, acceptStepWithNotes, commitWorkflow, readWorkspace, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log, newId } from "../task-flow/support.js";
 import { firstGraphInvocation, restartedGraphInvocation, resumeGraphInvocation, workflowWithCurrentGraphOperation } from "../work-breakdown/invocation.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
@@ -155,7 +155,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     ...(workflow.fixSource === undefined ? {} : { workflowFix: { source: workflow.fixSource, ...(startFrom === undefined ? {} : { startFrom }) } }),
     ...(graph === undefined ? {} : { workflowDependencies: graph.invocation }),
   });
-  const accepted = await acceptStep(deps, {
+  const accepted = await acceptStepWithNotes(deps, {
     task, workspace, requestId, prompt: withTestRule(prompt, next), workflowMode: "IMPLEMENT",
     workflow: { current: workflow, next: operationId === undefined ? next : workflowWithCurrentGraphOperation(next, operationId, graph?.invocation) },
     extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,

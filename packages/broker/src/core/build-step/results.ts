@@ -14,6 +14,7 @@ import {
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
+import { isReapprovalStop, liveSteerChangeItems, liveSteerCodingStop, settleLiveSteerReapproval } from "../sessions/live-steer-reapproval.js";
 import { DISPATCH_EXHAUSTED_ERROR } from "../task-flow/dispatch.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import type { StepOutcome } from "../task-flow/outcome.js";
@@ -64,8 +65,10 @@ export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, ne
 
 // ---- coding, and a rerun of the checks
 
-function blockReasonOfFailedRun(mode: "IMPLEMENT" | "CHECKS", ended: Ended): string {
+function blockReasonOfFailedRun(mode: "IMPLEMENT" | "CHECKS", ended: Ended, workflow: WorkflowSnapshot): string {
   const error = ended.error;
+  // The owner's live message asked for a change outside the approved plan, so coding stopped: the owner decides (Revise the plan when the plan can take it in, else Retry coding or a new task).
+  if (mode === "IMPLEMENT" && isReapprovalStop(error)) return liveSteerCodingStop(workflow, error);
   if (error?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true) return WORKFLOW_HISTORY_REWRITTEN_MESSAGE;
   if (error?.includes(WORKFLOW_NO_CODE_CHANGE_MESSAGE) === true) return WORKFLOW_BLOCK_REASONS.noCodeChanged;
   // The checks' rerun could not first stop the programs earlier work left running, so no check ran: a person decides (nothing sends it back or retries it by itself).
@@ -102,12 +105,19 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
   const reported = recordOf(ended.outcome?.kind === "built" ? ended.outcome.result : undefined);
   if (ended.status !== "SUCCEEDED") {
     // A coding run that left the code as it was reports what it found (redacted and bounded again here); it is kept only with that stop.
-    const reason = blockReasonOfFailedRun(mode, ended);
+    const reason = blockReasonOfFailedRun(mode, ended, workflow);
     let blocked = blockWorkflow(workflow, reason, now, { noChangeFindings: noChangeFindingsFrom(reported["noChangeFindings"]) });
     // An ordered run that stopped marks the item it was on as unknown, so a retry resumes only from what was acknowledged as done.
     const marked = mode === "IMPLEMENT" ? progressAfterStoppedRun(workflow, operation, now) : workflow.workflowDependenciesProgress ?? [];
     if (marked.length > (workflow.workflowDependenciesProgress ?? []).length) blocked = WorkflowSnapshotSchema.parse({ ...blocked, workflowDependenciesProgress: marked });
+    // The owner's message ids are kept with the block that offers Revise the plan, in the same transaction, so a card that offers it always has its record.
+    const kept = mode === "IMPLEMENT" ? liveSteerChangeItems(task.taskId, blocked, ended.error, now) : [];
+    if (kept.length > 0) {
+      if (await commitWorkflow(deps, task, blocked, kept)) await settleLiveSteerReapproval({ store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }), ...(deps.log === undefined ? {} : { log: deps.log }) }, task, ended.error);
+      return;
+    }
     await commitAndContinue(deps, task, blocked, now, causeOfEnd(ended));
+    if (mode === "IMPLEMENT" && isReapprovalStop(ended.error)) await settleLiveSteerReapproval({ store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }), ...(deps.log === undefined ? {} : { log: deps.log }) }, task, ended.error);
     return;
   }
 

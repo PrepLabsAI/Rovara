@@ -179,6 +179,10 @@ export interface TaskFlowDeps {
   onOperationEnded?: (operationId: string) => void;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
+  /** Whether a message to a running step is handed to the worker as it is sent (the kill switch, default on). Off: a message is a note, read by the next step. */
+  liveSteer?: boolean;
+  /** Whether the planning, understanding and coding steps read the people's notes (the flip-back setting, default on). Off: notes are saved and no step reads them. */
+  stepNotes?: boolean;
 }
 
 export const DEFAULT_DISPATCH_QUEUE = "task-dispatch";

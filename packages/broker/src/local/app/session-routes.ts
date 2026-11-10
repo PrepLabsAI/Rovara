@@ -1,10 +1,10 @@
 // Lane L9-wire: the session routes the MCP tools and the CLI's `session` commands call (`/v1/app/sessions...`), over L6b's session store, summary and control. A session here is a
 // task's session; the read is L6b's `sessionSnapshot` and the task flow's view of the same task. Comments between people are not here (one owner): a comment is refused, a message
-// to the agent goes through the control host (L9-wire's `host.ts`), which says plainly that a running step does not take it yet.
+// to the agent goes through the control host (L9-wire's `host.ts`), which keeps it as a note and gives it to a running step.
 import type { ObjectStorage } from "@agentx/contracts";
 import {
   AgentXError, IntentAnswerRefusal, SESSION_ACTIONS, SessionIdSchema, WorkflowTransitionError, agentXError,
-  type AgentSessionRecord, type OrgId,
+  type AgentSessionRecord, type OrgId, type SessionId,
 } from "@agentx/contracts";
 import { AGENT_SESSION_CONTRACT_VERSION } from "@agentx/contracts";
 import type { ControlResult } from "../../core/sessions/control.js";
@@ -15,12 +15,17 @@ import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import { readTask, taskViewOf } from "../../core/task-flow/reads.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
+import type { createAsk } from "../../core/sessions/ask.js";
+import { followSession, recordPresence, unfollowSession, viewingNow } from "../../core/sessions/followers.js";
+import { revisePlanWithLiveMessage } from "../../core/sessions/live-steer-revise.js";
 import { createLocalSessionControl } from "./host.js";
 import { answerUnderstandQuestions } from "./answers.js";
 import { developerTaskView } from "./task-view.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
-const SESSIONS = /^\/v1\/app\/sessions(?:\/([A-Za-z0-9_-]{1,100})(?:\/(stop|retry|messages|answers))?)?$/u;
+const SESSIONS = /^\/v1\/app\/sessions(?:\/([A-Za-z0-9_-]{1,100})(?:\/(stop|retry|messages|answers|revise-plan|follow|unfollow|presence|close))?)?$/u;
+/** `POST /v1/app/sessions/<id>/ask` asks about a task; `GET /v1/app/sessions/<id>/asks/<askId>` reads it back, for the person who asked. */
+const ASK_PATH = /^\/v1\/app\/sessions\/([A-Za-z0-9_-]{1,100})\/(?:ask|asks\/(ask_[0-9a-z]{20}))$/u;
 
 const STATUS_OF_REFUSAL: Record<string, number> = { not_found: 404, forbidden: 403, ended: 409, unavailable: 409, nothing_to_retry: 409, invalid: 400, request_id_reused: 409 };
 
@@ -30,6 +35,10 @@ export interface SessionRoutesDeps {
   companyId: OrgId;
   /** The URL clients reach this install at: the session's `link` is its own address. */
   origin: () => string;
+  /** Recomputes a session's summary now (after a close, so the answer shows the session ended). */
+  refresh?: ((orgId: OrgId, sessionId: SessionId) => Promise<unknown>) | undefined;
+  /** Ask about this task; absent when the install cannot answer one. */
+  ask?: ReturnType<typeof createAsk> | undefined;
 }
 
 function bodyOf(request: BrokerRequest): Record<string, unknown> {
@@ -45,6 +54,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   const store = flow.deps.store;
   const sessions = new SessionStore(store);
   const control = createLocalSessionControl(flow.deps);
+  const followerDeps = { store, ...(flow.deps.now === undefined ? {} : { now: flow.deps.now }) };
   const tile = (session: AgentSessionRecord): Record<string, unknown> => JSON.parse(JSON.stringify({
     contractVersion: AGENT_SESSION_CONTRACT_VERSION, sessionId: session.sessionId, kind: session.kind, title: session.title, project: session.project, agent: session.agent, owner: session.owner,
     where: session.where, level: "edit", revision: session.revision, summary: session.summary, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
@@ -59,7 +69,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
       contractVersion: AGENT_SESSION_CONTRACT_VERSION, sessionId: session.sessionId, kind: session.kind, mode: session.mode, title: session.title, project: session.project, agent: session.agent,
       owner: session.owner, startedBy: session.startedBy, where: session.where, status: session.summary.status, step: session.summary.step, peek: session.summary.peek, lastRunFailed: session.summary.lastRunFailed,
       cost: { spentUsd: session.summary.costUsd, ...(session.summary.runLimitUsd === undefined ? {} : { runLimitUsd: session.summary.runLimitUsd }), payer: { kind: "member", name: session.owner.name } },
-      approvals: [], followers: 0, viewingNow: [],
+      approvals: [], followers: session.followerCount, viewingNow: await viewingNow(store, session, (flow.deps.now?.() ?? new Date()).getTime()),
       you: { level: "edit", owner: true, following: true, actions: SESSION_ACTIONS.filter((action) => snapshot.actions.includes(action as never) || action === "close") },
       link: `${deps.origin()}/v1/app/sessions/${session.sessionId}`, bindings: [], legs: session.legs, revision: session.revision, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
       body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs) },
@@ -71,6 +81,21 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
 
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
+    const asked = ASK_PATH.exec(path);
+    if (asked !== null) {
+      try {
+        if (deps.ask === undefined || !SessionIdSchema.safeParse(asked[1]).success) throw agentXError("NOT_FOUND", "route not found");
+        if (asked[2] === undefined) {
+          if (request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
+          return json(200, await deps.ask.submit(caller.principal, deps.companyId, asked[1]!, bodyOf(request)));
+        }
+        if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
+        return json(200, await deps.ask.status(caller.principal, deps.companyId, asked[1]!, asked[2]));
+      } catch (error) {
+        if (error instanceof AgentXError) return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });
+        throw error;
+      }
+    }
     const match = SESSIONS.exec(path);
     if (match === null) return undefined;
     try {
@@ -91,6 +116,12 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
       const session = await sessions.get(orgId, sessionId);
       if (session === undefined || session.owner.developerId !== developerIdOf(caller.principal)) throw agentXError("NOT_FOUND", "There is no such session.");
       if (action === undefined && request.method === "GET") return json(200, { session: await view(session) });
+      // Following: the owner follows without an item, so a laptop answers `following: true` and writes nothing; a members adapter's people have items.
+      // `DELETE .../follow` is the hosted product's unfollow; this install's HTTP server takes GET and POST only (a hardening choice), so the unfollow is also `POST .../unfollow`.
+      if ((action === "follow" && (request.method === "POST" || request.method === "DELETE")) || (action === "unfollow" && request.method === "POST")) {
+        return json(200, request.method === "POST" && action === "follow" ? await followSession(followerDeps, caller.principal, orgId, sessionId) : await unfollowSession(followerDeps, caller.principal, orgId, sessionId));
+      }
+      if (action === "presence" && request.method === "POST") return json(200, await recordPresence(followerDeps, caller.principal, orgId, sessionId));
       if (request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
       const body = bodyOf(request);
       const requestId = typeof body["requestId"] === "string" ? body["requestId"] : "";
@@ -109,6 +140,21 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
         return result.status === "refused" ? refused(result) : json(200, result.message);
       }
       if (action === "answers") return json(200, { session: await answerQuestions(session, caller, body) });
+      if (action === "close") {
+        // Closes the session's task through the session control (the same checks as a stop, one transaction for the request, the event and the audit); the session ends with it, and the answer is the session as `GET` shows it.
+        // A repeat of the request is the same close. `discardUnpublished` is not taken: this install has no unpublished-work check to agree to.
+        if (typeof body["requestId"] !== "string" || Object.keys(body).some((name) => name !== "requestId")) throw agentXError("CONFIG_INVALID", "a close needs a request ID and takes nothing else (there is no unpublished work to discard on this install)");
+        const result = await control.close(caller.principal, orgId, sessionId, { requestId });
+        if (result.status === "refused") return refused(result);
+        await deps.refresh?.(orgId, sessionId).catch(() => undefined);
+        return json(200, { session: await view((await sessions.get(orgId, sessionId)) ?? result.session), closed: true });
+      }
+      if (action === "revise-plan") {
+        // The owner sends coding that stopped for their live message back to planning with that change; the revised plan still waits for their approval on the page (nothing is approved here).
+        if (session.subject.kind !== "task") throw agentXError("NOT_FOUND", "There is no such session.");
+        await revisePlanWithLiveMessage(flow.deps, orgId, sessionId, { taskId: session.subject.taskId, ownerDeveloperId: session.owner.developerId }, body);
+        return json(200, { session: await view((await sessions.get(orgId, sessionId)) ?? session) });
+      }
       throw agentXError("NOT_FOUND", "route not found");
     } catch (error) {
       if (error instanceof AgentXError) return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });

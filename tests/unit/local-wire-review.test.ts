@@ -22,11 +22,28 @@ describe("M1: the planner is told the newest changes the owner asked for", () =>
   });
 });
 
+const DEVELOPER = "ab".repeat(32);
+const messageId = (id: number): string => `msg_${String(id).padStart(20, "0")}`;
+
+/** A workflow task on the harness, and the host's plan for a message to it, written the way the session control writes it (the plan's items in one transaction). */
+async function messaging() {
+  const h = createHarness({ understandFirst: true });
+  await h.registerProject();
+  const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true });
+  const taskId = started.task.taskId;
+  const host = createSessionControlHost(h.deps);
+  const tell = async (id: number, text = "note") => {
+    const plan = await host.planMessage!(taskId, { messageId: messageId(id), text, sessionId: "ses_aaaaaaaaaaaaaaaaaaaa", author: { developerId: DEVELOPER, name: "Owner" }, owner: true });
+    if ((plan.items ?? []).length > 0) expect((await h.store.transact([...plan.items!])).applied).toBe(true);
+    return plan;
+  };
+  return { h, host, taskId, tell };
+}
+
 describe("L4 and L5: the message limit is a token bucket, and a repeat is not counted", () => {
   it("allows the limit in a burst, refills evenly, and does not allow twice the limit across an hour boundary", async () => {
-    const h = createHarness();
-    const host = createSessionControlHost(h.deps);
-    const send = async (id: number) => (await host.deliverMessage(TASK, { messageId: `msg_${id}`, text: "note" })).reason;
+    const { h, tell } = await messaging();
+    const send = async (id: number) => (await tell(id)).reason;
     for (let id = 1; id <= MESSAGES_PER_HOUR; id += 1) expect(await send(id)).not.toBe(MESSAGE_RATE_LIMITED);
     expect(await send(100)).toBe(MESSAGE_RATE_LIMITED);
     // A fixed hourly window would reopen at the next hour; a bucket refills a little at a time.
@@ -39,18 +56,20 @@ describe("L4 and L5: the message limit is a token bucket, and a repeat is not co
     // A repeat of a message already saved is answered again and takes no token.
     h.clock.advance(3_600);
     expect(await send(1)).not.toBe(MESSAGE_RATE_LIMITED);
-    expect(await send(1)).not.toBe(MESSAGE_RATE_LIMITED);
+    expect((await tell(1)).state).toBe("queued");
   });
 
-  it("gives every saved message an expiry, and a message saved twice is one row", async () => {
-    const h = createHarness();
-    const host = createSessionControlHost(h.deps);
-    await Promise.all([host.deliverMessage(TASK, { messageId: "msg_same", text: "a" }), host.deliverMessage(TASK, { messageId: "msg_same", text: "a" })]);
-    const rows = (await h.store.query({ pk: `DEVTASK#${TASK}`, sk: { op: "beginsWith", prefix: "MESSAGE#" } })).items;
+  it("keeps each saved message as a note with an expiry, and a message planned twice at once is one note and one token (the loser's transaction is refused and planned again)", async () => {
+    const { h, host, taskId } = await messaging();
+    const plan = () => host.planMessage!(taskId, { messageId: messageId(7), text: "a", sessionId: "ses_aaaaaaaaaaaaaaaaaaaa", author: { developerId: DEVELOPER, name: "Owner" }, owner: true });
+    const [first, second] = await Promise.all([plan(), plan()]);
+    const applied = await Promise.all([h.store.transact([...first.items!]), h.store.transact([...second.items!])]);
+    expect(applied.filter((result) => result.applied)).toHaveLength(1);
+    const rows = (await h.store.query({ pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "NOTE#" } })).items;
     expect(rows).toHaveLength(1);
     expect(typeof rows[0]!["indexExpiresAt"]).toBe("number");
-    const total = await h.store.get({ pk: `DEVTASK#${TASK}`, sk: "MESSAGE_TOTAL" });
-    expect(total?.["count"]).toBe(1);
+    expect((await h.store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))?.["threadNoteCount"]).toBe(1);
+    expect((await h.store.get({ pk: `DEVTASK#${taskId}`, sk: "MESSAGE_BUCKET" }))?.["tokens"]).toBe(MESSAGES_PER_HOUR - 1);
   });
 });
 
