@@ -1,0 +1,32 @@
+Rovara design review prompts
+Copyright 2026 PrepLabsAI
+
+The role prompts in this directory (comprehension, critic, critic-b, codebase, zoom-out,
+merge, resolve and the shared rules in common.ts) are adapted from the Elephant-Goldfish
+Model:
+
+  Elephant-Goldfish Model
+  https://github.com/google/elephant-goldfish-model (commit 464db031e)
+  Copyright 2026 Google LLC
+  Licensed under the Apache License, Version 2.0
+
+Source files adapted: agents/comprehension.md, agents/design_critic.md, agents/zoom_out.md,
+agents/codebase_details.md, agents/implementation_readiness.md, agents/synthesizer.md and
+skills/egm-resolve/SKILL.md.
+
+Modified by Rovara (PrepLabsAI). The changes: the interactive review gates are removed
+(the review is asynchronous and unclear points become questions with options and a
+recommendation); the brainstorm mode and the structural and style roles are dropped;
+findings are one strict JSON block, each with at least one citation; the roles are
+combined (design critic with zoom out, codebase details with implementation readiness)
+and fitted to a fixed design template; the resolve rules (propose fix, contest, escalate,
+decline) become fixed, contested, asked and declined; and all material under review is
+treated as untrusted data.
+
+You may obtain a copy of the Apache License, Version 2.0 at
+http://www.apache.org/licenses/LICENSE-2.0 (the full text is in LICENSE-APACHE at the
+root of this repository). Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+The upstream project ships no NOTICE file of its own (checked at commit 464db031e).

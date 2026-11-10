@@ -37,6 +37,11 @@ export interface ModelGrant {
   fence?: number | undefined;
   taskId?: string | undefined;
   projectName?: string | undefined;
+  /**
+   * A design review's key slot: the grant is for ONE reviewer (or the merge step) of one operation. Its token is one-shot (a slot's token is minted once, with a life past the whole stage), has a spend record of its own
+   * and a budget that is the slot's allocated ceiling, so no reviewer spends another's money and the broker can measure what each cost.
+   */
+  slot?: string | undefined;
   /** The only models a token for this operation may call. */
   routes: readonly ProxyRoute[];
   /** The most this operation may spend. Absent: no limit is held. */
@@ -48,7 +53,9 @@ export interface ModelGrantSource {
    * What the capability allows. Throws an `AgentXError` (`CALLBACK_FORBIDDEN` for a capability that is not valid, expired or not for model
    * access, `STALE_FENCE` for an operation that no longer holds its workspace); the proxy answers a fixed refusal and never repeats the text.
    */
-  grant(capability: string): Promise<ModelGrant>;
+  grant(capability: string, slot?: string): Promise<ModelGrant>;
+  /** A design-review slot's token was just minted: records its id (never the token) so the round can be verified and its spend read. Throws to refuse (the slot was asked for before: it fails closed). */
+  slotMinted?(grant: ModelGrant, minted: { keyId: string; expiresAt: number }): Promise<void>;
   /** Whether the operation still holds its workspace. Asked before every call, so a token dies with its operation. */
   active(operation: { workspaceId: string; operationId: string; fence: number | undefined }): Promise<boolean>;
 }

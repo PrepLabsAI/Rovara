@@ -56,7 +56,11 @@ export interface WorkflowSubjectOptions {
   /** When the waiting request stops being answerable (ISO). Absent: it does not expire. */
   expiresAt?: (task: Record<string, unknown>, workflow: WorkflowSnapshot) => string | undefined;
   /** More steps for the decision's transaction, from the stage machine. They must not name the task's own key. */
-  onDecided?: (context: { taskId: string; task: Record<string, unknown>; before: WorkflowSnapshot; after: WorkflowSnapshot; attempt: DecisionAttempt; approver: Principal; at: string }) => readonly TransactItem[] | Promise<readonly TransactItem[]>;
+  /**
+   * A rule of the document's own that must hold before the decision is applied (the design review's: a design with an open blocker is approved only with a one-line reason). Throws `SubjectRefusal`. Runs for every verified approver's decision, on the state the gate loaded.
+   */
+  checkDecision?: (context: { task: Record<string, unknown>; workflow: WorkflowSnapshot; attempt: DecisionAttempt }) => void | Promise<void>;
+  onDecided?: (context: { taskId: string; task: Record<string, unknown>; before: WorkflowSnapshot; after: WorkflowSnapshot; attempt: DecisionAttempt; approver: Principal; at: string; /** The risk the request was graded at. */ risk?: DecisionRisk | undefined }) => readonly TransactItem[] | Promise<readonly TransactItem[]>;
   /** Whether a verified repository collaborator may decide as a project approver (decision 45.3). Default true. Ignored when `actorFor` is given. */
   collaboratorsMayDecide?: boolean;
   /**
@@ -145,6 +149,7 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       const actor = actors[0];
       if (actor === undefined || actors.some((entry) => entry === undefined)) throw new SubjectRefusal("not_the_approver", "That person cannot decide this task.");
       const approver = approvers[0]!;
+      await options.checkDecision?.({ task, workflow, attempt });
       const given = (attempt.details ?? {}) as WorkflowDecisionDetails;
       // The plan's own decisions and what it says of needing no change come from the stored document the decision binds, never from what a surface sent: the surface's copies are dropped. A structured plan
       // that cannot be read back is refused when it is approved or answered (fail closed): an approval is never recorded for bytes nobody could check.
@@ -199,7 +204,7 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       // The engine answers an unchanged snapshot for a repeat of a decision it already holds; nothing is left to write.
       if (after.revision === workflow.revision) throw new SubjectRefusal("invalid_outcome", "The workflow already holds this decision.");
       const taskId = loaded.request.subject.id;
-      const extra = options.onDecided === undefined ? [] : await options.onDecided({ taskId, task, before: workflow, after, attempt, approver, at });
+      const extra = options.onDecided === undefined ? [] : await options.onDecided({ taskId, task, before: workflow, after, attempt, approver, at, risk: loaded.request.risk });
       return {
         ops: [change.set("workflow", jsonOf(after)), change.set("updatedAt", at)],
         extra,

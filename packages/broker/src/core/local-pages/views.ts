@@ -83,6 +83,8 @@ export interface PlanPageView {
   secondReview?: { lines: string[]; needsAcknowledgement: boolean; acknowledged: boolean };
   /** The acknowledgement key the form carries (set only while the owner has to acknowledge). */
   secondReviewAck?: string;
+  /** One plain line when the design's review did not run ("Design review did not run: ..."). Fixed words. Absent when it ran or there was none. */
+  designNote?: string;
 }
 
 export interface DesignMockupView {

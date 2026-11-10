@@ -35,6 +35,7 @@ import { planGraphOf } from "../../core/work-breakdown/plan-graph.js";
 import { workBreakdownView, type WorkBreakdownView } from "../../core/work-breakdown/view.js";
 import { operationKey } from "../../core/task-flow/keys.js";
 import type { SecondReview } from "../../core/second-review/index.js";
+import { designNotRunLine } from "../../core/design-review/not-run.js";
 
 const PLAN_READ_MAX_BYTES = 200_000;
 const COMMENTS_MAX = 200;
@@ -192,6 +193,8 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         pullRequests: (workflow.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state.toLowerCase(), ...(outside.has(`${pullRequest.repositoryId}#${String(pullRequest.number)}`) ? { note: CHANGED_OUTSIDE_NOTE } : {}) })),
         comments: await commentsOf(taskId), ...(approval === undefined ? {} : { approval }), ...(breakdown === undefined ? {} : { breakdown }),
         ...(workflow.critique === undefined ? {} : { critique: critiqueLines(workflow.critique, task.project) }),
+        // A design that went through no review says so beside the design itself, so nobody takes it for a reviewed one.
+        ...(designNotRunLine(workflow.designReview) === undefined ? {} : { designNote: designNotRunLine(workflow.designReview)! }),
         // Rovara's ask, the pull request's state and any questions: fixed words, and the forms that answer them.
         attention: await attentionWithThread(deps, task, (await attentionOf(deps.flow, task)).view),
         ...secondReviewOfPlanPage(deps, task),

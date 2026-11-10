@@ -362,6 +362,7 @@ function startPlainForwarder(ip, cidr) {
 // worker is refused when another worker's relay carries it.
 const CALLBACK_PATH = /^\/v1\/internal\/(workspaces|project-setups)\/([A-Za-z0-9-]{1,64})\/operations\/([A-Za-z0-9._-]{1,128})\/([a-z0-9][a-z0-9\/_-]{0,120})$/;
 const MODEL_ACCESS_PATH = /^\/v1\/internal\/model-access(\?slot=[a-z0-9][a-z0-9_-]{0,31})?$/;
+const DESIGN_REVIEW_PACKET_PATH = /^\/v1\/internal\/design-review\/packet\?slot=[a-z0-9][a-z0-9_-]{0,31}$/;
 const MODEL_PROXY_PATH = /^\/v1\/internal\/model-proxy\/v1\/(messages|responses|chat\/completions)(\?beta=true)?$/;
 const WORKSPACE_STAMP = "x-rovara-workspace";
 const MODEL_TIMEOUT_MS = 600000;
@@ -370,6 +371,7 @@ const HOP = ["connection", "keep-alive", "proxy-connection", "transfer-encoding"
 function callbackRoute(method, url, workspaceId) {
   const target = url || "";
   if (MODEL_ACCESS_PATH.test(target)) return method === "GET" ? { kind: "model-access" } : { status: 405, reason: "method_not_allowed" };
+  if (DESIGN_REVIEW_PACKET_PATH.test(target)) return method === "GET" ? { kind: "packet" } : { status: 405, reason: "method_not_allowed" };
   if (MODEL_PROXY_PATH.test(target)) return method === "POST" ? { kind: "model-call" } : { status: 405, reason: "method_not_allowed" };
   if (method !== "POST") return { status: 405, reason: "method_not_allowed" };
   const match = CALLBACK_PATH.exec(target);

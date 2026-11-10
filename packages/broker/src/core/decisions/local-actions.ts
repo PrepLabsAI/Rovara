@@ -29,6 +29,8 @@ const WORDS: Record<GateRefusalReason, { reason: "stale" | "refused" | "not_foun
 /** What a gate answer says to a page or a comment. A repeat of a finished decision is a success (the same answer again). */
 export function localResultOf(result: GateResult, done?: string): LocalActionResult {
   if (result.status !== "refused") return { ok: true, ...(done === undefined ? {} : { message: done }) };
+  // A rule of the document's own (a design with an open blocker needs a reason) says so in its own words, which are fixed text.
+  if (result.reason === "invalid" && result.detail.startsWith("reason: ")) return { ok: false, reason: "invalid", message: result.detail.slice("reason: ".length) };
   return { ok: false, ...WORDS[result.reason] };
 }
 

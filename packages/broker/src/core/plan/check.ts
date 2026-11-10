@@ -16,6 +16,7 @@ import { locate, settled, type RowRef } from "../build-step/start.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import { conversationKey } from "../task-flow/keys.js";
+import { readTask } from "../task-flow/reads.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
 import { acceptStep, blockTaskWorkflow, commitWorkflow, planFeedbackOf, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { DEFAULT_PROMPTS, iso, log } from "../task-flow/support.js";
@@ -35,12 +36,24 @@ export function planCheckConversationId(taskId: string, revision: number): strin
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/** Whether the row is the design review's: the same stage and rows serve a design that is being reviewed (the review's own step) and a coding plan (the plan check). */
+async function isDesignReviewRow(deps: TaskFlowDeps, row: RowRef): Promise<boolean> {
+  const workflow = (await readTask(deps, row.taskId))?.workflow;
+  return workflow !== undefined && workflowIsDesignReviewing(workflow);
+}
+
+/** The design review's step for the row, or a stale answer where the install has no design review. */
+async function startDesignReviewRow(deps: TaskFlowDeps, row: RowRef, kind: "CRITIQUE" | "CRITIC_REPLAN"): Promise<StepStart> {
+  return deps.designReview === undefined ? settled(deps, row, "STALE") : deps.designReview.runRow(deps, { ...row, kind });
+}
+
 /**
  * The plan check of a version 2 coding plan, started with no one asking. STALE unless the task is open and still waiting for exactly this check at the row's revision. PLAN_CRITIQUE/READY becomes
  * RUNNING and the check's operation is accepted in one transaction; its request id comes from the task and the revision, so a repeated row is the first one's duplicate. The critic is given the plan
  * the planner wrote as data, and the person's request, redacted and cut: Rovara's own words come first, and nothing in either can approve the plan.
  */
 export async function startPlanCritique(deps: TaskFlowDeps, row: RowRef): Promise<StepStart> {
+  if (await isDesignReviewRow(deps, row)) return startDesignReviewRow(deps, row, "CRITIQUE");
   const found = await locate(deps, row, (workflow) => workflow.stage === "PLAN_CRITIQUE" && workflow.state === "READY" && !workflowIsDesignReviewing(workflow)
     && workflow.program?.steps.some((step) => step.kind === "plan_critic") === true);
   if (found === "stale") return settled(deps, row, "STALE");
@@ -74,6 +87,7 @@ export async function startPlanCritique(deps: TaskFlowDeps, row: RowRef): Promis
  * is given the plan it wrote as data, to write back whole, and the critic's points in the labelled block after Rovara's own words; it decides what to change.
  */
 export async function startCriticRevision(deps: TaskFlowDeps, row: RowRef): Promise<StepStart> {
+  if (await isDesignReviewRow(deps, row)) return startDesignReviewRow(deps, row, "CRITIC_REPLAN");
   const found = await locate(deps, row, (workflow) => workflow.stage === "PLAN" && workflow.state === "READY" && workflow.critique?.critiques.at(-1)?.points.some((point) => point.severity === "blocking") === true);
   if (found === "stale") return settled(deps, row, "STALE");
   if (found === "waiting") return "WAITING";

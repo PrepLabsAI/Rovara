@@ -1,7 +1,7 @@
 // Lane L6a, task flow core: accepting an operation. An operation is one job for a workspace's worker (a preparation, one step of the
 // workflow). Accepting it writes the operation record and stages its dispatch message with the caller's own change, in one transaction
 // (the transactional outbox), so an operation exists if and only if its message does.
-import { INDEX_EXPIRY_ATTRIBUTE, agentXError, when, type Operation, type TransactItem, type WorkflowDependencyInvocation } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, agentXError, when, type DesignReviewBinding, type Operation, type TransactItem, type WorkflowDependencyInvocation } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
 import { operationKey, operationRequestKey } from "./keys.js";
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
@@ -30,6 +30,9 @@ export interface AcceptInput {
   firstEvent?: string;
   /** A REVIEW operation's second-review plan (or the fixed reason none could run), recorded on the operation. */
   secondReviewPlan?: SecondReviewOperationPlan;
+  /** Design review: the binding the broker stored for the round, kept on the operation (the packets and keys are served only for its slots), and the source that serves its model. */
+  designReview?: DesignReviewBinding;
+  modelSourceId?: string;
   now?: string;
   /** Whether to write the request's idempotency record (a start does not: the start's own record covers it). */
   recordRequest?: boolean;
@@ -73,6 +76,8 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
     ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
     ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
     ...(input.secondReviewPlan === undefined ? {} : { secondReviewPlan: input.secondReviewPlan }),
+    ...(input.designReview === undefined ? {} : { designReview: input.designReview }),
+    ...(input.modelSourceId === undefined ? {} : { modelSourceId: input.modelSourceId }),
   };
   const message: DispatchMessage = { v: 1, workspaceId: input.workspace.id, operationId: id };
   const first: TransactItem[] = input.firstEvent === undefined ? [] : [{

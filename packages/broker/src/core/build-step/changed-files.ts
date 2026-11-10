@@ -139,8 +139,9 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   await deps.store.put({ item: { ...verifiedFilesKey(task.workspaceId, candidate.digest), entityType: "VERIFIED_FILES", candidateDigest: candidate.digest, complete, verifiedAt: iso(deps), files: JSON.parse(JSON.stringify(all.slice(0, 200))) as never } });
   // The description says what changed, read from the host. A description a person edited is left as they left it.
   const plan = await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined);
+  const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
-  const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, lessonsUsed: NO_LESSONS_USED, ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }) });
+  const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, lessonsUsed: NO_LESSONS_USED, ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
   for (const entry of hosts) {
     try {
       const record = await pullRequestRecordOf(deps, task.workspaceId, entry.repositoryId, entry.number);

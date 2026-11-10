@@ -29,6 +29,7 @@ import type { CodeMilestones } from "../merge/seams.js";
 import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
 import type { SecondReview } from "../second-review/service.js";
+import type { ProofContext } from "../proof/proof-section.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
@@ -126,6 +127,27 @@ export interface BuildSteps {
   onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void>;
 }
 
+/**
+ * The design review stage: a fresh-context review of a Full task's design document, run in the plan-check stage (PLAN_CRITIQUE) with its own rows (`CRITIQUE`, `CRITIC_REPLAN`). Kept behind this seam so the
+ * stage machine does not import the review that imports it; `createDesignReviewSteps` (core/design-review/steps.ts) fills it, and a flow without it never enters the stage.
+ */
+export interface DesignReviewSteps {
+  /** Starts the step a `CRITIQUE` or `CRITIC_REPLAN` row stands for. Same answers as the stage machine's own runner. */
+  runRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING">;
+  /** After an operation of the review ended (a round, or the planner's answer to the findings). True when it was this review's (the stage machine then does nothing more). Idempotent; never throws for a task that moved on. */
+  onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<boolean>;
+  /** Understand answered `ready`: the workflow with the design review switched on when the mode says so (Full path forced), else as it was. */
+  afterUnderstand(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, assessment: unknown, now: string): Promise<WorkflowSnapshot>;
+  /** The row the workflow's new state makes due (a design handed to the reviewers, the planner's turn to answer them), or undefined. */
+  rowFor(workflow: WorkflowSnapshot): "CRITIQUE" | "CRITIC_REPLAN" | undefined;
+  /** What the planner is told beside its prompt while the design review is on and the phase is the design (the fixed template), or undefined. */
+  planInstructions(workflow: WorkflowSnapshot): string | undefined;
+  /** Whether this operation is the planner's answer to the reviewers' findings (a PLAN run while the review is resolving): its saved file is read by `onEnded`, not as a plan. */
+  isResolveRun(workflow: WorkflowSnapshot | undefined, operation: Pick<OperationRecord, "workflowMode">): boolean;
+  /** The Proof section's input when the task's design was approved (the design line, and the links to the approved design), or undefined: the pull request is then described as for any task. Informational; never throws. */
+  proofContext?(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<ProofContext | undefined>;
+}
+
 export interface TaskFlowDeps {
   /** Code's one company (`IMPLICIT_COMPANY_ID`); every port call carries it. */
   companyId: OrgId;
@@ -197,6 +219,8 @@ export interface TaskFlowDeps {
    * a fault or a slow store changes nothing about the task. Absent: no evidence is kept.
    */
   keepEvidence?: (input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<unknown>;
+  /** Lane the design review: the design review stage. Absent: no task enters it. */
+  designReview?: DesignReviewSteps;
   /** Lane L10: the steps after the plan is approved. `createTaskFlow` fills it with the build step when absent. */
   buildSteps?: BuildSteps;
   /**

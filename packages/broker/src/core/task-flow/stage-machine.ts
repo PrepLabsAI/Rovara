@@ -21,6 +21,7 @@ import {
   submitWorkflowArtifact,
   when,
   workflowRequestId,
+  type DesignReviewBinding,
   type DocumentKey,
   type JsonValue,
   type Operation,
@@ -112,6 +113,9 @@ export interface StepInput {
   notes?: NotesForStep;
   /** A REVIEW step's second-review plan, kept on the operation for the review end. */
   secondReviewPlan?: SecondReviewOperationPlan;
+  /** Design review: the round's binding and the source that serves its model, kept on the operation. */
+  designReview?: DesignReviewBinding;
+  modelSourceId?: string;
 }
 
 /** Accepts the operation for one step. `STALE` and `WAITING` write nothing. */
@@ -145,6 +149,8 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
     ...(input.firstEvent === undefined ? {} : { firstEvent: input.firstEvent }),
     ...(input.secondReviewPlan === undefined ? {} : { secondReviewPlan: input.secondReviewPlan }),
+    ...(input.designReview === undefined ? {} : { designReview: input.designReview }),
+    ...(input.modelSourceId === undefined ? {} : { modelSourceId: input.modelSourceId }),
     dispatch: {
       kind: operationKind, projectRevision: workspace.projectRevision,
       payload: operationKind !== "task"
@@ -329,6 +335,8 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
         ...(structured === undefined || task.planUnreadable === undefined ? {} : { revision: planUnreadablePrompt(task.planUnreadable.errors) }),
       });
       planPayload = structured === undefined ? undefined : { planFormat: "structured", ...(workflow.path === "FULL" && workflow.reviewPhase !== undefined ? { workflowPhase: workflow.reviewPhase } : {}) };
+      const designInstructions = deps.designReview?.planInstructions(workflow);
+      if (designInstructions !== undefined) prompt = `${prompt}\n\n${designInstructions}`;
       mode = "PLAN";
       requestId = workflowRequestId("agentx-plan-after-understand", task.taskId, workflow.revision);
     }
@@ -444,6 +452,10 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
 
   // A step that took live messages and did not succeed runs again without them: their notes stop saying "already given" so the re-run reads them as new (scoped to this attempt; never throws).
   if (!succeeded && operation.kind === "task") await clearLiveDeliveredSince({ store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }), ...(deps.log === undefined ? {} : { log: deps.log }) }, task.taskId, operation.createdAt);
+  // The design review's own operations: a round of reviewers (plan-check mode), and the planner's answer to their findings.
+  if (deps.designReview !== undefined && (operation.workflowMode === "PLAN_CRITIQUE" || deps.designReview.isResolveRun(task.workflow, operation))) {
+    if (await deps.designReview.onEnded(deps, task, operation, ended)) return;
+  }
 
   // The steps after the plan: coding, a rerun of the checks, the reviews, the publication and the push of a fix (lane L10).
   if (operation.kind === "publish" || operation.kind === "maintain" || operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS" || operation.workflowMode === "REVIEW" || operation.workflowMode === "PLAN_CRITIQUE") {
@@ -473,7 +485,9 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
         await commitWorkflow(deps, task, answerWorkflowIntent(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, artifact: outcome.answerArtifact, now }));
         return;
       }
-      const next = recordIntentAssessment(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, now });
+      let next = recordIntentAssessment(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, now });
+      // The design review: a ready reading that needs a design (or that the person asked to have reviewed) switches it on, which forces the Full path.
+      if (deps.designReview !== undefined) next = await deps.designReview.afterUnderstand(deps, task, next, outcome.assessment, now);
       // A ready request goes on to planning with no one asking: the row commits with the transition, and is run right after.
       const toPlan = next.stage === "PLAN" && next.state === "READY";
       const committed = await commitWorkflow(deps, task, next, toPlan ? [dispatchRowItem(deps, task.taskId, next.revision, "PLAN", now)] : []);

@@ -28,7 +28,7 @@ export interface DesignCardFacts {
   /** `planned`: reviewers the tier meant to run; `verified`: those whose input was verified and whose findings counted. Planned 0 means the review did not run at all. */
   reviewers: { planned: number; verified: number };
   /** Blockers no settled resolution closed. Approving with any needs a one-line reason (Q8). */
-  blockers: ReadonlyArray<{ section: string; text: string; /** Rests on source items alone (3.12 item 5): still open, shown as "source-only". */ sourceOnly?: true }>;
+  blockers: ReadonlyArray<{ section: string; text: string; /** Rests on source items alone: still open, shown as "source-only". */ sourceOnly?: true }>;
   majors: number;
   /** The contract's `designReviewDisagreements` (the one definition): where the reviewers and the planner differ, or a blocker or major nobody closed. */
   disagreements: ReadonlyArray<{ section: string; text: string; kind?: "contested" | "unresolved" | "unchecked_fix" | "oscillation" }>;

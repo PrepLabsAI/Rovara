@@ -117,14 +117,85 @@ describe("asking for model access", () => {
     expect(w.provider.calls).toHaveLength(0);
   });
 
-  it("serves a task that has a key for at least one of its models, and refuses a design-review slot it does not serve yet", async () => {
+  it("serves a task that has a key for at least one of its models, and refuses a design-review slot nobody allocated", async () => {
     const w = await world();
     w.keyStore.remove("openai");
     w.keyStore.remove("openrouter");
     expect((await askForToken(w, w.capability())).status).toBe(200);
     const slot = await w.send({ method: "GET", path: "/v1/internal/model-access?slot=reviewer-1", headers: { [CAPABILITY_HEADER]: w.capability() } });
     expect(slot.status).toBe(403);
-    expect(slot.text).toContain("MODEL_NOT_ALLOWED");
+    expect(slot.text).toContain("CALLBACK_FORBIDDEN");
+  });
+
+  it("gives a design-review slot its own token: one per slot, a life past the stage, its own spend, and a budget that is the slot's ceiling", async () => {
+    const w = await world();
+    w.slots.set(`${OPERATION}:r1-critic`, 100_000);
+    w.slots.set(`${OPERATION}:r1-codebase`, 100_000);
+    const ask = (slot: string) => w.send({ method: "GET", path: `/v1/internal/model-access?slot=${slot}`, headers: { [CAPABILITY_HEADER]: w.capability() } });
+    const critic = await ask("r1-critic");
+    expect(critic.status, critic.text).toBe(200);
+    const body = JSON.parse(critic.text) as { apiKey: string; expiresAt: number };
+    // The token lives past the whole stage (60 minutes), unlike an operation's own (15).
+    expect(body.expiresAt).toBeGreaterThan(Date.now() + 55 * 60_000);
+    expect(w.mintedSlots.map((entry) => entry.slot)).toEqual(["r1-critic"]);
+    expect(w.mintedSlots[0]!.keyId).toMatch(/^[0-9a-f]{64}$/u);
+    // A second reviewer's token does not revoke the first's, and the two spend separately.
+    const codebase = await ask("r1-codebase");
+    expect(codebase.status).toBe(200);
+    const criticCall = await w.send({ path: MESSAGES, headers: asWorker(body.apiKey), body: anthropicBody() });
+    expect(criticCall.status).toBe(200);
+    const [criticKey, codebaseKey] = w.mintedSlots.map((entry) => entry.keyId);
+    const criticSpent = w.proxy.slotKeys.spendUsd([criticKey!]);
+    expect(criticSpent).toBeGreaterThan(0);
+    expect(w.proxy.slotKeys.spendUsd([codebaseKey!])).toBe(0);
+    // The slot's own ceiling holds: a call that could cost more than what is left is refused as a spent budget, not served.
+    const big = await w.send({ path: MESSAGES, headers: asWorker(body.apiKey), body: anthropicBody({ max_tokens: 60_000 }) });
+    expect(big.status).toBe(422);
+    // Closing the round's keys blocks them at once and keeps the spend for the record.
+    w.proxy.slotKeys.closeKeys([criticKey!, codebaseKey!]);
+    expect((await w.send({ path: MESSAGES, headers: asWorker(body.apiKey), body: anthropicBody() })).status).toBe(401);
+    expect(w.proxy.slotKeys.spendUsd([criticKey!])).toBe(criticSpent);
+    // The operation ending forgets its own spend, not the slots' (the round is recorded after the operation ended).
+    w.proxy.operationEnded(OPERATION);
+    expect(w.proxy.slotKeys.spendUsd([criticKey!])).toBe(criticSpent);
+    // A slot is minted once: asking again is refused and recorded as a refusal.
+    expect((await ask("r1-critic")).status).toBe(403);
+    expect(w.mintedSlots).toHaveLength(2);
+    expect(w.proxy.slotKeys.spendUsd(["f".repeat(64)])).toBeUndefined();
+  });
+
+  it("charges a slot its whole ceiling when a call could not be counted: its next call is refused, and the broker reads the full ceiling as what it spent", async () => {
+    const w = await world();
+    w.slots.set(`${OPERATION}:r1-critic`, 100_000);
+    const asked = await w.send({ method: "GET", path: "/v1/internal/model-access?slot=r1-critic", headers: { [CAPABILITY_HEADER]: w.capability() } });
+    const token = apiKeyOf(asked);
+    const keyId = w.mintedSlots[0]!.keyId;
+    w.meterFault.on = true;
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(200);
+    expect(w.proxy.slotKeys.spendUsd([keyId])).toBe(0.1);
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(422);
+  });
+
+  it("charges a slot its whole ceiling when the meter gives no cost for a call (an unpriced model): the same rule as a call that could not be counted", async () => {
+    const w = await world();
+    w.slots.set(`${OPERATION}:r1-critic`, 100_000);
+    const asked = await w.send({ method: "GET", path: "/v1/internal/model-access?slot=r1-critic", headers: { [CAPABILITY_HEADER]: w.capability() } });
+    const token = apiKeyOf(asked);
+    const keyId = w.mintedSlots[0]!.keyId;
+    w.meterNoCost.on = true;
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(200);
+    expect(w.proxy.slotKeys.spendUsd([keyId])).toBe(0.1);
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(422);
+  });
+
+  it("answers a GET on the design review's packet path only (the callback server): any other GET, and a packet path with another query, is refused before the broker sees it", async () => {
+    const w = await world();
+    const get = (path: string) => w.send({ method: "GET", path, headers: { [CAPABILITY_HEADER]: w.capability() } });
+    // The exact path reaches the broker's handler (the world's answers 404 for everything it does not serve).
+    expect((await get("/v1/internal/design-review/packet?slot=r1-critic")).status).toBe(404);
+    for (const path of ["/v1/internal/design-review/packet", "/v1/internal/design-review/packet?slot=r1-critic&x=1", "/v1/internal/design-review/packet?slot=../x", "/v1/internal/workspaces/x/operations/y/result", "/v1/internal/other"]) {
+      expect((await get(path)).status, path).toBe(405);
+    }
   });
 
   it("refuses when the task's budget is already spent, in the words the worker reads as the task's budget", async () => {

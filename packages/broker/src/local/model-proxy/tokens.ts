@@ -15,6 +15,8 @@ export const MIN_TOKEN_TTL_SECONDS = 150;
 const MAX_TOKENS = 2_000;
 /** How many operations' called aliases are remembered. */
 const CALLED_OPERATIONS_MAX = 500;
+/** The spend records of design-review slot keys kept after their operation ended (a round has at most 4; two rounds and a few tasks). */
+const MAX_SLOT_LEDGERS = 200;
 /** The worker needs one live token per operation (it asks again a minute before expiry). Minting another beyond this revokes the oldest, so one operation can never fill the book. */
 export const MAX_LIVE_TOKENS_PER_OPERATION = 3;
 
@@ -26,6 +28,12 @@ export interface TokenRecord {
   projectName: string | undefined;
   routes: ReadonlyMap<string, ProxyRoute>;
   budget: Cost | undefined;
+  /** A design review's key slot, when this token is one reviewer's. */
+  slot: string | undefined;
+  /** The id of the key (the token's SHA-256): what the broker records and the worker reports. */
+  keyId: string;
+  /** The spend record this token adds to: the operation's own, or (for a slot) the slot's. */
+  ledgerId: string;
   /** Epoch milliseconds. */
   expiresAt: number;
 }
@@ -54,6 +62,8 @@ export class ModelTokenBook {
   readonly #routeLedgers = new Map<string, RouteLedger>();
   /** The aliases each operation's calls were forwarded on. Kept after the operation's spend is forgotten (the broker reads it when the operation's result arrives), and bounded. */
   readonly #called = new Map<string, Set<string>>();
+  /** Key id to the spend record of a design-review slot's key. */
+  readonly #slotLedgers = new Map<string, string>();
   readonly #now: () => number;
   readonly #ttlMs: number;
 
@@ -64,20 +74,32 @@ export class ModelTokenBook {
     this.#ttlMs = ttl * 1_000;
   }
 
-  mint(grant: ModelGrant): { token: string; expiresAt: number } {
+  mint(grant: ModelGrant, options: { ttlSeconds?: number } = {}): { token: string; keyId: string; expiresAt: number } {
     this.#purge();
-    // Oldest first (a Map keeps insertion order): keep room for the one being minted.
-    const mine = [...this.#tokens].filter(([, record]) => record.operationId === grant.operationId);
+    // Oldest first (a Map keeps insertion order): keep room for the one being minted. A slot's token counts against its own slot only.
+    const mine = [...this.#tokens].filter(([, record]) => record.operationId === grant.operationId && record.slot === grant.slot);
     for (const [hash] of mine.slice(0, Math.max(0, mine.length - (MAX_LIVE_TOKENS_PER_OPERATION - 1)))) this.#tokens.delete(hash);
     if (this.#tokens.size >= MAX_TOKENS) throw new RangeError("too many proxy tokens are live");
     const token = TOKEN_PREFIX + randomBytes(32).toString("base64url");
-    const expiresAt = this.#now() + this.#ttlMs;
-    this.#tokens.set(digest(token), {
+    const expiresAt = this.#now() + (options.ttlSeconds === undefined ? this.#ttlMs : options.ttlSeconds * 1_000);
+    const keyId = digest(token);
+    const ledgerId = grant.slot === undefined ? grant.operationId : `${grant.operationId}#${keyId}`;
+    this.#tokens.set(keyId, {
       workspaceId: grant.workspaceId, operationId: grant.operationId, fence: grant.fence, taskId: grant.taskId, projectName: grant.projectName,
-      routes: new Map(grant.routes.map((route) => [route.alias, route])), budget: grant.budget, expiresAt,
+      routes: new Map(grant.routes.map((route) => [route.alias, route])), budget: grant.budget, slot: grant.slot, keyId, ledgerId, expiresAt,
     });
-    if (!this.#ledgers.has(grant.operationId)) this.#ledgers.set(grant.operationId, { currency: undefined, spentMicros: 0, reservedMicros: 0, unpriced: 0, inFlight: 0 });
-    return { token, expiresAt };
+    if (!this.#ledgers.has(ledgerId)) this.#ledgers.set(ledgerId, { currency: undefined, spentMicros: 0, reservedMicros: 0, unpriced: 0, inFlight: 0 });
+    if (grant.slot !== undefined) {
+      this.#slotLedgers.set(keyId, ledgerId);
+      // A slot's spend record outlives its operation (the round is recorded after the operation ends and reads it); the oldest are dropped past a bound, but never the record of a token that is still live: its spend would start again from nothing.
+      for (const [oldKey, oldLedger] of this.#slotLedgers) {
+        if (this.#slotLedgers.size <= MAX_SLOT_LEDGERS) break;
+        if (this.#tokens.has(oldKey)) continue;
+        this.#slotLedgers.delete(oldKey);
+        this.#ledgers.delete(oldLedger);
+      }
+    }
+    return { token, keyId, expiresAt };
   }
 
   lookup(token: string): TokenLookup {
@@ -136,11 +158,30 @@ export class ModelTokenBook {
     return count;
   }
 
-  /** Forgets an operation's spend as well (after its settlement). */
+  /** Forgets an operation's spend as well (after its settlement). A design-review slot's spend record stays: the round is recorded after the operation ended and reads it. */
   forgetOperation(operationId: string): void {
     this.revokeOperation(operationId);
     this.#ledgers.delete(operationId);
     for (const key of [...this.#routeLedgers.keys()]) if (key.startsWith(`${operationId}\0`)) this.#routeLedgers.delete(key);
+  }
+
+  /** Blocks these keys now: their tokens die, and a call that was admitted stays counted. Idempotent. */
+  closeKeys(keyIds: readonly string[]): void {
+    for (const keyId of keyIds) this.#tokens.delete(keyId);
+  }
+
+  /** What these keys spent, in micros of one currency: the settled spend plus what the calls still running could cost (never under-counted). Undefined when a key has no record (the broker then charges its whole ceiling). */
+  keySpend(keyIds: readonly string[]): { micros: number; currency: string | undefined } | undefined {
+    let micros = 0;
+    let currency: string | undefined;
+    for (const keyId of keyIds) {
+      const ledgerId = this.#slotLedgers.get(keyId);
+      const ledger = ledgerId === undefined ? undefined : this.#ledgers.get(ledgerId);
+      if (ledger === undefined) return undefined;
+      micros += ledger.spentMicros + ledger.reservedMicros;
+      currency ??= ledger.currency;
+    }
+    return { micros, currency };
   }
 
   /** How many operations have a spend record (a ledger is freed when its operation is seen to end: `forgetOperation`). */

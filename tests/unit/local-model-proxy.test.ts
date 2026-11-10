@@ -12,6 +12,18 @@ import { fakeKey, loadGatewayRelay, sha256 } from "../support/model-proxy-world.
 const grant = (over: Partial<ModelGrant> = {}): ModelGrant => ({ workspaceId: "ws-1", operationId: "op-1", routes: [localRoute("anthropic", "claude-test").route], ...over });
 
 describe("the proxy token book", () => {
+  it("keeps the spend record of a design-review slot while its token is live, and drops the oldest records only past the bound", () => {
+    const book = new ModelTokenBook();
+    const minted = Array.from({ length: 205 }, (_, at) => book.mint(grant({ operationId: `op-${String(at)}`, slot: `r1-s${String(at)}` })));
+    // Past the bound, but every token is live: no record is dropped (its spend would start again from nothing).
+    expect(book.keySpend([minted[0]!.keyId])).toEqual({ micros: 0, currency: undefined });
+    // A closed token's record is the oldest and goes first; the live ones stay.
+    book.closeKeys([minted[0]!.keyId]);
+    book.mint(grant({ operationId: "op-last", slot: "r1-last" }));
+    expect(book.keySpend([minted[0]!.keyId])).toBeUndefined();
+    expect(book.keySpend([minted[1]!.keyId])).toBeDefined();
+  });
+
   it("mints a token no key can be read from, good for its time and then refused", () => {
     let now = 1_000_000;
     const book = new ModelTokenBook({ now: () => now, ttlSeconds: 300 });
@@ -330,6 +342,12 @@ describe("the egress gateway's route table (the program the helper container run
       expect(route("GET", "/v1/internal/model-access")).toEqual({ kind: "model-access" });
       expect(route("GET", "/v1/internal/model-access?slot=reviewer-1")).toEqual({ kind: "model-access" });
       expect(route("POST", "/v1/internal/model-access")).toMatchObject({ status: 405 });
+      // The design review's reviewers read their packet with a GET on one exact path, with the workspace stamped; nothing else is a packet.
+      expect(route("GET", "/v1/internal/design-review/packet?slot=r1-critic")).toEqual({ kind: "packet" });
+      expect(route("POST", "/v1/internal/design-review/packet?slot=r1-critic")).toMatchObject({ status: 405 });
+      for (const bad of ["/v1/internal/design-review/packet", "/v1/internal/design-review/packet?slot=", "/v1/internal/design-review/packet?slot=R1", "/v1/internal/design-review/packet?slot=r1-critic&x=1", "/v1/internal/design-review/packet/../x?slot=r1", "/v1/internal/design-review/other?slot=r1-critic"]) {
+        expect(route("GET", bad), bad).toHaveProperty("status");
+      }
       for (const path of ["messages", "responses", "chat/completions"]) expect(route("POST", `/v1/internal/model-proxy/v1/${path}`), path).toEqual({ kind: "model-call" });
       expect(route("POST", "/v1/internal/model-proxy/v1/messages?beta=true")).toEqual({ kind: "model-call" });
       expect(route("GET", "/v1/internal/model-proxy/v1/messages")).toMatchObject({ status: 405 });

@@ -72,8 +72,9 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
   // AFTER the push (`verifyPublishedChanges`), never from what the worker reports, so until then the level is high and says why.
   const judged = rovaraV2 ? riskFromFiles(workflow, undefined) : workflow;
   const title = pullRequestTitle(task.title, rovaraV2);
+  const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
-  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { lessonsUsed: NO_LESSONS_USED, ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }) });
+  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { lessonsUsed: NO_LESSONS_USED, ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
   const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha;
   const operationId = newId(deps);
   const headBranch = headBranchOf(operationId);

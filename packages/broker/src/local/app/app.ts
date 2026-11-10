@@ -16,7 +16,7 @@ import { createSecondReview, type SecondReview } from "../../core/second-review/
 import { createLocalSecondReviewSeams } from "./second-review.js";
 import { SecondReviewerSchema } from "@agentx/contracts";
 import type { ProxyRoute } from "../model-proxy/types.js";
-import { capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, type ModelGrantSource } from "../model-proxy/index.js";
+import { capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, type LocalModelProxy, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../../core/decisions/local-actions.js";
@@ -25,7 +25,6 @@ import type { LocalPageSessions } from "../../core/local-pages/guard.js";
 import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-pages/server.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { breakdownForApproval } from "../../core/work-breakdown/plan-graph.js";
-import { gradePlanRisk } from "../../core/decisions/plan-risk.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { WorkflowArtifactSchema } from "@agentx/contracts";
 import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js";
@@ -68,6 +67,8 @@ import { createSessionRoutes } from "./session-routes.js";
 import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens.js";
 
 import { createSessionStartExtras } from "./session-start.js";
+import { createLocalDesignReview } from "./design-review.js";
+import { checkDesignApproval, designApprovalRecordItems, gradeApprovalRisk } from "../../core/design-review/decision.js";
 
 export { TASK_FLOW_INDEXES };
 
@@ -79,6 +80,10 @@ export interface LocalAppOptions {
   operationEnded?: (operationId: string) => void;
   /** The model aliases an operation's calls went out on, from the model proxy: a second opinion counts only when its model was really called. Absent: the install cannot tell, and the opinion is taken as reported. */
   modelCalls?: (operationId: string) => ReadonlySet<string> | undefined;
+  /** The environment the install runs in (the design review's switch is read from it). */
+  environment?: NodeJS.ProcessEnv;
+  /** The model proxy's key slots for the design review, read late (the proxy is made after the app). */
+  slotKeys?: () => LocalModelProxy["slotKeys"] | undefined;
   /** The model a task step calls, fixed by the caller (tests). Absent: `modelSetting`, else the first provider with a key. */
   modelChoice?: LocalModelChoice;
   /** Lane L13: the owner's `model` setting from the config; see `chooseLocalModel` for the order. */
@@ -247,6 +252,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     log,
   });
 
+  // The design review stage (a Full task's design is read by fresh reviewers before anyone approves it). It fills `flow.deps.designReview`; with the switch off no task enters it.
+  const designReview = createLocalDesignReview({
+    flow: flow.deps, blobs, registry, companyId, environment: options.environment ?? {}, chosen, routeOf, provider: (id) => providers.get(id), slotKeys: () => options.slotKeys?.(),
+  });
+
   // Lane L12: merge tracking by polling. The publish step enrols a task's tracking row; a timer reads the due rows and calls the core's pass for each (pull request status, CI fix, branch sync, ready for review).
   const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log });
 
@@ -258,7 +268,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // run limit before a price table exists, and Code's price table is empty), and the proxy keeps no spend record without one.
   const modelGrants = capabilityModelGrants({
     capabilities: new CallbackCapabilities(signingKey),
+    ...designReview.slotGrants,
     async describe(operation) {
+      // A design review's operation has no key of its own: only its slots get one (`describeSlot`).
+      if (await designReview.isDesignReviewOperation(operation)) return undefined;
       const choice = await chosen();
       if (choice === undefined) return undefined;
       const pointer = fromDocument<TaskPointerRecord>(await store.get(taskPointerKey(operation.workspaceId)));
@@ -300,8 +313,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
         const artifact = workflow.artifacts.filter((entry) => entry.type === currentDocumentType(workflow)).at(-1);
         const parsed = artifact === undefined ? undefined : WorkflowArtifactSchema.safeParse(artifact);
         const loaded = parsed?.success === true ? await loadWorkflowDocument(textReaderOf(blobs), parsed.data, {}).catch(() => undefined) : undefined;
+        // A design that went through design review is graded from the review's own facts (the areas it touches, the open blockers, how much of the review ran), never lower than the review says.
         const estimate = (task["runEstimate"] as { highUsd?: unknown } | undefined)?.highUsd;
-        return gradePlanRisk({ loaded, workflow, requestText: typeof task["requestText"] === "string" ? task["requestText"] : undefined, ...(typeof estimate === "number" ? { costHighUsd: estimate } : {}) });
+        return gradeApprovalRisk({ loaded, workflow, requestText: typeof task["requestText"] === "string" ? task["requestText"] : undefined, ...(typeof estimate === "number" ? { costHighUsd: estimate } : {}) });
       },
       // The decided plan's own decisions, read from the checked document (the same load the work breakdown uses), so the owner's answers are held to the options it offered.
       planFactsOf: async (_task, _workflow, artifact) => {
@@ -310,10 +324,15 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       },
       // A plan with a work breakdown (spec 059) is approved WITH its graph: every surface that approves binds the graph in the stored document the approval's digest names.
       breakdown: ({ task, workflow, artifactDigest }) => breakdownForApproval(flow.deps, { taskId: String(task["taskId"]), project: String(task["project"]), startingRevision: Number(task["startingRevision"]) }, workflow, artifactDigest),
-      onDecided: ({ taskId, before, after, attempt, at }) => {
+      // A design with an open blocker is approved only with a one-line reason.
+      checkDecision: ({ workflow, attempt }) => checkDesignApproval(workflow, attempt),
+      onDecided: ({ taskId, before, after, attempt, at, approver, risk }) => {
         // The plan was approved: coding starts with no one asking, as a row like every automatic step.
         if (after.stage === "IMPLEMENT" && after.state === "READY" && before.stage !== "IMPLEMENT") return [dispatchRowItem(flow.deps, taskId, after.revision, "IMPLEMENT", at)];
         if (after.stage !== "PLAN" || after.state !== "READY" || before.stage === "PLAN") return [];
+        // An approved design leaves its approval record under its digest (who, at what tier, the blockers and the reason) for the pull request's Proof section.
+        const approval = designApprovalRecordItems({ taskId, before, after, attempt, approverId: approver.personId, approverLabel: approver.displayName ?? approver.personId, risk, at });
+        if (approval.length > 0) return [...approval, dispatchRowItem(flow.deps, taskId, after.revision, "PLAN", at)];
         const text = (attempt.reason ?? "").trim();
         return [
           ...(text === "" ? [] : [{ kind: "put" as const, item: { ...planFeedbackKey(taskId, after.revision), entityType: "PLAN_FEEDBACK", text, createdAt: at } }]),

@@ -501,6 +501,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
     scriptTokensEnabled: () => scriptTokensEnabled(options.environment),
     modelCalls: (operationId) => modelProxyHolder.current?.tokens.calledAliases(operationId),
+    slotKeys: () => modelProxyHolder.current?.slotKeys,
+    environment: options.environment ?? process.env,
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
     // Lane L13: the owner's model setting, read from the owner's own config only.

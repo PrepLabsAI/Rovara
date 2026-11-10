@@ -7,7 +7,7 @@
 import type { ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  AgentXError, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
+  AgentXError, DESIGN_REVIEW_ARTIFACT, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
 } from "@agentx/contracts";
 import { CallbackCapabilities, type CallbackAction } from "../../callbacks.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
@@ -26,6 +26,9 @@ import { PLAN_RETENTION } from "../../core/plan/store.js";
 import { processPlanAnswer } from "../../core/plan/process.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { readVerifiedText } from "./documents.js";
+import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../core/design-review/packet-route.js";
+import { readDesignTemplate } from "../../core/design-review/template.js";
+import { DESIGN_REVIEW_RESULT_MAX_BYTES } from "../../core/design-review/outcome.js";
 import type { RepositoryCredential, RepositoryGrantService } from "../../repository-access.js";
 
 const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z-]+)$/u;
@@ -84,7 +87,8 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
     throw agentXError("CONFIG_INVALID", "an artifact needs a plain file name, a media type and its content");
   }
   const bytes = new TextEncoder().encode(content);
-  if (bytes.byteLength > PLAN_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the artifact is too large");
+  // A design review's result holds every reviewer's answer; it is bigger than a plan (the broker reads it back with the same bound, `DESIGN_REVIEW_RESULT_MAX_BYTES`).
+  if (bytes.byteLength > (name === DESIGN_REVIEW_ARTIFACT && operation.designReview !== undefined ? DESIGN_REVIEW_RESULT_MAX_BYTES : PLAN_MAX_BYTES)) throw agentXError("CONFIG_INVALID", "the artifact is too large");
   const id = randomUUID();
   const objectKey = artifactObjectKey(operation.workspaceId, operation.id, name);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -183,6 +187,9 @@ export async function readOutcome(deps: CallbackDeps, operation: OperationRecord
     }
     // The document type is the workflow's own (a Quick or a coding plan is `plan`); `submitWorkflowArtifact` refuses a type the phase does not expect.
     const type = currentDocumentType(workflow);
+    // A design of a task with a design review is written in the fixed template (eight sections and one meta block); one that does not read is no result, and the step blocks with a plain reason the owner can retry.
+    // The planner's answer to the reviewers' findings carries its own block and is read by the review itself.
+    if (type === "design" && workflow.designReview !== undefined && deps.flow.designReview?.isResolveRun(workflow, operation) !== true && !readDesignTemplate(saved.text.trim()).ok) return undefined;
     const parsed = WorkflowArtifactSchema.safeParse({
       id: saved.artifact.id, type, version: workflow.artifacts.filter((artifact) => artifact.type === type).length + 1,
       sha256: saved.artifact.sha256, producer: "agentx-worker-untrusted", objectKey: saved.artifact.objectKey, createdAt: saved.artifact.createdAt, format: "markdown",
@@ -215,6 +222,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
   const capabilities = new CallbackCapabilities(Buffer.from(deps.flow.callbackSigningKey));
   return async (request) => {
     try {
+      // The design review's reviewers read their packets here (a GET; the capability names the action and the stored binding names the slots).
+      if (request.method === "GET" && (request.path.split("?")[0] ?? "") === DESIGN_REVIEW_PACKET_PATH) return await handleDesignReviewPacket(deps.flow, capabilities, request);
       const match = ROUTE.exec((request.path.split("?")[0]) ?? "");
       if (request.method !== "POST" || match === null) throw agentXError("NOT_FOUND", "route not found");
       const [, workspaceId, operationId, action] = match as unknown as [string, string, string, string];

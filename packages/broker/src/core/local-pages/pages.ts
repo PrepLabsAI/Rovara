@@ -138,6 +138,11 @@ function secondReviewHtml(context: PageContext, view: PlanPageView): string {
   return `<section class="panel" id="second-review"><h2>Second review</h2>${lines}${note}${ask}</section>`;
 }
 
+/** The line that says a design's review did not run (fixed words), in front of the approval form. */
+function designNoteHtml(view: PlanPageView): string {
+  return view.designNote === undefined ? "" : `<p class="panel" id="design-not-run"><strong>${esc(view.designNote)}</strong></p>`;
+}
+
 export async function renderPlanPage(context: PageContext, view: PlanPageView): Promise<string> {
   const current = view.versions.filter((version) => version.current);
   const older = view.versions.filter((version) => !version.current);
@@ -165,7 +170,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${attentionHtml(context, view)}${critiqueHtml(view)}${secondReviewHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${critiqueHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 

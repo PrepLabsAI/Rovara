@@ -1,5 +1,6 @@
 // Lane L6a, task flow core: the records the flow keeps in the document store, and the plain-JSON conversion that goes with them.
 import type {
+  DesignReviewBinding,
   DocumentKey,
   JsonValue,
   Operation,
@@ -19,6 +20,8 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
   admissionReservationId?: string;
   /** The task's session (lane L6b), created in the same transaction as the task when the install wires sessions. */
   sessionId?: string;
+  /** The person asked for the design to be reviewed before any code (`design first`), whatever the project's setting says. */
+  designFirst?: { by: string; at: string };
 };
 
 /** Cloud's `WORKSPACE#<id>/DEVELOPER_TASK` pointer: how a worker callback finds the task. The requester names the identity adapter, not a closed sign-in list. */
@@ -86,6 +89,12 @@ export interface OperationRecord extends Operation {
    * reason it did not run). The one REVIEW end reads it (`secondOpinionFromReviewResult`); no other code does and nothing waits on it.
    */
   secondReviewPlan?: SecondReviewOperationPlan;
+  /** Design review: the binding the broker stored when it dispatched a design-review round (the reviewers' slots and models, the merge step, the pinned commits). The worker is sent it in the payload; the packets and the keys are served only for the slots it names. */
+  designReview?: DesignReviewBinding;
+  /** The source that serves the operation's models (a design-review round records it on each reviewer run). */
+  modelSourceId?: string;
+  /** The ids of the model keys the operation's calls used (the planner's resolve run, whose spend the review counts). */
+  modelKeyIds?: string[];
   /** The worker machine and delivery time, once the operation was handed to a machine. */
   deliveredAt?: string;
   machineId?: string;
@@ -146,6 +155,8 @@ export interface DispatchRowRecord {
   lastError?: string;
   /** A REPLAN row: what the planner is told on its automatic second run (the plan's problems, or what could not be read), kept on the row. */
   planPrompt?: string;
+  /** A CRITIQUE row: who approved running the design review without a price (the cost hold's "run it anyway"). Only this lets a round start from the hold. */
+  costApprovedBy?: string;
   /** An AUTOFIX row: how the block it looks at came about when no finished run wrote it (the run was lost, or its start was tried until the budget ran out). */
   cause?: "run-lost" | "dispatch-exhausted";
 }

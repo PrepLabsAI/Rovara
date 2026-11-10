@@ -81,6 +81,19 @@ function makeServer(handler: LocalRequestHandler, allowedHost: () => string, pee
         }
         if (bare.startsWith(`${MODEL_PROXY_PREFIX}/`)) return await modelProxy.handle(request, response);
       }
+      // The design review's reviewers read their packets with a GET (core/design-review/packet-route.ts); nothing else but a POST is a callback.
+      if (request.method === "GET" && path.startsWith(INTERNAL_PREFIX) && !path.includes("..") && !path.includes("//") && /^\/v1\/internal\/design-review\/packet\?slot=[a-z0-9][a-z0-9_-]{0,31}$/u.test(path)) {
+        const headers: Record<string, string | undefined> = {};
+        for (const [name, value] of Object.entries(request.headers)) headers[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : value;
+        let answer: BrokerResponse;
+        try {
+          answer = await handler({ method: "GET", path, headers });
+        } catch {
+          return refuse(response, 500, "internal_error");
+        }
+        response.writeHead(answer.statusCode, { "content-type": "application/json", "cache-control": "no-store", "x-content-type-options": "nosniff", ...answer.headers });
+        return void response.end(answer.body);
+      }
       if (request.method !== "POST") return refuse(response, 405, "method_not_allowed");
       if (!path.startsWith(INTERNAL_PREFIX) || path.includes("..") || path.includes("//")) return refuse(response, 404, "not_found");
       const body = await readBody(request);
