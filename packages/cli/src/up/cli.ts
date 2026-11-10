@@ -108,6 +108,53 @@ export function registerSecondReviewCommand(program: Command, context: Pick<UpCo
     });
 }
 
+const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+/** Model words (a finding, a question) are shown as plain text: no control characters, no line breaks. */
+const plainWords = (text: string): string => text.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim();
+
+/**
+ * `rovara design-review status <task>`: how a task's design review stands: whether fresh reviewers read the design, the findings, and what waits for you (the cost choice, the planner's questions, a paused review). It only
+ * reads. The cost choice, the answers and picking a paused review up again are your acts on the task's page (`rovara design-review open <task>` or `rovara open <task>`), never a command's.
+ */
+export function registerDesignReviewCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
+  const review = program.command("design-review").description("show a task's design review; the cost choice, the answers and picking a paused review up again are made on the task's page (`rovara design-review open <task>`)");
+  review
+    .command("status <task>")
+    .description("show how the review stands, its findings, and what waits for you")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (task: string, options: { stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      if (!TASK_ID_PATTERN.test(task)) throw agentXError("CONFIG_INVALID", "name the task by its id (a UUID)");
+      const answer = await localCall(context, options.stateDir, "GET", `/v1/dev/tasks/${task}/design-review`) as {
+        designReview: { status: string; facts: string[]; findings: Array<{ severity: string; section: string; text: string; open: boolean }>; hold?: { why: string; note?: string; choices: string[] }; questions?: { items: Array<{ text: string }> }; parked: boolean; blockerReasonNeeded: boolean };
+      };
+      const state = answer.designReview;
+      if (globals.json) { context.stdout.write(`${JSON.stringify({ ok: true, data: state })}\n`); return; }
+      const open = state.findings.filter((finding) => finding.open);
+      context.stdout.write([
+        plainWords(state.status), ...state.facts.map(plainWords),
+        ...(state.hold === undefined ? [] : [`Waiting for your choice: ${plainWords(state.hold.why)}. Choices: ${state.hold.choices.map(plainWords).join("; ")}.`, ...(state.hold.note === undefined ? [] : [plainWords(state.hold.note)])]),
+        ...(state.questions === undefined ? [] : [`The planner asks you ${state.questions.items.length} ${state.questions.items.length === 1 ? "question" : "questions"}.`]),
+        ...(state.parked ? ["The review is paused: pick it up again on the page."] : []),
+        ...(state.blockerReasonNeeded ? ["A blocker is open: approving the design needs a one-line reason."] : []),
+        `${state.findings.length} ${state.findings.length === 1 ? "finding" : "findings"}, ${open.length} open.${open.length === 0 ? "" : ` Open: ${open.slice(0, 5).map((finding) => `[${finding.severity}] ${plainWords(finding.section)}: ${plainWords(finding.text)}`).join(" | ")}`}`,
+        `Decide, answer or resume on the page: rovara design-review open ${task}`,
+      ].join("\n") + "\n");
+    });
+  review
+    .command("open <task>")
+    .description("open the task's page in your browser, where you make the cost choice, answer the questions or pick a paused review up again")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (task: string, options: { stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      if (!TASK_ID_PATTERN.test(task)) throw agentXError("CONFIG_INVALID", "name the task by its id (a UUID)");
+      // The page session is the owner's: this command only asks the running process to open the page; it never decides, and the address is not printed.
+      await localCall(context, options.stateDir, "POST", "/v1/local/pages/open", { path: `/plan/${task}` });
+      context.stdout.write(globals.json ? `${JSON.stringify({ ok: true, data: { opened: true } })}\n` : "Opened the task's page in your browser. Make the choice, answer or resume there.\n");
+    });
+}
+
 /**
  * `rovara open [task]`: asks the running `rovara up` to open the review page in your browser (a task's plan, or the list of what waits for you). The address carries your page session and can
  * approve, so it is never sent here or printed: the running process opens the browser itself.

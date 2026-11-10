@@ -19,6 +19,8 @@ import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/
 import { CALLBACK_KEY_FILE_NAME } from "../../packages/broker/src/local/state-directory.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
+import { Command } from "commander";
+import { registerDesignReviewCommand } from "../../packages/cli/src/up/cli.js";
 import { sweepDesignWaits } from "../../packages/broker/src/core/design-review/wait.js";
 import { taskOf, toRound, waitingWithBlocker, world as flowWorld } from "../support/design-review-flow-world.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
@@ -66,7 +68,7 @@ async function launch() {
     const hop = await raw(runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } });
     return new URL(hop.headers["location"] as string, runtime.pagesUrl);
   };
-  return { root, stateDirectory, runtime, api, store, browse, taskId, workspaceId, operationId };
+  return { root, stateDirectory, runtime, api, store, browse, taskId, workspaceId, operationId, opened };
 }
 type World = Awaited<ReturnType<typeof launch>>;
 
@@ -249,5 +251,60 @@ describe("the forms of the cost hold and of a paused review", () => {
     const signed = await postForm(w, link, form.action, form.fields);
     expect(String(signed.headers["location"])).toContain("n=resumed");
     expect(designWaitOf(await workflowOfTask(w))?.parkedAt).toBeUndefined();
+  });
+});
+
+describe("reading a review and opening its page from the tools", () => {
+  const printedBy = (w: World) => {
+    const printed: string[] = [];
+    const run = async (...args: string[]) => {
+      const program = new Command().exitOverride().option("--json");
+      const context = { home: w.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } };
+      registerDesignReviewCommand(program, context);
+      await program.parseAsync(["node", "rovara", ...args]);
+    };
+    return { printed, run };
+  };
+
+  it("the route reads the review (the hold's choices by label, with the note) and refuses to make any of the owner's acts: a choice, the answers and resume are the page's", async () => {
+    const w = await launch();
+    await seedFromFlow(w, async (source) => { await toRound(source); return (await taskOf(source)).workflow; }, { price: false, holdAnswerable: true });
+    const read = await w.api(`/v1/dev/tasks/${w.taskId}/design-review`, {});
+    expect(read.status).toBe(200);
+    expect(read.body["designReview"]).toMatchObject({ taskId: w.taskId, parked: false, hold: { choices: ["Run it anyway", "Skip design review"], note: expect.stringContaining("counts it at $15 and $75") as string } });
+    // The offer ids, proofs and forms are the page's: the read carries none.
+    expect(JSON.stringify(read.body)).not.toMatch(/requestId|proof|formToken|artifactDigest/u);
+    for (const act of ["choice", "answers", "resume"]) {
+      const refused = await w.api(`/v1/dev/tasks/${w.taskId}/design-review/${act}`, { method: "POST", body: { choice: "skip", revision: 1 } });
+      expect(refused.status, act).toBe(403);
+      expect(JSON.stringify(refused.body)).toContain("your own acts on the task's page");
+    }
+    // Nothing was decided.
+    expect(WorkflowSnapshotSchema.parse((await w.store.get({ pk: `DEVTASK#${w.taskId}`, sk: "META" }))!["workflow"])).toMatchObject({ stage: "PLAN_CRITIQUE", state: "WAITING", designReview: { status: "waiting_cost" } });
+    // A task without a review has nothing to read.
+    const other = await w.api("/v1/dev/tasks/00000000-0000-4000-8000-000000000000/design-review", {});
+    expect(other.status).toBe(404);
+  });
+
+  it("`rovara design-review status <task>` says how it stands and where to act, and `open <task>` opens the task's page; neither decides", async () => {
+    const w = await launch();
+    await seedFromFlow(w, async (source) => { await toRound(source); return (await taskOf(source)).workflow; }, { price: false, holdAnswerable: true });
+    const { printed, run } = printedBy(w);
+    await run("design-review", "status", w.taskId, "--state-dir", w.stateDirectory);
+    const text = printed.join("");
+    expect(text).toContain("Waiting for your choice: The price of the model is not known. Choices: Run it anyway; Skip design review.");
+    expect(text).toContain("counts it at $15 and $75");
+    expect(text).toContain(`rovara design-review open ${w.taskId}`);
+    printed.length = 0;
+    await run("--json", "design-review", "status", w.taskId, "--state-dir", w.stateDirectory);
+    expect(JSON.parse(printed.join(""))).toMatchObject({ ok: true, data: { hold: { choices: ["Run it anyway", "Skip design review"] } } });
+    await expect(run("design-review", "status", "not-an-id", "--state-dir", w.stateDirectory)).rejects.toThrow(/UUID/u);
+    printed.length = 0;
+    await run("design-review", "open", w.taskId, "--state-dir", w.stateDirectory);
+    expect(printed.join("")).toContain("Opened the task's page in your browser");
+    expect(printed.join("")).not.toMatch(/\/s\//u);
+    expect(w.opened.at(-1)).toMatch(/\/s\/once\//u);
+    // Still undecided: the commands read and open, and nothing else.
+    expect(WorkflowSnapshotSchema.parse((await w.store.get({ pk: `DEVTASK#${w.taskId}`, sk: "META" }))!["workflow"])).toMatchObject({ designReview: { status: "waiting_cost" } });
   });
 });

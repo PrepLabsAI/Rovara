@@ -19,6 +19,7 @@ import { createLocalSessionControl, createSessionControlHost } from "./host.js";
 import { listProjects, registerProject } from "./projects.js";
 import { developerTaskListItem, developerTaskView } from "./task-view.js";
 import type { SecondReview } from "../../core/second-review/index.js";
+import { designReviewStateOf } from "../../core/design-review/state-view.js";
 
 export const OPENS_PER_MINUTE = 5;
 /** The most pages of the task index one list reads to fill a filtered answer. */
@@ -34,6 +35,8 @@ export interface OwnerRoutesDeps {
   version: string;
   /** The second review. Absent: its route is not there. */
   secondReview?: SecondReview;
+  /** The design review: what a client reads of it (the owner's acts on it are the page's). Absent: the review's route answers that the task has none. */
+  designReview?: { allowSkip(project: string): Promise<boolean>; unpricedNote(): string };
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -48,7 +51,8 @@ export const SECOND_REVIEW_PATH = "/v1/dev/second-review";
 /** Cloud's staff routes for the evidence that lets a model block. Here they are refused with the page message: the evidence is written on the local page (see `SECOND_REVIEW_ON_THE_PAGE`). */
 export const SECOND_REVIEW_EVIDENCE_PATH = /^\/v1\/admin\/second-review\/(replay|verdict)$/u;
 export const ATTACH_ON_THE_PAGE = "Saying where a task's plan is posted is done on the task's page, in your browser (run `rovara open <task>`): it lets a comment there decide the plan, so a tool with the API token cannot do it.";
-const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|thread|workflow\/decision|workflow\/retry|continue))?$/u;
+export const DESIGN_REVIEW_ON_THE_PAGE = "A cost choice, the answers to the design review's questions, and picking a paused review up again are your own acts on the task's page, in your browser (run `rovara open <task>`): a tool with the API token can read the review but cannot make them.";
+const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|thread|workflow\/decision|workflow\/retry|continue|design-review|design-review\/(?:choice|answers|resume)))?$/u;
 
 /**
  * routes the MCP tools and the CLI call that have no core feature in Code yet (they wait on features not built yet: custom agents, approvals of connected systems, sharing and task people,
@@ -212,6 +216,17 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         if (action === "workflow/retry" && request.method === "POST") {
           await controlled(caller, taskId, "retry", bodyOf(request));
           return json(200, { task: await viewOf(caller, taskId) });
+        }
+        if (action === "design-review" && request.method === "GET") {
+          const task = await loadOwnedTask(flow.deps, caller, taskId);
+          const state = task.workflow === undefined ? undefined : designReviewStateOf(taskId, task.workflow, { allowSkip: await (deps.designReview?.allowSkip(task.project) ?? Promise.resolve(false)), ...(deps.designReview === undefined ? {} : { unpricedNote: deps.designReview.unpricedNote() }) });
+          if (state === undefined) throw agentXError("NOT_FOUND", "this task has no design review");
+          return json(200, { designReview: state });
+        }
+        if (action !== undefined && action.startsWith("design-review/") && request.method === "POST") {
+          // The owner's acts on a review are made on the task's page (a token that every local tool holds never decides): a tool reads, and is told where to act.
+          await loadOwnedTask(flow.deps, caller, taskId);
+          throw agentXError("FORBIDDEN", DESIGN_REVIEW_ON_THE_PAGE);
         }
         if (action === "workflow/decision" && request.method === "POST") {
           await loadOwnedTask(flow.deps, caller, taskId);

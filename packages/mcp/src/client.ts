@@ -13,6 +13,7 @@ import {
   TASK_VIEW_HEADER,
   TASK_VIEW_VERSION,
   SecondReviewStateReaderSchema,
+  DesignReviewStateReaderSchema,
   SessionListReaderSchema,
   SessionMessageSchema,
   SessionResponseReaderSchema,
@@ -91,6 +92,9 @@ export interface CallOptions {
   busyStep?: string;
 }
 
+/** One task's design review as a client reads it (read only: the owner's acts on it are made on the local page). */
+export type DesignReviewStateReadView = z.infer<typeof DesignReviewStateReaderSchema>;
+
 /** The second review's state as a client reads it: a mode this build does not know reads `unknown` (forward-compatible reader). */
 export type SecondReviewStateRead = z.infer<typeof SecondReviewStateReaderSchema>;
 
@@ -128,6 +132,8 @@ export interface ControlPlaneClient {
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
   /** The second review's settings and state (read only: the owner changes them on the local page). Absent route: the install has no second review. */
   getSecondReview(query: { project?: string; builder?: readonly string[] }): Promise<SecondReviewStateRead>;
+  /** One task's design review: how it stands, the findings, and what waits for the owner (read only). */
+  getDesignReview(taskId: string): Promise<DesignReviewStateReadView>;
   getTaskPeople(taskId: string): Promise<TaskPeopleView>;
   getTaskPeopleRequest(taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
   setTaskPerson(taskId: string, request: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
@@ -383,6 +389,7 @@ export function httpControlPlaneClient(options: {
     closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
+    getDesignReview: async (taskId) => (await call(z.object({ designReview: DesignReviewStateReaderSchema }).passthrough(), "GET", path(taskId, "/design-review"))).designReview,
     getSecondReview: async (query) => {
       const search = new URLSearchParams();
       if (query.project !== undefined) search.set("project", query.project);

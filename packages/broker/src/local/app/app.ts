@@ -381,7 +381,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, designReview, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
     store, audit: registry.require("audit-sink"), admission: registry.require("admission"), enabled: options.ask ?? true, artifacts: blobs, readers: () => ({ diff: createAskDiffReader({ peek: createPeekClient(flow.deps) }) }), questionHashKey: deriveKey(rootKey, "ask-question"), log,
