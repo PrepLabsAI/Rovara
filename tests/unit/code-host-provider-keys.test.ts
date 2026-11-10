@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { CodeHost } from "@agentx/contracts";
 import { findLinkedChangeRequest, linkedChangeRequestKey, linkedChangeRequestStep } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
 import { codeHostRepositoryKey } from "../../packages/broker/src/core/proof/revert/repository-key.js";
-import { prepareMerge, readMergeTracking, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
+import { pressMerge, prepareMerge, readMergeTracking, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
 import { providerOf } from "../../packages/broker/src/plugins/routing.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
@@ -45,5 +45,14 @@ describe("keys by provider", () => {
     expect(items).toHaveLength(1);
     // The link the task was started with (filed under `github`) is found, so the press can be prepared.
     await expect(prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() })).resolves.toBeDefined();
+  });
+
+  it("presses a merge through a renamed GitHub connection: the reverse link (filed under the provider) is the one looked up (review L1)", async () => {
+    const world = await mergeWorld({ codeHost: renamed });
+    await world.seedTracking();
+    const prepared = await world.prepare();
+    const result = await pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) });
+    expect(result).toBeDefined();
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("merged");
   });
 });

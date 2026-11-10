@@ -72,10 +72,15 @@ export function codeHostForRecord(registry: RegistryView, repository: { host?: {
  * holds is on the default connection of the legacy provider. An address held by records that name different connections is refused (CONFIG_INVALID, a fixed sentence): no guess.
  */
 export function codeHostForRepositoryAddress(registry: RegistryView, address: string, records: readonly { url: string; host?: { kind: PluginKind } | undefined }[]): CodeHost {
-  const named = new Set(records.filter((record) => record.url === address).map((record) => record.host?.kind ?? ""));
-  if (named.size > 1) throw agentXError("CONFIG_INVALID", AMBIGUOUS_REPOSITORY_HOST_MESSAGE);
-  const kind = [...named][0];
-  return codeHostForRecord(registry, kind === undefined || kind === "" ? {} : { host: { kind } });
+  // Records that name different hosts but resolve to the SAME connection (no host, and `host: { kind: "github" }` when `github` is the default) agree; only records that resolve to different connections are refused (review N2).
+  const resolved = new Map<string, CodeHost>();
+  for (const record of records) {
+    if (record.url !== address) continue;
+    const host = codeHostForRecord(registry, record.host === undefined ? {} : { host: record.host });
+    resolved.set(host.kind, host);
+  }
+  if (resolved.size > 1) throw agentXError("CONFIG_INVALID", AMBIGUOUS_REPOSITORY_HOST_MESSAGE);
+  return [...resolved.values()][0] ?? codeHostForRecord(registry, {});
 }
 
 /** The code host that serves a bare repository address. `hostKindOf` says which kind an address is on; the default is `LEGACY_CODE_HOST_KIND`. */

@@ -192,6 +192,9 @@ interface HostState {
   writers: Record<string, "admin" | "write" | "read" | "none">;
   bots?: string[];
   others?: string[];
+  /** The code host connection is called this (a GitHub connection under another name); absent: `github`. */
+  connection?: string;
+  provider?: string;
   defaultBranch?: string | undefined;
   details: Partial<ChangeRequestDetails>;
   standingFails?: boolean;
@@ -201,7 +204,8 @@ function detector(state: HostState, extra: Partial<RevertDetectorDependencies> =
   const logged: string[] = [];
   const standingCalls: string[] = [];
   const codeHost = {
-    kind: "github",
+    kind: state.connection ?? "github",
+    ...(state.connection === undefined ? {} : { provider: state.provider ?? "github" }),
     repositoryIdentity: async () => ({ id: "1", fullName: "acme/payments", ...("defaultBranch" in state ? (state.defaultBranch === undefined ? {} : { defaultBranch: state.defaultBranch }) : { defaultBranch: "main" }) }),
     getChangeRequest: async () => ({
       ref: { repository: REPO, id: "20", url: "https://github.com/acme/payments/pull/20" }, state: "merged", sourceBranch: "revert-7", targetBranch: "main", headRevision: "4".repeat(40), mergeRevision: "5".repeat(40),
@@ -228,6 +232,20 @@ describe("a merged revert pull request", () => {
     expect(await t.store.get(revertRecordKey(TASK, "acme/payments", 7))).toMatchObject({ entityType: "TASK_REVERT", orgId: ORG, taskId: TASK, project: "payments", number: 7, reverter: "maya", detectedAt: NOW });
     // However many deliveries tell of it, it is recorded once.
     expect(await detectRevertFromMergedChangeRequest(t.deps, REF, SCOPE)).toEqual([]);
+  });
+
+  it("detects a revert through a GitHub connection that is not called github: the index is read by the provider (review N3)", async () => {
+    const t = detector({ writers: { maya: "write" }, details: {}, connection: "github-main" });
+    await rovaraPullRequest(t.store);
+    expect(await detectRevertFromMergedChangeRequest(t.deps, REF, SCOPE)).toEqual([{ taskId: TASK, project: "payments", number: 7, url: URL7, via: "5".repeat(40), reverter: "maya" }]);
+    // By the merge commit the body names, too.
+    const byCommit = detector({ writers: { maya: "write" }, details: { body: `This reverts commit ${MERGE}` }, connection: "github-main" });
+    await rovaraPullRequest(byCommit.store);
+    expect(await detectRevertFromMergedChangeRequest(byCommit.deps, REF, SCOPE)).toHaveLength(1);
+    // A connection of another provider is not GitHub: nothing is found.
+    const other = detector({ writers: { maya: "write" }, details: {}, connection: "github-main", provider: "examplehost" });
+    await rovaraPullRequest(other.store);
+    expect(await detectRevertFromMergedChangeRequest(other.deps, REF, SCOPE)).toEqual([]);
   });
 
   it("finds the pull request by the merge commit the body names too, and records one revert per task however many ways name it", async () => {

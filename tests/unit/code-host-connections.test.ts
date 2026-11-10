@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ProjectDefinitionSchema, type CodeHost } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
 import { AMBIGUOUS_CONNECTION_MESSAGE, TWO_DEFAULT_CONNECTIONS_MESSAGE, connectionProblems, defaultConnectionOf, providerOf } from "../../packages/broker/src/plugins/code-host/connections.js";
-import { NO_HOST_MESSAGE, assertRepositoryHostsKnown, codeHostForKind, codeHostForRecord } from "../../packages/broker/src/plugins/routing.js";
+import { AMBIGUOUS_REPOSITORY_HOST_MESSAGE, NO_HOST_MESSAGE, assertRepositoryHostsKnown, codeHostForKind, codeHostForRecord, codeHostForRepositoryAddress } from "../../packages/broker/src/plugins/routing.js";
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { githubCodeHostPlugin } from "../../packages/broker/src/plugins/code-host/github/plugin.js";
 import { registryRepositoryResolver } from "../../packages/broker/src/core/merge/resolver.js";
@@ -125,6 +125,43 @@ describe("code host connections", () => {
     expect(asked).toEqual(["runner:github-company", "runner:github", "team:github-company", "team:github"]);
     // Nobody has one: none is invented.
     expect((await resolverWith([])("p", 1, "main", org))?.checkRunner).toBeUndefined();
+  });
+});
+
+describe("which connection serves an address (review M1, N2)", () => {
+  const url = "https://github.com/acme/app";
+  const registered = () => {
+    const registry = createAdapterRegistry();
+    const main = connection("github", "github");
+    const company = connection("github-company", "github", true);
+    registry.register("code-host", "github", main);
+    registry.register("code-host", "github-company", company);
+    return { registry, main, company };
+  };
+
+  it("serves the connection the record names, and the default when it names none", () => {
+    const { registry, main, company } = registered();
+    expect(codeHostForRepositoryAddress(registry, url, [{ url, host: { kind: "github" } }])).toBe(main);
+    expect(codeHostForRepositoryAddress(registry, url, [{ url, host: { kind: "github-company" } }])).toBe(company);
+    expect(codeHostForRepositoryAddress(registry, url, [{ url }])).toBe(company);
+    expect(codeHostForRepositoryAddress(registry, url, [])).toBe(company);
+  });
+
+  it("refuses an address whose records resolve to DIFFERENT connections, and allows records that resolve to the same one", () => {
+    const { registry, company } = registered();
+    expect(() => codeHostForRepositoryAddress(registry, url, [{ url, host: { kind: "github" } }, { url, host: { kind: "github-company" } }])).toThrow(AMBIGUOUS_REPOSITORY_HOST_MESSAGE);
+    expect(() => codeHostForRepositoryAddress(registry, url, [{ url, host: { kind: "github" } }, { url }])).toThrow(AMBIGUOUS_REPOSITORY_HOST_MESSAGE);
+    // No host (the default, github-company) and a record naming the default by its name resolve to the same connection: not a disagreement.
+    expect(codeHostForRepositoryAddress(registry, url, [{ url }, { url, host: { kind: "github-company" } }])).toBe(company);
+    // Two records that name the same connection, or another address entirely, are no disagreement either.
+    expect(codeHostForRepositoryAddress(registry, url, [{ url, host: { kind: "github-company" } }, { url, host: { kind: "github-company" } }, { url: "https://github.com/acme/other", host: { kind: "github" } }])).toBe(company);
+  });
+
+  it("serves no-host and a provider name that resolves to the one default connection without refusing", () => {
+    const registry = createAdapterRegistry();
+    const only = connection("github-main", "github", true);
+    registry.register("code-host", "github-main", only);
+    expect(codeHostForRepositoryAddress(registry, url, [{ url }, { url, host: { kind: "github" } }])).toBe(only);
   });
 });
 

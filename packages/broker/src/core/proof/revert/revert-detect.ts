@@ -8,6 +8,7 @@
 //    and its author and the account that pushed it both can write. Port gap: the CodeHost port has no commit read, and the push event names no pusher, so the caller supplies `CommitReader` and `pusher`.
 // Anything unproven records nothing. A revert of a revert names the first revert's commit, so it matches nothing and the task stays reverted (there is no un-revert).
 import { when, type ChangeRequestRef, type CodeHost, type DocumentStore, type HostAccount, type HostScope, type OrgId, type RepositoryRef, COMMIT_ID_PATTERN, COMMIT_ID_SOURCE } from "@agentx/contracts";
+import { providerOf } from "../../../plugins/routing.js";
 import type { RovaraPullRequest, RovaraPullRequestIndex } from "./rovara-pull-request-index.js";
 
 /** A commit id of any hash length (item C4): the core never decides it is SHA-1. */
@@ -117,13 +118,15 @@ export async function detectRevertFromMergedChangeRequest(deps: RevertDetectorDe
   const details = await deps.codeHost.getChangeRequest(ref, scope);
   if (details.state !== "merged" || details.targetBranch !== identity.defaultBranch || !/^revert\s+["“']/iu.test(details.title.trim())) return [];
   const targets: RovaraPullRequest[] = [];
-  const host = deps.codeHost.kind;
+  // Rows are filed by the connection's PROVIDER, so a GitHub connection of any name is read (review N3); an older row under the connection's own name is still found.
+  const host = providerOf(deps.codeHost);
+  const connection = deps.codeHost.kind;
   for (const number of revertedPullRequests(details.body, identity.fullName)) {
-    const found = await deps.index.byNumber({ host, repo: identity.fullName, number });
+    const found = await deps.index.byNumber({ host, connection, repo: identity.fullName, number });
     if (found !== undefined) targets.push(found);
   }
   for (const sha of revertedCommits(details.body)) {
-    const found = await deps.index.byMergeCommit({ host, repo: identity.fullName, sha });
+    const found = await deps.index.byMergeCommit({ host, connection, repo: identity.fullName, sha });
     if (found !== undefined) targets.push(found);
   }
   if (targets.length === 0) return [];
@@ -156,7 +159,7 @@ export async function detectRevertFromPushedCommit(
   if (commit === undefined || commit.sha !== input.sha) return [];
   const targets: RovaraPullRequest[] = [];
   for (const sha of gitRevertedCommits(commit.message)) {
-    const found = await deps.index.byMergeCommit({ host: deps.codeHost.kind, repo: identity.fullName, sha });
+    const found = await deps.index.byMergeCommit({ host: providerOf(deps.codeHost), connection: deps.codeHost.kind, repo: identity.fullName, sha });
     if (found !== undefined) targets.push(found);
   }
   if (targets.length === 0) return [];

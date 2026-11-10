@@ -81,7 +81,7 @@ const classicToken = (seed: string): string => ["gh", "p_"].join("") + seed.repe
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string } } = {}) {
+async function launch(extra: { connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string } } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -92,11 +92,13 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
   // A fake code host that holds the repository (lane L10): the build step reads the pushed branch and opens the pull request through its port.
   const hostedUrl = "https://github.com/example/demo.git";
   const model = extra.model ?? new FakeHostModel({ url: hostedUrl, id: "1", fullName: "example/demo" });
-  const fakeHost = Object.defineProperty(new FakeCodeHost(model), "kind", { value: "github" });
+  // `connection`: the same GitHub host registered under another name (a second GitHub connection called `github-main`), which a repository record then names (lane P2, review N1/N3/L1).
+  const connection = extra.connection ?? "github";
+  const fakeHost = Object.defineProperties(new FakeCodeHost(model), { kind: { value: connection }, ...(connection === "github" ? {} : { provider: { value: "github" } }) });
   // A project cannot yet name another code host at registration (51 gap: the project contract refuses `repositories[].host`), so a repository is on the code host registered as `github`; the
   // test's host is the fake one under that name.
   const readiness = extra.readiness === true ? [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }] : [];
-  const project = extra.host === true ? { ...PROJECT, readiness, repositories: [{ ...PROJECT.repositories[0]!, url: hostedUrl }] } : PROJECT;
+  const project = extra.host === true ? { ...PROJECT, readiness, repositories: [{ ...PROJECT.repositories[0]!, url: hostedUrl, ...(connection === "github" ? {} : { host: { kind: connection } }) }] } : PROJECT;
   const base = extra.host === true ? model.headOf("main") : BASE_COMMIT;
   /** The addresses the server asked the browser to open: the only place a page address goes. */
   const opened: string[] = [];
@@ -107,7 +109,7 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
       // The fake's clock is its own (2026-10-30); a credential the worker is sent must expire in the real future.
       const issue = host.issueGitCredential.bind(host);
       host.issueGitCredential = async (repository, access, scope) => ({ ...(await issue(repository, access, scope)), expiresAt: new Date(Date.now() + 50 * 60_000).toISOString() });
-      registry.register("code-host", "github", host);
+      registry.register("code-host", connection, host);
     }
   };
   const runtime: LocalRuntime = await startLocalRuntime({
@@ -1218,6 +1220,61 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     const lifecycle = (commit: string, treeSha: string) => ({ action: "sync", repository: "demo", number: 1, url: h.model.crUrl("1"), state: "open", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: waiting.commit, commit, treeSha, checks: [], reconciled: false });
     return { ...waiting, newBase, sync, merge, call, lifecycle };
   }
+
+  // ---- lane P2 review N1 / L1: a GitHub connection that is not called `github` (here `github-main`) is filed, linked and re-keyed by its PROVIDER.
+  const linkOf = async (h: Harness, name: string) => h.runtime.registry.require("storage").get({ pk: `CODEHOST_CR#${name}#example/demo`, sk: "CR#0000000001" });
+  const linkUnderConnection = async (h: Harness) => h.runtime.registry.require("storage").get({ pk: "CODEHOST_CR#github-main#github-main:https://github.com/example/demo", sk: "CR#0000000001" });
+
+  it("files the link of a pull request opened through a renamed GitHub connection under the provider, and nothing under the connection's own name (publish)", async () => {
+    const h = await launch({ host: true, connection: "github-main" });
+    const w = await toWaitForMerge(h);
+    expect(await linkOf(h, "github")).toMatchObject({ taskId: w.taskId, number: 1, repositoryId: "demo" });
+    expect(await linkUnderConnection(h)).toBeUndefined();
+  });
+
+  it("moves the link to the new candidate when a CI fix is pushed through a renamed GitHub connection, and the fix is recorded (maintain: append)", async () => {
+    const h = await launch({ host: true, connection: "github-main" });
+    const t = await toAppend(h);
+    const before = (await linkOf(h, "github"))!["candidateDigest"];
+    h.model.branches.set(t.headBranch, t.fixCommit);
+    expect((await h.callback(t.update, "pull-request-update", t.call)).status).toBe(200);
+    expect((await h.callback(t.update, "result", { status: "SUCCEEDED", result: t.lifecycle(t.fixCommit, t.fixTree) })).status).toBe(200);
+    const after = await taskRecord(h, t.taskId) as unknown as { workflow: { stage: string; state: string; pullRequests: Array<{ headSha: string; candidateDigest: string }> } };
+    // Without the provider-keyed re-key the link update finds no row, the transaction is refused and the fix is never recorded.
+    expect(after.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ headSha: t.fixCommit }] });
+    const moved = (await linkOf(h, "github"))!["candidateDigest"];
+    expect(moved).not.toBe(before);
+    expect(moved).toBe(after.workflow.pullRequests[0]!.candidateDigest);
+    expect(await linkUnderConnection(h)).toBeUndefined();
+  });
+
+  it("still moves a link an earlier build filed under the connection's own name (maintain: dual read)", async () => {
+    const h = await launch({ host: true, connection: "github-main" });
+    const t = await toAppend(h);
+    const store = h.runtime.registry.require("storage");
+    const row = (await linkOf(h, "github"))!;
+    const legacyKey = { pk: "CODEHOST_CR#github-main#github-main:https://github.com/example/demo", sk: "CR#0000000001" };
+    await store.delete({ key: { pk: String(row["pk"]), sk: String(row["sk"]) } });
+    await store.put({ item: { ...row, ...legacyKey, hostKind: "github-main", repositoryKey: "github-main:https://github.com/example/demo" } });
+    h.model.branches.set(t.headBranch, t.fixCommit);
+    await h.callback(t.update, "pull-request-update", t.call);
+    expect((await h.callback(t.update, "result", { status: "SUCCEEDED", result: t.lifecycle(t.fixCommit, t.fixTree) })).status).toBe(200);
+    const after = await taskRecord(h, t.taskId) as unknown as { workflow: { pullRequests: Array<{ candidateDigest: string }> } };
+    expect((await linkUnderConnection(h))!["candidateDigest"]).toBe(after.workflow.pullRequests[0]!.candidateDigest);
+  });
+
+  it("records a branch sync pushed through a renamed GitHub connection and moves the link (maintain: sync)", async () => {
+    const h = await launch({ host: true, connection: "github-main" });
+    const t = await toSync(h);
+    const before = (await linkOf(h, "github"))!["candidateDigest"];
+    const merged = t.merge("8".repeat(40), "9".repeat(40), [t.commit, t.newBase]);
+    await h.callback(t.sync, "pull-request-update", t.call(merged));
+    await h.callback(t.sync, "result", { status: "SUCCEEDED", result: t.lifecycle(merged, "9".repeat(40)) });
+    const after = await taskRecord(h, t.taskId) as unknown as { workflow: { stage: string; pullRequests: Array<{ candidateDigest: string }> } };
+    expect(after.workflow.stage).toBe("VERIFY");
+    expect((await linkOf(h, "github"))!["candidateDigest"]).toBe(after.workflow.pullRequests[0]!.candidateDigest);
+    expect((await linkOf(h, "github"))!["candidateDigest"]).not.toBe(before);
+  });
 
   it("gives a worker a push credential only from the code host, for a publication and for a push to an open pull request, and never after the operation ended or for a clone grant", async () => {
     const h = await launch({ host: true });

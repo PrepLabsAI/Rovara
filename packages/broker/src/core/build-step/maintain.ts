@@ -11,7 +11,7 @@ import {
   PullRequestLifecycleResultSchema, WORKFLOW_FIX_DROPS_BASE_CHANGES, WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED, agentXError, blockWorkflowPullRequestUpdate, change, endWorkflowBranchSync,
   WorkflowSnapshotSchema, nextWorkflowPullRequestUpdate, observeWorkflowPullRequestMergedWithFix, recordWorkflowBranchSync, recordWorkflowPullRequestUpdate, startWorkflowBranchSyncRun, startWorkflowPullRequestUpdate, when,
   workflowRequestId, CONFLICT_ROUNDS_MAX,
-  type TransactItem, type WorkflowPullRequestUpdateCause, type WorkflowSnapshot,
+  type CodeHost, type TransactItem, type WorkflowPullRequestUpdateCause, type WorkflowSnapshot,
   COMMIT_ID_PATTERN,
 } from "@agentx/contracts";
 import { codeHostForRecord, providerOf } from "../../plugins/routing.js";
@@ -214,13 +214,15 @@ async function restoreRecordHead(deps: TaskFlowDeps, task: TaskRecord, operation
 export const SYNC_RECHECK_REASON = "The base branch was merged into this pull request. Rovara is checking the merged code again before it is called ready.";
 
 /** The link of a pull request to its task names the candidate it holds; a fix or a merge gives a new one. Conditional on the digest read, so a link that moved meanwhile is the newer writer's. */
-function rekeyItems(host: { kind: string }, definitionUrl: string, task: TaskRecord, before: WorkflowSnapshot, after: WorkflowSnapshot): TransactItem[] {
+async function rekeyItems(deps: TaskFlowDeps, host: CodeHost, definitionUrl: string, task: TaskRecord, before: WorkflowSnapshot, after: WorkflowSnapshot): Promise<TransactItem[]> {
   const items: TransactItem[] = [];
   for (const pullRequest of after.pullRequests ?? []) {
     const earlier = before.pullRequests?.find((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number);
     if (earlier === undefined || earlier.candidateDigest === pullRequest.candidateDigest) continue;
-    const key = linkedChangeRequestKey(host.kind, definitionUrl, String(pullRequest.number));
+    // Links are filed by the connection's PROVIDER (as publish files them); a row an earlier build filed under the connection's own name is still the one to move (dual read, lane P2 review N1).
+    let key = linkedChangeRequestKey(providerOf(host), definitionUrl, String(pullRequest.number));
     if (key === undefined) throw agentXError("CONFIG_INVALID", "the pull request cannot be linked to this task");
+    if (host.kind !== providerOf(host) && (await deps.store.get(key)) === undefined) key = linkedChangeRequestKey(host.kind, definitionUrl, String(pullRequest.number)) ?? key;
     items.push({ kind: "update", key, ops: [change.set("candidateDigest", pullRequest.candidateDigest)], condition: when.and(when.eq("taskId", task.taskId), when.eq("candidateDigest", earlier.candidateDigest)) });
   }
   return items;
@@ -306,7 +308,7 @@ async function recordAppended(deps: TaskFlowDeps, task: TaskRecord, workflow: Wo
     ? recordWorkflowBranchSync(updated, { repositoryId: pullRequest.repositoryId, number: pullRequest.number, headSha: head, headTreeSha: binding.treeSha, baseCommitSha: binding.mergeBaseCommit, now })
     : updated;
   const items: TransactItem[] = [
-    ...rekeyItems(host, definition.url, task, workflow, next),
+    ...(await rekeyItems(deps, host, definition.url, task, workflow, next)),
     ...(record !== undefined && record.expectedHeadCommit !== head
       ? [{ kind: "update" as const, key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", head), change.set("state", state), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
     ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(providerOf(host), definition.url), headSha: head, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number, branch: maintenance.headBranch }, Date.parse(now)),
@@ -385,7 +387,7 @@ async function recordSynced(deps: TaskFlowDeps, task: TaskRecord, workflow: Work
     void _verification; void _reviews; void _accepted;
     const recheck = WorkflowSnapshotSchema.parse({ ...merged, stage: "VERIFY", state: "BLOCKED", blockReason: SYNC_RECHECK_REASON, updatedAt: now });
     committed = await commitWorkflow(deps, task, recheck, [
-      ...rekeyItems(host, definition.url, task, workflow, outcome.workflow),
+      ...(await rekeyItems(deps, host, definition.url, task, workflow, outcome.workflow)),
       ...(record !== undefined && record.expectedHeadCommit !== outcome.headSha
         ? [{ kind: "update" as const, key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", outcome.headSha), change.set("state", "open"), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
       ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(providerOf(host), definition.url), headSha: outcome.headSha, taskId: task.taskId, repositoryId: marker.repositoryId, number: marker.number, branch: maintenance.headBranch }, Date.parse(now)),

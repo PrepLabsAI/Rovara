@@ -9,7 +9,7 @@ export const AMBIGUOUS_CONNECTION_MESSAGE = "This install has several code host 
 export const TWO_DEFAULT_CONNECTIONS_MESSAGE = "This install has two default code host connections of one kind.";
 
 /** The provider a connection is of: its `provider`, else its own name. */
-export const providerOf = (host: CodeHost): PluginKind => host.provider ?? host.kind;
+export const providerOf = (host: Pick<CodeHost, "kind" | "provider">): PluginKind => host.provider ?? host.kind;
 
 function connectionsOf(registry: RegistryView): CodeHost[] {
   const out: CodeHost[] = [];
