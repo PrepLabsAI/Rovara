@@ -1,6 +1,8 @@
 // The status of a project's lessons files and the maintainer's switches, as plain functions the route layer (`routes.ts`) and the CLI's API calls use. Fixed words only.
 //   status:  every repository of the project with its row (switched on or not, the open pull request, unmerged count, removals waiting, held lessons, pointer, problem, notices) and the repositories not yet switched on.
-//   actions: on / off (the open pull request is closed and its branch deleted; the merged file stays), resume (after the team deleted the file), pointer_add ("add it back"), pointer_decline ("don't ask again").
+//   actions: on / off (the open pull request is closed and its branch deleted; the merged file stays), resume (after the team deleted the file), pointer_add ("add it back"), pointer_decline ("don't ask again"),
+//            retire_confirm / retire_keep (owner decision 78: lessons that went missing from the file in one change, held a week, are retired or kept only when a person says so; the route decides who may answer. The answer is only
+//            RECORDED here: the nightly job retires a confirmed set, the next weekly pull request proposes a kept one back).
 // Switching on or off is audited BEFORE it changes. Nothing here calls a host except `off` (closing Rovara's own pull request); the first pull request is opened by the next nightly pass, within a day.
 import { resolveLearning, modeAllows, requireAudit, type ResolvedLearning } from "./policy.js";
 import type { LessonsRepoFileBody, LessonsRepoFileRow, LessonsRepoFileStatus } from "@agentx/contracts";
@@ -9,10 +11,10 @@ import { closeProjectPrs, sweepProject } from "./repo-file-sweep.js";
 import { watchRowOf, type RepoFileTarget } from "./repo-file-host.js";
 import { switchRepoFileOff } from "./repo-file-pass.js";
 import { rowOf } from "./repo-file-pr.js";
-import { newRepoFileState } from "./repo-file-state.js";
+import { READ_BACK_HOLD_MS, newRepoFileState } from "./repo-file-state.js";
 import type { ScopeKey } from "./store.js";
 
-export type RepoFileActionResult = { ok: true; row: LessonsRepoFileRow } | { ok: false; code: "not_found" | "host_cannot_write" | "audit_unavailable" | "conflict" | "unreadable" };
+export type RepoFileActionResult = { ok: true; row: LessonsRepoFileRow } | { ok: false; code: "not_found" | "host_cannot_write" | "audit_unavailable" | "conflict" | "unreadable" | "not_permitted" };
 
 /** Why a switched-on repository does nothing yet: the install's lessons switch is off, else the project's mode does not let lessons load. Absent when lessons are on. */
 const waitingOf = (resolved: ResolvedLearning): { waitingFor: "install" | "project" } | Record<string, never> =>
@@ -36,7 +38,7 @@ export async function repoFileStatus(runtime: RepoFileRuntime, key: ScopeKey): P
     return { ...newRepoFileState(place, name), enabled: false };
   });
   const rows = [...shownStates, ...waitingOnly].map((state) => {
-    const row = rowOf(state);
+    const row = rowOf(state, runtime.deps.now());
     const waiting = removals.filter((r) => r.place === state.place).length;
     const target = targets.find((candidate) => candidate.place === state.place);
     const shown = waiting === 0 ? withWaiting(row, resolved) : { ...withWaiting(row, resolved), erasurePrs: waiting, notices: [...row.notices, `${String(waiting)} ${waiting === 1 ? "pull request that removes" : "pull requests that remove"} deleted lessons ${waiting === 1 ? "is" : "are"} waiting for your team`] };
@@ -60,8 +62,11 @@ export async function repoFileStatus(runtime: RepoFileRuntime, key: ScopeKey): P
   };
 }
 
-/** One switch or answer for one repository, by the project's name for it. */
-export async function repoFileAction(runtime: RepoFileRuntime, key: ScopeKey, body: LessonsRepoFileBody): Promise<RepoFileActionResult> {
+/**
+ * One switch or answer for one repository, by the project's name for it. `decider` is the person whose answer a `retire_confirm` or `retire_keep` is: the ROUTE checked that they are the company owner or can approve lessons in the
+ * project (it is the layer that reaches the directory); without one those two actions are refused.
+ */
+export async function repoFileAction(runtime: RepoFileRuntime, key: ScopeKey, body: LessonsRepoFileBody, decider?: { developerId: string }): Promise<RepoFileActionResult> {
   let target: RepoFileTarget | undefined;
   let everyTarget: RepoFileTarget[];
   try { everyTarget = await runtime.targets(key.workspaceId, key.project); target = everyTarget.find((candidate) => candidate.name === body.repo); } catch { return { ok: false, code: "unreadable" }; }
@@ -74,24 +79,40 @@ export async function repoFileAction(runtime: RepoFileRuntime, key: ScopeKey, bo
     if (body.action === "on") {
       if (!canWrite(target)) return { ok: false, code: "host_cannot_write" };
       const resolved = await resolveLearning(deps.settings, key.workspaceId, key.project);
-      if (state.enabled) return { ok: true, row: withWaiting(rowOf(state), resolved) };
+      if (state.enabled) return { ok: true, row: withWaiting(rowOf(state, deps.now()), resolved) };
       // WRITE AHEAD: when the feature is switched on, the erasure sweep is told about EVERY repository of the project (a watch row each, never deleted while the project exists) before anything else happens. If that cannot be written, nothing changes.
       try { for (const each of everyTarget) await (deps.rows ?? deps.state).putPr(key, watchRowOf(each, deps.now())); } catch { return { ok: false, code: "unreadable" }; }
       if (!await requireAudit(deps.audit, { action: "lesson.repo_file_switched", workspaceId: key.workspaceId, project: key.project, facts: { enabled: true } })) return { ok: false, code: "audit_unavailable" };
       const saved = await save({ ...state, name: target.name, enabled: true, ...(body.pointers === undefined ? {} : { pointers: body.pointers }) });
-      return saved === undefined ? { ok: false, code: "conflict" } : { ok: true, row: withWaiting(rowOf(saved), resolved) };
+      return saved === undefined ? { ok: false, code: "conflict" } : { ok: true, row: withWaiting(rowOf(saved, deps.now()), resolved) };
     }
     if (existing === undefined) return { ok: false, code: "not_found" };
     if (body.action === "off") {
-      if (!existing.enabled && existing.open === undefined && existing.closing.length === 0) return { ok: true, row: rowOf(existing) };
+      if (!existing.enabled && existing.open === undefined && existing.closing.length === 0) return { ok: true, row: rowOf(existing, deps.now()) };
       if (!await requireAudit(deps.audit, { action: "lesson.repo_file_switched", workspaceId: key.workspaceId, project: key.project, facts: { enabled: false } })) return { ok: false, code: "audit_unavailable" };
-      return { ok: true, row: rowOf(await switchRepoFileOff(deps, key, target, existing)) };
+      return { ok: true, row: rowOf(await switchRepoFileOff(deps, key, target, existing), deps.now()) };
+    }
+    if (body.action === "retire_confirm" || body.action === "retire_keep") {
+      if (decider === undefined) return { ok: false, code: "not_permitted" };
+      const held = existing.readBackHeld;
+      // The answer is for exactly the set the person saw: nothing held, or another set (the file changed), is stale. A switched-off repository takes no answer.
+      if (held === undefined || body.held !== held.digest || !existing.enabled) return { ok: false, code: "conflict" };
+      const verdict = body.action === "retire_confirm" ? "retire" as const : "keep" as const;
+      // The same answer again changes nothing. A kept set may still be retired (a person changes their mind before the file changes); a confirmed retire is not taken back.
+      if (held.verdict === verdict) return { ok: true, row: rowOf(existing, deps.now()) };
+      if (held.verdict === "retire") return { ok: false, code: "conflict" };
+      // Only after the week's hold: before that nobody is asked, so nobody answers.
+      if (deps.now() - held.at < READ_BACK_HOLD_MS) return { ok: false, code: "conflict" };
+      if (!await requireAudit(deps.audit, { action: "lesson.repo_file_retire_decided", workspaceId: key.workspaceId, project: key.project, actor: decider.developerId, facts: { verdict, missing: held.missing } })) return { ok: false, code: "audit_unavailable" };
+      // The answer is only recorded here. The lessons are retired by the nightly job (`runRetireRead`), never inside this request; a kept set is proposed back by the next weekly pull request.
+      const decided = await save({ ...existing, readBackHeld: { ...held, verdict, decidedAt: deps.now() } });
+      return decided === undefined ? { ok: false, code: "conflict" } : { ok: true, row: rowOf(decided, deps.now()) };
     }
     // Resume: the team deleted the file and wants Rovara to start again; the next pass proposes it afresh. Pointer answers.
     const next = body.action === "resume" ? { ...existing, fileDeleted: false, fileSeen: false, held: [] } : body.action === "pointer_add"
       ? { ...existing, pointerProposed: false, pointerDeclined: false, pointerMissing: false } : { ...existing, pointerDeclined: true, pointerMissing: false };
     const saved = await save(next);
-    return saved === undefined ? { ok: false, code: "conflict" } : { ok: true, row: rowOf(saved) };
+    return saved === undefined ? { ok: false, code: "conflict" } : { ok: true, row: rowOf(saved, deps.now()) };
   } catch { return { ok: false, code: "conflict" }; }
 }
 

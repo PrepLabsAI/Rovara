@@ -5,7 +5,7 @@
 //   - every lesson version is kept, and every set version records which lesson versions it held, so a rollback restores a past set;
 //   - counters and expiry bookkeeping change in place (`mutate`) without a new version.
 // Every key carries the workspace and the project, so one workspace's call can never read or change another's lessons.
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { applyWriteFence, planRollback, withUsageOf, type FenceView } from "./store-rules.js";
 import { LessonSchema, normId, normSource, type Lesson, type LessonStatus, type VOLATILE_FIELDS } from "./types.js";
 import type { LessonStage } from "@agentx/contracts";
@@ -91,6 +91,18 @@ export interface LessonStore {
    * takes "could not look" for "not gone". The lessons file pass decides "this block must come out" from this, not from any list of its own.
    */
   goneOf(key: ScopeKey, ids: readonly string[]): Promise<Map<string, "withdrawn" | "purged">>;
+  /**
+   * Lessons in the repo (R3, review H2): the FINGERPRINT of a text in one repository's lessons file: an HMAC (32 hex) of the text's comparison hash (`bodyHashOf`) and the repository's place, under a secret of the PROJECT (made on first
+   * use, kept in the project's partition, wiped with it). It holds no text and no bare hash, and cannot be worked out without the secret. Read-back records the fingerprint of every marked block on every successful pass (while the
+   * lesson is live), so that erasure finds a fingerprint ready, and marks the fingerprint of an erased lesson's text while a copy is in the file (`markGoneFingerprint`).
+   */
+  textFingerprints(key: ScopeKey, place: string, hashes: readonly string[]): Promise<Map<string, string>>;
+  /** Marks a fingerprint: the text of a GONE lesson that is still in a repository's file. Read-back refuses a bullet with a marked fingerprint (a formatter or a deleted comment stripped its id line: erased words do not come back as a new lesson) and the erasure sweep takes it out of the file. Idempotent. */
+  markGoneFingerprint(key: ScopeKey, fingerprint: string): Promise<void>;
+  /** Which of these fingerprints are marked. A batched read; throws when it cannot read (never "not marked" for "could not look"). */
+  goneFingerprintsOf(key: ScopeKey, fingerprints: readonly string[]): Promise<Set<string>>;
+  /** Removes a mark: the erased text is out of the file, so a person who writes the same words again is the team's new lesson (decision 76.3). Idempotent. */
+  clearGoneFingerprint(key: ScopeKey, fingerprint: string): Promise<void>;
   /** Hard delete: the head, every version and every load-manifest reference. The id is remembered as purged so a rollback cannot bring it back. */
   purge(key: ScopeKey, id: string): Promise<void>;
   /** Forgets a source's counters and its pause (erasure of a person, deletion of a channel). */
@@ -134,7 +146,7 @@ interface ProjectState {
   heads: Map<string, Lesson>; versions: Map<string, Lesson[]>; members: Map<string, number>; sets: SetSnapshot[];
   manifests: Map<string, LoadManifest>; once: Set<string>; pending: Map<string, PendingOutcome>; flags: ProjectFlags;
   sourceEvents: Array<{ at: number; source: string }>;
-  gone: Map<string, "withdrawn" | "purged">;
+  gone: Map<string, "withdrawn" | "purged">; goneTexts: Set<string>; textSecret?: Buffer;
   erased: Set<string>; markRefs: Map<string, string>; harms: Map<string, Set<string>>; erasedSources: Set<string>; deletedIds: Set<string>; intents: Map<string, DeletionIntent>;
 }
 
@@ -147,7 +159,7 @@ export class InMemoryLessonStore implements LessonStore {
     const id = scopeId(key);
     let value = this.state.get(id);
     if (value === undefined) {
-      value = { heads: new Map(), versions: new Map(), members: new Map(), sets: [{ setVersion: 0, at: 0, members: [] }], manifests: new Map(), once: new Set(), pending: new Map(), flags: {}, sourceEvents: [], gone: new Map(), markRefs: new Map(), harms: new Map(), erased: new Set(), erasedSources: new Set(), deletedIds: new Set(), intents: new Map() };
+      value = { heads: new Map(), versions: new Map(), members: new Map(), sets: [{ setVersion: 0, at: 0, members: [] }], manifests: new Map(), once: new Set(), pending: new Map(), flags: {}, sourceEvents: [], gone: new Map(), goneTexts: new Set(), markRefs: new Map(), harms: new Map(), erased: new Set(), erasedSources: new Set(), deletedIds: new Set(), intents: new Map() };
       this.state.set(id, value);
     }
     return value;
@@ -263,6 +275,14 @@ export class InMemoryLessonStore implements LessonStore {
     s.versions.set(id, (s.versions.get(id) ?? []).map((v) => LessonSchema.parse({ ...fn(clone(v)), version: v.version })));
   }
   async markGone(key: ScopeKey, id: string, mode: "withdrawn" | "purged"): Promise<void> { this.of(key).gone.set(id, mode); }
+  private textSecretOf(key: ScopeKey): Buffer { const s = this.of(key); return (s.textSecret ??= randomBytes(32)); }
+  async textFingerprints(key: ScopeKey, place: string, hashes: readonly string[]): Promise<Map<string, string>> {
+    const secret = this.textSecretOf(key);
+    return new Map([...new Set(hashes)].map((hash) => [hash, createHmac("sha256", secret).update(`${place}\u0000${hash}`).digest("hex").slice(0, 32)] as const));
+  }
+  async markGoneFingerprint(key: ScopeKey, fingerprint: string): Promise<void> { this.of(key).goneTexts.add(fingerprint); }
+  async goneFingerprintsOf(key: ScopeKey, fingerprints: readonly string[]): Promise<Set<string>> { const known = this.of(key).goneTexts; return new Set(fingerprints.filter((fp) => known.has(fp))); }
+  async clearGoneFingerprint(key: ScopeKey, fingerprint: string): Promise<void> { this.of(key).goneTexts.delete(fingerprint); }
   async goneOf(key: ScopeKey, ids: readonly string[]): Promise<Map<string, "withdrawn" | "purged">> {
     const gone = this.of(key).gone;
     return new Map(ids.flatMap((id) => { const mode = gone.get(id); return mode === undefined ? [] : [[id, mode] as const]; }));

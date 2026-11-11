@@ -22,6 +22,7 @@ import { planRepoFile, type RepoFilePlan } from "./repo-file-plan.js";
 import { parseLessonsFile, textHash } from "./repo-file-format.js";
 import { Unconfirmed, freshBranchName, guardTarget, headOf, readOwnPr, repositoryIdOfPlace, verifyRepository, watchRowOf, type RepoFileTarget } from "./repo-file-host.js";
 import { prBody, prTitle } from "./repo-file-pr.js";
+import { ReadBackFailure, readBackFile, type ReadBackResult } from "./repo-file-readback.js";
 import { MAX_DECLINED, MAX_RENDERED, StateFull, StateUnreadable, additionsPaused, appendOrMark, boundedAppend, provisionalNumber, type OpenPr, type PrRow, type PrRowStore, type RepoFileState, type RepoFileStore } from "./repo-file-state.js";
 import type { LessonStore, ScopeKey } from "./store.js";
 import type { Lesson } from "./types.js";
@@ -42,6 +43,8 @@ export interface RepoFileDeps {
   holder: string;
   /** 12 random lower-case hex digits for a branch name; the default is the platform's random bytes. */
   randomHex?(): string;
+  /** A new lesson id (read-back makes lessons from the team's own bullets); the default is the lessons' own random id. */
+  newLessonId?: () => string;
   log?(event: string, fields: Record<string, string | number>): void;
 }
 
@@ -192,12 +195,15 @@ export async function switchRepoFileOff(deps: RepoFileDeps, key: ScopeKey, rawTa
   return finishClosings(deps, key, target, current);
 }
 
-/** The state after Rovara's open pull request was seen merged: what it put in the file is now Rovara's rendered record. */
+/** The state after Rovara's open pull request was seen merged: what it put in the file is now Rovara's rendered record. A kept set is not kept for ever: the restore pull request merged, so any later removal is a new disappearance. */
 function mergedState(state: RepoFileState, open: OpenPr): RepoFileState {
   const rendered = { ...state.rendered, ...open.added, ...open.edited };
   for (const id of open.removed) delete rendered[id];
-  return { ...without(state, "open") as RepoFileState, rendered, unmerged: 0, fileSeen: true, fileDeleted: false };
+  return { ...without(state, "open", ...keptOver(state)) as RepoFileState, rendered, unmerged: 0, fileSeen: true, fileDeleted: false };
 }
+
+/** A person's "keep" ends when Rovara's own pull request is merged or closed by the team: the hold is dropped, so a later removal starts a fresh week and a fresh card. */
+const keptOver = (state: Pick<RepoFileState, "readBackHeld">): Array<"readBackHeld"> => (state.readBackHeld?.verdict === "keep" ? ["readBackHeld"] : []);
 
 /**
  * One weekly pass for one repository. Never throws: a fault is a `problem` code on the state (shown in the status) and the pass tries again at the next night. `force` skips only the "one a week" gate.
@@ -238,7 +244,7 @@ export async function runRepoFilePass(deps: RepoFileDeps, key: ScopeKey, rawTarg
 
   let result: PassResult;
   try {
-    result = await pass(deps, key, target, state, learning.preset === "standard" ? "standard" : "regulated");
+    result = await pass(deps, key, target, state, learning.preset === "standard" ? "standard" : "regulated", learning.requiredGroups.length > 0);
   } catch (error) {
     const problem: LessonFileProblem = error instanceof Abort ? error.problem : "repository_unreadable";
     if (!(error instanceof Abort)) deps.log?.("lessons_repo_file.pass_failed", {});
@@ -252,7 +258,104 @@ export async function runRepoFilePass(deps: RepoFileDeps, key: ScopeKey, rawTarg
   return result;
 }
 
-async function pass(deps: RepoFileDeps, key: ScopeKey, target: RepoFileTarget, leased: RepoFileState, preset: "standard" | "regulated"): Promise<PassResult> {
+export type RetireReadResult =
+  | { status: "skipped"; reason: "lessons_off" | "not_enabled" | "nothing_confirmed" | "file_deleted" | "busy" }
+  | { status: "problem" }
+  | { status: "done"; retired: number };
+
+/**
+ * The nightly RETIRE-ONLY read-back (owner decision 78): for a repository whose confirmed set (`readBackHeld.verdict === "retire"`) is waiting, read the file on the default branch and take it in (`takeInReadBack`): the lessons
+ * of that same set are retired, a file that changed restarts the hold. It runs whether or not the weekly publish pass is due, and it NEVER opens, updates, reconciles or closes a pull request and never changes `unmerged` or
+ * `lastPassAt`. Same gates as the pass: lessons switched on and loading, the repository switched on, the file not deleted, the lease. A fault is quiet (the next night tries again); it records no problem on the row.
+ */
+export async function runRetireRead(deps: RepoFileDeps, key: ScopeKey, rawTarget: RepoFileTarget): Promise<RetireReadResult> {
+  const target = guardTarget(rawTarget);
+  const { host } = target;
+  const learning = await resolveLearning(deps.settings, key.workspaceId, key.project);
+  if (!modeAllows(learning.mode, "load")) return { status: "skipped", reason: "lessons_off" };
+  let state: RepoFileState | undefined;
+  try { state = await deps.state.get(key, target.place); } catch { return { status: "problem" }; }
+  if (state === undefined || !state.enabled) return { status: "skipped", reason: "not_enabled" };
+  if (state.fileDeleted) return { status: "skipped", reason: "file_deleted" };
+  if (state.readBackHeld?.verdict !== "retire") return { status: "skipped", reason: "nothing_confirmed" };
+  const started = deps.now();
+  if (state.lease !== undefined && state.lease.until > started && state.lease.holder !== deps.holder) return { status: "skipped", reason: "busy" };
+  if (host.pathKind === undefined) return { status: "problem" };
+  if (!(await verifyRepository(target)).ok) return { status: "problem" };
+  try {
+    state = await commit(deps, key, state, (s) => ({ ...s, lease: { holder: deps.holder, until: started + LEASE_MS } }));
+  } catch { return { status: "skipped", reason: "busy" }; }
+  let result: RetireReadResult;
+  try {
+    const { repository, scope } = target;
+    const identity = await host.repositoryIdentity(repository, scope);
+    if (identity === undefined || identity.defaultBranch === undefined || String(identity.id) !== repositoryIdOfPlace(target.place)) throw new Abort("repository_unreadable");
+    const head = await host.baseBranchHead(repository, identity.defaultBranch, scope);
+    const kind = await host.pathKind(repository, LESSON_FILE_PATH, head, scope);
+    if (kind !== "file") throw new Abort("file_unreadable");
+    const fileText = await host.fileAtRevision(repository, LESSON_FILE_PATH, head, scope, { maxBytes: LESSON_FILE_MAX_BYTES });
+    if (fileText === undefined) throw new Abort("file_unreadable");
+    const taken = await takeInReadBack(deps, key, target, state, fileText, learning.requiredGroups.length > 0);
+    result = { status: "done", retired: taken.readBack?.counts.retired ?? 0 };
+  } catch { deps.log?.("lessons_repo_file.retire_read_failed", {}); result = { status: "problem" }; }
+  const latest = await deps.state.get(key, target.place).catch(() => undefined);
+  if (latest?.lease?.holder === deps.holder) await deps.state.put(key, without(latest, "lease") as RepoFileState, latest.revision).catch(() => undefined);
+  return result;
+}
+
+/**
+ * Read-back of the team's edits of the file (R3), on the file text just read: what the lessons and the state look like after it. Shared by the weekly pass and by the nightly retire-only pass; it writes nothing to the host and
+ * touches neither `unmerged` nor `lastPassAt`. Throws `Abort` when it could not finish safely.
+ */
+async function takeInReadBack(deps: RepoFileDeps, key: ScopeKey, target: RepoFileTarget, leased: RepoFileState, fileText: string | undefined, requireGroup: boolean): Promise<{ state: RepoFileState; lessons: Lesson[]; gone: Set<string>; names: readonly string[]; readBack: ReadBackResult | undefined }> {
+  let state = leased;
+  let lessons = await deps.store.listAllHeads(key);
+  // Which of the markers in the file belong to a lesson that is gone for good: the lesson store's own tombstone, one durable row per lesson. A lookup that cannot be made stops the write (never read as 'not gone').
+  let gone: Set<string>;
+  try { gone = new Set((await deps.store.goneOf(key, [...(fileText === undefined ? [] : parseLessonsFile(fileText).blocks.map((block) => block.id)), ...lessons.filter((lesson) => lesson.provenance.repoOnly?.place === target.place).map((lesson) => lesson.id), ...Object.keys(state.rendered)])).keys()); } catch { throw new Abort("repository_unreadable"); }
+  let names: readonly string[];
+  try { names = await deps.names(key, lessons); } catch { throw new Abort("names_unreadable"); }
+  // 5b. READ-BACK (R3, one way: file -> Rovara), on the file this pass just read, before anything is planned: the team's corrections become the lessons' text, ids the team removed are retired, bullets the team wrote become new
+  // lessons. A file that cannot be trusted as read changes nothing and stops the pass (nothing is planned, declined or retired on it). No model, no further read.
+  let readBack: ReadBackResult | undefined;
+  if (fileText !== undefined) {
+    try {
+      readBack = await readBackFile({ store: deps.store, audit: deps.audit, now: () => deps.now(), ...(deps.newLessonId === undefined ? {} : { newId: deps.newLessonId }) }, {
+        key, place: target.place, repoName: target.name, fileText, rendered: state.rendered, refused: state.refused ?? {}, lessons, gone, names, requireGroup,
+        ...(state.seen === undefined ? {} : { seen: state.seen }),
+        ...(state.readBackHeld === undefined ? {} : { held: { digest: state.readBackHeld.digest, at: state.readBackHeld.at, ...(state.readBackHeld.verdict === undefined ? {} : { verdict: state.readBackHeld.verdict }), ...(state.readBackHeld.decidedAt === undefined ? {} : { decidedAt: state.readBackHeld.decidedAt }) } }),
+      });
+    } catch (error) {
+      if (error instanceof ReadBackFailure) throw new Abort(error.problem);
+      throw new Abort("repository_unreadable");
+    }
+    if (readBack.unreadable) throw new Abort("file_unreadable");
+    const done = readBack;
+    const sameRefused = JSON.stringify(done.refused) === JSON.stringify(state.refused ?? {});
+    const heldChanged = (done.held?.digest ?? "") !== (state.readBackHeld?.digest ?? "");
+    const seenChanged = JSON.stringify(done.seen) !== JSON.stringify(state.seen ?? {}) || done.duplicateIds !== (state.duplicateIds ?? 0);
+    const changed = Object.keys(done.rendered).length > 0 || done.counts.retired + done.counts.imported > 0 || !sameRefused || heldChanged || seenChanged;
+    if (changed) {
+      state = await commit(deps, key, state, (s) => {
+        const next = { ...without(s, "readBackHeld", "refused", "seen", "duplicateIds") as RepoFileState, rendered: { ...s.rendered, ...done.rendered } };
+        return {
+          ...next,
+          ...(Object.keys(done.seen).length > 0 ? { seen: done.seen } : {}),
+          ...(done.duplicateIds > 0 ? { duplicateIds: done.duplicateIds } : {}),
+          ...(done.counts.edited + done.counts.retired + done.counts.imported > 0 ? { readBack: { at: deps.now(), edited: done.counts.edited, retired: done.counts.retired, imported: done.counts.imported } } : {}),
+          ...(Object.keys(done.refused).length > 0 ? { refused: done.refused } : {}),
+          // (A person's answer saved while this pass ran moves the state's revision, so this write is a conflict and the answer stands; the pass tries again.)
+          ...(done.held === undefined ? {} : { readBackHeld: { missing: done.held.missing, digest: done.held.digest, at: done.held.at, ...(done.held.verdict === undefined ? {} : { verdict: done.held.verdict }), ...(done.held.decidedAt === undefined ? {} : { decidedAt: done.held.decidedAt }) } }),
+        };
+      });
+      // The lessons as read-back left them are what the plan works from.
+      lessons = await deps.store.listAllHeads(key);
+    }
+  }
+  return { state, lessons, gone, names, readBack };
+}
+
+async function pass(deps: RepoFileDeps, key: ScopeKey, target: RepoFileTarget, leased: RepoFileState, preset: "standard" | "regulated", requireGroup: boolean): Promise<PassResult> {
   const { host, repository, scope } = target;
   const pathKind = host.pathKind!.bind(host);
   let state = leased;
@@ -289,7 +392,7 @@ async function pass(deps: RepoFileDeps, key: ScopeKey, target: RepoFileTarget, l
       state = await commit(deps, key, state, (s) => ({ ...s, ...appendOrMark(s, "closing", { branch: open.branch, cause: "merged" as const, headRevision: open.headRevision }) }));
     } else if (details.state === "closed") {
       state = await commit(deps, key, state, (s) => ({
-        ...without(s, "open") as RepoFileState, unmerged: s.unmerged + 1,
+        ...without(s, "open", ...keptOver(s)) as RepoFileState, unmerged: s.unmerged + 1,
         ...appendOrMark(s, "closing", { branch: open.branch, cause: "closed_by_team" as const, headRevision: open.headRevision }),
       }));
     } else if (details.headRevision !== open.headRevision) {
@@ -338,17 +441,18 @@ async function pass(deps: RepoFileDeps, key: ScopeKey, target: RepoFileTarget, l
   if (fileText !== undefined && !state.fileSeen) state = await commit(deps, key, state, { fileSeen: true });
 
   // 5. The proposal.
-  const lessons = await deps.store.listAllHeads(key);
-  // Which of the markers in the file belong to a lesson that is gone for good: the lesson store's own tombstone, one durable row per lesson. A lookup that cannot be made stops the write (never read as 'not gone').
-  let gone: Set<string>;
-  try { gone = new Set((await deps.store.goneOf(key, [...(fileText === undefined ? [] : parseLessonsFile(fileText).blocks.map((block) => block.id)), ...lessons.filter((lesson) => lesson.provenance.repoOnly?.place === target.place).map((lesson) => lesson.id)])).keys()); } catch { throw new Abort("repository_unreadable"); }
-  let names: readonly string[];
-  try { names = await deps.names(key, lessons); } catch { throw new Abort("names_unreadable"); }
-  const plan = planRepoFile({ place: target.place, repoName: target.name, lessons, names, fileText, rendered: state.rendered, declined: state.declined, gone, addsPaused: additionsPaused({ unmerged }), teamPr, preset });
+  const taken = await takeInReadBack(deps, key, target, state, fileText, requireGroup);
+  state = taken.state;
+  const { lessons, gone, names, readBack } = taken;
+  const plan = planRepoFile({ place: target.place, repoName: target.name, lessons, names, fileText, rendered: state.rendered, declined: state.declined, gone, addsPaused: additionsPaused({ unmerged }), teamPr, preset, ...(readBack?.held === undefined ? {} : readBack.held.verdict === "keep" ? { keepIds: new Set(readBack.held.ids) } : { heldIds: new Set(readBack.held.ids) }) });
   // What the plan learned about the file is recorded whatever comes next.
   const rendered = { ...state.rendered, ...plan.adopted };
-  for (const id of plan.newlyDeclined) delete rendered[id];
-  const bounded = Object.fromEntries(Object.entries(rendered).slice(-MAX_RENDERED));
+  // The fingerprint of an erased lesson's block is kept while its text is still in the file (read-back needs it to clear the text's mark once the copy is gone); every other declined id is forgotten here.
+  const pinned = new Set(readBack?.pinned ?? []);
+  for (const id of plan.newlyDeclined) if (!pinned.has(id)) delete rendered[id];
+  // Bounded to the newest MAX_RENDERED, except an erased lesson's pinned fingerprint: it goes only after no copy of its text remains (its mark is cleared first).
+  const keepEntries = Object.entries(rendered);
+  const bounded = Object.fromEntries([...keepEntries.filter(([id]) => !pinned.has(id)).slice(-MAX_RENDERED), ...keepEntries.filter(([id]) => pinned.has(id))]);
   state = await commit(deps, key, state, { rendered: bounded, declined: boundedAppend(state.declined, plan.newlyDeclined, MAX_DECLINED), held: plan.held.slice(0, MAX_RENDERED) });
 
   // 6. The pointer: carried by the pull request that proposes it until that one is merged; proposed once. Every agent file is read, and a read that FAILS is never "absent": a pass that could not read one of them

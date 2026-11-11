@@ -211,7 +211,7 @@ export const unreachableGuard = (target: RepoFileTarget): Promise<void> => { ret
     expect(violations).toEqual([]);
     expect(guarded.sort()).toEqual([
       "repo-file-erase.ts#closeAllRovaraPrs", "repo-file-erase.ts#sweepErasures", "repo-file-host.ts#freshBranchName", "repo-file-host.ts#headOf", "repo-file-host.ts#readOwnPr",
-      "repo-file-pass.ts#finishClosings", "repo-file-pass.ts#runRepoFilePass", "repo-file-pass.ts#switchRepoFileOff",
+      "repo-file-pass.ts#finishClosings", "repo-file-pass.ts#runRepoFilePass", "repo-file-pass.ts#runRetireRead", "repo-file-pass.ts#switchRepoFileOff",
     ].sort());
   });
 });

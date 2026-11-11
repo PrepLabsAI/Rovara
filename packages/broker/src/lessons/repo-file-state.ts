@@ -22,6 +22,14 @@ export const MAX_THEIRS = 20;
 const Id = z.string().regex(/^[A-Za-z0-9_-]{4,64}$/u);
 const Branch = z.string().regex(/^rovara\/lessons-[0-9a-f]{12}$/u);
 
+/** Why a line the team wrote in the file was not taken in as a lesson (or an edit of one): fixed codes. `names_a_person` is the check every lesson text passes before it goes in a repository's file. */
+export const READ_BACK_REFUSALS = ["names_a_person", "capability_request", "empty", "not_allowed", "gone_text"] as const;
+export type ReadBackRefusal = (typeof READ_BACK_REFUSALS)[number];
+/** How long a bulk disappearance from the file is held before a person is asked to confirm retiring the missing lessons (by the clock, from the first time it was seen). */
+export const READ_BACK_HOLD_MS = 7 * 86_400_000;
+/** The most refused lines kept on one repository's record. */
+export const MAX_REFUSED = 100;
+
 export const OpenPrSchema = z.object({
   branch: Branch, number: z.string().min(1).max(40), url: z.string().max(2_048),
   /** The branch head Rovara left it at: a different head later means a person pushed to it, and it is theirs. */
@@ -67,6 +75,11 @@ export const PrRowSchema = z.object({
   unreachableAt: z.number().optional(), unreachableLessons: z.number().int().min(0).optional(), triedAt: z.number().optional(), strayBranches: z.number().int().min(0).optional(),
   /** How many open Rovara pull requests the last sweep did NOT close because the host could not show them or did not say Rovara made them. */
   unconfirmedCloses: z.number().int().min(0).optional(),
+  /**
+   * A WATCH row remembers the fingerprints (`LessonStore.textFingerprints`; no text) of the marked copies of erased texts the last successful sweep found in the repository's file. A mark is released only when a later successful
+   * sweep of the same repository finds no copy left, however the repository stands with the project (a repository that left it keeps its marks, so its stripped copies still come out).
+   */
+  marks: z.array(z.string().regex(/^[0-9a-f]{32}$/u)).max(1_500).optional(),
   /** A removal pull request: the fingerprint of the default branch's file it was made from. A different file now means it is out of date (closed and made again). */
   fileHash: z.string().max(40).optional(),
 }).strict();
@@ -117,6 +130,28 @@ export const RepoFileStateSchema = z.object({
   /** A pointer was proposed and a later pass found no agent file that names the lessons file. */
   pointerMissing: z.boolean(),
   lease: z.object({ holder: z.string().min(1).max(100), until: z.number() }).strict().optional(),
+  /**
+   * Read-back (R3): what the last pass took in from the team's own edits of the file, as counts (no text, no person): lessons whose wording became the team's, lessons the team removed, new lessons the team wrote. Shown in the
+   * status ("file changed on main, read back as N corrections / M retired"). Replaced by the next pass that reads something back.
+   */
+  readBack: z.object({ at: z.number(), edited: z.number().int().min(0), retired: z.number().int().min(0), imported: z.number().int().min(0) }).strict().optional(),
+  /**
+   * Read-back (R3, review M1; owner decision 78): lessons Rovara knew in the file that a change took out, more than a few at once, so none was retired yet. `digest` names exactly which ones. They are held READ_BACK_HOLD_MS; after
+   * that, with the SAME ones still missing, nothing is retired by itself: a person (the company owner, or someone who can approve lessons) is asked, and `verdict` is their answer: `retire` (the next pass retires them) or `keep` (they stay
+   * live and R2 proposes their blocks back). If the file changed (another set missing, or the lessons restored) the hold starts over. Count, fingerprint, an answer and times only: no person, no text. `at` is when it was FIRST seen:
+   * the hold lasts READ_BACK_HOLD_MS from then, however many passes (or failed passes) come between. `decidedAt` is when the answer was recorded.
+   */
+  readBackHeld: z.object({ missing: z.number().int().min(1), digest: z.string().regex(/^[0-9a-f]{16}$/u), at: z.number(), verdict: z.enum(["retire", "keep"]).optional(), decidedAt: z.number().optional() }).strict().optional(),
+  /**
+   * Read-back (R3): for each Rovara-marked block seen in the file on the last successful pass, the per-project FINGERPRINT (an HMAC under the project's secret, `LessonStore.textFingerprints`; no text, no bare hash) of its text, one per
+   * block of that id. Replaced when the text changes, so that when a lesson is erased a fingerprint is already there for the block whatever happens to the file next. Kept while the lesson is live, or gone with a copy still in the file;
+   * dropped after that.
+   */
+  seen: z.record(Id, z.array(z.string().regex(/^[0-9a-f]{32}$/u)).min(1).max(16)).optional(),
+  /** How many ids appear in more than one block of the file on the last successful pass (Rovara reads neither block back and leaves them as written). */
+  duplicateIds: z.number().int().min(0).optional(),
+  /** Lines of the file read-back did not take in as lessons, by a fingerprint of the line's text (never the text) and a fixed reason: it keeps the pass from recording the same line every week. Newest last, bounded. */
+  refused: z.record(z.string().regex(/^[0-9a-f]{16}$/u), z.enum(READ_BACK_REFUSALS)).optional(),
   revision: z.number().int().min(0),
 }).strict();
 export type RepoFileState = z.infer<typeof RepoFileStateSchema>;

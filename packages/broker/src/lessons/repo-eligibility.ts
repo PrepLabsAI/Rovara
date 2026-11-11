@@ -18,6 +18,7 @@ import { REPO_BLOCK_CODES, SPAN_KINDS, type Audience, type Lesson, type LessonCi
 /** What the eligibility rule reads of a lesson: a `Lesson` fits, and so does the reduced item the measurement script reads (it never needs the rest). */
 export type RepoEligibilityLesson = Pick<Lesson, "status" | "tier" | "trial" | "approvals" | "reviewRequired" | "retireProposedAt" | "counters" | "citationChecks" | "title" | "description" | "body"> & {
   provenance: Pick<LessonProvenance, "audience" | "repoOnly" | "repoBlockCodes">;
+  tierReasons?: Lesson["tierReasons"];
 };
 
 /** Whether a text is a repository place (`<source>:repo/<id>`), the shape the Team record names a code-host repository with. */
@@ -180,6 +181,9 @@ export function mergedRepoVisibility(target: Pick<LessonProvenance, "repoOnly" |
   return { repoBlockCodes: inCodeOrder(codes) };
 }
 
+/** The tier reason read-back (`repo-file-readback.ts`) puts on a lesson whose text is the team's own, merged into the repository's file. */
+export const TEAM_FILE_TEXT = "team_file_text";
+
 /** The approvals a PERSON gave (not the trial's or the automatic path's): 's "person-approved". */
 const PERSON_APPROVAL_MODES: ReadonlySet<string> = new Set(["one", "second_person", "sole_owner_exception"]);
 
@@ -212,7 +216,8 @@ export function repoFileBlockers(lesson: RepoEligibilityLesson, repo: string, na
   if (audience.kind !== "project" && !(readers !== undefined && readers.every((reader) => reader === repo))) blockers.push("restricted_audience");
   if (namesAPerson([lesson.title, lesson.description, lesson.body].join("\n"), names)) blockers.push("names_a_person");
   // The same soundness `isPublishable` asks of a lesson that leaves Rovara's store.
-  if (lesson.tier >= 2 || lesson.reviewRequired === true || lesson.retireProposedAt !== undefined || lesson.counters.harmful > 0 || hasStaleCitation(lesson)) blockers.push("needs_review");
+  // Tier 2 (words about tests, checks, security...) asks for two people before Rovara PROPOSES a lesson. Text the team itself merged into the file (read back by R3) is not Rovara's proposal: its tier never takes the team's own block out.
+  if ((lesson.tier >= 2 && !(lesson.tierReasons ?? []).includes(TEAM_FILE_TEXT)) || lesson.reviewRequired === true || lesson.retireProposedAt !== undefined || lesson.counters.harmful > 0 || hasStaleCitation(lesson)) blockers.push("needs_review");
   return blockers;
 }
 

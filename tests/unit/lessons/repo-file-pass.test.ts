@@ -377,8 +377,8 @@ describe("removals come first, with reasons, and the ignored-PR rule", () => {
   });
 });
 
-describe("the team's own edits are never overwritten (hand-edit hold)", () => {
-  it("a block a person reworded is left as written and its lesson's edits and removal are held, and it is recorded", async () => {
+describe("the team's own edits are never overwritten (hand-edit hold, released by read-back)", () => {
+  it("a block a person reworded becomes the lesson's own text (R3), so Rovara's later wording never wins and nothing is held", async () => {
     const w = passSetup();
     await w.seedLessons(repoLesson("les_aaaa0001"), repoLesson("les_aaaa0002"));
     await w.enable();
@@ -393,18 +393,18 @@ describe("the team's own edits are never overwritten (hand-edit hold)", () => {
     w.week();
     expect(await w.run()).toMatchObject({ status: "opened", edits: 0, adds: 1 });
     const state = await w.current();
-    expect(state.held).toEqual(["les_aaaa0001"]);
+    expect(state.held).toEqual([]);
+    expect((await store.get(w.key, "les_aaaa0001"))!.body).toBe("The team's own wording of the first lesson.");
     const next = w.host.file(state.open!.branch, FILE)!;
     expect(next).toContain("The team's own wording of the first lesson.");
     expect(next).not.toContain("Rovara's new wording that must not win.");
-    expect(w.host.open[0]!.body).toContain("1 lesson your team edited is left exactly as you wrote");
-    // Retiring the held lesson in Rovara does not remove the team's text either.
-    await store.commit(w.key, await store.setVersion(w.key), [{ ...first, version: 3, status: "retired" }], 6);
+    // The lesson is Rovara's now: retiring it in Rovara proposes its removal like any other lesson.
+    const reread = (await store.get(w.key, "les_aaaa0001"))!;
+    await store.commit(w.key, await store.setVersion(w.key), [{ ...reread, version: reread.version + 1, status: "retired" }], 6);
     w.host.merge(w.host.open[0]!.number);
     w.week();
     await w.run();
-    expect(w.host.file("main", FILE)).toContain("The team's own wording of the first lesson.");
-    expect((await w.current()).open?.removed ?? []).not.toContain("les_aaaa0001");
+    expect((await w.current()).open?.removed ?? []).toContain("les_aaaa0001");
   });
 
   it("a block the team moved to another section is theirs too", async () => {

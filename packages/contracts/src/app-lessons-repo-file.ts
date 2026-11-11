@@ -81,6 +81,11 @@ export const LessonsRepoFileRowSchema = z.object({
   pr: LessonsRepoFilePrSchema.optional(),
   lastPassAt: z.number().optional(),
   problem: z.enum(LESSON_FILE_PROBLEMS).optional(),
+  /**
+   * Present only while a person is asked to confirm retiring lessons that went missing from the file in one change (more than a few at once, held a week first; owner decision 78): how many, since when (the first time this set
+   * was seen) and the digest the person's answer must carry back. Absent: nothing waits for a decision.
+   */
+  retireConfirm: z.object({ missing: z.number().int().min(1), since: z.number(), digest: z.string().regex(/^[0-9a-f]{16}$/u) }).strict().optional(),
   /** The fixed sentences to show for this row, in order (the same lines the pull request body and the CLI print). */
   notices: z.array(z.string().max(300)).max(10),
 }).strict();
@@ -93,6 +98,8 @@ export const LessonsRepoFileStatusSchema = z.object({
   /** True when the code host of at least one repository can write, so the switch can be offered. */
   canEnable: z.boolean(),
   repos: z.array(LessonsRepoFileRowSchema).max(100),
+  /** Whether the caller may answer for lessons missing from a file (the company owner, or a person who can approve lessons here): the card with Retire and Keep shows only then. Absent: no. Computed only while a row asks. */
+  canDecideRetire: z.boolean().optional(),
   /** Repositories Rovara cannot reach (the app is uninstalled, the repository is gone or was removed from the project) while deleted lessons may still be in them: recorded once, tried again weekly. */
   unreachable: z.array(z.object({ repo: z.string().min(1).max(200), lessons: z.number().int().min(0) }).strict()).max(100).optional(),
   /** Open Rovara pull requests that were NOT closed (or taken down) because the code host could not show them or did not say Rovara made them: counted, tried again. */
@@ -105,11 +112,20 @@ export const LessonsRepoFileStatusSchema = z.object({
 export type LessonsRepoFileStatus = z.infer<typeof LessonsRepoFileStatusSchema>;
 export const LessonsRepoFileStatusReaderSchema = forwardReader(LessonsRepoFileStatusSchema);
 
-/** What a maintainer sends: switch a repository on or off, resume it after the team deleted the file, or answer the pointer. `pointers` are the agent files the person ticked (default: the ones Rovara finds). */
-export const LESSON_FILE_ACTIONS = ["on", "off", "resume", "pointer_add", "pointer_decline"] as const;
+/**
+ * What a maintainer sends: switch a repository on or off, resume it after the team deleted the file, or answer the pointer. `pointers` are the agent files the person ticked (default: the ones Rovara finds).
+ * `retire_confirm` and `retire_keep` answer the card for lessons that went missing from the file (owner decision 78; the company owner or a person who can approve lessons): they carry `held`, the digest of the row's `retireConfirm`.
+ */
+export const LESSON_FILE_ACTIONS = ["on", "off", "resume", "pointer_add", "pointer_decline", "retire_confirm", "retire_keep"] as const;
 export const LessonsRepoFileBodySchema = z.object({
   action: z.enum(LESSON_FILE_ACTIONS),
   repo: z.string().min(1).max(200),
   pointers: z.array(z.enum(["AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"])).max(3).optional(),
-}).strict();
+  /** The digest of the missing set the person saw (`retireConfirm.digest`): required for `retire_confirm` and `retire_keep`, refused for anything else. */
+  held: z.string().regex(/^[0-9a-f]{16}$/u).optional(),
+}).strict().superRefine((body, context) => {
+  const retire = body.action === "retire_confirm" || body.action === "retire_keep";
+  if (retire && body.held === undefined) context.addIssue({ code: "custom", path: ["held"], message: "held is required for this action" });
+  if (!retire && body.held !== undefined) context.addIssue({ code: "custom", path: ["held"], message: "held is only for retire_confirm and retire_keep" });
+});
 export type LessonsRepoFileBody = z.infer<typeof LessonsRepoFileBodySchema>;
