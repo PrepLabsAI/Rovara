@@ -191,6 +191,9 @@ The protocol grows by three primitives, each behind a capability an adapter decl
   owner keys and bindings stay exactly as they are (SC-001).
 - **FR-074 (rollout):** `SlackViaChannel` (`enabled` | `disabled`, default `disabled`) routes Slack through the adapter;
   disabled, today's Slack path runs unchanged. It is enabled in TEST first; the old path is removed only after.
+- **FR-075 (order):** a conversation's events reach its adapter in the order the core sent them. The event queue is
+  FIFO, one group per conversation (per person for a direct message); an event being retried holds the group's later
+  events behind it.
 
 Phases: 7a the primitives (contracts, signing, the core's command client, capabilities); 7b Slack's conversation path
 through the adapter behind `SlackViaChannel`; 7c the task workflow, notices and directory through the adapter; 7d
@@ -198,7 +201,7 @@ TEST, then the old path's removal.
 
 Constitution: Principle I requires an adapter's actors to be linked and refuses step-up decisions from adapters.
 FR-073 needs a MINOR amendment before 7b: the built-in Slack adapter is registered by the deploy, and its actors are
-verified by Slack, as today.
+verified by Slack, as today. Done: constitution 5.1.0 (2026-11-11).
 
 ## Security considerations
 

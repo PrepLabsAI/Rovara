@@ -215,3 +215,50 @@ capabilities an adapter declares; nothing is sent to an adapter that does not de
 
 Nothing uses the primitives yet; revert.
 
+
+## Phase 7b: Slack's conversations through the channel API
+
+Behind `SlackViaChannel` (default `disabled`; named environments only). Disabled, nothing changes. Enabled, an ordinary
+Slack conversation request takes the same path as any adapter's:
+
+```mermaid
+sequenceDiagram
+  participant S as Slack
+  participant I as Slack ingress (the Slack adapter)
+  participant C as Channel API
+  participant O as Orchestrator
+  participant E as Event sender
+  S->>I: event (Slack-signed)
+  I->>C: POST /v1/channels/slack/messages (adapter-signed)
+  C->>O: request queue (FIFO per conversation)
+  O->>E: message / approval_request events (FIFO per conversation)
+  E->>I: POST /v1/slack/channel-events (core-signed)
+  I->>S: chat.postMessage / chat.update / chat.postEphemeral
+```
+
+| Layer | Change |
+|---|---|
+| contracts | `builtInAdapterRecord` and `builtIn` on a record (never stored); queue items may carry no developer; events may name any channel; `channelEventGroupId`; `usableWebhookSecret` (the deployment's generated secret has no `whsec_` prefix); `TURN_DETAILS_ACTION_ID`. |
+| broker | `adapterForChannel`: the built-in adapter for its channel, a registered one only while `ChannelAdapters` is on. The channel API takes the built-in adapter's requests from any bound Slack channel, with no link, no step-up and no ack (Slack ingress says "Got it" itself); the API is reachable when either setting is on. The event sender holds a conversation's later events behind a retried one. `slack-adapter.ts`: the forwarder (Slack ingress → channel API) and the events route (core → Slack: posts, keyed edits, private replies, Slack's confirmation and Details blocks; 429/503 to retry, 422 to drop). Slack ingress and confirmation clicks use the forwarder when the setting is on. Fix: a registered adapter's `commandsUrl` was dropped when read back. |
+| orchestrator service | `channelRequestHandler` takes `surfaces` by channel; `slackChannelRequests` runs Slack's items through `processSlackRequest` (Slack's subject, format, identity, turn records and commands) and answers with events. A Slack item with no surface is dropped. |
+| infra | `SlackViaChannel` parameter; the adapter's secret `agentx/<env>/channel-adapter/slack`, generated at deploy and readable by Slack ingress; `POST /v1/slack/channel-events` on Slack ingress; built-in adapter settings on the channel API and event sender; the channel API may read Slack bindings; FIFO event queues (replaced: they carry nothing while both settings are off). |
+
+### Still on Slack's own queue with the setting on (Phase 7c)
+
+- Plain top-level requests where the task workflow routes them (Task 21), `workflow:` starts, task-thread replies and
+  questions, stop, feedback notes, ChatGPT commands and task page comments.
+- Notices the developer task notifier posts, canvases, directory reads and direct messages.
+
+### Known differences with the setting on
+
+- The "starting now" notice after waiting behind earlier requests is not said; the ingress still says how many are
+  ahead. The channel API carries no queue count.
+- Each reply is one more Lambda call (the event sender, then Slack ingress). The production account's Lambda concurrency
+  is 10, which 7d must allow for.
+- Production runs the legacy stack, which has no channel API. 7d needs the channel API and its queues there before the
+  old path can go.
+
+### Rollback
+
+Set `SlackViaChannel` to `disabled`: new requests go on Slack's own queue again. Replies still queued for Slack are then
+dropped (the built-in adapter is gone), so switch it off once the channel queues are empty.
