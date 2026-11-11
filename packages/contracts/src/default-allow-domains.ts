@@ -1,6 +1,5 @@
-// The websites every agent machine in a cloud install may resolve (Plan 2, Task 17 moved this list here from infra/lib/agent-dns-firewall.ts,
-// which re-exports it): the DNS firewall allows exactly these, and a project's own allowed domains are checked against it so that adding
-// one of these is answered "already allowed" instead of waiting for approval.
+// The websites every agent machine in a cloud install may resolve: the DNS firewall allows exactly these, and a project's own allowed domains are
+// checked against this list so that adding one of these is answered "already allowed" instead of waiting for approval.
 /**
  * The websites the machines in a cloud install may resolve by default: GitHub's git host and container registry, package
  * registries, OS package mirrors, Docker registries, the AI providers, and Slack and the connector

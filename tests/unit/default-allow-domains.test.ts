@@ -1,4 +1,4 @@
-// DEFAULT-ALLOW-LIST-EXFIL (0.5.15): the default list a cloud install's DNS firewall and a laptop's egress gateway allow is pinned exactly, and the names that let anyone
+// The default list a cloud install's DNS firewall and a laptop's egress gateway allow is pinned exactly, and the names that let anyone
 // upload (a bucket of any AWS account, a GitHub repository or gist of any user) are not on it. Adding an entry means changing this file on purpose, with the reason.
 import { describe, expect, it } from "vitest";
 import { DEFAULT_AGENT_ALLOW_DOMAINS, isAllowedDomain } from "@agentx/contracts";
