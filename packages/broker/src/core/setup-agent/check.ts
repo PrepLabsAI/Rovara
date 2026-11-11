@@ -23,7 +23,8 @@ import { releaseAdmission } from "../task-flow/admission.js";
 /** The longest a preparation may be PREPARING before the check reads as failed. */
 export const SETUP_CHECK_STUCK_MS = 50 * 60_000;
 export const STALLED_STEP = "setup did not finish";
-const FAILED_REASON_MAX = 300;
+/** The most characters the whole failing step keeps (stage, command and reason): the session views cap `failedStep` at 300. */
+export const FAILED_REASON_MAX = 300;
 const COMMAND_SHOWN_MAX = 160;
 
 export interface SetupCheckMark { workspaceId: string; revision: number; startedAt: string; startedBy: string }
@@ -38,21 +39,32 @@ export interface SetupState {
 type CheckedDefinition = Pick<ProjectDefinition, "revision" | "setup" | "readiness">;
 
 const first = (text: string, limit: number): string => [...text].slice(0, limit).join("").trimEnd();
+/** At most `limit` UTF-16 units (what a schema's `max` counts), ending with "…" when the text was cut; a cut never splits a character. */
+export function shortened(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  let kept = "";
+  for (const character of text) {
+    if (kept.length + character.length > limit - 1) break;
+    kept += character;
+  }
+  return `${kept.trimEnd()}…`;
+}
 /** Text for a person's screen: redacted, on one line, with every control and format character (escapes, direction overrides) turned into a space. */
 const oneLine = (text: string): string => redactText(text).replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim();
 
 /**
  * The failing step as the page shows it: `"setup: npm ci - <reason>"` or `"test: npm test - <reason>"`. The stage and command come from the failure the worker recorded (`setup step 0 (...)`, `readiness check 1 (...)`),
- * looked up in the revision that was checked; a failure that names neither (a clone, a devcontainer) is `"setup: <reason>"`. The reason is the first 300 characters of the recorded, redacted error, on one line.
+ * looked up in the revision that was checked; a failure that names neither (a clone, a devcontainer) is `"setup: <reason>"`. The reason is the recorded, redacted error on one line. The whole step is at most `FAILED_REASON_MAX` characters: the command stays whole (up to 160), and the reason is cut to what is left, ending with "…".
  */
 export function failedStepOf(error: string, definition: Pick<CheckedDefinition, "setup" | "readiness">): string {
   const named = /^(setup step|readiness check) (\d{1,4}) \(/u.exec(error);
-  const reason = first(oneLine(error), FAILED_REASON_MAX);
-  if (named === null) return reason === "" ? "setup" : `setup: ${reason}`;
+  const text = oneLine(error);
+  if (named === null) return text === "" ? "setup" : `setup: ${shortened(text, FAILED_REASON_MAX - "setup: ".length)}`;
   const stage = named[1] === "setup step" ? "setup" : "test";
   const run = (stage === "setup" ? definition.setup : definition.readiness)[Number(named[2])];
   const shown = run === undefined ? "" : first(oneLine(formatCommandLine(run)), COMMAND_SHOWN_MAX);
-  return `${stage}:${shown === "" ? "" : ` ${shown}`}${reason === "" ? "" : ` - ${reason}`}`;
+  const prefix = `${stage}:${shown === "" ? "" : ` ${shown}`}`;
+  return text === "" ? prefix : `${prefix} - ${shortened(text, FAILED_REASON_MAX - prefix.length - " - ".length)}`;
 }
 
 /** The error the check's preparation recorded, or undefined when it recorded none. */

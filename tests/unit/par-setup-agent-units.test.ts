@@ -14,7 +14,7 @@ import { refuseSetupHost } from "../../packages/broker/src/core/setup-agent/host
 import { appendSetupJournal, readJournalEntry, readSetupJournal } from "../../packages/broker/src/core/setup-agent/journal.js";
 import { refusedCommand } from "../../packages/broker/src/core/setup-agent/refused-command.js";
 import { commandsFromProposal, setupApplyDigest } from "../../packages/broker/src/core/setup-agent/apply.js";
-import { failedStepOf, setupStateOfCheck } from "../../packages/broker/src/core/setup-agent/check.js";
+import { FAILED_REASON_MAX, failedStepOf, setupStateOfCheck } from "../../packages/broker/src/core/setup-agent/check.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { setupAgentWireOf } from "../../packages/broker/src/core/setup-agent/agent.js";
@@ -286,7 +286,23 @@ describe("the status of a project's setup check", () => {
     expect(failedStepOf("", definitionLike)).toBe("setup");
     const key = ["AKIA", "ABCDEFGHIJKLMNOP"].join("");
     expect(failedStepOf(`clone failed ${key}`, definitionLike)).not.toContain(key);
-    expect(failedStepOf(`${"x".repeat(500)}`, definitionLike).length).toBeLessThan(330);
+    expect(failedStepOf(`${"x".repeat(500)}`, definitionLike).length).toBeLessThanOrEqual(FAILED_REASON_MAX);
+  });
+
+  it("keeps the whole step to 300 characters: a long command stays named and a 700-character error is cut with an ellipsis", () => {
+    const long = { setup: [parseOne("make", ["x".repeat(400)])], readiness: [parseOne("npm", ["run", "test:integration", "--workspace=packages/payments-service", "--reporter=verbose", "--bail", "--coverage", "--runInBand"])] };
+    const named = failedStepOf(`readiness check 0 (npm run test) exited 1 ${"e".repeat(700)}`, long);
+    expect(named.length).toBeLessThanOrEqual(FAILED_REASON_MAX);
+    expect(named).toMatch(/^test: npm run test:integration --workspace=packages\/payments-service .* - readiness check 0.*…$/u);
+    const hugeCommand = failedStepOf(`setup step 0 (make) exited 1 ${"e".repeat(700)}`, long);
+    expect(hugeCommand.length).toBeLessThanOrEqual(FAILED_REASON_MAX);
+    expect(hugeCommand).toMatch(/^setup: make x{100,} - .*…$/u);
+    const unnamed = failedStepOf(`clone failed ${"e".repeat(700)}`, long);
+    expect(unnamed).toHaveLength(FAILED_REASON_MAX);
+    expect(unnamed.startsWith("setup: clone failed ")).toBe(true);
+    expect(unnamed.endsWith("…")).toBe(true);
+    expect(failedStepOf(`clone failed ${"😀".repeat(400)}`, long)).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u);
+    expect(failedStepOf("readiness check 0 (npm run test) exited 1", long).endsWith("exited 1")).toBe(true);
   });
 });
 
