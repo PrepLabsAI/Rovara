@@ -227,7 +227,7 @@ export const EVIDENCE_DEPENDENCY_LABEL_BACKING: Record<EvidenceDependencyLabel, 
 };
 /** The fixed words of each label. `company_approved` is completed with the service by `evidenceDependencyLabelWords`; a fake that made up answers adds "(+N made-up answers)" there too. */
 export const EVIDENCE_DEPENDENCY_LABEL_WORDS: Record<EvidenceDependencyLabel, string> = {
-  real: "real", real_project_image: "real (your image)", company_approved: "company-approved image", rovara_local_aws: "Rovara local AWS", test_account: "test account",
+  real: "real", real_project_image: "real (company-approved image)", company_approved: "company-approved image", rovara_local_aws: "Rovara local AWS", test_account: "test account",
   recorded_fake: "recorded fake", hand_written_fake: "hand-written fake", faked_by_tests: "faked by your tests", not_available: "not available",
 };
 /** Why a run used the fallback (a fake, or nothing) in place of the dependency's backing. Fixed words, never an error text. */

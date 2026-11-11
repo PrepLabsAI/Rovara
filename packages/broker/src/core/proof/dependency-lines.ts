@@ -28,7 +28,7 @@ const shortDigest = (digest: string | undefined) => (digest !== undefined && /^[
 const recordedDate = (iso: string | undefined) => (iso !== undefined && /^\d{4}-\d{2}-\d{2}T/u.test(iso) ? iso.slice(0, 10) : "an unknown date");
 const fallbackWords = (dependency: EvidenceDependency) => (dependency.fellBack === undefined ? undefined : `fallback: ${EVIDENCE_FALLBACK_REASON_WORDS[dependency.fellBack.reason]}`);
 
-/** A label in a run of words: its parentheses become commas, so the entry has one pair of its own ("real (your image)" is "real, your image"). */
+/** A label in a run of words: its parentheses become commas, so the entry has one pair of its own ("real (company-approved image)" is "real, company-approved image"). */
 const inline = (words: string) => words.replace(" (", ", ").replace(/\)$/u, "");
 
 /**
