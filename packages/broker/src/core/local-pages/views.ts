@@ -169,7 +169,7 @@ export interface LessonReposView {
   project: string;
   canEnable: boolean;
   repos: Array<{ repo: string; enabled: boolean; fileDeleted: boolean; pointer: "not_yet" | "added" | "missing" | "declined"; notices: string[];
-    /** Present while a person is asked to retire or keep the lessons that went missing from the file in one change (owner decision 78): how many, and the digest the answer must carry back. */
+    /** Present while a person is asked to retire or keep the lessons that went missing from the file in one change: how many, and the digest the answer must carry back. */
     retireConfirm?: { missing: number; digest: string } }>;
   /** The project's repositories not switched on yet. */
   available: string[];

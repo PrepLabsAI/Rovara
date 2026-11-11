@@ -64,7 +64,7 @@ async function namePeople(deps: LessonViewDeps, orgId: OrgId, me: string, ids: r
     }));
   }
   return (id) => {
-    // A lesson written in the repository file is approved by the repository edit, not by a person (read-back, decision 76.1): shown as that.
+    // A lesson written in the repository file is approved by the repository edit, not by a person (read-back): shown as that.
     if (id === REPOSITORY_APPROVER) return { name: "repository edit" };
     const name = found.get(normId(id));
     return name === undefined ? { name: FORMER } : { name, ...(sameId(id, me) ? { you: true as const } : {}) };

@@ -1,7 +1,7 @@
 // The status of a project's lessons files and the maintainer's switches, as plain functions the route layer (`routes.ts`) and the CLI's API calls use. Fixed words only.
 //   status:  every repository of the project with its row (switched on or not, the open pull request, unmerged count, removals waiting, held lessons, pointer, problem, notices) and the repositories not yet switched on.
 //   actions: on / off (the open pull request is closed and its branch deleted; the merged file stays), resume (after the team deleted the file), pointer_add ("add it back"), pointer_decline ("don't ask again"),
-//            retire_confirm / retire_keep (owner decision 78: lessons that went missing from the file in one change, held a week, are retired or kept only when a person says so; the route decides who may answer. The answer is only
+//            retire_confirm / retire_keep (lessons that went missing from the file in one change, held a week, are retired or kept only when a person says so; the caller decides who may answer (on a laptop, the owner on the lessons page). The answer is only
 //            RECORDED here: the nightly job retires a confirmed set, the next weekly pull request proposes a kept one back).
 // Switching on or off is audited BEFORE it changes. Nothing here calls a host except `off` (closing Rovara's own pull request); the first pull request is opened by the next nightly pass, within a day.
 import { resolveLearning, modeAllows, requireAudit, type ResolvedLearning } from "./policy.js";
@@ -63,8 +63,8 @@ export async function repoFileStatus(runtime: RepoFileRuntime, key: ScopeKey): P
 }
 
 /**
- * One switch or answer for one repository, by the project's name for it. `decider` is the person whose answer a `retire_confirm` or `retire_keep` is: the ROUTE checked that they are the company owner or can approve lessons in the
- * project (it is the layer that reaches the directory); without one those two actions are refused.
+ * One switch or answer for one repository, by the project's name for it. `decider` is the person whose answer a `retire_confirm` or `retire_keep` is: the CALLER checked that they may answer (a laptop's owner on the lessons page,
+ * or whoever the install's directory says can approve lessons in the project); without one those two actions are refused.
  */
 export async function repoFileAction(runtime: RepoFileRuntime, key: ScopeKey, body: LessonsRepoFileBody, decider?: { developerId: string }): Promise<RepoFileActionResult> {
   let target: RepoFileTarget | undefined;

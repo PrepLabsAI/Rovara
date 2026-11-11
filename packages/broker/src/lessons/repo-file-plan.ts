@@ -8,7 +8,7 @@
 //   - One home per lesson (50a): the text in the merged file is the team's. A block whose text or section no longer matches what Rovara rendered was edited by a person: it is left exactly as written and that lesson is HELD
 //     (no edit, no removal) until read-back takes the team's text in. It is recorded, never silently skipped.
 //   - A block a person removed is `declined`: never proposed back.
-//   - Read-back (R3, `repo-file-readback.ts`) runs before the plan: a hand edit has become the lesson's own text by then, so a block that is not what Rovara rendered is only the team's MOVE of a block (held) or a refused wording.
+//   - Read-back (`repo-file-readback.ts`) runs before the plan: a hand edit has become the lesson's own text by then, so a block that is not what Rovara rendered is only the team's MOVE of a block (held) or a refused wording.
 //     A bullet the team wrote with no id line (or whose id line a tool stripped) whose lesson Rovara knows is not added a second time: the pull request puts the id line before the bullet (a `tag` edit), and nothing is declined
 //     for an id whose text is still in the file.
 //   - After 3 weekly pull requests in a row that nobody merged, additions and edits stop; removals go on.
@@ -103,10 +103,10 @@ export interface PlanInput {
   /** A Rovara pull request a person pushed to is still open: only removals are proposed until it is closed or merged. */
   teamPr?: boolean;
   preset: "standard" | "regulated";
-  /** Ids read-back holds for a pass (a bulk disappearance from the file, review M1): not declined, not removed and not added back until the next pass decides. */
+  /** Ids read-back holds for a pass (a bulk disappearance from the file): not declined, not removed and not added back until the next pass decides. */
   heldIds?: ReadonlySet<string>;
   /**
-   * Ids a person chose to KEEP after they went missing from the file (owner decision 78): never declined, never removed, and proposed back into the file as additions (they respect the pause after unmerged pull requests like any
+   * Ids a person chose to KEEP after they went missing from the file: never declined, never removed, and proposed back into the file as additions (they respect the pause after unmerged pull requests like any
    * addition).
    */
   keepIds?: ReadonlySet<string>;
@@ -166,7 +166,7 @@ export function planRepoFile(input: PlanInput): RepoFilePlan {
   for (const id of known) {
     const block = blockOf(file!, id)!;
     const lesson = everyLesson.get(id);
-    // A lesson that only waits for the company's approver group with the team's own text (read-back, review M3) is the team's block: not an add, not a removal for "not active", left as written until the group decides.
+    // A lesson that only waits for the company's approver group with the team's own text (read-back) is the team's block: not an add, not a removal for "not active", left as written until the group decides.
     // (A group that never decided in time is not a decision: the lesson expires with no approval ever given, and the team's block stays as written. A group's rejection is one, and a removal is proposed then.)
     if (lesson !== undefined && lesson.tierReasons.includes(TEAM_FILE_TEXT) && lesson.provenance.repoOnly?.place === input.place
       && (lesson.status === "pending" || (lesson.status === "expired" && lesson.approvals.length === 0))) { held.push(id); continue; }

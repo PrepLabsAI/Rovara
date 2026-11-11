@@ -131,19 +131,19 @@ export const RepoFileStateSchema = z.object({
   pointerMissing: z.boolean(),
   lease: z.object({ holder: z.string().min(1).max(100), until: z.number() }).strict().optional(),
   /**
-   * Read-back (R3): what the last pass took in from the team's own edits of the file, as counts (no text, no person): lessons whose wording became the team's, lessons the team removed, new lessons the team wrote. Shown in the
+   * Read-back: what the last pass took in from the team's own edits of the file, as counts (no text, no person): lessons whose wording became the team's, lessons the team removed, new lessons the team wrote. Shown in the
    * status ("file changed on main, read back as N corrections / M retired"). Replaced by the next pass that reads something back.
    */
   readBack: z.object({ at: z.number(), edited: z.number().int().min(0), retired: z.number().int().min(0), imported: z.number().int().min(0) }).strict().optional(),
   /**
-   * Read-back (R3, review M1; owner decision 78): lessons Rovara knew in the file that a change took out, more than a few at once, so none was retired yet. `digest` names exactly which ones. They are held READ_BACK_HOLD_MS; after
+   * Read-back: lessons Rovara knew in the file that a change took out, more than a few at once, so none was retired yet. `digest` names exactly which ones. They are held READ_BACK_HOLD_MS; after
    * that, with the SAME ones still missing, nothing is retired by itself: a person (the company owner, or someone who can approve lessons) is asked, and `verdict` is their answer: `retire` (the next pass retires them) or `keep` (they stay
-   * live and R2 proposes their blocks back). If the file changed (another set missing, or the lessons restored) the hold starts over. Count, fingerprint, an answer and times only: no person, no text. `at` is when it was FIRST seen:
+   * live and the next weekly pull request proposes their blocks back). If the file changed (another set missing, or the lessons restored) the hold starts over. Count, fingerprint, an answer and times only: no person, no text. `at` is when it was FIRST seen:
    * the hold lasts READ_BACK_HOLD_MS from then, however many passes (or failed passes) come between. `decidedAt` is when the answer was recorded.
    */
   readBackHeld: z.object({ missing: z.number().int().min(1), digest: z.string().regex(/^[0-9a-f]{16}$/u), at: z.number(), verdict: z.enum(["retire", "keep"]).optional(), decidedAt: z.number().optional() }).strict().optional(),
   /**
-   * Read-back (R3): for each Rovara-marked block seen in the file on the last successful pass, the per-project FINGERPRINT (an HMAC under the project's secret, `LessonStore.textFingerprints`; no text, no bare hash) of its text, one per
+   * Read-back: for each Rovara-marked block seen in the file on the last successful pass, the per-project FINGERPRINT (an HMAC under the project's secret, `LessonStore.textFingerprints`; no text, no bare hash) of its text, one per
    * block of that id. Replaced when the text changes, so that when a lesson is erased a fingerprint is already there for the block whatever happens to the file next. Kept while the lesson is live, or gone with a copy still in the file;
    * dropped after that.
    */

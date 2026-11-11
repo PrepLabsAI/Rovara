@@ -92,7 +92,7 @@ export interface LessonStore {
    */
   goneOf(key: ScopeKey, ids: readonly string[]): Promise<Map<string, "withdrawn" | "purged">>;
   /**
-   * Lessons in the repo (R3, review H2): the FINGERPRINT of a text in one repository's lessons file: an HMAC (32 hex) of the text's comparison hash (`bodyHashOf`) and the repository's place, under a secret of the PROJECT (made on first
+   * Lessons in the repo: the FINGERPRINT of a text in one repository's lessons file: an HMAC (32 hex) of the text's comparison hash (`bodyHashOf`) and the repository's place, under a secret of the PROJECT (made on first
    * use, kept in the project's partition, wiped with it). It holds no text and no bare hash, and cannot be worked out without the secret. Read-back records the fingerprint of every marked block on every successful pass (while the
    * lesson is live), so that erasure finds a fingerprint ready, and marks the fingerprint of an erased lesson's text while a copy is in the file (`markGoneFingerprint`).
    */
@@ -101,7 +101,7 @@ export interface LessonStore {
   markGoneFingerprint(key: ScopeKey, fingerprint: string): Promise<void>;
   /** Which of these fingerprints are marked. A batched read; throws when it cannot read (never "not marked" for "could not look"). */
   goneFingerprintsOf(key: ScopeKey, fingerprints: readonly string[]): Promise<Set<string>>;
-  /** Removes a mark: the erased text is out of the file, so a person who writes the same words again is the team's new lesson (decision 76.3). Idempotent. */
+  /** Removes a mark: the erased text is out of the file, so a person who writes the same words again is the team's new lesson. Idempotent. */
   clearGoneFingerprint(key: ScopeKey, fingerprint: string): Promise<void>;
   /** Hard delete: the head, every version and every load-manifest reference. The id is remembered as purged so a rollback cannot bring it back. */
   purge(key: ScopeKey, id: string): Promise<void>;

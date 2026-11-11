@@ -345,7 +345,7 @@ describe("lessons", () => {
     } finally { await aged.close(); }
   });
 
-  describe("lessons that went missing from a file (decision 78)", () => {
+  describe("lessons that went missing from a file", () => {
     const DIGEST = "0123456789abcdef";
     const missingRow = (over: Record<string, unknown> = {}) => ({ repo: "api", enabled: true, fileDeleted: false, pointer: "added" as const, notices: [], retireConfirm: { missing: 7, digest: DIGEST }, ...over });
     /** Every form on the page that posts to /lessons/repo, with its hidden fields. */

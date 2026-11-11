@@ -54,7 +54,7 @@ export function prBody(plan: RepoFilePlan, context: { pointerFiles: readonly str
   return body.length <= BODY_MAX ? body : `${body.slice(0, BODY_MAX)}\n\n(shortened)`;
 }
 
-/** Lessons that went missing from the file in one change, held a week, and now wait for a person's answer (owner decision 78). `now` is the broker's clock. */
+/** Lessons that went missing from the file in one change, held a week, and now wait for a person's answer. `now` is the broker's clock. */
 export const awaitingRetireConfirm = (state: Pick<RepoFileState, "readBackHeld">, now: number): boolean =>
   state.readBackHeld !== undefined && state.readBackHeld.verdict === undefined && now - state.readBackHeld.at >= READ_BACK_HOLD_MS;
 
