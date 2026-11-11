@@ -303,7 +303,7 @@ export function applyFileChanges(existing: string | undefined, changes: FileChan
       else units.splice(item.index, item.lines);
     }
   }
-  // Tagging: an id line goes before the team's own bullet. Done after the removals above (which move units) and from the last item to the first, so the earlier positions stay right.
+  // Id lines: an id line goes before the team's own bullet. Done after the removals above (which move units) and from the last item to the first, so the earlier positions stay right.
   if ((changes.tag ?? []).length > 0) {
     const items = looseItems({ ...parsed, units });
     const taken = new Set<number>();
