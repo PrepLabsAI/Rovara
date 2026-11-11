@@ -66,6 +66,7 @@ export async function finishClose(deps: TaskFlowDeps, task: TaskRecord, parts: P
   // The workspace is read again once it is closed: a dispatch may have recorded a machine after the first read, and nothing records one on a closed workspace.
   const closed = await readWorkspace(deps, task.workspaceId);
   await stopMachines(deps, [workspace?.machine?.machineId, closed?.machine?.machineId], [workspace?.machineReservationId, closed?.machineReservationId, task.admissionReservationId]);
+  await deps.taskEnded?.({ orgId: deps.companyId, taskId: task.taskId }).catch((error: unknown) => log(deps, { event: "task_flow.task_ended_failed", error: error instanceof Error ? error.name : "unknown" }));
 }
 
 export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskView> {

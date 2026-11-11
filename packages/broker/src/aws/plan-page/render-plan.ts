@@ -11,6 +11,23 @@ import { commentCountBadge, renderThreads, suggestionLines, targetKey, type Page
 
 export type PlanAnchor = "requirements" | "design" | "coding-plan";
 
+/**
+ * One source item a claim cites, as the reader may see it. The words are Rovara's or the source's and are escaped here; a quote is present only when the
+ * source's rule let this reader see it (context-sources/quotes.ts).
+ */
+export interface ClaimSourceView {
+  label: string; itemRef: string; title: string; url?: string | undefined;
+  /** A marker the planner wrote that matches an item a stage really read. */
+  verified: boolean;
+  /** The plan check found the item gone, or changed since the plan read it. */
+  flagged?: "changed" | "gone" | undefined;
+  /** Written by someone outside the company: its words are untrusted and the page says so. */
+  outsider: boolean;
+  quote?: string | undefined;
+  /** Fetched fresh for this page, never stored. */
+  live?: { status: "fresh"; facts: Record<string, string>; fetchedAt: string } | { status: "unavailable" } | undefined;
+}
+
 export interface RenderPlanInput {
   anchor: PlanAnchor;
   kind: PlanDocumentKind; version: number; approved: boolean; current: boolean;
@@ -52,6 +69,8 @@ export interface RenderPlanInput {
   commentRefs?: Record<string, string>;
   /** A coding plan: what AgentX's plan check stored beside it. Absent reads as "not checked". */
   selfCheck?: PlanSelfCheckView;
+  /** The source items each claim cites (by claim id), as this reader may see them. */
+  claimSources?: ReadonlyMap<string, readonly ClaimSourceView[]>;
   /** The page of a local install: it names the product Rovara and says nothing of Slack. Absent: the hosted product's words. */
   local?: boolean;
 }
@@ -240,6 +259,29 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
   return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><p class="decision-question">${t(decision.question)}</p>${where}<ul class="options">${options}</ul>${after}</div>`;
 }
 
+const SAFE_HTTPS = /^https:\/\/[^\s"'<>]{1,500}$/u;
+
+/** The sources a claim cites: each with its title, a link when it has an https one, what the plan check found, its live facts and (for an allowed reader) its quote. */
+function claimSourcesHtml(context: Context, claim: PlanClaim): string {
+  const sources = context.input.claimSources?.get(claim.id) ?? [];
+  if (sources.length === 0) return "";
+  const items = sources.map((source) => {
+    const title = source.url !== undefined && SAFE_HTTPS.test(source.url) ? `<a href="${escapeHtml(source.url)}" rel="noopener noreferrer">${t(source.title)}</a>` : t(source.title);
+    const flags = [
+      ...(source.verified ? [] : ['<span class="badge badge-source-unverified">Unverified: no stage read this item</span>']),
+      ...(source.flagged === "gone" ? ['<span class="badge badge-source-flagged">Not found at the source any more</span>'] : []),
+      ...(source.flagged === "changed" ? ['<span class="badge badge-source-flagged">Changed at the source since it was read</span>'] : []),
+      ...(source.outsider ? ['<span class="badge badge-source-outsider">Written by someone outside the company: untrusted</span>'] : []),
+    ].join(" ");
+    const live = source.live === undefined ? ""
+      : source.live.status === "unavailable" ? ' <span class="source-live">status unavailable</span>'
+      : ` <span class="source-live">${Object.entries(source.live.facts).map(([name, value]) => `${t(name)}: ${t(value)}`).join(", ")} (fetched ${t(source.live.fetchedAt.slice(11, 16))})</span>`;
+    const quote = source.quote === undefined ? "" : `<blockquote class="source-quote">${t(source.quote)}</blockquote>`;
+    return `<li class="source"><span class="source-ref">${t(source.label)} ${t(source.itemRef)}</span> ${title} ${flags}${live}${quote}</li>`;
+  });
+  return `<aside class="claim-sources"><p class="claim-sources-head">Sources</p><ul class="source-list">${items.join("")}</ul></aside>`;
+}
+
 function badges(context: Context, claim: PlanClaim): string {
   const { previous } = context.input;
   const found: string[] = [];
@@ -257,7 +299,7 @@ async function claimHtml(context: Context, claim: PlanClaim, level: number, open
   const id = claimAnchor(context.input.anchor, context.input.version, claim.id);
   const key = `claim:${claim.id}`;
   const count = commentCountBadge(context.threads.get(key)?.length ?? 0);
-  return `<details id="${escapeHtml(id)}" class="claim level-${level}"${open ? " open" : ""}><summary><span class="claim-id">${t(claim.id)}</span> <span class="claim-text">${t(claim.text)}</span>${badges(context, claim)}${count}</summary><div class="claim-body">${evidence.join("")}${decisions}${children}${threadsHtml(context, key, { controlLabel: `Comment on ${claim.id}` })}</div></details>`;
+  return `<details id="${escapeHtml(id)}" class="claim level-${level}"${open ? " open" : ""}><summary><span class="claim-id">${t(claim.id)}</span> <span class="claim-text">${t(claim.text)}</span>${badges(context, claim)}${count}</summary><div class="claim-body">${evidence.join("")}${claimSourcesHtml(context, claim)}${decisions}${children}${threadsHtml(context, key, { controlLabel: `Comment on ${claim.id}` })}</div></details>`;
 }
 
 /** The first five claims of a level, then the rest folded away. Only the first five claims of level 1 start open. */

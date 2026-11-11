@@ -11,10 +11,11 @@ import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import type { ApprovalProof } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
+import { renderConnections, renderSources } from "./connection-pages.js";
 import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, renderTestEnvironment, type PageContext } from "./pages.js";
 import { renderHowWeWork, renderHowWeWorkIndex } from "./how-we-work-page.js";
 import { renderSetupIndex, renderSetupPage } from "./setup-page.js";
-import type { ApprovalOffer, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
+import type { ApprovalOffer, ConnectionPageAction, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
 
 export interface LocalPagesServer {
   /** `http://127.0.0.1:<port>`. */
@@ -112,6 +113,56 @@ function noticeOf(url: URL): string | undefined {
 
 const outcomeCode = (result: LocalActionResult, success: string): string => (result.ok ? success : result.reason === "stale" ? "stale" : result.reason === "not_found" ? "missing" : result.reason === "invalid" ? "invalid" : result.reason === "reauth" ? "reauth" : "refused");
 
+
+/** The change a Connections or Sources form asks for, or undefined when it is not one these pages offer. Every value is checked again by the contract's schemas where it is used. */
+function connectionActionOf(op: string, form: URLSearchParams | undefined): { action: ConnectionPageAction; subject: string; requestId?: string } | undefined {
+  const get = (name: string): string => form?.get(name) ?? "";
+  const requestId = get("requestId");
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+  const connectionId = /^con_[0-9a-z]{20}$/u;
+  const serverId = /^mcp[a-z0-9]{6,24}$/u;
+  // eslint-disable-next-line no-control-regex -- a project name is one line of plain text
+  const projectName = (value: string): boolean => value !== "" && value.length <= 200 && !/[\u0000-\u001f]/u.test(value);
+  switch (op) {
+    case "save": {
+      const type = get("type");
+      if (!uuid.test(requestId) || !/^[a-z]{3,20}$/u.test(type)) return undefined;
+      const fields: Record<string, string> = {};
+      for (const [name, value] of form?.entries() ?? []) if (name.startsWith("f_") && name.length <= 40 && value.length <= 9000) fields[name.slice(2)] = value;
+      const access = get("access") === "read_write" ? "read_write" : "read";
+      return { action: { op, requestId, type, fields, access }, subject: type, requestId };
+    }
+    case "remove": case "check":
+      return uuid.test(requestId) && connectionId.test(get("connectionId")) ? { action: { op, requestId, connectionId: get("connectionId") }, subject: get("connectionId"), requestId } : undefined;
+    case "server-add":
+      return get("label") !== "" && get("label").length <= 200 && get("address") !== "" && get("address").length <= 2048 && get("token").length <= 4096
+        ? { action: { op, label: get("label"), address: get("address"), token: get("token") }, subject: "new" } : undefined;
+    case "server-approve": case "server-disable": case "server-remove":
+      return serverId.test(get("serverId")) ? { action: { op, serverId: get("serverId") }, subject: get("serverId") } : undefined;
+    case "server-reapprove":
+      return serverId.test(get("serverId")) && get("toolsHash") !== "" && get("toolsHash").length <= 100 ? { action: { op, serverId: get("serverId"), toolsHash: get("toolsHash") }, subject: get("serverId") } : undefined;
+    case "source-remove":
+      return projectName(get("project")) && /^[a-z][a-z0-9]{1,15}$/u.test(get("sourceId")) ? { action: { op, project: get("project"), sourceId: get("sourceId") }, subject: `${get("project")}:${get("sourceId")}` } : undefined;
+    case "source-confirm": case "source-reject":
+      return projectName(get("project")) && uuid.test(get("changeId")) ? { action: { op, project: get("project"), changeId: get("changeId") }, subject: `${get("project")}:${get("changeId")}` } : undefined;
+    case "source-propose": {
+      const project = get("project");
+      if (!projectName(project) || !/^(?:connection:con_[0-9a-z]{20}|server:mcp[a-z0-9]{6,24})$/u.test(get("server"))) return undefined;
+      const tools: Array<{ name: string; schemaHash: string; attested: boolean; role: string }> = [];
+      for (const index of form?.getAll("tool") ?? []) {
+        if (!/^\d{1,3}$/u.test(index)) return undefined;
+        const name = get(`tool_name_${index}`), schemaHash = get(`tool_hash_${index}`);
+        if (name === "" || name.length > 200 || !/^[0-9a-f]{64}$/u.test(schemaHash)) return undefined;
+        tools.push({ name, schemaHash, attested: get(`attest_${index}`) === "1", role: get(`role_${index}`) });
+      }
+      return {
+        action: { op, project, server: get("server"), sourceId: get("sourceId"), label: get("label"), stages: form?.getAll("stage") ?? [], tools, quotes: get("quotes"), retention: get("retention"), sendCodeSnippets: get("sendCodeSnippets") === "1" },
+        subject: `${project}:new`,
+      };
+    }
+    default: return undefined;
+  }
+}
 
 /** A model as a second-review form names it: `provider::modelId` (a provider id never holds a colon). */
 function modelRefOf(value: string | null | undefined): { provider: string; modelId: string } | undefined {
@@ -426,6 +477,41 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (state === undefined) return notFound();
       const draft = request.form?.get("text") ?? "";
       return page(request, async (context) => renderHowWeWork(context, project, state, { text: draft, result: await data.preview(project, draft) }));
+    } },
+    { method: "GET", pattern: /^\/connections$/, handle: async (request) => {
+      const view = await options.data.getConnectionsPage?.();
+      return view === undefined ? notFound() : page(request, (context) => renderConnections(context, view, { fresh: tokenPageIsFresh(request) }));
+    } },
+    { method: "POST", pattern: /^\/connections\/act$/, handle: async (request) => {
+      const act = options.actions.connectionAction?.bind(options.actions);
+      const parsed = connectionActionOf(request.form?.get("op") ?? "", request.form);
+      if (act === undefined || options.data.getConnectionsPage === undefined) return notFound();
+      if (parsed === undefined || parsed.action.op.startsWith("source-")) return redirect(`${request.base}/connections?n=invalid`);
+      if (!verified(request, { action: "connections.act", subject: `${parsed.action.op}:${parsed.subject}`, ...(parsed.requestId === undefined ? {} : { requestId: parsed.requestId }) })) return redirect(`${request.base}/connections?n=form`);
+      // Adding a key, approving a server: only from a page session opened a few minutes ago (checked again here, not only when the page was drawn).
+      const result = await act(parsed.action, { fresh: tokenPageIsFresh(request) });
+      const view = await options.data.getConnectionsPage();
+      // The answer to the one form post, drawn here: a refusal's words are Rovara's, and no secret is in them.
+      return view === undefined ? notFound() : page(request, (context) => renderConnections({ ...context, notice: result.message ?? (result.ok ? "Done." : "That did not work.") }, view, { fresh: tokenPageIsFresh(request) }));
+    } },
+    { method: "GET", pattern: /^\/sources$/, handle: async (request) => {
+      const project = request.url.searchParams.get("project") ?? "";
+      // Listing a server's tools calls the server with its token: only from a page opened in the last few minutes, like every other owner act.
+      const discover = tokenPageIsFresh(request) ? request.url.searchParams.get("discover") ?? undefined : undefined;
+      if (project === "" || project.length > 200 || options.data.getSourcesPage === undefined) return notFound();
+      const view = await options.data.getSourcesPage(project, discover);
+      return view === undefined ? notFound() : page(request, (context) => renderSources(context, view, { fresh: tokenPageIsFresh(request) }));
+    } },
+    { method: "POST", pattern: /^\/sources\/act$/, handle: async (request) => {
+      const act = options.actions.connectionAction?.bind(options.actions);
+      const parsed = connectionActionOf(request.form?.get("op") ?? "", request.form);
+      if (act === undefined || options.data.getSourcesPage === undefined) return notFound();
+      if (parsed === undefined || !parsed.action.op.startsWith("source-")) return redirect(`${request.base}/connections?n=invalid`);
+      if (!verified(request, { action: "connections.act", subject: `${parsed.action.op}:${parsed.subject}` })) return redirect(`${request.base}/connections?n=form`);
+      const result = await act(parsed.action, { fresh: tokenPageIsFresh(request) });
+      const project = "project" in parsed.action ? parsed.action.project : "";
+      const view = await options.data.getSourcesPage(project);
+      return view === undefined ? notFound() : page(request, (context) => renderSources({ ...context, notice: result.message ?? (result.ok ? "Done." : "That did not work.") }, view, { fresh: tokenPageIsFresh(request) }));
     } },
     { method: "GET", pattern: /^\/second-review$/, handle: async (request) => {
       const state = await options.data.getSecondReview?.();

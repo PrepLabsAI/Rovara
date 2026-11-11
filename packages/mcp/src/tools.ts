@@ -1350,6 +1350,37 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: "agentx_list_connections",
+    title: "List the connections",
+    description: "Lists the connections the owner gave Rovara (a tracker, an MCP server or a monitoring service): its name, kind, where it points, whether a key is saved and what its last check found. This only reads: it never shows a key, and a connection is added, changed, checked or removed on the local page by the owner (rovara open connections), never by a tool.",
+    inputSchema: {},
+    outputSchema: { connections: z.array(z.object({ id: z.string(), kind: z.string(), label: z.string(), access: z.string(), points_at: z.string(), key_saved: z.boolean(), last_check: z.string() })) },
+    async handler(context) {
+      const answer = await context.client.listConnections();
+      const connections = answer.connections.slice(0, 100).map((entry) => ({
+        id: entry.connectionId, kind: entry.type, label: plainText(entry.label, ""), access: entry.access, points_at: plainText(entry.detail, ""), key_saved: entry.hasCredential,
+        last_check: entry.lastCheck === undefined ? "not checked" : `${entry.lastCheck.ok ? "passed" : "failed"} at ${entry.lastCheck.at}`,
+      }));
+      const text = connections.length === 0 ? "No connections. Add one on the local page: rovara open connections." : [...connections.map((entry) => `${entry.label} (${entry.kind}, ${entry.access}): ${entry.points_at}; ${entry.key_saved ? "key saved" : "no key"}; last check ${entry.last_check}.`), "Change them on the local page: rovara open connections."].join("\n");
+      return { structured: { connections }, text };
+    },
+  },
+  {
+    name: "agentx_get_context_sources",
+    title: "Show a project's context sources",
+    description: "Shows the read-only systems a project lets Rovara ask while it understands, plans, checks a plan or reviews (never while the code is written): each source's tools, the stages and how quotes are shown, and any change waiting for the owner. This only reads: ticking a tool and confirming a change are the owner's acts on the local page (rovara open connections), never a tool's.",
+    inputSchema: { project: z.string().min(1).max(200).describe("the project's name") },
+    outputSchema: { project: z.string(), sources: z.array(z.object({ id: z.string(), label: z.string(), stages: z.array(z.string()), tools: z.array(z.string()), quotes: z.string(), retention: z.string() })), waiting: z.array(z.object({ change_id: z.string(), kind: z.string(), source_id: z.string(), reasons: z.array(z.string()) })) },
+    async handler(context, input) {
+      const answer = await context.client.getContextSources(input.project as string);
+      const sources = answer.sources.slice(0, 20).map((entry) => ({ id: entry.sourceId, label: plainText(entry.label, ""), stages: entry.stages, tools: entry.tools.map((tool) => `${tool.name} (${tool.role})`), quotes: entry.quotes, retention: entry.retention }));
+      const waiting = answer.pending.slice(0, 20).map((entry) => ({ change_id: entry.changeId, kind: entry.kind, source_id: entry.sourceId, reasons: entry.reasons.map((reason) => plainText(reason, "")) }));
+      const text = [sources.length === 0 ? `${answer.project} has no context sources.` : `${answer.project} has ${sources.length} context source${sources.length === 1 ? "" : "s"}: ${sources.map((entry) => `${entry.label} (${entry.tools.length} tools)`).join(", ")}.`,
+        ...(waiting.length === 0 ? [] : [`${waiting.length} change${waiting.length === 1 ? "" : "s"} wait${waiting.length === 1 ? "s" : ""} for the owner to confirm on the local page.`]), "Change them on the local page: rovara open connections."].join("\n");
+      return { structured: { project: answer.project, sources, waiting }, text };
+    },
+  },
+  {
     name: "agentx_get_second_review",
     title: "Show the second review's settings",
     description: "Shows who gives the second opinion on your tasks' code (a model of a different AI company than the one that wrote it), how it counts (off, shadow or on), the models that could, and any notice that the chosen model stopped qualifying. This only reads: the owner changes the model, the mode and the evidence on the local page (`rovara open second-review`), never through a tool.",

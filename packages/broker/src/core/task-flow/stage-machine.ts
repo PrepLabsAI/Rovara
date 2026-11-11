@@ -15,6 +15,7 @@ import {
   answerWorkflowIntent,
   blockWorkflow,
   change,
+  isContextSourceStage,
   recordIntentAssessment,
   startWorkflowPlanAfterUnderstand,
   startWorkflowUnderstand,
@@ -140,6 +141,11 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     if (task.workflow !== undefined) await blockTaskWorkflow(deps, task.taskId, task.workflow.revision, permitted.message);
     return { result: "STALE" };
   }
+  // A stage that may read the project's sources and has some gets the capability to ask for them, and only on a worker that can use them. Build never does.
+  // (A design review reviewer reads its packet, which already holds the project's source items, so it gets no capability of its own.)
+  const withSources = operationKind === "task" && input.workflowMode !== undefined && deps.contextSources !== undefined && isContextSourceStage(input.workflowMode)
+    && input.designReview === undefined
+    && await deps.contextSources.stageHasSources({ project: task.project }, input.workflowMode);
   const now = iso(deps);
   const fed = input.notes === undefined ? undefined : notesFedUpdate(input.notes);
   const workflowRevision = input.workflow?.next.revision ?? task.workflow?.revision;
@@ -160,9 +166,9 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
       kind: operationKind, projectRevision: workspace.projectRevision,
       payload: operationKind !== "task"
         ? { ...input.payload }
-        : { conversationId: input.conversationId ?? task.conversationId, prompt: input.prompt, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }), ...input.payload },
-      ...(input.requires === undefined ? {} : { requires: input.requires }),
-      ...(input.extraActions === undefined ? {} : { extraActions: input.extraActions }),
+        : { conversationId: input.conversationId ?? task.conversationId, prompt: input.prompt, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }), ...input.payload, ...(withSources ? { contextSources: true } : {}) },
+      ...(input.requires === undefined && !withSources ? {} : { requires: [...(input.requires ?? []), ...(withSources ? ["task.contextSources.v1"] : [])] }),
+      ...(input.extraActions === undefined && !withSources ? {} : { extraActions: [...(input.extraActions ?? []), ...(withSources ? ["context-tools"] : [])] }),
     },
     requester: { personId: task.developerId, provider: task.provider },
   });

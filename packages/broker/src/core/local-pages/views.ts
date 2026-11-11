@@ -284,6 +284,86 @@ export interface SetupPageView {
   approvedHosts: Array<{ host: string; at: string | undefined }>;
 }
 
+/** What the Connections page shows about one saved connection: never its secret, its secret's name or the vendor account it belongs to. */
+export interface ConnectionRowView {
+  connectionId: string;
+  type: string;
+  label: string;
+  access: "read" | "read_write";
+  hasCredential: boolean;
+  /** Where it points (the site, the endpoint's host, the region): words for the owner. */
+  detail: string;
+  lastCheck?: { ok: boolean; at: string };
+}
+
+/** A registered MCP server as the page shows it: its address (a private server's own) and what it offers; never its token. */
+export interface McpServerRowView {
+  serverId: string;
+  label: string;
+  status: string;
+  transport: "http" | "stdio";
+  address?: string;
+  hasToken: boolean;
+  tools: Array<{ name: string; description: string; annotation: string }>;
+  pausedAt?: string;
+}
+
+export interface ConnectionsPageView {
+  connections: ConnectionRowView[];
+  servers: McpServerRowView[];
+  /** The monitoring kinds an adapter is registered for (a kind with none cannot be checked). */
+  monitoringKinds: string[];
+  /** Whether the operator named the private ranges a registered server may be in (`ROVARA_PRIVATE_MCP_CIDRS`); with none every private server is refused. */
+  privateRangesSet: boolean;
+  stdioAvailable: boolean;
+  projects: string[];
+}
+
+/** One source of a project as the Sources page shows it. */
+export interface SourceRowView {
+  sourceId: string;
+  label: string;
+  server: string;
+  stages: string[];
+  tools: Array<{ name: string; role: string; attested: boolean }>;
+  quotes: string;
+  retention: string;
+  sendCodeSnippets: boolean;
+}
+
+export interface SourceChangeView {
+  changeId: string;
+  kind: "set" | "remove";
+  sourceId: string;
+  label?: string;
+  proposedAt: string;
+  /** What the owner is asked to read again before confirming. */
+  reasons: string[];
+}
+
+export interface DiscoveredToolRowView { name: string; description: string; schemaHash: string; annotation: "read_only" | "unannotated" | "unsafe"; nameSuggestsChange: boolean; takesAddress: boolean }
+
+export interface SourcesPageView {
+  project: string;
+  sources: SourceRowView[];
+  pending: SourceChangeView[];
+  /** What a source may read from: read-only connections and approved registered servers, as `connection:<id>` or `server:<id>`. */
+  serverChoices: Array<{ value: string; label: string }>;
+  /** The tools of the server the owner chose to look at (a form posted, nothing saved). */
+  discovered?: { server: string; serverLabel: string; tools: DiscoveredToolRowView[] } | { server: string; serverLabel: string; problem: string };
+}
+
+/** One of the owner's acts on the Connections and Sources pages. Every one is made on a page, in a session opened a few minutes ago (a token an AI tool may hold never makes one). */
+export type ConnectionPageAction =
+  | { op: "save"; requestId: string; type: string; fields: Record<string, string>; access: "read" | "read_write" }
+  | { op: "remove" | "check"; requestId: string; connectionId: string }
+  | { op: "server-add"; label: string; address: string; token: string }
+  | { op: "server-approve" | "server-disable" | "server-remove"; serverId: string }
+  | { op: "server-reapprove"; serverId: string; toolsHash: string }
+  | { op: "source-propose"; project: string; server: string; sourceId: string; label: string; stages: string[]; tools: Array<{ name: string; schemaHash: string; attested: boolean; role: string }>; quotes: string; retention: string; sendCodeSnippets: boolean }
+  | { op: "source-remove"; project: string; sourceId: string }
+  | { op: "source-confirm" | "source-reject"; project: string; changeId: string };
+
 /** The read side: each method answers undefined for something that is not there. */
 export interface LocalPageData {
   /** What waits for the owner. */
@@ -305,6 +385,10 @@ export interface LocalPageData {
   howWeWork?: HowWeWorkPageData;
   /** The second review's settings page: the model list, the choice, the mode, the evidence and the notice. Absent: the page is not there. */
   getSecondReview?(): Promise<SecondReviewState | undefined>;
+  /** The Connections page: the saved connections, the registered MCP servers and the projects. Absent: the page is not there. */
+  getConnectionsPage?(): Promise<ConnectionsPageView | undefined>;
+  /** A project's Sources page. With `discover`, also the tools of that server (listing them calls the server; nothing is saved). */
+  getSourcesPage?(project: string, discover?: string): Promise<SourcesPageView | undefined>;
   /** The chat page. Absent, or undefined: no chat adapter is set up here and the page is not found. */
   getChatPage?(): Promise<ChatPageView | undefined>;
   /** What a code of a chat account names (the channel and the masked account), for the confirmation the owner reads before linking; undefined for an unknown, used or expired code. */
@@ -379,6 +463,8 @@ export interface LocalPageActions {
   secondReview?(input: SecondReviewPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
   /** Fix with agent: the owner asks for a diagnosis of the error the task page showed (`errorKey` names the error as shown; `requestId` is this press). Spends the owner's own model key, so it is the owner's act on a page. */
   diagnose?(input: { taskId: string; requestId: string; errorKey: string }): Promise<LocalActionResult>;
+  /** The owner's acts on the Connections and Sources pages (see `ConnectionPageAction`). `fresh`: the page session was opened in the last ten minutes. */
+  connectionAction?(input: ConnectionPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
   /** The owner acknowledges that an `on` second review did not run, so the merge may go ahead. `revision` is the task revision on the page; `key` is the acknowledgement the page showed. */
   acknowledgeSecondReview?(input: { taskId: string; revision: number; key: string }): Promise<LocalActionResult>;
   /**

@@ -29,13 +29,13 @@ const WITH_ADMIN_TOOL_NAMES = [...DEVELOPER_TOOLS, ...ADMIN_READ_TOOLS].map((too
 const offered = async (client: Client) => (await client.listTools()).tools.map((tool) => tool.name).sort();
 
 describe("the tool lists", () => {
-  it("are 43 developer tools, including the five session tools, agentx_start (the one start tool; the three old start tools stay as aliases), agentx_get_plan and agentx_answer_task_questions, and 51 with the eight admin read tools", () => {
-    expect(DEVELOPER_TOOL_NAMES).toHaveLength(43);
+  it("are 45 developer tools, including the five session tools, agentx_start (the one start tool; the three old start tools stay as aliases), agentx_get_plan and agentx_answer_task_questions, and 53 with the eight admin read tools", () => {
+    expect(DEVELOPER_TOOL_NAMES).toHaveLength(45);
     expect(DEVELOPER_TOOL_NAMES).toEqual(expect.arrayContaining(["agentx_start", "agentx_start_task", "agentx_start_workflow", "agentx_run_agent"]));
     expect(DEVELOPER_TOOL_NAMES).toEqual(expect.arrayContaining(SESSION_TOOLS));
     expect(ADMIN_READ_TOOLS).toHaveLength(8);
-    expect(WITH_ADMIN_TOOL_NAMES).toHaveLength(51);
-    expect(new Set(WITH_ADMIN_TOOL_NAMES).size).toBe(51);
+    expect(WITH_ADMIN_TOOL_NAMES).toHaveLength(53);
+    expect(new Set(WITH_ADMIN_TOOL_NAMES).size).toBe(53);
   });
 });
 

@@ -204,6 +204,38 @@ export function registerIntakeCommand(program: Command, context: Pick<UpCommandC
     });
 }
 
+/**
+ * `rovara connections`: the connections you gave Rovara (a tracker, an MCP server or a monitoring service) and a project's context sources, read only. Adding, changing, checking or removing a connection and
+ * ticking a source's tools happen on the local page (`rovara open connections`): they are the owner's own acts in the browser, never a token's, and a key is never typed into a terminal.
+ */
+export function registerConnectionsCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
+  const connections = program.command("connections").description("show your connections and a project's context sources; change them with `rovara open connections`");
+  connections
+    .command("list", { isDefault: true })
+    .description("list the connections: what each points at, whether a key is saved and what its last check found")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (options: { stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      const answer = await localCall(context, options.stateDir, "GET", "/v1/dev/connections") as { connections: Array<{ connectionId: string; type: string; label: string; access: string; hasCredential: boolean; detail: string; lastCheck?: { ok: boolean; at: string } }> };
+      if (globals.json) { context.stdout.write(`${JSON.stringify({ ok: true, data: answer })}\n`); return; }
+      context.stdout.write((answer.connections.length === 0 ? ["No connections."] : answer.connections.map((entry) => `${plainWords(entry.label)} (${plainWords(entry.type)}, ${plainWords(entry.access)}): ${plainWords(entry.detail)}; ${entry.hasCredential ? "key saved" : "no key"}; ${entry.lastCheck === undefined ? "not checked" : `last check ${entry.lastCheck.ok ? "passed" : "failed"}`}. ${entry.connectionId}`)).concat("Change them on the page: rovara open connections").join("\n") + "\n");
+    });
+  connections
+    .command("sources <project>")
+    .description("show a project's context sources and the changes waiting for you to confirm")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (project: string, options: { stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      const answer = await localCall(context, options.stateDir, "GET", `/v1/dev/context-sources?project=${encodeURIComponent(project)}`) as { project: string; sources: Array<{ sourceId: string; label: string; stages: string[]; tools: Array<{ name: string }> }>; pending: Array<{ changeId: string; kind: string; sourceId: string; reasons: string[] }> };
+      if (globals.json) { context.stdout.write(`${JSON.stringify({ ok: true, data: answer })}\n`); return; }
+      context.stdout.write([
+        ...(answer.sources.length === 0 ? [`${plainWords(answer.project)} has no context sources.`] : answer.sources.map((entry) => `${plainWords(entry.label)} (${plainWords(entry.sourceId)}): ${entry.tools.map((tool) => plainWords(tool.name)).join(", ")}; ${entry.stages.join(", ")}`)),
+        ...answer.pending.map((entry) => `Waiting for you: ${entry.kind === "remove" ? "remove" : "add or change"} ${plainWords(entry.sourceId)}${entry.reasons.length === 0 ? "" : ` (${entry.reasons.map(plainWords).join("; ")})`}`),
+        "Change them on the page: rovara open connections",
+      ].join("\n") + "\n");
+    });
+}
+
 const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
 /** Model words (a finding, a question) are shown as plain text: no control characters, no line breaks. */
@@ -282,18 +314,18 @@ export function registerDiagnosisCommand(program: Command, context: Pick<UpComma
 export function registerOpenCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
   program
     .command("open [task]")
-    .description("open the local review page for a task (or for everything that waits for you, `second-review`, or `lessons`) in your browser; `rovara up` must be running")
+    .description("open the local review page for a task (or for everything that waits for you, `second-review`, `lessons` or `connections`) in your browser; `rovara up` must be running")
     .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
     .action(async (task: string | undefined, options: { stateDir?: string }, command: Command) => {
       const globals = command.optsWithGlobals<{ json: boolean }>();
-      if (task !== undefined && task !== "second-review" && task !== "lessons" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), `second-review`, `lessons`, or leave it out");
+      if (task !== undefined && task !== "second-review" && task !== "lessons" && task !== "connections" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), `second-review`, `lessons`, `connections`, or leave it out");
       const { url, secret } = await requireLocalRuntime(context.home ?? homedir(), options.stateDir);
       let response: Response;
       try {
         response = await context.fetch(`${url}/v1/local/pages/open`, {
           method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
           // The lessons page opens in a new page session: switching on a repository's lessons file asks for one opened in the last few minutes.
-          body: JSON.stringify(task === "lessons" ? { path: "/lessons", fresh: true } : { path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
+          body: JSON.stringify(task === "lessons" ? { path: "/lessons", fresh: true } : task === "connections" ? { path: "/connections", fresh: true } : { path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
         });
       } catch {
         throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is not answering at its address. Start it again with `rovara up`.");

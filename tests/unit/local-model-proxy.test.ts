@@ -348,6 +348,15 @@ describe("the egress gateway's route table (the program the helper container run
       for (const bad of ["/v1/internal/design-review/packet", "/v1/internal/design-review/packet?slot=", "/v1/internal/design-review/packet?slot=R1", "/v1/internal/design-review/packet?slot=r1-critic&x=1", "/v1/internal/design-review/packet/../x?slot=r1", "/v1/internal/design-review/other?slot=r1-critic"]) {
         expect(route("GET", bad), bad).toHaveProperty("status");
       }
+      // A stage reads its project's sources on two exact paths: the tool list (GET) and one call (POST), each with the workspace stamped; nothing else under them is relayed.
+      expect(route("GET", "/v1/internal/context-tools")).toEqual({ kind: "context-tools" });
+      expect(route("POST", "/v1/internal/context-tools")).toMatchObject({ status: 405 });
+      expect(route("POST", "/v1/internal/context-tools/call")).toEqual({ kind: "context-tools" });
+      expect(route("GET", "/v1/internal/context-tools/call")).toMatchObject({ status: 405 });
+      for (const bad of ["/v1/internal/context-tools/", "/v1/internal/context-tools?x=1", "/v1/internal/context-tools/call?x=1", "/v1/internal/context-tools/call/extra", "/v1/internal/context-tools/../model-access", "/v1/internal/context-toolsx"]) {
+        expect(route("POST", bad), bad).toMatchObject({ status: 404 });
+        expect(route("GET", bad), bad).toHaveProperty("status");
+      }
       for (const path of ["messages", "responses", "chat/completions"]) expect(route("POST", `/v1/internal/model-proxy/v1/${path}`), path).toEqual({ kind: "model-call" });
       expect(route("POST", "/v1/internal/model-proxy/v1/messages?beta=true")).toEqual({ kind: "model-call" });
       expect(route("GET", "/v1/internal/model-proxy/v1/messages")).toMatchObject({ status: 405 });
@@ -357,6 +366,47 @@ describe("the egress gateway's route table (the program the helper container run
       }
     } finally {
       await gateway.dispose();
+    }
+  });
+});
+
+describe("the egress gateway's relay of a stage's source calls", () => {
+  it("stamps its own workspace on both source routes, drops one the worker sent, hands the capability on, and relays nothing else under them", async () => {
+    const { createServer } = await import("node:http");
+    const { request: httpRequest } = await import("node:http");
+    const seen: Array<{ method: string | undefined; url: string | undefined; workspace: string | string[] | undefined; capability: string | string[] | undefined; body: string }> = [];
+    const broker = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        seen.push({ method: request.method, url: request.url, workspace: request.headers["x-rovara-workspace"], capability: request.headers["x-agentx-callback-capability"], body: Buffer.concat(chunks).toString("utf8") });
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("{}");
+      });
+    });
+    await new Promise<void>((resolve) => broker.listen(0, "127.0.0.1", resolve));
+    const brokerPort = (broker.address() as { port: number }).port;
+    const gateway = await loadGatewayRelay({ workspaceId: "ws-own", callbackPort: brokerPort });
+    const send = (method: string, path: string, body?: string) => new Promise<number>((resolve, reject) => {
+      const url = new URL(gateway.url);
+      const out = httpRequest({ host: url.hostname, port: url.port, method, path, headers: { "x-rovara-workspace": "ws-forged", "x-agentx-callback-capability": "cap.value", ...(body === undefined ? {} : { "content-type": "application/json" }) } }, (answer) => { answer.resume(); answer.on("end", () => resolve(answer.statusCode ?? 0)); });
+      out.on("error", reject);
+      out.end(body);
+    });
+    try {
+      expect(await send("GET", "/v1/internal/context-tools")).toBe(200);
+      expect(await send("POST", "/v1/internal/context-tools/call", "{\"tool\":\"x\"}")).toBe(200);
+      expect(seen).toEqual([
+        { method: "GET", url: "/v1/internal/context-tools", workspace: "ws-own", capability: "cap.value", body: "" },
+        { method: "POST", url: "/v1/internal/context-tools/call", workspace: "ws-own", capability: "cap.value", body: "{\"tool\":\"x\"}" },
+      ]);
+      expect(await send("GET", "/v1/internal/context-tools/call")).toBe(405);
+      expect(await send("POST", "/v1/internal/context-tools/extra", "{}")).toBe(404);
+      expect(await send("GET", "/v1/internal/context-tools?x=1")).toBe(405);
+      expect(seen).toHaveLength(2);
+    } finally {
+      await gateway.dispose();
+      await new Promise<void>((resolve) => { broker.close(() => resolve()); broker.closeAllConnections(); });
     }
   });
 });

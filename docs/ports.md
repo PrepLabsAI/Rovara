@@ -304,6 +304,29 @@ and asks the point; it does not write its own reader.
   Install a `secrets` plug-in only from a source you trust as you would trust the broker.
 - A conformance suite for every adapter is `tests/support/ports/secret-store-conformance.ts`.
 
+## Monitoring (the `monitoring` point)
+
+A monitoring adapter is one read-only source of operational facts (an error tracker, a metrics service, an on-call tool) that the owner connects to Rovara. The interface is small on purpose
+(`packages/contracts/src/ports/monitoring.ts`): `kind` (the connection type it serves), `vendor` (words for the owner), `readOnly: true`, `takesSecret`, `tools()` (name, description and a closed JSON
+Schema for each read-only tool) and `check(input)`. **This is a new interface (decision 42a); the owner decides it alone (decision 63), and the plug-in author is told.**
+
+- The point holds many adapters, each named by its kind. Code ships `sentry`, `datadog`, `grafana`, `pagerduty` and `vercel` (`monitoring/native-adapters.ts`, over the connector specs in `connectors/native`); `rovara up`
+  registers them after the config's plug-ins are loaded and before the registry is sealed, and a plug-in's own adapter for a kind is left in place. CloudWatch is an AWS service and is not one of them.
+- `check` gets the company, the connection's **settings** (never its secret), the saved secret as a `SecretValue` (a kind that assumes a role has none) and **the only fetch it may use**: the core holds it to the vendor's
+  origin (or, for an address the owner typed, pins it to the addresses it checked) and follows no redirect. An adapter never builds its own fetch, never stores the secret and never quotes it in a message.
+- An adapter does not save a connection, approve a tool or widen what a tool may do: adding a connection and approving a tool are the owner's acts on a page (decision 66). Whatever a tool returns is data; the
+  core frames it as untrusted text before a model sees it.
+- `connectionChecksFromRegistry(registry)` answers the connection store's checks from whatever adapters the registry holds; a kind with no adapter is "not available on this install".
+
+### Connection secrets
+
+A connection's key or token is not in its record. The record keeps whether a secret was saved and the id of the version its own save wrote; the value is under the name
+`agentx/<env>/org-connectors/<company>/<id>` (the hosted product's name, so a later switch moves no data), written and removed through `ConnectionSecrets` (`connections/org-secrets.ts`: `read`, `put`,
+`scheduleDelete`). Code's adapter (`connections/local-secrets.ts`) keeps one file per saved version in `<state folder>/connection-secrets/<company>/` (folder `0700`, files `0600`, written without following a link,
+at most 16 KiB) and **reads them back through the `secrets` socket** as `{ "file": "<absolute path>" }`, so that socket's file rules apply (no link in the path, a plain file that is yours, not readable by others, small).
+A save writes its version first, and the record's commit decides which save won: a version no record names is never read. The newest two versions are kept; older ones are removed; removing a connection removes all.
+A `secrets` plug-in that does not know `{ "file" }` makes saved connections read as "no key" until it does (a configured plug-in is the source of truth for reads).
+
 ## Object storage (lane L9a, PROVISIONAL: owner decision 58, until Pratik agrees)
 
 The `object-storage` point (one adapter) is where files live that are too big or too plain for the document store: proof evidence, plan documents, a

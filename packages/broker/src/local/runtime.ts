@@ -29,6 +29,7 @@ import {
   registerCodeDefaults,
 } from "../ports/index.js";
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
+import { registerNativeMonitoring } from "../monitoring/native-adapters.js";
 import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
 import { createLocalLearningAdapter } from "../lessons/local-embedder.js";
@@ -211,6 +212,10 @@ export interface LocalRuntimeOptions {
   workerFetch?: typeof fetch;
   /** The most threads one comment poll reads (default 20). */
   commentThreadsPerPoll?: number;
+  /** For tests: the fetch under a connection's check, the check that refuses an address that must not be called, and the transport under a source's server. */
+  connectionsFetch?: typeof fetch;
+  connectionsCheckEndpoint?: (url: string) => Promise<void>;
+  connectionsServerPort?: NonNullable<Parameters<typeof createLocalApp>[0]["connectionsServerPort"]>;
   /** The document a planning run is asked to write: a structured plan (the default) or the Markdown plan an older worker takes. */
   planFormat?: "structured" | "markdown";
   /** The app's clock (the flow's records, the sessions and the tracking timer's schedule). Default: the real time. A test moves it. */
@@ -517,6 +522,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   if (registry.names("object-storage").length === 0) {
     registry.register("object-storage", "document", createDocumentObjectStorage(registry.require("storage"), { companyId: config.companyId ?? IMPLICIT_COMPANY_ID }), { isDefault: true });
   }
+  // The monitoring adapters Code ships (Sentry, Datadog, Grafana, PagerDuty, Vercel); a plug-in's own adapter for a kind, loaded above, is left in place. CloudWatch needs AWS access: it is
+  // registered by whoever gives this install that access (`cloudwatchMonitoringAdapter`).
+  registerNativeMonitoring(registry);
   registry.seal();
   // Port lane P6 (item L2): an append-only, hash-chained copy of the committed audit rows (audit.db), fed through the store's change feed. It is never the primary record. Its chain and anchor are checked now.
   if (options.storage !== "memory" && !configured("audit-sink")) {
@@ -566,6 +574,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(options.timers === undefined ? {} : { timers: options.timers }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.commentThreadsPerPoll === undefined ? {} : { commentThreadsPerPoll: options.commentThreadsPerPoll }),
+    ...(options.connectionsFetch === undefined ? {} : { connectionsFetch: options.connectionsFetch }),
+    ...(options.connectionsCheckEndpoint === undefined ? {} : { connectionsCheckEndpoint: options.connectionsCheckEndpoint }),
+    ...(options.connectionsServerPort === undefined ? {} : { connectionsServerPort: options.connectionsServerPort }),
     ...(options.planFormat === undefined ? {} : { planFormat: options.planFormat }),
     ...(options.modelProviderEndpoints === undefined ? {} : { modelProviderEndpoints: options.modelProviderEndpoints }),
     // The flip-back settings of the session features (`0` turns one off; anything else leaves it on).

@@ -383,9 +383,16 @@ describe("the callback listener", () => {
         ["an empty segment", { port: server.tcpPort, host, path: "/v1/internal//x" }, 404],
         ["a path that only looks internal", { port: server.tcpPort, host, path: "/v1/internalx/y" }, 404],
       ];
+      refusals.push(
+        ["a GET of a source path with more on it", { port: server.tcpPort, host, method: "GET", path: "/v1/internal/context-tools/call" }, 405],
+        ["a GET of the source list with a query", { port: server.tcpPort, host, method: "GET", path: "/v1/internal/context-tools?x=1" }, 405],
+      );
       for (const [what, options, status] of refusals) expect((await send(options)).status, what).toBe(status);
       expect((await send({ port: server.tcpPort, host, path: "/v1/internal/x", body: "x".repeat(8 * 1_048_576 + 1) }).catch(() => ({ status: 413, text: "" }))).status).toBe(413);
       expect(seen).toHaveLength(1);
+      // A stage's source list is one exact GET, handed on with the headers it came with; every other GET stays refused.
+      expect((await send({ port: server.tcpPort, host, method: "GET", path: "/v1/internal/context-tools", headers: { "x-agentx-callback-capability": "c" } })).status).toBe(200);
+      expect(seen.at(-1)).toMatchObject({ path: "/v1/internal/context-tools" });
     } finally {
       await server.close();
     }

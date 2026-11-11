@@ -143,8 +143,8 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         // The server opens the page in the owner's browser; the address (which carries the page session and can approve) never leaves this process.
         const body = bodyOf(request) as { path?: unknown; fresh?: unknown };
         const target = typeof body.path === "string" && /^\/[A-Za-z0-9/_-]{0,200}$/u.test(body.path) ? body.path : "/";
-        // A page that makes a long-lived credential or changes who can act as the owner asks for a page session opened a few minutes ago: only the script tokens page, the chat page and the lessons page may ask the page server for a new one.
-        const fresh = body.fresh === true && (target === "/tokens" || target === "/chat" || target === "/lessons");
+        // A page that makes a long-lived credential or changes who can act as the owner asks for a page session opened a few minutes ago: only the script tokens page, the chat, lessons and connections pages may ask the page server for a new one.
+        const fresh = body.fresh === true && (target === "/tokens" || target === "/chat" || target === "/lessons" || target === "/connections");
         // A few a minute, one at a time: a holder of the API token cannot open a pile of browser tabs and processes.
         const now = (flow.deps.now?.() ?? new Date()).getTime();
         while (opens.length > 0 && opens[0]! <= now - OPEN_WINDOW_MS) opens.shift();

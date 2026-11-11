@@ -110,6 +110,22 @@ export type SecondReviewStateRead = z.infer<typeof SecondReviewStateReaderSchema
 
 /** A task's Fix with agent state as a client reads it (forward-compatible: a proposal kind this build does not know reads `unknown`). */
 export type TaskDiagnosisRead = z.infer<typeof TaskDiagnosisViewReaderSchema>;
+/** The saved connections as a client reads them: never a secret, its name or the vendor account (read only: the owner adds and changes them on the local page). */
+export const ConnectionsReadSchema = z.object({
+  connections: z.array(z.object({
+    connectionId: z.string(), type: z.string(), label: z.string(), access: z.string(), hasCredential: z.boolean(), detail: z.string(),
+    lastCheck: z.object({ ok: z.boolean(), at: z.string() }).optional(),
+  }).passthrough()),
+}).passthrough();
+export type ConnectionsRead = z.infer<typeof ConnectionsReadSchema>;
+
+/** A project's context sources and the changes waiting for the owner, as a client reads them. */
+export const ContextSourcesReadSchema = z.object({
+  project: z.string(), revision: z.number(),
+  sources: z.array(z.object({ sourceId: z.string(), label: z.string(), stages: z.array(z.string()), tools: z.array(z.object({ name: z.string(), role: z.string() }).passthrough()), quotes: z.string(), retention: z.string() }).passthrough()),
+  pending: z.array(z.object({ changeId: z.string(), kind: z.string(), sourceId: z.string(), reasons: z.array(z.string()) }).passthrough()),
+}).passthrough();
+export type ContextSourcesRead = z.infer<typeof ContextSourcesReadSchema>;
 
 export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
@@ -151,6 +167,10 @@ export interface ControlPlaneClient {
   startIntakeTicket(project: string, itemId: string, requestId: string): Promise<IntakeStartRead>;
   /** Drops a ticket that waits ("not this one"). */
   dismissIntakeTicket(project: string, itemId: string, requestId: string): Promise<{ dismissed: boolean }>;
+  /** The saved connections (read only: the owner adds, changes and removes them on the local page). Absent route: the install has none. */
+  listConnections(): Promise<ConnectionsRead>;
+  /** A project's context sources and the changes waiting for the owner (read only). */
+  getContextSources(project: string): Promise<ContextSourcesRead>;
   /** One task's design review: how it stands, the findings, and what waits for the owner (read only). */
   getDesignReview(taskId: string): Promise<DesignReviewStateReadView>;
   /** A task's error, whether Fix with agent is offered for it, and the diagnosis of it (read only: the owner starts one on the task's page). Absent route: the install has no Fix with agent. */
@@ -415,6 +435,8 @@ export function httpControlPlaneClient(options: {
     getIntake: (project) => call(IntakeListReaderSchema, "GET", `/v1/app/projects/${encodeURIComponent(project)}/intake`),
     startIntakeTicket: (project, itemId, requestId) => call(IntakeStartReaderSchema, "POST", `/v1/app/projects/${encodeURIComponent(project)}/intake/${encodeURIComponent(itemId)}/start`, { requestId }),
     dismissIntakeTicket: (project, itemId, requestId) => call(z.object({ dismissed: z.boolean() }).passthrough(), "POST", `/v1/app/projects/${encodeURIComponent(project)}/intake/${encodeURIComponent(itemId)}/dismiss`, { requestId }),
+    listConnections: () => call(ConnectionsReadSchema, "GET", "/v1/dev/connections"),
+    getContextSources: (project) => call(ContextSourcesReadSchema, "GET", `/v1/dev/context-sources?project=${encodeURIComponent(project)}`),
     getSecondReview: async (query) => {
       const search = new URLSearchParams();
       if (query.project !== undefined) search.set("project", query.project);

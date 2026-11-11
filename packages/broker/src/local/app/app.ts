@@ -86,6 +86,8 @@ import { createSessionRoutes } from "./session-routes.js";
 import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens.js";
 import { createLocalPlaybook } from "./playbook.js";
 import { createLocalSetupAgent, setupDecisionSubjects, type LocalSetupAgent } from "./setup-agent.js";
+import { createLocalConnections } from "./connections.js";
+import type { TaskEndRegistrar } from "../../context-sources/quotes.js";
 
 import { createSessionStartExtras } from "./session-start.js";
 import { createLocalDesignReview } from "./design-review.js";
@@ -151,6 +153,10 @@ export interface LocalAppOptions {
   setupAgent?: boolean;
   /** The websites this install's machines reach by their own list, so a setup run's ask for one of them is "already allowed". */
   installDomains?: () => readonly string[];
+  /** For tests: the fetch under a connection's check, and the check that refuses an address that must not be called. */
+  connectionsFetch?: typeof fetch;
+  connectionsCheckEndpoint?: (url: string) => Promise<void>;
+  connectionsServerPort?: NonNullable<Parameters<typeof createLocalConnections>[0]["serverPort"]>;
   /** Port of the review pages (0: a free one). */
   pagesPort?: number;
   /** The most pull request threads one comment poll reads (default 20): a test lowers it to see the rotation. */
@@ -320,9 +326,19 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     readTask: (taskId: string) => readTask({ store }, taskId),
     log: (entry: Record<string, unknown>) => log({ component: "e2e", ...entry }),
   };
+  // Connections, context sources and registered MCP servers (the monitoring port's adapters, the secrets socket, the document store). The owner's acts on them are made on a page; a stage reads them through the context tools.
+  const taskEndHandlers: Array<(event: { orgId: OrgId; taskId: string }) => Promise<void>> = [];
+  const onTaskEnd: TaskEndRegistrar = (handler) => { taskEndHandlers.push(handler); return () => { const at = taskEndHandlers.indexOf(handler); if (at >= 0) taskEndHandlers.splice(at, 1); }; };
+  const connections = createLocalConnections({
+    registry, store, companyId, owner, stateDirectory: options.stateDirectory, environment: options.environment ?? process.env, now: () => clock().getTime(), log, onTaskEnd,
+    ...(options.connectionsFetch === undefined ? {} : { fetch: options.connectionsFetch }), ...(options.connectionsCheckEndpoint === undefined ? {} : { checkEndpoint: options.connectionsCheckEndpoint }),
+    ...(options.connectionsServerPort === undefined ? {} : { serverPort: options.connectionsServerPort }),
+  });
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
     testEnvironment: testEnvironment.taskEnvironment,
+    contextSources: connections.contextSources,
+    taskEnded: async (event) => { for (const handler of [...taskEndHandlers]) await handler(event); },
     projects: projectSource,
     standingInstructions,
     e2e,
@@ -488,6 +504,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     data: {
       ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview, diagnosis, lessons }),
       howWeWork: howWeWork.page,
+      getConnectionsPage: () => connections.getConnectionsPage(),
+      getSourcesPage: (project, discover) => connections.getSourcesPage(project, discover),
       listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
       ...testEnvironment.pageData,
       getChatPage: () => chat.view(),
@@ -496,7 +514,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     },
     actions: {
       ...chat.actions,
-      decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
+      decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, connectionAction: (input, context) => connections.action(input, context), decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       ...(setupAgent.enabled ? {
         setupStart: setupAgent.page.start, setupStop: setupAgent.page.stop, setupCommand: setupAgent.page.command, setupConfirm: setupAgent.page.confirm, setupDiscard: setupAgent.page.discard, setupForgetHost: setupAgent.page.forgetHost,
@@ -534,7 +552,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     replay: (taskId, key) => readWorkflowE2EReplayRecord({ store }, taskId, key),
     grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
-  const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}) });
+  const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}) });
   const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
@@ -547,7 +565,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 

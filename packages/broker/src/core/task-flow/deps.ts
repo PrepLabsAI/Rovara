@@ -202,6 +202,13 @@ export interface TaskFlowDeps {
   workflowDependenciesEnabled?: boolean;
   /** The queue operations are dispatched on. Default `task-dispatch`. */
   dispatchQueue?: string;
+  /**
+   * The project's read-only context sources (MCP servers and monitoring connections the owner has ticked). Asked when a workflow step starts: a stage that may read sources and has some is
+   * dispatched with the `context-tools` capability and `contextSources: true`, and so only on a worker that lists `task.contextSources.v1`. Absent: no stage has sources.
+   */
+  contextSources?: { stageHasSources(task: { project: string }, mode: string): Promise<boolean> };
+  /** Told, best effort, after a task was closed and its machines and allowances given back (what a task kept only for its own lifetime, such as live-only source text, goes now). Never fails the close. */
+  taskEnded?: (event: { orgId: OrgId; taskId: string }) => Promise<void>;
   now?: () => Date;
   newId?: () => string;
   log?: (entry: Record<string, unknown>) => void;

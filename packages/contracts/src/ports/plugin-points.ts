@@ -22,6 +22,7 @@ import type { ImageRegistry } from "./image-registry.js";
 import type { ObjectStorage } from "./object-storage.js";
 import type { OutboundEventsAdapter } from "./outbound-events.js";
 import type { SecretStore } from "./secrets.js";
+import type { MonitoringAdapter } from "./monitoring.js";
 import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
 import type { AuditSink } from "./audit-sink.js";
@@ -141,7 +142,7 @@ export interface ChannelAdapter {
 }
 
 /**
- * The thing an adapter of a point that has no port yet must be (monitoring, team-record-source). The lane
+ * The thing an adapter of a point that has no port yet must be (team-record-source). The lane
  * that defines the point's port narrows its line in `PluginPointTypes` to the real interface. Until then only the name is known.
  */
 export interface UnspecifiedAdapter {
@@ -157,7 +158,7 @@ export interface PluginPointTypes {
   "worker-machines": WorkerMachines;
   storage: DocumentStore;
   queue: QueueService;
-  monitoring: UnspecifiedAdapter;
+  monitoring: MonitoringAdapter;
   learning: LearningAdapter;
   "team-record-source": UnspecifiedAdapter;
   identity: IdentityProvider;

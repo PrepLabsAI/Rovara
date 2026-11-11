@@ -81,8 +81,8 @@ function makeServer(handler: LocalRequestHandler, allowedHost: () => string, pee
         }
         if (bare.startsWith(`${MODEL_PROXY_PREFIX}/`)) return await modelProxy.handle(request, response);
       }
-      // The design review's reviewers read their packets with a GET (core/design-review/packet-route.ts); nothing else but a POST is a callback.
-      if (request.method === "GET" && path.startsWith(INTERNAL_PREFIX) && !path.includes("..") && !path.includes("//") && /^\/v1\/internal\/design-review\/packet\?slot=[a-z0-9][a-z0-9_-]{0,31}$/u.test(path)) {
+      // The design review's reviewers read their packets, and a stage reads its source tool list, with a GET (core/design-review/packet-route.ts, app/context-tools.ts); nothing else but a POST is a callback.
+      if (request.method === "GET" && path.startsWith(INTERNAL_PREFIX) && !path.includes("..") && !path.includes("//") && /^\/v1\/internal\/(?:design-review\/packet\?slot=[a-z0-9][a-z0-9_-]{0,31}|context-tools)$/u.test(path)) {
         const headers: Record<string, string | undefined> = {};
         for (const [name, value] of Object.entries(request.headers)) headers[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : value;
         let answer: BrokerResponse;

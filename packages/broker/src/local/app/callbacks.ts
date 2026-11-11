@@ -30,6 +30,8 @@ import { processPlanAnswer } from "../../core/plan/process.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { readVerifiedText } from "./documents.js";
 import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../core/design-review/packet-route.js";
+import { CONTEXT_TOOLS_CALL_PATH, CONTEXT_TOOLS_PATH, handleContextTools } from "./context-tools.js";
+import type { ContextSourcesRuntime } from "../../context-sources/runtime.js";
 import { readDesignTemplate } from "../../core/design-review/template.js";
 import { DESIGN_REVIEW_RESULT_MAX_BYTES } from "../../core/design-review/outcome.js";
 import { handleSetupAgentCallback, type SetupAgentCallbackDeps } from "../../core/setup-agent/callback.js";
@@ -69,6 +71,8 @@ export interface CallbackDeps {
   onEvents?: ((operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>) => Promise<void>) | undefined;
   /** A setup run's callback (`core/setup-agent`): what it needs beyond the flow's store. Absent: the action is not served. */
   setupAgent?: Omit<SetupAgentCallbackDeps, "store" | "companyId" | "now"> | undefined;
+  /** The project's context sources (the monitoring connections and MCP servers the owner ticked). Absent: a stage is told there are none. */
+  contextSources?: ContextSourcesRuntime;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -241,6 +245,10 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
     try {
       // The design review's reviewers read their packets here (a GET; the capability names the action and the stored binding names the slots).
       if (request.method === "GET" && (request.path.split("?")[0] ?? "") === DESIGN_REVIEW_PACKET_PATH) return await handleDesignReviewPacket(deps.flow, capabilities, request);
+      // A stage reads the project's sources here (the capability names `context-tools`; the gateway stamps the workspace).
+      const bare = request.path.split("?")[0] ?? "";
+      if (request.method === "GET" && bare === CONTEXT_TOOLS_PATH) return await handleContextTools(deps.flow, capabilities, deps.contextSources, request, "list");
+      if (request.method === "POST" && bare === CONTEXT_TOOLS_CALL_PATH) return await handleContextTools(deps.flow, capabilities, deps.contextSources, request, "call");
       const match = ROUTE.exec((request.path.split("?")[0]) ?? "");
       if (request.method !== "POST" || match === null) throw agentXError("NOT_FOUND", "route not found");
       const [, workspaceId, operationId, action] = match as unknown as [string, string, string, string];

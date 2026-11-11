@@ -75,7 +75,7 @@ import { registerDoctorCommand } from "./doctor/cli.js";
 import type { DoctorServices } from "./doctor/checks.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
 import { registerDestroyCommand } from "./destroy/cli.js";
-import { registerDesignReviewCommand, registerDiagnosisCommand, registerIntakeCommand, registerOpenCommand, registerSecondReviewCommand, registerUpCommand, type UpCommandContext } from "./up/cli.js";
+import { registerDesignReviewCommand, registerConnectionsCommand, registerDiagnosisCommand, registerIntakeCommand, registerOpenCommand, registerSecondReviewCommand, registerUpCommand, type UpCommandContext } from "./up/cli.js";
 import { registerTestEnvCommand } from "./up/test-env-command.js";
 import { registerTokenCommands } from "./up/token.js";
 import { registerPlaybookCommands } from "./up/playbook.js";
@@ -490,6 +490,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   registerTokenCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerPlaybookCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerSecondReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerConnectionsCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerDesignReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerDiagnosisCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerIntakeCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });

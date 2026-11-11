@@ -16,6 +16,7 @@ export * from "./secrets.js";
 export * from "./image-registry.js";
 export * from "./scheduler.js";
 export * from "./object-storage.js";
+export * from "./monitoring.js";
 export * from "./outbound-events.js";
 export * from "./plugin-adapters.js";
 export * from "./plugin-points.js";

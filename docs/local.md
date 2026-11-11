@@ -571,6 +571,31 @@ A ticket in a tracker can start a task, and a task writes its progress back to t
 - **What is written back** (`rovara intake updates <project>`): a comment on the ticket the task started from at five moments (the work started, the plan is ready for review, a pull request opened, merged, closed), with the title and the pull request's link and nothing else (no plan, code or summary). Comments are on, and Rovara says plainly where they can be seen: a comment is internal only where the tracker has internal comments (Jira Service Management); a Linear comment, with the pull request's link, is visible to everyone who can see the ticket (turn comments off with `--comments off` if the ticket is wider than the repository). Moving the ticket's status (`--status on`, to the project's own status names, `In Progress` / `In Review` / `Done` by default) is off until you turn it on. Only the ticket intake started this task from is written to; a comment is internal where the tracker can tell; at most 12 writes a task and 120 an hour a tracker. A tracker that refuses a write (its sign-in may only read) is noted and never fails the task. A Linear ticket's pull request says `Fixes <KEY>`, which Linear's own GitHub integration closes the issue on.
 - **Where it is stored.** Tickets, sources, claims and settings are rows in the document store under Cloud's key layout (see `docs/ports.md`, "Tracker intake and write-back"). The routes are under `/v1/app/projects/<project>/intake` (a POST where Cloud uses a PUT, because `rovara up` answers GET and POST only).
 
+## Connections, context sources and registered MCP servers
+
+A **connection** is a key the owner gives Rovara for a tracker (Linear, Jira), an MCP server at a public address, or a monitoring service (Sentry, Datadog, Grafana, PagerDuty, Vercel). A project's **context
+sources** are read-only systems a stage may ask while it understands, plans, checks the plan or reviews (never while the code is written). A **registered MCP server** is one on the owner's own network.
+
+- **Adding, changing, checking and removing a connection, ticking a source's tools, approving a server and confirming a source are the owner's acts on the Connections and Sources pages** (`rovara open connections`), in
+  a page session opened in the last ten minutes (decision 66). The API token that a tool may hold reads (`GET /v1/dev/connections`, `/v1/dev/context-sources?project=`, `/v1/dev/mcp-servers`; `rovara connections`; the
+  `agentx_list_connections` and `agentx_get_context_sources` MCP tools) and every write is refused with the page message. A key typed on the page goes to one file only you can read (see `docs/ports.md`, "Connection
+  secrets") and is never shown again, put in a record, an audit event, a log line or an answer.
+- **A source is proposed, then confirmed.** The Sources page lists the tools a connection or an approved server offers, with what Rovara checked on each (its own hint that it only reads, a name that sounds like a change,
+  a schema that takes an address). A tool that does not say it only reads needs the owner's confirmation ("I confirm it only reads"); a vendor connection that may be sent code is flagged for a second look. One owner decides:
+  the person who proposed a change confirms it, after reading what it asks. The change is checked again against the server as it is when it is confirmed, and a tool that changes afterwards is off until ticked again.
+- **What a stage reads is data.** A stage with sources is dispatched with the `context-tools` capability and `contextSources: true`, only on a worker that lists `task.contextSources.v1`; a stage with none, and Build,
+  get neither. The worker's calls go to `GET /v1/internal/context-tools` and `POST /v1/internal/context-tools/call` through its own gateway, which stamps its workspace; the broker checks the capability, the stamp, the
+  fence and that the operation is the workspace's live one. Every call is checked again (the stage, the ticked tool and its hash, the allowance of calls and bytes, small arguments with no code, no credential and no
+  address off the source's host, a time limit), and the answer is cleaned, cut, framed as untrusted text and recorded as a citation. A source's text is kept only as its retention allows and a `live_only` text is
+  deleted when the task is closed.
+- **Reaching a server.** A connection's public address is checked before every request and the connection is pinned to the addresses checked. A registered server on your network is reached only inside the ranges the
+  operator names (`ROVARA_PRIVATE_MCP_CIDRS`, with `ROVARA_VPC_CIDRS` for the network Rovara itself is in: on a laptop that is the ranges of the Docker networks Rovara makes for a worker, its gateway and its sandboxes, and any private range of your own that must never be probed. A private range that overlaps it stops `rovara up`); with none named every private server is refused, and an address that is this machine, link-local, a metadata
+  address or inside Rovara's own network is never called.
+- **Not here.** Servers that Rovara would run from a package (`stdio`) need an MCP host; Code runs none, so they are off (`ROVARA_STDIO_MCP_SERVERS=1` with `MCP_HOST_URL` and `MCP_HOST_TOKEN` names a host an operator
+  runs, over https). The gateway's own runner for such servers stays out of Code until it can run them inside Docker under the rules of "What a worker can reach". Monitoring connections are saved, checked and listed.
+  Their tools are **not yet usable by an agent on a laptop**: the five connector types are registered (`BUILT_IN_CONNECTOR_TYPES`), but the local task flow does not call the connector engine, and the per-company credential
+  registry (`connections/registry.ts`) that those connectors read their settings and key through is not wired into it. They are also not yet a kind of context source.
+
 ## Not wired yet
 
 - **Merge from `rovara up`.** A person merges a draft pull request on the code host (or with their proof); merge tracking never presses Merge (owner decision 1). The owner's own Merge button on the local page is not built;

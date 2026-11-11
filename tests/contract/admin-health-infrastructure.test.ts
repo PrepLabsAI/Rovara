@@ -168,6 +168,10 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/test-env/deps.ts", "packages/broker/src/core/test-env/saved-env-markers.ts", "packages/broker/src/core/test-env/candidate-check.ts", "packages/broker/src/core/test-env/night-status.ts",
       // Tickets that ask for work: a ticket's item (30 days while it waits, 400 once started), the event and change claims (30 and 7 days), the owner's notices (30 days), the poll's hourly read counts (2 hours), Rovara's notes of its own writes, and the ticket updates' claims and counts.
       "packages/broker/src/core/intake/store.ts", "packages/broker/src/core/intake/poll.ts", "packages/broker/src/core/intake/notices.ts", "packages/broker/src/core/intake/own-writes.ts", "packages/broker/src/core/ticket-updates/handler.ts",
+      // Context sources: a project's pending and decided changes (90 days), the usage counters of one stage (3 days), the text a task kept from a source and its citations (14 days), and the request item of a
+      // connection change (7 days). A connection's own record, a project's source document and a registered server are durable and carry no expiry.
+      "packages/broker/src/context-sources/store.ts", "packages/broker/src/context-sources/usage.ts", "packages/broker/src/context-sources/quotes.ts", "packages/broker/src/context-sources/citations.ts",
+      "packages/broker/src/connections/request-marks.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
