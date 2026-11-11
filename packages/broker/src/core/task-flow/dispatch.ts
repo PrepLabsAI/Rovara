@@ -10,6 +10,7 @@ import {
   AGENT_WORKER_OUTDATED,
   AgentXError,
   MachineError,
+  STANDING_INSTRUCTIONS_FEATURE,
   WorkerInvocationSchema,
   change,
   when,
@@ -18,6 +19,7 @@ import {
   workflowPublicationContextDigest,
   type Queue,
   type ReceivedMessage,
+  type StandingInstructionsPayload,
   type WorkerInvocation,
   type WorkflowDependencyInvocation,
 } from "@agentx/contracts";
@@ -31,6 +33,7 @@ import { isTerminalStatus, readOperation, recordOperationResult } from "./result
 import { readWorkspace } from "./stage-machine.js";
 import { dispatchQueueName, iso, log } from "./support.js";
 import type { OperationRecord, WorkspaceRecord } from "./records.js";
+import type { PlaybookMode } from "../playbook/service.js";
 
 /** How long a capability the worker is given lives: nine hours, as Cloud's. */
 const CAPABILITY_SECONDS = 32_400;
@@ -114,6 +117,22 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // The workspace has moved on (closed, or taken by a newer hold): this job is no longer wanted.
     return endAndAck("INTERRUPTED", "the workspace no longer waits for this job");
   }
+  // Standing instructions (the company's rules and the project's How we work): read now, before admission and before any machine is started, since a refusal needs no machine and a code host that is down must
+  // not wake one on every try. The playbook is read at the commit the task pinned when it started. A refusal that waiting will not mend ends the step with its sentence; a read that may pass is tried again, and when
+  // the tries run out the step ends with the true cause (the rules could not be read), never "the machine did not become ready".
+  let standing: StandingInstructionsPayload | undefined;
+  if (operation.dispatch.kind === "task" && deps.standingInstructions !== undefined) {
+    try {
+      standing = await deps.standingInstructions.forOperation({
+        project: workspace.projectName, mode: operation.dispatch.payload["workflowMode"] as PlaybookMode | undefined, ...(workspace.playbookCommit === undefined ? {} : { playbookCommit: workspace.playbookCommit }),
+      });
+    } catch (error) {
+      const sentence = error instanceof AgentXError ? error.message.replace(/^[A-Z_]+: /u, "") : undefined;
+      if (sentence !== undefined && error instanceof AgentXError && (error.code === "CONFIG_INVALID" || error.code === "PROCESS_UNAVAILABLE")) return endAndAck("FAILED", sentence);
+      if (sentence !== undefined && error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return message.receiveCount >= DISPATCH_ATTEMPTS_MAX ? endAndAck("FAILED", sentence) : retryLater();
+      throw error;
+    }
+  }
   if (message.receiveCount > DISPATCH_ATTEMPTS_MAX) return endAndAck("FAILED", DISPATCH_EXHAUSTED_ERROR);
 
   let reservationId: string | undefined;
@@ -154,10 +173,12 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     const routed = operation.dispatch.kind === "task" && (await deps.modelAccess?.route()) !== undefined;
     const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : [])].filter((feature) => !health.features.includes(feature));
     if (missing.length > 0) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
+    // A block is never dropped: a worker that cannot place it is refused the step (the rules were read above, before any machine was asked for).
+    if (standing !== undefined && !health.features.includes(STANDING_INSTRUCTIONS_FEATURE)) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
     // The claim: in one transaction, the workspace is still held by this operation at its fence and is not closing, and the operation is handed over.
     // Nothing is issued to the worker (no grant, no capability) before it applies.
     if (!(await claimDispatch(deps, operation, handle.machineId))) return abandon(deps, queue, message, operation, handle.machineId, reservationId ?? workspace.machineReservationId);
-    const invocation = await buildInvocation(deps, operation, workspace, health.features);
+    const invocation = await buildInvocation(deps, operation, workspace, health.features, standing);
     if (typeof invocation === "string") return endAndAck("FAILED", invocation);
     await deps.machines.deliver(handle.machineId, invocation);
     await queue.ack(message.receiptHandle);
@@ -211,7 +232,7 @@ async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessag
 }
 
 /** Builds the worker's invocation, or a sentence saying why this operation cannot be sent to this worker. */
-async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, features: readonly string[]): Promise<WorkerInvocation | string> {
+async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, features: readonly string[], standing: StandingInstructionsPayload | undefined): Promise<WorkerInvocation | string> {
   const spec = operation.dispatch;
   const secret = Buffer.from(deps.callbackSigningKey);
   const modelRoute = spec.kind === "task" ? await deps.modelAccess?.route() : undefined;
@@ -219,7 +240,7 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
     actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
-  let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }) };
+  let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }) };
   // The lessons the step is given are chosen now, from the lessons as they are at this moment (a lesson retired since the step was queued is not sent). A worker that does not list the feature gets none.
   if (spec.kind === "task" && deps.learned !== undefined) {
     const learned = await deps.learned({ workspaceId: workspace.id, operationId: operation.id, workflowMode: operation.workflowMode, features }).catch(() => undefined);

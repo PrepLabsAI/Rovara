@@ -1807,6 +1807,8 @@ export class GitHubAppCredentialProvider {
     );
     if (!response.ok) {
       await response.body?.cancel();
+      // A branch the host does not have is not an outage: the caller may try the host's own default branch.
+      if (response.status === 404) throw agentXError("NOT_FOUND", "the repository has no such branch");
       throw agentXError("RUNTIME_UNAVAILABLE", `GitHub branch lookup failed with HTTP ${response.status}`);
     }
     const value = feedbackRecord(await response.json());

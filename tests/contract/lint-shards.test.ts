@@ -53,6 +53,15 @@ beforeAll(async () => {
 }, 280_000);
 
 describe("the lint shards: which files they lint", () => {
+  it("name every letter of the alphabet for tests/unit, so a new test file of any name has a shard and none falls to the last one", () => {
+    const named = new Set(SHARD_DIRECTORIES.flatMap((shard) => shard.directories).flatMap((directory) => (/^tests\/unit\/[a-z]\*\.ts$/u.test(directory) ? [directory.charAt(11)] : [])));
+    expect([..."abcdefghijklmnopqrstuvwxyz"].filter((letter) => !named.has(letter))).toEqual([]);
+  });
+
+  it("keep the folders of tests/unit in a shard of their own", () => {
+    expect(SHARD_DIRECTORIES.find((shard) => shard.name === "tests-unit-folders")?.directories).toEqual(["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/lessons"]);
+  });
+
   it("lint, together, exactly the files that `eslint .` lints, each file in exactly one shard", () => {
     expect(wholeRepository.length).toBeGreaterThan(1000); // positive control: the enumeration found the repository
     const owners = new Map<string, string[]>();

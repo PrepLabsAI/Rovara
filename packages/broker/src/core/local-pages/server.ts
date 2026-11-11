@@ -12,6 +12,7 @@ import type { ApprovalProof } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
 import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, type PageContext } from "./pages.js";
+import { renderHowWeWork, renderHowWeWorkIndex } from "./how-we-work-page.js";
 import { renderSetupIndex, renderSetupPage } from "./setup-page.js";
 import type { ApprovalOffer, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
 
@@ -92,6 +93,8 @@ const NOTICES: Record<string, string> = {
   missing: "That is no longer there.",
   form: "That form has expired or was already used. Read the page again.",
 };
+/** A project name as a path segment: the names a project can have, nothing else. */
+const PROJECT_SEGMENT = "[A-Za-z0-9][A-Za-z0-9._-]{0,99}";
 
 type Route = { method: "GET" | "POST"; pattern: RegExp; handle: (request: Req, match: RegExpExecArray) => Promise<Reply> };
 interface Req { session: { id: string; token: string; createdAt: number }; url: URL; form: URLSearchParams | undefined; base: string; origin: string }
@@ -388,6 +391,27 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "tokens.revoke", subject: tokenId })) return redirect(`${request.base}/tokens?n=form`);
       const result = await options.actions.revokeScriptToken({ tokenId });
       return redirect(`${request.base}/tokens?n=${outcomeCode(result, "revoked")}`);
+    } },
+    { method: "GET", pattern: /^\/how-we-work$/, handle: async (request) => {
+      if (options.data.howWeWork === undefined) return notFound();
+      const projects = await options.data.howWeWork.projects();
+      return page(request, (context) => renderHowWeWorkIndex(context, projects));
+    } },
+    { method: "GET", pattern: new RegExp(`^/how-we-work/(${PROJECT_SEGMENT})$`), handle: async (request, match) => {
+      const project = match[1] ?? "";
+      const state = await options.data.howWeWork?.state(project);
+      return state === undefined ? notFound() : page(request, (context) => renderHowWeWork(context, project, state));
+    } },
+    // A draft is checked and shown, never saved: the page answers the form itself (the draft is not kept in an address or a redirect).
+    { method: "POST", pattern: new RegExp(`^/how-we-work/(${PROJECT_SEGMENT})/check$`), handle: async (request, match) => {
+      const project = match[1] ?? "";
+      const data = options.data.howWeWork;
+      if (data === undefined) return notFound();
+      if (!verified(request, { action: "playbook.check", subject: project })) return redirect(`${request.base}/how-we-work/${project}?n=form`);
+      const state = await data.state(project);
+      if (state === undefined) return notFound();
+      const draft = request.form?.get("text") ?? "";
+      return page(request, async (context) => renderHowWeWork(context, project, state, { text: draft, result: await data.preview(project, draft) }));
     } },
     { method: "GET", pattern: /^\/second-review$/, handle: async (request) => {
       const state = await options.data.getSecondReview?.();

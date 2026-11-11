@@ -18,6 +18,7 @@ import {
   workspaceProjectIndexAttributes,
   when,
   DocumentStoreError,
+  type JsonValue,
   type StartDeveloperTaskRequest,
   type TransactItem,
 } from "@agentx/contracts";
@@ -33,6 +34,8 @@ import { loadOwnedTask, taskViewOf, type TaskView } from "./reads.js";
 import { toDocument, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 import { hashJson, iso, limitsOf, log, newId, redactedTitle, storedRequestText } from "./support.js";
 import { assertRepositoryHostsKnown } from "../../plugins/routing.js";
+import { codeHostMetaHeadReader } from "../meta-repo/head-reader.js";
+import { META_PREPARE_FEATURE, metaPrepareFor } from "../meta-repo/prepare-meta.js";
 import { setupAgentPointerItem } from "../setup-agent/agent.js";
 import { developerIdOf } from "../sessions/create.js";
 import { setupFailedMessage, setupStateOf } from "../setup-agent/check.js";
@@ -146,15 +149,33 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
   const requestText = storedRequestText(request.instructions);
   const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt });
 
+  // The project's playbook is read now, at the head of the default branch, and the task keeps the commit: every step of this task reads the file at it, so one task runs under one playbook. A file that cannot be
+  // used, or a host that does not answer, refuses the start with the reason: a task is never started under rules it cannot be given.
+  let playbookCommit: string | undefined;
+  try {
+    playbookCommit = await deps.standingInstructions?.pin(request.project);
+  } catch (error) {
+    if (error instanceof AgentXError) return refused(error);
+    throw error;
+  }
   const workspace: WorkspaceRecord = {
     ...workspaceKey(workspaceId), sk: "META", entityType: "WORKSPACE", id: workspaceId, companyId: deps.companyId, orgId: deps.companyId, ownerKey,
-    projectName: project.definition.name, projectRevision: revision, status: "PREPARING", activeOperationId: prepareOperationId, fence: 1,
+    projectName: project.definition.name, projectRevision: revision, ...(playbookCommit === undefined ? {} : { playbookCommit }), status: "PREPARING", activeOperationId: prepareOperationId, fence: 1,
     ...workspaceProjectIndexAttributes({ orgId: deps.companyId, projectName: project.definition.name, createdAt: receivedAt }),
     createdAt: receivedAt, updatedAt: receivedAt,
   };
+  // A project whose meta repository is separate from its code: the repository's head is pinned now, through the code host, and the worker materializes exactly that commit. A head that cannot be
+  // read refuses the start (a project's team rules are never skipped); the commit the worker reports is kept on the task only when it is this one.
+  let meta: Awaited<ReturnType<typeof metaPrepareFor>>;
+  try {
+    meta = await metaPrepareFor(project.definition, codeHostMetaHeadReader(deps.codeHosts, project.definition), deps.companyId);
+  } catch (error) {
+    if (error instanceof AgentXError) return refused(error);
+    throw error;
+  }
   const prepare = buildOperation(deps, {
     workspace, kind: "prepare", requestId: newId(deps), operationId: prepareOperationId, now: receivedAt, recordRequest: false,
-    dispatch: { kind: "prepare", projectRevision: revision, payload: {} },
+    dispatch: { kind: "prepare", projectRevision: revision, payload: meta.meta === undefined ? {} : { meta: JSON.parse(JSON.stringify(meta.meta)) as JsonValue }, ...(meta.meta === undefined ? {} : { requires: [META_PREPARE_FEATURE] }) },
     requester: { personId: developerId, provider: principal.provider },
   });
   const task: TaskRecord = {

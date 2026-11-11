@@ -170,4 +170,76 @@ export async function writeDesignReviewSetting(
   return applied;
 }
 
+/**
+ * Whether the company's lock refuses the design review setting a playbook file carries, as a sentence (field names only), or undefined when it holds. A READ: the page asks it to say why a file cannot be applied
+ * without writing; `syncPlaybookFromFile` does the same check again inside its transaction.
+ */
+export async function designReviewFileRefusal(store: Pick<DocumentStore, "get">, orgId: OrgId, setting: DesignReviewSetting): Promise<string | undefined> {
+  const check = checkDesignReviewWrite(setting, await readDesignReviewLock(store, orgId), false);
+  if (check.ok) return undefined;
+  return check.reason === "locked" ? `${check.fields.join(", ")}: ${DESIGN_REVIEW_LOCKED}` : `designReview: ${check.reason === "group_not_available" ? DESIGN_REVIEW_GROUP_EDITION : DESIGN_REVIEW_LOCK_UNREADABLE}`;
+}
+
+/** What a sync from the repository's playbook file did: nothing (the file is the one already stored), or a new revision of the item. */
+export type PlaybookFileSyncResult = { kind: "unchanged"; playbook: ProjectPlaybook } | { kind: "written"; playbook: ProjectPlaybook };
+
+/**
+ * Makes the item say what the repository's playbook file says (`core/playbook`): the file's design review setting (none when the file has none, which drops one an earlier file set), and the file's digest beside it so
+ * the same file is never written twice. It is the same write as `writeDesignReviewSetting` in everything that keeps a setting safe (the strict schema, the company's lock read into the transaction as a condition, the
+ * revision pinned, the audit steps in the same transaction) and the default process is left as it is. A digest equal to the stored one is no change, and an item no file wrote (the hosted install's) is left alone while
+ * there is no file. `fileDigest` is the one attribute Code adds; a hosted reader ignores it. Two syncs at once write once.
+ */
+export async function syncPlaybookFromFile(
+  deps: ProjectPlaybookWriter, input: { orgId: OrgId; project: string; actorId: string; designReview: DesignReviewSetting | undefined; fileDigest: string | undefined },
+): Promise<PlaybookFileSyncResult> {
+  const { orgId, project } = input;
+  for (let attempt = 0; ; attempt += 1) {
+    const item = await readItem(deps, orgId, project);
+    const detail = detailOfItem(item, orgId, project, { lenient: true });
+    const current = detail.playbook;
+    const storedDigest = typeof item?.["fileDigest"] === "string" ? item["fileDigest"] : undefined;
+    if (storedDigest === input.fileDigest) return { kind: "unchanged", playbook: current };
+    let carried: DesignReviewSetting | undefined;
+    let lockCheck: TransactItem | undefined;
+    if (input.designReview !== undefined) {
+      const valid = DesignReviewSettingSchema.safeParse(input.designReview);
+      if (!valid.success) throw agentXError("CONFIG_INVALID", `designReview${valid.error.issues[0] === undefined || valid.error.issues[0].path.length === 0 ? "" : `.${valid.error.issues[0].path.join(".")}`}: ${DESIGN_REVIEW_INVALID}`);
+      carried = valid.data;
+      const lock = await readDesignReviewLock(deps, orgId);
+      const check = checkDesignReviewWrite(carried, lock, false);
+      if (!check.ok) {
+        if (check.reason === "locked") throw agentXError("CONFIG_INVALID", `${check.fields.join(", ")}: ${DESIGN_REVIEW_LOCKED}`);
+        throw agentXError("CONFIG_INVALID", `designReview: ${check.reason === "group_not_available" ? DESIGN_REVIEW_GROUP_EDITION : DESIGN_REVIEW_LOCK_UNREADABLE}`);
+      }
+      lockCheck = lockRevisionCheck(orgId, lock);
+      // Only maintainers can be the high-risk approver in a file: naming people is a hosted setting (the file reader refuses it first; this is the same fail-closed rule as the settings write).
+      if (carried.highRiskApprover.kind === "people") throw agentXError("CONFIG_INVALID", `designReview: ${DESIGN_REVIEW_NAMED_PEOPLE_UNCHECKED}`);
+    }
+    const applied: ProjectPlaybook = { revision: current.revision + 1, defaultProcess: current.defaultProcess, ...(carried === undefined ? {} : { designReview: carried }) };
+    const at = new Date(deps.now()).toISOString();
+    const droppedUnreadable = detail.designReviewUnreadable && carried === undefined;
+    const designChanged = droppedUnreadable || canonicalJson(current.designReview ?? null) !== canonicalJson(applied.designReview ?? null);
+    const actor = { type: "system" as const, id: input.actorId };
+    const auditSteps: readonly TransactItem[] = deps.audit === undefined ? [] : [
+      ...deps.audit.stage({ eventId: `playbook.file_changed:${orgId}:${project}:${String(applied.revision)}`, companyId: orgId, at, actor, action: "playbook.file_changed", subject: { type: "project", id: project }, details: { revision: applied.revision, filePresent: input.fileDigest !== undefined } }),
+      ...(!designChanged ? [] : deps.audit.stage({
+        eventId: `playbook.design_review_changed:${orgId}:${project}:${String(applied.revision)}`, companyId: orgId, at, actor, action: "playbook.design_review_changed",
+        subject: { type: "project", id: project }, details: { revision: applied.revision, ...designReviewAuditFacts(droppedUnreadable ? { ...DESIGN_REVIEW_DEFAULT_SETTING, mode: "never" } : designReviewSettingOf(applied)) },
+      })),
+    ];
+    const written = await deps.transact([
+      {
+        kind: "put",
+        item: { ...projectPlaybookKey(orgId, project), entityType: "PROJECT_PLAYBOOK", orgId, ...JSON.parse(JSON.stringify(applied)) as Record<string, never>, ...(input.fileDigest === undefined ? {} : { fileDigest: input.fileDigest }), updatedAt: at, updatedBy: input.actorId },
+        condition: item === undefined ? when.absent() : when.and(when.eq("revision", current.revision), item["designReview"] === undefined ? when.notExists("designReview") : when.exists("designReview")),
+      },
+      ...(lockCheck === undefined ? [] : [lockCheck]),
+      ...auditSteps,
+    ]);
+    if (written.applied) return { kind: "written", playbook: applied };
+    // Another writer moved it first: read it again, and stop when it already says what the file says.
+    if (attempt >= 2) throw agentXError("PLAYBOOK_STALE", PLAYBOOK_STALE_MESSAGE);
+  }
+}
+
 export { DESIGN_REVIEW_DEFAULT_SETTING };

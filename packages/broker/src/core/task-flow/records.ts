@@ -63,6 +63,8 @@ export interface WorkspaceRecord {
   ownerKey: string;
   projectName: string;
   projectRevision: number;
+  /** The commit of the project's playbook the task pinned when it started (`StandingInstructionsSeam.pin`): every step of the task reads the file at it. Absent: the head of the default branch. */
+  playbookCommit?: string;
   status: WorkspaceStatus;
   /** The one operation that holds the workspace (single writer); null when none does. */
   activeOperationId: string | null;

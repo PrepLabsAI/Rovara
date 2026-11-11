@@ -245,6 +245,8 @@ the shape of Cloud's `CompanyInstructionsSource` so Cloud's port is a copy of th
 Code's adapter (`FileCompanyInstructions`, plug-in `@agentx/local-adapters/company-instructions`, the default of `rovara up`) reads `company-instructions.md` in the state folder (`~/.rovara` by default; a plug-in's default is the state folder the install runs from) at every call: bullets under `## Required` and `## Preferred`, a bullet with no
 heading is Required, a line it cannot place is refused (naming the line) instead of being dropped, and the file must be a plain file owned by the user and not writable by others, in a folder that is a real folder owned by the user and not writable by group or others. At most 64 KiB are read from the open file. The version is the SHA-256 of the file's bytes, so it is also the hash a task records.
 The file is outside every repository on purpose: a repository's writers cannot edit the company's rules.
+The core builds the rules into the step's system prompt (`core/instructions`): the dispatch reads them at every step, so a step started after the file changed carries the newest, puts them first (Required, then Preferred), then the project's How we work (`docs/how-we-work.md`),
+and refuses the step with a sentence when the file is over the limits, cannot be read, or the whole block is over the worker's limit. A worker that does not list `task.standingInstructions.v1` is refused the step, never sent it without the block.
 
 ### Team-record sources: the unknown-source rule (lane P6, item T1)
 

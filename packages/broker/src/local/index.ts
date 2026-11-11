@@ -16,3 +16,5 @@ export * from "./isolation/stack.js";
 export * from "./open-browser.js";
 // Port lane P5 (review M1): what `rovara up --check` says about a configured Bedrock provider, without loading it.
 export { describeBedrockSettings } from "../plugins/model-provider/bedrock/plugin.js";
+// How we work: the reader of `.rovara/playbook.yaml`, for `rovara playbook check` (it needs no running install).
+export { parsePlaybookText, playbookIsEmpty } from "../core/playbook/file.js";

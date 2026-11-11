@@ -51,6 +51,9 @@ import { readWorkflowE2EReplayRecord } from "../../core/e2e/replay.js";
 import { readWorkflowE2EGroundingRecord } from "../../core/e2e/grounding.js";
 import { operationKey, taskPointerKey, workspaceKey } from "../../core/task-flow/keys.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
+import { createStandingInstructions } from "../../core/instructions/step-block.js";
+import { createCodeHostPlaybookSource } from "../../core/playbook/source.js";
+import { createPlaybookService, type PlaybookService } from "../../core/playbook/service.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
 import { isTerminalStatus } from "../../core/task-flow/results.js";
@@ -75,6 +78,7 @@ import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
 import { createSessionRoutes } from "./session-routes.js";
 import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens.js";
+import { createLocalPlaybook } from "./playbook.js";
 import { createLocalSetupAgent, setupDecisionSubjects, type LocalSetupAgent } from "./setup-agent.js";
 
 import { createSessionStartExtras } from "./session-start.js";
@@ -176,6 +180,8 @@ export interface LocalApp {
   readonly modelGrants: ModelGrantSource;
   /** Script tokens: serving a request that carries one, and the settings the local pages and routes use. */
   readonly scriptTokens: LocalScriptTokens;
+  /** How we work: the project's playbook file (read through the code host), its effective view and what a draft would make. */
+  readonly playbook: PlaybookService;
   /** The setup agent: its routes, its page and the hosts the owner approved. */
   readonly setupAgent: LocalSetupAgent;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
@@ -256,6 +262,15 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
   const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs });
+  // How we work is the repository's `.rovara/playbook.yaml`, read through the code host at the default branch's head (a host nobody registered reads as no file). The company's rules come from the
+  // `company-instructions` point. Both are put in front of every step that reads them, at the dispatch (core/instructions).
+  const playbook = createPlaybookService({
+    companyId, store, audit: registry.require("audit-sink"), projects: projectSource, now: () => options.now?.() ?? new Date(),
+    source: createCodeHostPlaybookSource({ companyId, projects: projectSource, codeHosts: registry.names("code-host").length > 0 ? registry : undefined, ...(options.now === undefined ? {} : { now: () => options.now!().getTime() }) }),
+  });
+  const standingInstructions = createStandingInstructions({
+    companyId, playbook, ...(registry.names("company-instructions").length > 0 ? { company: registry.require("company-instructions") } : {}),
+  });
   // The browser and API checks: a finished round is verified from what the broker stored, against the owner, the project, the source and the runtime as they are now. This install keeps no runtime
   // registration for a round to stand on (see docs/local.md), so the authority has no `currentSelection` and no round passes; everything else about a round is checked as Cloud checks it.
   const e2e = {
@@ -278,6 +293,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
     projects: projectSource,
+    standingInstructions,
     e2e,
     repositoryGrants: grants,
     secondReview,
@@ -426,6 +442,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const scriptTokens = createLocalScriptTokens({ store, audit: registry.require("audit-sink"), now: () => clock().getTime(), log, companyId, owner, identity: registry.require("identity"), ...(options.scriptTokensEnabled === undefined ? {} : { enabled: options.scriptTokensEnabled }) });
   // The switch is off: every token made before is ended now, so turning it back on later revives nothing.
   await scriptTokens.revokeAllForSwitchOff().catch((error: unknown) => log({ event: "local_app.script_tokens_switch_off_failed", error: error instanceof Error ? error.name : "unknown" }));
+  const howWeWork = createLocalPlaybook({ playbook, store, companyId });
   // Fix with agent: the owner's own model, called through the model proxy (a one-shot operation of its own, capped), for the error a task shows.
   const diagnosis = createLocalDiagnosis({
     flow: flow.deps, registry, companyId, owner, tagKey: deriveKey(rootKey, "diagnosis-tag"), enabled: options.diagnosis ?? true, log, ...(options.now === undefined ? {} : { now: options.now }),
@@ -434,6 +451,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const pages = await createLocalPagesServer({
     data: {
       ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview, diagnosis, lessons }),
+      howWeWork: howWeWork.page,
       listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
       getChatPage: () => chat.view(),
       previewChatLink: (code) => chat.preview(code),
@@ -491,7 +509,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -559,7 +577,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, diagnosis, milestones, scriptTokens, setupAgent,
+    flow, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, diagnosis, milestones, scriptTokens, playbook, setupAgent,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

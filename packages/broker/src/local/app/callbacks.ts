@@ -24,6 +24,7 @@ import type { StepOutcome } from "../../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
 import { isTerminalStatus, recordOperationResult } from "../../core/task-flow/results.js";
 import { iso } from "../../core/task-flow/support.js";
+import { parseKnowledgeCommit } from "../../core/meta-repo/prepare-meta.js";
 import { PLAN_RETENTION } from "../../core/plan/store.js";
 import { processPlanAnswer } from "../../core/plan/process.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
@@ -177,7 +178,8 @@ async function readArtifactText(deps: CallbackDeps, operation: OperationRecord, 
 export async function readOutcome(deps: CallbackDeps, operation: OperationRecord, result: unknown): Promise<StepOutcome | undefined> {
   if (operation.kind === "prepare") {
     const base = WorkflowReviewBaseSchema.safeParse((result as { preparedBase?: unknown } | undefined)?.preparedBase);
-    return { kind: "prepared", ...(base.success ? { base: base.data } : {}) };
+    const knowledgeCommit = parseKnowledgeCommit(result);
+    return { kind: "prepared", ...(base.success ? { base: base.data } : {}), ...(knowledgeCommit === undefined ? {} : { knowledgeCommit }) };
   }
   if (operation.workflowMode === "SETUP_AGENT") return { kind: "setup-run", result: result ?? {} };
   if (operation.workflowMode === "UNDERSTAND") {

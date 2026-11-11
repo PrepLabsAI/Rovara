@@ -404,6 +404,16 @@ export const githubClientChecks: readonly GitHubClientConformanceCheck[] = [
     },
   },
   {
+    name: "the default branch's head: a branch the repository does not have is NOT_FOUND (not an outage), the one it has answers its head",
+    async run(world) {
+      await world.prepare();
+      const missing = await attempt(() => world.client.getDefaultBranchHead(world.repositoryUrl, "no-such-branch", world.scope));
+      expect(missing.ok).toBe(false);
+      if (!missing.ok) expect(missing.error).toMatchObject({ code: "NOT_FOUND" });
+      expect(await world.client.getDefaultBranchHead(world.repositoryUrl, "main", world.scope)).toMatch(/^[0-9a-f]{40}$/u);
+    },
+  },
+  {
     name: "inputs: a branch name or a path that is not safe never reaches an address",
     async run(world) {
       const fixture = await world.prepare();

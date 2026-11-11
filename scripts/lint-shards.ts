@@ -35,9 +35,10 @@ export const PROGRAM_DIRECTORY = "node_modules/.cache/lint-shards";
 /**
  * The shards before the catch-all. A shard is a group of paths linted together, and a path is a directory ("packages/broker") or, to
  * split a big directory, a glob over the files directly in it ("tests/contract/a*.ts"; only `*` and `?`, which eslint, the ignore
- * patterns and a tsconfig `include` all read the same way). tests/contract is split by the first letter of the file name: the
- * biggest shard bounds the memory of the whole run, and one process over all of tests/contract peaked at 4.5 GB. Anything in no
- * group (a file in tests/contract that starts with a digit, a new directory, files at the root) is linted by the last shard.
+ * patterns and a tsconfig `include` all read the same way). tests/contract and tests/unit are split by the first letter of the file name: the
+ * biggest shard bounds the memory of the whole run, and one process over all of tests/contract peaked at 4.5 GB (all of tests/unit passed the 4 GB cap
+ * of one shard). Anything in no group (a file in tests/contract or tests/unit that starts with a digit, a file in a folder of tests/unit that no shard names (the three there now are in tests-unit-folders; a big new one gets a shard of its own), a new directory, files
+ * at the root) is linted by the last shard.
  */
 export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly string[] }[] = [
   { name: "tests-contract-a-d", directories: ["tests/contract/a*.ts", "tests/contract/b*.ts", "tests/contract/c*.ts", "tests/contract/d*.ts"] },
@@ -45,11 +46,12 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   { name: "tests-contract-l-p", directories: ["tests/contract/l*.ts", "tests/contract/m*.ts", "tests/contract/n*.ts", "tests/contract/o*.ts", "tests/contract/p*.ts"] },
   { name: "tests-contract-r-s", directories: ["tests/contract/r*.ts", "tests/contract/s*.ts"] },
   { name: "tests-contract-t-z", directories: ["tests/contract/t*.ts", "tests/contract/u*.ts", "tests/contract/v*.ts", "tests/contract/w*.ts"] },
-  { name: "tests-unit-a-d", directories: ["tests/unit/a*.ts", "tests/unit/b*.ts", "tests/unit/c*.ts", "tests/unit/d*.ts"] },
-  { name: "tests-unit-e-l", directories: ["tests/unit/e*.ts", "tests/unit/f*.ts", "tests/unit/g*.ts", "tests/unit/h*.ts", "tests/unit/i*.ts", "tests/unit/j*.ts", "tests/unit/k*.ts", "tests/unit/l*.ts"] },
-  { name: "tests-unit-m-s", directories: ["tests/unit/m*.ts", "tests/unit/n*.ts", "tests/unit/o*.ts", "tests/unit/p*.ts", "tests/unit/q*.ts", "tests/unit/r*.ts", "tests/unit/s*.ts"] },
-  { name: "tests-unit-t-z", directories: ["tests/unit/t*.ts", "tests/unit/u*.ts", "tests/unit/v*.ts", "tests/unit/w*.ts", "tests/unit/x*.ts", "tests/unit/y*.ts", "tests/unit/z*.ts", "tests/unit/context-sources", "tests/unit/contracts"] },
-  { name: "tests-unit-lessons", directories: ["tests/unit/lessons"] },
+  { name: "tests-unit-a-d-f", directories: ["tests/unit/a*.ts", "tests/unit/b*.ts", "tests/unit/c*.ts", "tests/unit/d*.ts", "tests/unit/f*.ts"] },
+  { name: "tests-unit-e", directories: ["tests/unit/e*.ts"] },
+  { name: "tests-unit-g-q", directories: ["tests/unit/g*.ts", "tests/unit/h*.ts", "tests/unit/i*.ts", "tests/unit/j*.ts", "tests/unit/k*.ts", "tests/unit/l*.ts", "tests/unit/m*.ts", "tests/unit/n*.ts", "tests/unit/o*.ts", "tests/unit/p*.ts", "tests/unit/q*.ts"] },
+  { name: "tests-unit-r-v", directories: ["tests/unit/r*.ts", "tests/unit/s*.ts", "tests/unit/t*.ts", "tests/unit/u*.ts", "tests/unit/v*.ts"] },
+  { name: "tests-unit-w-z", directories: ["tests/unit/w*.ts", "tests/unit/x*.ts", "tests/unit/y*.ts", "tests/unit/z*.ts"] },
+  { name: "tests-unit-folders", directories: ["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/lessons"] },
   { name: "tests-integration", directories: ["tests/integration"] },
   { name: "tests-support", directories: ["tests/support"] },
   { name: "broker", directories: ["packages/broker"] },

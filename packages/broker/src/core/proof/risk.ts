@@ -19,6 +19,8 @@ export const RISK_SENSITIVE_PATH_PATTERNS: readonly RegExp[] = [
   /(^|\/)\.github\/workflows(\/|$)/,
   // Who must approve and how a branch is protected: a change to them changes the rules every later merge follows.
   /(^|\/)codeowners$/,
+  // How the project works (the playbook file) and what its meta repository configures: a merged change to them changes what every later task is told, and design review's cost and approvers.
+  /(^|\/)\.rovara\/(playbook|project)\.(ya?ml|json)$/,
   /(^|\/)\.github\/(settings\.ya?ml|rulesets?(\/|$)|branch[-_]protection[^/]*)$/,
   /\.(sql|tf)$/,
   /(^|\/)dockerfile$/,

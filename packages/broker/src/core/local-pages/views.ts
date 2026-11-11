@@ -8,6 +8,7 @@ export type LocalActionResult = { ok: true; message?: string } | { ok: false; re
 
 /** The approval a page offers. The id, revision and digest are what the person is looking at; the page signs them into its form. */
 import type { WorkBreakdownView } from "../work-breakdown/view.js";
+import type { HowWeWorkState } from "../playbook/service.js";
 import type { PlanSelfCheckView } from "../../developer/plan-self-check.js";
 
 export interface ApprovalOffer {
@@ -214,6 +215,16 @@ export interface ChatPageView {
 /** A token the page just made: the secret is shown on the answer to the form, once, and kept nowhere. */
 export type LocalCreateTokenResult = { ok: true; created: CreatedScriptToken } | { ok: false; reason: "refused" | "invalid" | "not_found"; message: string };
 
+/** How we work, as the page reads it: the effective view and where it came from (the file in the repository), for each registered project. */
+export type HowWeWorkPageState = HowWeWorkState;
+export interface HowWeWorkPageData {
+  projects(): Promise<string[]>;
+  /** `undefined`: no such project. */
+  state(project: string): Promise<HowWeWorkPageState | undefined>;
+  /** What a draft of the file would make, or what is wrong with it. Nothing is written. */
+  preview(project: string, draft: string): Promise<{ problems: Array<{ path: string; message: string }> } | { view: HowWeWorkState["view"] }>;
+}
+
 /** One website a setup run asked for, as the page shows it: the name, where the ask stands, and the offer to decide it while it is open. */
 export interface SetupHostAskView {
   host: string;
@@ -276,6 +287,8 @@ export interface LocalPageData {
   getProofReport(taskId: string): Promise<ProofReportView | undefined>;
   /** the owner's script tokens. Absent, or undefined: script tokens are off here and the page is not found. */
   listScriptTokens?(): Promise<ScriptTokensPageView | undefined>;
+  /** How we work: the project's playbook file and what a draft of it would make. Absent: the page is not found. */
+  howWeWork?: HowWeWorkPageData;
   /** The second review's settings page: the model list, the choice, the mode, the evidence and the notice. Absent: the page is not there. */
   getSecondReview?(): Promise<SecondReviewState | undefined>;
   /** The chat page. Absent, or undefined: no chat adapter is set up here and the page is not found. */

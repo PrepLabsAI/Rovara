@@ -14,6 +14,7 @@ import type {
   ProjectDefinition,
   QueueService,
   RegistryView,
+  StandingInstructionsPayload,
   TransactItem,
   TransactionalOutbox,
   WorkerMachines,
@@ -26,6 +27,7 @@ import type { RepositoryGrantService } from "../../repository-access.js";
 import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
 import type { StepOutcome } from "./outcome.js";
 import type { CodeMilestones } from "../merge/seams.js";
+import type { PlaybookMode } from "../playbook/service.js";
 import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
 import type { SecondReview } from "../second-review/service.js";
@@ -128,6 +130,16 @@ export interface BuildSteps {
   runRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING">;
   /** After a coding run, a rerun of the checks, the reviews or a publication ended (the operation's result is committed). Idempotent; never throws for a task that moved on. */
   onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void>;
+}
+
+/**
+ * Standing instructions: the block one operation carries in its system prompt (the company's rules and the project's How we work). `core/instructions` fills it. Read at every dispatch, so a step
+ * started after the rules changed carries the newest ones. A rejection with `CONFIG_INVALID` or `PROCESS_UNAVAILABLE` ends the operation with its sentence; any other waits and tries again.
+ */
+export interface StandingInstructionsSeam {
+  forOperation(input: { project: string; mode: PlaybookMode | undefined; purpose?: string | undefined; playbookCommit?: string | undefined }): Promise<StandingInstructionsPayload | undefined>;
+  /** The playbook commit a task starting now is pinned to, kept on its workspace; the task's steps read the file at it. Refuses (as `forOperation`) when the rules cannot be read, so a task does not start under rules it cannot be given. */
+  pin(project: string): Promise<string | undefined>;
 }
 
 /**
@@ -251,6 +263,8 @@ export interface TaskFlowDeps {
   secondReview?: Pick<SecondReview, "prepare" | "opinionOf" | "prLines" | "mergeWait" | "operationEnded" | "releaseHold">;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
+  /** The company's rules and the project's How we work, put in front of every step that reads them. Absent: no block (the step is exactly what it was before). */
+  standingInstructions?: StandingInstructionsSeam;
   /** Whether a message to a running step is handed to the worker as it is sent (the kill switch, default on). Off: a message is a note, read by the next step. */
   liveSteer?: boolean;
   /** Whether the planning, understanding and coding steps read the people's notes (the flip-back setting, default on). Off: notes are saved and no step reads them. */

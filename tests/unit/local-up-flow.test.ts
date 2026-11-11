@@ -85,6 +85,8 @@ function fakeGithub(token: string, options: { canPush?: boolean } = {}): { fetch
     calls.push(`${init?.method ?? "GET"} ${url.pathname}`);
     if (new Headers(init?.headers).get("authorization") !== `Bearer ${token}`) return Response.json({ message: "Bad credentials" }, { status: 401 });
     if (url.pathname === "/repos/example/demo") return Response.json({ id: 77, full_name: "example/demo", owner: { login: "example", id: 5, type: "User" }, permissions: { push: options.canPush !== false, pull: true } });
+    // The default branch's head (the project's rules are read at it when a task starts); the playbook file is not there (404), which is a project with no rules, never a refusal.
+    if (url.pathname === "/repos/example/demo/git/ref/heads/main") return Response.json({ ref: "refs/heads/main", object: { type: "commit", sha: "a".repeat(40) } });
     return Response.json({ message: "Not Found" }, { status: 404 });
   };
   return { fetch: fetchImplementation, calls };

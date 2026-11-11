@@ -6,7 +6,7 @@ import type { PlanDocument, WorkflowArtifact, WorkflowCheckProposal, WorkflowRev
 
 export type StepOutcome =
   /** The workspace is prepared; `base` is the commit each repository was checked out at. */
-  | { kind: "prepared"; base?: WorkflowReviewBase }
+  | { kind: "prepared"; base?: WorkflowReviewBase; /** The meta repository's commit the worker materialized, when it reports one. Kept only if it is the one the broker chose for this preparation. */ knowledgeCommit?: string }
   /** Understand's assessment as the broker checked it; an answer also names the file it was read from. */
   | { kind: "understood"; assessment: unknown; answerArtifact?: { id: string; objectKey: string; createdAt: string } }
   /**

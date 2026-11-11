@@ -45,6 +45,7 @@ import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecor
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
 import type { StepOutcome } from "./outcome.js";
+import { knowledgeCommitToStore } from "../meta-repo/prepare-meta.js";
 import { SETUP_AGENT_FEATURE } from "@agentx/contracts";
 import { setupAgentWireOf } from "../setup-agent/agent.js";
 import { endSetupAgentTask } from "../setup-agent/end.js";
@@ -460,6 +461,12 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
 
   if (operation.kind === "prepare") {
     if (!succeeded) return;
+    // The meta repository's commit is the one the broker chose for this preparation, kept only when the worker reports exactly it (a worker or an old manifest never decides it).
+    if (ended.outcome?.kind === "prepared" && task.knowledgeCommit === undefined) {
+      const chosen = (operation.dispatch.payload["meta"] as { commit?: unknown } | undefined)?.commit;
+      const keep = knowledgeCommitToStore(typeof chosen === "string" ? chosen : undefined, { knowledgeCommit: ended.outcome.knowledgeCommit });
+      if (keep !== undefined) await deps.store.update({ key: taskKey(task.taskId), ops: [change.set("knowledgeCommit", keep), change.set("updatedAt", iso(deps))], condition: when.notExists("knowledgeCommit") });
+    }
     if (ended.outcome?.kind === "prepared" && ended.outcome.base !== undefined && task.preparedBase === undefined) {
       await deps.store.update({ key: taskKey(task.taskId), ops: [change.set("preparedBase", toDocument(ended.outcome.base)), change.set("updatedAt", iso(deps))], condition: when.notExists("preparedBase") });
     }
