@@ -965,6 +965,28 @@ export class ControlPlaneStack extends Stack {
       }).addAlarmAction(notifyOperator);
       // Spec 025 E14 (C14): the interactivity route hands Slack Confirm and Cancel presses to the broker.
       slackIngress.addEnvironment("ADMIN_CHANGES", "enabled");
+      // Spec 062 Phase 7c3b: the channel API takes Slack's presses and forms for the built-in adapter: admin change
+      // presses, the Details view (the same field-limited read of one turn record) and a ChatGPT connection finished in
+      // an asynchronous invoke of itself (a policy of its own, so the function does not wait on it).
+      if (slackChannelAdapter !== undefined) {
+        const channelApi = slackChannelAdapter.ingress;
+        channelApi.addEnvironment("ADMIN_CHANGES", "enabled");
+        channelApi.addEnvironment("TURN_RECORDS_TABLE_NAME", turnRecords.tableName);
+        channelApi.addToRolePolicy(new iam.PolicyStatement({
+          actions: ["dynamodb:GetItem"],
+          resources: [turnRecords.tableArn],
+          conditions: {
+            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
+            "ForAllValues:StringEquals": { "dynamodb:Attributes": TURN_DETAILS_READ_ATTRIBUTES },
+            StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+            Null: { "dynamodb:Attributes": "false" },
+          },
+        }));
+        new iam.Policy(this, "ChannelApiSelfInvoke", {
+          roles: [channelApi.role!],
+          statements: [new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: [channelApi.functionArn] })],
+        });
+      }
       // Spec 025 E14, FR-052: the interactivity route logs a press with its change's trace ID; it may
       // read only that attribute and the keys, by key.
       slackIngress.addToRolePolicy(new iam.PolicyStatement({

@@ -15,13 +15,16 @@ import {
   confirmationBlocks,
   conversationFromSlackThread,
   inboundFromSlackRequest,
+  ChannelActionAnswerSchema,
   slackBlocksOf,
+  slackModalOf,
   slackThreadOf,
   slackThreadSubject,
   usableWebhookSecret,
   verifyWebhook,
   webhookHeaders,
   type ChannelAction,
+  type ChannelActionAnswer,
   type ChannelCommand,
   type ChannelEvent,
   type DirectoryUser,
@@ -374,6 +377,15 @@ export function createSlackChannelCommandsHandler(deps: SlackChannelCommandsDepe
       }
       case "delete_document":
         return { deleted: (await deleteTaskPlanCanvas(token, command.documentId, fetchFn)) === "deleted" };
+      // Phase 7c3b: a form still open, updated by the handle its submission gave (Slack's view ID).
+      case "update_form": {
+        const response = await slackWebFetch("views.update", token, { body: { view_id: command.handle, view: slackModalOf(command.form) }, signal: AbortSignal.timeout(5_000) }, fetchFn)
+          .catch(() => { throw new Unanswered("views.update"); });
+        const body = await response.json().catch(() => undefined) as { ok?: unknown; error?: unknown } | undefined;
+        if (response.status === 429 || response.status >= 500 || body === undefined) throw new Unanswered("views.update");
+        if (body.ok !== true) throw new Refused(typeof body.error === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(body.error) ? body.error : "no_error_code", "Slack refused views.update");
+        return { updated: true };
+      }
       // Phase 7c1b: the directory's reads.
       case "user":
         try {
@@ -486,6 +498,43 @@ export function slackAdapterSecretReader(secretsManager: Pick<SecretsManagerClie
       return undefined;
     }
   };
+}
+
+/**
+ * Phase 7c3b: sends one action and waits for the core's answer: the form to open, or what to do with a submitted one.
+ * Undefined when the channel API queued it instead. Throws on no answer within `timeoutMs`.
+ */
+export function createSlackChannelActionClient(deps: SlackChannelForwarderDependencies): (action: ChannelAction, timeoutMs: number) => Promise<ChannelActionAnswer | undefined> {
+  const fetchFn = deps.fetch ?? fetch;
+  const now = deps.now ?? Date.now;
+  const url = new URL(`/v1/channels/${SLACK_CHANNEL}/actions`, deps.channelApiUrl);
+  return async (action, timeoutMs) => {
+    const body = JSON.stringify(ChannelActionSchema.parse(action));
+    const secret = await deps.secret();
+    const headers = { "content-type": "application/json", ...webhookHeaders({ secret, id: `act_${randomUUID()}`, timestamp: Math.floor(now() / 1_000), body }) };
+    const response = await fetchFn(url, { method: "POST", headers, body, redirect: "error", signal: AbortSignal.timeout(Math.max(200, timeoutMs)) });
+    const json: unknown = await response.json().catch(() => undefined);
+    if (response.status === 202) return undefined;
+    const answer = ChannelActionAnswerSchema.safeParse(json);
+    if (response.status !== 200 || !answer.success) throw new Error(`the channel API did not answer the action: HTTP ${response.status}`);
+    return answer.data;
+  };
+}
+
+/** The action client when the deployment routes Slack through the channel API; otherwise undefined. */
+export function slackChannelActionClientFromEnvironment(secretsManager: Pick<SecretsManagerClient, "send">): ReturnType<typeof createSlackChannelActionClient> | undefined {
+  const channelApiUrl = process.env.CHANNEL_API_URL;
+  const secretName = process.env.SLACK_ADAPTER_SECRET_NAME;
+  if (process.env.SLACK_VIA_CHANNEL !== "enabled" || !channelApiUrl || !secretName) return undefined;
+  const read = slackAdapterSecretReader(secretsManager, secretName);
+  return createSlackChannelActionClient({
+    channelApiUrl,
+    async secret() {
+      const value = await read();
+      if (value === undefined) throw new Error("the Slack adapter's signing secret could not be read");
+      return value;
+    },
+  });
 }
 
 /**

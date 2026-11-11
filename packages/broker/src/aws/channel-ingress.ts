@@ -77,7 +77,7 @@ export interface ChannelIngressDependencies {
 /** Decides one built-in adapter message, in the bound space's project. */
 export type ChannelSurface = (message: InboundMessage, context: { projectName: string }) => Promise<{ statusCode: number; body: string }>;
 /** Runs one built-in adapter action, or answers undefined for one it does not run. */
-export type ChannelActionSurface = (action: ChannelAction, context: { projectName: string }) => Promise<{ statusCode: number; body: string } | undefined>;
+export type ChannelActionSurface = (action: ChannelAction, context: { projectName?: string }) => Promise<{ statusCode: number; body: string } | undefined>;
 
 export interface ChannelIngressEvent {
   rawPath?: string;
@@ -152,9 +152,17 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
       const item = parsed.data;
       if (item.channel !== adapter.channel) return refuse(403, "channel_mismatch");
       const { actor } = item;
-      // FR-071: an action on a direct message has no conversation; those arrive with the task workflow (Phase 7c).
+      // FR-071: an action on a direct message, or a submitted form, has no conversation. Phase 7c3b: the built-in
+      // adapter's are run by its press handler, which checks the person's access to the task itself; any other is refused.
       const conversation = item.conversation;
-      if (conversation === undefined) return refuse(400, "conversation_required");
+      if (conversation === undefined) {
+        const direct = adapter.builtIn === true && kind === "actions" ? deps.actionSurfaces?.[adapter.channel] : undefined;
+        const handled = direct === undefined ? undefined : await direct(ChannelActionSchema.parse(item), {});
+        if (handled === undefined) return refuse(400, "conversation_required");
+        if (handled.statusCode >= 500) throw new Error(`the ${adapter.channel} press handler answered ${handled.statusCode}`);
+        log({ event: "pressed", channel: adapter.channel, statusCode: handled.statusCode });
+        return { statusCode: handled.statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: handled.body };
+      }
       if (actor.tenant !== conversation.tenant) return refuse(403, "actor_tenant_mismatch");
 
       const binding = await deps.getBinding({ channel: conversation.channel, tenant: conversation.tenant, space: conversation.space });

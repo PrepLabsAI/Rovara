@@ -216,6 +216,13 @@ The protocol grows by three primitives, each behind a capability an adapter decl
   keep the pull request, PR feedback decisions, Quick, Full and Just answer) is handed to the channel API as an action
   carrying the pressed message's ID and text, after Slack has its answer, and runs there with the same request ID.
   Its private notes and card edits go through the adapter's commands. Presses that open a form follow in Phase 7c3b.
+- **FR-080 (forms):** a press that opens a form is answered synchronously with the form (read-only parts and fields:
+  text, multiline, select, multiselect, checkboxes, radio, person), which the adapter opens within its surface's limit.
+  A submitted form comes back as an action with the form as shown, the core's `state`, each field's typed value, and
+  the surface's handle for the open form; the core answers by closing it, showing errors on its fields, or replacing
+  it, and may later replace a form still open (`update_form`). The built-in adapter's form submissions and its
+  direct-message presses (an admin change's Confirm and Cancel) carry no conversation; the core checks the person's
+  access itself. Every modal the core opens reads as a form that renders back to the same Slack modal.
 
 Phases: 7a the primitives (contracts, signing, the core's command client, capabilities); 7b Slack's conversation path
 through the adapter behind `SlackViaChannel`; 7c the task workflow, notices and directory through the adapter, in parts

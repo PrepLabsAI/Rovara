@@ -61,9 +61,11 @@ describe("a press as a channel action", () => {
     expect(seen.responseUrl.startsWith("channel-reply:")).toBe(true);
   });
 
-  it("is made only for presses that open no form, from the thread's own workspace", () => {
-    expect(channelActionOfPress(press({ actionId: "agentx_workflow_approve" }))).toBeUndefined();
-    expect(channelActionOfPress(press({ actionId: "agentx_task_people" }))).toBeUndefined();
+  it("is made only for presses the core takes, from the thread's own workspace", () => {
+    // Phase 7c3b: presses that open a form are taken too (answered at once with the form).
+    expect(channelActionOfPress(press({ actionId: "agentx_workflow_approve" }))).toBeDefined();
+    expect(channelActionOfPress(press({ actionId: "rovara_chatgpt_open" }))).toBeUndefined();
+    expect(channelActionOfPress(press({ actionId: "someone_elses_button" }))).toBeUndefined();
     expect(channelActionOfPress(press({ userTeamId: "T0OTHERORG1" }))).toBeUndefined();
     expect(ROUTED_SLACK_PRESSES.has(WORKFLOW_PATH_QUICK_ACTION)).toBe(true);
   });
