@@ -1,6 +1,6 @@
 // Slice 1, s1-sealed: source guards for the sealed check round (TS-SEAL-3) and for where the usage record may go (TS-SEAL-1 bandwidth). They scan every `packages/*/src` file, so a new importer fails here until someone
 // names it on purpose. The scanner is a pure function over {path, text}, and the tests below feed it bad sources to show that it fails, so the guard is not passing on an empty search.
-import { readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -24,13 +24,13 @@ export const PUBLIC_SEALED_ROUND_NAMES: readonly string[] = ["runSealedCheckRoun
  * with the record and the round's output (they carry what the sandbox's program chose to print or ask for).
  */
 export const SEALED_ROUND_USERS: readonly string[] = [`${W}check-round-runners.ts`, `${W}service-usage-record.ts`, `${W}test-services-run.ts`, `${W}run-task.ts`, `${W}prepare.ts`];
-/** The record's contract type and schema (`TestServicesUsageRecord`, ...): the contract itself, the worker that builds it, and the broker modules that turn it into evidence and Prove steps (s1-broker T4, T5). */
+/** The record's contract type and schema (`TestServicesUsageRecord`, ...): the contract itself, the worker that builds it, and the broker modules that keep it and turn it into Prove steps (s1-broker T4, T5). */
 export const USAGE_RECORD_USERS: readonly string[] = [
   "packages/contracts/src/test-services-usage.ts", "packages/contracts/src/index.ts",
   // the evidence file the worker writes (EvidenceRawSchema) carries the record under `testServices`, so evidence.ts imports its schema (s1-broker T4)
   "packages/contracts/src/evidence.ts", `${W}service-usage-record.ts`, `${W}test-services-run.ts`, `${W}verification/evidence-raw.ts`,
-  "packages/broker/src/rovara-code/evidence-pack.ts", "packages/broker/src/test-env/evidence-line.ts", "packages/broker/src/test-env/prove-from-setup-check.ts",
-  "packages/broker/src/org/test-env-candidate.ts", "packages/broker/src/aws/developer-routes/test-environment-candidate.ts",
+  // Code's broker keeps the test environment under core/test-env/: candidate-check.ts keeps the record on the candidate check (recordCandidateUsage, keepCandidateUsage) and prove-from-setup-check.ts derives the two Prove steps from it
+  "packages/broker/src/core/test-env/candidate-check.ts", "packages/broker/src/core/test-env/prove-from-setup-check.ts",
 ];
 
 const SEALED_MODULES = /["'][^"']*\/(?:check-round-runners|service-usage-record)(?:\.js|\.ts)?["']/u;
@@ -114,11 +114,16 @@ describe("the sealed round's source guards", () => {
     }
     // The allowed ones pass.
     expect(bad(`${W}test-services-run.ts`, 'import { buildServiceUsageRecord } from "./service-usage-record.js";\nimport { runSealedCheckRound } from "./check-round-runners.js";\nimport type { TestServicesUsageRecord } from "@agentx/contracts";')).toEqual([]);
-    expect(bad("packages/broker/src/rovara-code/evidence-pack.ts", 'import type { TestServicesUsageRecord } from "@agentx/contracts";')).toEqual([]);
+    expect(bad("packages/broker/src/core/test-env/candidate-check.ts", 'import type { TestServicesUsageRecord } from "@agentx/contracts";')).toEqual([]);
   });
 
   it("the allowlists name files that exist or are the planned wiring, and nothing agent-facing", () => {
     const agentFacing = /(?:^|\/)(?:agent-run\/|pi-session|agent-step|setup-agent|read-.*-tool|sandbox-file-tools|model-|understand|plan-|conversations|learned-|steer-invocation|diagnosis|context-)/u;
     for (const path of [...SEALED_ROUND_USERS, ...USAGE_RECORD_USERS]) expect(agentFacing.test(path.slice(path.lastIndexOf("/src/") + 5)), path).toBe(false);
+  });
+
+  it("every allowlisted file exists, so a path left behind by a move cannot silently allow a new file", async () => {
+    const repo = new URL("../../", import.meta.url).pathname;
+    for (const path of [...SEALED_ROUND_USERS, ...USAGE_RECORD_USERS]) await expect(access(join(repo, path)), path).resolves.toBeUndefined();
   });
 });
