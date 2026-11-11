@@ -211,7 +211,10 @@ and answer HTTP 200:
 | `update_message` | `--edits` | `updated` |
 | `start_conversation` | `--start-conversations` | `thread` |
 | `create_document`, `delete_document` | `--documents` | `documentId` and `url`; `deleted` |
-| `space_members`, `user`, `user_by_email` | `--directory` | `members` and `nextCursor`; `user`; `userId` |
+| `space_members`, `user`, `user_by_email` | `--directory` | `members` and `nextCursor`; `user` (none for someone you don't know) |
+| `space`, `spaces`, `check` | `--directory` | a space's `name` and `private` (none if you don't know it); a page of public `spaces`; the `tenant` you serve |
+
+A directory `user` is `{ userId, tenant?, linkedTenants?, name?, displayName?, realName?, email?, bot, deleted, external? }`.
 
 An `ok: false` answer, or a 4xx, means you did nothing. A 5xx or no answer means the command may have run.
 
