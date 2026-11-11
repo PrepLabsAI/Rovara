@@ -14,6 +14,14 @@ export interface AdapterAddOptions {
   threads?: boolean;
   edits?: boolean;
   proactive?: boolean;
+  /** Spec 062 Phase 7: the richer capabilities, each off unless given. */
+  ephemeral?: boolean;
+  direct?: boolean;
+  forms?: boolean;
+  documents?: boolean;
+  directory?: boolean;
+  startConversations?: boolean;
+  commandsUrl?: string;
   stepUp: string;
   rotate?: boolean;
   secretFile?: string;
@@ -49,15 +57,27 @@ export function stepUpOption(value: string): StepUpKind[] {
   return [...new Set(kinds as StepUpKind[])];
 }
 
+/** The Phase 7 capabilities an adapter declares; one not given is left out, which means off. */
+const RICH_CAPABILITIES = ["ephemeral", "direct", "forms", "documents", "directory", "startConversations"] as const;
+/** The capabilities that are sent to the adapter as commands, and so need its commands URL. */
+const COMMAND_CAPABILITIES: ReadonlySet<(typeof RICH_CAPABILITIES)[number]> = new Set(["documents", "directory", "startConversations"]);
+
 export function adapterRegistration(options: AdapterAddOptions) {
+  const rich = Object.fromEntries(RICH_CAPABILITIES.filter((name) => options[name] === true).map((name) => [name, true]));
+  const needsCommands = RICH_CAPABILITIES.filter((name) => options[name] === true && COMMAND_CAPABILITIES.has(name));
+  if (needsCommands.length > 0 && options.commandsUrl === undefined) {
+    throw agentXError("CONFIG_INVALID", `--commands-url is required with ${needsCommands.map((name) => `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`).join(", ")}: Rovara asks the adapter there`);
+  }
   return {
     callbackUrl: options.callbackUrl,
+    ...(options.commandsUrl === undefined ? {} : { commandsUrl: options.commandsUrl }),
     capabilities: {
       threads: options.threads === true,
       buttons: whole(options.buttons, "--buttons", 0, 10),
       edits: options.edits === true,
       maxTextLength: whole(options.maxText, "--max-text", 200, 100_000),
       proactive: options.proactive === true,
+      ...rich,
     },
     projects: projectsOption(options.projects),
     stepUp: stepUpOption(options.stepUp),
@@ -80,6 +100,13 @@ export function registerAdapterCommands(program: Command, context: SetupCommandC
     .option("--threads", "the adapter shows threads")
     .option("--edits", "the adapter can edit a message it posted")
     .option("--proactive", "the adapter can message a conversation first")
+    .option("--ephemeral", "the adapter can show a message to one person only")
+    .option("--direct", "the adapter can message a person outside any conversation")
+    .option("--forms", "the adapter opens a form a button names and posts what was filled in")
+    .option("--documents", "the adapter can make and remove documents a space can read (needs --commands-url)")
+    .option("--directory", "the adapter can list a space's members and look people up (needs --commands-url)")
+    .option("--start-conversations", "the adapter can start a conversation in a space (needs --commands-url)")
+    .option("--commands-url <url>", "the public https URL Rovara sends commands to and waits for the answer")
     .option("--step-up <kinds>", "decisions only a signed-in person can make on the task page: plan_approval, admin, both, or none", "plan_approval,admin")
     .option("--rotate", "replace the signing secret")
     .option("--secret-file <path>", "write a new signing secret to this file (mode 600) instead of printing it")

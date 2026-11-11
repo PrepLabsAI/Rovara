@@ -32,6 +32,11 @@ agentx --env staging adapter add whatsapp \
 - The command prints the adapter's signing secret once. Give it to the adapter; Rovara keeps it in Secrets Manager
   and never shows it again. Use `--secret-file <path>` to write it to a private file instead.
 - `--projects` limits the projects the adapter's spaces may be bound to. You must administer each one.
+- `--threads`, `--edits` and `--proactive` say the adapter shows threads, can edit a message it posted, and may message
+  a conversation first. `--ephemeral` (a message one person sees), `--direct` (a message to a person outside any
+  conversation) and `--forms` (a form a button opens) turn on richer messages. Each is off unless given.
+- `--documents`, `--directory` and `--start-conversations` let Rovara ask the adapter to make documents, look people
+  up and start conversations. They need `--commands-url`, where Rovara sends those commands and waits for the answer.
 - `--step-up` (default `plan_approval,admin`) lists the decisions only a signed-in person can make on the task page.
   An adapter can't approve those, by button or by reply.
 - Run `adapter add` again to change the settings; the secret stays. Add `--rotate` to replace it.
@@ -111,6 +116,19 @@ threads. The actor's `tenant` must equal the conversation's.
 `decision` is `APPROVE`, `REQUEST_CHANGES`, `REJECT` or `SKIP`. For an action confirmation, anything but `APPROVE`
 cancels. Without buttons, people can also reply `yes` or `cancel` as a message.
 
+`POST /v1/channels/{channel}/actions` carries a press of a button or select, or a submitted form, on a message Rovara
+sent. It echoes the action's `actionId` and `value`, and the message's `key` when it had one. A button that declares a
+form is opened by the adapter itself, and only the submission is posted:
+
+```json
+{
+  "version": 1, "channel": "whatsapp", "eventId": "wamid.HBgL3",
+  "conversation": { "...": "as above" }, "actor": { "...": "as above" },
+  "actionId": "workflow.changes", "value": "42", "form": { "note": "keep the old menu" }, "messageKey": "task:42:plan",
+  "receivedAt": "2026-11-08T10:03:00.000Z"
+}
+```
+
 Rovara drops a repeated `eventId`, so resending after a failure is safe.
 
 ### Signing
@@ -151,7 +169,7 @@ Rovara posts each event to your callback URL, signed as above, with the event's 
 | `type` | `data` | Show it as |
 |---|---|---|
 | `ack` | `inReplyTo` | Optional: a reaction or "typing" on that message |
-| `message` | `text` | A message in the conversation |
+| `message` | `text`, optional `key`, `parts`, `actions`, `audience` | A message in the conversation (see below) |
 | `approval_request` | `text`, `kind`, `requestId`, `expectedRevision`, `artifactDigest`, optional `taskUrl` and `actions` | A message with buttons for `actions`; with no `actions`, the text already says how to answer |
 | `done` | optional `inReplyTo`, `text` | The request finished; stop any typing indicator |
 | `link_required` | `linkUrl`, `expiresAt`, `actor` | A private message to that actor with the link |
@@ -159,6 +177,41 @@ Rovara posts each event to your callback URL, signed as above, with the event's 
 
 Text is plain, cut to your `--max-text`. Rovara sends no more buttons than `--buttons` allows.
 
+A `message` may be richer, by what you declared:
+
+- `parts`, when present, are the message's whole rich form, in order: `section`, `fields`, `context`, `divider`,
+  `image` and `actions` (buttons placed among them). `text` is its plain form: show it where you cannot show parts.
+- `actions` are buttons (`actionId`, `value`, `label`), links, selects and, with `--forms`, form buttons.
+- `key` names the message: a later one with the same key replaces it if you declared `--edits`; otherwise post it as
+  a new message.
+- `audience` of `ephemeral` shows it to that one person only (`--ephemeral`); a `direct` event goes to one person
+  outside any conversation (`--direct`). Rovara never sends either to an adapter that cannot keep it private.
+
+Events of one conversation reach you in the order Rovara sent them: a later one waits while an earlier one is retried.
+
 Answer 2xx once you have the event. Rovara retries 408, 429, 5xx and network errors, waiting from 10 seconds up to 15
 minutes between tries, then gives up after 8 tries. It drops an event on any other 4xx or a redirect. The callback must
 be public HTTPS: Rovara refuses private addresses and never follows redirects. Use the event `id` to drop repeats.
+
+### Commands from Rovara
+
+With `--commands-url`, Rovara sends commands there and waits up to 10 seconds (25 for documents) for the answer. Each
+is signed as above with its own `id` (`cmd_…`) as `webhook-id`; sign your answer the same way, with the same `id`,
+and answer HTTP 200:
+
+```json
+{ "ok": true, "result": { "messageId": "…", "space": "…" } }
+{ "ok": false, "error": { "code": "channel_not_found", "message": "for an administrator" } }
+```
+
+| `kind` | Needs | Answers |
+|---|---|---|
+| `post_message` | `--proactive` | `space`, `messageId` (none for a private message), `thread` |
+| `direct_message` | `--direct` | `space`, `messageId` |
+| `update_message` | `--edits` | `updated` |
+| `start_conversation` | `--start-conversations` | `thread` |
+| `create_document`, `delete_document` | `--documents` | `documentId` and `url`; `deleted` |
+| `space_members`, `user`, `user_by_email` | `--directory` | `members` and `nextCursor`; `user`; `userId` |
+
+An `ok: false` answer, or a 4xx, means you did nothing. A 5xx or no answer means the command may have run.
+
