@@ -287,7 +287,7 @@ export const CONTROL_PLANE_LAMBDAS = {
   "eval-batch-tick": { logicalId: "EvalBatchTickA4585B04", entry: "packages/broker/src/aws/eval-batch-tick.ts" },
   "developer-sign-in": { logicalId: "DeveloperSignInFunction10B62B05", entry: "packages/broker/src/aws/developer-identity.ts" },
   "developer-task-notifier": { logicalId: "DeveloperTaskNotifierFunction551419CC", entry: "packages/broker/src/aws/developer-task-notifier.ts" },
-  "channel-ingress": { logicalId: "ChannelApiIngress9235D30E", entry: "packages/broker/src/aws/channel-ingress.ts" },
+  "channel-ingress": { logicalId: "ChannelApiIngress9235D30E", entry: "packages/broker/src/aws/channel-api-lambda.ts" },
   "channel-event-sender": { logicalId: "ChannelApiEventSenderDECD5203", entry: "packages/broker/src/aws/channel-events.ts" },
   "sessions-steps": {
     logicalId: "SessionsSteps3B98DD2B", entry: "packages/broker/src/aws/session-steps.ts",
