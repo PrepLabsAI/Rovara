@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { z } from "zod";
 import { ActorRefSchema, ChannelIdSchema, ChannelOpaqueIdSchema, ConversationRefSchema, InboundMessageSchema, SLACK_CHANNEL, type ActorRef, type ConversationRef } from "./conversation.js";
 import { publicHttpsUrlSchema } from "./mcp-connector.js";
+import { ChannelFormSchema, ChannelFormSubmissionSchema } from "./channel-forms.js";
 import { AgentXNameSchema } from "./project.js";
 
 /**
@@ -81,7 +82,7 @@ export type ChannelAdapterRecord = z.infer<typeof ChannelAdapterRecordSchema>;
  * and the directory (Phase 7c).
  */
 export const BUILT_IN_ADAPTER_CAPABILITIES: ChannelCapabilities = {
-  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true, direct: true, documents: true, directory: true,
+  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true, direct: true, documents: true, directory: true, forms: true,
 };
 
 /** FR-073: the built-in adapter's record, made from the deployment's settings rather than read from the registry. */
@@ -158,6 +159,8 @@ export const ChannelActionSchema = z.object({
   /** Phase 7c3: the pressed message's own ID in its space, and its text as shown, where the surface has them. */
   messageId: ChannelOpaqueIdSchema.optional(),
   messageText: z.string().max(40_000).optional(),
+  /** Phase 7c3b (FR-080): a submitted form the core opened; `actionId` is the form's ID. */
+  formSubmission: ChannelFormSubmissionSchema.optional(),
   receivedAt: z.string().datetime(),
 }).strict().superRefine((action, context) => {
   if (action.conversation !== undefined && action.conversation.channel !== action.channel) context.addIssue({ code: "custom", path: ["conversation", "channel"], message: "must equal channel" });
@@ -373,6 +376,7 @@ export const COMMAND_CAPABILITY = {
   post_message: "proactive",
   direct_message: "direct",
   update_message: "edits",
+  update_form: "forms",
   create_document: "documents",
   delete_document: "documents",
   space_members: "directory",
@@ -405,6 +409,8 @@ export const ChannelCommandSchema = z.discriminatedUnion("kind", [
   }).strict(),
   /** A message to one person outside any conversation; answers where it went and its ID. */
   z.object({ ...commandBase, kind: z.literal("direct_message"), to: ActorRefSchema, message: z.object(richMessage).strict() }).strict(),
+  /** Phase 7c3b: replaces a form still open, by the handle its submission gave. */
+  z.object({ ...commandBase, kind: z.literal("update_form"), handle: z.string().min(1).max(255), form: ChannelFormSchema }).strict(),
   /** Replaces a message the adapter posted for the core. */
   z.object({ ...commandBase, kind: z.literal("update_message"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, messageId: ChannelOpaqueIdSchema, message: z.object(richMessage).strict() }).strict(),
   /** A titled Markdown document people in the space can read, such as a task's plan; answers its ID and link. */
@@ -448,6 +454,7 @@ export const ChannelCommandResultSchemas = {
   post_message: z.object({ space: ChannelOpaqueIdSchema, messageId: ChannelOpaqueIdSchema.optional(), thread: ChannelOpaqueIdSchema.optional() }).strict(),
   direct_message: z.object({ space: ChannelOpaqueIdSchema, messageId: ChannelOpaqueIdSchema }).strict(),
   update_message: z.object({ updated: z.literal(true) }).strict(),
+  update_form: z.object({ updated: z.literal(true) }).strict(),
   create_document: z.object({ documentId: ChannelOpaqueIdSchema, url: HttpsUrl }).strict(),
   delete_document: z.object({ deleted: z.boolean() }).strict(),
   space_members: z.object({ members: z.array(ChannelOpaqueIdSchema).max(1_000), nextCursor: z.string().min(1).max(500).optional() }).strict(),
