@@ -55,10 +55,14 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
     }]);
   });
 
-  it("lets the named reconciler read the Slack secret alone, for the bot token, and nothing else", () => {
+  it("lets the named reconciler read the Slack secret, for the bot token, and the Slack adapter's signing secret (spec 062 Phase 7c), and nothing else", () => {
     const { statements } = reconciler(named);
     const secrets = statements.filter((statement) => actionsOf([statement]).some((action) => action.startsWith("secretsmanager:")));
-    expect(secrets).toEqual([{ Sid: "PostUnwaitedTaskNote", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: slackSecretId(named) } }]);
+    expect(secrets).toHaveLength(2);
+    expect(secrets[0]).toEqual({ Sid: "PostUnwaitedTaskNote", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: slackSecretId(named) } });
+    // With SlackViaChannel on, its notes go through the adapter's commands, signed with the adapter's secret.
+    expect(JSON.stringify(secrets[1]!.Resource)).toContain("ChannelApiSlackAdapterSecret");
+    expect(actionsOf([secrets[1]!]).every((action) => action === "secretsmanager:GetSecretValue" || action === "secretsmanager:DescribeSecret")).toBe(true);
   });
 
   it("names the threads table, the Slack secret and the callback signing key to the named reconciler", () => {
