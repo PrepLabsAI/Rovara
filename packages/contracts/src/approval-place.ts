@@ -12,7 +12,7 @@
 //   5. Where it may be answered, by answer and risk:
 //        approve  low     browser, tool, or an outside place by a linked person;
 //        approve  medium  browser; or an outside place by a linked person whose last INTERACTIVE Rovara sign-in is inside the company's window (default 24 h, 1 h to 7 days); a tool (an AI tool, the CLI or an API token) gets a link;
-//        approve  high    browser only, and only under the company's fresh sign-in (`freshSignIn`, decided by the caller with its own rule: Code's `checkApprovalSignIn`, Cloud's decide-grade step);
+//        approve  high    browser only, and only under the company's fresh sign-in (`freshSignIn`, decided by the caller with the rule it has: Code's `checkApprovalSignIn`, or an extra sign-in step an approvers plug-in asks for);
 //        reject   any     browser only (a signed-in session), under the fresh sign-in;
 //        request changes  any place a linked person can reach; no sign-in age.
 // The "recent" time is the person's last interactive Rovara sign-in (`Principal.authTime`, the adapter's own fact), never a refresh and never a sign-in at the outside service (decision Q3); a caller that cannot say passes none and the
