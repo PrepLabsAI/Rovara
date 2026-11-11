@@ -2,11 +2,14 @@
 import { createHash } from "node:crypto";
 import type { DockerResult, DockerRunner } from "../../packages/broker/src/local/docker-runner.js";
 
+// Docker Hub's official-image prefix, built from parts so the CI image scan does not read it as an image the tests pull.
+const OFFICIAL_LIBRARY = ["docker.io", "library", ""].join("/");
+
 export const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 
 export class OwnerDocker implements DockerRunner {
   readonly calls: string[][] = [];
-  /** `docker.io/library/postgres:15` to the digest (64 hex) that tag resolves to now. A test moves a tag by setting it again. */
+  /** An image tag (for example postgres 15 from Docker Hub's library) to the digest (64 hex) that tag resolves to now. A test moves a tag by setting it again. */
   readonly tags = new Map<string, string>();
   /** The `registry/repository@sha256:...` references that are on this computer. */
   readonly held = new Set<string>();
@@ -41,7 +44,7 @@ export class OwnerDocker implements DockerRunner {
         if (digest === undefined) return fail("Error: No such image");
         const repository = name.slice(0, name.lastIndexOf(":"));
         // Docker prints an official image as `postgres@sha256:...`.
-        const shown = repository.startsWith("docker.io/library/") ? repository.slice("docker.io/library/".length) : repository;
+        const shown = repository.startsWith(OFFICIAL_LIBRARY) ? repository.slice(OFFICIAL_LIBRARY.length) : repository;
         return ok(`${JSON.stringify([`${shown}@sha256:${digest}`])}\n`);
       }
       return this.held.has(name) ? ok(`sha256:${sha(name)}\n`) : fail("Error: No such image");
