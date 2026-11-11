@@ -320,3 +320,54 @@ The task-person proof Lambda (the owner-approved TEST-only workload) still reads
 ### Rollback
 
 Set `SlackViaChannel` to `disabled`.
+
+## Phase 7c2: Slack's routing in the core
+
+```mermaid
+sequenceDiagram
+  participant S as Slack
+  participant F as Slack adapter front (Slack ingress)
+  participant C as Channel API (Slack router)
+  participant A as Slack adapter commands
+  participant O as Orchestrator
+  S->>F: event (Slack-signed)
+  F-->>S: 200 at once
+  F->>F: asynchronous hand-off (Lambda retries, then its failure queue)
+  F->>C: message (adapter-signed)
+  C->>A: "Got it", choice cards, private notices (commands)
+  C->>O: request queue: message, queuedBehind, routing marks
+  O->>A: routing card, a task question's private answer (commands)
+```
+
+| Layer | Change |
+|---|---|
+| contracts | `InboundMessage` takes `addressed`, `messageId`, `viaApp` (FR-078). Queue items carry `queuedBehind` and `routing` (`suggest`, `task_question`). `sendSignedChannelCommand` and `ChannelCommandFailed` move here, so the orchestrator can send commands too. `SLACK_CONFIRMATION_ACTION_ID`. |
+| broker | Slack ingress is split: the Slack front (signature, parsing) and `createSlackMentionRouter`, everything it decided after parsing, unchanged. `awsSlackRouterDependencies` takes a `SlackRouterTransport`: Slack's own (bot token, Slack's queue) or the channel's (`slack-channel-router.ts`: the adapter's commands, the channel request queue, the person check over the directory). With `SlackViaChannel` on, Slack ingress runs `createSlackAdapterFront`, which hands messages to an asynchronous invoke of itself for the channel API. The adapter records each thread it posts in (`ROVARA_THREAD#`, 90 days, renewed by each post). The channel ingress gives the built-in adapter's messages to its router (`surfaces`); `channel-api-lambda.ts` composes the two. Confirmation presses go as `slack.confirmation` actions. |
+| orchestrator service | The Slack surface takes actions (a confirmation press runs as its `yes` or `cancel`), passes `queuedBehind` to the processor, and hands routed items to Slack's own routing and task-question handlers, which post through the adapter (`slack-adapter-client.ts`). |
+| infra | The channel API Lambda's entry is `channel-api-lambda.ts`, with 30 seconds, Slack's threads table, the broker, `SHARED_TASK#` reads and the Slack settings. The orchestrator reads the adapter's secret and takes `SlackAdapterCommandsUrl` and `SlackAdapterSecretName` (control-plane outputs, passed by the CLI). |
+
+### Known differences with the setting on
+
+- A plain reply in a thread Rovara posted in before this phase was deployed is read only once Rovara posts there again.
+- A hand-off that fails every asynchronous retry is lost, and lands in Slack ingress's hand-off failure queue, where
+  the operator is alerted; Slack's own retries no longer apply once Slack has its answer.
+
+### Rollback
+
+Set `SlackViaChannel` to `disabled`: Slack ingress routes again itself.
+
+## Phase 7c3a: presses without a form, in the core
+
+| Layer | Change |
+|---|---|
+| contracts | `ChannelAction` takes the pressed message's `messageId` and `messageText`. |
+| broker | Slack interactivity is split: `createSlackPressDispatcher` (a press to its handler, with the presser told when it failed) and `awsWorkflowSlackHandlers`, the workflow buttons' handlers over a `SlackPressTransport`. With `SlackViaChannel` on, interactivity's `routePress` hands a press in `ROUTED_SLACK_PRESSES` (from the thread's own workspace) to an asynchronous invoke of itself, as a channel action whose event ID is Slack's press ID. The channel API's `actionSurfaces` run it (`slack-channel-presses.ts`): the same handlers, a press rebuilt as Slack saw it (request IDs unchanged), replies by target (a private post, the pressed card edited) through the adapter's commands, and a Quick or Full start run in place. Any other action is queued as before (a confirmation press). |
+| infra | The channel API reads a task's owner, share and workflow by key, those fields only, as Slack's interactivity does. |
+
+Still with Slack's interactivity until Phase 7c3b: presses that open a form (approve, request changes, retry checks,
+resolve findings, close, PR feedback changes, People, Details, ChatGPT paste), their submissions, and admin change
+Confirm and Cancel (in a direct message, which has no bound space).
+
+### Rollback
+
+Set `SlackViaChannel` to `disabled`.

@@ -4,6 +4,8 @@ import { ChannelOpaqueIdSchema } from "./conversation.js";
 /** Block Kit action IDs on a confirmation message (feature 014). */
 export const CONFIRM_APPROVE_ACTION = "agentx_confirm_approve";
 export const CONFIRM_CANCEL_ACTION = "agentx_confirm_cancel";
+/** Spec 062 Phase 7c2: a confirmation's Approve or Cancel, pressed in Slack, as a channel action valued `yes` or `cancel`. */
+export const SLACK_CONFIRMATION_ACTION_ID = "slack.confirmation";
 
 /** A pending confirmation answers for 24 hours; after that a "yes" hears that it expired. */
 export const CONFIRMATION_TTL_MS = 24 * 60 * 60 * 1_000;
