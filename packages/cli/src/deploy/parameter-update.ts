@@ -18,7 +18,7 @@ export interface ParameterUpdateInput {
 }
 
 /** Parameters only named environments' templates declare (spec 025 E16): the legacy deployment never has them, so no upgrade adds them. */
-const NAMED_ENVIRONMENT_ONLY_PARAMETERS: ReadonlySet<string> = new Set(["McpConfirmElicitation"]);
+const NAMED_ENVIRONMENT_ONLY_PARAMETERS: ReadonlySet<string> = new Set(["McpConfirmElicitation", "ChannelAdapters", "SlackViaChannel"]);
 const LEGACY_STACK_NAMES: ReadonlySet<string> = new Set(Object.values(ADOPTED_STACK_NAMES));
 
 const NO_CHANGES = ["didn't contain changes", "No updates are to be performed"];
