@@ -1,7 +1,7 @@
 // Work events (U3): the shape is closed and holds no content; the key, the retention and the id are exact; one change gives one event, in the change's own transaction, once.
 import { describe, expect, it } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, WORK_EVENT_KINDS, WorkEventSchema, queryAll, workEventExpiresAt, workEventId, workEventKey, workEventMonths, workEventPartition,
+  IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, WORK_EVENT_BLOCK_CAUSES, WORK_EVENT_FAILURE_CAUSES, WORK_EVENT_KINDS, WORK_EVENT_SHARDS, WorkEventSchema, queryAll, workEventCauseIsFailure, workEventExpiresAt, workEventId, workEventKey, workEventMonths, workEventPartition, workEventPartitions, workEventShard,
   type DocumentStore, type WorkEventInput, type WorkEventKind,
 } from "@agentx/contracts";
 import { WORK_EVENTS_PER_CHANGE_MAX, listWorkEvents, recordWorkEvent, workEventItem, workEventItems, workEventRow } from "../../packages/broker/src/core/work-events/work-events.js";
@@ -18,13 +18,16 @@ const SAMPLES: Record<WorkEventKind, WorkEventInput> = {
   task_started: { ...common("task_started", "start"), kind: "task_started", path: "FULL", origin: "web" },
   plan_approved: { ...common("plan_approved", "r1"), kind: "plan_approved", risk: "medium" },
   step_started: { ...common("step_started", "op1"), kind: "step_started", step: "coding" },
-  step_ended: { ...common("step_ended", "op1"), kind: "step_ended", step: "coding", outcome: "done", actor: { kind: "agent" } },
+  step_ended: { ...common("step_ended", "op1"), kind: "step_ended", step: "coding", outcome: "stopped", cause: "cancelled", actor: { kind: "agent" } },
   decision_asked: { ...common("decision_asked", "d1"), kind: "decision_asked", decisionId: "card-1", decision: "plan", risk: "low", actor: { kind: "system" } },
   decision_answered: { ...common("decision_answered", "d1"), kind: "decision_answered", decisionId: "card-1", decision: "plan", outcome: "approved", place: "web" },
   pr_opened: { ...common("pr_opened", "acme/api#7"), kind: "pr_opened", repository: "acme/api", number: 7, actor: { kind: "agent" } },
   pr_merged: { ...common("pr_merged", "acme/api#7"), kind: "pr_merged", repository: "acme/api", number: 7, actor: { kind: "system" } },
   pr_closed: { ...common("pr_closed", "acme/api#7"), kind: "pr_closed", repository: "acme/api", number: 7, actor: { kind: "system" } },
-  task_failed: { ...common("task_failed", "f1"), kind: "task_failed", reason: "checks_failed", actor: { kind: "system" } },
+  task_failed: { ...common("task_failed", "f1"), kind: "task_failed", cause: "checks_failed", actor: { kind: "system" } },
+  task_closed: { ...common("task_closed", "r9"), kind: "task_closed", outcome: "merged", actor: { kind: "system" } },
+  review_requested: { ...common("review_requested", "acme/api#7"), kind: "review_requested", repository: "acme/api", number: 7, actor: { kind: "system" } },
+  review_approved: { ...common("review_approved", "acme/api#7"), kind: "review_approved", repository: "acme/api", number: 7 },
   waiting_changed: { ...common("waiting_changed", "w1"), kind: "waiting_changed", waitingOn: "person", personIds: ["dev_0123456789abcdef"], reason: "plan_review", actor: { kind: "system" } },
   cost_settled: { ...common("cost_settled", "op1"), kind: "cost_settled", micros: 1_250_000, currency: "USD", source: "model", actor: { kind: "system" } },
 };
@@ -52,12 +55,31 @@ describe("the work event contract", () => {
   });
 
   it("holds free text nowhere: every short code and reference refuses spaces, capitals and sentences", () => {
-    expect(WorkEventSchema.safeParse({ ...SAMPLES.task_failed, reason: "The build failed because of a missing file." }).success).toBe(false);
+    expect(WorkEventSchema.safeParse({ ...SAMPLES.task_failed, cause: "The build failed because of a missing file." }).success).toBe(false);
+    expect(WorkEventSchema.safeParse({ ...SAMPLES.waiting_changed, reason: "Waiting for Priya to review" }).success).toBe(false);
     expect(WorkEventSchema.safeParse({ ...SAMPLES.step_started, step: "Coding Step" }).success).toBe(false);
     expect(WorkEventSchema.safeParse({ ...SAMPLES.decision_asked, decisionId: "a decision about the plan" }).success).toBe(false);
     expect(WorkEventSchema.safeParse({ ...SAMPLES.pr_opened, repository: "https://example.com/acme/api?token=1" }).success).toBe(false);
     expect(WorkEventSchema.safeParse({ ...SAMPLES.cost_settled, currency: "usd" }).success).toBe(false);
     expect(WorkEventSchema.safeParse({ ...SAMPLES.cost_settled, micros: -1 }).success).toBe(false);
+  });
+
+  it("tells a failure from a stop: task_failed takes only a failure cause, and a finished step has no cause", () => {
+    for (const cause of WORK_EVENT_FAILURE_CAUSES) expect(WorkEventSchema.safeParse({ ...SAMPLES.task_failed, cause }).success, cause).toBe(true);
+    for (const cause of WORK_EVENT_BLOCK_CAUSES.filter((cause) => !workEventCauseIsFailure(cause))) {
+      expect(WorkEventSchema.safeParse({ ...SAMPLES.task_failed, cause }).success, `${cause} is a stop, not a failure`).toBe(false);
+      expect(WorkEventSchema.safeParse({ ...SAMPLES.step_ended, outcome: "stopped", cause }).success, cause).toBe(true);
+    }
+    expect(WorkEventSchema.safeParse({ ...SAMPLES.step_ended, outcome: "done", cause: "cancelled" }).success).toBe(false);
+    expect(WorkEventSchema.safeParse({ ...SAMPLES.step_ended, outcome: "done", cause: undefined }).success).toBe(true);
+    expect(WorkEventSchema.safeParse({ ...SAMPLES.step_ended, outcome: "superseded" }).success).toBe(false);
+    expect(WorkEventSchema.safeParse({ ...SAMPLES.task_failed, cause: undefined }).success).toBe(false);
+  });
+
+  it("ends a task with one of the closed outcomes", () => {
+    for (const outcome of ["merged", "closed_unmerged", "answered", "plan_rejected", "passed", "skipped", "changes_requested"]) expect(WorkEventSchema.safeParse({ ...SAMPLES.task_closed, outcome }).success, outcome).toBe(true);
+    expect(WorkEventSchema.safeParse({ ...SAMPLES.task_closed, outcome: "It was merged on Friday" }).success).toBe(false);
+    expect(WorkEventSchema.safeParse({ ...SAMPLES.task_closed, outcome: undefined }).success).toBe(false);
   });
 
   it("names who the work waits on, with person ids only when it waits on a person", () => {
@@ -81,15 +103,27 @@ describe("the work event contract", () => {
     expect(workEventId({ kind: "pr_merged", taskId, source: "acme/api#7" })).not.toBe(workEventId({ kind: "pr_merged", taskId, source: "acme/api#8" }));
     expect(workEventId({ kind: "pr_merged", taskId, source: "x" })).toMatch(/^wev_[a-f0-9]{32}$/u);
     expect(() => workEventId({ kind: "pr_merged", taskId, source: "" })).toThrow();
+    for (const source of ["undefined", "r4.undefined", "acme/api#undefined.r4", "null"]) expect(() => workEventId({ kind: "pr_merged", taskId, source }), source).toThrow();
+    expect(workEventId({ kind: "pr_merged", taskId, source: "acme/undefined-repo#7.r4" })).toMatch(/^wev_/u);
   });
 });
 
 describe("where an event lives, and for how long", () => {
   it("keys an event by company and month, then by time and id", () => {
     const event = WorkEventSchema.parse(SAMPLES.task_started);
-    expect(workEventKey(event)).toEqual({ pk: `ORG#${orgId}#WORK_EVENTS#2026-11`, sk: `${at}#${event.id}` });
-    expect(workEventPartition(orgId, "2027-01")).toBe(`ORG#${orgId}#WORK_EVENTS#2027-01`);
-    expect(() => workEventPartition(orgId, "2027-13")).toThrow();
+    expect(workEventKey(event)).toEqual({ pk: `ORG#${orgId}#WORK_EVENTS#2026-11#${String(workEventShard(taskId))}`, sk: `${at}#${event.id}` });
+    expect(workEventPartition(orgId, "2027-01", 3)).toBe(`ORG#${orgId}#WORK_EVENTS#2027-01#3`);
+    expect(() => workEventPartition(orgId, "2027-13", 0)).toThrow();
+    expect(() => workEventPartition(orgId, "2027-01", WORK_EVENT_SHARDS)).toThrow();
+  });
+
+  it("spreads tasks over the shards, keeps one task in one shard, and reads a month from every shard", () => {
+    expect(workEventShard(taskId)).toBe(workEventShard(taskId));
+    const shards = new Set(Array.from({ length: 64 }, (_, index) => workEventShard(`${index.toString(16).padStart(2, "0")}579b4b-eaa7-4bf2-87bc-6da86b97c9e6`)));
+    expect(shards.size).toBe(WORK_EVENT_SHARDS);
+    expect(workEventPartitions(orgId, "2026-11")).toHaveLength(WORK_EVENT_SHARDS);
+    expect(new Set(workEventPartitions(orgId, "2026-11")).size).toBe(WORK_EVENT_SHARDS);
+    expect(workEventShard("not-a-uuid")).toBe(0);
   });
 
   it("lists the months of a range", () => {
@@ -115,7 +149,7 @@ describe("where an event lives, and for how long", () => {
 
 describe("writing events", () => {
   const store = (): DocumentStore => new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE });
-  const rowsOf = (s: DocumentStore) => queryAll(s, { pk: workEventPartition(orgId, "2026-11") });
+  const rowsOf = async (s: DocumentStore) => (await Promise.all(workEventPartitions(orgId, "2026-11").map((pk) => queryAll(s, { pk })))).flat();
 
   it("is one put with no condition, so an event can never be the reason a change is refused", () => {
     const item = workEventItem(SAMPLES.task_started);
@@ -123,7 +157,17 @@ describe("writing events", () => {
     expect(item).not.toHaveProperty("condition");
     expect(workEventItems([SAMPLES.step_started, SAMPLES.cost_settled])).toHaveLength(2);
     expect(workEventItems([])).toEqual([]);
-    expect(() => workEventItems(Array.from({ length: WORK_EVENTS_PER_CHANGE_MAX + 1 }, () => SAMPLES.task_started))).toThrow(/at most/u);
+  });
+
+  it("never throws inside a business write: an invalid, repeated or surplus event is left out and reported", () => {
+    const skipped: string[] = [];
+    const items = workEventItems([SAMPLES.task_started, { ...SAMPLES.task_started }, { ...SAMPLES.step_started, text: "a plan" } as unknown as WorkEventInput, SAMPLES.cost_settled], (reason) => skipped.push(reason));
+    expect(items).toHaveLength(2);
+    expect(skipped).toEqual(["duplicate", "invalid"]);
+    const many = Array.from({ length: WORK_EVENTS_PER_CHANGE_MAX + 3 }, (_, index) => ({ ...SAMPLES.step_started, id: workEventId({ kind: "step_started", taskId, source: `s${String(index)}` }) }));
+    const surplus: string[] = [];
+    expect(workEventItems(many, (reason) => surplus.push(reason))).toHaveLength(WORK_EVENTS_PER_CHANGE_MAX);
+    expect(surplus).toEqual(["too_many", "too_many", "too_many"]);
   });
 
   it("writes nothing for an event that is not valid", () => {
@@ -173,6 +217,14 @@ describe("reading events", () => {
     expect(merged.events.map((event) => event.kind)).toEqual(["task_started"]);
     // The range's end is inclusive.
     expect((await listWorkEvents(s, { orgId, from: at, to: at })).events.map((event) => event.id).sort()).toEqual([SAMPLES.task_started, elsewhere].map((event) => event.id).sort());
+  });
+
+  it("does not return a row past its expiry that the store has not swept yet", async () => {
+    const s = new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE, nowSeconds: () => 0 });
+    await recordWorkEvent(s, SAMPLES.task_started);
+    const range = { orgId, from: at, to: at } as const;
+    expect((await listWorkEvents(s, { ...range, now: Date.parse(at) })).events).toHaveLength(1);
+    expect((await listWorkEvents(s, { ...range, now: workEventExpiresAt(at) * 1000 })).events).toEqual([]);
   });
 
   it("counts a row it cannot read instead of failing the read", async () => {
