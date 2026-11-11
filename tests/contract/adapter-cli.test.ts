@@ -60,6 +60,25 @@ describe("agentx adapter add", () => {
     expect(lines.join("")).toContain(`Signing secret (shown once; give it to the adapter, Rovara does not show it again):\n${SECRET}\n`);
   });
 
+  it("declares the richer capabilities and the commands URL only when they are given (spec 062 Phase 7)", async () => {
+    const { cli, requests } = harness();
+    expect((await cli("adapter", "add", "chatops", "--callback-url", "https://adapter.example.com/events", "--projects", "web",
+      "--ephemeral", "--forms", "--directory", "--commands-url", "https://adapter.example.com/commands")).code).toBe(0);
+    expect(requests[0]?.body).toMatchObject({
+      callbackUrl: "https://adapter.example.com/events", commandsUrl: "https://adapter.example.com/commands",
+      capabilities: { threads: false, buttons: 0, edits: false, maxTextLength: 4096, proactive: false, ephemeral: true, forms: true, directory: true },
+    });
+    expect(requests[0]?.body).not.toHaveProperty("capabilities.direct");
+  });
+
+  it("refuses a command capability without a commands URL, and sends nothing", async () => {
+    const { cli, requests } = harness();
+    const result = await cli("adapter", "add", "chatops", "--callback-url", "https://adapter.example.com/events", "--projects", "web", "--documents", "--start-conversations");
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("--commands-url is required with --documents, --start-conversations");
+    expect(requests).toEqual([]);
+  });
+
   it("writes the secret to a private file instead, and asks for a rotation with --rotate", async () => {
     directory = await mkdtemp(join(tmpdir(), "adapter-cli-"));
     const file = join(directory, "whatsapp.secret");
