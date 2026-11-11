@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { ActorRefSchema, ChannelIdSchema, ChannelOpaqueIdSchema, ConversationRefSchema, InboundMessageSchema, SLACK_CHANNEL } from "./conversation.js";
+import { ActorRefSchema, ChannelIdSchema, ChannelOpaqueIdSchema, ConversationRefSchema, InboundMessageSchema, SLACK_CHANNEL, type ActorRef, type ConversationRef } from "./conversation.js";
 import { publicHttpsUrlSchema } from "./mcp-connector.js";
 import { AgentXNameSchema } from "./project.js";
 
@@ -68,8 +68,28 @@ export const ChannelAdapterRecordSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   updatedBy: z.string().min(1).max(512),
+  /**
+   * FR-073: the deployment's own adapter (Slack), never stored or registered. Its actors keep the surface's verified
+   * identity: no linking, any bound space, no step-up.
+   */
+  builtIn: z.literal(true).optional(),
 }).strict();
 export type ChannelAdapterRecord = z.infer<typeof ChannelAdapterRecordSchema>;
+
+/** FR-073: what the built-in adapter can show: threads, buttons, edits and private replies. */
+export const BUILT_IN_ADAPTER_CAPABILITIES: ChannelCapabilities = {
+  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true,
+};
+
+/** FR-073: the built-in adapter's record, made from the deployment's settings rather than read from the registry. */
+export function builtInAdapterRecord(input: { channel: string; callbackUrl: string; secretName: string; deployedAt?: string }): ChannelAdapterRecord {
+  const at = input.deployedAt ?? "1970-01-01T00:00:00.000Z";
+  return {
+    channel: ChannelIdSchema.parse(input.channel), callbackUrl: publicHttpsUrlSchema("callbackUrl").parse(input.callbackUrl),
+    capabilities: { ...BUILT_IN_ADAPTER_CAPABILITIES }, projects: [], stepUp: [], secretName: input.secretName,
+    createdAt: at, updatedAt: at, updatedBy: "deployment", builtIn: true,
+  };
+}
 
 export const CHANNEL_ADAPTERS_PK = "CHANNEL_ADAPTERS";
 export function channelAdapterKey(channel: string): { pk: string; sk: string } {
@@ -140,8 +160,9 @@ export type ChannelAction = z.infer<typeof ChannelActionSchema>;
 
 export const ChannelQueueItemSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("action"), action: ChannelActionSchema, projectName: AgentXNameSchema.optional(), developerId: z.string().min(1).max(200).optional(), stepUp: QueuedStepUp }).strict(),
-  z.object({ kind: z.literal("message"), message: InboundMessageSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200), stepUp: QueuedStepUp }).strict(),
-  z.object({ kind: z.literal("decision"), decision: ChannelDecisionSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200), stepUp: QueuedStepUp }).strict(),
+  // FR-073: the built-in adapter's items carry no developer; its actors keep the surface's verified identity.
+  z.object({ kind: z.literal("message"), message: InboundMessageSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200).optional(), stepUp: QueuedStepUp }).strict(),
+  z.object({ kind: z.literal("decision"), decision: ChannelDecisionSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200).optional(), stepUp: QueuedStepUp }).strict(),
 ]);
 export type ChannelQueueItem = z.infer<typeof ChannelQueueItemSchema>;
 
@@ -158,6 +179,8 @@ const Label = z.string().trim().min(1).max(75);
 export const MessageKeySchema = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
 /** An action's ID, which comes back with a press or a form (FR-071). */
 export const ActionIdSchema = z.string().regex(/^[a-z][a-z0-9_.:-]{0,127}$/);
+/** The button on a reply that followed tool calls; its value names the turn record (spec 014 FR-024). */
+export const TURN_DETAILS_ACTION_ID = "turn.details";
 const ActionValue = z.string().max(2_000);
 const Choice = z.object({ label: Label, value: ActionValue }).strict();
 
@@ -244,7 +267,8 @@ const eventBase = {
   version: z.literal(1),
   /** Stable across retries, so the adapter drops a repeat (it is also the `webhook-id`). */
   id: z.string().regex(/^evt_[A-Za-z0-9_-]{16,64}$/),
-  channel: AdapterChannelIdSchema,
+  // Any channel, the built-in adapter's included (FR-073).
+  channel: ChannelIdSchema,
   conversation: ConversationRefSchema,
   createdAt: z.string().datetime(),
 };
@@ -278,6 +302,17 @@ export type ChannelEvent = z.infer<typeof ChannelEventSchema>;
 
 export function channelEventId(): string {
   return `evt_${randomBytes(18).toString("base64url")}`;
+}
+
+/**
+ * The FIFO group an event is delivered in: one per conversation (or per person, for a direct message), so the
+ * conversation's events reach its adapter in the order they were sent.
+ */
+export function channelEventGroupId(event: Pick<ChannelEvent, "channel" | "type"> & { conversation?: ConversationRef; to?: ActorRef }): string {
+  const scope = event.type === "direct" && event.to !== undefined
+    ? ["direct", event.to.channel, event.to.tenant, event.to.userId]
+    : ["conversation", event.channel, event.conversation?.tenant ?? "", event.conversation?.space ?? "", event.conversation?.thread ?? ""];
+  return createHash("sha256").update(scope.join("/")).digest("hex");
 }
 
 /** FR-023: an approval request shaped for the adapter. A stepped-up kind carries no actions; a buttonless adapter gets numbered replies in the text. */
@@ -369,6 +404,16 @@ export function adapterTakesCommand(adapter: Pick<ChannelAdapterRecord, "capabil
 
 export const WEBHOOK_TOLERANCE_SECONDS = 300;
 const SECRET_PREFIX = "whsec_";
+
+/**
+ * A stored signing secret as the signer takes it, or undefined for one that is not (a revoked one). The built-in
+ * adapter's secret is generated by the deployment as 64 letters and digits, which read as base64, without the prefix.
+ */
+export function usableWebhookSecret(stored: string | undefined): string | undefined {
+  if (stored === undefined) return undefined;
+  if (stored.startsWith(SECRET_PREFIX)) return stored;
+  return /^[A-Za-z0-9]{64}$/.test(stored) ? `${SECRET_PREFIX}${stored}` : undefined;
+}
 
 /** A new signing secret: `whsec_` and 32 random bytes in base64. */
 export function generateWebhookSecret(): string {
