@@ -70,6 +70,7 @@ import {
   type HandedOffChatGptFinish,
 } from "./slack-chatgpt.js";
 import { confirmationAction, slackChannelForwarderFromEnvironment } from "./slack-adapter.js";
+import { channelActionOfPress } from "./slack-press-routing.js";
 import { chatPostEphemeral, slackWebFetch } from "./slack-web.js";
 import { PROJECT_TASKS_DISABLED_TEXT, WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
@@ -138,6 +139,11 @@ export interface SlackInteractivityDependencies {
   };
   /** #340: the pasted ChatGPT address; the answer is Slack's response to the form. Absent: the form just closes. */
   chatgptSubmission?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /**
+   * Spec 062 Phase 7c3: hands a press to the core (the channel API), which answers it itself; true when it was handed
+   * on. Absent, or false: the press is answered here.
+   */
+  routePress?: (action: SlackBlockAction) => Promise<boolean>;
 }
 
 /** What an admin hears, privately, once a Confirm press is handed to the broker (spec 025 E14). */
@@ -481,47 +487,70 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       log("interaction.ignored", { reason: actions.reason });
       return respond(200, { ok: true });
     }
+    const dispatch = createSlackPressDispatcher(dependencies);
     for (const action of actions.actions) {
-      const handler = dependencies.workflow && WORKFLOW_ACTION_IDS.has(action.actionId)
-        ? { matches: () => true, handle: (value: SlackBlockAction) => dependencies.workflow!.handleAction(value) }
-        : dependencies.handlers.find((entry) => entry.matches(action.actionId));
-      if (!handler) {
-        log("interaction.ignored", { reason: "unknown_action", actionId: action.actionId.slice(0, 64) });
+      if (dependencies.routePress !== undefined) {
+        let routed: boolean;
         try {
-          await dependencies.respondEphemeral?.(action.responseUrl, UNKNOWN_BUTTON_TEXT);
+          routed = await dependencies.routePress(action);
         } catch (error) {
-          log("interaction.respond_failed", { errorName: error instanceof Error ? error.name : "unknown" });
+          log("interaction.route_failed", { actionId: action.actionId.slice(0, 64), errorName: errorName(error) });
+          await dependencies.respondEphemeral?.(action.responseUrl, CLICK_FAILED_TEXT).catch(() => undefined);
+          continue;
         }
-        continue;
+        if (routed) continue;
       }
-      try {
-        await handler.handle(action);
-      } catch (error) {
-        // A handler throws only before it took the click (the confirmation handler guards every step
-        // after its claim), so the member can safely press again.
-        log("interaction.failed", { actionId: action.actionId.slice(0, 64), errorName: errorName(error) });
-        try {
-          const workflowButton = WORKFLOW_ACTION_IDS.has(action.actionId);
-          const message = error instanceof WorkflowInteractionRefusal ? error.message
-            : error instanceof WorkflowDecisionSubmissionError ? "I couldn't save that decision. Try again."
-            : action.actionId === WORKFLOW_PATH_QUICK_ACTION || action.actionId === WORKFLOW_PATH_FULL_ACTION ? "I couldn't take that choice. Press the button again, or reply `quick` or `full`."
-            : action.actionId === WORKFLOW_PATH_ANSWER_ACTION ? "I couldn't take that choice. Press the button again, or reply `answer`."
-            : action.actionId === "agentx_workflow_retry_reviews" ? "I couldn't start the review retry. Use the latest AgentX task update and try again."
-            : action.actionId === "agentx_workflow_retry_publish" ? "I couldn't retry opening the pull request. Use the latest AgentX task update and try again."
-            : action.actionId === "agentx_workflow_send_back" ? "I couldn't send the task back to coding. Use the latest AgentX task update and try again."
-            : action.actionId === "agentx_workflow_resolve_findings" ? "I couldn't open the findings form. Use the latest AgentX task update and try again."
-            : action.actionId === "agentx_workflow_retry_plan" || action.actionId === "agentx_workflow_retry_implementation" ? "I couldn't start the retry. Use the latest AgentX task update and try again."
-            : action.actionId === "agentx_workflow_close" ? "I couldn't open the close confirmation. Use the latest AgentX task update and try again."
-            : action.actionId === "agentx_workflow_keep_pull_requests" ? "I couldn't keep the pull request as it is. Use the latest message in this thread and try again."
-            : workflowButton ? "I couldn't open those plan controls. Use the latest plan message and try again."
-            : CLICK_FAILED_TEXT;
-          await dependencies.respondEphemeral?.(action.responseUrl, message);
-        } catch (respondError) {
-          log("interaction.respond_failed", { errorName: errorName(respondError) });
-        }
-      }
+      await dispatch(action);
     }
     return respond(200, { ok: true });
+  };
+}
+
+/**
+ * One press, answered by the handler its action ID names, with the member told privately when it failed. Spec 062
+ * Phase 7c3: the channel API runs this same dispatcher for the presses the Slack adapter hands it.
+ */
+export function createSlackPressDispatcher(dependencies: Pick<SlackInteractivityDependencies, "handlers" | "workflow" | "respondEphemeral" | "log">): (action: SlackBlockAction) => Promise<void> {
+  const log: SlackIngressLog = dependencies.log ?? (() => undefined);
+  return async (action) => {
+    const handler = dependencies.workflow && WORKFLOW_ACTION_IDS.has(action.actionId)
+      ? { matches: () => true, handle: (value: SlackBlockAction) => dependencies.workflow!.handleAction(value) }
+      : dependencies.handlers.find((entry) => entry.matches(action.actionId));
+    if (!handler) {
+      log("interaction.ignored", { reason: "unknown_action", actionId: action.actionId.slice(0, 64) });
+      try {
+        await dependencies.respondEphemeral?.(action.responseUrl, UNKNOWN_BUTTON_TEXT);
+      } catch (error) {
+        log("interaction.respond_failed", { errorName: error instanceof Error ? error.name : "unknown" });
+      }
+      return;
+    }
+    try {
+      await handler.handle(action);
+    } catch (error) {
+      // A handler throws only before it took the click (the confirmation handler guards every step
+      // after its claim), so the member can safely press again.
+      log("interaction.failed", { actionId: action.actionId.slice(0, 64), errorName: errorName(error) });
+      try {
+        const workflowButton = WORKFLOW_ACTION_IDS.has(action.actionId);
+        const message = error instanceof WorkflowInteractionRefusal ? error.message
+          : error instanceof WorkflowDecisionSubmissionError ? "I couldn't save that decision. Try again."
+          : action.actionId === WORKFLOW_PATH_QUICK_ACTION || action.actionId === WORKFLOW_PATH_FULL_ACTION ? "I couldn't take that choice. Press the button again, or reply `quick` or `full`."
+          : action.actionId === WORKFLOW_PATH_ANSWER_ACTION ? "I couldn't take that choice. Press the button again, or reply `answer`."
+          : action.actionId === "agentx_workflow_retry_reviews" ? "I couldn't start the review retry. Use the latest AgentX task update and try again."
+          : action.actionId === "agentx_workflow_retry_publish" ? "I couldn't retry opening the pull request. Use the latest AgentX task update and try again."
+          : action.actionId === "agentx_workflow_send_back" ? "I couldn't send the task back to coding. Use the latest AgentX task update and try again."
+          : action.actionId === "agentx_workflow_resolve_findings" ? "I couldn't open the findings form. Use the latest AgentX task update and try again."
+          : action.actionId === "agentx_workflow_retry_plan" || action.actionId === "agentx_workflow_retry_implementation" ? "I couldn't start the retry. Use the latest AgentX task update and try again."
+          : action.actionId === "agentx_workflow_close" ? "I couldn't open the close confirmation. Use the latest AgentX task update and try again."
+          : action.actionId === "agentx_workflow_keep_pull_requests" ? "I couldn't keep the pull request as it is. Use the latest message in this thread and try again."
+          : workflowButton ? "I couldn't open those plan controls. Use the latest plan message and try again."
+          : CLICK_FAILED_TEXT;
+        await dependencies.respondEphemeral?.(action.responseUrl, message);
+      } catch (respondError) {
+        log("interaction.respond_failed", { errorName: errorName(respondError) });
+      }
+    }
   };
 }
 
@@ -761,37 +790,28 @@ export async function respondReplace(responseUrl: string, message: { text: strin
 }
 
 /** The interactivity handler for the ingress Lambda, from the same environment the ingress reads. */
-export function createAwsSlackInteractivityHandler() {
+/**
+ * Spec 062 Phase 7c3: how the workflow buttons' handlers answer and hand work on. Slack's interactivity answers through
+ * the press's response URL and Slack's Web API; the channel API answers through the Slack adapter's commands.
+ */
+export interface SlackPressTransport {
+  openView(triggerId: string, view: Record<string, unknown>): Promise<void>;
+  respondEphemeral(responseUrl: string, text: string): Promise<void>;
+  respondReplace(responseUrl: string, message: { text: string; blocks: Array<Record<string, unknown>> }): Promise<void>;
+  update(input: { channel: string; ts: string; text: string; blocks: unknown[] }): Promise<void>;
+  /** Hands a Quick or Full start on, so it may outlast Slack's three seconds. */
+  handOff(event: HandedOffWorkflowStart): Promise<void>;
+  enqueueAnswer(answer: { thread: SlackThread; userId: string; text: string; eventId: string }): Promise<void>;
+}
+
+/** The workflow buttons' handlers over AWS (the state table, Slack's threads table, the broker), answering through `transport`. */
+export function awsWorkflowSlackHandlers(transport: SlackPressTransport) {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
-  const sqs = new SQSClient(clientConfiguration);
-  const secretsManager = new SecretsManagerClient(clientConfiguration);
+  const lambda = new LambdaClient(clientConfiguration);
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
-  const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
-  const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
-  // Optional: only the Details button reads it, so a missing variable must not break Approve/Cancel.
-  const turnRecordsTableName = process.env.TURN_RECORDS_TABLE_NAME;
   const stateTableName = process.env.STATE_TABLE_NAME;
   const brokerFunctionName = process.env.BROKER_FUNCTION_NAME;
-  const lambda = new LambdaClient(clientConfiguration);
-  const forward = slackChannelForwarderFromEnvironment(secretsManager);
-  let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
-  const secrets = (): Promise<SlackSecrets> => {
-    if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
-      const loading = secretsManager.send(new GetSecretValueCommand({ SecretId: secretArn })).then((response) => {
-        if (!response.SecretString) throw new Error("Slack secret is empty");
-        return parseSlackSecrets(response.SecretString);
-      });
-      cached = { secrets: loading, loadedAt: Date.now() };
-      loading.catch(() => { cached = undefined; });
-    }
-    return cached.secrets;
-  };
-  const log: SlackIngressLog = (event, fields) => console.log(JSON.stringify({ component: "slack-interactivity", event, ...fields }));
-  if (!turnRecordsTableName) log("interaction.details_not_configured", { variable: "TURN_RECORDS_TABLE_NAME" });
-  // Spec 025 E14 (C14): named environments only (D14). The legacy deployment sets no ADMIN_CHANGES,
-  // so its interactivity handling, and every variable and grant it reads, is unchanged.
-  const adminChange = process.env.ADMIN_CHANGES === "enabled" ? awsAdminChangePress(clientConfiguration, documentClient) : undefined;
   /** A direct broker invoke: the broker's answer, or a throw when the broker itself failed. */
   const invokeBroker = async (event: Record<string, unknown>, timeoutMs: number): Promise<BrokerReply> => {
     if (brokerFunctionName === undefined) throw new Error("the broker is not configured");
@@ -837,7 +857,7 @@ export function createAwsSlackInteractivityHandler() {
       const answer = await invokeBroker({ source: "agentx.slack-ingress", action: "task-people-take-ownership", ...input }, SLACK_FETCH_TIMEOUT_MILLISECONDS);
       if (answer.statusCode !== 200) throw taskPeopleRefusal(answer, "Task ownership changed before it could be saved.");
     },
-    openView: async (triggerId, view) => slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }),
+    openView: (triggerId, view) => transport.openView(triggerId, view),
     async submit(input) {
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-decision", ...input });
     },
@@ -880,24 +900,65 @@ export function createAwsSlackInteractivityHandler() {
     async chooseWorkflowPath(input) {
       if (process.env.SHARED_TASKS !== "enabled") throw new WorkflowInteractionRefusal(SLACK_TASK_THREADS_OFF_NOTICE);
       // The card says "Starting this on ..." at once, before the start is handed over; a start that fails puts it back.
-      return handOffChosenWorkflow({ store: choices, handOff: (event) => handOffToSelf(lambda, event), replaceCard: (message) => respondReplace(input.responseUrl, message) }, input);
+      return handOffChosenWorkflow({ store: choices, handOff: (event) => transport.handOff(event), replaceCard: (message) => transport.respondReplace(input.responseUrl, message) }, input);
     },
     // Task 21: queuing for the chat agent is quick (DynamoDB and SQS), so it runs while Slack waits.
     async answerWorkflowChoice(input) {
       if (process.env.SHARED_TASKS !== "enabled") throw new WorkflowInteractionRefusal(SLACK_TASK_THREADS_OFF_NOTICE);
-      return answerChosenRequest({ store: choices, enqueueAnswer: createAnswerQueue({ sqs, queueUrl, changePending: threadPendingCounter(documentClient, threadsTableName) }),
-        updateQuestion: async (question) => slackApi((await secrets()).botToken, "chat.update", question) }, input);
+      return answerChosenRequest({ store: choices, enqueueAnswer: (answer) => transport.enqueueAnswer(answer),
+        updateQuestion: (question) => transport.update(question) }, input);
     },
-    respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
+    respondEphemeral: (responseUrl, text) => transport.respondEphemeral(responseUrl, text),
   }) : undefined;
   // The handed-off start runs inside this Lambda's own 10 seconds: a broker that has not answered in 7 is given up on,
   // so the member is still told (the broker's start is idempotent, so a later press meets the same task).
   const chosenStart = (event: HandedOffWorkflowStart) => runHandedOffWorkflowStart({
     store: choices, startWorkflow: (start) => startWorkflowThroughBroker((brokerEvent) => invokeBroker(brokerEvent, HANDED_OFF_START_TIMEOUT_MS), start),
-    updateQuestion: async (input) => slackApi((await secrets()).botToken, "chat.update", input),
-    respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
-    replaceCard: (responseUrl, message) => respondReplace(responseUrl, message),
+    updateQuestion: (input) => transport.update(input),
+    respondEphemeral: (responseUrl, text) => transport.respondEphemeral(responseUrl, text),
+    replaceCard: (responseUrl, message) => transport.respondReplace(responseUrl, message),
   }, event);
+  return { workflow, chosenStart, invokeBroker };
+}
+
+export function createAwsSlackInteractivityHandler() {
+  const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
+  const sqs = new SQSClient(clientConfiguration);
+  const secretsManager = new SecretsManagerClient(clientConfiguration);
+  const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
+  const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
+  const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  // Optional: only the Details button reads it, so a missing variable must not break Approve/Cancel.
+  const turnRecordsTableName = process.env.TURN_RECORDS_TABLE_NAME;
+  const brokerFunctionName = process.env.BROKER_FUNCTION_NAME;
+  const lambda = new LambdaClient(clientConfiguration);
+  const forward = slackChannelForwarderFromEnvironment(secretsManager);
+  let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
+  const secrets = (): Promise<SlackSecrets> => {
+    if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
+      const loading = secretsManager.send(new GetSecretValueCommand({ SecretId: secretArn })).then((response) => {
+        if (!response.SecretString) throw new Error("Slack secret is empty");
+        return parseSlackSecrets(response.SecretString);
+      });
+      cached = { secrets: loading, loadedAt: Date.now() };
+      loading.catch(() => { cached = undefined; });
+    }
+    return cached.secrets;
+  };
+  const log: SlackIngressLog = (event, fields) => console.log(JSON.stringify({ component: "slack-interactivity", event, ...fields }));
+  if (!turnRecordsTableName) log("interaction.details_not_configured", { variable: "TURN_RECORDS_TABLE_NAME" });
+  // Spec 025 E14 (C14): named environments only (D14). The legacy deployment sets no ADMIN_CHANGES,
+  // so its interactivity handling, and every variable and grant it reads, is unchanged.
+  const adminChange = process.env.ADMIN_CHANGES === "enabled" ? awsAdminChangePress(clientConfiguration, documentClient) : undefined;
+  const { workflow, chosenStart, invokeBroker } = awsWorkflowSlackHandlers({
+    openView: async (triggerId, view) => slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }),
+    respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
+    respondReplace: (responseUrl, message) => respondReplace(responseUrl, message),
+    update: async (input) => slackApi((await secrets()).botToken, "chat.update", input),
+    handOff: (event) => handOffToSelf(lambda, event),
+    enqueueAnswer: createAnswerQueue({ sqs, queueUrl, changePending: threadPendingCounter(documentClient, threadsTableName) }),
+  });
   const openView = async (triggerId: string, view: Record<string, unknown>, timeoutMs?: number) => {
     await slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }, fetch, timeoutMs);
   };
@@ -909,9 +970,23 @@ export function createAwsSlackInteractivityHandler() {
     postEphemeral: async (input) => chatPostEphemeral((await secrets()).botToken, input),
     log,
   }, event);
+  // Spec 062 Phase 7c3: with SlackViaChannel on, a press the core takes is handed to an asynchronous invoke of this
+  // Lambda for the channel API, after Slack has its answer.
+  const viaChannel = process.env.SLACK_VIA_CHANNEL === "enabled" && forward !== undefined;
+  const routePress = async (action: SlackBlockAction): Promise<boolean> => {
+    const channelAction = channelActionOfPress(action);
+    if (channelAction === undefined) return false;
+    const functionName = requiredEnvironment("AWS_LAMBDA_FUNCTION_NAME");
+    const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "Event",
+      Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-adapter", kind: "forward", message: channelAction })) }));
+    if (response.StatusCode !== 202) throw Object.assign(new Error("the press was not handed over"), { name: "HandOffRefused" });
+    log("interaction.handed_off", { actionId: action.actionId.slice(0, 64) });
+    return true;
+  };
   const interactivity = createSlackInteractivityHandler({
     secrets,
     log,
+    ...(viaChannel ? { routePress } : {}),
     ...(brokerFunctionName === undefined ? {} : {
       chatgptSubmission: (payload: Record<string, unknown>) => chatGptSubmission({ handOff: (event) => handOffToSelf(lambda, event) }, payload),
     }),

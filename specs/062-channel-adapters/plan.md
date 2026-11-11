@@ -355,3 +355,19 @@ sequenceDiagram
 ### Rollback
 
 Set `SlackViaChannel` to `disabled`: Slack ingress routes again itself.
+
+## Phase 7c3a: presses without a form, in the core
+
+| Layer | Change |
+|---|---|
+| contracts | `ChannelAction` takes the pressed message's `messageId` and `messageText`. |
+| broker | Slack interactivity is split: `createSlackPressDispatcher` (a press to its handler, with the presser told when it failed) and `awsWorkflowSlackHandlers`, the workflow buttons' handlers over a `SlackPressTransport`. With `SlackViaChannel` on, interactivity's `routePress` hands a press in `ROUTED_SLACK_PRESSES` (from the thread's own workspace) to an asynchronous invoke of itself, as a channel action whose event ID is Slack's press ID. The channel API's `actionSurfaces` run it (`slack-channel-presses.ts`): the same handlers, a press rebuilt as Slack saw it (request IDs unchanged), replies by target (a private post, the pressed card edited) through the adapter's commands, and a Quick or Full start run in place. Any other action is queued as before (a confirmation press). |
+| infra | The channel API reads a task's owner, share and workflow by key, those fields only, as Slack's interactivity does. |
+
+Still with Slack's interactivity until Phase 7c3b: presses that open a form (approve, request changes, retry checks,
+resolve findings, close, PR feedback changes, People, Details, ChatGPT paste), their submissions, and admin change
+Confirm and Cancel (in a direct message, which has no bound space).
+
+### Rollback
+
+Set `SlackViaChannel` to `disabled`.

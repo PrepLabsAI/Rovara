@@ -155,6 +155,9 @@ export const ChannelActionSchema = z.object({
   value: z.string().max(2_000),
   form: z.record(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/), z.string().max(3_000)).refine((form) => Object.keys(form).length <= 20, "at most 20 fields").optional(),
   messageKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/).optional(),
+  /** Phase 7c3: the pressed message's own ID in its space, and its text as shown, where the surface has them. */
+  messageId: ChannelOpaqueIdSchema.optional(),
+  messageText: z.string().max(40_000).optional(),
   receivedAt: z.string().datetime(),
 }).strict().superRefine((action, context) => {
   if (action.conversation !== undefined && action.conversation.channel !== action.channel) context.addIssue({ code: "custom", path: ["conversation", "channel"], message: "must equal channel" });

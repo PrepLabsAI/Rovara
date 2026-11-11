@@ -23,6 +23,7 @@ import {
   type ChannelQueueItem,
   type ChannelSpaceRef,
   type ConversationRef,
+  type ChannelAction,
   type InboundMessage,
 } from "@agentx/contracts";
 import { adapterForChannel, builtInAdapterFromEnvironment } from "./channel-adapters.js";
@@ -64,12 +65,19 @@ export interface ChannelIngressDependencies {
    * this API's answer.
    */
   surfaces?: Readonly<Record<string, ChannelSurface>>;
+  /**
+   * Phase 7c3: the built-in adapter's own press handlers, by channel. An action one of them answers is run there; one it
+   * does not (undefined) is queued for the orchestrator as before.
+   */
+  actionSurfaces?: Readonly<Record<string, ChannelActionSurface>>;
   now(): number;
   log?(entry: Record<string, unknown>): void;
 }
 
 /** Decides one built-in adapter message, in the bound space's project. */
 export type ChannelSurface = (message: InboundMessage, context: { projectName: string }) => Promise<{ statusCode: number; body: string }>;
+/** Runs one built-in adapter action, or answers undefined for one it does not run. */
+export type ChannelActionSurface = (action: ChannelAction, context: { projectName: string }) => Promise<{ statusCode: number; body: string } | undefined>;
 
 export interface ChannelIngressEvent {
   rawPath?: string;
@@ -155,6 +163,15 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
         return refuse(403, "space_not_bound");
       }
 
+      const actionSurface = adapter.builtIn === true && kind === "actions" ? deps.actionSurfaces?.[adapter.channel] : undefined;
+      if (actionSurface !== undefined) {
+        const handled = await actionSurface(ChannelActionSchema.parse(item), { projectName: binding.projectName });
+        if (handled !== undefined) {
+          if (handled.statusCode >= 500) throw new Error(`the ${adapter.channel} press handler answered ${handled.statusCode}`);
+          log({ event: "pressed", channel: adapter.channel, statusCode: handled.statusCode });
+          return { statusCode: handled.statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: handled.body };
+        }
+      }
       const surface = adapter.builtIn === true && kind === "messages" ? deps.surfaces?.[adapter.channel] : undefined;
       if (surface !== undefined) {
         // The router claims the event itself, and answers 5xx for anything worth trying again.
@@ -217,7 +234,7 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-export function createAwsChannelIngressHandler(surfaces: Readonly<Record<string, ChannelSurface>> = {}) {
+export function createAwsChannelIngressHandler(surfaces: Readonly<Record<string, ChannelSurface>> = {}, actionSurfaces: Readonly<Record<string, ChannelActionSurface>> = {}) {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
   const sqs = new SQSClient(clientConfiguration);
@@ -284,6 +301,7 @@ export function createAwsChannelIngressHandler(surfaces: Readonly<Record<string,
       }));
     },
     surfaces,
+    actionSurfaces,
     now: Date.now,
   });
 }
@@ -296,12 +314,15 @@ export function queueItemIdentity(item: ChannelQueueItem): string {
 }
 
 /** The channel API's Lambda handler, with the deployment's own routers made on first use. */
-export function channelApiHandler(makeSurfaces: () => Readonly<Record<string, ChannelSurface>> = () => ({})) {
+export function channelApiHandler(
+  makeSurfaces: () => Readonly<Record<string, ChannelSurface>> = () => ({}),
+  makeActionSurfaces: () => Readonly<Record<string, ChannelActionSurface>> = () => ({}),
+) {
   let built: ReturnType<typeof createChannelIngressHandler> | undefined;
   return async (event: ChannelIngressEvent): Promise<ChannelIngressResponse> => {
     // Spec 062: off unless the deployment turns channel adapters or its built-in adapter on; then nothing is reachable.
     if (process.env.CHANNEL_ADAPTERS !== "enabled" && process.env.BUILT_IN_ADAPTER !== "enabled") return refuse(404, "not_found");
-    built ??= createAwsChannelIngressHandler(makeSurfaces());
+    built ??= createAwsChannelIngressHandler(makeSurfaces(), makeActionSurfaces());
     return built(event);
   };
 }

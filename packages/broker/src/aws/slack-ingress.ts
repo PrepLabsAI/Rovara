@@ -37,9 +37,11 @@ import {
   channelBindingKey,
   readChannelBindingItem,
   slackBindingOf,
+  ChannelActionSchema,
   InboundMessageSchema,
   conversationFromSlackThread,
   slackThreadOf,
+  type ChannelAction,
   type InboundMessage,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
@@ -1340,7 +1342,7 @@ let awsChannelEventsHandler: ReturnType<typeof createAwsSlackChannelEventsHandle
 let awsChannelCommandsHandler: ReturnType<typeof createAwsSlackChannelCommandsHandler> | undefined;
 let awsAdapterBotToken: (() => Promise<string>) | undefined;
 let awsAdapterFront: ReturnType<typeof createSlackAdapterFront> | undefined;
-let awsForward: ((message: InboundMessage) => Promise<void>) | undefined;
+let awsForward: ((message: InboundMessage | ChannelAction) => Promise<void>) | undefined;
 
 /** Phase 7c2: a message the adapter's front handed to an asynchronous invoke of this Lambda, for the channel API. */
 interface HandedOffSlackMessage { source: "agentx.slack-adapter"; kind: "forward"; message: unknown }
@@ -1397,7 +1399,9 @@ export const handler = async (event: HttpApiV2Event | HandedOffWorkflowStart | H
   if (isHandedOffSlackMessage(event)) {
     awsForward ??= slackChannelForwarderFromEnvironment(new SecretsManagerClient(process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION }));
     if (awsForward === undefined) throw new Error("Slack does not go through the channel API here");
-    await awsForward(InboundMessageSchema.parse(event.message));
+    // Phase 7c3: a press is an action.
+    const handed = event.message as { actionId?: unknown };
+    await awsForward(typeof handed.actionId === "string" ? ChannelActionSchema.parse(event.message) : InboundMessageSchema.parse(event.message));
     return respond(200, { ok: true });
   }
   // Spec 062 Phase 7b: the core's events for Slack, when Slack goes through the channel API.
