@@ -10915,7 +10915,7 @@ const AUTOFIX_USAGE_PAGES_MAX = 40;
  * Every usage record of one operation, added up: a review run records one per reviewer (code and security), a coding run one. Undefined when the events cannot all be read (more pages than
  * the bound, or a read that failed): spend that is not known is never counted as zero.
  */
-async function autofixOperationUsage(dependencies: AwsBrokerDependencies, operationId: string): Promise<{ total: number; records: number } | undefined> {
+export async function autofixOperationUsage(dependencies: AwsBrokerDependencies, operationId: string): Promise<{ total: number; records: number } | undefined> {
   let total = 0;
   let records = 0;
   let start: Record<string, unknown> | undefined;

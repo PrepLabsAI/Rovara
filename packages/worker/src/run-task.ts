@@ -9,7 +9,7 @@ import { DIAGNOSIS_RETRY_PROMPT, cutDiagnosisAnswer, diagnosisInstructions, hold
 import { readSpecWriteAnswer, specWriteInstructions, specWriteRetryPrompt } from "./spec-write.js";
 import type { BashOperations, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
-import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
+import { NO_REPORTED_USAGE, WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
 import { PLAN_CRITIQUE_ARTIFACT, settlePlanCritique } from "./plan-critic.js";
 import { createReviewSessionOpener, designReviewBindingOf, reviewFileToolsOf, runDesignReviewOperation, type DesignReviewDependencies } from "./design-review-sessions.js";
 import { checkCodeCitations, sameCitedRanges, withCorrectedRanges } from "./plan-citations.js";
@@ -39,7 +39,7 @@ import {
   CANCEL_FLUSH_MAX_MS, ModelCallMonitor, PLANNING_ABORT_CONFIRM_MS, PLANNING_STALL_MS, expiryNote, logEventsRefused, logModelCallNote,
   planningDeadlineMs, sanitizeModelCallEvent, type ModelCallExpiryInfo, type ModelCallNote,
 } from "./model-call-monitor.js";
-import { consoleWorkerLog, type WorkerLogSink } from "./worker-log.js";
+import { consoleWorkerLog, logUsageNote, type WorkerLogSink } from "./worker-log.js";
 import { ToolLoopGuard, toolLoopGuardExtension } from "./tool-loop-guard.js";
 import { assistantOutcome, eventType, failedTurn, type AssistantOutcome } from "./session-events.js";
 import { pinnedSkills, withStepTimeout, type AgentSkillFile } from "./agent-step.js";
@@ -75,8 +75,8 @@ import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
-  usageForControlPlane, reviewUsageArtifactName,
-  type TaskUsageOutcome,
+  usageForControlPlane, reviewUsageArtifactName, spentNothing, statsSince,
+  type TaskUsageOutcome, type UsageStats,
 } from "./usage.js";
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies, type ExecuteSerialWorkflowDependenciesInput, type ExecuteSerialWorkflowDependenciesResult } from "./workflow-dependencies.js";
 import { WorkflowPartsHaltedError, executeParallelWorkflowDependencies, type ParallelPartContext } from "./parallel-parts.js";
@@ -869,11 +869,27 @@ async function runTask(
   try {
     // Written before the prompt, so a crash mid-turn orphans an empty session rather than the transcript.
     if (registered) await conversations.recordTurn(conversationId, dependencies.model);
-    else await conversations.register(session.sessionFile, conversationId, dependencies.model);
+    else await conversations.register(session.sessionFile, conversationId, dependencies.model, NO_REPORTED_USAGE);
   } catch (error) {
     session.dispose();
     throw error;
   }
+  // A reopened session's stats are the conversation's running total, earlier operations' included. This run's usage event is what it spent itself, so what the conversation's earlier usage
+  // events already added up to is taken off: the figure kept in the conversation record when the last event reached the control plane. Taking off the stats at reopen would lose the spend of an
+  // attempt that died before its event was sent. A conversation started before the figure was kept has none, and its earlier operations were reported as running totals, so it starts from the stats at
+  // reopen. A session made new for the run starts at zero (its record is written with a zero figure above).
+  let usageBaseline: UsageStats | undefined;
+  /** False when the baseline cannot be had: reporting the whole running total again would be the old over-count, so the run reports nothing and says so. */
+  let usageBaselineKnown = true;
+  if (registered) {
+    if (registered.reportedUsage !== undefined) usageBaseline = registered.reportedUsage;
+    else {
+      try { usageBaseline = session.getSessionStats(); } catch {
+        usageBaselineKnown = false;
+        logUsageNote(log, "usage.baseline_unavailable", invocation.operationId);
+      }
+    }
+  } else usageBaseline = NO_REPORTED_USAGE;
   // K1 C5a: what this stage's session loaded, as references only; sent again at the end with anything loaded during the run.
   const reportLoadedKnowledge = async (): Promise<void> => {
     try {
@@ -1817,15 +1833,31 @@ async function runTask(
     await flushDiagnostics().catch(() => undefined);
 
     let telemetryFailure = evidenceFailure;
+    let usageToKeep: UsageStats | undefined;
+    /** True when the figure is kept without an event: the run's own spend could not be told apart from the running total, so nothing was sent for it. */
+    let usageKeptUnsent = false;
     try {
-      const usage = createTaskUsageTelemetry(session.getSessionStats(), {
+      const running = session.getSessionStats();
+      const spent = statsSince(running, usageBaseline);
+      const usage = createTaskUsageTelemetry(spent, {
         ...session.getModel(),
         ...(dependencies.model.cacheRetention === undefined
           ? {}
           : { cacheRetention: dependencies.model.cacheRetention }),
       }, outcome);
       const redactedUsage = redactCredentials(usage);
-      await emit("usage", usageForControlPlane(redactedUsage, dependencies.model));
+      // A run that made no model call (a review run's own session is not used: its reviewers have sessions of their own) has nothing to report, on a fresh session and on a reopened one alike.
+      // Without this a reopened run would send the whole conversation's running total again.
+      if (usageBaselineKnown && !spentNothing(spent)) {
+        await emit("usage", usageForControlPlane(redactedUsage, dependencies.model));
+        // Kept once the control plane has the event (after the final flush below).
+        usageToKeep = running;
+      } else if (!usageBaselineKnown) {
+        // Nothing is sent for a run whose baseline could not be read, but the stats now are what the conversation has added up to. Kept, the next run (and a retry of it that dies before its event) starts
+        // from the right figure and does not fall back to the stats at reopen.
+        usageToKeep = running;
+        usageKeptUnsent = true;
+      }
       await artifactSink({
         name: "usage.json",
         mediaType: "application/json",
@@ -1836,6 +1868,13 @@ async function runTask(
     }
     await reportLoadedKnowledge();
     await flushEvents();
+    // What the usage events sent so far add up to is kept in the conversation record once the control plane has taken the event. A refused send leaves it unkept, and the next attempt then
+    // reports this spend too: a repeat is the safe side, a loss is not. (Flushing again sends nothing when nothing is pending, so the batches are the ones the run made.)
+    if (usageToKeep !== undefined && (usageKeptUnsent || await events.flush().then(() => true, () => false))) {
+      try {
+        await conversations.recordReportedUsage(conversationId, { tokens: { input: usageToKeep.tokens.input, output: usageToKeep.tokens.output, cacheRead: usageToKeep.tokens.cacheRead, cacheWrite: usageToKeep.tokens.cacheWrite, total: usageToKeep.tokens.total }, cost: usageToKeep.cost });
+      } catch { logUsageNote(log, "usage.reported_not_kept", invocation.operationId); }
+    }
     // Ruling Y: a task that ends failed or cancelled still tells the broker about a regression, so it stays standing.
     const withChecks = (error: Error): Error => {
       const final = finalChecks();
