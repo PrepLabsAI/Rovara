@@ -51,7 +51,11 @@ export function spendAcceptedFor(review: Pick<WorkflowDesignReview, "rounds" | "
 export function unpricedReferencePriceOf(environment: NodeJS.ProcessEnv): { inputMicrosPerMillionTokens: number; outputMicrosPerMillionTokens: number } {
   const parts = (environment["ROVARA_UNPRICED_REFERENCE_PRICE"] ?? "").split(",").map((part) => Number(part.trim()));
   if (parts.length !== 2 || !parts.every((value) => Number.isFinite(value) && value > 0 && value <= 100_000)) return UNPRICED_REFERENCE_PRICE;
-  return { inputMicrosPerMillionTokens: Math.round(parts[0]! * 1_000_000), outputMicrosPerMillionTokens: Math.round(parts[1]! * 1_000_000) };
+  const inputMicrosPerMillionTokens = Math.round(parts[0]! * 1_000_000);
+  const outputMicrosPerMillionTokens = Math.round(parts[1]! * 1_000_000);
+  // A figure that rounds to nothing would count the run at $0 and bound nothing: it is ignored like any other figure that is not a price.
+  if (inputMicrosPerMillionTokens < 1 || outputMicrosPerMillionTokens < 1) return UNPRICED_REFERENCE_PRICE;
+  return { inputMicrosPerMillionTokens, outputMicrosPerMillionTokens };
 }
 
 /** The sentence on the cost hold that says how an unpriced run is counted, and that the real bill can differ. */

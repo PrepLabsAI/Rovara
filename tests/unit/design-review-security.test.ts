@@ -245,8 +245,10 @@ describe("a reviewer's model key when the model has no price here", () => {
 describe("the figure an unpriced run is counted at", () => {
   it("is $15 and $75 per million tokens unless the install states another, and a figure that is not two positive numbers is ignored", () => {
     expect(unpricedReferencePriceOf({})).toEqual(UNPRICED_REFERENCE_PRICE);
+    // The smallest figure that is a price: one micro-dollar per million tokens.
+    expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: "0.000001,0.000001" })).toEqual({ inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 1 });
     expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: "150, 600" })).toEqual({ inputMicrosPerMillionTokens: 150_000_000, outputMicrosPerMillionTokens: 600_000_000 });
-    for (const bad of ["", "15", "15,75,1", "a,b", "0,75", "-1,5", "15,Infinity", "1000000,5"]) expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: bad })).toEqual(UNPRICED_REFERENCE_PRICE);
+    for (const bad of ["", "15", "15,75,1", "a,b", "0,75", "-1,5", "15,Infinity", "1000000,5", "0.0000001,0.0000001", "1e-9,1e-9", "0.0000004,75", "15,0.0000004"]) expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: bad })).toEqual(UNPRICED_REFERENCE_PRICE);
     expect(unpricedNoteOf(UNPRICED_REFERENCE_PRICE)).toBe("If you run it anyway, Rovara counts it at $15 and $75 per million tokens (input and output). A dearer model can cost more than the limit.");
   });
 });

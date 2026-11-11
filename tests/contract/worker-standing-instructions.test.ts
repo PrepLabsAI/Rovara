@@ -10,7 +10,7 @@ import { fauxAssistantMessage, getCurrentSystemPrompt, type TranscriptContext } 
 import { afterEach, describe, expect, it } from "vitest";
 import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, AGENT_STEP_PREAMBLE, STANDING_INSTRUCTIONS_FEATURE, WORKER_INVOCATION_FEATURES } from "../../packages/contracts/src/index.js";
 import { READ_ONLY_TOOLS } from "@agentx/contracts";
-import { createReviewSessionOpener } from "../../packages/worker/src/design-review-sessions.js";
+import { DESIGN_REVIEW_MAX_OUTPUT_TOKENS, createReviewSessionOpener } from "../../packages/worker/src/design-review-sessions.js";
 import { agentStepSystemPrompt } from "../../packages/worker/src/agent-run/run-agent-step.js";
 import { materializeSkills, skillsPromptSection, type AgentSkillFile } from "../../packages/worker/src/agent-step.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
@@ -238,5 +238,27 @@ describe("the design-review session", () => {
     (await createReviewSessionOpener({ rootPath: dir, localFileTools: true, runtimeFor })(open)).dispose();
     expect(seen).toEqual(["ROLE PROMPT\n\nSTANDING BLOCK", "ROLE PROMPT"]);
     expect(seen[0]!.startsWith("ROLE PROMPT")).toBe(true);
+  });
+
+  it("limits one reviewer turn to 16,000 output tokens, so the broker's worst-case reservation for a call fits the reviewer's key budget", async () => {
+    const dir = await temp("dr-limit-");
+    const limits: Array<number | undefined> = [];
+    const adapter: PiSessionAdapter = {
+      async create(input) {
+        limits.push(input.maxOutputTokens);
+        const sessionFile = join(input.sessionDirectory, "f.jsonl");
+        await writeFile(sessionFile, "");
+        return {
+          sessionFile, conversationId: "f", prompt: async () => undefined, abort: async () => undefined, getModel: () => ({ provider: "p", modelId: "m" }),
+          getSessionStats: () => ({ sessionFile, sessionId: "f", userMessages: 0, assistantMessages: 0, toolCalls: 0, toolResults: 0, totalMessages: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+          subscribe: () => () => undefined, dispose: () => undefined,
+        };
+      },
+    };
+    const open = { purpose: "reviewer" as const, keySlot: "slot-critic", model: { provider: "p", modelId: "m" }, system: "ROLE PROMPT", tools: [...READ_ONLY_TOOLS] };
+    (await createReviewSessionOpener({ rootPath: dir, localFileTools: true, runtimeFor: () => ({ model: { provider: "p", modelId: "m" }, piAdapter: adapter }) })(open)).dispose();
+    // The limit reaches the session adapter, and it is the one the proxy test and the docs name.
+    expect(limits).toEqual([16_000]);
+    expect(DESIGN_REVIEW_MAX_OUTPUT_TOKENS).toBe(16_000);
   });
 });

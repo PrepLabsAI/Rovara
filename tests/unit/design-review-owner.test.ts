@@ -396,3 +396,34 @@ describe("what a cost choice leaves behind", () => {
     expect(designWaitNotifyKey(w.taskId, held.revision, "24h").sk).toBe(`DESIGN_WAIT_NOTIFY#${String(held.revision)}#24h`);
   });
 });
+
+describe("the run-anyway choice and the answers, as the owner's page makes them", () => {
+  it("records the run-anyway choice in the decision history like every other choice, and the round it starts names the owner", async () => {
+    const w = await world({ price: false, holdAnswerable: true });
+    await toRound(w);
+    const held = await workflowOf(w);
+    const requestId = newRequestId();
+    expect(await makeGate(w).decide({
+      companyId: COMPANY, kind: DESIGN_CHOICE_KIND, subjectId: w.taskId, requestId, outcome: "approve", seen: { revision: held.revision, artifactDigest: designChoiceDigest(held)! },
+      credentials: [{ method: LOCAL_SESSION_METHOD, token: SESSION }], details: { choice: "run_unpriced" },
+    })).toMatchObject({ status: "decided" });
+    const developerId = localOwnerPrincipal({ companyId: COMPANY }).personId;
+    expect(await w.h.store.get({ pk: `DECISION#${COMPANY}#${developerId}`, sk: `DECIDED#${requestId}` })).toMatchObject({
+      entityType: "DECISION_RECORD", cardId: `approve_spend:${w.taskId}`, kind: "approve_spend", outcome: "approved", reason: "run_unpriced", requestId,
+    });
+  });
+
+  it("records the owner's answers under the workflow's own owner id (the person the review's record accepts), through the page's action", async () => {
+    const w = await world({ holdAnswerable: true });
+    const resolveRun = await toPlannerRun(w);
+    w.results.set(`${resolveRun.operation.id}:plan.md`, askingAnswer(await workflowOf(w)));
+    await finish(w, resolveRun.operation, { kind: "ended" });
+    const asking = await workflowOf(w);
+    const { local } = localDesignReview(w);
+    const actions = local.pageActions({ gate: makeGate(w), owner: localOwnerPrincipal({ companyId: COMPANY }) });
+    const answered = await actions.answerQuestions({ taskId: w.taskId, revision: asking.revision, answers: [{ questionId: "q1", optionId: "a" }] });
+    expect(answered).toMatchObject({ ok: true });
+    const after = await workflowOf(w);
+    expect(after.designReview!.rounds[0]!.answers).toMatchObject({ by: { actorId: asking.ownerId } });
+  });
+});
