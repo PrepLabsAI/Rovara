@@ -58,7 +58,11 @@ describe("channel adapters infrastructure", () => {
     expect(onState.map((statement) => [actions(statement), statement.Condition?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]])).toEqual([
       [["dynamodb:GetItem"], ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*", "SHARED_TASK#*"]],
       [["dynamodb:PutItem"], ["CHANNEL_LINK_CODE#*"]],
+      // Phase 7c3: Slack's plan buttons read a task's owner, share and workflow, by key and those fields only.
+      [["dynamodb:GetItem"], ["DEVTASK#*"]],
     ]);
+    const taskRead = onState.find((statement) => JSON.stringify(statement.Condition).includes("DEVTASK#*"))!;
+    expect(taskRead.Condition).toMatchObject({ "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "slackUserId", "share", "workflow"] }, Null: { "dynamodb:Attributes": "false" } });
     // No query, no scan, no other write to the state table. (Slack's threads table is the Slack router's own, Phase 7c2.)
     for (const statement of statements.filter((entry) => JSON.stringify(entry.Resource).includes("State"))) {
       for (const action of actions(statement)) expect(["dynamodb:Query", "dynamodb:Scan"]).not.toContain(action);

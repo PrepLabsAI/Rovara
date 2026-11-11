@@ -212,6 +212,10 @@ The protocol grows by three primitives, each behind a capability an adapter decl
   ChatGPT commands, task threads' notes, Quick or Full answers, new tasks, the per-thread limit, requests for the
   orchestrator). An inbound message may say it is not `addressed` to Rovara, give its own `messageId`, and say it came
   `viaApp` (the core confirms the poster is a person). A confirmation's Approve or Cancel is an action.
+- **FR-079 (presses in the core):** with `SlackViaChannel` on, a press that opens no form (workflow retries, send back,
+  keep the pull request, PR feedback decisions, Quick, Full and Just answer) is handed to the channel API as an action
+  carrying the pressed message's ID and text, after Slack has its answer, and runs there with the same request ID.
+  Its private notes and card edits go through the adapter's commands. Presses that open a form follow in Phase 7c3b.
 
 Phases: 7a the primitives (contracts, signing, the core's command client, capabilities); 7b Slack's conversation path
 through the adapter behind `SlackViaChannel`; 7c the task workflow, notices and directory through the adapter, in parts
