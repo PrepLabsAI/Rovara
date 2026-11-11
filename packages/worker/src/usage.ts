@@ -1,11 +1,12 @@
 // Moved to @agentx/contracts in feature 013 so the Slack orchestrator's turn records share the shape.
-import { SECOND_REVIEW_OPERATION_TAG } from "@agentx/contracts";
+import { SECOND_REVIEW_OPERATION_TAG, type UsageStats } from "@agentx/contracts";
 export {
   createTaskUsageTelemetry,
   effectiveCacheRetention,
   type PiCacheRetention,
   type TaskUsageOutcome,
   type TaskUsageTelemetry,
+  type UsageStats,
 } from "@agentx/contracts";
 
 /**
@@ -25,3 +26,25 @@ export function usageForControlPlane<T>(usage: T, requested: { thinkingLevel?: u
   delete rest.thinkingLevel;
   return rest as T;
 }
+
+/**
+ * What a session spent since `baseline`. A reopened conversation's Pi session adds up every message of the saved transcript, the earlier operations' too, so its raw stats are the
+ * conversation's running total. A usage event is one operation's own spend, so a run that reopened a session reports its stats minus the stats it opened with (a session made new for
+ * the run has no baseline). Never below zero.
+ */
+export function statsSince<T extends UsageStats>(stats: T, baseline: UsageStats | undefined): T {
+  if (baseline === undefined) return stats;
+  const tokens = (now: number, before: number) => Math.max(0, now - before);
+  return {
+    ...stats,
+    tokens: {
+      input: tokens(stats.tokens.input, baseline.tokens.input), output: tokens(stats.tokens.output, baseline.tokens.output),
+      cacheRead: tokens(stats.tokens.cacheRead, baseline.tokens.cacheRead), cacheWrite: tokens(stats.tokens.cacheWrite, baseline.tokens.cacheWrite),
+      total: tokens(stats.tokens.total, baseline.tokens.total),
+    },
+    cost: Math.max(0, Math.round((stats.cost - baseline.cost) * 1e9) / 1e9),
+  };
+}
+
+/** Whether a session did nothing since its baseline: no tokens and no cost. A run that only read a reopened session's transcript spent nothing and sends no usage event. */
+export const spentNothing = (stats: UsageStats): boolean => stats.tokens.total === 0 && stats.tokens.input === 0 && stats.tokens.output === 0 && stats.tokens.cacheRead === 0 && stats.tokens.cacheWrite === 0 && stats.cost === 0;
