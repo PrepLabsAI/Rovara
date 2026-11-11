@@ -6,3 +6,4 @@ export * from "./proxy.js";
 export * from "./grants.js";
 export * from "./sign-in.js";
 export * from "./credentials.js";
+export * from "./one-shot.js";

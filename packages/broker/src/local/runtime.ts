@@ -502,6 +502,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     scriptTokensEnabled: () => scriptTokensEnabled(options.environment),
     modelCalls: (operationId) => modelProxyHolder.current?.tokens.calledAliases(operationId),
     slotKeys: () => modelProxyHolder.current?.slotKeys,
+    // A diagnosis calls its model through the proxy over the listener's loopback port (both are made after the app).
+    modelProxy: () => (modelProxyHolder.current === undefined || callbackServer.current === undefined ? undefined : { tokens: modelProxyHolder.current.tokens, port: callbackServer.current.tcpPort }),
     environment: options.environment ?? process.env,
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
@@ -524,6 +526,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(options.modelProviderEndpoints === undefined ? {} : { modelProviderEndpoints: options.modelProviderEndpoints }),
     // The flip-back settings of the session features (`0` turns one off; anything else leaves it on).
     liveSteer: options.environment["ROVARA_LIVE_STEER"] !== "0", stepNotes: options.environment["ROVARA_STEP_NOTES"] !== "0", ask: options.environment["ROVARA_ASK"] !== "0",
+    diagnosis: options.environment["ROVARA_DIAGNOSIS"] !== "0",
   });
 
   comments.current = app.comments;

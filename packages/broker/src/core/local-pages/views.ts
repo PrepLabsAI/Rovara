@@ -99,10 +99,30 @@ export interface PlanPageView {
   secondReview?: { lines: string[]; needsAcknowledgement: boolean; acknowledged: boolean };
   /** The acknowledgement key the form carries (set only while the owner has to acknowledge). */
   secondReviewAck?: string;
+  /**
+   * Fix with agent for the error the task shows: the button when one is offered (the error as shown, and a request id for this press), why it is not offered, and the diagnosis that is open or was answered, in
+   * plain lines. The lines of a proposal are a model's words and are drawn as untrusted; a diagnosis changes nothing, and whatever it suggests is done by the owner with this page's ordinary forms.
+   */
+  diagnosis?: PlanDiagnosisView;
   /** One plain line when the design's review did not run ("Design review did not run: ..."). Fixed words. Absent when it ran or there was none. */
   designNote?: string;
   /** Design review: present when the task has one. */
   designReview?: DesignReviewPanelView;
+}
+
+export interface PlanDiagnosisView {
+  /** The error the page shows, by its key, and the request id of this press. Present when a diagnosis can be asked for now. */
+  offer?: { requestId: string; errorKey: string };
+  /** Why none is offered (fixed words), when the task shows an error and none can be asked for. */
+  why?: string;
+  /** Where the open or answered diagnosis is. Absent: none was asked for this error. */
+  state?: "waiting" | "ready" | "failed";
+  /** The fixed words of a failed diagnosis. */
+  failure?: string;
+  /** One line for each suggestion, in the words every surface uses. */
+  lines?: string[];
+  /** The answer says the cause is in the code; a deeper look at the repositories is not on this install yet. */
+  needsCode?: boolean;
 }
 
 export interface DesignMockupView {
@@ -255,6 +275,8 @@ export interface LocalPageActions {
   revokeScriptToken?(input: { tokenId: string }): Promise<LocalActionResult>;
   /** A change of the second review's settings. Refused (with its fixed words) when the owner may not or the setting moved. */
   secondReview?(input: SecondReviewPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
+  /** Fix with agent: the owner asks for a diagnosis of the error the task page showed (`errorKey` names the error as shown; `requestId` is this press). Spends the owner's own model key, so it is the owner's act on a page. */
+  diagnose?(input: { taskId: string; requestId: string; errorKey: string }): Promise<LocalActionResult>;
   /** The owner acknowledges that an `on` second review did not run, so the merge may go ahead. `revision` is the task revision on the page; `key` is the acknowledgement the page showed. */
   acknowledgeSecondReview?(input: { taskId: string; revision: number; key: string }): Promise<LocalActionResult>;
   /**

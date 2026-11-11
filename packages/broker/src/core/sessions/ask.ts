@@ -179,21 +179,38 @@ export function createAsk(deps: AskDependencies) {
   }
 
   /** The answer turn: the context, one model call, the stored answer. Never throws; a failure ends the Ask `failed` in fixed words. */
-  async function turn(session: AgentSessionRecord, askId: string, askerKey: string, question: string, held: { reservationId?: string | undefined; submittedMs: number }): Promise<void> {
+  async function turn(session: AgentSessionRecord, askId: string, askerKey: string, question: string, held: { reservationId?: string | undefined; submittedMs: number; estimateTokens: number }): Promise<void> {
     const { orgId, sessionId } = session;
+    // The allowance this Ask holds is given back or settled ONCE. Once the request may have reached the provider, it is only ever SETTLED (with what the call used, else the estimate): the model may have been paid.
+    let reservation = held.reservationId;
+    const resolve = async (how: "release" | "settle", tokens?: number): Promise<void> => {
+      const id = reservation;
+      reservation = undefined;
+      if (id === undefined || deps.admission === undefined) return;
+      await (how === "release" ? deps.admission.release(id) : deps.admission.settle(id, { tokens: tokens ?? held.estimateTokens })).catch(() => undefined);
+    };
     const fail = async (reason: string, error?: unknown): Promise<void> => {
       const cause = causeOf(error);
       log({ event: "ask.failed", reason, ...(cause === undefined ? {} : { cause }), error: error instanceof Error ? error.name : undefined });
-      if (held.reservationId !== undefined) await deps.admission?.release(held.reservationId).catch(() => undefined);
+      // A failure that is Rovara's own (no model, a request the guard refused) is one where nothing was sent: the allowance goes back and the slots too. Any other failure of the call (a timeout, an abort, the
+      // provider's own error, an answer thrown away) is settled at the estimate, since the provider may have charged for it.
+      const never = reason !== "turn_failed" ? OWN_FAILURES.has(reason) : cause !== undefined && OWN_FAILURES.has(cause);
+      await resolve(never ? "release" : "settle");
       if (!(await settle(orgId, sessionId, askId, askerKey, "failed").catch(() => false))) return;
-      // A failure that is Rovara's own (no model, a request the guard refused) gives the slots back: the Ask never ran.
-      if (reason !== "turn_failed" ? OWN_FAILURES.has(reason) : cause !== undefined && OWN_FAILURES.has(cause)) await refund(orgId, sessionId, askerKey, held.submittedMs);
+      if (never) await refund(orgId, sessionId, askerKey, held.submittedMs);
     };
     try {
       if (deps.answerer === undefined || session.subject.kind !== "task") return await fail("no_answerer");
       const context = await loadAskContext(deps, session, storeAskReaders(deps, session, deps.readers?.(session)));
       if (context === undefined) return await fail("no_context");
       const outcome = await deps.answerer.answer({ context: `${ASK_TURN_RULES}\n\n${context.text}`, question, maxOutputTokens: ASK_LIMITS.answerMaxOutputTokens, signal: AbortSignal.timeout(ASK_TURN_TIMEOUT_MS), taskId: session.subject.taskId });
+      // The provider answered: the call is paid whatever happens to the answer next (an empty answer, a failing write, an Ask that ended meanwhile). It is settled and counted against the task now, before any of that can fail.
+      // A response that said nothing of what it used is charged the most it could have cost (the context as input, the output limit), never nothing.
+      const [provider, ...modelParts] = outcome.model.split("/");
+      const usage = outcome.usage ?? { input: Math.ceil(context.bytes / 4), output: ASK_LIMITS.answerMaxOutputTokens, cacheRead: 0, cacheWrite: 0, provider: modelParts.length === 0 ? "unknown" : provider!, modelId: (modelParts.length === 0 ? outcome.model : modelParts.join("/")).slice(0, 200) };
+      if (outcome.usage === undefined) log({ event: "ask.unmetered", code: "charged_maximum" });
+      await resolve("settle", usage.input + usage.output);
+      if (deps.recordUsage !== undefined) await deps.recordUsage({ taskId: session.subject.taskId, entryId: `ask:${askId}`, usage }).catch((error: unknown) => log({ event: "ask.usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }));
       const answer = scrubAskText(outcome.text).trim().slice(0, ASK_ANSWER_MAX_CHARS).trim();
       if (answer === "") return await fail("empty_answer");
       const nowMs = now().getTime();
@@ -208,12 +225,6 @@ export function createAsk(deps: AskDependencies) {
         ...deps.audit.stage({ eventId: `session:${sessionId}:asked:${askId}`, companyId: orgId, at: new Date(nowMs).toISOString(), actor: { type: "person", id: askerKey }, action: "task.asked", subject: { type: "session", id: sessionId } }),
       ];
       if (!(await settle(orgId, sessionId, askId, askerKey, "answered", stored))) return;
-      // A response that said nothing of what it used is charged the most it could have cost (the context as input, the output limit), never nothing.
-      const [provider, ...modelParts] = outcome.model.split("/");
-      const usage = outcome.usage ?? { input: Math.ceil(context.bytes / 4), output: ASK_LIMITS.answerMaxOutputTokens, cacheRead: 0, cacheWrite: 0, provider: modelParts.length === 0 ? "unknown" : provider!, modelId: (modelParts.length === 0 ? outcome.model : modelParts.join("/")).slice(0, 200) };
-      if (outcome.usage === undefined) log({ event: "ask.unmetered", code: "charged_maximum" });
-      if (held.reservationId !== undefined) await deps.admission?.settle(held.reservationId, { tokens: usage.input + usage.output }).catch(() => undefined);
-      if (deps.recordUsage !== undefined) await deps.recordUsage({ taskId: session.subject.taskId, entryId: `ask:${askId}`, usage }).catch((error: unknown) => log({ event: "ask.usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }));
     } catch (error) {
       await fail("turn_failed", error);
     }
@@ -241,10 +252,11 @@ export function createAsk(deps: AskDependencies) {
       const scope = { orgId, sessionId };
       // Admission first (Cloud's budgets, hard cap and forbidden models plug in here; Code's default allows everything): an Ask costs model money, so it asks like any other call.
       let reservationId: string | undefined;
+      const estimateTokens = Math.ceil(ASK_LIMITS.contextMaxBytes / 4) + ASK_LIMITS.answerMaxOutputTokens;
       if (deps.admission !== undefined) {
         const decision = await deps.admission.admit({
           companyId: orgId, idempotencyKey: `ask:${askId}`, action: "model.call", actor: principal, ...(typeof task["project"] === "string" ? { projectName: task["project"] } : {}),
-          subject: { type: "task", id: session.subject.taskId }, estimate: { tokens: Math.ceil(ASK_LIMITS.contextMaxBytes / 4) + ASK_LIMITS.answerMaxOutputTokens },
+          subject: { type: "task", id: session.subject.taskId }, estimate: { tokens: estimateTokens },
         });
         if (!decision.allowed) throw admissionRefusal(decision);
         reservationId = decision.reservationId;
@@ -279,7 +291,7 @@ export function createAsk(deps: AskDependencies) {
         throw error;
       }
       // The question travels in this process only: it is in no record while the Ask waits.
-      const running1 = turn(session, askId, askerKey, body.data.question, { reservationId, submittedMs: nowMs }).finally(() => { running.delete(running1); });
+      const running1 = turn(session, askId, askerKey, body.data.question, { reservationId, submittedMs: nowMs, estimateTokens }).finally(() => { running.delete(running1); });
       running.add(running1);
       return AskStatusSchema.parse({ askId, state: "queued" });
     },

@@ -51,7 +51,7 @@ class AskModelProblem extends Error {
 }
 
 /** The request of each format, with no tools and nothing kept at the provider. */
-function requestBody(api: ProxyApi, model: string, context: string, question: string, maxOutputTokens: number): Record<string, unknown> {
+export function requestBody(api: ProxyApi, model: string, context: string, question: string, maxOutputTokens: number): Record<string, unknown> {
   switch (api) {
     case "anthropic-messages": return { model, max_tokens: maxOutputTokens, system: context, messages: [{ role: "user", content: question }], stream: false };
     case "openai-completions": return { model, max_tokens: maxOutputTokens, messages: [{ role: "system", content: context }, { role: "user", content: question }], stream: false, store: false };
@@ -61,7 +61,7 @@ function requestBody(api: ProxyApi, model: string, context: string, question: st
 }
 
 /** The answer's text, wherever the format puts it. */
-function textOf(api: ProxyApi, body: Record<string, unknown>): string {
+export function textOf(api: ProxyApi, body: Record<string, unknown>): string {
   const parts: string[] = [];
   if (api === "anthropic-messages") {
     for (const block of Array.isArray(body["content"]) ? body["content"] as unknown[] : []) if (typeof block === "object" && block !== null && (block as { type?: unknown }).type === "text" && typeof (block as { text?: unknown }).text === "string") parts.push((block as { text: string }).text);

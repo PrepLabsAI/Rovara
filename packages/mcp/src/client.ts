@@ -14,6 +14,7 @@ import {
   TASK_VIEW_VERSION,
   SecondReviewStateReaderSchema,
   DesignReviewStateReaderSchema,
+  TaskDiagnosisViewReaderSchema,
   SessionListReaderSchema,
   SessionMessageSchema,
   SessionResponseReaderSchema,
@@ -98,6 +99,9 @@ export type DesignReviewStateReadView = z.infer<typeof DesignReviewStateReaderSc
 /** The second review's state as a client reads it: a mode this build does not know reads `unknown` (forward-compatible reader). */
 export type SecondReviewStateRead = z.infer<typeof SecondReviewStateReaderSchema>;
 
+/** A task's Fix with agent state as a client reads it (forward-compatible: a proposal kind this build does not know reads `unknown`). */
+export type TaskDiagnosisRead = z.infer<typeof TaskDiagnosisViewReaderSchema>;
+
 export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
   configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string; confirm?: AgentXConfigurationConfirm }>;
@@ -134,6 +138,8 @@ export interface ControlPlaneClient {
   getSecondReview(query: { project?: string; builder?: readonly string[] }): Promise<SecondReviewStateRead>;
   /** One task's design review: how it stands, the findings, and what waits for the owner (read only). */
   getDesignReview(taskId: string): Promise<DesignReviewStateReadView>;
+  /** A task's error, whether Fix with agent is offered for it, and the diagnosis of it (read only: the owner starts one on the task's page). Absent route: the install has no Fix with agent. */
+  getTaskDiagnosis(taskId: string): Promise<TaskDiagnosisRead>;
   getTaskPeople(taskId: string): Promise<TaskPeopleView>;
   getTaskPeopleRequest(taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
   setTaskPerson(taskId: string, request: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
@@ -390,6 +396,7 @@ export function httpControlPlaneClient(options: {
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
     getDesignReview: async (taskId) => (await call(z.object({ designReview: DesignReviewStateReaderSchema }).passthrough(), "GET", path(taskId, "/design-review"))).designReview,
+    getTaskDiagnosis: (taskId) => call(TaskDiagnosisViewReaderSchema, "GET", path(taskId, "/diagnosis")),
     getSecondReview: async (query) => {
       const search = new URLSearchParams();
       if (query.project !== undefined) search.set("project", query.project);

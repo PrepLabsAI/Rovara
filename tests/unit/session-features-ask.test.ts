@@ -7,6 +7,7 @@ import { ASK_BUSY_TEXT, ASK_CLOSED_TEXT, ASK_NOT_SET_UP_TEXT, ASK_RATE_TEXT, ask
 import { buildAskContext, ASK_AUDIENCE_POLICY } from "../../packages/broker/src/core/sessions/ask-context.js";
 import { createTaskSessionItems, developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/index.js";
 import { sessionNoteItems } from "../../packages/broker/src/core/sessions/notes.js";
+import { holdingAdmission } from "../support/holding-admission.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 
@@ -260,7 +261,8 @@ describe("what an Ask costs", () => {
 
   it("gives the reservation back when the Ask fails or is refused after admission, and when the rate says no", async () => {
     const adm = recordingAdmission();
-    const failing = await world({ admission: adm.admission, answerer: { answer: async () => { throw new Error("x"); } } });
+    // A failure that is Rovara's own (no key, a request the guard refused) came before anything was sent: the allowance goes back.
+    const failing = await world({ admission: adm.admission, answerer: { answer: async () => { throw Object.assign(new Error("x"), { reason: "no_credential" }); } } });
     await failing.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(22), question: "q" });
     await failing.ask.idle();
     expect(adm.released).toEqual(["res-1"]);
@@ -269,6 +271,79 @@ describe("what an Ask costs", () => {
     await limited.store.put({ item: { ...sessionRateKey(ORG, SESSION, OWNER_ID, "ask"), windowStart: Math.floor(clock.ms / 3_600_000) * 3_600_000, count: ASK_RATE.perPersonPerHour } });
     await expect(limited.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(23), question: "q" })).rejects.toThrow(ASK_RATE_TEXT);
     expect(rate.released).toEqual(["res-1"]);
+  });
+
+  describe("an allowance held for a call that may have been paid is settled, never given back", () => {
+    const run = async (options: Parameters<typeof world>[0], n: number) => {
+      const adm = holdingAdmission();
+      const w = await world({ ...options, admission: adm.admission });
+      await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(n), question: "q" });
+      await w.ask.idle();
+      return { adm, w };
+    };
+
+    it("settles at the estimate when the call timed out or was aborted after it was sent", async () => {
+      for (const [n, error] of [[200, Object.assign(new Error("x"), { reason: "timed_out" })], [201, new DOMException("aborted", "AbortError")], [202, Object.assign(new Error("x"), { reason: "provider_status_503" })]] as const) {
+        const { adm } = await run({ answerer: { answer: async () => { throw error; } } }, n);
+        expect(adm.released).toEqual([]);
+        expect(adm.settled).toHaveLength(1);
+        expect(adm.settled[0]!.tokens).toBeGreaterThan(0);
+        expect(adm.open()).toEqual([]);
+        expect(adm.violations).toEqual([]);
+      }
+    });
+
+    it("settles with the usage when the answer comes back empty", async () => {
+      const { adm, w } = await run({ answerer: { answer: async () => ({ text: "   ", model: "anthropic/m", usage: { input: 700, output: 50, cacheRead: 0, cacheWrite: 0, provider: "anthropic", modelId: "m" } }) } }, 203);
+      expect(adm.settled).toEqual([{ id: "held-1", tokens: 750 }]);
+      expect(adm.released).toEqual([]);
+      expect(w.usage).toHaveLength(1);
+      expect(adm.violations).toEqual([]);
+    });
+
+    it("settles with the usage, or the estimate when it said none, when writing the answer fails", async () => {
+      for (const [n, usage, tokens] of [[204, { input: 700, output: 50, cacheRead: 0, cacheWrite: 0, provider: "anthropic", modelId: "m" }, 750], [205, undefined, undefined]] as const) {
+        const adm = holdingAdmission();
+        const w = await world({ admission: adm.admission, answerer: { answer: async () => ({ text: "an answer", model: "anthropic/m", ...(usage === undefined ? {} : { usage }) }) } });
+        const real = w.store.transact.bind(w.store);
+        w.store.transact = async (items) => { if (items.some((item) => item.kind === "put" && item.item["entityType"] === "ASK")) throw new Error("the disk is full"); return real(items); };
+        await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(n), question: "q" });
+        await w.ask.idle();
+        expect(adm.released).toEqual([]);
+        expect(adm.settled).toHaveLength(1);
+        if (tokens !== undefined) expect(adm.settled[0]!.tokens).toBe(tokens);
+        else expect(adm.settled[0]!.tokens).toBeGreaterThan(0);
+        expect(adm.open()).toEqual([]);
+        expect(adm.violations).toEqual([]);
+      }
+    });
+
+    it("settles when the Ask had already ended by the time the answer came (nothing is left held)", async () => {
+      let release: (() => void) | undefined;
+      const adm = holdingAdmission();
+      const w = await world({ admission: adm.admission, answerer: { answer: () => new Promise((resolve) => { release = () => resolve({ text: "late", model: "anthropic/m" }); }) } });
+      const queued = await w.ask.submit(OWNER, ORG, SESSION, { requestId: REQ(206), question: "q" });
+      const before = clock.ms;
+      while (release === undefined) await new Promise((resolve) => setTimeout(resolve, 5));
+      clock.ms += 16 * 60_000;
+      await w.store.update({ key: askRequestKey(ORG, SESSION, queued.askId), ops: [{ op: "set", path: ["state"], value: "failed" }] });
+      release();
+      await w.ask.idle();
+      expect(adm.settled).toHaveLength(1);
+      expect(adm.settled[0]!.tokens).toBeGreaterThan(0);
+      expect(adm.open()).toEqual([]);
+      expect(adm.violations).toEqual([]);
+      clock.ms = before;
+    });
+
+    it("gives it back only when nothing was sent: no model set up, no credential, a request the guard refused, a task with no context", async () => {
+      for (const [n, reason] of [[207, "no_model"], [208, "provider_not_set_up"], [209, "no_credential"], [210, "sign_in_failed"], [211, "request_not_allowed"]] as const) {
+        const { adm } = await run({ answerer: { answer: async () => { throw Object.assign(new Error("x"), { reason }); } } }, n);
+        expect(adm.settled).toEqual([]);
+        expect(adm.released).toEqual(["held-1"]);
+        expect(adm.violations).toEqual([]);
+      }
+    });
   });
 
   it("caps one person across every task, beside the per-session rates", async () => {

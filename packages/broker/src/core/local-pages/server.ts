@@ -58,6 +58,7 @@ const NOTICES: Record<string, string> = {
   rejected: "Rejected.",
   commented: "Comment added.",
   retried: "Rovara is running that step again.",
+  diagnosing: "Fix with agent is looking into this error. Reload this page in a moment.",
   attached: "That thread is attached. A writer's comment there can decide this plan.",
   answered: "Your answers were sent.",
   chosen: "Done. Rovara carries on with the design review.",
@@ -230,6 +231,16 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "task.retry", taskId, revision })) return redirect(`${request.base}/plan/${taskId}?n=form`);
       const result = await options.actions.retry({ taskId, revision });
       return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "retried")}`);
+    } },
+    { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/diagnose$`), handle: async (request, match) => {
+      const taskId = match[1] ?? "";
+      const requestId = request.form?.get("requestId") ?? "";
+      const errorKey = request.form?.get("errorKey") ?? "";
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(requestId) || !/^[a-f0-9]{64}$/u.test(errorKey) || options.actions.diagnose === undefined) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
+      // The form is good only for the error the page showed and for this press: a second click, or a form drawn for another error, finds its token spent or wrong.
+      if (!verified(request, { action: "task.diagnose", taskId, requestId, subject: errorKey })) return redirect(`${request.base}/plan/${taskId}?n=form`);
+      const result = await options.actions.diagnose({ taskId, requestId, errorKey });
+      return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "diagnosing")}#fix-with-agent`);
     } },
     { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/thread$`), handle: async (request, match) => {
       const taskId = match[1] ?? "";

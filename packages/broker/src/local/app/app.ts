@@ -16,7 +16,7 @@ import { createSecondReview, type SecondReview } from "../../core/second-review/
 import { createLocalSecondReviewSeams } from "./second-review.js";
 import { SecondReviewerSchema } from "@agentx/contracts";
 import type { ProxyRoute } from "../model-proxy/types.js";
-import { capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, type LocalModelProxy, type ModelGrantSource } from "../model-proxy/index.js";
+import { OneShotOperations, capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, withOneShotOperations, type LocalModelProxy, type LoopbackProxy, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../../core/decisions/local-actions.js";
@@ -35,6 +35,8 @@ import { createAsk } from "../../core/sessions/ask.js";
 import { createAskDiffReader, createPeekClient } from "../../core/sessions/peek.js";
 import { settleSteerDeliveriesFor } from "../../core/sessions/steer.js";
 import { createLocalAskModel } from "../ask-model.js";
+import { createLocalDiagnosisModel } from "../diagnosis-model.js";
+import { createLocalDiagnosis, type LocalDiagnosis } from "./diagnosis.js";
 import type { ProviderEndpoints } from "../model-proxy/providers.js";
 import { sweepOpenSessions } from "../../core/sessions/sweep.js";
 import { refreshSessionSummary, type SummaryDependencies } from "../../core/sessions/summary.js";
@@ -124,6 +126,10 @@ export interface LocalAppOptions {
   stepNotes?: boolean;
   /** Whether Ask about a task is served. The runtime sets it from `ROVARA_ASK` (`0` turns it off); default on. */
   ask?: boolean;
+  /** The model proxy and the loopback port of its listener, read late (the proxy is made after the app): what a diagnosis calls its model through. Absent: no diagnosis can run. */
+  modelProxy?: () => LoopbackProxy | undefined;
+  /** Whether Fix with agent is served. The runtime sets it from `ROVARA_DIAGNOSIS` (`0` turns it off); default on. */
+  diagnosis?: boolean;
   /** Port of the review pages (0: a free one). */
   pagesPort?: number;
   /** The most pull request threads one comment poll reads (default 20): a test lowers it to see the rotation. */
@@ -153,6 +159,8 @@ export interface LocalApp {
   readonly milestones: Pick<DocumentMilestones, "register" | "deliverDue">;
   /** The second review by another AI company: its settings, state and the task flow's hooks. */
   readonly secondReview: SecondReview;
+  /** Fix with agent: a diagnosis of the error a task shows, answered by the owner's own model through the proxy. */
+  readonly diagnosis: LocalDiagnosis;
   /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
   readonly modelGrants: ModelGrantSource;
   /** Script tokens: serving a request that carries one, and the settings the local pages and routes use. */
@@ -299,7 +307,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   installBranchSyncDeciders(registerMergeActionDecider);
   // The model proxy asks, per call, what this operation's capability entitles it to. The models are the install's own choice, never the worker's; no budget is held yet (the flow has no
   // run limit before a price table exists, and Code's price table is empty), and the proxy keeps no spend record without one.
-  const modelGrants = capabilityModelGrants({
+  // The broker's own one-shot calls (a diagnosis) are live operations of the proxy only while they run; a worker's capability never names one.
+  const oneShot = new OneShotOperations();
+  const modelGrants = withOneShotOperations(capabilityModelGrants({
     capabilities: new CallbackCapabilities(signingKey),
     ...designReview.slotGrants,
     async describe(operation) {
@@ -322,7 +332,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       const [record, workspace] = await Promise.all([store.get(operationKey(operation.workspaceId, operation.operationId)), store.get(workspaceKey(operation.workspaceId))]);
       return record !== undefined && typeof record["status"] === "string" && !isTerminalStatus(record["status"]) && record["fence"] === operation.fence && workspace?.["activeOperationId"] === operation.operationId && workspace["fence"] === operation.fence;
     },
-  });
+  }), oneShot);
 
   // Sessions: facts over the task records, the cost ledger over the metering seam.
   const summaryDeps: SummaryDependencies = {
@@ -387,9 +397,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const scriptTokens = createLocalScriptTokens({ store, audit: registry.require("audit-sink"), now: () => clock().getTime(), log, companyId, owner, identity: registry.require("identity"), ...(options.scriptTokensEnabled === undefined ? {} : { enabled: options.scriptTokensEnabled }) });
   // The switch is off: every token made before is ended now, so turning it back on later revives nothing.
   await scriptTokens.revokeAllForSwitchOff().catch((error: unknown) => log({ event: "local_app.script_tokens_switch_off_failed", error: error instanceof Error ? error.name : "unknown" }));
+  // Fix with agent: the owner's own model, called through the model proxy (a one-shot operation of its own, capped), for the error a task shows.
+  const diagnosis = createLocalDiagnosis({
+    flow: flow.deps, registry, companyId, owner, tagKey: deriveKey(rootKey, "diagnosis-tag"), enabled: options.diagnosis ?? true, log, ...(options.now === undefined ? {} : { now: options.now }),
+    answerer: createLocalDiagnosisModel({ choice: chosen, providers, proxy: () => options.modelProxy?.(), operations: oneShot }),
+  });
   const pages = await createLocalPagesServer({
     data: {
-      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview }),
+      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview, diagnosis }),
       listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
       getChatPage: () => chat.view(),
       previewChatLink: (code) => chat.preview(code),
@@ -397,7 +412,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     actions: {
       ...chat.actions,
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume,
-      ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, designAnswers: (input) => designPageActions.answerQuestions(input) }),
+      ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, diagnosis, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       async createScriptToken(input) {
         try {
           return { ok: true, created: await scriptTokens.create(input) };
@@ -430,7 +445,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords } });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, designReview, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
     store, audit: registry.require("audit-sink"), admission: registry.require("admission"), enabled: options.ask ?? true, artifacts: blobs, readers: () => ({ diff: createAskDiffReader({ peek: createPeekClient(flow.deps) }) }), questionHashKey: deriveKey(rootKey, "ask-question"), log,
@@ -503,7 +518,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants, secondReview, milestones, scriptTokens,
+    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants, secondReview, diagnosis, milestones, scriptTokens,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

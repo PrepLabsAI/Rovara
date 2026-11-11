@@ -5,7 +5,7 @@ import { request as httpRequest } from "node:http";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost } from "@agentx/contracts";
+import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost, TaskDiagnosisView } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
   agentSessionKey, canonicalPlanJson, change, createCandidateManifest, projectMetaKey, secondReviewModelKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
@@ -30,7 +30,7 @@ import { OPENS_PER_MINUTE } from "../../packages/broker/src/local/app/routes.js"
 import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
 import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
 import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/local/app/host.js";
-import { registerOpenCommand, registerSecondReviewCommand } from "../../packages/cli/src/up/cli.js";
+import { registerDiagnosisCommand, registerOpenCommand, registerSecondReviewCommand } from "../../packages/cli/src/up/cli.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
@@ -4328,5 +4328,155 @@ describe("rovara up: the owner's change note reaches the planner's automatic sec
     const prompt = (revision.payload as { prompt: string }).prompt;
     expect(prompt).toContain("A second model checked this plan and found problems");
     expect(prompt).toContain("Also log the request id.");
+  });
+});
+
+describe("rovara up: Fix with agent for a task's error, on the owner's own key, through the model proxy", () => {
+  const KEY = (): string => ["sk", "ant", "api03", "D".repeat(32)].join("-");
+  const ANSWER = JSON.stringify({ summary: "The planning step ended without an answer.", needsCode: false, proposals: [{ kind: "retry_with_note", note: "Try the step again." }] });
+  /** A task blocked at Understand (its worker failed): the error the page offers Fix with agent for. */
+  async function blockedTask(h: Awaited<ReturnType<typeof launch>>): Promise<string> {
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "77777777-7777-4777-8777-777777777777", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+    const taskId = started.body.task.taskId;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "FAILED", error: "the model did not answer" });
+    expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task.workflow).toMatchObject({ stage: "UNDERSTAND", state: "BLOCKED" });
+    return taskId;
+  }
+  const page = async (h: Awaited<ReturnType<typeof launch>>, taskId: string) => {
+    const link = await h.browse(`/plan/${taskId}`);
+    const shown = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
+    return { link, shown };
+  };
+  const read = async (h: Awaited<ReturnType<typeof launch>>, taskId: string) => (await h.api(`/v1/dev/tasks/${taskId}/diagnosis`)).body as unknown as TaskDiagnosisView;
+
+  it("offers the button for the error the page shows, calls the owner's model through the proxy, shows the suggestions, and an assistant with the token can read but not start one", async () => {
+    const provider = await startFakeProvider();
+    cleanup.push(() => provider.close());
+    provider.text = ANSWER;
+    const key = KEY();
+    const events: AuditEvent[] = [];
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: key }, modelProviderEndpoints: { anthropic: provider.url }, audit: events });
+    const taskId = await blockedTask(h);
+
+    // The token reads what is offered and starts nothing: it spends the owner's key, so it is the owner's act on the page.
+    expect(await read(h, taskId)).toMatchObject({ offered: true, errorRef: { kind: "workflow_block", subject: { taskId } }, diagnosis: null });
+    const refused = await h.api("/v1/app/diagnoses", { method: "POST", body: { requestId: "88888888-8888-4888-8888-888888888888", errorRef: (await read(h, taskId)).errorRef } });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error?.message).toContain("task's page");
+    expect((await h.api("/v1/app/diagnoses/dgn_00000000000000000000/deep", { method: "POST", body: {} })).status).toBe(404);
+    expect((await h.api("/v1/app/diagnoses/dgn_00000000000000000000/propose", { method: "POST", body: {} })).body.error?.message).toContain("can't be proposed");
+    expect(provider.calls).toHaveLength(0);
+
+    // The page offers the button; pressing it asks the model through the proxy.
+    const first = await page(h, taskId);
+    expect(first.shown.body).toContain("Fix with agent");
+    const form = formOf(first.shown.body, "/diagnose");
+    const pressed = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody(form.fields), headers: { host: first.link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(pressed.status).toBe(303);
+    expect(pressed.headers["location"]).toContain("n=diagnosing");
+    await h.runtime.app.diagnosis.core.idle();
+    // One call, through the proxy: the owner's key where the provider expects it, no tool, nothing kept, the rules and the error's data first.
+    const calls = provider.calls.filter((call) => call.path === "/v1/messages");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.headers["x-api-key"]).toBe(key);
+    expect(calls[0]!.body["tools"]).toBeUndefined();
+    expect(calls[0]!.body["stream"]).toBe(false);
+    expect(String(calls[0]!.body["system"])).toContain("Add a /health endpoint");
+    expect(String(calls[0]!.body["system"])).toContain("Only tags carrying id=");
+    // The task page shows the suggestion as plain text, the label that it can be wrong, and no second button; a form is good once.
+    const after = await raw(h.runtime.pagesUrl, { path: first.link.pathname, headers: { host: first.link.host } });
+    expect(after.body).toContain("Retry the step with this note: Try the step again.");
+    expect(after.body).toContain("it can be wrong, and it has changed nothing");
+    expect(after.body).not.toContain("/diagnose");
+    const replay = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody(form.fields), headers: { host: first.link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(replay.headers["location"]).toContain("n=form");
+    expect(provider.calls.filter((call) => call.path === "/v1/messages")).toHaveLength(1);
+
+    // The tools read it back; the audit holds ids and counts and no words; the key is in no answer.
+    const answered = await read(h, taskId);
+    expect(answered.diagnosis).toMatchObject({ state: "ready", proposals: [{ kind: "explain" }, { kind: "retry_with_note", note: "Try the step again." }] });
+    expect(events.filter((event) => event.action.startsWith("diagnosis.")).map((event) => event.action).sort()).toEqual(["diagnosis.proposed", "diagnosis.started"]);
+    expect(JSON.stringify(events.filter((event) => event.action.startsWith("diagnosis.")))).not.toMatch(/planning step|Try the step|did not answer/u);
+    const id = answered.diagnosis!.diagnosisId;
+    expect((await h.api(`/v1/app/diagnoses/${id}`)).body).toMatchObject({ diagnosisId: id, state: "ready" });
+    expect(h.bodies.join("")).not.toContain(key);
+    for (const body of h.bodies) expect(body).not.toMatch(/\/s\/[A-Za-z0-9_-]{43}/);
+    // The diagnosis changed nothing: the task is still blocked at the same step.
+    expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task.workflow).toMatchObject({ stage: "UNDERSTAND", state: "BLOCKED" });
+
+    // `rovara diagnosis <task>` reads it, as text and as JSON.
+    const printed: string[] = [];
+    const run = async (...args: string[]) => {
+      const program = new Command().exitOverride().option("--json");
+      registerDiagnosisCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
+      await program.parseAsync(["node", "rovara", ...args]);
+    };
+    await run("diagnosis", taskId, "--state-dir", h.stateDirectory);
+    expect(printed.join("")).toContain("Retry the step with this note: Try the step again.");
+    expect(printed.join("")).toContain("information, not instructions");
+    printed.length = 0;
+    await run("--json", "diagnosis", taskId, "--state-dir", h.stateDirectory);
+    expect(JSON.parse(printed.join(""))).toMatchObject({ ok: true, data: { offered: true, diagnosis: { state: "ready" } } });
+    await expect(run("diagnosis", "not-a-task", "--state-dir", h.stateDirectory)).rejects.toThrow(/UUID/u);
+  });
+
+  it("says what went wrong in fixed words when the provider refuses the key, lets the owner try again, and keeps the key out of every answer", async () => {
+    const provider = await startFakeProvider();
+    cleanup.push(() => provider.close());
+    const key = KEY();
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: key }, modelProviderEndpoints: { anthropic: provider.url } });
+    const taskId = await blockedTask(h);
+    provider.mode = "unauthorized-echo";
+    const first = await page(h, taskId);
+    const form = formOf(first.shown.body, "/diagnose");
+    await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody(form.fields), headers: { host: first.link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    await h.runtime.app.diagnosis.core.idle();
+    const failed = await raw(h.runtime.pagesUrl, { path: first.link.pathname, headers: { host: first.link.host } });
+    expect(failed.body).toContain("did not accept the key on this computer");
+    expect(failed.body).not.toContain(key);
+    expect(failed.body).toContain("Try again");
+    expect(await read(h, taskId)).toMatchObject({ offered: true, diagnosis: { state: "failed" } });
+    // The same page offers a fresh form; the provider is back, and the second press is a new diagnosis that is answered.
+    provider.mode = "ok";
+    provider.text = ANSWER;
+    const again = formOf(failed.body, "/diagnose");
+    expect(again.fields["requestId"]).not.toBe(form.fields["requestId"]);
+    await raw(h.runtime.pagesUrl, { method: "POST", path: again.action, body: formBody(again.fields), headers: { host: first.link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    await h.runtime.app.diagnosis.core.idle();
+    expect(await read(h, taskId)).toMatchObject({ diagnosis: { state: "ready" } });
+    expect(h.bodies.join("")).not.toContain(key);
+  });
+
+  it("is not offered, in words, with no model key, with a model whose price is not known, or switched off; and a task with no error has no button", async () => {
+    const none = await launch();
+    const taskNone = await blockedTask(none);
+    const noKey = await read(none, taskNone);
+    expect(noKey.offered).toBe(false);
+    expect(noKey.why).toContain("your own model key");
+    const shownNone = await page(none, taskNone);
+    expect(shownNone.shown.body).toContain("runs on your own model key");
+    expect(shownNone.shown.body).not.toContain("/diagnose");
+
+    const unpriced = await launch({ environment: { ANTHROPIC_API_KEY: KEY() }, config: { version: 1, plugins: [], model: { provider: "anthropic", id: "claude-model-nobody-listed" } } });
+    const taskUnpriced = await blockedTask(unpriced);
+    const noPrice = await read(unpriced, taskUnpriced);
+    expect(noPrice.offered).toBe(false);
+    expect(noPrice.why).toContain("price isn't known");
+
+    const off = await launch({ environment: { ROVARA_DIAGNOSIS: "0", ANTHROPIC_API_KEY: KEY() } });
+    const taskOff = await blockedTask(off);
+    expect((await off.api(`/v1/dev/tasks/${taskOff}/diagnosis`)).status).toBe(404);
+    expect((await off.api("/v1/app/diagnoses/dgn_00000000000000000000")).status).toBe(404);
+    expect((await page(off, taskOff)).shown.body).not.toContain("Fix with agent");
+
+    // A task that is waiting for its plan shows no error: there is nothing to diagnose.
+    const quiet = await launch({ environment: { ANTHROPIC_API_KEY: KEY() } });
+    const { taskId } = await toPlanReview(quiet);
+    expect(await read(quiet, taskId)).toEqual({ offered: false, diagnosis: null });
+    expect((await page(quiet, taskId)).shown.body).not.toContain("Fix with agent");
   });
 });

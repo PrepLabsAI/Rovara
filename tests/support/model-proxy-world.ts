@@ -14,8 +14,8 @@ import { createPriceTableMetering } from "../../packages/broker/src/ports/policy
 import { startCallbackServer, type CallbackServer } from "../../packages/broker/src/local/callback-server.js";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/broker/src/local/isolation/egress-gateway-source.js";
 import {
-  CAPABILITY_HEADER, WORKSPACE_HEADER, capabilityModelGrants, createLocalModelProxy, localRoute,
-  type LocalModelProxy, type ModelProxyEvent, type ProxyRoute,
+  CAPABILITY_HEADER, WORKSPACE_HEADER, capabilityModelGrants, createLocalModelProxy, localRoute, withOneShotOperations,
+  type LocalModelProxy, type ModelGrantSource, type ModelProxyEvent, type OneShotOperations, type ProxyRoute,
 } from "../../packages/broker/src/local/model-proxy/index.js";
 
 export const COMPANY = "org_00000000000000000000";
@@ -40,8 +40,8 @@ export interface ProviderCall { provider: "anthropic" | "openai" | "openrouter";
 export type ProviderMode = "ok" | "split-key-in-stream" | "flood" | "cut" | "unauthorized-echo" | "rate-limit" | "echo-key-in-stream" | "echo-key-whole" | "redirect" | "server-error" | "no-usage" | "slow";
 
 /** One fake server standing in for the three providers (they differ by path). It records what it was sent. */
-export async function startFakeProvider(): Promise<{ url: string; calls: ProviderCall[]; mode: ProviderMode; aborted: number; close(): Promise<void> }> {
-  const state = { calls: [] as ProviderCall[], mode: "ok" as ProviderMode, aborted: 0 };
+export async function startFakeProvider(): Promise<{ url: string; calls: ProviderCall[]; mode: ProviderMode; /** What the model says in an ordinary answer (default "hello"). */ text: string; aborted: number; close(): Promise<void> }> {
+  const state = { calls: [] as ProviderCall[], mode: "ok" as ProviderMode, aborted: 0, text: "hello" };
   const server = createServer((request, response) => void answer(request, response));
   async function answer(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const chunks: Buffer[] = [];
@@ -93,7 +93,7 @@ export async function startFakeProvider(): Promise<{ url: string; calls: Provide
       return void response.end();
     }
     const stream = body.stream === true;
-    const text = state.mode === "echo-key-in-stream" || state.mode === "echo-key-whole" ? `here is the key ${key}` : "hello";
+    const text = state.mode === "echo-key-in-stream" || state.mode === "echo-key-whole" ? `here is the key ${key}` : state.text;
     const usage = state.mode === "no-usage";
     if (provider === "anthropic") {
       if (!stream) return json(200, { type: "message", content: [{ type: "text", text }], ...(usage ? {} : { usage: { input_tokens: 1_000, output_tokens: 200, cache_read_input_tokens: 5_000, cache_creation_input_tokens: 400 } }) });
@@ -129,6 +129,7 @@ export async function startFakeProvider(): Promise<{ url: string; calls: Provide
   return {
     url, calls: state.calls,
     get mode() { return state.mode; }, set mode(value: ProviderMode) { state.mode = value; },
+    get text() { return state.text; }, set text(value: string) { state.text = value; },
     get aborted() { return state.aborted; },
     close: () => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }),
   };
@@ -171,7 +172,7 @@ export interface ModelProxyWorld {
   directory: string;
 }
 
-export async function startModelProxyWorld(options: { ttlSeconds?: number; now?: () => number; fetch?: typeof fetch; maxConcurrentPerOperation?: number; keyDelayMs?: number; requestTimeoutMs?: number; keySource?: string } = {}): Promise<ModelProxyWorld> {
+export async function startModelProxyWorld(options: { oneShot?: OneShotOperations; ttlSeconds?: number; now?: () => number; fetch?: typeof fetch; maxConcurrentPerOperation?: number; keyDelayMs?: number; requestTimeoutMs?: number; keySource?: string } = {}): Promise<ModelProxyWorld> {
   const provider = await startFakeProvider();
   const directory = await mkdtemp(join(tmpdir(), "model-proxy-"));
   const keys = { anthropic: fakeKey("sk-ant"), openai: fakeKey("sk-oai"), openrouter: fakeKey("sk-or") };
@@ -200,12 +201,13 @@ export async function startModelProxyWorld(options: { ttlSeconds?: number; now?:
   const assumedSlots = new Set<string>();
   const mintedSlots: Array<{ slot: string; keyId: string; expiresAt: number }> = [];
   const events: ModelProxyEvent[] = [];
+  const withOneShot = (source: ModelGrantSource): ModelGrantSource => (options.oneShot === undefined ? source : withOneShotOperations(source, options.oneShot));
   const proxy = createLocalModelProxy({
     keys: keyStore, metering, companyId: COMPANY,
     ...(options.keySource === undefined ? {} : { keySource: options.keySource }),
     workerUrl: "http://rovara-broker:8081/v1/internal/model-proxy",
     endpoints: { anthropic: provider.url, openai: provider.url, openrouter: provider.url },
-    grants: capabilityModelGrants({
+    grants: withOneShot(capabilityModelGrants({
       capabilities,
       holds: async (operation) => active.has(`${operation.workspaceId}:${operation.operationId}:${String(operation.fence)}`),
       describeSlot: async (operation, slot) => {
@@ -220,7 +222,7 @@ export async function startModelProxyWorld(options: { ttlSeconds?: number; now?:
         ...(budgets.has(operation.operationId) ? { budget: budgets.get(operation.operationId)! } : {}),
         taskId: "task-1", projectName: "demo",
       }),
-    }),
+    })),
     onEvent: (event) => events.push(event),
     ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
     ...(options.now === undefined ? {} : { now: options.now }),

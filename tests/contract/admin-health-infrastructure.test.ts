@@ -158,6 +158,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/e2e/baseline.ts", "packages/broker/src/core/e2e/replay.ts", "packages/broker/src/core/e2e/grounding.ts",
       // Second review: the track record rows (one per answered second opinion, and a pointer per task) expire after their retention (400 days).
       "packages/broker/src/core/second-review/track.ts",
+      // Fix with agent: a diagnosis's request (a day while it waits, 30 days once settled), result and person rows, the open-place row and the rate rows all expire after a named retention.
+      "packages/broker/src/core/diagnosis/store.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

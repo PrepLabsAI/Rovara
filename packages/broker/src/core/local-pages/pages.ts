@@ -1,7 +1,7 @@
 // Lane L8: the five pages, as pure functions from a view model to HTML. A page that takes a decision draws its form with a form token that binds the
 // exact content shown; the server checks that binding again when the form comes back.
 import { randomUUID } from "node:crypto";
-import { SCRIPT_TOKEN_DEFAULT_DAYS, SCRIPT_TOKEN_MAX_DAYS, SCRIPT_TOKEN_NAME_MAX, SCRIPT_TOKEN_PERMISSIONS, type CreatedScriptToken, type PlanDocumentKind } from "@agentx/contracts";
+import { DIAGNOSIS_ANSWER_LABEL, SCRIPT_TOKEN_DEFAULT_DAYS, SCRIPT_TOKEN_MAX_DAYS, SCRIPT_TOKEN_NAME_MAX, SCRIPT_TOKEN_PERMISSIONS, type CreatedScriptToken, type PlanDocumentKind } from "@agentx/contracts";
 import { renderPlanDocument, type PlanAnchor } from "../../aws/plan-page/render-plan.js";
 import { esc, externalLink, layout, untrusted } from "./html.js";
 import type { FormBinding } from "./guard.js";
@@ -159,6 +159,30 @@ function designReviewHtml(context: PageContext, view: PlanPageView): string {
   return `<section class="panel" id="design-review"><h2>Design review</h2><p>${untrusted(review.status)}</p>${review.facts.length === 0 ? "" : `<ul>${review.facts.map((fact) => `<li>${untrusted(fact)}</li>`).join("")}</ul>`}${reason}<h3>Findings</h3>${findings}</section>${hold}${parked}`;
 }
 
+/**
+ * Fix with agent: the button (a form to this page's own `diagnose` route, bound to the error as shown and to this press), why it is not offered, and the diagnosis in plain lines. The lines are a model's words: untrusted
+ * text, never a link or a control. Nothing here changes anything; a suggestion is done with the page's ordinary forms (Retry, the plan's decision).
+ */
+function diagnosisHtml(context: PageContext, view: PlanPageView): string {
+  const fix = view.diagnosis;
+  if (fix === undefined) return "";
+  const parts: string[] = [];
+  if (fix.state === "waiting") parts.push("<p role=\"status\">Fix with agent is looking into this error. Reload this page in a moment.</p>");
+  if (fix.state === "failed") parts.push(`<p class="bad" role="alert">${untrusted(fix.failure ?? "Couldn't diagnose this now.")}</p>`);
+  if (fix.state === "ready") {
+    parts.push(fix.lines === undefined || fix.lines.length === 0 ? "<p>No suggestion came back for this error.</p>" : `<ul>${fix.lines.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul>`);
+    if (fix.needsCode === true) parts.push("<p class=\"muted\">The answer says the cause is in the code. A deeper look at the repositories is not on this install yet.</p>");
+    parts.push(`<p class="muted">${esc(DIAGNOSIS_ANSWER_LABEL)}</p>`);
+  }
+  if (fix.offer !== undefined) {
+    const again = fix.state === "failed" ? "Try again" : "Fix with agent";
+    parts.push(fix.state === "waiting" || fix.state === "ready" ? "" : `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/diagnose">${hidden("requestId", fix.offer.requestId)}${hidden("errorKey", fix.offer.errorKey)}`
+      + `${hidden("ft", context.formToken({ action: "task.diagnose", taskId: view.taskId, requestId: fix.offer.requestId, subject: fix.offer.errorKey }))}`
+      + `<p class="muted">An AI model reads this error's data and suggests what to do. It runs on your own model key, can be wrong, and changes nothing.</p><div class="row"><button class="primary" type="submit">${esc(again)}</button></div></form>`);
+  } else if (fix.why !== undefined && fix.state === undefined) parts.push(`<p class="muted">${untrusted(fix.why)}</p>`);
+  return `<section class="panel" id="fix-with-agent"><h2>Fix with agent</h2>${parts.join("")}</section>`;
+}
+
 export async function renderPlanPage(context: PageContext, view: PlanPageView): Promise<string> {
   const current = view.versions.filter((version) => version.current);
   const older = view.versions.filter((version) => !version.current);
@@ -186,7 +210,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${attentionHtml(context, view)}${critiqueHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${designReviewHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${diagnosisHtml(context, view)}${critiqueHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${designReviewHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 

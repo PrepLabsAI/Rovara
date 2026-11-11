@@ -40,6 +40,7 @@ import { workBreakdownView, type WorkBreakdownView } from "../../core/work-break
 import { operationKey } from "../../core/task-flow/keys.js";
 import type { SecondReview } from "../../core/second-review/index.js";
 import { designNotRunLine } from "../../core/design-review/not-run.js";
+import type { LocalDiagnosis } from "./diagnosis.js";
 
 const PLAN_READ_MAX_BYTES = 200_000;
 const COMMENTS_MAX = 200;
@@ -77,6 +78,8 @@ export interface PageDataDeps {
   companyId: OrgId;
   /** The second review. Absent: no second review page or lines. */
   secondReview?: SecondReview;
+  /** Fix with agent. Absent: the task page has no such part. */
+  diagnosis?: Pick<LocalDiagnosis, "pageView" | "diagnose">;
 }
 
 /** The attention view with where the plan is posted: the attached thread and the project's repositories, only while a code host reads comments. */
@@ -107,6 +110,12 @@ function secondReviewOfPlanPage(deps: PageDataDeps, task: TaskRecord): Pick<Plan
   if (view === undefined) return {};
   const ack = view.needsAcknowledgement && !view.acknowledged ? second.acknowledgement(task) : undefined;
   return { secondReview: view, ...(ack === undefined ? {} : { secondReviewAck: ack.key }) };
+}
+
+/** Fix with agent's part of the task page (absent when the task shows no error, or the feature is off here). */
+async function diagnosisOfPlanPage(deps: PageDataDeps, taskId: string): Promise<Pick<PlanPageView, "diagnosis">> {
+  const view = await deps.diagnosis?.pageView(taskId).catch(() => undefined);
+  return view === undefined ? {} : { diagnosis: view };
 }
 
 export function createLocalPageData(deps: PageDataDeps): LocalPageData {
@@ -206,6 +215,8 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         // The design review's panel: how it went, what is open, and what waits for the owner.
         ...(workflow.designReview === undefined ? {} : { designReview: designPanelOf(workflow, { allowSkip: await (deps.designReview?.allowSkip(task.project) ?? Promise.resolve(false)), ...(deps.designReview === undefined ? {} : { unpricedNote: deps.designReview.unpricedNote() }), ...(designChoiceDigest(workflow) === undefined ? {} : { holdOffer: { requestId: approvalRequestId(taskId, workflow.revision, designChoiceDigest(workflow)!), revision: workflow.revision, artifactDigest: designChoiceDigest(workflow)! } }) })! }),
         ...secondReviewOfPlanPage(deps, task),
+        // Fix with agent: the button for the error the task shows, or the diagnosis already asked for.
+        ...(await diagnosisOfPlanPage(deps, taskId)),
       };
     },
 
@@ -227,8 +238,11 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
 }
 
 /** The writes of the pages that the decision gate does not own: a comment on a plan, and the lessons (none here yet). */
-export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "acknowledgeSecondReview"> {
+export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview" | "diagnosis"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "diagnose" | "acknowledgeSecondReview"> {
   return {
+    async diagnose(input): Promise<LocalActionResult> {
+      return deps.diagnosis === undefined ? { ok: false, reason: "not_found", message: "That is no longer there." } : deps.diagnosis.diagnose(input);
+    },
     async secondReview(input, context): Promise<LocalActionResult> {
       if (deps.secondReview === undefined) return { ok: false, reason: "not_found", message: "That is no longer there." };
       try {

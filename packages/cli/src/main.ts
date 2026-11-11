@@ -75,7 +75,7 @@ import { registerDoctorCommand } from "./doctor/cli.js";
 import type { DoctorServices } from "./doctor/checks.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
 import { registerDestroyCommand } from "./destroy/cli.js";
-import { registerDesignReviewCommand, registerOpenCommand, registerSecondReviewCommand, registerUpCommand, type UpCommandContext } from "./up/cli.js";
+import { registerDesignReviewCommand, registerDiagnosisCommand, registerOpenCommand, registerSecondReviewCommand, registerUpCommand, type UpCommandContext } from "./up/cli.js";
 import { registerTokenCommands } from "./up/token.js";
 import { registerChatCommands } from "./up/chat.js";
 import type { DestroyDependencies } from "./destroy/run.js";
@@ -486,6 +486,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   registerTokenCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerSecondReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerDesignReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerDiagnosisCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerChatCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerUpgradeCommand(program, {
     ...(dependencies.upgrade === undefined ? {} : { overrides: dependencies.upgrade }),

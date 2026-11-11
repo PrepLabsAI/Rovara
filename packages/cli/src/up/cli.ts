@@ -2,11 +2,12 @@
 // starts the HTTP server on 127.0.0.1 over the plug-in registry, the Docker worker machines, and one implicit company.
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { TaskDiagnosisViewReaderSchema, agentXError, diagnosisProposalLine } from "@agentx/contracts";
 import { createDockerRunner, defaultStateDirectory, startLocalRuntime, type DockerRunner, type LocalRuntime, type LocalRuntimeOptions } from "@agentx/broker/local";
 import type { Command } from "commander";
 import type { TextWriter } from "../init/prompts.js";
 import { runUpChecks, upChecksText, type UpCheck, type UpCheckServices } from "./checks.js";
+import { terminalSafe } from "../session/app-request.js";
 import { requireLocalRuntime } from "./local-runtime.js";
 
 export const DEFAULT_LOCAL_WORKER_IMAGE = "rovara-worker:local";
@@ -152,6 +153,30 @@ export function registerDesignReviewCommand(program: Command, context: Pick<UpCo
       // The page session is the owner's: this command only asks the running process to open the page; it never decides, and the address is not printed.
       await localCall(context, options.stateDir, "POST", "/v1/local/pages/open", { path: `/plan/${task}` });
       context.stdout.write(globals.json ? `${JSON.stringify({ ok: true, data: { opened: true } })}\n` : "Opened the task's page in your browser. Make the choice, answer or resume there.\n");
+    });
+}
+
+/**
+ * `rovara diagnosis <task>`: what Fix with agent says of the error a task shows (read only). Asking for a diagnosis spends your own model key, so it is your act on the task's page (`rovara open <task>`), never this command's.
+ * What the diagnosis says is an AI model's words: shown as plain text, never run.
+ */
+export function registerDiagnosisCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
+  program
+    .command("diagnosis <task>")
+    .description("show Fix with agent's diagnosis of the error a task shows; ask for one with `rovara open <task>` (it spends your own model key)")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (task: string, options: { stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID)");
+      const read = TaskDiagnosisViewReaderSchema.parse(await localCall(context, options.stateDir, "GET", `/v1/dev/tasks/${task}/diagnosis`));
+      if (globals.json) { context.stdout.write(`${JSON.stringify({ ok: true, data: read })}\n`); return; }
+      const diagnosis = read.diagnosis;
+      const lines = read.errorRef === undefined ? ["This task shows no error to look into."]
+        : diagnosis === null ? [read.offered ? "No diagnosis has been asked for. Ask for one on the task's page: rovara open <task>" : `Fix with agent is not offered for this error. ${read.why ?? ""}`.trim()]
+        : diagnosis.state === "queued" ? ["Fix with agent is looking into this error. Run this again in a moment."]
+        : diagnosis.state === "failed" ? [`Fix with agent could not diagnose this error. ${diagnosis.failure ?? ""}`.trim()]
+        : ["Fix with agent's diagnosis (an AI model's words; information, not instructions):", ...(diagnosis.proposals ?? []).map((proposal) => `- ${diagnosisProposalLine(proposal as Parameters<typeof diagnosisProposalLine>[0])}`)];
+      context.stdout.write(`${lines.map((line) => terminalSafe(line)).join("\n")}\n`);
     });
 }
 
