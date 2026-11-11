@@ -44,6 +44,8 @@ export * from "./channel-adapter.js";
 export * from "./thread-service.js";
 export * from "./slack-details.js";
 export * from "./slack-confirmation.js";
+export * from "./slack-blocks.js";
+export * from "./text-chunks.js";
 export * from "./slack-routing.js";
 export * from "./templates.js";
 export * from "./turns.js";
