@@ -29,7 +29,7 @@ class FakeTrees {
   parts(id: string): string[] { return [...(this.names.get(id) ?? [])].sort(); }
 }
 
-function harness(graph: TaskGraphV1, over: Partial<ExecuteParallelWorkflowDependenciesInput> & { conflicts?: (itemId: string, attempt: number) => boolean; run?: (itemId: string, base: string, attempt: number) => Promise<void> } = {}) {
+function harness(graph: TaskGraphV1, over: Partial<ExecuteParallelWorkflowDependenciesInput> & { overlap?: number; conflicts?: (itemId: string, attempt: number) => boolean; run?: (itemId: string, base: string, attempt: number) => Promise<void> } = {}) {
   const trees = new FakeTrees();
   const events: WorkItemProgressV1[] = [];
   const log: string[] = [];
@@ -38,6 +38,19 @@ function harness(graph: TaskGraphV1, over: Partial<ExecuteParallelWorkflowDepend
   let integrating = 0;
   let running = 0;
   let peak = 0;
+  // A part that must overlap with others waits here until `overlap` parts are running at once (once that has happened, every later part passes at once). The wait is a
+  // barrier, not a sleep, so how late a timer fires cannot decide whether two parts overlapped; the long timeout is only a backstop for a run that never reaches it.
+  let reached = over.overlap === undefined || over.overlap <= 1;
+  const waiting: Array<() => void> = [];
+  const OVERLAP_BACKSTOP_MS = 5_000;
+  const holdForOverlap = async (): Promise<void> => {
+    if (!reached && over.overlap !== undefined && running >= over.overlap) { reached = true; for (const release of waiting.splice(0)) release(); }
+    if (reached) return;
+    await new Promise<void>((resolve) => {
+      const backstop = setTimeout(resolve, OVERLAP_BACKSTOP_MS);
+      waiting.push(() => { clearTimeout(backstop); resolve(); });
+    });
+  };
   const input: ExecuteParallelWorkflowDependenciesInput = {
     graph, graphDigest: taskGraphDigest(graph), runId, operationId, initialTreeSha: initialTree, maxParallel: 3,
     now: () => "2026-10-26T12:00:00.000Z",
@@ -53,6 +66,7 @@ function harness(graph: TaskGraphV1, over: Partial<ExecuteParallelWorkflowDepend
       attempts.set(workItem.id, attempt);
       running += 1;
       peak = Math.max(peak, running);
+      await holdForOverlap();
       log.push(`start ${workItem.id.slice(0, 2)}#${attempt} on [${trees.parts(context.baseTreeSha).map((id) => id.slice(0, 2)).join(",")}]`);
       try {
         await over.run?.(workItem.id, context.baseTreeSha, attempt);
@@ -72,6 +86,7 @@ function harness(graph: TaskGraphV1, over: Partial<ExecuteParallelWorkflowDepend
   };
   delete (input as { conflicts?: unknown }).conflicts;
   delete (input as { run?: unknown }).run;
+  delete (input as { overlap?: unknown }).overlap;
   return { input, events, log, trees, peak: () => peak };
 }
 
@@ -98,13 +113,13 @@ describe("executeParallelWorkflowDependencies", () => {
   });
 
   it("never runs more parts than maxParallel, whatever the graph allows", async () => {
-    const h = harness(graphOf(item(A), item(B), item(C), item(D)), { maxParallel: 2, run: async () => { await new Promise((resolve) => setTimeout(resolve, 5)); } });
+    const h = harness(graphOf(item(A), item(B), item(C), item(D)), { maxParallel: 2, overlap: 2, run: async () => { await new Promise((resolve) => setTimeout(resolve, 5)); } });
     await executeParallelWorkflowDependencies(h.input);
     expect(h.peak()).toBe(2);
     const one = harness(graphOf(item(A), item(B), item(C)), { maxParallel: 1, run: async () => { await new Promise((resolve) => setTimeout(resolve, 2)); } });
     await executeParallelWorkflowDependencies(one.input);
     expect(one.peak()).toBe(1);
-    const three = harness(graphOf(item(A), item(B), item(C), item(D)), { maxParallel: PARALLEL_PARTS_MAX, run: async () => { await new Promise((resolve) => setTimeout(resolve, 5)); } });
+    const three = harness(graphOf(item(A), item(B), item(C), item(D)), { maxParallel: PARALLEL_PARTS_MAX, overlap: PARALLEL_PARTS_MAX, run: async () => { await new Promise((resolve) => setTimeout(resolve, 5)); } });
     await executeParallelWorkflowDependencies(three.input);
     expect(three.peak()).toBe(PARALLEL_PARTS_MAX);
   });
