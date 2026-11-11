@@ -11,6 +11,8 @@ import { lazyModelProxy, modelAccessSource } from "./model-access.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";
 import { assistantOutcome, failedTurn, type AssistantOutcome } from "./session-events.js";
 import { designReviewRuntime } from "./task-model.js";
+import { designMergeAnswerSpec, designReviewAnswerSpec } from "./design-review-answers.js";
+import { answerToolInstruction, createAnswerChannel, structuredAnswersEnabled } from "./structured-answer.js";
 import { assistantText } from "./verification/extension.js";
 
 const CAPABILITY_HEADER = "x-agentx-callback-capability";
@@ -85,6 +87,8 @@ export interface ReviewSessionOptions {
    * prompt (`sentAsRendered`) and the addition is counted in `harnessSystemChars` like Pi's own sections.
    */
   standingInstructions?: string | undefined;
+  /** Structured answers: a reviewer and the merge step answer through a tool Pi checks (design-review-answers.ts). Default: on, unless ROVARA_STRUCTURED_ANSWERS=0. */
+  structuredAnswers?: boolean | undefined;
 }
 
 /** A new pi session for one reviewer or the merge step, behind the orchestration's port. */
@@ -92,6 +96,12 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
   return async (open) => {
     const runtime = options.runtimeFor(open);
     const sessionId = randomUUID();
+    // The answer tool's instruction goes in the system text, after the role prompt (the user message is the packet's, digest-checked, and cannot carry it); the text still BEGINS with the role prompt.
+    const answerSpec = options.structuredAnswers ?? structuredAnswersEnabled()
+      ? open.purpose === "merge" ? designMergeAnswerSpec() : open.role === undefined ? undefined : designReviewAnswerSpec(open.role, { withParaphrase: open.withParaphrase === true })
+      : undefined;
+    const answers = answerSpec === undefined ? undefined : createAnswerChannel(answerSpec);
+    const standing = options.standingInstructions === undefined || options.standingInstructions === "" ? open.system : `${open.system}\n\n${options.standingInstructions}`;
     const handle = await createWorkspacePiSession({
       rootPath: options.rootPath,
       model: runtime.model,
@@ -103,7 +113,8 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
       ...(options.localFileTools === undefined ? {} : { localFileTools: options.localFileTools }),
       agentTools: [...open.tools],
       maxOutputTokens: DESIGN_REVIEW_MAX_OUTPUT_TOKENS,
-      agentRun: { systemPrompt: options.standingInstructions === undefined || options.standingInstructions === "" ? open.system : `${open.system}\n\n${options.standingInstructions}`, tools: [] },
+      agentRun: { systemPrompt: answerSpec === undefined ? standing : `${standing}\n\n${answerToolInstruction(answerSpec.name)}`, tools: [] },
+      ...(answers === undefined ? {} : { answerTools: [answers.tool] }),
     }, runtime.piAdapter);
     let lastOutcome: AssistantOutcome | undefined;
     let lastText: string | undefined;
@@ -133,11 +144,13 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
         await handle.prompt(text);
         const failure = failedTurn(lastOutcome);
         if (failure !== undefined) throw failure;
-        return lastText;
+        // An accepted answer reaches the orchestration as the block its reader reads; with none (the model wrote its answer as text) the text is what it was.
+        return answers?.take() ?? lastText;
       },
       firstRequest: () => first,
       filesRead: () => [...files],
-      tools: () => [...open.tools],
+      // The tools the session had: the read-only file tools and, when structured answers are on, the answer tool (it has no effect on the workspace; the broker's read-only check names it).
+      tools: () => [...open.tools, ...(answerSpec === undefined ? [] : [answerSpec.name])],
       keyId: async () => runtime.keyId?.(),
       usage: () => {
         const stats = handle.getSessionStats();

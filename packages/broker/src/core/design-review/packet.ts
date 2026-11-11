@@ -34,6 +34,11 @@ export const PACKET_SOURCES_LOOKED_AT_MAX = 200;
 export const BYTES_PER_TOKEN = 4;
 /** Tokens a first call carries that the packet does not: the four read-only tool definitions and the wrapper words. Calibrate on real runs. */
 export const FIRST_CALL_OVERHEAD_TOKENS = 1_500;
+/**
+ * Tokens the reviewer's answer tool adds to the first call (structured answers): its schema and description, and the line in the system text that says to use it. The worker's biggest (the comprehension reviewer's,
+ * with the paraphrase) is about 2,400 bytes; a test holds this number above it. With structured answers turned off the first call is this much smaller than the estimate: a temporary setting for one release.
+ */
+export const ANSWER_TOOL_OVERHEAD_TOKENS = 800;
 /** One reader call (a repository file, a meta repository file, an MCP item) may take this long, then the source is left out as `unavailable`. */
 export const READER_TIMEOUT_MS = 10_000;
 /** The whole build may read for this long; the sources not yet read when it passes are left out as `unavailable`. */
@@ -129,7 +134,7 @@ export interface BuiltPacket extends PacketDelivery {
 
 /** What the broker expects the first call to cost in input tokens: the bytes of the first request, divided by BYTES_PER_TOKEN, plus the fixed overhead. */
 export function estimateInputTokens(totalBytes: number, options: { bytesPerToken?: number; overheadTokens?: number } = {}): number {
-  return Math.ceil(totalBytes / (options.bytesPerToken ?? BYTES_PER_TOKEN)) + (options.overheadTokens ?? FIRST_CALL_OVERHEAD_TOKENS);
+  return Math.ceil(totalBytes / (options.bytesPerToken ?? BYTES_PER_TOKEN)) + (options.overheadTokens ?? FIRST_CALL_OVERHEAD_TOKENS + ANSWER_TOOL_OVERHEAD_TOKENS);
 }
 
 function cutToBytes(text: string, maxBytes: number): string {

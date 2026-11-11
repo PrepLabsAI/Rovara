@@ -86,6 +86,11 @@ export interface VerifyReviewerInput {
 
 const fail = (failure: ReviewerVerifyFailure): VerifyResult => ({ verified: false, failure });
 const READ_ONLY: ReadonlySet<string> = new Set(READ_ONLY_TOOLS);
+/**
+ * The reviewer's answer tool (structured answers): the worker offers it beside the read-only file tools and lists it in the report. It reads and writes nothing in the workspace: its call is the reviewer's
+ * answer. Named here, so an unknown tool is still refused. The merge step's tool is not listed: the merge step has no report.
+ */
+export const REVIEWER_ANSWER_TOOLS: ReadonlySet<string> = new Set(["submit_design_review"]);
 const KEY_ID = /^[0-9a-f]{64}$/;
 
 /** Verifies one reviewer's report. First failing check wins, in this order: unreadable report, packet digest, first request, session, tools, key, first call. */
@@ -98,7 +103,7 @@ export async function verifyReviewerReport(input: VerifyReviewerInput): Promise<
   // History in the first request means the session was not fresh. The contract has no code of its own for it; the first call did not read what the packet says it should.
   if (report.firstRequestMessages !== FIRST_REQUEST_MESSAGES) return fail("first_call_mismatch");
   if (input.usedSessionIds.has(report.sessionId)) return fail("session_reused");
-  if (report.tools.some((tool) => !READ_ONLY.has(tool))) return fail("tool_not_read_only");
+  if (report.tools.some((tool) => !READ_ONLY.has(tool) && !REVIEWER_ANSWER_TOOLS.has(tool))) return fail("tool_not_read_only");
 
   const { keyId, otherReviewerKeyIds, operationKeyId } = input.modelKey;
   if (!KEY_ID.test(keyId) || !KEY_ID.test(operationKeyId) || keyId === operationKeyId || otherReviewerKeyIds.has(keyId) || report.modelKeyId !== keyId) return fail("model_key_mismatch");

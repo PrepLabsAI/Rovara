@@ -14,6 +14,8 @@ import { PLAN_CRITIQUE_ARTIFACT, settlePlanCritique } from "./plan-critic.js";
 import { createReviewSessionOpener, designReviewBindingOf, reviewFileToolsOf, runDesignReviewOperation, type DesignReviewDependencies } from "./design-review-sessions.js";
 import { checkCodeCitations, sameCitedRanges, withCorrectedRanges } from "./plan-citations.js";
 import { UNDERSTAND_DEADLINE_MS, settleUnderstanding } from "./understand.js";
+import { answerToolInstruction, createAnswerChannel, structuredAnswersEnabled } from "./structured-answer.js";
+import { planCritiqueAnswerSpec, understandAnswerSpec } from "./structured-answer-specs.js";
 import {
   createDevcontainerCli,
   devcontainerBashOperations,
@@ -169,6 +171,8 @@ export interface TaskInvocationDependencies {
   testProofOriginalCode?: Parameters<typeof runTestProof>[0]["originalCode"];
   /** How long a review (each role) and a PR feedback review may take; tests supply short ones. Default: the reviews' own (5 minutes). */
   timeouts?: { reviewMs?: number; feedbackReviewMs?: number };
+  /** Structured answers (structured-answer.ts): the reviews, the plan check, Understand and a design review answer through a tool Pi checks. Default: on, unless ROVARA_STRUCTURED_ANSWERS=0; tests set it. */
+  structuredAnswers?: boolean;
   /**
    * PLANINC-3b: the limits on a model call; tests supply short ones. Defaults: the planning deadline (25 minutes, or AGENTX_PLAN_DEADLINE_MS), the stall limit (240 s),
    * the abort confirmation (30 s), the heartbeat (60 s) and the clock's tick (5 s). Only a PLAN run has a deadline and a stall limit.
@@ -440,6 +444,7 @@ async function runTask(
         ruleFileBaseCommits: invocation.payload.workflowBase ?? [],
         ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
         ...(feedbackTimeoutMs === undefined ? {} : { timeoutMs: feedbackTimeoutMs }),
+        ...(dependencies.structuredAnswers === undefined ? {} : { structuredAnswers: dependencies.structuredAnswers }),
         ...(agentStep?.promptSection === undefined ? {} : { promptSection: agentStep.promptSection }),
         ...(standingInstructions === undefined ? {} : { standingInstructions }),
         ...(agentStep?.tools === undefined ? {} : { tools: agentStep.tools }),
@@ -801,6 +806,10 @@ async function runTask(
   }
   // A model repeating the same failing call is told once, then stopped (#127), and the call past the tool-call limit is refused before it runs: the guard's extension sits in front of every call of this session.
   const loopGuard = new ToolLoopGuard();
+  // Structured answers: Understand and the plan check deliver their answer through a tool whose schema Pi checks (the design-review form of the plan check opens reviewer sessions of its own, which do the same).
+  // The accepted answer takes the place of the model's final text, as the same block the step's own reader reads, so what is saved and what the broker reads are unchanged. Off: no tool, as before.
+  const answerSpec = !(dependencies.structuredAnswers ?? structuredAnswersEnabled()) || designReviewBinding !== undefined ? undefined : understanding ? understandAnswerSpec() : critiquing ? planCritiqueAnswerSpec() : undefined;
+  const answerChannel = answerSpec === undefined ? undefined : createAnswerChannel(answerSpec);
   let session: PiSessionHandle;
   if (registered) {
     session = await openRegisteredWorkspacePiSession(
@@ -818,6 +827,7 @@ async function runTask(
         ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
         ...stepSession,
         ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
+        ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
       },
       dependencies.piAdapter,
     );
@@ -832,6 +842,7 @@ async function runTask(
         ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
         ...stepSession,
         ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
+        ...(answerChannel === undefined ? {} : { answerTools: [answerChannel.tool] }),
       },
       dependencies.piAdapter,
     );
@@ -991,7 +1002,8 @@ async function runTask(
     const learned = await prepareLearnedContext({ raw: invocation.payload.learnedContext, mode: payloadMode, repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase) });
     if (learned.report !== undefined) await emit("progress", { [LEARNED_LOAD_REPORT_FIELD]: learned.report }).catch(() => undefined);
     // Stop & redirect (steer-invocation.ts): the owner's instruction that stopped the previous run is taken from the owner and framed after the broker's prompt (coding only; absent for every other step).
-    const taskPrompt = withLearnedBlock(ownerRedirectPrompt(invocation.payload.prompt, invocation.payload.ownerRedirect, payloadMode === "IMPLEMENT" ? "IMPLEMENT" : undefined, dependencies.cancellationController, invocation.operationId), learned.section);
+    const taskPrompt = withLearnedBlock(ownerRedirectPrompt(invocation.payload.prompt, invocation.payload.ownerRedirect, payloadMode === "IMPLEMENT" ? "IMPLEMENT" : undefined, dependencies.cancellationController, invocation.operationId), learned.section)
+      + (answerSpec === undefined ? "" : `\n\n${answerToolInstruction(answerSpec.name)}`);
     let outcome: TaskUsageOutcome = "FAILED";
     let taskResult: TaskInvocationResult | undefined;
     let workflowDependenciesResult: WorkflowDependencyResult | undefined;
@@ -1164,6 +1176,9 @@ async function runTask(
         // The owner's live message asked for a change outside the approved plan and the step did not act on it: the step stops here and the owner is asked (the broker blocks the step).
         const reapproval = reapprovalStop(finalText, dependencies.cancellationController?.liveSteers(invocation.operationId) ?? []);
         if (reapproval !== undefined) throw reapproval;
+        // An accepted structured answer is the step's answer: the block its reader reads, in place of the model's final text (which holds none, the call having ended the run).
+        const accepted = answerChannel?.take();
+        if (accepted !== undefined) finalText = accepted;
       };
       /**
        * Rovara Code v2: the independent parts of the approved plan, each in a working copy of its own, up to `maxParallel` at once. Each part is a Pi session of its own on this
@@ -1312,7 +1327,7 @@ async function runTask(
           binding: designReviewBinding, artifactSink,
           ports: {
             loadPacket: designReview.loadPacket,
-            openSession: createReviewSessionOpener({ rootPath: dependencies.rootPath, ...reviewFileToolsOf(fileTools), runtimeFor: designReview.runtimeFor(designReviewBinding), onDiagnostic, ...(companyStandingInstructions === undefined ? {} : { standingInstructions: companyStandingInstructions }) }),
+            openSession: createReviewSessionOpener({ rootPath: dependencies.rootPath, ...reviewFileToolsOf(fileTools), runtimeFor: designReview.runtimeFor(designReviewBinding), onDiagnostic, ...(dependencies.structuredAnswers === undefined ? {} : { structuredAnswers: dependencies.structuredAnswers }), ...(companyStandingInstructions === undefined ? {} : { standingInstructions: companyStandingInstructions }) }),
             progress: async (message) => { await emit("progress", { message }); },
           },
           options: { signal: verificationStop.signal },
@@ -1564,6 +1579,7 @@ async function runTask(
         let secondReview: SecondReviewResult | undefined = invocation.payload.workflowSecondReviewer === undefined ? undefined : { tries: 0 };
         let reports = await runWorkflowReviews({
           operationId: invocation.operationId,
+          ...(dependencies.structuredAnswers === undefined ? {} : { structuredAnswers: dependencies.structuredAnswers }),
           rootPath: canonicalRoot,
           model: session.getModel(),
           candidate: beforeReview.repositories,

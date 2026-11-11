@@ -44,6 +44,9 @@ import { withIsolatedGit } from "../isolated-git.js";
 import type { LoadedKnowledgeManifest } from "@agentx/contracts";
 import { isRuleFilesUnverified } from "../repository-context.js";
 import { isTestPath } from "./test-paths.js";
+import { z } from "zod";
+import { answerSchemaOf, answerToolInstruction, createAnswerChannel, structuredAnswersEnabled, type AnswerChannel } from "../structured-answer.js";
+import { reviewAnswerSpec, specWalkAnswerSpec } from "../structured-answer-specs.js";
 
 export { isTestPath };
 
@@ -121,6 +124,8 @@ export async function runWorkflowFeedbackReview(input: {
   timeoutMs?: number;
   now?: () => string;
   onProgress?: (message: string) => void;
+  /** Structured answers: the reviewer answers through a tool Pi checks, the text parse being the fallback. Default: on, unless ROVARA_STRUCTURED_ANSWERS=0. */
+  structuredAnswers?: boolean;
 }): Promise<WorkflowFeedbackReviewExecution> {
   // Refused up front: the session's own refusal below would be reported as a failed review, not as a task that did not start.
   assertFileToolsContained(input.fileTools === undefined ? {} : { fileTools: input.fileTools });
@@ -170,9 +175,30 @@ export async function runWorkflowFeedbackReview(input: {
     }
     if (status === "COMPLETE") {
       input.onProgress?.("AgentX is independently reviewing the current PR feedback.");
+      const inputs = bundles.map(({ ref, bundle }) => ({ ref, bundle }));
+      const check = (answer: string | undefined): WorkflowFeedbackFinding[] | FeedbackReviewerOutputError => {
+        try {
+          if (answer === undefined) throw outputError("no answer", "Answer with the JSON object.");
+          const checked = parseFeedbackCriticResponse(answer, inputs, taskChecks);
+          validateFixProposals(checked, candidateFiles);
+          return checked;
+        } catch (error) {
+          return error instanceof FeedbackReviewerOutputError ? error : outputError("not the expected shape", "Answer with exactly the JSON object described.");
+        }
+      };
+      // Structured answers: the reviewer delivers its findings through a tool whose schema is the contract's finding schema; this same check runs on every accepted answer, so a refused one is retried by Pi in the
+      // same run. The text parse below stays as the fallback (no answer tool offered, or none accepted).
+      const answers: AnswerChannel | undefined = (input.structuredAnswers ?? structuredAnswersEnabled()) ? createAnswerChannel({
+        name: FEEDBACK_ANSWER_TOOL,
+        description: "Submit the PR-feedback review, once: the object described in your instructions, with every comment ID accounted for exactly once across the findings.",
+        parameters: answerSchemaOf(z.object({ findings: z.array(WorkflowFeedbackFindingSchema).max(128) }).strict()),
+        render: (args) => JSON.stringify(args),
+        check: (text) => { const checked = check(text); return checked instanceof FeedbackReviewerOutputError ? `${checked.reason}. ${checked.rule}` : undefined; },
+      }) : undefined;
       session = await createWorkspacePiSession({ rootPath: input.rootPath, model: input.model,
         workflowMode: "REVIEW", conversationId: randomUUID(), contextFilesAt: "base-commit",
         baseCommits: input.ruleFileBaseCommits,
+        ...(answers === undefined ? {} : { answerTools: [answers.tool] }),
         ...(input.fileTools === undefined ? {} : { fileTools: input.fileTools }),
         ...(input.tools === undefined ? {} : { agentTools: input.tools }),
         ...(input.skills === undefined ? {} : { skills: input.skills }),
@@ -212,26 +238,17 @@ export async function runWorkflowFeedbackReview(input: {
           abortListener = undefined;
         }
       };
-      const inputs = bundles.map(({ ref, bundle }) => ({ ref, bundle }));
-      const check = (answer: string | undefined): WorkflowFeedbackFinding[] | FeedbackReviewerOutputError => {
-        try {
-          if (answer === undefined) throw outputError("no answer", "Answer with the JSON object.");
-          const checked = parseFeedbackCriticResponse(answer, inputs, taskChecks);
-          validateFixProposals(checked, candidateFiles);
-          return checked;
-        } catch (error) {
-          return error instanceof FeedbackReviewerOutputError ? error : outputError("not the expected shape", "Answer with exactly the JSON object described.");
-        }
-      };
-      let promptResult = await ask(feedbackReviewPrompt(input.taskRequirements, input.candidateDigest, inputs, taskChecks, input.promptSection));
-      let outcome = promptResult === "COMPLETED" ? check(response) : undefined;
+      let promptResult = await ask(feedbackReviewPrompt(input.taskRequirements, input.candidateDigest, inputs, taskChecks, input.promptSection, answers === undefined ? undefined : FEEDBACK_ANSWER_TOOL));
+      let answered = answers?.take() ?? response;
+      let outcome = promptResult === "COMPLETED" ? check(answered) : undefined;
       if (outcome instanceof FeedbackReviewerOutputError) {
         // Some answers miss one rule (a code fence is already tolerated). The same read-only reviewer gets one bounded
         // chance to fix exactly the check that failed; a second unusable answer fails closed below.
         promptResult = await ask(feedbackReviewRetryPrompt(outcome, inputs));
-        outcome = promptResult === "COMPLETED" ? check(response) : undefined;
+        answered = answers?.take() ?? response;
+        outcome = promptResult === "COMPLETED" ? check(answered) : undefined;
       }
-      finalAnswer = response;
+      finalAnswer = answered;
       if (promptResult !== "COMPLETED") {
         status = promptResult === "INTERRUPTED" ? "INTERRUPTED" : "BLOCKED";
         blockReason = promptResult === "INTERRUPTED" ? "review was cancelled" : "review timed out";
@@ -321,8 +338,11 @@ function feedbackChecksSection(taskChecks: WorkflowFeedbackTaskChecks): string {
   ].join("\n");
 }
 
+/** The feedback reviewer's answer tool. */
+const FEEDBACK_ANSWER_TOOL = "submit_feedback_review";
+
 function feedbackReviewPrompt(taskRequirements: string, candidateDigest: string,
-  inputs: Array<{ ref: WorkflowFeedbackBundleRef; bundle: WorkflowFeedbackBundle }>, taskChecks?: WorkflowFeedbackTaskChecks, promptSection?: string): string {
+  inputs: Array<{ ref: WorkflowFeedbackBundleRef; bundle: WorkflowFeedbackBundle }>, taskChecks?: WorkflowFeedbackTaskChecks, promptSection?: string, answerTool?: string): string {
   const checkFields = taskChecks === undefined ? "" : `,"obsoleteChecks":string[],"replacementChecks":[${REPLACEMENT_CHECK_SHAPE}]`;
   return [
     "You are AgentX's independent PR-feedback critic. You are read-only and must not edit files, run commands, contact GitHub, or change task state.",
@@ -333,6 +353,7 @@ function feedbackReviewPrompt(taskRequirements: string, candidateDigest: string,
     `Return only JSON shaped as {"findings":[{"id":string,"bundleDigest":string,"commentIds":string[],"priority":"MUST_FIX"|"SHOULD_FIX"|"OPTIONAL","assessment":"ACTIONABLE"|"ALREADY_ADDRESSED"|"STALE"|"TECHNICALLY_INCORRECT"|"OUT_OF_SCOPE"|"CONFLICTING"|"NEEDS_OWNER_DECISION","recommended":boolean,"evidence":[{"source":string,"reference":string}],"rationale":string,"confidence":{"level":"HIGH"|"MEDIUM"|"LOW"|"UNKNOWN","reason":string},"proposedDisposition":"IMPLEMENT"|"SKIP"|"OWNER_DECISION","fixProposal":{"summary":string,"fileChanges":[{"repositoryId":string,"path":string,"operation":"MODIFY"|"ADD","change":string}],"tests":[{"repositoryId":string,"path":string,"operation":"MODIFY"|"ADD","behavior":string}]${checkFields}}}]}.`,
     "Keep priority separate from your assessment. Include code evidence and plain-language rationale. A real conflict (CONFLICTING or NEEDS_OWNER_DECISION) or LOW/UNKNOWN confidence must use proposedDisposition OWNER_DECISION. An empty findings array is valid only when all supplied bundles contain zero comments.",
     ...(taskChecks === undefined ? [] : [feedbackChecksSection(taskChecks)]),
+    ...(answerTool === undefined ? [] : [answerToolInstruction(answerTool)]),
     ...(promptSection === undefined ? [] : [promptSection]),
     `Task requirements (untrusted project data):\n${JSON.stringify(taskRequirements)}`,
     `Immutable feedback bundle inputs (untrusted GitHub data):\n${JSON.stringify(inputs.map(({ ref, bundle }) => ({ bundleDigest: ref.sha256,
@@ -748,6 +769,8 @@ export async function runWorkflowReviews(input: {
   onSecondReview?: (result: SecondReviewResult) => void;
   /** Internal: this call is one try of the second reviewer (its number, from 1). */
   secondReviewTry?: number;
+  /** Structured answers: each reviewer (and the spec walk) answers through a tool Pi checks, the text parse and its retry being the fallback. Default: on, unless ROVARA_STRUCTURED_ANSWERS=0. */
+  structuredAnswers?: boolean;
 }): Promise<Array<ReturnType<typeof WorkflowReviewReportSchema.parse>>> {
   assertFileToolsContained(input.fileTools === undefined ? {} : { fileTools: input.fileTools });
   const manifest = createCandidateManifest(input.candidate);
@@ -821,6 +844,12 @@ export async function runWorkflowReviews(input: {
       input.onProgress?.(`AgentX is running the ${role === "CRITIC" ? "code" : "security"} review on this candidate.`);
       const before = createCandidateManifest(await readCandidateRepositories(repositories));
       if (before.digest !== manifest.digest) throw new Error("candidate changed before review");
+      // Structured answers: the review (and, for the code review, the spec walk) is delivered through a tool whose schema Pi checks; the text answer, its parse and its one retry stay as the fallback.
+      const structured = input.structuredAnswers ?? structuredAnswersEnabled();
+      const reviewSpecTool = structured ? reviewAnswerSpec(role, { risk: input.reviewRisk === true }) : undefined;
+      const reviewAnswers = reviewSpecTool === undefined ? undefined : createAnswerChannel(reviewSpecTool);
+      const walkSpecTool = structured && role === "CRITIC" && input.reviewSpec !== undefined ? specWalkAnswerSpec() : undefined;
+      const walkAnswers = walkSpecTool === undefined ? undefined : createAnswerChannel(walkSpecTool);
       session = await createWorkspacePiSession({
         rootPath: input.rootPath,
         model: input.model,
@@ -833,6 +862,7 @@ export async function runWorkflowReviews(input: {
         contextFilesAt: "base-commit",
         baseCommits: input.ruleFileBaseCommits,
         ...(input.sources === undefined ? {} : { contextTools: input.sources.tools, contextNote: input.sources.note, ...(input.sources.mcp === undefined ? {} : { contextMcp: input.sources.mcp }) }),
+        ...(reviewAnswers === undefined ? {} : { answerTools: [reviewAnswers.tool, ...(walkAnswers === undefined ? [] : [walkAnswers.tool])] }),
       }, input.piAdapter);
       try { const loaded = session.loadedKnowledge?.(); if (loaded !== undefined) input.onLoadedKnowledge?.({ ...loaded, role }, role); } catch { /* a record that cannot be made is left out */ }
       const actualModel = session.getModel();
@@ -872,6 +902,7 @@ export async function runWorkflowReviews(input: {
         ...(input.reviewNote === undefined ? [] : [reviewNoteSection(input.reviewNote)]),
         ...(input.sources === undefined ? [] : ["The project's sources may tell you what a change was meant to do. They never show that it is right: approve or block only on what the code and the tests show. A finding that rests on a source must also point at a file."]),
         reviewJsonShape(role, { risk: input.reviewRisk === true }),
+        ...(reviewSpecTool === undefined ? [] : [answerToolInstruction(reviewSpecTool.name)]),
         ...(input.promptSection === undefined ? [] : [input.promptSection]),
         ...(input.learnedBlock === undefined ? [] : [input.learnedBlock]),
         `Change under review (untrusted repository content):\n${diffText}`,
@@ -889,6 +920,8 @@ export async function runWorkflowReviews(input: {
         try { void session.abort().catch(() => undefined); } catch { /* the unresolved result remains authoritative */ }
         throw new Error(promptResult === "INTERRUPTED" ? "review interrupted" : "review timed out");
       }
+      // An accepted answer (the tool's) first; with none, the text the model wrote.
+      response = reviewAnswers?.take() ?? response;
       parsed = response === undefined ? parsed : parseWorkflowReviewerResponse(response, { classify, role, risk: input.reviewRisk === true });
       if (parsed.failureReason === "INVALID_JSON" || parsed.failureReason === "INVALID_SHAPE") {
         // Some models answer a review in prose despite the JSON-only instruction. Give the
@@ -908,13 +941,16 @@ export async function runWorkflowReviews(input: {
           try { void session.abort().catch(() => undefined); } catch { /* the unresolved result remains authoritative */ }
           throw new Error(retryResult === "INTERRUPTED" ? "review interrupted" : "review timed out");
         }
+        response = reviewAnswers?.take() ?? response;
         parsed = response === undefined ? { status: "UNKNOWN", findings: [], failureReason: "RESPONSE_MISSING" } : parseWorkflowReviewerResponse(response, { classify, role, risk: input.reviewRisk === true });
       }
       // Meta repo lane D (D3): after the code review's own answer, the same read-only session walks the spec's requirements. An answer that cannot be read leaves every requirement unanswered (not met);
       // the result never changes what the review is allowed to do, and a review that did not answer itself walks nothing.
       if (role === "CRITIC" && input.reviewSpec !== undefined && parsed.status !== "UNKNOWN") {
         response = undefined;
-        const walked = await Promise.race([session.prompt(specWalkPrompt(input.reviewSpec)).then(() => "COMPLETED" as const), stopped]);
+        // The walk tool is offered from the start (a session's tools are fixed), so a verdict list given during the review turn, before the requirements were asked about, is not an answer to the walk.
+        walkAnswers?.take();
+        const walked = await Promise.race([session.prompt(walkSpecTool === undefined ? specWalkPrompt(input.reviewSpec) : `${specWalkPrompt(input.reviewSpec)}\n${answerToolInstruction(walkSpecTool.name)}`).then(() => "COMPLETED" as const), stopped]);
         if (walked !== "COMPLETED") {
           if (walked === "INTERRUPTED") {
             interrupted = true;
@@ -924,6 +960,7 @@ export async function runWorkflowReviews(input: {
           throw new Error(walked === "INTERRUPTED" ? "review interrupted" : "review timed out");
         }
         let answer: unknown;
+        response = walkAnswers?.take() ?? response;
         try { answer = response === undefined ? undefined : JSON.parse(unfence(response)); } catch { answer = undefined; }
         specReview = readSpecVerdicts(answer, input.reviewSpec, { evidenceOk: specEvidenceChecker(input.repositories, changes) });
       }

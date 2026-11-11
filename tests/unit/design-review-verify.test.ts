@@ -51,6 +51,15 @@ describe("verifyReviewerReport: each failure voids the run with its own code", (
     expect(r.firstCall).not.toHaveBeenCalled();
   });
 
+  it("accepts the reviewer's own answer tool beside the read-only tools, and nothing else that is not read-only", async () => {
+    await expect(verifyReviewerReport(input({ report: report({ tools: [...READ_ONLY_TOOLS, "submit_design_review"] }) }))).resolves.toMatchObject({ verified: true });
+    // Only that one name: the merge step's tool, a look-alike and the code review's tool are not read-only tools.
+    for (const tool of ["submit_design_merge", "submit_review", "submit_design_review2", "Submit_design_review"]) {
+      await expect(verifyReviewerReport(input({ report: report({ tools: ["read", tool] }) })), tool).resolves.toEqual({ verified: false, failure: "tool_not_read_only" });
+    }
+    await expect(verifyReviewerReport(input({ report: report({ tools: ["submit_design_review", "bash"] }) }))).resolves.toEqual({ verified: false, failure: "tool_not_read_only" });
+  });
+
   it("a session id already used in this task is refused", async () => {
     await expect(verifyReviewerReport(input({ usedSessionIds: new Set(["ses_0", "ses_1"]) }))).resolves.toEqual({ verified: false, failure: "session_reused" });
   });

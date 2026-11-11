@@ -1739,3 +1739,111 @@ describe("AgentX measures the before result on the original code (spec 051 D-16,
     expect(progress(run.events).some((message) => message.includes("refs/agentx/agent-files"))).toBe(true);
   });
 });
+
+/**
+ * Structured answers (Pi feature audit, recommendation 2): the PR-feedback reviewer delivers its findings through the answer tool. This adapter plays Pi's part: it offers the session's answer tools, and for
+ * each prompt calls the first one with the next scripted arguments until a call is accepted (a refused call throws, as in Pi, and the model "tries again"). With no scripted call it writes `text` instead.
+ */
+function feedbackToolAdapter(script: { calls: unknown[]; text?: string; prompts?: Array<{ calls: unknown[]; text?: string }> }, record: { prompts: string[]; refusals: string[]; toolNames: string[] }): PiSessionAdapter {
+  return {
+    async create(input) {
+      let notify: ((event: unknown) => void) | undefined;
+      const sessionFile = join(input.sessionDirectory, "feedback-review.json");
+      record.toolNames.push(...(input.answerTools ?? []).map((tool) => tool.name));
+      return {
+        conversationId: randomUUID(), sessionFile,
+        async prompt(prompt) {
+          record.prompts.push(prompt);
+          // A script for each prompt in turn, when it has them; otherwise one for all.
+          const now = script.prompts?.[record.prompts.length - 1] ?? script;
+          const tool = input.answerTools?.[0];
+          let accepted = false;
+          while (tool !== undefined && now.calls.length > 0 && !accepted) {
+            try { await tool.execute("call", now.calls.shift(), undefined, undefined, {} as never); accepted = true; } catch (error) { record.refusals.push(error instanceof Error ? error.message : String(error)); }
+          }
+          if (!accepted) notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: now.text ?? "" }] } });
+        }, async abort() {},
+        getModel: () => ({ provider: "test-provider", modelId: "read-only-critic-v1" }),
+        getSessionStats: () => ({ sessionFile, sessionId: "feedback-review", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0,
+          totalMessages: 2, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
+        subscribe(listener) { notify = listener; return () => { notify = undefined; }; },
+        dispose() {},
+      };
+    },
+  };
+}
+
+describe("PR-feedback review through the answer tool", () => {
+  async function structuredReview(fixture: Awaited<ReturnType<typeof feedbackReviewFixture>>, adapter: PiSessionAdapter, structuredAnswers?: boolean) {
+    return runWorkflowFeedbackReview({
+      ruleFileBaseCommits: [], operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
+      taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
+      candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
+      piAdapter: adapter, artifactSink: async () => undefined, ...(structuredAnswers === undefined ? {} : { structuredAnswers }),
+    });
+  }
+  const goodFinding = (digest: string) => implementFinding(digest, { summary: "Guard empty input.",
+    fileChanges: [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Return early for empty input." }],
+    tests: [{ repositoryId: "app", path: "src.test.ts", operation: "ADD", behavior: "Empty input returns an empty result." }] });
+
+  it("takes a valid answer from the tool in one prompt, with the tool's instruction in the prompt", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [{ findings: [goodFinding(fixture.bundleRef.sha256)] }] }, record));
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings).toHaveLength(1);
+    expect(record.toolNames).toEqual(["submit_feedback_review"]);
+    expect(record.prompts).toHaveLength(1);
+    expect(record.prompts[0]).toContain("calling the submit_feedback_review tool");
+    expect(record.refusals).toEqual([]);
+  });
+
+  it("refuses an answer the contract's check refuses, inside the tool, so the model retries in the same run and no text retry prompt is sent", async () => {
+    const fixture = await feedbackReviewFixture({ "src.ts": "export const parse = (input: string) => input.trim();\n", "src.test.ts": "// existing test\n" });
+    const changes = [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Return early for empty input." }];
+    const noTests = implementFinding(fixture.bundleRef.sha256, { summary: "Guard empty input.", fileChanges: changes, tests: [] });
+    const withTests = implementFinding(fixture.bundleRef.sha256, { summary: "Guard empty input.", fileChanges: changes,
+      tests: [{ repositoryId: "app", path: "src.test.ts", operation: "MODIFY", behavior: "Empty input returns an empty result." }] });
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [{ findings: [noTests] }, { findings: [withTests] }] }, record));
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings[0]?.fixProposal?.tests).toHaveLength(1);
+    expect(record.refusals).toHaveLength(1);
+    expect(record.refusals[0]).toContain("fixProposal.tests is empty");
+    expect(record.prompts).toHaveLength(1);
+  });
+
+  it("falls back to the text answer, and to its one text retry, when the tool is not used", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [], text: JSON.stringify({ findings: [goodFinding(fixture.bundleRef.sha256)] }) }, record));
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings).toHaveLength(1);
+    expect(record.prompts).toHaveLength(1);
+    const unreadable = feedbackToolAdapter({ calls: [], text: "All fine." }, { prompts: [], refusals: [], toolNames: [] });
+    const failed = await structuredReview(fixture, unreadable);
+    expect(failed.report.status).toBe("FAILED");
+  });
+
+  it("takes a tool answer given on the retry prompt, after a first answer written as text that could not be read", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [], prompts: [
+      { calls: [], text: "All fine, nothing to report." },
+      { calls: [{ findings: [goodFinding(fixture.bundleRef.sha256)] }] },
+    ] }, record));
+    expect(record.prompts).toHaveLength(2);
+    expect(record.prompts[1]).toContain("reviewer output: not valid JSON");
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings).toHaveLength(1);
+  });
+
+  it("flips back with structuredAnswers off: no tool is offered and the prompt does not mention one", async () => {
+    const fixture = await feedbackReviewFixture();
+    const record = { prompts: [] as string[], refusals: [] as string[], toolNames: [] as string[] };
+    const review = await structuredReview(fixture, feedbackToolAdapter({ calls: [], text: JSON.stringify({ findings: [goodFinding(fixture.bundleRef.sha256)] }) }, record), false);
+    expect(review.report.status).toBe("COMPLETE");
+    expect(record.toolNames).toEqual([]);
+    expect(record.prompts[0]).not.toContain("submit_feedback_review");
+  });
+});

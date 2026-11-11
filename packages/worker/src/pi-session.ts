@@ -54,6 +54,7 @@ import type { ResolvedKnowledge } from "./knowledge/resolve.js";
 import type { PiCacheRetention } from "./usage.js";
 import { stubPersistedContextResults } from "./context-sources/transcript.js";
 import { ROVARA_MCP_TOOL_PATTERN, rovaraMcpExtensions, type ContextMcpSession, type RovaraMcpWatch } from "./context-sources/pi-mcp.js";
+import { ANSWER_REFUSALS_MAX, ANSWER_TEXT_FALLBACK_NOTE } from "./structured-answer.js";
 
 export type PiThinkingLevel = ThinkingLevel;
 export type PiWorkflowMode = "PLAN" | "IMPLEMENT" | "REVIEW" | "UNDERSTAND" | "SETUP";
@@ -156,6 +157,11 @@ export interface PiSessionInput {
    * session is given this or `contextTools`, never both.
    */
   contextMcp?: ContextMcpSession;
+  /**
+   * Structured answers: the one tool (or a few) through which a judging step delivers its answer, with a parameter schema Pi validates (structured-answer.ts). Offered only to a session that reads and
+   * judges (Understand, Plan, the plan check, a review); never to Build or a setup run. After `ANSWER_REFUSALS_MAX` refused answers in a row the session is told to answer in plain text instead.
+   */
+  answerTools?: readonly ToolDefinition[];
   /** Tool calls of one assistant message run one after another, never side by side (the setup agent's limits are counted per command). Default: pi's own (parallel). */
   sequentialTools?: boolean;
   /** The most output tokens one model turn may produce: the model's own limit is lowered to this when it is higher. Default: the model's. */
@@ -184,6 +190,14 @@ export function assertContextToolsAllowed(input: { workflowMode?: PiWorkflowMode
   if (mode === "IMPLEMENT" || mode === "SETUP" || input.agentRun !== undefined) {
     throw agentXError("FORBIDDEN", "context sources are not available to a session that can run commands or change files");
   }
+}
+
+/** The answer tools are for the stages that read and judge: a session that can run commands or change files gets none, so Build's tool list never changes with this setting. */
+export function assertAnswerToolsAllowed(input: { workflowMode?: PiWorkflowMode | undefined; agentRun?: unknown; answerTools?: readonly ToolDefinition[] | undefined }): void {
+  if (input.answerTools === undefined || input.answerTools.length === 0) return;
+  // An agent run is a planning session whatever its mode says.
+  const mode = input.agentRun === undefined ? input.workflowMode ?? "IMPLEMENT" : "PLAN";
+  if (mode === "IMPLEMENT" || mode === "SETUP") throw agentXError("FORBIDDEN", "answer tools are not available to a session that can run commands or change files");
 }
 
 export interface PiSessionAdapter {
@@ -243,6 +257,8 @@ export async function createWorkspacePiSession(
     contextNote?: string;
     /** The same sources through Pi's own MCP client (see PiSessionInput.contextMcp). */
     contextMcp?: ContextMcpSession;
+    /** Structured answers: the tool(s) the step delivers its answer through (see PiSessionInput.answerTools). */
+    answerTools?: readonly ToolDefinition[];
     /** Where the agent works, when that is not the workspace root: a folder inside it (a parallel part's working copy). Its saved transcript and settings stay in the root's. */
     workingDirectory?: string;
     /**
@@ -269,6 +285,7 @@ export async function createWorkspacePiSession(
 ): Promise<PiSessionHandle> {
   assertFileToolsContained(input);
   assertContextToolsAllowed(input);
+  assertAnswerToolsAllowed(input);
   const rootPath = await realpath(resolve(input.rootPath));
   const workingDirectory = input.workingDirectory === undefined ? rootPath : await realpath(resolve(input.workingDirectory));
   if (workingDirectory !== rootPath && !workingDirectory.startsWith(`${rootPath}/`)) {
@@ -308,6 +325,7 @@ export async function createWorkspacePiSession(
     ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
     ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
+    ...(input.answerTools === undefined ? {} : { answerTools: input.answerTools }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return withLoadedKnowledge(handle, knowledgeLoad?.manifest);
@@ -342,6 +360,8 @@ export async function openRegisteredWorkspacePiSession(
     contextNote?: string;
     contextMcp?: ContextMcpSession;
     /** As for `createWorkspacePiSession`. */
+    answerTools?: readonly ToolDefinition[];
+    /** As for `createWorkspacePiSession`. */
     contextFilesAt?: "working-tree" | "base-commit";
     baseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
     knowledge?: SessionKnowledgeOptions;
@@ -351,6 +371,7 @@ export async function openRegisteredWorkspacePiSession(
 ): Promise<PiSessionHandle> {
   assertFileToolsContained(input);
   assertContextToolsAllowed(input);
+  assertAnswerToolsAllowed(input);
   const rootPath = await realpath(resolve(input.rootPath));
   const sessionDirectory = resolve(rootPath, "agent-sessions");
   const agentDirectory = workerPiDirectory(rootPath);
@@ -390,6 +411,7 @@ export async function openRegisteredWorkspacePiSession(
     ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
     ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
+    ...(input.answerTools === undefined ? {} : { answerTools: input.answerTools }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return withLoadedKnowledge(handle, knowledgeLoad?.manifest);
@@ -524,8 +546,10 @@ async function createDefaultSession(
     const skillFiles = input.skills ?? [];
     const skills = skillFiles.length === 0 ? [] : await materializeSkills(input.agentDirectory, skillFiles);
     assertContextToolsAllowed(input);
+    assertAnswerToolsAllowed(input);
     const sourceTools = input.contextTools ?? [];
-    const runTools = [...(input.agentRun?.tools ?? []), ...sourceTools];
+    const answerTools = input.answerTools ?? [];
+    const runTools = [...(input.agentRun?.tools ?? []), ...sourceTools, ...answerTools];
     const clash = runTools.find((tool, index) => RESERVED_TOOL_NAMES.has(tool.name) || runTools.findIndex(({ name }) => name === tool.name) !== index);
     if (clash !== undefined) throw agentXError("CONFIG_INVALID", `an agent step cannot have two tools named ${clash.name}, or one named like a file tool, the shell or read_skill`);
     const knowledge = input.agentRun === undefined ? input.knowledgeSession : undefined;
@@ -577,6 +601,19 @@ async function createDefaultSession(
     });
     // Both the shell tool (executionMode) and the agent's own setting: a message with several tool calls runs them one at a time.
     if (input.sequentialTools === true) session.agent.toolExecution = "sequential";
+    // Structured answers: a refused answer (Pi's schema check, or the step's own reader) is retried by the model in the same run. After ANSWER_REFUSALS_MAX in a row the model is told once to answer in plain text,
+    // so the step's text parse takes over, instead of looping until the step's clock runs out.
+    let answerRefusals = 0;
+    if (answerTools.length > 0) {
+      const answerNames = new Set(answerTools.map((tool) => tool.name));
+      session.subscribe((event) => {
+        const record = event as { type?: unknown; toolName?: unknown; isError?: unknown };
+        if (record.type !== "tool_execution_end" || typeof record.toolName !== "string" || !answerNames.has(record.toolName)) return;
+        if (record.isError !== true) { answerRefusals = 0; return; }
+        answerRefusals += 1;
+        if (answerRefusals === ANSWER_REFUSALS_MAX) void session.steer(ANSWER_TEXT_FALLBACK_NOTE).catch(() => undefined);
+      });
+    }
     const reportedModel = (): { provider: string; modelId: string } => {
       const provider = session.model?.provider ?? resolved.model.provider;
       if (resolved.route !== undefined && provider === ROUTE_PROVIDER) {
@@ -611,6 +648,7 @@ async function createDefaultSession(
       conversationId: conversationId ?? session.sessionId,
       sessionFile,
       prompt: async (text) => {
+        answerRefusals = 0;
         try {
           const run = () => session.prompt(text, { expandPromptTemplates: false });
           if (sourceMcp === undefined) await run();
