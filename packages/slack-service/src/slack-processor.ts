@@ -39,6 +39,11 @@ export type ProcessorDependencies = Omit<ConversationDependencies<SlackThread>, 
   turnRecords?: TurnRecordSink;
   /** Posts a message with Block Kit blocks. The reply's Details button needs it (spec 014 FR-024); without it, replies are text only. */
   postWithBlocks?: (thread: SlackThread, text: string, blocks: unknown[]) => Promise<void>;
+  /**
+   * Spec 062 Phase 7b: posts a reply's last chunk with its Details button named by `value`, the way the surface shows
+   * it (an event for the built-in Slack adapter). Takes the place of postWithBlocks.
+   */
+  postDetails?: (thread: SlackThread, text: string, value: string) => Promise<void>;
 };
 
 export function processSlackRequest(
@@ -47,7 +52,8 @@ export function processSlackRequest(
   options: Parameters<typeof processConversationRequest<SlackThread>>[2],
 ): Promise<void> {
   const log: ServiceLog = dependencies.log ?? (() => undefined);
-  const { turnRecords, postWithBlocks, api: apiFor, ...rest } = dependencies;
+  const { turnRecords, postWithBlocks, postDetails, api: apiFor, ...rest } = dependencies;
+  const details = postDetails ?? (postWithBlocks === undefined ? undefined : (thread: SlackThread, text: string, value: string) => postWithBlocks(thread, text, detailsReplyBlocks(text, value)));
   // One client per request, for the core and for Slack's commands alike.
   const api = apiFor(message);
   return processConversationRequest(message, {
@@ -56,7 +62,7 @@ export function processSlackRequest(
     subjectOf: dependencies.subjectOf ?? slackThreadSubject,
     format: dependencies.format ?? SLACK_FORMAT,
     commands: slackCommands(api, message),
-    ...(postWithBlocks === undefined || turnRecords === undefined ? {} : { postReplyEnd: detailsReply(postWithBlocks, log) }),
+    ...(details === undefined || turnRecords === undefined ? {} : { postReplyEnd: detailsReply(details, log) }),
     ...(turnRecords === undefined ? {} : { onFinished: (turn: FinishedTurn<SlackThread>) => recordTurn(turnRecords, log, turn) }),
   }, options);
 }
@@ -67,7 +73,7 @@ export function processSlackRequest(
  * the reply: the text is posted on its own. Any other failure (a network error, a timeout, an unreadable answer) may come
  * after Slack posted the message, so it is thrown like any failed post rather than risking the reply twice.
  */
-function detailsReply(postWithBlocks: NonNullable<ProcessorDependencies["postWithBlocks"]>, log: ServiceLog): NonNullable<ConversationDependencies<SlackThread>["postReplyEnd"]> {
+function detailsReply(postDetails: NonNullable<ProcessorDependencies["postDetails"]>, log: ServiceLog): NonNullable<ConversationDependencies<SlackThread>["postReplyEnd"]> {
   return async (thread, text, { recorder, message }) => {
     let calls: number;
     try {
@@ -80,7 +86,7 @@ function detailsReply(postWithBlocks: NonNullable<ProcessorDependencies["postWit
     const value = detailsButtonValue(message);
     if (value === undefined) return "not_posted";
     try {
-      await postWithBlocks(thread, text, detailsReplyBlocks(text, value));
+      await postDetails(thread, text, value);
       return "posted";
     } catch (error) {
       const refusal = slackRefusal(error);

@@ -40,6 +40,7 @@ import {
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
+import { SLACK_CHANNEL_EVENTS_PATH, createAwsSlackChannelEventsHandler, slackChannelForwarderFromEnvironment } from "./slack-adapter.js";
 import { createAwsSlackInteractivityHandler } from "./slack-interactivity.js";
 import { chatPostEphemeral, chatUpdate, slackWebFetch } from "./slack-web.js";
 import { chatGptCommandReply, chatGptSlackCommand, isHandedOffChatGptFinish, readBrokerAnswer, type BrokerAnswer, type ChatGptSlackCommand, type HandedOffChatGptFinish } from "./slack-chatgpt.js";
@@ -1033,6 +1034,8 @@ function createAwsSlackIngressHandler() {
   const choices = createDynamoWorkflowChoiceStore({ documentClient, tableName: threadsTableName });
   const changePending = threadPendingCounter(documentClient, threadsTableName);
   const enqueueAnswer = createAnswerQueue({ sqs, queueUrl, changePending });
+  // Spec 062 FR-074: with SlackViaChannel on, an ordinary conversation request goes through the channel API.
+  const forward = slackChannelForwarderFromEnvironment(secretsManager);
   return createSlackIngressHandler({
     secrets,
     appPosted: { accept: settings.acceptAppPosted, checkMember },
@@ -1109,6 +1112,10 @@ function createAwsSlackIngressHandler() {
     }),
     changePending,
     async enqueue(message, messageGroupId, queuedBehind) {
+      if (forward !== undefined) {
+        await forward(message);
+        return;
+      }
       await sqs.send(new SendMessageCommand({
         QueueUrl: queueUrl,
         MessageBody: JSON.stringify(message),
@@ -1174,12 +1181,37 @@ export const SLACK_INTERACTIONS_PATH = "/v1/slack/interactions";
 
 let awsHandler: ReturnType<typeof createSlackIngressHandler> | undefined;
 let awsInteractivityHandler: ReturnType<typeof createAwsSlackInteractivityHandler> | undefined;
+let awsChannelEventsHandler: ReturnType<typeof createAwsSlackChannelEventsHandler> | undefined;
+
+/** The bot token for the Slack adapter's posts, read as the ingress reads it. */
+function awsBotToken(): () => Promise<string> {
+  const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const secretsManager = new SecretsManagerClient(clientConfiguration);
+  const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  let cached: { token: Promise<string>; loadedAt: number } | undefined;
+  return () => {
+    if (cached === undefined || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
+      const token = secretsManager.send(new GetSecretValueCommand({ SecretId: secretArn })).then((response) => {
+        if (!response.SecretString) throw new Error("Slack secret is empty");
+        return parseSlackSecrets(response.SecretString).botToken;
+      });
+      cached = { token, loadedAt: Date.now() };
+      token.catch(() => { cached = undefined; });
+    }
+    return cached.token;
+  };
+}
 
 /**
  * The Events API and, since spec 014, Slack's interactivity request URL share this Lambda. Task 19: so does the
  * asynchronous start of a Quick or Full choice, which the interactivity handler hands to this same Lambda.
  */
 export const handler = (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish): Promise<HttpResponse> => {
+  // Spec 062 Phase 7b: the core's events for Slack, when Slack goes through the channel API.
+  if (!isHandedOffWorkflowStart(event) && !isHandedOffChatGptFinish(event) && event.rawPath === SLACK_CHANNEL_EVENTS_PATH) {
+    awsChannelEventsHandler ??= createAwsSlackChannelEventsHandler(awsBotToken());
+    return awsChannelEventsHandler(event);
+  }
   if (isHandedOffWorkflowStart(event) || isHandedOffChatGptFinish(event) || event.rawPath === SLACK_INTERACTIONS_PATH) {
     awsInteractivityHandler ??= createAwsSlackInteractivityHandler();
     return awsInteractivityHandler(event);

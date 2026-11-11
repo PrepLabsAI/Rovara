@@ -4,14 +4,16 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  AdapterChannelIdSchema,
+  ChannelIdSchema,
   channelBindingKey,
+  channelEventGroupId,
   readChannelBindingItem,
   ChannelActionSchema,
   ChannelDecisionSchema,
   InboundMessageSchema,
   LINK_REQUIRED_INTERVAL_SECONDS,
   channelEventId,
+  usableWebhookSecret,
   verifyWebhook,
   WEBHOOK_TOLERANCE_SECONDS,
   type ActorRef,
@@ -22,7 +24,7 @@ import {
   type ChannelSpaceRef,
   type ConversationRef,
 } from "@agentx/contracts";
-import { getChannelAdapter } from "./channel-adapters.js";
+import { adapterForChannel, builtInAdapterFromEnvironment } from "./channel-adapters.js";
 import { issueLinkCode, linkedDeveloper } from "./channel-links.js";
 
 /**
@@ -30,6 +32,9 @@ import { issueLinkCode, linkedDeveloper } from "./channel-links.js";
  * with its own secret (Standard Webhooks). It is queued for the core only when the signature is good and fresh, the
  * path's channel is the body's, the space is bound to one of the adapter's projects, and the actor is linked to a
  * developer. Anything else runs nothing. An unlinked actor gets one `link_required` event an hour.
+ *
+ * FR-073: the built-in adapter (Slack) is checked the same way, except that its actors keep the surface's verified
+ * identity: any space with a binding, no link and no step-up.
  */
 
 /** How long a `webhook-id` is remembered: twice the signature tolerance, so a replay within it is always caught. */
@@ -86,7 +91,7 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
   return async (event: ChannelIngressEvent): Promise<ChannelIngressResponse> => {
     if (event.requestContext?.http?.method !== "POST") return refuse(405, "method_not_allowed");
     const route = /^\/v1\/channels\/([^/]+)\/(messages|decisions|actions)$/.exec(event.rawPath ?? "");
-    const channel = route === null ? undefined : AdapterChannelIdSchema.safeParse(route[1]);
+    const channel = route === null ? undefined : ChannelIdSchema.safeParse(route[1]);
     if (route === null || channel === undefined || !channel.success) return refuse(404, "not_found");
     const kind = route[2] as "messages" | "decisions" | "actions";
 
@@ -131,15 +136,15 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
       if (actor.tenant !== conversation.tenant) return refuse(403, "actor_tenant_mismatch");
 
       const binding = await deps.getBinding({ channel: conversation.channel, tenant: conversation.tenant, space: conversation.space });
-      if (binding === undefined || !adapter.projects.includes(binding.projectName)) {
+      if (binding === undefined || (adapter.builtIn !== true && !adapter.projects.includes(binding.projectName))) {
         log({ event: "refused", channel: adapter.channel, reason: "space_not_bound" });
         return refuse(403, "space_not_bound");
       }
 
       if (!(await claim(`EVENT#${adapter.channel}/${kind}/${item.eventId}`, EVENT_DEDUPE_SECONDS))) return respond(200, { status: "duplicate" });
 
-      const developerId = await deps.linkedDeveloper(actor);
-      if (developerId === undefined) {
+      const developerId = adapter.builtIn === true ? undefined : await deps.linkedDeveloper(actor);
+      if (developerId === undefined && adapter.builtIn !== true) {
         // FR-030: one notice per actor an hour, claimed like the rest so a failed send frees it for the retry.
         if (await claim(`LINK_NOTICE#${actor.channel}/${actor.tenant}/${actor.userId}`, LINK_REQUIRED_INTERVAL_SECONDS)) {
           const { code, expiresAt } = await deps.issueLinkCode(actor);
@@ -152,14 +157,15 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
         return respond(202, { status: "link_required" });
       }
 
-      const checked = { projectName: binding.projectName, developerId, stepUp: adapter.stepUp };
+      const checked = { projectName: binding.projectName, ...(developerId === undefined ? {} : { developerId }), stepUp: adapter.stepUp };
       const queued: ChannelQueueItem = kind === "messages"
         ? { kind: "message", message: InboundMessageSchema.parse(item), ...checked }
         : kind === "decisions"
           ? { kind: "decision", decision: ChannelDecisionSchema.parse(item), ...checked }
           : { kind: "action", action: ChannelActionSchema.parse(item), ...checked };
       await deps.enqueue(queued, groupOf(conversation));
-      if (kind === "messages") {
+      // The built-in adapter answers its surface itself ("Got it"), so it gets no ack to deliver.
+      if (kind === "messages" && adapter.builtIn !== true) {
         // Queued already: a failed ack must not fail the request, or the adapter's retry would queue it twice.
         try {
           await deps.sendEvent({ ...eventBase(adapter, conversation, nowMs), type: "ack", data: { inReplyTo: item.eventId } });
@@ -199,15 +205,17 @@ function createAwsChannelIngressHandler() {
   const eventQueueUrl = requiredEnvironment("CHANNEL_EVENT_QUEUE_URL");
   const linkOrigin = new URL(requiredEnvironment("CHANNEL_LINK_ORIGIN")).origin;
   const links = { documentClient, stateTableName, now: Date.now };
+  const builtIn = builtInAdapterFromEnvironment(process.env);
+  const registry = process.env.CHANNEL_ADAPTERS === "enabled";
   const secrets = new Map<string, { value: string | undefined; at: number }>();
   return createChannelIngressHandler({
-    getAdapter: (channel) => getChannelAdapter({ documentClient, tableName: stateTableName }, channel),
+    getAdapter: (channel) => adapterForChannel({ documentClient, tableName: stateTableName }, channel, { builtIn, registry }),
     async getSecret(secretName) {
       const cached = secrets.get(secretName);
       if (cached !== undefined && Date.now() - cached.at < SECRET_CACHE_MS) return cached.value;
       try {
         const value = (await secretsManager.send(new GetSecretValueCommand({ SecretId: secretName }))).SecretString;
-        const usable = value?.startsWith("whsec_") === true ? value : undefined;
+        const usable = usableWebhookSecret(value);
         secrets.set(secretName, { value: usable, at: Date.now() });
         return usable;
       } catch {
@@ -247,7 +255,10 @@ function createAwsChannelIngressHandler() {
       }));
     },
     async sendEvent(channelEvent) {
-      await sqs.send(new SendMessageCommand({ QueueUrl: eventQueueUrl, MessageBody: JSON.stringify(channelEvent) }));
+      // FIFO: a conversation's events reach its adapter in order; the event ID drops a resend.
+      await sqs.send(new SendMessageCommand({
+        QueueUrl: eventQueueUrl, MessageBody: JSON.stringify(channelEvent), MessageGroupId: channelEventGroupId(channelEvent), MessageDeduplicationId: channelEvent.id,
+      }));
     },
     now: Date.now,
   });
@@ -263,8 +274,8 @@ export function queueItemIdentity(item: ChannelQueueItem): string {
 let awsHandler: ReturnType<typeof createChannelIngressHandler> | undefined;
 
 export const handler = async (event: ChannelIngressEvent): Promise<ChannelIngressResponse> => {
-  // Spec 062: off unless the deployment turns channel adapters on; then nothing is reachable.
-  if (process.env.CHANNEL_ADAPTERS !== "enabled") return refuse(404, "not_found");
+  // Spec 062: off unless the deployment turns channel adapters or its built-in adapter on; then nothing is reachable.
+  if (process.env.CHANNEL_ADAPTERS !== "enabled" && process.env.BUILT_IN_ADAPTER !== "enabled") return refuse(404, "not_found");
   awsHandler ??= createAwsChannelIngressHandler();
   return awsHandler(event);
 };

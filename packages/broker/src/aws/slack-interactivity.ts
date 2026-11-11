@@ -69,6 +69,7 @@ import {
   CHATGPT_OPEN_ACTION, CHATGPT_PASTE_ACTION, CHATGPT_PASTE_SUBMISSION, chatGptPasteModal, chatGptSubmission, isHandedOffChatGptFinish, runHandedOffChatGptFinish,
   type HandedOffChatGptFinish,
 } from "./slack-chatgpt.js";
+import { slackChannelForwarderFromEnvironment } from "./slack-adapter.js";
 import { chatPostEphemeral, slackWebFetch } from "./slack-web.js";
 import { PROJECT_TASKS_DISABLED_TEXT, WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
@@ -773,6 +774,7 @@ export function createAwsSlackInteractivityHandler() {
   const stateTableName = process.env.STATE_TABLE_NAME;
   const brokerFunctionName = process.env.BROKER_FUNCTION_NAME;
   const lambda = new LambdaClient(clientConfiguration);
+  const forward = slackChannelForwarderFromEnvironment(secretsManager);
   let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
   const secrets = (): Promise<SlackSecrets> => {
     if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
@@ -942,6 +944,11 @@ export function createAwsSlackInteractivityHandler() {
         return Number(response.Attributes?.pendingRequests ?? 0);
       },
       async enqueue(message, messageGroupId, queuedBehind) {
+        // Spec 062 FR-074: a click is a typed "yes" or "cancel", so with SlackViaChannel on it goes the same way.
+        if (forward !== undefined) {
+          await forward(message);
+          return;
+        }
         await sqs.send(new SendMessageCommand({
           QueueUrl: queueUrl, MessageBody: JSON.stringify(message), MessageGroupId: messageGroupId, MessageDeduplicationId: message.eventId,
           MessageAttributes: queuedBehindAttributes(queuedBehind),

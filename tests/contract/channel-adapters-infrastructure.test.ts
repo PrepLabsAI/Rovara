@@ -52,15 +52,14 @@ describe("channel adapters infrastructure", () => {
     for (const route of routes) expect(route.AuthorizationType).toBe("NONE");
   });
 
-  it("lets the channel API read only adapters, bindings and links from the state table, by key", () => {
+  it("lets the channel API read only adapters, bindings (Slack's too, for the built-in adapter) and links from the state table, by key", () => {
     const statements = statementsOf(named, roleOf(named, "ChannelApiIngress"));
     const onState = statements.filter((statement) => JSON.stringify(statement.Resource).includes("State") && !JSON.stringify(statement.Resource).includes("ChannelApiState"));
     expect(onState.map((statement) => [actions(statement), statement.Condition?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]])).toEqual([
-      [["dynamodb:GetItem"], ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*"]],
+      [["dynamodb:GetItem"], ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*"]],
       [["dynamodb:PutItem"], ["CHANNEL_LINK_CODE#*"]],
     ]);
-    // No Slack binding, no query, no scan, no write to the state table.
-    expect(JSON.stringify(statements)).not.toContain("SLACK_BINDING");
+    // No query, no scan, no other write to the state table.
     for (const statement of statements) {
       for (const action of actions(statement)) expect(["dynamodb:Query", "dynamodb:Scan"]).not.toContain(action);
     }
@@ -91,6 +90,33 @@ describe("channel adapters infrastructure", () => {
     expect(events.RedrivePolicy).toMatchObject({ maxReceiveCount: 8 });
     const requests = queues.find(([id]) => withoutHash(id) === "ChannelApiRequests")![1].Properties;
     expect(requests.FifoQueue).toBe(true);
+    // Phase 7b: a conversation's events arrive in order.
+    expect(events.FifoQueue).toBe(true);
+    expect(queues.find(([id]) => withoutHash(id) === "ChannelApiEventDeadLetters")![1].Properties.FifoQueue).toBe(true);
+  });
+
+  it("registers the built-in Slack adapter at deploy, off until SlackViaChannel is enabled (FR-073, FR-074)", () => {
+    expect(named.Parameters.SlackViaChannel).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
+    expect(legacy.Parameters.SlackViaChannel).toBeUndefined();
+    const secrets = ofType(named, "AWS::SecretsManager::Secret").filter(([id]) => withoutHash(id) === "ChannelApiSlackAdapterSecret");
+    expect(secrets).toHaveLength(1);
+    expect(secrets[0]![1].Properties).toMatchObject({
+      Name: "agentx/staging/channel-adapter/slack",
+      GenerateSecretString: { PasswordLength: 64, ExcludePunctuation: true, IncludeSpace: false },
+    });
+    const variables = (prefix: string) => (functionNamed(named, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    for (const prefix of ["ChannelApiIngress", "ChannelApiEventSender"]) {
+      expect(variables(prefix)).toMatchObject({ BUILT_IN_ADAPTER: { Ref: "SlackViaChannel" }, BUILT_IN_ADAPTER_CHANNEL: "slack", BUILT_IN_ADAPTER_SECRET_NAME: "agentx/staging/channel-adapter/slack" });
+      expect(JSON.stringify(variables(prefix).BUILT_IN_ADAPTER_CALLBACK_URL)).toContain("/v1/slack/channel-events");
+    }
+    expect(variables("SlackIngress")).toMatchObject({ SLACK_VIA_CHANNEL: { Ref: "SlackViaChannel" }, SLACK_ADAPTER_SECRET_NAME: "agentx/staging/channel-adapter/slack" });
+    // Slack's ingress may read the adapter's secret, and nothing else under the adapter prefix.
+    const reads = statementsOf(named, roleOf(named, "SlackIngress")).filter((statement) => actions(statement).includes("secretsmanager:GetSecretValue"));
+    expect(reads.map((statement) => JSON.stringify(statement.Resource)).join()).toContain("ChannelApiSlackAdapterSecret");
+    expect(JSON.stringify(reads)).not.toContain("channel-adapter/*");
+    const route = ofType(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => resource.Properties).find((properties) => properties.RouteKey === "POST /v1/slack/channel-events");
+    expect(route).toMatchObject({ AuthorizationType: "NONE" });
+    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-events")).toBe(false);
   });
 
   it("expires short-lived channel state by expiresAt", () => {

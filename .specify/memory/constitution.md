@@ -1,3 +1,10 @@
+<!-- Sync impact: 5.0.0 -> 5.1.0 (Slack reaches the core through the channel API as the built-in adapter).
+Principles modified: I. One orchestrator, remote coding (the deployment registers the built-in Slack adapter itself;
+it relays only requests Slack has signed, and its actors keep Slack's verified identity, the bound channel's
+membership and no linking or step-up).
+Sections modified: none. Removed sections: none.
+Design and verification are recorded in specs/062-channel-adapters/ (Phase 7, FR-073).
+Follow-up TODOs: none. -->
 <!-- Sync impact: 4.1.0 -> 5.0.0 (admits channel adapters beside Slack).
 Principles modified: I. One orchestrator, remote coding (the orchestrator accepts requests signed by
 Slack or by a registered channel adapter; an adapter actor must be linked to a developer sign-in and
@@ -93,7 +100,10 @@ is registered for. An adapter relays messages and renders events. It is a client
 orchestrator, and MUST NOT receive credentials or run coding work. A decision kind an adapter is
 set to step up, plan approval and administration by default, MUST be made by a signed-in developer
 on the task page and MUST be refused from the adapter. Slack keeps its verified identity and is not
-subject to linking or step-up.
+subject to linking or step-up. Slack MAY reach the orchestrator through the channel API as the
+built-in Slack adapter, which the deployment registers itself rather than an administrator. It MUST
+relay only requests Slack has signed, from the Slack channel bound to the project, and its actors
+keep Slack's verified identity.
 
 The hosted orchestrator is the only AgentX orchestrator model. Another client, the developer
 task API, may drive coding work. It MUST authenticate a developer through the control plane's
@@ -194,4 +204,4 @@ Amendments MUST identify changed principles and update affected specifications a
 Use semantic versioning: major for incompatible principles, minor for new principles, patch
 for clarifications. Reviewers MUST identify and resolve violations before declaring delivery complete.
 
-**Version**: 5.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-11-08
+**Version**: 5.1.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-11-11

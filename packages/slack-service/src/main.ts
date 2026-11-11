@@ -14,8 +14,8 @@ import {
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
-  SLACK_CHAT_ATTRIBUTE, SLACK_NOTE_TS_ATTRIBUTE, SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, SLACK_TASK_ID_ATTRIBUTE, confirmationBlocks,
-  isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, type ConversationRef, type SlackRequestMessage, type SlackThread,
+  SLACK_CHAT_ATTRIBUTE, SLACK_NOTE_TS_ATTRIBUTE, SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, SLACK_TASK_ID_ATTRIBUTE, channelEventGroupId, confirmationBlocks,
+  isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, type ChannelEvent, type ConversationRef, type SlackRequestMessage, type SlackThread,
 } from "@agentx/contracts";
 import { channelRequestHandler, readChannelQueueItem } from "./channel-requests.js";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
@@ -25,6 +25,7 @@ import { createDynamoConfirmationStore } from "./confirmation-store.js";
 import { runConsumer as runQueueConsumer, type QueueClient } from "./consumer.js";
 import type { ProcessorMessage, ServiceLog, ThreadStore, TurnInput } from "./processor.js";
 import { runConsumer } from "./slack-consumer.js";
+import { slackChannelRequests } from "./slack-channel.js";
 import { processSlackRequest } from "./slack-processor.js";
 import { createEvalBatchWatchApi, withSlackThreadRoutes, type SlackThreadServiceApi } from "./slack-thread-api.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
@@ -400,7 +401,13 @@ const batchWatcher = runEvalBatchWatcher({
   signal: controller.signal,
 });
 
-// Spec 062 Phase 4: adapter conversations, run beside the Slack queue with their own concurrency.
+/** Queues an event for its adapter, in its conversation's order (the event queue is FIFO). */
+async function sendChannelEvent(url: string, event: ChannelEvent): Promise<void> {
+  await sqs.send(new SendMessageCommand({ QueueUrl: url, MessageBody: JSON.stringify(event), MessageGroupId: channelEventGroupId(event), MessageDeduplicationId: event.id }));
+}
+
+// Spec 062 Phase 4: adapter conversations, run beside the Slack queue with their own concurrency. Phase 7b: with
+// SlackViaChannel on, Slack's own conversations come this way too, and run as Slack threads.
 const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueueUrl === undefined
   ? Promise.resolve()
   : runQueueConsumer(sqsQueue(channelRequestQueueUrl), channelRequestHandler({
@@ -411,8 +418,20 @@ const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueu
       log,
       confirmations,
     },
-    send: async (event) => {
-      await sqs.send(new SendMessageCommand({ QueueUrl: channelEventQueueUrl, MessageBody: JSON.stringify(event) }));
+    send: (event) => sendChannelEvent(channelEventQueueUrl, event),
+    surfaces: {
+      slack: slackChannelRequests({
+        processor: {
+          api: threadApi,
+          threads,
+          runTurn,
+          log,
+          confirmations,
+          turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
+          userName: slackUserName,
+        },
+        send: (event) => sendChannelEvent(channelEventQueueUrl, event),
+      }),
     },
     log,
   }), {
