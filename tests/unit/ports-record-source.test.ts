@@ -1,7 +1,7 @@
 // The `team-record-source` point (lane K1): the memory sink keeps the sink contract, the scripted source passes the source suite, Code's sink keeps nothing, and the
 // sources the audience rule believes are the registered ones.
 import { describe, expect, it } from "vitest";
-import { MAINTAINERS_GROUP, PLUGIN_POINT_CARDINALITY, PluginRegistryError, audienceForSource, recordDraftRefusal, recordLinks, recordScopeCovers, recordSourceDraftProblem, type RecordDraft } from "@agentx/contracts";
+import { MAINTAINERS_GROUP, PLUGIN_POINT_CARDINALITY, PluginRegistryError, audienceForSource, recordDraftRefusal, recordLinks, recordScopeCovers, recordSourceDraftProblem, recordStoredTrust, type RecordDraft } from "@agentx/contracts";
 import { createAdapterRegistry, createFakeRecordSource, createMemoryRecordSink, createRefusingRecordSink, knownRecordSources } from "../../packages/broker/src/ports/index.js";
 import { CHAT_SAMPLE, runRecordSinkConformance, runRecordSourceConformance, sampleRecordDraft as sampleWith } from "../support/ports/record-source-conformance.js";
 
@@ -78,6 +78,20 @@ describe("the team-record-source point", () => {
     expect(recordSourceDraftProblem({ ...base, retention: "A" })).toBe("retention A keeps no text");
     expect(recordSourceDraftProblem({ ...base, pieceTrusts: ["outsider"] })).toBe("the row's trust is higher than one of its parts");
     expect(recordSourceDraftProblem({ ...base, audience: { kind: "restricted", acl: { source: "tracker", scope: "chat:T1/C9", capturedAt: "2026-11-10T10:00:00.000Z", liveCheck: "none" } } })).toBe("the permission snapshot names another source");
+  });
+
+  it("stores a row no higher than its quoted authors, and at most `system` for outside text with no actor", async () => {
+    expect(recordStoredTrust({ trust: "member", actor: { sourceId: "U1", trust: "member" }, quotedTrusts: ["outsider"], source: "chat", text: "x" })).toBe("outsider");
+    expect(recordStoredTrust({ trust: "member", source: "chat", text: "x" })).toBe("system");
+    expect(recordStoredTrust({ trust: "member", source: "chat" })).toBe("member");
+    expect(recordStoredTrust({ trust: "rovara", source: "rovara", text: "x" })).toBe("rovara");
+    const sink = createMemoryRecordSink();
+    const { actor: _actor, ...noActor } = sampleRecordDraft({ id: "na" }); // eslint-disable-line @typescript-eslint/no-unused-vars -- the draft without its actor
+    await sink.put(noActor);
+    await sink.put(sampleRecordDraft({ id: "q", quotedTrusts: ["outsider"] }));
+    expect(sink.row("org_00000000000000000000", "chat", "T1", "na")?.draft.trust).toBe("system");
+    expect(sink.row("org_00000000000000000000", "chat", "T1", "q")?.draft.trust).toBe("outsider");
+    expect(recordSourceDraftProblem(sampleRecordDraft({ quotedTrusts: ["outsider"] }))).toBeUndefined();
   });
 
   it("keeps the first 20 valid http(s) links of at most 2,048 characters", () => {
