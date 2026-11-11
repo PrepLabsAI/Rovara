@@ -17,10 +17,11 @@ const catalog: ConnectorCatalog = {
     inputSchema: { type: "object", properties: { state: { type: "string" } }, required: [] } }],
 };
 
-/** A session stub with only what runOrchestratorTurn used before recording existed. */
+/** A session stub with only what runOrchestratorTurn uses before recording exists: the prompt, the idle wait, the messages, and (Pi 1.5 `agent_settled`) a subscription that never signals here, so the idle wait ends the turn. */
 function stubRuntime(messages: unknown[], prompt = vi.fn(async () => undefined)) {
   const waitForIdle = vi.fn(async () => undefined);
-  return { runtime: { session: { prompt, waitForIdle, messages } } as unknown as AgentSessionRuntime, prompt, waitForIdle };
+  const subscribe = vi.fn(() => () => undefined);
+  return { runtime: { session: { prompt, waitForIdle, subscribe, messages } } as unknown as AgentSessionRuntime, prompt, waitForIdle };
 }
 
 describe("orchestrator behaviour without a turn recorder (characterization)", () => {

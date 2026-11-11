@@ -16,7 +16,7 @@ import { EventBatcher, redactCredentials, type EventBatchSink } from "../events.
 import type { FileOpsTarget } from "../file-ops-exec.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { assistantOutcome, eventType, failedTurn, type AssistantOutcome } from "../session-events.js";
-import { ToolLoopGuard } from "../tool-loop-guard.js";
+import { ToolLoopGuard, toolLoopGuardExtension } from "../tool-loop-guard.js";
 import { usageForControlPlane } from "../usage.js";
 import { assistantText } from "../verification/extension.js";
 import { withStepTimeout, type AgentSkillFile } from "../agent-step.js";
@@ -157,7 +157,10 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
     const recorder = new ToolCallRecorder(new Set(connectorTools.map(({ name }) => name)));
 
     const { workspace } = input;
+    // The step's tool-call backstop is a block in front of the call: the call past the limit is refused before it runs.
+    const loopGuard = new ToolLoopGuard();
     session = await createWorkspacePiSession({
+      extensionFactories: [toolLoopGuardExtension(loopGuard)],
       rootPath: workspace.rootPath,
       model: input.modelAccess.model,
       // An agent step is a planning session whatever else is said (pi-session.ts): at most the read-only file tools.
@@ -172,8 +175,8 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
     }, input.modelAccess.piAdapter);
 
     const handle = session;
-    const loopGuard = new ToolLoopGuard();
     let loopStop: Error | undefined;
+    loopGuard.onLimit = (error) => { if (loopStop === undefined) { loopStop = error; void handle.abort().catch(() => undefined); } };
     let lastAssistant: AssistantOutcome | undefined;
     let finalText: string | undefined;
     unsubscribe = handle.subscribe((event) => {

@@ -1,4 +1,5 @@
 import { agentXError, type AgentXError } from "@agentx/contracts";
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 /** The model is told it is looping after this many identical failing calls in a row (#127). */
 export const REPEAT_WARNING_AT = 3;
@@ -17,16 +18,42 @@ export type ToolLoopAction =
   | { kind: "warn"; message: string }
   | { kind: "stop"; error: AgentXError };
 
+/** What the guard tells Pi when a call is over the limit: the call is refused before it runs. */
+export type ToolCallBlock = { block: true; reason: string; terminate: true };
+
 /**
  * Watches one task's pi events for a model repeating the same failing tool call, and for too many
  * tool calls. A call counts as a repeat when the tool, its arguments and its error all match the
  * previous failing call, ignoring digits in the error (timestamps, durations, process IDs). Any
  * successful call other than a lookup (read, grep, find, ls) ends the streak, so editing and
  * rerunning a failing test is never a loop.
+ *
+ * The tool-call backstop is a `tool_call` block, not an event it reads afterwards: Pi asks `beforeToolCall` (through
+ * toolLoopGuardExtension) before every call, and the call after the limit is refused before it runs, so a task never
+ * starts a 201st command and then aborts it in flight.
  */
 export class ToolLoopGuard {
   /** The tool-call backstop; SWE-Bench Pro runs raise it for their long-horizon tasks (spec 044 FR-005). */
   constructor(private readonly toolCallLimit: number = TOOL_CALL_LIMIT) {}
+
+  /** Told once, when the first call past the limit is refused: the owner of the run ends it with this error. */
+  onLimit: ((error: AgentXError) => void) | undefined;
+  private attempts = 0;
+  private limitError: AgentXError | undefined;
+
+  /**
+   * Called by Pi before each tool call runs. Within the limit it returns nothing and the call goes ahead; past it, the call is
+   * refused (and the batch ends), and the run's owner is told to stop the task with the limit error.
+   */
+  beforeToolCall(): ToolCallBlock | undefined {
+    this.attempts += 1;
+    if (this.attempts <= this.toolCallLimit) return undefined;
+    if (this.limitError === undefined) {
+      this.limitError = agentXError("OPERATION_INTERRUPTED", `the agent used more than ${this.toolCallLimit} tool calls in one task; stopped it. Split the request into smaller tasks.`);
+      try { this.onLimit?.(this.limitError); } catch { /* The run's own stop is best effort here: the call is refused either way. */ }
+    }
+    return { block: true, reason: `AgentX stopped this task: it used more than ${this.toolCallLimit} tool calls. This call was not run.`, terminate: true };
+  }
 
   private readonly started = new Map<string, string>();
   private calls = 0;
@@ -34,7 +61,7 @@ export class ToolLoopGuard {
   private streak = 0;
   private warnedSignature: string | undefined;
 
-  /** The tool calls started so far, including any past the limit (spec 052 Ruling 28). */
+  /** The tool calls started so far, including any the limit refused (spec 052 Ruling 28). */
   get toolCalls(): number {
     return this.calls;
   }
@@ -44,11 +71,9 @@ export class ToolLoopGuard {
     const value = event as { type?: unknown; toolCallId?: unknown; toolName?: unknown; args?: unknown; isError?: unknown; result?: unknown };
     const callId = typeof value.toolCallId === "string" ? value.toolCallId : undefined;
     if (value.type === "tool_execution_start") {
+      // Only counted here: the limit itself is enforced before the call runs (beforeToolCall).
       this.calls += 1;
       if (callId !== undefined) this.started.set(callId, `${String(value.toolName)}\u0000${stableJson(value.args)}`);
-      if (this.calls > this.toolCallLimit) {
-        return { kind: "stop", error: agentXError("OPERATION_INTERRUPTED", `the agent used more than ${this.toolCallLimit} tool calls in one task; stopped it. Split the request into smaller tasks.`) };
-      }
       return { kind: "none" };
     }
     if (value.type !== "tool_execution_end") return { kind: "none" };
@@ -99,4 +124,19 @@ function stableJson(value: unknown): string {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "undefined";
+}
+
+/**
+ * The inline extension that puts the guard's limit in front of every tool call of one Pi session. It is added to the sessions of
+ * run-task (coding, planning, a run-task review step and understanding stage, and each parallel part), of agent steps (run-agent-step.ts) and of
+ * SWE-bench evaluation runs. It is NOT yet on the independent CRITIC/SECURITY reviewer sessions (verification/review.ts), the design-review
+ * sessions (design-review-sessions.ts) or the setup agent (setup-agent-invocation.ts): those never had the limit, and are capped by their own timeouts.
+ */
+export function toolLoopGuardExtension(guard: ToolLoopGuard): InlineExtension {
+  return {
+    name: "rovara-tool-loop-guard",
+    factory: (pi) => {
+      pi.on("tool_call", () => guard.beforeToolCall());
+    },
+  };
 }

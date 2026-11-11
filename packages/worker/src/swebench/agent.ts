@@ -4,7 +4,7 @@ import { parseAgentClaim, redactText, type CheckReport, type SwebenchStopReason 
 import { recorderFingerprint } from "../artifacts.js";
 import { workspaceRelativeCdTarget, type DevcontainerPaths } from "../devcontainer.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
-import { ToolLoopGuard } from "../tool-loop-guard.js";
+import { ToolLoopGuard, toolLoopGuardExtension } from "../tool-loop-guard.js";
 import { createCheckRunners, planChecks, type CheckRunners } from "../verification/checks.js";
 import { assistantText, finalCheckReport, verificationExtension } from "../verification/extension.js";
 import { gitOriginalCode } from "../verification/original-code.js";
@@ -94,9 +94,11 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
     onDiagnostic,
     ...(input.baseCommit === undefined ? {} : { originalCode: gitOriginalCode([{ directory: input.paths.hostFolder, commit: input.baseCommit }]) }),
   });
+  // The tool-call backstop is a block in front of the call (tool-loop-guard.ts): the call past the limit is refused before it runs.
+  const guard = new ToolLoopGuard(input.toolCallLimit);
   const session = await createWorkspacePiSession({
     onDiagnostic,
-    extensionFactories: [verification],
+    extensionFactories: [toolLoopGuardExtension(guard), verification],
     rootPath: input.rootPath,
     model: input.model,
     bashOperations: input.bashOperations,
@@ -118,7 +120,7 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
     limitStop.abort();
     void session.abort().catch(() => undefined);
   };
-  const guard = new ToolLoopGuard(input.toolCallLimit);
+  guard.onLimit = (error) => { halt("loop_guard", error.message); };
   const unsubscribe = session.subscribe((event) => {
     const action = guard.observe(event);
     if (action.kind === "warn") void session.steer?.(action.message).catch(() => undefined);

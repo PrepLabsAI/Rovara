@@ -353,7 +353,8 @@ describe("the worker's run", () => {
   it("is a read-only session that reports a proposal, never a version 1 draft, for the revision it ran on", async () => {
     const { result, seen } = await run([answer], { meta: KIRO_META, web: NODE_CODE }, "meta");
     expect(seen.created[0]!.workflowMode).toBe("PLAN");
-    expect(seen.created[0]!.extensionFactories ?? []).toEqual([]);
+    // No verification and no other extension: only the tool-call limit (a tool_call block, tool-loop-guard.ts) is in front of the session's calls.
+    expect((seen.created[0]!.extensionFactories ?? []).map((extension) => (extension as { name?: string }).name)).toEqual(["rovara-tool-loop-guard"]);
     expect(result.workflowMode).toBe("SETUP_DRAFT");
     expect(result).not.toHaveProperty("setupDraft");
     expect(result.setupProposal).toMatchObject({ version: 2, basedOnRevision: 4, metaRepo: { name: "meta", commit: COMMITS.meta } });

@@ -38,7 +38,7 @@ import {
   planningDeadlineMs, sanitizeModelCallEvent, type ModelCallExpiryInfo, type ModelCallNote,
 } from "./model-call-monitor.js";
 import { consoleWorkerLog, type WorkerLogSink } from "./worker-log.js";
-import { ToolLoopGuard } from "./tool-loop-guard.js";
+import { ToolLoopGuard, toolLoopGuardExtension } from "./tool-loop-guard.js";
 import { assistantOutcome, eventType, failedTurn, type AssistantOutcome } from "./session-events.js";
 import { pinnedSkills, withStepTimeout, type AgentSkillFile } from "./agent-step.js";
 import { loadedKnowledgePayload } from "./knowledge/manifest.js";
@@ -789,6 +789,8 @@ async function runTask(
       };
     }
   }
+  // A model repeating the same failing call is told once, then stopped (#127), and the call past the tool-call limit is refused before it runs: the guard's extension sits in front of every call of this session.
+  const loopGuard = new ToolLoopGuard();
   let session: PiSessionHandle;
   if (registered) {
     session = await openRegisteredWorkspacePiSession(
@@ -799,7 +801,7 @@ async function runTask(
         conversationId,
         sessionFile: registered.sessionFile,
         onDiagnostic,
-        extensionFactories: planning || reviewing || understanding ? [] : [verification],
+        extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing || understanding ? [] : [verification])],
         ...ruleBases,
         ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
@@ -813,7 +815,7 @@ async function runTask(
     session = await createWorkspacePiSession(
       {
         rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: piMode, conversationId, onDiagnostic,
-        extensionFactories: planning || reviewing || understanding ? [] : [verification],
+        extensionFactories: [toolLoopGuardExtension(loopGuard), ...(planning || reviewing || understanding ? [] : [verification])],
         ...ruleBases,
         ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
@@ -916,8 +918,6 @@ async function runTask(
       });
     },
   });
-  // A model repeating the same failing call is told once, then stopped (#127).
-  const loopGuard = new ToolLoopGuard();
   // A task whose every edit or write failed, and that changed nothing, did not do its job (#158).
   const fileChanges = new FileChangeAttempts([canonicalRoot, resolve(dependencies.rootPath)]);
   let loopStop: Error | undefined;
@@ -928,6 +928,12 @@ async function runTask(
   let finalText: string | undefined;
   // The last model call's failure as a fixed-shape note: the operation's error is built from it, never from the provider's text.
   let lastModelNote: ModelCallNote | undefined;
+  const stopForLoop = (error: Error): void => {
+    loopStop = error;
+    monitor.stop();
+    verificationStop.abort();
+    void session.abort().catch(() => undefined);
+  };
   const unsubscribe = session.subscribe((event) => {
     monitor.observe(event);
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(stubContextEvent(event)));
@@ -960,12 +966,11 @@ async function runTask(
       void events.append("progress", { message: "The agent repeated a failing call; AgentX told it to change approach." }).catch(() => undefined);
       void session.steer?.(action.message).catch(() => undefined);
     } else if (action.kind === "stop") {
-      loopStop = action.error;
-      monitor.stop();
-      verificationStop.abort();
-      void session.abort().catch(() => undefined);
+      stopForLoop(action.error);
     }
   });
+  // The call past the tool-call limit was refused before it ran (tool_call block); the task ends with the limit's error.
+  loopGuard.onLimit = (error) => { if (loopStop === undefined) stopForLoop(error); };
   try {
     // 058-stop-close: a Stop that came while this run was still preparing (before it registered above) is applied now, before any prompt: the catch below ends the run cancelled.
     if (dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
@@ -991,7 +996,7 @@ async function runTask(
     };
     // P-4: Pi skips agent_before_settle after an abort, so a stopped run has no report from the extension.
     // Ruling N: an extra try with no second settle and no stop keeps the first round's regression.
-    // A cancelled model call also ends with stopReason "error", so the stop is read first.
+    // A cancelled model call ends with stopReason "aborted" on Pi 1.5 (it was "error" before), so `errored` is false for it; the stop is read first all the same.
     // Ruling Y: a regression AgentX found stands through a stop, a cancel or a model error on the extra turn.
     const finalChecks = (): CheckReport => finalCheckReport({
       reported: reportedChecks,
@@ -1179,11 +1184,14 @@ async function runTask(
           let partSession: PiSessionHandle | undefined;
           let unsubscribe: () => void = () => undefined;
           let partOutcome: TaskUsageOutcome = "SUCCEEDED";
+          // Each part has its own guard: the call past its tool-call limit is refused before it runs.
+          const guard = new ToolLoopGuard();
+          let stoppedBy: Error | undefined;
           try {
             partSession = await createWorkspacePiSession(
               {
                 rootPath: dependencies.rootPath, workingDirectory: copy.directory, model: dependencies.model, workflowMode: "IMPLEMENT", onDiagnostic,
-                extensionFactories: [],
+                extensionFactories: [toolLoopGuardExtension(guard)],
                 ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
                 // The part's file tools are rooted at its own folder, so it cannot edit the project repository or another part.
                 ...(fileTools !== undefined ? { fileTools: { ...fileTools, root: copy.directory } } : localShell ? { localFileTools: true } : {}),
@@ -1200,8 +1208,7 @@ async function runTask(
             let lastNote: ModelCallNote | undefined;
             let lastText: string | undefined;
             const partFindings = findings.forPart(item.id);
-            const guard = new ToolLoopGuard();
-            let stoppedBy: Error | undefined;
+            guard.onLimit = (error) => { if (stoppedBy === undefined) { stoppedBy = error; void open.abort().catch(() => undefined); } };
             unsubscribe = open.subscribe((event) => {
               if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(stubContextEvent(event)));
               fileChanges.observe(event);

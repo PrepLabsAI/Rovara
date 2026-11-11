@@ -124,8 +124,10 @@ async function runTask(options: {
   failArtifact?: string;
   /** D-16: the original code AgentX measures before results on. Default: none (the fixture has no repositories). */
   originalCode?: OriginalCode;
+  /** The scripted model's context window. Pi 1.5 compacts a long transcript on its own, and a compaction asks the scripted model for a summary, which would use up the script; a run with huge outputs gives the model room. */
+  contextWindow?: number;
 }) {
-  const { modelRuntime, faux } = await fauxModelRuntime();
+  const { modelRuntime, faux } = await fauxModelRuntime(options.contextWindow === undefined ? {} : { contextWindow: options.contextWindow });
   const requests: Request[] = [];
   faux.setResponses(options.steps.map((step): FauxResponseStep => async (context: TranscriptContext, ...rest) => {
     requests.push(JSON.parse(JSON.stringify(context.messages.filter((message) => (message as { role: string }).role !== "system"))) as Request);
@@ -282,7 +284,7 @@ describe("a coding run that leaves the code as it was keeps what it found", () =
     const shell = scriptedShell(big);
     const run = await runTask({
       steps: [...Array.from({ length: 25 }, (_, index) => bash(`echo ${String(index)}`, `b${String(index)}`)), fauxAssistantMessage(`${"c".repeat(20_000)}\n${DONE}`)],
-      workflowMode: "IMPLEMENT", readiness: [], shell, rootPath: await gitWorkspaceRoot(),
+      workflowMode: "IMPLEMENT", readiness: [], shell, rootPath: await gitWorkspaceRoot(), contextWindow: 10_000_000,
     });
     const found = findingsOf(run.failure)!;
     expect(found.commands).toHaveLength(10);

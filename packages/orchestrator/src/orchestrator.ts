@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { createModelRuntimeWithFallback, type ModelFallbackNotice } from "@agentx/model-runtime";
+import { createPiSettingsManager } from "@agentx/model-runtime/pi-settings";
 import { resolve } from "node:path";
 import {
   createAgentSessionFromServices,
@@ -260,6 +261,10 @@ export async function createPiSessionRuntime(options: PiSessionOptions): Promise
       cwd: sessionCwd,
       agentDir: agentDirectory,
       modelRuntime: options.modelRuntime,
+      // The same written-not-read settings as the worker's: no settings file, no project settings, no telemetry, no cache warming, the same retry budget.
+      settingsManager: createPiSettingsManager(),
+      // Project trust stays off whatever the working folder holds.
+      resourceLoaderReloadOptions: { resolveProjectTrust: async () => false },
       resourceLoaderOptions: {
         noExtensions: true,
         noSkills: true,
@@ -270,9 +275,6 @@ export async function createPiSessionRuntime(options: PiSessionOptions): Promise
         systemPrompt: options.systemPrompt,
       },
     });
-    // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
-    // none. The mode is a global-only setting, so it is written to AgentX's own agent directory.
-    services.settingsManager.setCacheWarmingMode("off");
     const created = await createAgentSessionFromServices({
       services,
       sessionManager,
@@ -323,16 +325,14 @@ function connectorFailure(connector: string, error: unknown): ConnectorUnavailab
 
 export async function runOrchestratorTurn(runtime: AgentSessionRuntime, prompt: string, recorder?: TurnRecorder): Promise<string> {
   if (recorder === undefined) {
-    await runtime.session.prompt(prompt, { expandPromptTemplates: false });
-    await runtime.session.waitForIdle();
+    await promptUntilSettled(runtime, prompt);
     return lastAssistantText(runtime.session.messages);
   }
   // The session is reloaded each turn, so its totals are cumulative; the recorder keeps the difference.
   const before = sessionStats(runtime, recorder);
   let outcome: "SUCCEEDED" | "FAILED" = "FAILED";
   try {
-    await runtime.session.prompt(prompt, { expandPromptTemplates: false });
-    await runtime.session.waitForIdle();
+    await promptUntilSettled(runtime, prompt);
     const text = lastAssistantText(runtime.session.messages);
     outcome = "SUCCEEDED";
     return text;
@@ -346,6 +346,25 @@ export async function runOrchestratorTurn(runtime: AgentSessionRuntime, prompt: 
         recorder.usageFailed("usage_measurement_failed");
       }
     }
+  }
+}
+
+/**
+ * Sends the prompt and returns once Pi says the run has settled (`agent_settled`: no retry, compaction or queued continuation will run), not merely once `prompt` returned.
+ * The settle signal is awaited only if it has not come by the time `prompt` returns; an idle session (a prompt that ran nothing) returns at once, so a missing signal cannot hang a turn.
+ */
+async function promptUntilSettled(runtime: AgentSessionRuntime, prompt: string): Promise<void> {
+  let settled = false;
+  let signal!: () => void;
+  const reached = new Promise<void>((resolve) => { signal = resolve; });
+  const unsubscribe = runtime.session.subscribe((event) => {
+    if (event.type === "agent_settled") { settled = true; signal(); }
+  });
+  try {
+    await runtime.session.prompt(prompt, { expandPromptTemplates: false });
+    if (!settled) await Promise.race([reached, runtime.session.waitForIdle()]);
+  } finally {
+    unsubscribe();
   }
 }
 

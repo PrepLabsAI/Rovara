@@ -14,6 +14,14 @@ describe("shared usage contract", () => {
     expect(TaskUsageTelemetrySchema.parse(unknown)).toMatchObject({ costUsd: null, costSource: "unknown" });
     expect(createTaskUsageTelemetry(stats, { provider: "openrouter", modelId: "model" }, "SUCCEEDED")).toMatchObject({ costUsd: 0.25, costSource: "estimated" });
   });
+  it("labels an OpenRouter total the provider billed (Pi 1.5 totalFromProvider) as billed, and only for OpenRouter", () => {
+    const billed = createTaskUsageTelemetry({ ...stats, costFromProvider: true }, { provider: "openrouter", modelId: "model" }, "SUCCEEDED");
+    expect(TaskUsageTelemetrySchema.parse(billed)).toMatchObject({ costUsd: 0.25, costSource: "billed" });
+    expect(createTaskUsageTelemetry({ ...stats, costFromProvider: false }, { provider: "openrouter", modelId: "model" }, "SUCCEEDED")).toMatchObject({ costSource: "estimated" });
+    // No cost is never billed; a direct provider's total is its list price whatever the flag says.
+    expect(createTaskUsageTelemetry({ ...stats, cost: 0, costFromProvider: true }, { provider: "openrouter", modelId: "model" }, "SUCCEEDED")).toMatchObject({ costUsd: null, costSource: "unknown" });
+    expect(createTaskUsageTelemetry({ ...stats, costFromProvider: true }, { provider: "anthropic", modelId: "model" }, "SUCCEEDED")).toMatchObject({ costSource: "list-price" });
+  });
   it.each(["anthropic", "openai"])("labels %s list prices and unknown cost", (provider) => {
     const listed = createTaskUsageTelemetry(stats, { provider, modelId: "model" }, "SUCCEEDED");
     expect(TaskUsageTelemetrySchema.parse(listed)).toMatchObject({ costUsd: 0.25, costSource: "list-price" });
