@@ -594,7 +594,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const scheduleRouter = createScheduleRouter(registry.require("scheduler"));
   const automation = createLocalAutomation({
     store, companyId, owner, flow, projects: projectSource, admission: registry.require("admission"), audit: registry.require("audit-sink"), approvers: registry.require("approvers"),
-    automation: typeof options.automation === "object" ? options.automation : fixedAutomationSwitch(options.automation === true), now: () => clock().getTime(), scheduler: scheduleRouter.view, dollarsEnforced: !registry.names("admission").includes("allow-all"), log,
+    automation: typeof options.automation === "object" ? options.automation : fixedAutomationSwitch(options.automation === true), now: () => clock().getTime(), scheduler: scheduleRouter.view, log,
   });
   const pages = await createLocalPagesServer({
     data: {

@@ -30,6 +30,8 @@ export interface AdmissionHarness {
   admissible: AdmissionRequest;
   /** A request this adapter refuses, or undefined when it refuses nothing (Code's default). */
   refused?: AdmissionRequest;
+  /** What the adapter must declare as `enforcesCost`. Required: an adapter states it, the suite never infers it. `true` only for an adapter that refuses a request whose `estimate.cost` is over its allowance (so `refused` must be set, and carry such an estimate). */
+  enforcesCost: boolean;
 }
 
 export function runAdmissionConformance(name: string, harness: AdmissionHarness): void {
@@ -37,6 +39,16 @@ export function runAdmissionConformance(name: string, harness: AdmissionHarness)
     it("admits an admissible request", async () => {
       const decision = await (await harness.create()).admit(harness.admissible);
       expect(decision.allowed).toBe(true);
+    });
+
+    it("declares whether it enforces a cost limit, and an adapter that says it does refuses a request over its allowance", async () => {
+      const admission = await harness.create();
+      expect(typeof admission.enforcesCost).toBe("boolean");
+      expect(admission.enforcesCost).toBe(harness.enforcesCost);
+      if (harness.enforcesCost) {
+        expect(harness.refused?.estimate?.cost).toBeDefined();
+        expect((await admission.admit(harness.refused!)).allowed).toBe(false);
+      }
     });
 
     it("refuses with a code a caller can branch on and a sentence a person can read", async () => {

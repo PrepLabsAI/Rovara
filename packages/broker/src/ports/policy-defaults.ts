@@ -34,6 +34,7 @@ import {
 /** Admission that lets everything through and holds nothing back. */
 export function createAllowAllAdmission(): Admission {
   return {
+    enforcesCost: false,
     async admit() {
       return { allowed: true };
     },

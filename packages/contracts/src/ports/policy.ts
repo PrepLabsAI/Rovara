@@ -72,6 +72,12 @@ export type AdmissionDecision =
     };
 
 export interface Admission {
+  /**
+   * Declares that this adapter REFUSES or holds back a request whose `estimate.cost` is more than its remaining allowance (a real dollar cap). Only an explicit `true` is believed: a missing value means
+   * `false`, and so does a name (`allow-all` or any other). Rovara starts work with no one present (triggers, schedules, chain steps) only where this is `true`. An adapter that ignores the estimate
+   * (an allow-list, a logger, a rate limiter) must leave it unset or `false`. Code's default allow-all declares `false`.
+   */
+  enforcesCost?: boolean;
   /** Decides on its own. For a decision that must commit with the caller's change, use `stage`. */
   admit(request: AdmissionRequest): Promise<AdmissionDecision>;
   /**

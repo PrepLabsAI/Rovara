@@ -1,6 +1,6 @@
 // Automation, the one door through which unattended work is started. Every automatic start (a trigger's event or schedule, a chain's step, an automatic job) goes through `startUnattendedRun`:
 //   1. the switch is on;
-//   2. a real cap applies: the install says whether a dollar cap is enforced (a real `Admission` adapter, or the starter's own per-task cap). A run that carries a dollar limit is REFUSED where none is: a limit
+//   2. a real cap applies: the install says whether a dollar cap is enforced (the registered `Admission` declares `enforcesCost: true`). A run that carries a dollar limit is REFUSED where none is: a limit
 //      nothing enforces is no limit, and unattended paid work is never started on one;
 //   3. `Admission` is asked (`automation.run`), before anything is written, with the request's own id as its key: a refusal starts nothing and holds nothing;
 //   4. the host's `AutomatedRunStarter` starts the run, with the limits the run is held to;
@@ -70,7 +70,7 @@ export interface UnattendedStartDeps {
   admission: Admission;
   audit: AuditSink;
   starter: AutomatedRunStarter;
-  /** Whether a dollar cap is enforced on this install: a real `Admission` adapter that holds the estimate, or the starter's own per-task cap. False (the allow-all default): a run that carries a dollar limit is refused. */
+  /** Whether a dollar cap is enforced on this install: the registered `Admission` declares `enforcesCost: true`. False (the allow-all default, or any adapter that does not declare it): a run that carries a dollar limit is refused. */
   enforces: { dollars: boolean };
   /** The store the open runs are kept in, and the host's view of tasks. Absent: runs are not recorded (a test, or an install with nothing to settle). */
   store?: DocumentStore | undefined;
@@ -83,11 +83,16 @@ export interface UnattendedStartDeps {
 export const UNATTENDED_EVENT_TEXT = "Do your job for this event.";
 
 /** What the owner is told when a run is refused for want of a cap. */
-export const NO_CAP_MESSAGE = "This install has no dollar cap for work that starts with no one present (its admission allows everything), so nothing is started on its own. Install an admission adapter that holds a limit, then try again.";
+export const NO_CAP_MESSAGE = "This install has no dollar cap for work that starts with no one present (its admission does not declare that it enforces a cost limit), so nothing is started on its own. Install an admission adapter that holds a limit and declares `enforcesCost: true`, then try again.";
 
 const OPEN_RUN_PARTITION = "UNATTENDED_RUN_OPEN";
 const RUN_ROW_DAYS = 62;
 const openRunKey = (companyId: string, requestId: string): DocumentKey => ({ pk: orgScoped(companyId, OPEN_RUN_PARTITION), sk: requestId });
+
+/** The one rule for "a dollar cap is enforced on this install": the registered `Admission` declares `enforcesCost: true`. Never a name, never a guess; a missing or any other value is false. */
+export function admissionEnforcesCost(admission: Pick<Admission, "enforcesCost">): boolean {
+  return admission.enforcesCost === true;
+}
 
 /**
  * Whether a run may be started on this install: undefined when it may, else the words. EVERY run that can use a model needs a cap that is enforced, whether or not it names a dollar limit (a run with no

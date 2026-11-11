@@ -22,7 +22,7 @@ import { dispatchTriggerEvent, type TriggerDispatchContext, type TriggerDispatch
 import { triggerScheduleHandler } from "../../core/triggers/schedules.js";
 import { afterTargetChanged, createTrigger, enableTrigger, repairPendingSchedules, triggerEnableRequest, turnOffTrigger, deleteTrigger } from "../../core/triggers/lifecycle.js";
 import { triggerProblemText, triggerProblems, targetName, triggerWords } from "../../core/triggers/requirements.js";
-import { capProblem, sweepUnattendedRuns, type AutomatedRunRequest, type AutomatedRunResult, type AutomatedRunStarter, type UnattendedTasks } from "../../core/automation/run-seam.js";
+import { admissionEnforcesCost, capProblem, sweepUnattendedRuns, type AutomatedRunRequest, type AutomatedRunResult, type AutomatedRunStarter, type UnattendedTasks } from "../../core/automation/run-seam.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import type { ProjectSource } from "../../core/task-flow/deps.js";
 import { startIdempotencyKey, taskKey } from "../../core/task-flow/keys.js";
@@ -131,8 +131,6 @@ export interface LocalAutomationOptions {
   now: () => number;
   /** The install's scheduler, as the schedule router hands it out (one subscription is shared with the nightly run). Without one a schedule trigger can't be turned on. */
   scheduler?: Pick<Scheduler, "capabilities" | "put" | "remove" | "get" | "subscribe"> | undefined;
-  /** Whether a dollar cap is enforced on this install (a real `Admission` adapter holds the estimate of each run). False (the allow-all default): no unattended run that carries a dollar limit is started, and no trigger is turned on. */
-  dollarsEnforced: boolean;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
 
@@ -183,7 +181,7 @@ export function createLocalAutomation(options: LocalAutomationOptions): LocalAut
   const roster: RosterDependencies = { store: agents, rules, canRun: (agentId) => (agentId === ROVARA_CODE_AGENT_ID ? undefined : CUSTOM_AGENT_RUN_NOT_HERE) };
   const starter = createTaskFlowRunStarter({ flow: options.flow, owner });
   const tasks = createTaskFlowTasks({ flow: options.flow, owner });
-  const enforces = { dollars: options.dollarsEnforced };
+  const enforces = { dollars: admissionEnforcesCost(options.admission) };
   const unattended = { automation: options.automation, companyId, admission: options.admission, audit: options.audit, starter, enforces, store, tasks, now: options.now, log };
   const taskOpen = async (taskId: string): Promise<boolean> => { const state = await tasks.read(taskId); return state !== undefined && state.end === undefined; };
   const chainRuns: ChainRunnerDeps = {

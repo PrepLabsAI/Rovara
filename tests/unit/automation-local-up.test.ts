@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, builtinDefaultPin, type Admission, type AdapterRegistry, type TriggerEvent } from "@agentx/contracts";
 import { createIntervalScheduler } from "../../packages/local-adapters/src/interval-scheduler.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { createAllowAllAdmission, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { change } from "@agentx/contracts";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
@@ -38,7 +38,7 @@ const LABELED = { kind: "event", source: "github", type: "issues.labeled", filte
 
 /** An admission that holds what it is asked: the stand-in for an adapter that enforces a dollar cap (the default admission allows everything, and then no unattended run with a dollar limit is started). */
 function holdingAdmission(held: string[]): Admission {
-  return { async admit(request) { held.push(request.idempotencyKey); return { allowed: true, reservationId: `res-${String(held.length)}` }; }, async stage() { return { decision: { allowed: true }, items: [] }; }, async settle() {}, async release() {} };
+  return { enforcesCost: true, async admit(request) { held.push(request.idempotencyKey); return { allowed: true, reservationId: `res-${String(held.length)}` }; }, async stage() { return { decision: { allowed: true }, items: [] }; }, async settle() {}, async release() {} };
 }
 
 async function launch(environment: NodeJS.ProcessEnv = {}, options: { admission?: Admission; timers?: boolean; scheduler?: (registry: AdapterRegistry) => void; automation?: { enabled(): boolean } } = {}) {
@@ -226,6 +226,42 @@ describe("the dollar cap on a default install", () => {
     expect(shown.body).toContain("no dollar cap");
     expect(shown.body).not.toContain('value="trigger-on"');
     void made;
+  });
+});
+
+describe("what counts as an enforced cap is the adapter's own declaration, never its name", () => {
+  /** The same admission as `holdingAdmission`, registered under the name `holding`, with its declaration set (or left out) as asked. */
+  const declared = (declaration: { enforcesCost?: unknown }): Admission => ({ ...holdingAdmission([]), enforcesCost: undefined, ...declaration } as Admission);
+  const refusedFor = async (admission: Admission) => {
+    const h = await launch({ ROVARA_AUTOMATION: "on" }, { admission });
+    const { state } = await startChain(h);
+    expect((await state()).run).toMatchObject({ status: "failed", failure: { reason: "AGENT_BUDGET_REQUIRED" } });
+    expect((await h.api("/v1/dev/tasks")).body["tasks" as never]).toHaveLength(0);
+    expect((await h.page("/automation")).body).not.toContain('value="trigger-on"');
+  };
+
+  it("an admission with another name and no declaration is NOT enforcing: no unattended run starts", async () => {
+    await refusedFor(declared({}));
+  });
+
+  it("enforcesCost: false is not enforcing", async () => {
+    await refusedFor(declared({ enforcesCost: false }));
+  });
+
+  it("only an explicit true counts: a truthy value of another kind is not enforcing", async () => {
+    await refusedFor(declared({ enforcesCost: "true" }));
+    await refusedFor(declared({ enforcesCost: 1 }));
+  });
+
+  it("an explicit true enables unattended runs, even though the adapter is not named allow-all or anything in particular", async () => {
+    const h = await launch({ ROVARA_AUTOMATION: "on" }, { admission: declared({ enforcesCost: true }) });
+    const { state } = await startChain(h);
+    expect((await state()).run).toMatchObject({ status: "running" });
+    expect((await h.api("/v1/dev/tasks")).body["tasks" as never]).toHaveLength(1);
+  });
+
+  it("Code's own default admission declares false, so a plain install enforces nothing", async () => {
+    expect(createAllowAllAdmission().enforcesCost).toBe(false);
   });
 });
 

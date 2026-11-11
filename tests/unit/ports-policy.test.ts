@@ -24,6 +24,7 @@ const owner = localOwnerPrincipal();
 runAdmissionConformance("Code default (allow all)", {
   create: async () => createAllowAllAdmission(),
   admissible: { companyId: owner.companyId, idempotencyKey: "k", action: "task.start", projectName: "web" },
+  enforcesCost: false,
 });
 
 runAuditSinkConformance("Code default (writes nothing)", { create: async () => createNoopAuditSink() });
