@@ -119,6 +119,22 @@ describe("channel adapters infrastructure", () => {
     expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-events")).toBe(false);
   });
 
+  it("takes the core's commands for Slack, and lets the notifier and reconciler sign them (Phase 7c)", () => {
+    const route = ofType(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => resource.Properties).find((properties) => properties.RouteKey === "POST /v1/slack/channel-commands");
+    expect(route).toMatchObject({ AuthorizationType: "NONE" });
+    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-commands")).toBe(false);
+    const variables = (prefix: string) => (functionNamed(named, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    for (const prefix of ["DeveloperTaskNotifierFunction", "SessionsReconciler"]) {
+      expect(variables(prefix), prefix).toMatchObject({ SLACK_VIA_CHANNEL: { Ref: "SlackViaChannel" }, SLACK_ADAPTER_TEAM_ID: { Ref: "SlackTeamId" }, BUILT_IN_ADAPTER_SECRET_NAME: "agentx/staging/channel-adapter/slack" });
+      expect(JSON.stringify(variables(prefix).BUILT_IN_ADAPTER_COMMANDS_URL)).toContain("/v1/slack/channel-commands");
+      const reads = statementsOf(named, roleOf(named, prefix)).filter((statement) => actions(statement).includes("secretsmanager:GetSecretValue"));
+      expect(reads.map((statement) => JSON.stringify(statement.Resource)).join(), prefix).toContain("ChannelApiSlackAdapterSecret");
+    }
+    // A Canvas takes three Slack calls; the legacy Slack ingress keeps its 10 seconds.
+    expect(functionNamed(named, "SlackIngress")![1].Properties.Timeout).toBe(30);
+    expect(functionNamed(legacy, "SlackIngress")![1].Properties.Timeout).toBe(10);
+  });
+
   it("expires short-lived channel state by expiresAt", () => {
     const table = ofType(named, "AWS::DynamoDB::Table").find(([id]) => withoutHash(id) === "ChannelApiState")![1];
     expect(table.Properties.TimeToLiveSpecification).toEqual({ AttributeName: "expiresAt", Enabled: true });
