@@ -34,7 +34,7 @@ import { constants as fsConstants, readFileSync } from "node:fs";
 import { open, readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import {
-  CATALOG_REGISTRY_ROOT, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, agentXError, catalogEntryById, catalogRepositoryName,
+  CATALOG_REGISTRY_ROOT, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, agentXError, catalogEntryById, catalogRepositoryName,
   type CatalogEdition, type CatalogEntry, type ServiceCatalog, type TaskAwsResource, type TaskDependencyPlan, type TestEnvTaskPlan, type TestServicesStartFailure, type TestServicesUsageRecord,
 } from "@agentx/contracts";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, type TaskSandbox } from "./task-sandbox.js";
@@ -187,8 +187,10 @@ export interface TestServicesConfig {
   maxMemMiB: number;
   /** A directory on the worker's tmpfs, at the same path on the host (Docker bind-mounts from it), where each run's directory is made. */
   runDirectoryParent: string;
-  /** The worker's verified catalog (`loadSignedCatalog`). */
+  /** The worker's verified catalog (`loadSignedCatalog`), or the owner list's catalog (`ownerCatalogOf`) on a laptop. */
   catalog(): Promise<ServiceCatalog>;
+  /** Owner-approved images by `svc/<name>@sha256:<digest>` (owner-image-list.ts): present only on a laptop that runs from the owner's approved list, where it names the image to start. Absent: the install's registry does. */
+  imageReferences?: ReadonlyMap<string, string>;
   sealedRound?: SealedRoundPorts;
   runner?: ServiceRunner;
   now?: () => number;
@@ -202,6 +204,8 @@ const defaultLog = (event: Record<string, unknown>): void => console.log(JSON.st
 // ---- the configuration a worker makes from its environment
 
 export const TEST_SERVICES_REGISTRY_ENVIRONMENT = "AGENTX_TEST_SERVICES_REGISTRY";
+/** Code on a laptop: the owner's approved images as a JSON list of `{reference, family, version}` (owner-image-list.ts), set by the broker. With it the worker needs no registry and no baked catalog. */
+export const TEST_SERVICES_OWNER_IMAGES_ENVIRONMENT = "AGENTX_TEST_SERVICES_OWNER_IMAGES";
 export const TEST_SERVICES_ENV_ENVIRONMENT = "AGENTX_TEST_SERVICES_ENV";
 export const TEST_SERVICES_RUN_DIR_ENVIRONMENT = "AGENTX_TEST_SERVICES_RUN_DIR";
 export const TEST_SERVICES_EDITION_ENVIRONMENT = "AGENTX_TEST_SERVICES_EDITION";
@@ -234,9 +238,14 @@ export async function loadBakedCatalog(file: URL | string = BAKED_CATALOG_URL): 
  */
 export function testServicesConfigFromEnvironment(
   environment: NodeJS.ProcessEnv = process.env, docker: DockerCli = createDockerCli(), roundPorts: SealedRoundPorts | undefined = SEALED_ROUND_PORTS,
+  /** Whether this build compiles in a catalog signing key (a signed-catalog build). Tests only; production reads the compiled-in list. */
+  signedBuild: boolean = catalogSigningKeysCompiledIn(),
 ): TestServicesConfig | undefined {
-  const registry = environment[TEST_SERVICES_REGISTRY_ENVIRONMENT];
-  const catalogEnv = environment[TEST_SERVICES_ENV_ENVIRONMENT];
+  const ownerList = ownerImageListFrom(environment[TEST_SERVICES_OWNER_IMAGES_ENVIRONMENT]);
+  // The owner's list stands in for the signed catalog only in a build that has no signing key. A signed build that is handed an owner list is not configured at all: it never builds a catalog from it.
+  if (ownerList !== undefined && signedBuild) return undefined;
+  const registry = ownerList === undefined ? environment[TEST_SERVICES_REGISTRY_ENVIRONMENT] : OWNER_LIST_REGISTRY;
+  const catalogEnv = ownerList === undefined ? environment[TEST_SERVICES_ENV_ENVIRONMENT] : OWNER_LIST_CATALOG_ENV;
   const runDirectoryParent = environment[TEST_SERVICES_RUN_DIR_ENVIRONMENT];
   const probeImage = environment[TASK_SANDBOX_IMAGE_ENVIRONMENT];
   const guardImage = environment[WORKER_IMAGE_ENVIRONMENT];
@@ -248,8 +257,27 @@ export function testServicesConfigFromEnvironment(
   const mem = Number(environment[TEST_SERVICES_MAX_MEM_ENVIRONMENT] ?? DEFAULT_MAX_MEM_MIB);
   return {
     docker, registry, catalogEnv, edition, probeImage, guardImage, runDirectoryParent, maxMemMiB: Number.isSafeInteger(mem) && mem > 0 ? mem : DEFAULT_MAX_MEM_MIB,
-    catalog: () => loadBakedCatalog(), ...(roundPorts === undefined ? {} : { sealedRound: roundPorts }),
+    catalog: ownerList === undefined ? () => loadBakedCatalog() : () => ownerCatalog(ownerList),
+    ...(ownerList === undefined ? {} : { imageReferences: ownerImageReferences(ownerList) }),
+    ...(roundPorts === undefined ? {} : { sealedRound: roundPorts }),
   };
+}
+
+/** The list the broker put in the worker's environment, or undefined when there is none (or it is not a list of entries: then the worker is configured the signed way or not at all). The entries are checked again where they are used. */
+function ownerImageListFrom(text: string | undefined): unknown[] | undefined {
+  if (text === undefined || text === "" || text.length > 64 * 1024) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return Array.isArray(parsed) && normalizeOwnerList(parsed).length > 0 ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function ownerCatalog(list: readonly unknown[]): Promise<ServiceCatalog> {
+  const catalog = ownerCatalogOf(list);
+  if (catalog === undefined) throw new TestServicesError("catalog");
+  return catalog;
 }
 
 // ---- the worker's start (TS-RN-3 rule 3 and TS19)
@@ -360,13 +388,16 @@ async function initFilesOf(plan: TaskDependencyPlan, root: string, repositoryPat
 }
 
 /** Every base's image, by digest, must already be on this host (the launcher runs with `--pull=never`, and the worker has no registry login). Otherwise: the fixed `pull_failed`, naming the dependencies, with nothing made yet. */
-async function requireLocalImages(docker: DockerCli, config: Pick<TestServicesConfig, "registry" | "catalogEnv">, bases: readonly Base[], signal: AbortSignal | undefined): Promise<void> {
+async function requireLocalImages(docker: DockerCli, config: Pick<TestServicesConfig, "registry" | "catalogEnv" | "imageReferences">, bases: readonly Base[], signal: AbortSignal | undefined): Promise<void> {
   const missing = new Map<string, TestServicesStartFailure>();
   for (const base of bases) {
     if (signal?.aborted === true) throw new TestServicesError("start_failed");
     // A fake runs from the worker's own image (the probe image), which is on this host by being the worker's: it has no catalog image to pull.
     if (base.fake !== undefined) continue;
-    const reference = `${config.registry}/${catalogRepositoryName(config.catalogEnv, base.plan.repository)}@sha256:${base.plan.digest}`;
+    const reference = config.imageReferences === undefined
+      ? `${config.registry}/${catalogRepositoryName(config.catalogEnv, base.plan.repository)}@sha256:${base.plan.digest}`
+      : config.imageReferences.get(`${base.plan.repository}@sha256:${base.plan.digest}`);
+    if (reference === undefined) { for (const id of base.emulator?.ids ?? [base.plan.id]) missing.set(id, "pull_failed"); continue; }
     const present = await docker.run(["image", "inspect", "--format", "{{.Id}}", reference], { timeoutMs: DOCKER_CALL_TIMEOUT_MS, ...(signal === undefined ? {} : { signal }) }).catch(() => undefined);
     if (present === undefined || present.exitCode !== 0) for (const id of base.emulator?.ids ?? [base.plan.id]) missing.set(id, "pull_failed");
   }
@@ -757,6 +788,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
   const registry = `${config.registry}/${CATALOG_REGISTRY_ROOT}/${config.catalogEnv}`;
   const startInput = (phaseRunId: string, resolved: readonly Resolved[], phaseFiles: HelperFiles, extra: Partial<Parameters<ServiceRunner["start"]>[0]>): Parameters<ServiceRunner["start"]>[0] => ({
     runId: phaseRunId, workspace, roundBudgetMs: TEST_SERVICES_RUN_LIFETIME_MS, registry, edition: config.edition, probeImage: config.probeImage, maxMemMiB: config.maxMemMiB,
+    ...(config.imageReferences === undefined ? {} : { imageReferences: config.imageReferences }),
     helpers: resolved.map((item) => item.request), files: phaseFiles, resetHooks: createResetHooks({ http: { files: phaseFiles, probeImage: config.probeImage } }),
     ...(config.now === undefined ? {} : { now: config.now }), ...(config.sleep === undefined ? {} : { sleep: config.sleep }), ...extra,
   });

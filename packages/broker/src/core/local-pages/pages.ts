@@ -318,7 +318,30 @@ export function renderScriptTokens(context: PageContext, view: ScriptTokensPageV
 const RISK_WORDS = { low: "low", medium: "medium", high: "high: only a strong proof (this page) can approve it" } as const;
 
 /** One project's test environment: what is approved, and the proposal that waits (what changes, how risky, whether a Prove run passed) with an Approve button only when the proposal was proved. */
-export function renderTestEnvironment(context: PageContext, view: TestEnvironmentPageView): string {
+/** The panel of test service images (Code on a laptop). Every reference is shown whole, with its registry, because that is what the owner is approving; the repository's words never appear, only a family and version it asked for. */
+function renderServiceImages(context: PageContext, project: string, images: NonNullable<TestEnvironmentPageView["serviceImages"]>, fresh: boolean): string {
+  const action = (verb: "approve" | "remove"): string => `${esc(context.base)}/test-environment/${esc(encodeURIComponent(project))}/images/${verb}`;
+  const form = (verb: "approve" | "remove", field: string, value: string, label: string, cls: string): string =>
+    `<form class="decide" method="post" action="${action(verb)}">${hidden(field, value)}${hidden("ft", context.formToken({ action: `testenv.image-${verb}`, subject: `${project}:${value}` }))}<div class="row"><button class="${cls}" type="submit">${esc(label)}</button></div></form>`;
+  const registryOf = (reference: string): string => esc(reference.slice(0, reference.indexOf("/")));
+  const starter = `<ul>${images.starter.map((image) => `<li><code>${esc(image.reference)}</code> <span class="muted">(${esc(image.label)}; ${image.inEffect ? "in use" : "not on this computer yet"})</span></li>`).join("")}</ul>`;
+  const owned = images.owned.length === 0 ? "<p class=\"muted\">You have approved no other image.</p>" : `<ul>${images.owned.map((image) => `<li><code>${esc(image.reference)}</code> <span class="muted">(${esc(image.label)}, registry ${registryOf(image.reference)}; `
+    + `${image.origin === "env" ? `from ROVARA_TEST_SERVICE_IMAGES${image.stale ? ", no longer listed there" : ""}` : "approved here"} ${esc(image.approvedAt)}; ${image.inEffect ? "in use" : "used from the next rovara up"})</span> ${fresh ? form("remove", "reference", image.reference, "Remove", "danger") : ""}</li>`).join("")}</ul>`;
+  const proposed = images.proposed.length === 0 ? "<p class=\"muted\">This project's files name no service image Rovara can run (Postgres, MySQL, Redis, MongoDB).</p>"
+    : `<ul>${images.proposed.map((proposal) => {
+      const where = proposal.where.length === 0 ? "" : ` <span class="muted">seen at ${proposal.where.map((place) => `<code>${untrusted(place)}</code>`).join(", ")}</span>`;
+      const state = proposal.status === "builtin" ? "<span class=\"ok\">built in, no approval needed</span>"
+        : proposal.status === "approved" ? "<span class=\"ok\">approved</span>"
+        : fresh ? form("approve", "requested", proposal.requested, `Approve ${proposal.label}`, "primary")
+          : "<span class=\"warn\">needs your approval: open this page again with <code>rovara test-env open</code> (it needs a page opened in the last ten minutes)</span>";
+      return `<li><strong>${esc(proposal.label)}</strong>${where} ${state}</li>`;
+    }).join("")}</ul>`;
+  return `<section class="panel"><h2>Service images</h2><p>Test services start only the images below, each pinned to a digest. A project can ask for an image; it is not used until you approve it here. Approving pulls it through your Docker and pins the digest Docker resolves now; a later change of the tag needs a new approval. A change takes effect the next time you run <code>rovara up</code>.</p>`
+    + `<h3>Waiting for your approval</h3>${proposed}<h3>Built in</h3><p class="muted">Part of Rovara's release, pinned to a digest, so they need no approval.</p>${starter}<h3>Approved by you</h3>${owned}`
+    + (images.envList.length === 0 ? "" : `<p class="muted">ROVARA_TEST_SERVICE_IMAGES lists: ${images.envList.map((entry) => `<code>${esc(entry)}</code>`).join(", ")}.</p>`) + `</section>`;
+}
+
+export function renderTestEnvironment(context: PageContext, view: TestEnvironmentPageView, options: { fresh?: boolean } = {}): string {
   const approved = view.approved === undefined
     ? "<p class=\"muted\">No test environment is approved for this project: its tasks run the project's own checks.</p>"
     : `<p>Revision ${esc(view.approved.revision)}, approved ${esc(view.approved.approvedAt)}${view.approved.approvedBy === undefined ? "" : ` by ${untrusted(view.approved.approvedBy)}`}.</p><ul>${view.approved.lines.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul>`
@@ -335,10 +358,11 @@ export function renderTestEnvironment(context: PageContext, view: TestEnvironmen
       + `<h3>What changes</h3>${view.proposal.changes.length === 0 ? "<p class=\"muted\">Nothing differs from the approved revision.</p>" : `<ul>${view.proposal.changes.map((line) => `<li><code>${untrusted(line)}</code></li>`).join("")}</ul>`}${form}`;
   }
   const extra = view.extra === undefined || view.extra.length === 0 ? "" : `<section class="panel"><h2>More</h2><ul>${view.extra.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`;
+  const serviceImages = view.serviceImages === undefined ? "" : renderServiceImages(context, view.project, view.serviceImages, options.fresh === true);
   return layout({
     title: `Test environment: ${view.project}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>Test environment: ${untrusted(view.project)}</h1><p>The environment tasks of this project run their checks in, and the nightly run uses. A change is approved here, by you, once it has been proved.</p>`
-      + `<section class="panel"><h2>Approved</h2>${approved}</section><section class="panel"><h2>Waiting for approval</h2>${proposal}</section>${extra}`,
+      + `<section class="panel"><h2>Approved</h2>${approved}</section><section class="panel"><h2>Waiting for approval</h2>${proposal}</section>${serviceImages}${extra}`,
   });
 }
 

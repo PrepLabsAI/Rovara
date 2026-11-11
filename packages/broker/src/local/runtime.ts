@@ -83,9 +83,9 @@ import {
 } from "./state-directory.js";
 import { THIS_MACHINE_ADAPTER_NAME, ThisMachineWorkerMachines } from "./this-machine-worker-machines.js";
 import { prepareLocalTestServices } from "./test-services-install.js";
+import { createOwnerImageService, createOwnerImageStore } from "./test-services-owner-list.js";
 import { createDockerImageRegistry } from "./docker-image-registry.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
-import { releaseServiceCatalogSource } from "../core/test-env/shipped-catalog.js";
 
 /** The model providers whose keys `rovara up` looks for (the environment variable is `<PROVIDER>_API_KEY`). */
 export const LOCAL_MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
@@ -446,7 +446,16 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     registry.register("image-registry", "docker", images, { isDefault: true });
   }
   // Test services (off unless `ROVARA_TEST_SERVICES=1`): the catalog's images are pulled on the host and the worker is told what it may start. Anything missing leaves the worker offering none.
-  const testServices = await prepareLocalTestServices({ environment: options.environment, stateDirectory, docker: runner, log: (entry) => console.log(JSON.stringify(entry)) });
+  // Code has no catalog signing key, so the owner's own approved image list stands where the signed catalog would: the built-in starter images, what the owner approved on the test environment page, and `ROVARA_TEST_SERVICE_IMAGES`.
+  // The store and the audit sink are read late (a storage or audit plug-in registers after this); a store that is not there yet counts as holding no approvals.
+  const ownerCompany = OrgIdSchema.parse(config.companyId ?? IMPLICIT_COMPANY_ID);
+  const ownerImageStore = createOwnerImageStore({ store: () => registry.require("storage"), companyId: ownerCompany });
+  const ownerImages = createOwnerImageService({
+    store: ownerImageStore, docker: runner, now: () => Date.now(), companyId: ownerCompany,
+    audit: { stage: (event) => registry.require("audit-sink").stage(event), record: (event) => registry.require("audit-sink").record(event) },
+    log: (entry) => console.log(JSON.stringify(entry)),
+  });
+  const testServices = await prepareLocalTestServices({ environment: options.environment, stateDirectory, docker: runner, ownerImages, log: (entry) => console.log(JSON.stringify(entry)) });
   // Worker machines. The callback listener's port is not known until the handler exists, so it is read when a machine starts.
   const callbackServer: { current?: CallbackServer } = {};
   // The hosts the owner approved for a setup run: read at each machine start (the app is made after the machines, so it is read late).
@@ -572,7 +581,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
     operationSpend: (operationId) => modelProxyHolder.current?.tokens.spentBy(operationId),
     scriptTokensEnabled: () => scriptTokensEnabled(options.environment),
-    ...(testServices.catalog === undefined ? {} : { serviceCatalog: releaseServiceCatalogSource(options.environment) }),
+    ...(testServices.catalogSource === undefined ? {} : { serviceCatalog: testServices.catalogSource }),
+    ...(testServices.mode === "owner" && testServices.ownerImages !== undefined ? { testServiceImages: testServices.ownerImages } : {}),
     modelCalls: (operationId) => modelProxyHolder.current?.tokens.calledAliases(operationId),
     slotKeys: () => modelProxyHolder.current?.slotKeys,
     // A diagnosis calls its model through the proxy over the listener's loopback port (both are made after the app).

@@ -888,6 +888,12 @@ describe("port-guard hardening (review of lane L0)", () => {
     expect(lane.guard().filter((f) => f.rule === "cloud-import").map((f) => f.file).sort()).toEqual(["packages/mcp/package.json", "packages/worker/tsconfig.json"]);
   });
 
+  it("flags an edit to the built-in starter image list of test services as a guard file (it is what runs with no owner approval)", () => {
+    lane.write("packages/contracts/src/owner-starter-images.ts", "export {};\n");
+    lane.commit();
+    expect(lane.guard().filter((f) => f.rule === "guard-files").map((f) => f.file)).toEqual(["packages/contracts/src/owner-starter-images.ts"]);
+  });
+
   it("flags an edit to the port:guard script and a stack nested under infra/lib", () => {
     lane.write("package.json", '{ "scripts": { "port:guard": "true" } }\n');
     lane.write(`infra/lib/stacks/${AUDIT}-stack.ts`, "export {};\n");

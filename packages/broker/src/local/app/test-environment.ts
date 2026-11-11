@@ -8,7 +8,10 @@ import { AgentXError, agentXError, type ApprovalProof, type AuditSink, type Docu
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import { localResultOf } from "../../core/decisions/local-actions.js";
 import type { DecisionGate } from "../../core/decisions/approval-gate.js";
-import type { LocalActionResult, TestEnvironmentPageView } from "../../core/local-pages/views.js";
+import { describeImage, ownerCatalogIdOf, ownerImageRequest, parseImageReference, starterImageFor } from "@agentx/contracts";
+import type { LocalActionResult, ServiceImagesPageView, TestEnvironmentPageView } from "../../core/local-pages/views.js";
+import { latestDraftCandidates } from "../../core/test-env/draft.js";
+import { proposeServiceImages, type OwnerImageService } from "../test-services-owner-list.js";
 import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { TEST_ENVIRONMENT_KIND, createTestEnvironmentSubject, proposeTestEnvironment, testEnvironmentSubjectId } from "../../core/test-env/environment.js";
 import { testEnvironmentView, type TestEnvironmentView } from "../../core/test-env/local-view.js";
@@ -19,6 +22,9 @@ import { listProjects } from "./projects.js";
 
 export const APPROVE_TEST_ENVIRONMENT_ON_THE_PAGE = "A test environment is approved on its local page, by you. Run `rovara test-env open <project>` to open it; an assistant cannot approve for you.";
 const PATH = /^\/v1\/app\/projects\/([A-Za-z0-9._-]{1,100})\/test-environment(?:\/(propose|open))?$/u;
+const IMAGES_PATH = /^\/v1\/app\/projects\/([A-Za-z0-9._-]{1,100})\/test-environment\/service-images(?:\/(approve|remove))?$/u;
+/** The API token (which an assistant may hold) and the MCP tools never approve an image: that is the owner's act, on the page. */
+export const APPROVE_SERVICE_IMAGE_ON_THE_PAGE = "A service image is approved on the test environment page, by you, in a page you opened a few minutes ago. Run `rovara test-env open <project>` to open it; an assistant cannot approve for you.";
 const OPEN_NOT_AVAILABLE = "Rovara could not open a browser. Open the review pages from the terminal where `rovara up` runs.";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(value) });
@@ -42,6 +48,8 @@ export interface LocalTestEnvironmentOptions {
   /** Called after an approval was recorded (the nightly schedule follows the approved environment). A failure here never undoes the approval. */
   onApproved?: (project: string) => Promise<void>;
   serviceCatalog?: TestEnvDeps["serviceCatalog"];
+  /** Code on a laptop: the owner's approved service images. Absent when a signed catalog is used or test services are off. */
+  serviceImages?: OwnerImageService | undefined;
   fixtureStore?: TestEnvDeps["fixtureStore"];
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -58,6 +66,9 @@ export interface LocalTestEnvironment {
     getTestEnvironmentPage(project: string): Promise<TestEnvironmentPageView | undefined>;
   };
   decideTestEnvironment(input: { project: string; approval: { requestId: string; revision: number; artifactDigest: string }; proof: ApprovalProof }): Promise<LocalActionResult>;
+  /** The owner's approval of one image, called only by the page's form (a fresh page session, a single-use form). */
+  approveServiceImage(input: { project: string; requested: string }): Promise<LocalActionResult>;
+  removeServiceImage(input: { project: string; reference: string }): Promise<LocalActionResult>;
 }
 
 export function createLocalTestEnvironment(options: LocalTestEnvironmentOptions): LocalTestEnvironment {
@@ -69,11 +80,33 @@ export function createLocalTestEnvironment(options: LocalTestEnvironmentOptions)
   const enabled = (): boolean => testEnvironmentEnabled(env);
   const knownProject = async (project: string): Promise<boolean> => (await listProjects(options.store, options.companyId)).some((entry) => entry.name === project);
 
+  /** What the project asks for (from its newest draft's candidates), against what is built in and what the owner approved. */
+  const imagesFor = async (project: string): Promise<ServiceImagesPageView | undefined> => {
+    const service = options.serviceImages;
+    if (service === undefined) return undefined;
+    const view = await service.view();
+    const candidates = await latestDraftCandidates(deps, options.companyId, project, options.now(), env).catch(() => []);
+    return {
+      starter: view.starter.map((image) => ({ label: describeImage(parseImageReference(image.reference)!), reference: image.reference, inEffect: image.inEffect })),
+      owned: view.owned.map((image) => ({ label: describeImage(parseImageReference(image.requested) ?? parseImageReference(image.reference)!), reference: image.reference, origin: image.origin, approvedAt: image.approvedAt, inEffect: image.inEffect, stale: image.stale })),
+      envList: view.envRequested,
+      proposed: proposeServiceImages(candidates).map((proposal) => {
+        const ownedHere = view.owned.some((image) => ownerCatalogIdOf(image.family, image.version) === ownerCatalogIdOf(proposal.family, proposal.version));
+        return {
+          requested: proposal.requested, label: describeImage(parseImageReference(proposal.requested)!), where: proposal.evidence.map((place) => `${place.path}:${String(place.line)}`),
+          status: starterImageFor(proposal.family, proposal.version) !== undefined ? "builtin" as const : ownedHere ? "approved" as const : "needs_approval" as const,
+        };
+      }),
+    };
+  };
+
   const pageView = async (project: string): Promise<TestEnvironmentPageView> => {
     const view = await testEnvironmentView(deps, options.companyId, project);
     const extra = await options.extraLines?.(project).catch(() => []);
+    const serviceImages = await imagesFor(project).catch(() => undefined);
     return {
       project,
+      ...(serviceImages === undefined ? {} : { serviceImages }),
       ...(view.approved === undefined ? {} : { approved: { revision: view.approved.revision, approvedAt: view.approved.approvedAt, ...(view.approved.approvedBy === undefined ? {} : { approvedBy: view.approved.approvedBy }), lines: view.approved.lines, checks: view.approved.checks } }),
       ...(view.proposal === undefined ? {} : { proposal: { digest: view.proposal.digest, proposedAt: view.proposal.proposedAt, risk: view.proposal.risk, lessSafe: view.proposal.lessSafe, changes: view.proposal.changes, proved: view.proposal.proved, ...(view.proposal.expiresAt === undefined ? {} : { expiresAt: view.proposal.expiresAt }) } }),
       // Only a proposal that passed a Prove run can be approved, so only it gets an Approve button.
@@ -111,8 +144,38 @@ export function createLocalTestEnvironment(options: LocalTestEnvironmentOptions)
       if (result.status === "refused" && result.reason === "invalid") return { ok: false, reason: "invalid", message: result.detail };
       return localResultOf(result, "Approved. Tasks that start from now on use it.");
     },
+    async approveServiceImage(input) {
+      const service = options.serviceImages;
+      if (!enabled() || service === undefined || !(await knownProject(input.project))) return { ok: false, reason: "not_found", message: "That is no longer there." };
+      const asked = ownerImageRequest(input.requested);
+      if (!asked.ok) return { ok: false, reason: "invalid", message: "That was not understood." };
+      // Only an image the project asks for can be approved from its page: the form was drawn for it, and the repository may have changed since.
+      const candidates = await latestDraftCandidates(deps, options.companyId, input.project, options.now(), env).catch(() => []);
+      if (!proposeServiceImages(candidates).some((proposal) => proposal.requested === input.requested)) return { ok: false, reason: "stale", message: "It changed while you were looking." };
+      const result = await service.approve({ requested: input.requested, project: input.project });
+      return result.ok ? { ok: true, message: "Approved and pinned." } : { ok: false, reason: "refused", message: result.message };
+    },
+    async removeServiceImage(input) {
+      const service = options.serviceImages;
+      if (!enabled() || service === undefined || !(await knownProject(input.project))) return { ok: false, reason: "not_found", message: "That is no longer there." };
+      return (await service.remove(input.reference)) ? { ok: true } : { ok: false, reason: "not_found", message: "That is no longer there." };
+    },
     async routes(request, caller) {
       const url = new URL(request.path, "http://local");
+      const images = IMAGES_PATH.exec(url.pathname);
+      if (images !== null) {
+        try {
+          if (!enabled() || options.serviceImages === undefined) throw agentXError("NOT_AVAILABLE_HERE", "Test service images are not managed here: this install uses a signed service catalog, or test services are off.");
+          if (!(await knownProject(images[1] ?? ""))) throw agentXError("PROJECT_NOT_FOUND", `project \`${images[1] ?? ""}\` doesn't exist`);
+          if (images[2] === undefined && request.method === "GET") return json(200, { serviceImages: await imagesFor(images[1] ?? "") });
+          // Approving and removing are the page's alone, whatever credential the caller holds.
+          if (images[2] !== undefined && request.method === "POST") throw agentXError("FORBIDDEN", APPROVE_SERVICE_IMAGE_ON_THE_PAGE);
+          return undefined;
+        } catch (error) {
+          if (error instanceof AgentXError) return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });
+          throw error;
+        }
+      }
       const match = PATH.exec(url.pathname);
       if (match === null) return undefined;
       const project = match[1] ?? "";

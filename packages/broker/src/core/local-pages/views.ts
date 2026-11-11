@@ -226,6 +226,22 @@ export interface TestEnvironmentPageView {
   approval?: ApprovalOffer;
   /** More facts a feature adds (the nightly run's last night, the saved image), one plain line each. */
   extra?: string[];
+  /** Test services on a laptop (Code): the images that may run, and the ones this project asks for. Absent when the install uses a signed catalog or test services are off. */
+  serviceImages?: ServiceImagesPageView;
+}
+
+/**
+ * The images test services may start on this computer, as the page shows them. Every `reference` is the exact pinned `registry/repository@sha256:...`. `proposed` is what the project's repository ASKS for: nothing in it is approved
+ * by being listed, and the repository's own words never reach it (only a family, a version and where it was seen).
+ */
+export interface ServiceImagesPageView {
+  /** Built into Rovara's release and pinned there: no approval needed. */
+  starter: Array<{ label: string; reference: string; inEffect: boolean }>;
+  /** The owner's own: approved on a page, or pinned from `ROVARA_TEST_SERVICE_IMAGES`. */
+  owned: Array<{ label: string; reference: string; origin: "page" | "env"; approvedAt: string; inEffect: boolean; stale: boolean }>;
+  /** `ROVARA_TEST_SERVICE_IMAGES` as it was when `rovara up` started. */
+  envList: string[];
+  proposed: Array<{ requested: string; label: string; where: string[]; status: "builtin" | "approved" | "needs_approval" }>;
 }
 
 /** How we work, as the page reads it: the effective view and where it came from (the file in the repository), for each registered project. */
@@ -487,6 +503,10 @@ export interface LocalPageActions {
   revokeScriptToken?(input: { tokenId: string }): Promise<LocalActionResult>;
   /** Approves a proved test environment proposal as the project's next revision. Like a plan decision it is the owner's own act on a page: it carries a proof for exactly this request, revision and digest. */
   decideTestEnvironment?(input: { project: string; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
+  /** Approves one service image the project asks for: pulls it through the owner's Docker and pins the digest. The page has checked the session is fresh and the form is single-use. */
+  approveServiceImage?(input: { project: string; requested: string }): Promise<LocalActionResult>;
+  /** Forgets an approved service image. */
+  removeServiceImage?(input: { project: string; reference: string }): Promise<LocalActionResult>;
   /** The owner's acts on the automation page: turn a trigger on (with their proof), off, decide a chain's gate (with their proof), stop a run. */
   automation?(input: AutomationPageAction): Promise<LocalActionResult>;
   /** A change of the per-step model setting. Refused (with its fixed words) when the owner may not, the page was not opened lately, or the setting moved. */

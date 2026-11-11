@@ -146,6 +146,11 @@ export const CatalogEntrySchema = z
      * pin (the worker image is the release's), the catalog build carries it over untouched, and it is never in the pre-pull list. Absent on every other entry.
      */
     workerImage: z.literal(true).optional(),
+    /**
+     * Code on a laptop only (owner-image-list.ts): the entry was made from an image THE OWNER approved on their own page, pinned to the digest their Docker resolved, not from a signed catalog. It has a digest and no SBOM or scan
+     * (nothing reviewed it but the owner). `loadSignedCatalog` refuses any catalog that carries one, so a signed catalog never holds an owner-approved entry; only `ownerCatalogOf` makes a catalog of them.
+     */
+    ownerApproved: z.literal(true).optional(),
   })
   .strict()
   .superRefine((entry, context) => {
@@ -157,6 +162,7 @@ export const CatalogEntrySchema = z
     if (entry.backing === "fake" && name !== "fake-server") problem(["backing"], "the fake entry is the fake server");
     if (entry.backing === "helper" && name !== "test-account-proxy" && name !== "dns-helper") problem(["backing"], "a helper entry is the proxy or the DNS helper");
     if (entry.workerImage === true && name !== "fake-server" && name !== "dns-helper" && name !== "test-account-proxy") problem(["workerImage"], "only Rovara's own helpers run from the worker image");
+    if (entry.ownerApproved === true && (entry.backing !== "local" || entry.image.digest === undefined || entry.sbomRef !== undefined || entry.scan !== undefined || entry.process !== undefined || entry.status === "retired" || entry.workerImage === true || entry.emulator !== undefined)) problem(["ownerApproved"], "an owner-approved entry is real software pinned to a digest, with no SBOM, scan or process of its own");
     if (entry.workerImage === true && (entry.image.digest !== undefined || entry.sbomRef !== undefined || entry.scan !== undefined || entry.process !== undefined)) problem(["workerImage"], "a helper that runs from the worker image has no image of its own to pin");
     if ((entry.backing === "emulated") !== (entry.emulator !== undefined)) problem(["emulator"], "the emulator block is on the emulated entry and nowhere else");
     if (entry.status === "default" && entry.backing === "helper") problem(["status"], "a helper is started by Rovara, never chosen: it has no default");
@@ -205,12 +211,14 @@ export const ServiceCatalogSchema = z
     const defaults = catalog.entries.filter((entry) => entry.status === "default").map((entry) => entry.family);
     if (new Set(defaults).size !== defaults.length) problem(["entries"], "a family has one default");
     catalog.entries.forEach((entry, index) => {
+      const ownerPinned = entry.ownerApproved === true;
+      if (ownerPinned && !catalog.pinned) problem(["entries", index], "an owner-approved entry must be in a pinned catalog");
       const carriesPin = entry.image.digest !== undefined || entry.sbomRef !== undefined || entry.scan !== undefined || entry.process !== undefined;
       if (!catalog.pinned && carriesPin) problem(["entries", index], "an unpinned catalog has no digest, SBOM, scan or process artifact");
       // Slice 1: a pinned catalog may hold entries that are not pinned YET (a release that pins one image at a time, `catalog-build --entries`). An entry is wholly pinned (digest, SBOM and scan) or carries none of the
       // three: a half-pinned ENTRY never parses. Nothing starts an unpinned entry (`catalogPins` leaves it out, `resolveCatalogImage` refuses it as `not_pinned`).
       const pinnedParts = [entry.image.digest, entry.sbomRef, entry.scan].filter((part) => part !== undefined).length;
-      if (catalog.pinned && entry.status !== "retired" && pinnedParts !== 0 && pinnedParts !== 3) problem(["entries", index], "a pinned entry has a digest, an SBOM and a scan");
+      if (catalog.pinned && !ownerPinned && entry.status !== "retired" && pinnedParts !== 0 && pinnedParts !== 3) problem(["entries", index], "a pinned entry has a digest, an SBOM and a scan");
       if (catalog.pinned && entry.status !== "retired" && pinnedParts === 0 && entry.process !== undefined) problem(["entries", index], "an entry that is not pinned yet has no process artifact");
     });
     if (catalog.pinned && !catalog.entries.some((entry) => entry.status !== "retired" && entry.image.digest !== undefined)) problem(["entries"], "a pinned catalog pins at least one image");

@@ -10,6 +10,7 @@ import type { BundleImageCheck, MirrorCheck, VerifiedCatalog } from "./service-c
 import type { ServiceCatalog } from "./service-catalog.js";
 
 const verifiedCatalogs = new WeakSet<object>();
+const ownerListCatalogs = new WeakSet<object>();
 const mirrorChecks = new WeakSet<object>();
 const bundleChecks = new WeakSet<object>();
 
@@ -28,6 +29,17 @@ export function registerVerifiedCatalog(catalog: ServiceCatalog): VerifiedCatalo
   return catalog as VerifiedCatalog;
 }
 
+/**
+ * Marks a catalog made from the OWNER'S approved image list (owner-image-list.ts) as one a laptop may start images from: freezes it and registers it as verified AND as an owner-list catalog. Called only by `ownerCatalogOf`.
+ * `resolveCatalogImage` (the signed-catalog, mirror and bundle rule that Cloud keeps) refuses an owner-list catalog, so this brand never passes for a signed one there.
+ */
+export function registerOwnerListCatalog(catalog: ServiceCatalog): VerifiedCatalog {
+  deepFreeze(catalog);
+  verifiedCatalogs.add(catalog);
+  ownerListCatalogs.add(catalog);
+  return catalog as VerifiedCatalog;
+}
+
 /** Marks the result of a registry digest check (passed or failed): freezes it and registers it. Called only by the registry checks. */
 export function registerMirrorCheck(check: MirrorCheck): MirrorCheck {
   deepFreeze(check);
@@ -43,5 +55,6 @@ export function registerBundleCheck(check: BundleImageCheck): BundleImageCheck {
 }
 
 export const isVerifiedCatalog = (value: unknown): boolean => typeof value === "object" && value !== null && verifiedCatalogs.has(value);
+export const isOwnerListCatalog = (value: unknown): boolean => typeof value === "object" && value !== null && ownerListCatalogs.has(value);
 export const isMirrorCheck = (value: unknown): boolean => typeof value === "object" && value !== null && mirrorChecks.has(value);
 export const isBundleCheck = (value: unknown): boolean => typeof value === "object" && value !== null && bundleChecks.has(value);

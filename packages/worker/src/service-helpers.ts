@@ -171,6 +171,11 @@ export interface StartHelpersInput {
   edition: "public" | "enterprise";
   /** The worker's own image: the health probe runs from it. */
   probeImage: string;
+  /**
+   * Owner-approved images (Code on a laptop): the digest reference to start for a catalog repository and digest (`svc/postgres@sha256:<digest>`). Present, a helper whose entry is not in the map is refused and the
+   * registry above is not used; absent, the install's registry names the image, as it always did.
+   */
+  imageReferences?: ReadonlyMap<string, string>;
   /** The most memory the run's helpers may add up to (company setting `services.maxMemMiB`, default 3072). */
   maxMemMiB: number;
   helpers: readonly HelperRequest[];
@@ -247,6 +252,8 @@ const FAMILY_RULES: Record<string, FamilyRule> = {
     ] };
   } },
   "fake-server": { prepare: () => ({ env: [] }) },
+  // The official image with no authentication (owner-image-list.ts says why): the run's network is sealed and nothing from the project is let in to it.
+  mongodb: { prepare: () => ({ env: [] }) },
 };
 
 /** The fixed commands of the `command` health checks, by catalog check id. A cache's client is named after the entry (Valkey's own, or Redis's). */
@@ -336,7 +343,9 @@ function planHelpers(net: ServicesNetwork, input: StartHelpersInput): Plan[] {
         const segments = file.to.split("/");
         if (!MOUNT_TARGET.test(file.to) || segments.includes("..") || FORBIDDEN_MOUNT_ROOTS.some((root) => file.to === `/${root}` || file.to.startsWith(`/${root}/`)) || file.to.endsWith(".sock")) throw new RangeError("file");
       }
-      plans.push({ request, index, entry, name: plainName(request.name), address, aliases, prepared, files, image: fake === undefined ? `${input.registry}/${entry.image.repository}@sha256:${entry.image.digest}` : input.probeImage, ...(fake === undefined ? {} : { program: fake.program }) });
+      const catalogImage = input.imageReferences === undefined ? `${input.registry}/${entry.image.repository}@sha256:${entry.image.digest}` : input.imageReferences.get(`${entry.image.repository}@sha256:${entry.image.digest}`);
+      if (catalogImage === undefined) throw new RangeError("image");
+      plans.push({ request, index, entry, name: plainName(request.name), address, aliases, prepared, files, image: fake === undefined ? catalogImage : input.probeImage, ...(fake === undefined ? {} : { program: fake.program }) });
     } catch (error) {
       if (error instanceof HelperStartError) throw error;
       throw refused(request);

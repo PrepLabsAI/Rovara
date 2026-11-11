@@ -15,7 +15,7 @@
 import { z } from "zod";
 import { type CATALOG_EDITIONS, type CatalogEntry, type ServiceCatalog, catalogEntryById } from "./service-catalog.js";
 import { CatalogIdSchema, SubstituteImageSchema, catalogIdName, type SubstituteImage } from "./test-env-dependency.js";
-import { isBundleCheck, isMirrorCheck, isVerifiedCatalog, registerBundleCheck } from "./service-catalog-brand.js";
+import { isBundleCheck, isMirrorCheck, isOwnerListCatalog, isVerifiedCatalog, registerBundleCheck } from "./service-catalog-brand.js";
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 export type CatalogEdition = (typeof CATALOG_EDITIONS)[number];
@@ -278,7 +278,8 @@ export async function resolveCatalogImage(input: ResolveCatalogImageInput): Prom
     if (!id.success) return refuse(catalogId, "unknown_entry");
     // Run-time brands (service-catalog-brand.ts): the catalog is the object `loadSignedCatalog` returned, and the check is the object a real checker returned, of the kind the source needs. A raw or cloned catalog, a
     // hand-built check, and a bundle check offered for a registry (or the reverse) are refused, whatever their fields say.
-    if (!isVerifiedCatalog(input.catalog)) return refuse(catalogId, "not_verified");
+    // An owner-list catalog (a laptop's own approved images, owner-image-list.ts) is never a signed one: the signed-catalog rule refuses it.
+    if (!isVerifiedCatalog(input.catalog) || isOwnerListCatalog(input.catalog)) return refuse(catalogId, "not_verified");
     const check = (input.served as { check?: { id?: unknown; ok?: unknown; digest?: unknown } } | undefined)?.check;
     const source = z.enum(CATALOG_IMAGE_SOURCES).safeParse((input.served as { source?: unknown } | undefined)?.source);
     if (!source.success || !(source.data === "signed_bundle" ? isBundleCheck(check) : isMirrorCheck(check))) return refuse(catalogId, "not_verified");

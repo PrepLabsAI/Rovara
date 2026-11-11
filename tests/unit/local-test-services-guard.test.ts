@@ -1148,3 +1148,34 @@ describe("test services: the program profile and the caps", () => {
     });
   }
 });
+
+describe("test services: the owner's list (images by digest only)", () => {
+  const STARTER = "docker.io/library/postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657";
+  const OTHER_DIGEST = STARTER.replace("f9a7b9eb", "00000000");
+  const ownerBody = (image: string) => mutated(helperBody, (v) => { v.Image = image; });
+  const withImages = (images: string[]) => ({ policyExtra: { images } });
+
+  it("starts exactly the digests on the list, and refuses a starter name with another digest", async () => {
+    await using(true, async (w) => {
+      expect((await create(w, `${NET}-h0123456789`, ownerBody(STARTER))).status).toBe(201);
+      for (const [index, image] of [OTHER_DIGEST, STARTER.replace(/@sha256:.*$/u, ":16"), STARTER.replace(/@sha256:.*$/u, ""), "postgres:16", "postgres"].entries()) {
+        expect((await create(w, `${NET}-h012345678${String(index)}`, ownerBody(image))).status, image).toBe(403);
+      }
+    }, withImages([STARTER]));
+  });
+
+  it("drops a list entry that is not a digest reference, so a tag on the list starts nothing and is not inspectable", async () => {
+    await using(true, async (w) => {
+      expect((await create(w, `${NET}-h0123456789`, ownerBody("docker.io/library/postgres:16"))).status).toBe(403);
+      expect((await w.call("GET", "/v1.54/images/docker.io%2Flibrary%2Fpostgres%3A16/json")).status).toBe(403);
+      // The digest entry beside it still works.
+      expect((await create(w, `${NET}-h0123456788`, ownerBody(STARTER))).status).toBe(201);
+    }, withImages(["docker.io/library/postgres:16", "postgres", STARTER, "sha256:" + "a".repeat(64), "docker.io/library/postgres@sha256:short"]));
+  });
+
+  it("starts no image at all when the list is empty (nothing approved)", async () => {
+    await using(true, async (w) => {
+      expect((await create(w, `${NET}-h0123456789`, ownerBody(STARTER))).status).toBe(403);
+    }, withImages([]));
+  });
+});

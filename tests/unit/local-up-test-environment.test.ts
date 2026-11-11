@@ -181,14 +181,22 @@ describe("rovara up: what the switches start", () => {
     expect(docker.calls.some((call) => call[0] === "pull")).toBe(false);
   });
 
-  it("test services on without a registry to take the images from or a catalog this release trusts: the worker is told nothing, and nothing is pulled", async () => {
+  it("test services on and no catalog key in this build (Code): only the starter images are pulled, by digest, and no registry is needed", async () => {
     const docker = new FakeDocker();
     await launch({ ROVARA_TEST_SERVICES: "1" }, docker);
+    const pulls = docker.calls.filter((call) => call[0] === "pull").map((call) => call.at(-1)!);
+    expect(pulls).toHaveLength(5);
+    for (const reference of pulls) expect(reference).toMatch(/^docker\.io\/library\/(postgres|mysql|redis|mongo)@sha256:[a-f0-9]{64}$/u);
+  });
+
+  it("test services on in a build with a catalog key but no registry or no catalog this release trusts: the worker is told nothing, and nothing is pulled", async () => {
+    const docker = new FakeDocker();
+    const none = await prepareLocalTestServices({ environment: { ROVARA_TEST_SERVICES: "1" }, stateDirectory: tmpdir(), docker, interfaces: {}, signedKeysPresent: () => true });
+    expect(none).toMatchObject({ services: undefined, mode: "signed" });
+    const withRegistry = await prepareLocalTestServices({ environment: { ROVARA_TEST_SERVICES: "1", ROVARA_TEST_SERVICES_REGISTRY: "registry.examplehost:5000" }, stateDirectory: tmpdir(), docker, interfaces: {}, signedKeysPresent: () => true });
+    // A catalog folder with no signed catalog in it pins nothing, so nothing is pulled.
+    expect(withRegistry).toMatchObject({ services: undefined, mode: "signed" });
     expect(docker.calls.some((call) => call[0] === "pull")).toBe(false);
-    const withRegistry = new FakeDocker();
-    await launch({ ROVARA_TEST_SERVICES: "1", ROVARA_TEST_SERVICES_REGISTRY: "registry.examplehost:5000" }, withRegistry);
-    // A catalog folder with no signed catalog in it (and no key this release trusts) pins nothing, so nothing is pulled.
-    expect(withRegistry.calls.some((call) => call[0] === "pull")).toBe(false);
   });
 
   it("saved environments on register the local registry adapter, which says the worker cannot push or pull yet", async () => {
@@ -204,7 +212,7 @@ describe("rovara up: what the switches start", () => {
     expect(hostUsesRunRange(other)).toBe(false);
     const docker = new FakeDocker();
     const install = await prepareLocalTestServices({ environment: { ROVARA_TEST_SERVICES: "1", ROVARA_TEST_SERVICES_REGISTRY: "registry.examplehost:5000" }, stateDirectory: tmpdir(), docker, interfaces: used });
-    expect(install).toEqual({ services: undefined, catalog: undefined, unavailable: RANGE_IN_USE_SENTENCE });
+    expect(install).toMatchObject({ services: undefined, catalog: undefined, unavailable: RANGE_IN_USE_SENTENCE });
     expect(docker.calls).toHaveLength(0);
   });
 });

@@ -12,7 +12,7 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   CATALOG_FILE, CATALOG_SIGNATURE_FILE, catalogImageReference, catalogPins, catalogRepositoryName, loadSignedCatalog,
-  type CatalogEdition, type VerifiedCatalog,
+  type CatalogEdition, type OwnerListEntry, type VerifiedCatalog,
 } from "@agentx/contracts";
 import type { DockerRunner } from "./docker-runner.js";
 
@@ -28,6 +28,11 @@ export interface LocalTestServices {
   notPulled?: readonly string[] | undefined;
   /** The most memory one helper may be given, in MiB. Default 3072. */
   maxMemoryMiB?: number | undefined;
+  /**
+   * Code on a laptop: the owner's approved images (the built-in starter list and what the owner approved), as `{reference, family, version}`. Present, the worker is told them instead of a registry and a baked catalog, `images` is
+   * exactly their references, and `registry` and `catalogEnv` are placeholders (`OWNER_LIST_REGISTRY`, `OWNER_LIST_CATALOG_ENV`).
+   */
+  ownerImages?: readonly OwnerListEntry[] | undefined;
   /** Where each worker's run folder is made (one folder per worker, outside every workspace). Default: `<state folder>/test-services`. */
   runDirectoryParent?: string | undefined;
 }
@@ -41,13 +46,16 @@ export function testServicesEnvironment(services: LocalTestServices, input: { ru
     AGENTX_TEST_SERVICES_RUN_DIR: input.runDirectory,
     AGENTX_WORKER_IMAGE: input.workerImageId,
     ...(services.maxMemoryMiB === undefined ? {} : { AGENTX_TEST_SERVICES_MAX_MEM_MIB: String(services.maxMemoryMiB) }),
+    ...(services.ownerImages === undefined ? {} : { AGENTX_TEST_SERVICES_OWNER_IMAGES: JSON.stringify(services.ownerImages.map((entry) => ({ reference: entry.reference, family: entry.family, version: entry.version }))) }),
     ...(notPulled.length === 0 ? {} : { AGENTX_TEST_SERVICES_NOT_PULLED: notPulled.join(",") }),
   };
 }
 
 /** What changes the machine's configuration beyond its environment: the images the guard lets start. */
 export function localTestServicesDigestPart(services: LocalTestServices, imageId: string | undefined): unknown {
-  return [services.registry, services.catalogEnv, [...services.images].sort(), services.maxMemoryMiB ?? null, imageId ?? null];
+  const base = [services.registry, services.catalogEnv, [...services.images].sort(), services.maxMemoryMiB ?? null, imageId ?? null];
+  // The signed path's digest is what it always was; an owner list adds its own part.
+  return services.ownerImages === undefined ? base : [...base, services.ownerImages.map((entry) => entry.reference).sort()];
 }
 
 // ---- the catalog

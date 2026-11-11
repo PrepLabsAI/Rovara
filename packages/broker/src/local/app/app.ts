@@ -84,6 +84,7 @@ import { createTaskFactsSource } from "./facts.js";
 import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
 import { createLocalTestEnvironment } from "./test-environment.js";
+import type { OwnerImageService } from "../test-services-owner-list.js";
 import type { ServiceCatalogSource } from "../../core/test-env/dependency-plan.js";
 import { nightlyHooks, subscribeNightly } from "../../core/test-env/nightly-wiring.js";
 import { readApprovedTestEnvironment } from "../../core/test-env/environment.js";
@@ -184,6 +185,8 @@ export interface LocalAppOptions {
   scriptTokensEnabled?: () => boolean;
   /** The signed service catalog a dependency is pinned from (absent: no dependency can be pinned). */
   serviceCatalog?: ServiceCatalogSource | undefined;
+  /** Code on a laptop: the owner's approved test service images, for the test environment page to approve on. Absent when a signed catalog is used or test services are off. */
+  testServiceImages?: OwnerImageService | undefined;
   /**
    * Whether automation (chains, triggers, automatic runs, custom agents) is on. OFF unless the owner switched it on when the install started: a boolean, or a switch the host reads on each use. It is never read from a
    * route, a token or a page. Off, nothing of it is mounted, shown or run.
@@ -346,7 +349,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const testEnvironment = createLocalTestEnvironment({
     store, companyId, now: () => clock().getTime(), audit: registry.require("audit-sink"), log,
     gate: () => gate,
-    openPage: async (path) => { if (pagesServer.current === undefined) throw new Error("the pages are not up yet"); await (options.openBrowser ?? openInSystemBrowser)(pagesServer.current.onceLink(path, { label: "browser" })); },
+    openPage: async (path) => { if (pagesServer.current === undefined) throw new Error("the pages are not up yet"); await (options.openBrowser ?? openInSystemBrowser)(pagesServer.current.onceLink(path, { label: "browser", ...(options.testServiceImages !== undefined && path.startsWith("/test-environment/") ? { fresh: true } : {}) })); },
+    // Where the owner approves service images, the page opens in a NEW page session: an approval needs one opened in the last ten minutes (the same rule as making a script token).
     // What this computer does not do yet, said on the page instead of left for the owner to find out.
     extraLines: async () => [
       ...(savedEnvEnabled(options.environment ?? process.env) ? ["Saved environments are on, but no image is built on this computer yet: the worker's Docker access does not allow it. Tasks set up fresh."] : []),
@@ -359,6 +363,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     },
     ...(options.environment === undefined ? {} : { env: options.environment }),
     ...(options.serviceCatalog === undefined ? {} : { serviceCatalog: options.serviceCatalog }),
+    ...(options.testServiceImages === undefined ? {} : { serviceImages: options.testServiceImages }),
   });
   // How we work is the repository's `.rovara/playbook.yaml`, read through the code host at the default branch's head (a host nobody registered reads as no file). The company's rules come from the
   // `company-instructions` point. Both are put in front of every step that reads them, at the dispatch (core/instructions).
@@ -613,6 +618,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       ...chat.actions,
       ...automation.pageActions,
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, connectionAction: (input, context) => connections.action(input, context), decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
+      approveServiceImage: (input) => testEnvironment.approveServiceImage(input), removeServiceImage: (input) => testEnvironment.removeServiceImage(input),
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, modelSelection, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       ...(setupAgent.enabled ? {
         setupStart: setupAgent.page.start, setupStop: setupAgent.page.stop, setupCommand: setupAgent.page.command, setupConfirm: setupAgent.page.confirm, setupDiscard: setupAgent.page.discard, setupForgetHost: setupAgent.page.forgetHost,

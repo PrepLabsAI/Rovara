@@ -256,6 +256,8 @@ export * from "./test-services-usage.js";
 export * from "./service-catalog.js";
 export * from "./service-catalog-images.js";
 export * from "./catalog-trust.js";
+export * from "./owner-image-list.js";
+export * from "./owner-starter-images.js";
 export * from "./service-catalog-verify.js";
 export * from "./test-account.js";
 export * from "./context-sources.js";

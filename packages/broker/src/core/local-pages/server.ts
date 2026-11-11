@@ -74,6 +74,10 @@ const NOTICES: Record<string, string> = {
   lessonfresh: "Switching a repository's lessons file on needs a page you opened in the last few minutes. Run `rovara open lessons` to open one.",
   revoked: "That script token is revoked.",
   envapproved: "Approved. Tasks that start from now on use it.",
+  imageapproved: "Approved and pinned. Test services use it from the next `rovara up`.",
+  imageremoved: "Removed. It stops being offered from the next `rovara up`.",
+  imagefresh: "Approving or removing a service image needs a page you opened in the last few minutes. Run `rovara test-env open <project>` to open one.",
+  imagerefused: "That image was not approved: Rovara could not pull and pin it, it is built in already, or it is not a kind Rovara can run.",
   linked: "That chat account is linked to you.",
   unlinked: "That chat account is no longer linked.",
   bound: "That space is bound to the project.",
@@ -445,7 +449,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     } },
     { method: "GET", pattern: /^\/test-environment\/([A-Za-z0-9._-]{1,100})$/, handle: async (request, match) => {
       const view = await options.data.getTestEnvironmentPage?.(match[1] ?? "");
-      return view === undefined ? notFound() : page(request, (context) => renderTestEnvironment(context, view));
+      return view === undefined ? notFound() : page(request, (context) => renderTestEnvironment(context, view, { fresh: tokenPageIsFresh(request) && options.actions.approveServiceImage !== undefined }));
     } },
     { method: "POST", pattern: /^\/test-environment\/([A-Za-z0-9._-]{1,100})\/decide$/, handle: async (request, match) => {
       const project = match[1] ?? "";
@@ -455,6 +459,22 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "testenv.decide", taskId: project, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })) return redirect(`${back}?n=form`);
       const result = await options.actions.decideTestEnvironment({ project, approval: offer, proof: proofFor(request, offer) });
       return redirect(`${back}?n=${outcomeCode(result, "envapproved")}`);
+    } },
+    // A service image is approved by the owner alone: a page session opened in the last ten minutes and a form that answers once, bound to this project and this exact image.
+    { method: "POST", pattern: new RegExp(`^/test-environment/(${PROJECT_SEGMENT})/images/(approve|remove)$`), handle: async (request, match) => {
+      const project = match[1] ?? "";
+      const verb = match[2] ?? "";
+      const back = `${request.base}/test-environment/${encodeURIComponent(project)}`;
+      const approve = options.actions.approveServiceImage?.bind(options.actions);
+      const remove = options.actions.removeServiceImage?.bind(options.actions);
+      if (approve === undefined || remove === undefined) return notFound();
+      const subject = verb === "approve" ? (request.form?.get("requested") ?? "") : (request.form?.get("reference") ?? "");
+      if (subject === "" || subject.length > 300) return redirect(`${back}?n=invalid`);
+      // Checked before the form is used up: a page that is too old keeps its form, and says why.
+      if (!tokenPageIsFresh(request)) return redirect(`${back}?n=imagefresh`);
+      if (!verified(request, { action: `testenv.image-${verb}`, subject: `${project}:${subject}` })) return redirect(`${back}?n=form`);
+      const result = verb === "approve" ? await approve({ project, requested: subject }) : await remove({ project, reference: subject });
+      return redirect(`${back}?n=${result.ok ? (verb === "approve" ? "imageapproved" : "imageremoved") : result.reason === "refused" ? "imagerefused" : outcomeCode(result, "imageapproved")}`);
     } },
     { method: "GET", pattern: /^\/tokens$/, handle: async (request) => {
       const view = await options.data.listScriptTokens?.();

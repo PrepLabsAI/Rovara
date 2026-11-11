@@ -18,10 +18,12 @@ import {
   TEST_ENV_ROUND_BUDGET_MIN,
   TestEnvDraftSchema,
   projectPk,
+  queryAll,
   redactText,
   testEnvLessSafeChanges,
   type OrgId,
   type TransactItem,
+  type TestEnvDependencyCandidate,
   type TestEnvDraft,
   type TestEnvironmentBody,
 } from "@agentx/contracts";
@@ -237,6 +239,20 @@ export async function readTestEnvDraft(client: StoreOnly, orgId: OrgId, project:
   if (sanitized === undefined) return undefined;
   const offers = RecordedOffersSchema.safeParse(stored["recipeOffers"]);
   return { draft: sanitized.draft, routedSeeds: sanitized.routed, at: stored["at"], recipeOffers: offers.success ? offers.data : [] };
+}
+
+/**
+ * The dependency candidates (a family and a major version each, with where they were seen) of the project's NEWEST kept setup draft, read again through the sanitizer; none when there is no draft, it expired, or test services
+ * are off (the candidates are dropped then). Test services use this to PROPOSE the images a project asks for: reading it approves nothing.
+ */
+export async function latestDraftCandidates(client: StoreOnly, orgId: OrgId, project: string, nowMs: number, env: NodeJS.ProcessEnv = process.env): Promise<TestEnvDependencyCandidate[]> {
+  const rows = await queryAll(client.store, { pk: projectPk(orgId, project), sk: { op: "beginsWith", prefix: "TESTENV#DRAFT#" } });
+  const drafts = rows
+    .filter((row) => row["entityType"] === "TEST_ENV_DRAFT" && row["orgId"] === orgId && row["project"] === project && typeof row["at"] === "string" && !expired(row, nowMs))
+    .sort((a, b) => ((a["at"] as string) < (b["at"] as string) ? 1 : -1));
+  const newest = drafts[0];
+  if (newest === undefined) return [];
+  return sanitizeTestEnvDraft(newest["draft"], { env })?.dependencies ?? [];
 }
 
 /**

@@ -968,6 +968,8 @@ const GUARD_FILES = [
   /^tests\/[^/]+\/port-guard[^/]*$/i,
   /^\.github\/workflows\/ci\.yml$/i,
   /(^|\/)\.gitleaks[^/]*$/i,
+  // The built-in starter list of test service images: part of the source, so Code's release is its trust anchor. A change to the list is a change to what runs with no owner approval, so it is reviewed by hand.
+  /^packages\/contracts\/src\/owner-starter-images\.ts$/i,
 ];
 
 class Collector {

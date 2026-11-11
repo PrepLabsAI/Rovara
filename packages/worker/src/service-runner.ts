@@ -115,6 +115,8 @@ export interface ServiceRunnerStartInput {
   registry: string;
   edition: StartHelpersInput["edition"];
   probeImage: string;
+  /** Owner-approved images by `svc/<name>@sha256:<digest>` (see `StartHelpersInput.imageReferences`). Absent: the registry names them. */
+  imageReferences?: ReadonlyMap<string, string> | undefined;
   maxMemMiB: number;
   helpers: readonly HelperRequest[];
   /**
@@ -221,6 +223,7 @@ export function createDockerServiceRunner(docker: DockerCli): ServiceRunner {
       try {
         started = await startHelpers(docker, network, {
           registry: input.registry, edition: input.edition, probeImage: input.probeImage, maxMemMiB: input.maxMemMiB, helpers: input.helpers, files: input.files,
+          ...(input.imageReferences === undefined ? {} : { imageReferences: input.imageReferences }),
           ...(input.signal === undefined ? {} : { signal: input.signal }), ...(input.now === undefined ? {} : { now: input.now }), ...(input.sleep === undefined ? {} : { sleep: input.sleep }),
         });
         const view: SandboxNetworkView = {

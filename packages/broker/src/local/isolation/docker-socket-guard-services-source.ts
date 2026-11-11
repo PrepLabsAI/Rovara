@@ -80,7 +80,9 @@ const SVC_LIMITS = {
 };
 const SLOT_FIRST = SVC === null ? 0 : (SVC.slots && SVC.slots.first) || 1;
 const SLOT_LAST = SVC === null ? 0 : (SVC.slots && SVC.slots.last) || 253;
-const SVC_IMAGES = SVC === null ? [] : (Array.isArray(SVC.images) ? SVC.images.filter(function (entry) { return typeof entry === "string" && entry.length > 0 && entry.length <= 400; }) : []);
+// A helper image is named by registry, repository and DIGEST, never a tag: an entry of the list that is not in that form (a tag can be moved under the guard) is dropped, so no create or inspect can match it.
+const DIGEST_IMAGE = /^[a-z0-9][a-z0-9._\/:-]{0,199}@sha256:[a-f0-9]{64}$/;
+const SVC_IMAGES = SVC === null ? [] : (Array.isArray(SVC.images) ? SVC.images.filter(function (entry) { return typeof entry === "string" && entry.length <= 400 && DIGEST_IMAGE.test(entry); }) : []);
 const RUN_DIRECTORY = SVC === null || typeof SVC.runDirectory !== "string" ? "" : SVC.runDirectory.replace(/\/+$/, "");
 const GUARD_IMAGE = SVC === null || typeof SVC.guardImage !== "string" ? "" : SVC.guardImage;
 
