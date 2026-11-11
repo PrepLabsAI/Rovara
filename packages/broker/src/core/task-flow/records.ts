@@ -189,6 +189,10 @@ export interface DispatchRowRecord {
   costApprovedBy?: string;
   /** An AUTOFIX row: how the block it looks at came about when no finished run wrote it (the run was lost, or its start was tried until the budget ran out). */
   cause?: "run-lost" | "dispatch-exhausted" | "base-merged";
+  /** A `base-merged` AUTOFIX row: when the company's allowance first made it wait (the wait is capped from here). */
+  deferredSince?: string;
+  /** A `base-merged` AUTOFIX row: when admission granted its start, so a look that comes after a start that did not finish does not ask for a second allowance. */
+  admittedAt?: string;
 }
 
 /** A record as the store keeps it: plain JSON, with undefined fields dropped. */

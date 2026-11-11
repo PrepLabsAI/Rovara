@@ -1765,15 +1765,26 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
   });
 
   it("does not take a merge of the base on its parents alone: wrong parents are refused (swapped, extra), a merge the host does not show is not recorded, and a good one is checked and reviewed again before the task waits for the merge", async () => {
-    // Wrong parents: not the recorded head and the base commit; the same two in the other order; and the right two with a third.
+    // Wrong parents: not the recorded head and the base commit; the same two in the other order; and the right two with a third. Each is refused by the callback for its parents (not for another reason), and the
+    // result that follows, with that merge on the host's branch, is not recorded either: the plan of what a finished merge is reads the host's parents itself.
     const a = await launch({ host: true });
     const wrong = await toSync(a);
-    wrong.merge("7".repeat(40), "6".repeat(40), [wrong.commit, "5".repeat(40)]);
-    expect((await a.callback(wrong.sync, "pull-request-update", wrong.call("7".repeat(40)))).body).toMatchObject({ error: { code: "STALE_FENCE" } });
-    wrong.merge("7".repeat(40), "6".repeat(40), [wrong.newBase, wrong.commit]);
-    expect((await a.callback(wrong.sync, "pull-request-update", wrong.call("7".repeat(40)))).body).toMatchObject({ error: { code: "STALE_FENCE" } });
-    wrong.merge("7".repeat(40), "6".repeat(40), [wrong.commit, wrong.newBase, "5".repeat(40)]);
-    expect((await a.callback(wrong.sync, "pull-request-update", wrong.call("7".repeat(40)))).body).toMatchObject({ error: { code: "STALE_FENCE" } });
+    const shapes: Array<{ name: string; sha: string; parents: string[] }> = [
+      { name: "another second parent", sha: "7".repeat(40), parents: [wrong.commit, "5".repeat(40)] },
+      { name: "swapped", sha: "6".repeat(40), parents: [wrong.newBase, wrong.commit] },
+      { name: "an extra parent", sha: "5".repeat(40), parents: [wrong.commit, wrong.newBase, "4".repeat(40)] },
+    ];
+    for (const shape of shapes) {
+      wrong.merge(shape.sha, "6".repeat(40), shape.parents);
+      const refused = await a.callback(wrong.sync, "pull-request-update", wrong.call(shape.sha));
+      expect(refused.body, shape.name).toMatchObject({ error: { code: "STALE_FENCE" } });
+      expect(JSON.stringify(refused.body), shape.name).toContain("not built on the head and base");
+      expect(await recordHead(a, wrong.workspaceId), shape.name).toBe(wrong.commit);
+    }
+    // The last merge (three parents) is on the host's branch when the run reports success: it is not a merge Rovara asked for, so nothing is recorded and the task waits for the merge as it did.
+    expect((await a.callback(wrong.sync, "result", { status: "SUCCEEDED", result: wrong.lifecycle(shapes[2]!.sha, "6".repeat(40)) })).status).toBe(200);
+    const afterWrong = await taskRecord(a, wrong.taskId) as unknown as { workflow: { stage: string; pullRequests: Array<{ headSha: string }> } };
+    expect(afterWrong.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", pullRequests: [{ headSha: wrong.commit }] });
     expect(await recordHead(a, wrong.workspaceId)).toBe(wrong.commit);
 
     // A run that failed with no merge on the host: nothing is recorded, and the task waits for the merge as it did.
@@ -1933,6 +1944,96 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     await store.update({ key: rowKey, ops: [change.set("nextAttemptAt", due), change.set("dispatchDueSk", `${due}#${row["sk"]}`)] });
     expect(await h.nextJob(t.workspaceId, t.seen)).toMatchObject({ kind: "task", payload: { workflowMode: "CHECKS" } });
     expect((await workflowOf(h, t.taskId)).decisions.filter((decision) => decision.reason === BASE_MERGED_RETRY_REASON)).toHaveLength(1);
+  });
+
+  /** Admission that answers each `autofix.base-merged` request by `answer(request number)` and keeps what it was asked. */
+  function scriptedAdmission(h: Harness, answer: (n: number) => { allowed: true } | { allowed: false; code: string; message: string }) {
+    const requests: Array<{ idempotencyKey: string; action: string }> = [];
+    const inner = h.runtime.app.flow.deps.admission;
+    h.runtime.app.flow.deps.admission = {
+      ...inner,
+      async admit(request) {
+        if (request.action !== "autofix.base-merged") return inner.admit(request);
+        requests.push({ idempotencyKey: request.idempotencyKey, action: request.action });
+        return answer(requests.length);
+      },
+    } satisfies Admission;
+    return requests;
+  }
+  const makeRowDue = async (h: Harness, key: { pk: string; sk: string }, extra: Parameters<typeof change.set>[0][] = []) => {
+    const store = h.runtime.registry.require("storage");
+    const due = new Date(Date.now() - 1_000).toISOString();
+    await store.update({ key, ops: [change.set("nextAttemptAt", due), change.set("dispatchDueSk", `${due}#${key.sk}`), ...extra.map((name) => change.set(name, "x"))] });
+  };
+
+  it("asks the owner at once when admission refuses for any reason but the allowance being used (a budget, a trial): no waiting, no re-run, and the milestone says it needs them", async () => {
+    for (const code of ["budget_exhausted", "org_budget_exceeded", "trial_locked"]) {
+      const h = await launch({ host: true });
+      const requests = scriptedAdmission(h, () => ({ allowed: false, code, message: "the company's budget is used" }));
+      const t = await mergeLands(h);
+      await t.land();
+      const blocked = await taskRecord(h, t.taskId);
+      expect(blocked.workflow, code).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.baseMergedRecheck });
+      expect(blocked.autofixAsk, code).toMatchObject({ reason: "needs-a-person" });
+      expect(requests, code).toHaveLength(1);
+      // The row is gone (nothing is looked at again), and nothing was started.
+      expect(await h.runtime.registry.require("storage").get(dispatchRowKey(IMPLICIT_COMPANY_ID, t.taskId, blocked.workflow.revision)), code).toBeUndefined();
+      await h.runtime.tick();
+      expect(requests, code).toHaveLength(1);
+      expect(await checksOperations(h, t.workspaceId), code).toHaveLength(0);
+      expect((await milestonesOf(h, t.taskId)).map((milestone) => milestone.text), code).toContain(BASE_MERGED_NEEDS_YOU_MILESTONE);
+    }
+  });
+
+  it("waits only on the rate-limit refusal, asks again with the window in the key, and asks the owner once the wait has gone past an hour", async () => {
+    const h = await launch({ host: true });
+    const requests = scriptedAdmission(h, () => ({ allowed: false, code: "rate_limited", message: "five re-runs in ten minutes are used" }));
+    const t = await mergeLands(h);
+    await t.land();
+    const blocked = await taskRecord(h, t.taskId);
+    const store = h.runtime.registry.require("storage");
+    const rowKey = dispatchRowKey(IMPLICIT_COMPANY_ID, t.taskId, blocked.workflow.revision);
+    const first = (await store.get(rowKey))!;
+    expect(first["deferredSince"]).toEqual(expect.any(String));
+    expect(blocked.autofixAsk).toBeUndefined();
+    // The second look (the row is due again) asks with the ten-minute window in the key; the first did not have one.
+    await makeRowDue(h, { pk: String(first["pk"]), sk: String(first["sk"]) });
+    await h.runtime.tick();
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.idempotencyKey).toMatch(/^autofix\.base-merged:[^:]+:[a-f0-9]+$/u);
+    expect(requests[1]!.idempotencyKey).toMatch(/^autofix\.base-merged:[^:]+:[a-f0-9]+:\d+$/u);
+    expect((await taskRecord(h, t.taskId)).autofixAsk).toBeUndefined();
+    // It has waited more than an hour: the owner is asked instead, and the row is gone.
+    const old = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    const waiting = (await store.get(rowKey))!;
+    await store.update({ key: rowKey, ops: [change.set("deferredSince", old)] });
+    await makeRowDue(h, { pk: String(waiting["pk"]), sk: String(waiting["sk"]) });
+    await h.runtime.tick();
+    expect((await taskRecord(h, t.taskId)).autofixAsk).toMatchObject({ reason: "needs-a-person" });
+    expect(await store.get(rowKey)).toBeUndefined();
+    expect(requests).toHaveLength(2);
+    expect(await checksOperations(h, t.workspaceId)).toHaveLength(0);
+    expect((await milestonesOf(h, t.taskId)).map((milestone) => milestone.text)).toContain(BASE_MERGED_NEEDS_YOU_MILESTONE);
+  });
+
+  it("takes one allowance for a start that did not finish: the next look starts without asking admission again", async () => {
+    const h = await launch({ host: true });
+    const requests = scriptedAdmission(h, () => ({ allowed: true }));
+    const t = await mergeLands(h);
+    // The start fails with a fault that is not a refusal (the test environment cannot be read): the row stays.
+    h.runtime.app.flow.deps.testEnvironment = { stepPlan: async () => { throw new Error("the environment store is down"); } } as never;
+    await t.land();
+    const blocked = await taskRecord(h, t.taskId);
+    const rowKey = dispatchRowKey(IMPLICIT_COMPANY_ID, t.taskId, blocked.workflow.revision);
+    const row = (await h.runtime.registry.require("storage").get(rowKey))!;
+    expect(row["admittedAt"]).toEqual(expect.any(String));
+    expect(requests).toHaveLength(1);
+    // Mended, and in the next ten-minute window: it starts, and admission is not asked for a second allowance.
+    delete h.runtime.app.flow.deps.testEnvironment;
+    h.runtime.app.flow.deps.now = () => new Date(Date.now() + 11 * 60_000);
+    await makeRowDue(h, { pk: String(row["pk"]), sk: String(row["sk"]) });
+    expect(await h.nextJob(t.workspaceId, t.seen)).toMatchObject({ kind: "task", payload: { workflowMode: "CHECKS" } });
+    expect(requests).toHaveLength(1);
   });
 
   it("stops before the reviews of the merged code when Rovara's autonomy was lowered while its checks ran; the owner's Retry reviews runs them", async () => {

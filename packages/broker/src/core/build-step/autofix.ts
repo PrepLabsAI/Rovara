@@ -15,7 +15,6 @@ import {
   type AutoFixAskReason, type AutoFixCode, type AutoFixDecision, type AutoFixFacts, type OriginalCodeResult, type WorkflowAutoSpend, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
-import { admit } from "../task-flow/admission.js";
 import { loadPlanSelfCheck } from "../../developer/plan-self-check.js";
 import { textReaderOf } from "./plan-input.js";
 import { AutoFixAskSchema, autoFixRetryReason, autoFixSendBackReason } from "../../developer/autofix-messages.js";
@@ -166,7 +165,11 @@ export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; work
       }
       case "RETRY": {
         // A re-run after a merge of the base starts only inside the company's allowance for these ten minutes (admission's answer); the rest wait, with jitter, instead of starting together.
-        if (cause === "base-merged" && row_ !== undefined && !await baseMergedStartAdmitted(deps, task, workflow, nowMs, row_)) return "STARTED";
+        if (cause === "base-merged" && row_ !== undefined) {
+          const admitted = await baseMergedStartAdmitted(deps, task, workflow, nowMs, row_);
+          if (admitted === "deferred") return "STARTED";
+          if (admitted === "ask") return await ask("needs-a-person", ["base-merged"]);
+        }
         const automaticDecision = workflowAutomaticRetryDecision(workflow, {
           expectedRevision: workflow.revision, stage: decision.stage, reason: cause === "base-merged" ? BASE_MERGED_RETRY_REASON : autoFixRetryReason(decision.stage, decision.codes), spend, now: at,
         });
@@ -188,20 +191,41 @@ export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; work
 
 /** One minute plus up to two (so a herd of merged bases spreads out): how long a row waits when the company's allowance of re-runs is used. */
 const deferralMs = (): number => 60_000 + Math.floor(Math.random() * 120_000);
+/** The refusal that means "the allowance is used for now" (an adapter's rate limit): the only refusal that makes a re-run wait. Any other (a budget, a trial, a block) asks the owner at once. */
+export const BASE_MERGED_ALLOWANCE_USED_CODE = "rate_limited";
+/** A row that has waited this long for the company's allowance asks the owner instead of waiting on (the hosts are read at every look). */
+export const BASE_MERGED_DEFERRAL_MAX_MS = 3_600_000;
 
 /**
- * Decision 70(c), the fleet guard: asks `Admission` for one of the company's re-runs after a merge of the base for this ten-minute window (the key holds the allowance once per task, candidate and window, so a repeated look
- * does not take a second). Refused: the row waits (a minute plus up to two) and no attempt is counted; the per-task cap (the spend read before each start) is the money backstop. Answers whether it may start.
+ * Decision 70(c), the fleet guard: asks `Admission` for one of the company's re-runs after a merge of the base. `start`: granted (kept on the row, so a start that did not finish does not take a second allowance).
+ * `deferred`: the rate-limit refusal; the row waits (a minute plus up to two, or what the adapter named) with no attempt counted. `ask`: any other refusal, or a wait that went past an hour: the owner is asked.
+ * The first request is keyed by task and candidate; Admission answers one key one way, so after a deferral the key carries the ten-minute window, or a refusal would stay a refusal. The per-task cap (the
+ * spend read before each start) is the money backstop.
  */
-async function baseMergedStartAdmitted(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, nowMs: number, row: DispatchRowRecord): Promise<boolean> {
-  const window = Math.floor(nowMs / 600_000);
-  const admitted = await admit(deps, {
-    idempotencyKey: `${BASE_MERGED_ADMISSION_ACTION}:${task.taskId}:${workflow.candidate?.digest ?? "none"}:${String(window)}`, action: BASE_MERGED_ADMISSION_ACTION, projectName: task.project, subject: { type: "task", id: task.taskId },
+async function baseMergedStartAdmitted(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, nowMs: number, row: DispatchRowRecord): Promise<"start" | "deferred" | "ask"> {
+  if (row.admittedAt !== undefined) return "start";
+  const waitedMs = row.deferredSince === undefined ? 0 : nowMs - Date.parse(row.deferredSince);
+  if (waitedMs > BASE_MERGED_DEFERRAL_MAX_MS) return "ask";
+  const base = `${BASE_MERGED_ADMISSION_ACTION}:${task.taskId}:${workflow.candidate?.digest ?? "none"}`;
+  const decision = await deps.admission.admit({
+    companyId: deps.companyId, idempotencyKey: row.deferredSince === undefined ? base : `${base}:${String(Math.floor(nowMs / 600_000))}`, action: BASE_MERGED_ADMISSION_ACTION, projectName: task.project, subject: { type: "task", id: task.taskId },
   });
-  if (!("refusal" in admitted)) return true;
-  const delayMs = deferralMs();
+  const key = { pk: row.pk, sk: row.sk };
+  if (decision.allowed) {
+    await deps.store.update({ key, ops: [change.set("admittedAt", new Date(nowMs).toISOString())], condition: when.present() })
+      .catch((error: unknown) => log(deps, { event: "autofix.admitted_mark_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
+    return "start";
+  }
+  if (decision.code.toLowerCase() !== BASE_MERGED_ALLOWANCE_USED_CODE) {
+    log(deps, { event: "autofix.decided", taskId: task.taskId, revision: workflow.revision, outcome: "ASK", reason: "admission-refused", code: decision.code });
+    return "ask";
+  }
+  const delayMs = decision.retryAfterSeconds === undefined ? deferralMs() : Math.min(Math.max(decision.retryAfterSeconds, 30), 3_600) * 1_000;
   const next = new Date(nowMs + delayMs).toISOString();
-  await deps.store.transact([rescheduleRowItem(row, next, row.attempts)]).catch(() => undefined);
+  const moved = rescheduleRowItem(row, next, row.attempts);
+  if (moved.kind !== "update") return "deferred";
+  await deps.store.transact([{ ...moved, ops: [...moved.ops, change.set("deferredSince", row.deferredSince ?? new Date(nowMs).toISOString())] }])
+    .catch((error: unknown) => log(deps, { event: "autofix.defer_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
   log(deps, { event: "autofix.decided", taskId: task.taskId, revision: workflow.revision, outcome: "DEFERRED", reason: "company-allowance" });
-  return false;
+  return "deferred";
 }
