@@ -306,3 +306,17 @@ the session reconciler send signed commands to the Slack adapter, which makes th
 ### Rollback
 
 Set `SlackViaChannel` to `disabled`: the notifier and reconciler post to Slack themselves again.
+
+## Phase 7c1b: the Slack directory through the Slack adapter
+
+| Layer | Change |
+|---|---|
+| contracts | `DirectoryUserSchema`; `user` and `user_by_email` answer one; new `space`, `spaces` and `check` commands (FR-077); tenants optional on the directory commands. The built-in adapter takes `directory`. |
+| broker | `slackDirectory` takes a `call`: one Web API read made some other way. `slack-directory-channel.ts` makes each read one command and gives the answer back in Slack's shape, so the directory's caches, call budgets and eligibility rules are unchanged. The adapter answers the directory commands from users.info, users.lookupByEmail, conversations.members/info/list and auth.test. `sendChannelCommand` takes the caller's deadline. |
+| infra | Developer sign-in gets the adapter's settings and secret. |
+
+The task-person proof Lambda (the owner-approved TEST-only workload) still reads Slack itself; it moves with 7d.
+
+### Rollback
+
+Set `SlackViaChannel` to `disabled`.

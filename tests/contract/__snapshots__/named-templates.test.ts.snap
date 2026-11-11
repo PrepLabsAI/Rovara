@@ -4747,6 +4747,39 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "Environment": {
           "Variables": {
             "AGENTX_ENV": "staging",
+            "BUILT_IN_ADAPTER": {
+              "Ref": "SlackViaChannel",
+            },
+            "BUILT_IN_ADAPTER_CALLBACK_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-events",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_CHANNEL": "slack",
+            "BUILT_IN_ADAPTER_COMMANDS_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-commands",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/staging/channel-adapter/slack",
             "DEVELOPER_OIDC_CLIENT_ID": {
               "Ref": "DeveloperOidcClientId",
             },
@@ -4798,11 +4831,17 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "MCP_CONFIRM_ELICITATION": {
               "Ref": "McpConfirmElicitation",
             },
+            "SLACK_ADAPTER_TEAM_ID": {
+              "Ref": "SlackTeamId",
+            },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
             },
             "SLACK_TEAM_ID": {
               "Ref": "SlackTeamId",
+            },
+            "SLACK_VIA_CHANNEL": {
+              "Ref": "SlackViaChannel",
             },
           },
         },
@@ -5017,6 +5056,16 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     ":secret:agentx/staging/developer-oidc-??????",
                   ],
                 ],
+              },
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "ChannelApiSlackAdapterSecret5DDDDC01",
               },
             },
           ],
