@@ -69,8 +69,15 @@ import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens
 import { createSessionStartExtras } from "./session-start.js";
 import { createLocalDesignReview } from "./design-review.js";
 import { checkDesignApproval, designApprovalRecordItems, gradeApprovalRisk } from "../../core/design-review/decision.js";
+import { createLocalChat } from "./chat.js";
+import { createChannelSink } from "../../core/channel/sink.js";
+import { readTaskThread } from "../../core/channel/threads.js";
+import { deliverAttention, queueAttention } from "../../core/notify/attention.js";
 
 export { TASK_FLOW_INDEXES };
+
+/** The line after the list in a notice: the task is opened on the page of the machine Rovara runs on, and the page address carries the owner's session, so it is never put in a chat. */
+const ATTENTION_FOOTER = "Open it on the computer where Rovara runs: `rovara open`.";
 
 /** The id the default identity adapter gives the machine's owner (`localOwnerPrincipal`). */
 const LOCAL_OWNER_PERSON_ID = "local-owner";
@@ -298,6 +305,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     cost: { async costUsd(company, taskId) { return costUsdOf(await ledger.taskCost(company, taskId)) ?? 0; } },
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
+    // A person is told what needs them through the chat adapters the registry holds (`core/notify`); with none, nothing is queued. The row is only a queue entry: it is checked again before anything is sent.
+    onChange: [async (change) => { if (registry.names("channel").length > 0) await queueAttention({ store, now: clock, log }, change); }],
     // A step that read a message's note settles the message `delivered`; a session that ended closes the ones no step took.
     afterRefresh: (orgId, sessionId) => settleSteerDeliveriesFor({ store, ...(options.now === undefined ? {} : { now: options.now }), log }, orgId, sessionId),
   };
@@ -344,6 +353,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const designPageActions = designReview.pageActions({ gate, owner });
   const decisionActions = createDecisionActions({ gate, companyId });
+  // Chat (owner decision 58): the owner's own acts on the chat page, and what an adapter may hand the core. Nothing here approves: see chat.ts.
+  const chat = createLocalChat({ registry, flow, store, companyId, owner, now: () => clock().getTime(), gate, log });
   const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
   // script tokens. The creator is asked of the identity port by Rovara id; the audit steps are the registry's sink's.
@@ -354,8 +365,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     data: {
       ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview }),
       listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
+      getChatPage: () => chat.view(),
+      previewChatLink: (code) => chat.preview(code),
     },
     actions: {
+      ...chat.actions,
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume,
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       async createScriptToken(input) {
@@ -378,6 +392,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     },
     sessions: options.pageSessions,
     ...(options.pagesPort === undefined ? {} : { port: options.pagesPort }),
+    // The pages age their sessions by the same clock as everything else (a test that sets the clock sees a page session grow old).
+    ...(options.now === undefined ? {} : { now: () => clock().getTime() }),
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
@@ -392,7 +408,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -407,6 +423,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await milestones.deliverDue().catch(logFailure("local_app.milestones_failed"));
     await designReview.sweepWaits().catch(logFailure("local_app.design_wait_sweep_failed"));
     await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
+    // What needs the owner reaches them in their chat, batched (one message at most every few minutes). The sweep of the sessions above is what queues it.
+    if (registry.names("channel").length > 0) {
+      await deliverAttention({ store, registry, now: () => clock().getTime(), thread: (org, sessionId) => readTaskThread(store, org, sessionId), footer: ATTENTION_FOOTER, log }, { deadlineMs: clock().getTime() + 4_000 }).catch(logFailure("local_app.attention_failed"));
+    }
   };
   // Reading pull requests asks the code host over the network and may take seconds, so the timer runs it apart from the dispatch (a slow host never holds a step back); a test's `tick()` runs both in order.
   const tickTracking = async (): Promise<void> => {
@@ -417,6 +437,22 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await tickCore();
     await tickTracking();
   };
+  // The in-process chat adapters begin to listen. What one hears goes through the sink, which applies the checks of the channel API (bound space, linked person, a card's request); a start that fails
+  // (a token the chat does not accept) is reported and leaves the rest of Rovara running.
+  const listening: Array<{ name: string; stop(): Promise<void> }> = [];
+  for (const name of registry.names("channel")) {
+    const adapter = registry.get("channel", name);
+    if (adapter?.start === undefined) continue;
+    const sink = createChannelSink({
+      channel: name, adapter, store, orgId: companyId, now: () => clock().getTime(), work: chat.work(name), log: (entry) => log({ component: "channel", channel: name, ...entry }),
+      linkWords: (code) => `Run \`rovara chat\` on the computer where Rovara runs, and paste this code: ${code}. It works once, for ten minutes.`,
+    });
+    try {
+      listening.push({ name, ...(await adapter.start(sink)) });
+    } catch (error) {
+      console.error(JSON.stringify({ component: "broker", event: "channel.start_failed", channel: name, error: error instanceof Error ? error.name : "unknown" }));
+    }
+  }
   const timers: NodeJS.Timeout[] = [];
   if (options.timers !== false) {
     const every = (ms: number, work: () => Promise<void>): void => {
@@ -440,6 +476,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     tick,
     async stop() {
       for (const timer of timers) clearInterval(timer);
+      for (const one of listening) await one.stop().catch(() => undefined);
       await tracking.idle();
       await projector?.stop();
       await trackIndexer?.stop();

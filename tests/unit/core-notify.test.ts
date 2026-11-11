@@ -2,7 +2,7 @@
 // channel adapters the registry holds. The adapters here are fakes; no provider is named.
  
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, NOTIFY_BATCH_MINUTES, type ChannelEvent, type ConversationRef, type OrgId } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, NOTIFY_BATCH_MINUTES, agentSessionKey, type ChannelEvent, type ConversationRef, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
@@ -88,7 +88,7 @@ describe("queueing", () => {
     expect((changes[0]!.previous as { display?: unknown }).display).toBeDefined();
     const logs: Array<Record<string, unknown>> = [];
     let writes = 0;
-    const broken = await queueAttention({ store: { put: async () => { writes += 1; throw new Error("down"); } }, log: (entry) => logs.push(entry) }, changes[0]!);
+    const broken = await queueAttention({ store: { put: async () => { writes += 1; throw new Error("down"); }, query: async () => ({ items: [] }) }, log: (entry) => logs.push(entry) }, changes[0]!);
     expect(writes).toBeGreaterThan(0);
     expect(broken).toBe(0);
     expect(logs).toEqual([expect.objectContaining({ event: "attention.queue_failed" })]);
@@ -243,5 +243,78 @@ describe("delivering", () => {
     await finished.move({ workflow: { stage: "MERGED", state: "COMPLETE" }, step: "Merged" });
     await finished.deliver();
     expect(finished.adapter.delivered.at(-1)!.type).toBe("done");
+  });
+});
+
+describe("followers, the conversation a task was started from, and the footer", () => {
+  const FOLLOWER = "f".repeat(64);
+  const follow = (store: MemoryDocumentStore) => store.put({ item: { ...agentSessionKey(ORG, SESSION, `FOLLOWER#${FOLLOWER}`), entityType: "AGENT_SESSION_FOLLOWER", developerId: FOLLOWER } });
+
+  it("tells the followers of a session when it fails or ends, and not when it only waits", async () => {
+    const waiting = await world();
+    await follow(waiting.store);
+    await waiting.move({});
+    await waiting.move({ workflow: { stage: "IMPLEMENT", state: "RUNNING" } });
+    await waiting.move({ workflow: { stage: "PLAN_REVIEW", state: "WAITING" } });
+    expect((await waiting.pending()).map((row) => row["developerId"])).toEqual([OWNER_ID]);
+    const failed = await world();
+    await follow(failed.store);
+    await failed.move({});
+    await failed.move({ workflow: undefined, runStatus: "FAILED", failureCategory: "timed_out" });
+    expect((await failed.pending()).map((row) => row["developerId"]).sort()).toEqual([FOLLOWER, OWNER_ID].sort());
+    // The follower is messaged only where they chose, and only when they may still read the session.
+    await writeNotifyPrefs({ store: failed.store, now: () => new Date(clock.ms) }, ORG, FOLLOWER, { targets: [target()] });
+    await failed.prefs([target(OTHER_CONVERSATION)]).catch(() => undefined);
+    const outcome = await failed.deliver({ access: async (_org: OrgId, person: string) => (person === FOLLOWER ? { owner: false } : undefined) });
+    expect(outcome).toMatchObject({ people: 1, sent: 1 });
+    expect(failed.adapter.delivered).toHaveLength(1);
+  });
+
+  it("tells the conversation a task was started from, even where the channel may not message first, and never past a mute", async () => {
+    const w = await needsYou();
+    const quiet = new FakeChannelAdapter({ ...FAKE_CHANNEL_CAPABILITIES, proactive: false });
+    w.registry.register("channel", "otherchat", quiet);
+    const started: ConversationRef = { channel: "otherchat", tenant: "team1", space: "room1", thread: "main" };
+    const thread = async (_org: OrgId, sessionId: string) => (sessionId === SESSION ? { conversation: started, personId: OWNER_ID } : undefined);
+    // No place chosen at all: the conversation of the start is where they are told.
+    const outcome = await w.deliver({ thread });
+    expect(outcome).toMatchObject({ people: 1, sent: 1, unreachable: 0 });
+    expect(quiet.delivered).toHaveLength(1);
+    expect(quiet.delivered[0]).toMatchObject({ conversation: started, channel: "otherchat" });
+    expect(await w.pending()).toHaveLength(0);
+    // A person who muted notices is told nowhere, the conversation of a start included.
+    const muted = await needsYou();
+    const quiet2 = new FakeChannelAdapter({ ...FAKE_CHANNEL_CAPABILITIES, proactive: false });
+    muted.registry.register("channel", "otherchat", quiet2);
+    await muted.prefs([], true);
+    await muted.deliver({ thread });
+    expect(quiet2.delivered).toEqual([]);
+    // A conversation another person started is not this person's.
+    const other = await needsYou();
+    const quiet3 = new FakeChannelAdapter();
+    other.registry.register("channel", "otherchat", quiet3);
+    await other.deliver({ thread: async () => ({ conversation: started, personId: "e".repeat(64) }) });
+    expect(quiet3.delivered).toEqual([]);
+  });
+
+  it("adds the footer after the list and keeps it whole when the text is cut", async () => {
+    const w = await needsYou();
+    await w.prefs([target()]);
+    await w.deliver({ footer: "Open it with `rovara open`." });
+    expect((w.adapter.delivered[0]!.data as { text: string }).text.endsWith("\nOpen it with `rovara open`.")).toBe(true);
+    const line = { title: "x".repeat(300), status: "Needs you", kind: "needs_you" as const };
+    const cut = attentionText([line], 0, 200, "Open it with `rovara open`.");
+    expect([...cut].length).toBeLessThanOrEqual(200);
+    expect(cut.endsWith("Open it with `rovara open`.")).toBe(true);
+  });
+
+  it("logs how many places were left out when a person has more than the cap, and still tells the first ones", async () => {
+    const w = await needsYou();
+    await w.prefs([target(), target(OTHER_CONVERSATION)]);
+    w.registry.register("channel", "otherchat", new FakeChannelAdapter());
+    const logs: Array<Record<string, unknown>> = [];
+    await w.deliver({ maxTargets: 1, log: (entry: Record<string, unknown>) => logs.push(entry) });
+    expect(logs).toContainEqual({ event: "attention.thread_targets_truncated", dropped: 1 });
+    expect(w.adapter.delivered).toHaveLength(1);
   });
 });

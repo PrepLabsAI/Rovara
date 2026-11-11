@@ -11,7 +11,7 @@ import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import type { ApprovalProof } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
-import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, type PageContext } from "./pages.js";
+import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, type PageContext } from "./pages.js";
 import type { ApprovalOffer, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
 
 export interface LocalPagesServer {
@@ -64,6 +64,16 @@ const NOTICES: Record<string, string> = {
   resumed: "Picked up again.",
   lesson: "Lesson updated.",
   revoked: "That script token is revoked.",
+  linked: "That chat account is linked to you.",
+  unlinked: "That chat account is no longer linked.",
+  bound: "That space is bound to the project.",
+  unbound: "That space is not bound any more.",
+  noticed: "You will be told there.",
+  unnoticed: "You will not be told there any more.",
+  muted: "Notices are muted.",
+  unmuted: "Notices are on again.",
+  badcode: "That code is not valid: it may have expired or been used. Message Rovara in the chat again for a new one.",
+  chatfresh: "Changing chat settings needs a page you opened in the last few minutes. Run `rovara chat` to open one.",
   tokenfresh: "Making a token needs a page you opened in the last few minutes. Run `rovara token create` to open one.",
   saved: "Saved.",
   acknowledged: "Acknowledged and recorded.",
@@ -133,6 +143,12 @@ function secondReviewActionOf(op: string, form: URLSearchParams | undefined): Se
     default: return undefined;
   }
 }
+/** The same request address with a notice code set, for a page that explains its own answer (a code that does not read). */
+const withNotice = (url: URL, notice: string): URL => {
+  const next = new URL(url.href);
+  next.searchParams.set("n", notice);
+  return next;
+};
 
 export async function createLocalPagesServer(options: LocalPagesOptions): Promise<LocalPagesServer> {
   const now = options.now ?? Date.now;
@@ -363,6 +379,62 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "second-review.acknowledge", taskId, revision, subject: key })) return redirect(`${request.base}/plan/${taskId}?n=form`);
       const result = await options.actions.acknowledgeSecondReview({ taskId, revision, key });
       return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "acknowledged")}`);
+    } },
+    { method: "GET", pattern: /^\/chat$/, handle: async (request) => {
+      const view = await options.data.getChatPage?.();
+      if (view === undefined) return notFound();
+      // A code in the address is only looked at: what it names is shown for the owner to confirm. Nothing changes until the confirmation form is posted.
+      const code = (request.url.searchParams.get("code") ?? "").trim();
+      const found = code === "" ? undefined : await options.data.previewChatLink?.(code);
+      const notice = code !== "" && found === undefined ? "badcode" : undefined;
+      return page({ ...request, url: notice === undefined ? request.url : withNotice(request.url, notice) }, (context) => renderChat(context, view, found === undefined ? {} : { preview: { code, ...found } }));
+    } },
+    { method: "POST", pattern: /^\/chat\/(link|unlink|bind|unbind|notice-add|notice-remove|mute)$/, handle: async (request, match) => {
+      const action = match[1] ?? "";
+      const back = `${request.base}/chat`;
+      const data = options.actions;
+      if (options.data.getChatPage === undefined) return notFound();
+      const field = (name: string, max = 128): string => (request.form?.get(name) ?? "").trim().slice(0, max);
+      const CHANNEL = /^[a-z][a-z0-9-]{1,31}$/u, OPAQUE = /^[A-Za-z0-9._:+@=-]{1,128}$/u;
+      const subjectOf: Record<string, string> = {
+        link: field("code", 64), unlink: `${field("channel")}/${field("tenant")}/${field("userId")}`, bind: "new", unbind: `${field("channel")}/${field("tenant")}/${field("space")}`,
+        "notice-add": "new", "notice-remove": `${field("channel")}/${field("tenant")}/${field("space")}/${field("thread")}`, mute: field("muted") === "yes" ? "on" : "off",
+      };
+      if (!verified(request, { action: `chat.${action}`, subject: subjectOf[action] ?? "" })) return redirect(`${back}?n=form`);
+      // Linking an account, binding a space and choosing where task titles go change who can act as the owner: only from a page session opened a few minutes ago, checked here and not only when the page was drawn.
+      if (!tokenPageIsFresh(request)) return redirect(`${back}?n=chatfresh`);
+      const channel = field("channel"), tenant = field("tenant"), space = field("space"), thread = field("thread"), userId = field("userId");
+      if (action === "link") {
+        if (data.linkChatAccount === undefined || field("confirmed") !== "yes" || !/^[A-Za-z0-9_-]{32}$/u.test(field("code", 64))) return redirect(`${back}?n=invalid`);
+        return redirect(`${back}?n=${outcomeCode(await data.linkChatAccount({ code: field("code", 64) }), "linked")}`);
+      }
+      if (action === "mute") {
+        if (data.muteNotices === undefined) return redirect(`${back}?n=invalid`);
+        const muted = field("muted") === "yes";
+        return redirect(`${back}?n=${outcomeCode(await data.muteNotices({ muted }), muted ? "muted" : "unmuted")}`);
+      }
+      if (!CHANNEL.test(channel) || !OPAQUE.test(tenant)) return redirect(`${back}?n=invalid`);
+      if (action === "unlink") {
+        if (data.unlinkChatAccount === undefined || !OPAQUE.test(userId)) return redirect(`${back}?n=invalid`);
+        return redirect(`${back}?n=${outcomeCode(await data.unlinkChatAccount({ channel, tenant, userId }), "unlinked")}`);
+      }
+      if (!OPAQUE.test(space)) return redirect(`${back}?n=invalid`);
+      if (action === "bind") {
+        const project = field("project");
+        if (data.bindChatSpace === undefined || project === "") return redirect(`${back}?n=invalid`);
+        return redirect(`${back}?n=${outcomeCode(await data.bindChatSpace({ channel, tenant, space, project }), "bound")}`);
+      }
+      if (action === "unbind") {
+        if (data.unbindChatSpace === undefined) return redirect(`${back}?n=invalid`);
+        return redirect(`${back}?n=${outcomeCode(await data.unbindChatSpace({ channel, tenant, space }), "unbound")}`);
+      }
+      if (thread !== "" && !OPAQUE.test(thread)) return redirect(`${back}?n=invalid`);
+      if (action === "notice-add") {
+        if (data.addNoticeTarget === undefined) return redirect(`${back}?n=invalid`);
+        return redirect(`${back}?n=${outcomeCode(await data.addNoticeTarget({ channel, tenant, space, ...(thread === "" ? {} : { thread }) }), "noticed")}`);
+      }
+      if (data.removeNoticeTarget === undefined || thread === "") return redirect(`${back}?n=invalid`);
+      return redirect(`${back}?n=${outcomeCode(await data.removeNoticeTarget({ channel, tenant, space, thread }), "unnoticed")}`);
     } },
     { method: "GET", pattern: new RegExp(`^/proof/(${TASK_ID})$`), handle: async (request, match) => {
       const view = await options.data.getProofReport(match[1] ?? "");

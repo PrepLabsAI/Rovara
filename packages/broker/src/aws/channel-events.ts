@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { ChannelEventSchema, publicHttpsUrlProblem, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent } from "@agentx/contracts";
+import { ChannelEventSchema, RegisteredChannelIdSchema, publicHttpsUrlProblem, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent } from "@agentx/contracts";
 import { checkEndpointAddresses, EndpointRefused } from "@agentx/gateway";
 import { getChannelAdapter } from "./channel-adapters.js";
 
@@ -55,7 +55,8 @@ export function createChannelEventSender(deps: ChannelEventSenderDependencies) {
     let event: ChannelEvent;
     try {
       const parsed = ChannelEventSchema.safeParse(JSON.parse(record.body));
-      if (!parsed.success) { log({ event: "dropped", reason: "invalid_event" }); return "dropped"; }
+      // The hosted product serves `slack` on its own path, so an event labelled with that id is not for a registered adapter: dropped, as before the id was allowed for in-process adapters.
+      if (!parsed.success || !RegisteredChannelIdSchema.safeParse(parsed.data.channel).success) { log({ event: "dropped", reason: "invalid_event" }); return "dropped"; }
       event = parsed.data;
     } catch {
       log({ event: "dropped", reason: "invalid_json" });

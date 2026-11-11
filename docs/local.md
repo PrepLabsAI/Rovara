@@ -375,6 +375,29 @@ A script token lets the owner's own scripts and CI on this computer read their t
 - **Off switch**: `ROVARA_SCRIPT_TOKENS=0` in the environment of `rovara up` turns the feature off (no token authenticates, the page and routes do not exist). Starting with the switch off also REVOKES every live token (audited), so turning it back on never revives one.
 - **Keys**: Cloud's (`scriptTokenKey`, `orgScriptTokensKey`, the rate rows under `ORG#<company>#SCRIPT_TOKEN_RATE`...). Differences: the record also keeps `personId`, and `amr` may be `local`; Cloud's reader strips the first and its sign-in list does not have the second.
 
+## Chat and notices (a `channel` adapter)
+
+A chat tool is an ordinary `channel` adapter, like any other plug-in: Rovara core names none. With one set up, three things work on a laptop. Without one, none of this runs and nothing is queued.
+
+- **Notices.** When a task moves into a state that asks someone to act (needs you, ready to merge, failed) or ends, the person is told in their chat: one message at most every 15 minutes per place, with everything pending in one list. Each row is checked again before it is sent (the session still stands in that state, the person may still read it), and a muted person or one with no place chosen is told nothing. A session's followers are told when it fails or ends. A task started from a chat is also told in the conversation it started from (every member of a bound space can read the task titles and status words told there, so bind only spaces whose members may see them), even where the chat may not message first. The message holds the task's title and Rovara's status words, never the plan, and no address: a page address carries your session, so the footer says `rovara open`.
+- **Starting work.** A message that mentions the bot, from a linked account in a space bound to a project, starts a task on that project as you (the same start as `rovara session start`, with the plan still waiting for you on its page).
+- **Cards.** The card code (`postApprovalCard`, the decision path through the sink) is a seam for a host with an https task address; a laptop's page address is http and carries your session, so `rovara up` posts no card and every press ends at "not open". A card for an approval is a pointer to the task page. Nothing said or pressed in a chat approves anything: the kinds that ask for a sign-in (a plan, an admin change) are sent with no buttons, and any press is checked against the card Rovara posted (this conversation, this revision, this content digest, still open) and then handed to the approval gate as a credential of the chat's own method, `chat-<channel>`. Code's approvers do not offer that method, so the gate refuses it; an approvers plug-in that names it takes the decision for the kinds that allow it, and a high-risk approval, a rejection and a plan are never decided from a chat on Code's rules.
+
+**Everything that changes who can act as you is on one page**, `rovara chat`, which opens the chat page on a new page session (the form works for a session opened in the last 10 minutes, once per form): link a chat account (message the bot in a bound space; it answers an account it does not know with a one-use code, valid for 10 minutes, shown only to that account; you paste it on the page, which shows the workspace and the whole account id, and confirm only if that is your own account. An account of another workspace, such as a guest from a shared channel, gets no code), bind a space to a project, choose where you are told, mute. None of these is reachable with the API session token an AI tool may hold. That token can read what is set up: `rovara chat status`, `GET /v1/app/channel` (adapters, linked accounts with the account id masked, bound spaces) and `GET /v1/app/me/notifications` (where you are told, whether muted, and the channels that can be named).
+
+Stored rows, all under the company scope: `NOTIFY_PREFS#<company>` and `NOTIFY_SENT#<company>` (the person's places and mute, and when each was last told), `NOTIFY_PENDING` (the queue), `ORG#<company>#CHANNEL_LINK#<channel>/<tenant>`, `ORG#<company>#DEVELOPER_CHANNEL_LINKS#<person>`, `ORG#<company>#CHANNEL_LINK_CODE#<hash>`, `ORG#<company>#BINDING#<channel>/<tenant>` (and `ORG#<company>#CHANNEL_TENANTS`, the tenants a space was bound in, so every binding can be listed), `ORG#<company>#CHANNEL_CARD#<request>`, `ORG#<company>#CHANNEL_CLAIM#<channel>/...` (an adapter's event used once) and `ORG#<company>#CHANNEL_THREAD#<session>`. Link codes, claims and cards expire.
+
+### The Slack adapter
+
+The chat tool the product shipped first is a plug-in of this kind. Name it in your plug-in config; the tokens are read through the `secrets` point (an environment variable or an owner-only file), never held in the config:
+
+```json
+{ "point": "channel", "name": "slack", "module": "@agentx/broker/plugins/channel-slack",
+  "settings": { "botToken": { "env": "SLACK_BOT_TOKEN" }, "appToken": { "env": "SLACK_APP_TOKEN" }, "projects": ["web"] } }
+```
+
+`botToken` lets it post. `appToken` (the app-level token of a socket-mode app, with the `connections:write` scope) lets it hear a mention and a button press with no public address: it opens an outbound socket and reopens it when the tool asks or the network drops. Without `appToken` it only posts notices. Subscribe the app to `app_mention` and turn on interactivity; no other event is read, so a message that does not mention the bot is never seen. It posts only in the workspace its own bot belongs to. A notice to a direct message or to a space itself (no thread) names the thread `0000000000.000000`, which this adapter reads as "no thread" (`ChannelAdapter.noThread`; the chat page fills it in when you leave the thread empty). A token the tool refuses stops that adapter's start with the tool's error code; the rest of `rovara up` runs.
+
 ## A message to the agent
 
 `rovara session tell` (and `POST /v1/app/sessions/<id>/messages`, the MCP tool) gives the agent a message. It is information, never an instruction that decides an approval, a gate, a tool or a budget.
@@ -427,7 +450,7 @@ it is stored beside the workflow (`task.secondOpinion`), never in it, so a secon
   `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself, given only for a repository on github.com over https and only to clone (no push credential is given yet; lane L11 brings a scoped one).
 - **A budget on the model proxy.** The task flow grants a step the install's model (see "Choosing the model") and no budget: the flow has no run limit before a price table exists, and Code's price table is empty. See "Model calls" below; `operationEnded` is called when an operation settles.
 - **Ask, Revise the plan and Close in the CLI, in the MCP tools and on the local page** are not wired: the routes above are what they will call (the tools, commands and a page form are built separately). Stop and redirect (the owner stops a coding step to give a new instruction) is not ported.
-- **Lessons** answer "nothing there"; **notifications** need a `channel` adapter (none on a laptop). **Design review** runs (see "Design review" below); its CLI and MCP surfaces are not built yet.
+- **Lessons** answer "nothing there". **Design review** runs (see "Design review" below); its CLI and MCP surfaces are not built yet. **Notifications** and chat need a `channel` adapter (see "Chat and notices"); none is set up by default.
 - **A CLI sign-in to the local runtime** is `--env local` (see "The CLI and the MCP tools on `rovara up`").
 
 ### Design review

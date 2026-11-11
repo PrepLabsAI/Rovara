@@ -163,6 +163,16 @@ export interface ScriptTokensPageView {
   projects: string[];
 }
 
+/** What the chat page shows: the chat adapters this install runs, the accounts linked to the owner, the spaces bound to projects, and where the owner is told. Never a token or a code. */
+export interface ChatPageView {
+  adapters: Array<{ name: string; projects: string[]; proactive: boolean; buttons: number; noThread?: string }>;
+  links: Array<{ channel: string; tenant: string; userId: string; maskedUserId: string; linkedAt: string }>;
+  bindings: Array<{ channel: string; tenant: string; space: string; project: string }>;
+  /** The names a space may be bound to. */
+  projects: string[];
+  notify: { muted: boolean; targets: Array<{ channel: string; tenant: string; space: string; thread: string }> };
+}
+
 /** A token the page just made: the secret is shown on the answer to the form, once, and kept nowhere. */
 export type LocalCreateTokenResult = { ok: true; created: CreatedScriptToken } | { ok: false; reason: "refused" | "invalid" | "not_found"; message: string };
 
@@ -180,6 +190,10 @@ export interface LocalPageData {
   listScriptTokens?(): Promise<ScriptTokensPageView | undefined>;
   /** The second review's settings page: the model list, the choice, the mode, the evidence and the notice. Absent: the page is not there. */
   getSecondReview?(): Promise<SecondReviewState | undefined>;
+  /** The chat page. Absent, or undefined: no chat adapter is set up here and the page is not found. */
+  getChatPage?(): Promise<ChatPageView | undefined>;
+  /** What a code of a chat account names (the channel and the masked account), for the confirmation the owner reads before linking; undefined for an unknown, used or expired code. */
+  previewChatLink?(code: string): Promise<{ channel: string; tenant: string; userId: string } | undefined>;
 }
 
 /** One change of the second review's settings, as the owner made it on the page (every one is the owner's own act, in this browser session). */
@@ -243,4 +257,15 @@ export interface LocalPageActions {
   secondReview?(input: SecondReviewPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
   /** The owner acknowledges that an `on` second review did not run, so the merge may go ahead. `revision` is the task revision on the page; `key` is the acknowledgement the page showed. */
   acknowledgeSecondReview?(input: { taskId: string; revision: number; key: string }): Promise<LocalActionResult>;
+  /**
+   * The owner's own acts on the chat page. Like a decision they are made on a page, never through the API token an AI tool may hold: linking a chat account lets that account start work as the owner, binding a space
+   * lets its messages start work on a project, and a notice target is a place task titles are sent to.
+   */
+  linkChatAccount?(input: { code: string }): Promise<LocalActionResult>;
+  unlinkChatAccount?(input: { channel: string; tenant: string; userId: string }): Promise<LocalActionResult>;
+  bindChatSpace?(input: { channel: string; tenant: string; space: string; project: string }): Promise<LocalActionResult>;
+  unbindChatSpace?(input: { channel: string; tenant: string; space: string }): Promise<LocalActionResult>;
+  addNoticeTarget?(input: { channel: string; tenant: string; space: string; thread?: string }): Promise<LocalActionResult>;
+  removeNoticeTarget?(input: { channel: string; tenant: string; space: string; thread: string }): Promise<LocalActionResult>;
+  muteNotices?(input: { muted: boolean }): Promise<LocalActionResult>;
 }

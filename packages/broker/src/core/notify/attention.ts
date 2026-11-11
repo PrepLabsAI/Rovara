@@ -13,8 +13,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  ConversationRefSchema, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, change, conversationSubject, hideEmailAddresses, sessionTaskStatus, taskStatusText, when,
-  type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type DocumentStore, type OrgId, type RegistryView, type SessionSummary, type StoredDocument,
+  ConversationRefSchema, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, agentSessionKey, change, conversationSubject, hideEmailAddresses, sessionTaskStatus, taskStatusText, when,
+  type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type ConversationRef, type DocumentStore, type OrgId, type RegistryView, type SessionSummary, type StoredDocument,
 } from "@agentx/contracts";
 import type { SessionChange } from "../sessions/summary.js";
 import { SessionStore } from "../sessions/store.js";
@@ -89,12 +89,23 @@ export async function writeNotifyPrefs(deps: { store: Pick<DocumentStore, "updat
 
 // ---- queue
 
-/** Who is told about a change of this kind: the owner and, for a wait or a pause, the people the summary names as needed. A closed task tells only its owner when it merged. */
-export function attentionRecipients(session: AgentSessionRecord, summary: SessionSummary, kind: AttentionKind): string[] {
+/** The session's followers (the hosted product's `FOLLOWER#<person>` rows on the session's partition), at most `RECIPIENTS_MAX`. A row that is not shaped like a person is left out. */
+async function followersOf(store: Pick<DocumentStore, "query">, session: AgentSessionRecord): Promise<string[]> {
+  const key = agentSessionKey(session.orgId, session.sessionId, "FOLLOWER#");
+  const page = await store.query({ pk: key.pk, sk: { op: "beginsWith", prefix: "FOLLOWER#" }, limit: RECIPIENTS_MAX });
+  return page.items.flatMap((item) => (/^FOLLOWER#[a-f0-9]{64}$/u.test(item.sk) ? [item.sk.slice("FOLLOWER#".length)] : []));
+}
+
+/**
+ * Who is told about a change of this kind: the owner and, for a wait or a pause, the people the summary names as needed; the session's followers for a failure and for the end. A closed task tells only its followers
+ * (a merged one tells its owner too).
+ */
+export async function attentionRecipients(store: Pick<DocumentStore, "query">, session: AgentSessionRecord, summary: SessionSummary, kind: AttentionKind): Promise<string[]> {
   const owner = session.owner.developerId;
   const named = summary.needsPeople.filter((id) => /^[a-f0-9]{64}$/u.test(id));
+  const followers = kind === "failed" || kind === "done" ? await followersOf(store, session) : [];
   const ownerToo = kind !== "done" || sessionTaskStatus(summary).state === "merged";
-  const people = [...(ownerToo ? [owner] : []), ...(kind === "needs_you" || kind === "paused" ? named : [])];
+  const people = [...(ownerToo ? [owner] : []), ...(kind === "needs_you" || kind === "paused" ? named : []), ...followers];
   return [...new Set(people)].slice(0, RECIPIENTS_MAX);
 }
 
@@ -102,7 +113,7 @@ export function attentionRecipients(session: AgentSessionRecord, summary: Sessio
  * After a refresh committed: when the session moved into a state someone is told about, one pending row per person. Only task sessions. Never throws: a notification is never a reason for a refresh to fail.
  * Use it as a session change hook.
  */
-export async function queueAttention(deps: { store: Pick<DocumentStore, "put">; now?: () => Date; log?: Log }, change: SessionChange): Promise<number> {
+export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log }, change: SessionChange): Promise<number> {
   try {
     if (change.session.subject.kind !== "task") return 0;
     const kind = attentionKindOf(change.summary);
@@ -113,7 +124,7 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put">; 
     if (change.session.endedAt !== undefined && kind !== "done" && kind !== "failed") return 0;
     const before = sessionTaskStatus(change.previous), after = sessionTaskStatus(change.summary);
     if (before.state === after.state && before.reason === after.reason) return 0;
-    const people = attentionRecipients(change.session, change.summary, kind);
+    const people = await attentionRecipients(deps.store, change.session, change.summary, kind);
     const nowMs = (deps.now ?? (() => new Date()))().getTime();
     for (const developerId of people) {
       await deps.store.put({
@@ -136,6 +147,15 @@ export interface AttentionDeliveryDependencies {
   now: () => number;
   /** The address of a session's page, built by the surface that serves it; undefined when there is none (the message then has no link). */
   link?: (session: AgentSessionRecord) => string | undefined;
+  /** Fewer places than the cap of one person's targets (the chosen ones and the conversations of starts) to tell in one sweep; it never raises the cap. A test lowers it. */
+  maxTargets?: number;
+  /** A line added after the list (how to open a task when the surface has no address to link). Fixed words, set by the install. */
+  footer?: string;
+  /**
+   * The conversation a session was started from, and the person who started it (`core/channel/threads.ts`). What that person is told about the session goes to that conversation as well as to their chosen targets: it
+   * answers them where they asked, so a channel that may not message first (`proactive` false) is still used for it. Absent: no session has one.
+   */
+  thread?: (orgId: OrgId, sessionId: string) => Promise<{ conversation: ConversationRef; personId: string } | undefined>;
   /** Whether the person may READ the session now. Default: the session's owner. */
   access?: (orgId: OrgId, developerId: string, session: AgentSessionRecord) => Promise<{ owner: boolean } | undefined>;
   log?: Log;
@@ -149,19 +169,24 @@ const oneLine = (text: string, max: number): string => {
   return chars.length <= max ? flat : `${chars.slice(0, max - 1).join("")}…`;
 };
 
-/** The message text: the tasks (title, status sentence, link). Plain text; an adapter formats it for its channel. */
-export function attentionText(lines: readonly Line[], more: number, maxLength: number): string {
+/**
+ * The message text: the tasks (title, status sentence, link), then the footer when there is one (how to open the task when no line has a link). Plain text; an adapter formats it for its channel. The text is cut to `maxLength`
+ * with the footer kept whole.
+ */
+export function attentionText(lines: readonly Line[], more: number, maxLength: number, footer?: string): string {
   const count = lines.length + more;
   const body = [
     count === 1 ? "A task needs your attention in Rovara:" : "These tasks need your attention in Rovara:",
     ...lines.map((line) => `- ${line.title}: ${line.status}${line.link === undefined ? "" : ` ${line.link}`}`),
     ...(more > 0 ? [`- and ${String(more)} more`] : []),
   ].join("\n");
+  const tail = footer === undefined || footer === "" ? "" : `\n${footer}`;
+  const room = Math.max(1, maxLength - [...tail].length);
   const chars = [...body];
-  return chars.length <= maxLength ? body : `${chars.slice(0, maxLength - 1).join("")}…`;
+  return `${chars.length <= room ? body : `${chars.slice(0, room - 1).join("")}…`}${tail}`;
 }
 
-const doneText = (lines: readonly Line[], maxLength: number): string => attentionText(lines, 0, maxLength).replace(/^A task needs your attention in Rovara:/u, "A task finished in Rovara:").replace(/^These tasks need your attention in Rovara:/u, "These tasks finished in Rovara:");
+const doneText = (lines: readonly Line[], maxLength: number, footer?: string): string => attentionText(lines, 0, maxLength, footer).replace(/^A task needs your attention in Rovara:/u, "A task finished in Rovara:").replace(/^These tasks need your attention in Rovara:/u, "These tasks finished in Rovara:");
 
 /** The event id of a batch: the same rows to the same target are the same event, so an adapter that is told twice drops the repeat. */
 export function batchEventId(orgId: string, developerId: string, target: string, rows: readonly { sk: string; at: string }[]): string {
@@ -256,18 +281,36 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     for (const row of stale) { await dropRow(row); outcome.dropped += 1; }
     if (current.length === 0) continue;
     const prefs = await readNotifyPrefs(deps.store, orgId, developerId);
+    // Where each session's change is also told: the conversation it was started from, when this person started it. Never past a mute.
+    const threadSessions = new Map<string, { target: NotifyTarget; sessions: Set<string> }>();
+    if (!prefs.muted && deps.thread !== undefined) {
+      for (const sessionId of new Set(current.map(({ row }) => row.sessionId))) {
+        const thread = await deps.thread(orgId, sessionId).catch(() => undefined);
+        if (thread === undefined || thread.personId !== developerId) continue;
+        const target: NotifyTarget = { channel: thread.conversation.channel, conversation: thread.conversation };
+        const found = threadSessions.get(targetKey(target)) ?? { target, sessions: new Set<string>() };
+        found.sessions.add(sessionId);
+        threadSessions.set(targetKey(target), found);
+      }
+    }
+    const chosen = new Set(prefs.targets.map((target) => targetKey(target)));
+    const wanted: NotifyTarget[] = [...prefs.targets, ...[...threadSessions.values()].map(({ target }) => target).filter((target) => !chosen.has(targetKey(target)))];
+    const targets = wanted.slice(0, Math.min(NOTIFY_TARGETS_MAX * 2, deps.maxTargets ?? Number.POSITIVE_INFINITY));
+    if (targets.length < wanted.length) log({ event: "attention.thread_targets_truncated", dropped: wanted.length - targets.length });
+    // A target tells the person about every row when they chose it, and only about the sessions started there when it is the conversation of a start.
+    const appliesTo = (tkey: string, row: PendingRow): boolean => chosen.has(tkey) || threadSessions.get(tkey)?.sessions.has(row.sessionId) === true;
     // A person who muted notices, or has nowhere to be told, is not messaged; the rows go (Home still lists what waits for them).
-    if (prefs.muted || prefs.targets.length === 0) { for (const { row } of current) await dropRow(row); continue; }
+    if (prefs.muted || targets.length === 0) { for (const { row } of current) await dropRow(row); continue; }
     taken += 1;
     let sentSomething = false, attempted = false;
     const next: SentMarker = { lastAt: marker.lastAt, failures: { ...marker.failures }, retryAt: { ...marker.retryAt } };
-    for (const target of prefs.targets) {
+    for (const target of targets) {
       const tkey = targetKey(target);
-      const owed = current.filter(({ row }) => !row.done.has(tkey));
+      const owed = current.filter(({ row }) => appliesTo(tkey, row) && !row.done.has(tkey));
       if (owed.length === 0) continue;
       const adapter: ChannelAdapter | undefined = deps.registry.get("channel", target.channel);
-      // A channel nobody serves, or one that cannot message first, will not succeed by trying again: it is counted as unreachable and marked, never retried.
-      if (adapter === undefined || !adapter.capabilities.proactive) {
+      // A channel nobody serves, or one that cannot message first (for a target the person chose; a conversation of a start is a reply), will not succeed by trying again: it is counted as unreachable and marked, never retried.
+      if (adapter === undefined || (!adapter.capabilities.proactive && chosen.has(tkey))) {
         outcome.unreachable += 1;
         for (const { row } of owed) row.done.add(tkey);
         continue;
@@ -277,7 +320,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       const lines = [...new Map(owed.map(({ row, line }) => [row.sessionId, line])).values()];
       const shown = lines.slice(0, NOTIFY_ITEMS_MAX), more = lines.length - shown.length;
       const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done");
-      const text = allDone ? doneText(shown, adapter.capabilities.maxTextLength) : attentionText(shown, more, adapter.capabilities.maxTextLength);
+      const text = allDone ? doneText(shown, adapter.capabilities.maxTextLength, deps.footer) : attentionText(shown, more, adapter.capabilities.maxTextLength, deps.footer);
       const base = { version: 1 as const, id: batchEventId(orgId, developerId, tkey, owed.map(({ row }) => ({ sk: row.key.sk, at: row.at }))), channel: target.channel, conversation: target.conversation, createdAt: new Date(nowMs).toISOString() };
       const event = (allDone ? { ...base, type: "done", data: { text } } : allFailed ? { ...base, type: "error", data: { code: "task_failed", text } } : { ...base, type: "progress", data: { text } }) as ChannelEvent;
       let ok = false;
@@ -303,12 +346,12 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     }
     if (sentSomething) { outcome.people += 1; next.lastAt = nowMs; }
     // When every target still owed waits for a retry, the person is not due again before the first of them.
-    const waiting = prefs.targets.filter((target) => current.some(({ row }) => !row.done.has(targetKey(target)))).map((target) => next.retryAt[targetKey(target)]);
+    const waiting = targets.filter((target) => current.some(({ row }) => appliesTo(targetKey(target), row) && !row.done.has(targetKey(target)))).map((target) => next.retryAt[targetKey(target)]);
     if (!sentSomething && waiting.length > 0 && waiting.every((at) => at !== undefined && at > nowMs)) next.waitUntil = Math.min(...(waiting as number[]));
     if (!attempted) taken -= 1;
     // What each target received is marked on the rows; an event already sent has a stable id, so a mark that fails is only logged.
     for (const { row } of current) {
-      if (prefs.targets.every((target) => row.done.has(targetKey(target)))) { await dropRow(row); continue; }
+      if (targets.every((target) => !appliesTo(targetKey(target), row) || row.done.has(targetKey(target)))) { await dropRow(row); continue; }
       await deps.store.update({ key: row.key, ops: [change.set("doneTargets", [...row.done])], condition: when.and(when.present(), when.eq("at", row.at)) }).catch((error: unknown) => log({ event: "attention.mark_failed", error: error instanceof Error ? error.name : "unknown" }));
     }
     await deps.store.put({

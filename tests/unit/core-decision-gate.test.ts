@@ -482,3 +482,41 @@ describe("the approval gate: what the review of round 1 found", () => {
     expect(await gate.decide(attempt())).toMatchObject({ status: "refused", reason: "expired" });
   });
 });
+
+describe("the approval gate: a chat method is one act and no sign-in", () => {
+  /** An approvers plug-in that names the chat method as a strong method and takes any proof of it as the owner's. */
+  const chatNamed = (): Approvers => {
+    const requirement: ApprovalRequirement = { methods: ["chat-examplechat"], minApprovers: 1, selfApprovalAllowed: true, strongMethods: ["chat-examplechat"], rejectMethods: ["chat-examplechat"], changesMethods: ["chat-examplechat"] };
+    return {
+      async requirement() { return requirement; },
+      async verify(_request: ApprovalRequest, proof: ApprovalProof): Promise<ApprovalVerdict> { return { approved: true, approver: OWNER, method: proof.method, proofId: proof.proofId }; },
+    };
+  };
+  const press = (overrides: Partial<DecisionAttempt> = {}): DecisionAttempt => attempt({
+    credentials: [{ method: "chat-examplechat", token: "trigger-1", claimedAccount: { provider: "examplechat", tenant: "team1", accountId: "user1" } }], ...overrides,
+  });
+
+  it("is refused for a high-risk approval and for a rejection, whatever the approvers plug-in names", async () => {
+    const high = world({ approvers: chatNamed(), risk: "high" });
+    await high.ready;
+    expect(await high.gate.decide(press())).toMatchObject({ status: "refused", reason: "method_not_allowed" });
+    expect((await taskWorkflow(high.store)).revision).toBe(R0);
+    const reject = world({ approvers: chatNamed(), risk: "low" });
+    await reject.ready;
+    expect(await reject.gate.decide(press({ outcome: "reject", reason: "no" }))).toMatchObject({ status: "refused", reason: "method_not_allowed" });
+    expect((await taskWorkflow(reject.store)).revision).toBe(R0);
+  });
+
+  it("is still the plug-in's to take for a low-risk approval", async () => {
+    const low = world({ approvers: chatNamed(), risk: "low" });
+    await low.ready;
+    expect(await low.gate.decide(press())).toMatchObject({ status: "decided" });
+  });
+
+  it("is refused when the plug-in names nothing strong and the default would have been the local session", async () => {
+    const plain: Approvers = { async requirement() { return { methods: ["chat-examplechat"], minApprovers: 1, selfApprovalAllowed: true }; }, async verify(_request, proof) { return { approved: true, approver: OWNER, method: proof.method, proofId: proof.proofId }; } };
+    const high = world({ approvers: plain, risk: "high" });
+    await high.ready;
+    expect(await high.gate.decide(press())).toMatchObject({ status: "refused", reason: "method_not_allowed" });
+  });
+});

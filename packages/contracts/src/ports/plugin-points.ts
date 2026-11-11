@@ -119,6 +119,11 @@ export interface ChannelAdapter {
   readonly projects: readonly string[];
   /** Decision kinds that must be made on the task page, not through this adapter (`ChannelAdapterRecord.stepUp`). */
   readonly stepUp: readonly StepUpKind[];
+  /**
+   * Optional. The thread id this adapter reads as "no thread": a message to a space itself, at its top, not a reply in one. A notice to a person's own space (a direct message) has no thread to name, and a conversation
+   * reference always carries one; an adapter whose tool has threads names here the id that stands for none. Absent: the adapter has no such id, and a notice to it names a real thread.
+   */
+  readonly noThread?: string;
   /** Rovara to the channel. At least once: `event.id` is stable across retries, so an adapter drops a repeat. */
   deliver(event: ChannelEvent): Promise<void>;
   /** In-process adapters begin listening here. Webhook adapters need no listener: they post to the channel API. */

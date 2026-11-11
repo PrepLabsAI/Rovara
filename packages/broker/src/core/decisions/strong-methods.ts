@@ -11,9 +11,15 @@ export interface MethodPolicy {
   changesMethods?: readonly string[] | undefined;
 }
 
-/** Whether a method proves one act by a code host comment: `code-host-comment`, any `code-host-*` method, and every method the plug-in lists in `commentMethods`. */
+/** The prefix of a chat adapter's decision method (`chat-<channel>`): a press or a reply in a chat, which proves one act and no sign-in. */
+export const CHAT_METHOD_PREFIX = "chat-";
+
+/**
+ * Whether a method proves ONE act and no sign-in, so it can never be a strong method: `code-host-comment`, any `code-host-*` method, any `chat-*` method (a press or a reply in a chat), and every method the plug-in lists in
+ * `commentMethods`. The core drops these from the high-risk and reject sets whatever an approvers plug-in names.
+ */
 export function isCommentMethod(method: string, requirement: Pick<ApprovalRequirement, "commentMethods"> = {}): boolean {
-  return method === CODE_HOST_COMMENT_METHOD || method.startsWith("code-host-") || requirement.commentMethods?.includes(method) === true;
+  return method === CODE_HOST_COMMENT_METHOD || method.startsWith("code-host-") || method.startsWith(CHAT_METHOD_PREFIX) || requirement.commentMethods?.includes(method) === true;
 }
 
 /**

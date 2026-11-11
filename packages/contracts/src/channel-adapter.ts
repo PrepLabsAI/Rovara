@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { ActorRefSchema, ChannelIdSchema, ChannelOpaqueIdSchema, ConversationRefSchema, InboundMessageSchema, SLACK_CHANNEL } from "./conversation.js";
+import { orgScoped, type OrgId, type OrgKey } from "./company-scope.js";
 import { publicHttpsUrlSchema } from "./mcp-connector.js";
 import { AgentXNameSchema } from "./names.js";
 
@@ -9,8 +10,17 @@ import { AgentXNameSchema } from "./names.js";
  * posts to Rovara and Rovara signs what it sends back, both with Standard Webhooks (https://www.standardwebhooks.com).
  */
 
-/** A registered adapter's channel: any channel ID except `slack`, which is the built-in adapter. */
-export const AdapterChannelIdSchema = ChannelIdSchema.refine((channel) => channel !== SLACK_CHANNEL, "slack is the built-in adapter and cannot be registered");
+/**
+ * An adapter's channel: any channel ID, `slack` included (owner decision 58: a chat tool is an ordinary adapter, and the id of the chat tool Rovara shipped first is not special). An in-process adapter of
+ * any id is named by the plug-in config; the hosted product's own path for that tool is a separate matter (`RegisteredChannelIdSchema`).
+ */
+export const AdapterChannelIdSchema = ChannelIdSchema;
+
+/**
+ * The channel of an adapter REGISTERED OVER HTTP (a webhook adapter, `ChannelAdapterRecord`): any ID except `slack`. The hosted product still serves that chat tool on its own built-in path, whose rows and
+ * workspace owner keys a registered webhook adapter must not be able to pose as; until the hosted product moves onto the in-process adapter, a registration cannot take the id.
+ */
+export const RegisteredChannelIdSchema = ChannelIdSchema.refine((channel) => channel !== SLACK_CHANNEL, "slack is served by its own adapter and cannot be registered over HTTP");
 
 /** FR-023: what the adapter's surface can show. The core never sends a part it cannot. */
 export const ChannelCapabilitiesSchema = z.object({
@@ -43,7 +53,7 @@ export type ChannelAdapterRegistration = z.infer<typeof ChannelAdapterRegistrati
 
 /** A registered adapter as the state table stores it. The signing secret is in Secrets Manager under `secretName`. */
 export const ChannelAdapterRecordSchema = z.object({
-  channel: AdapterChannelIdSchema,
+  channel: RegisteredChannelIdSchema,
   callbackUrl: publicHttpsUrlSchema("callbackUrl"),
   capabilities: ChannelCapabilitiesSchema,
   projects: uniqueList(AgentXNameSchema, 64, "projects"),
@@ -57,11 +67,11 @@ export type ChannelAdapterRecord = z.infer<typeof ChannelAdapterRecordSchema>;
 
 export const CHANNEL_ADAPTERS_PK = "CHANNEL_ADAPTERS";
 export function channelAdapterKey(channel: string): { pk: string; sk: string } {
-  return { pk: CHANNEL_ADAPTERS_PK, sk: `CHANNEL#${AdapterChannelIdSchema.parse(channel)}` };
+  return { pk: CHANNEL_ADAPTERS_PK, sk: `CHANNEL#${RegisteredChannelIdSchema.parse(channel)}` };
 }
 /** The adapter's signing secret's name, under this deployment's secret prefix (for example `agentx/prod/`). */
 export function channelAdapterSecretName(prefix: string, channel: string): string {
-  return `${prefix}channel-adapter/${AdapterChannelIdSchema.parse(channel)}`;
+  return `${prefix}channel-adapter/${RegisteredChannelIdSchema.parse(channel)}`;
 }
 
 /** What an adapter sees once, at registration: the record and the secret it signs with. */
@@ -112,7 +122,11 @@ const ApprovalAction = z.object({ decision: ChannelDecisionValueSchema, label: z
 
 const eventData = {
   ack: z.object({ inReplyTo: ChannelOpaqueIdSchema }).strict(),
-  progress: z.object({ text: Text }).strict(),
+  /**
+   * `onlyTo`: the id of the one account (of the conversation's tenant) that may see the text, for what must not be read by the others in the conversation (a one-use link code). An adapter that cannot show a message to one
+   * person must not post it at all.
+   */
+  progress: z.object({ text: Text, onlyTo: ChannelOpaqueIdSchema.optional() }).strict(),
   question: z.object({ text: Text, choices: z.array(z.string().min(1).max(200)).max(10).optional() }).strict(),
   approval_request: z.object({
     text: Text,
@@ -276,7 +290,7 @@ export type ChannelLink = z.infer<typeof ChannelLinkSchema>;
 
 function actorParts(actor: z.infer<typeof ActorRefSchema>) {
   const parsed = ActorRefSchema.parse(actor);
-  if (parsed.channel === SLACK_CHANNEL) throw new Error("Slack actors are not linked; Slack verifies them itself");
+  if (parsed.channel === SLACK_CHANNEL) throw new Error("Slack actors are not linked under these unscoped keys: the hosted product verifies them itself (an in-process adapter links through the company-scoped keys below)");
   return parsed;
 }
 export function channelLinkKey(actor: z.infer<typeof ActorRefSchema>): { pk: string; sk: string } {
@@ -286,6 +300,23 @@ export function channelLinkKey(actor: z.infer<typeof ActorRefSchema>): { pk: str
 export function developerChannelLinkKey(developerId: string, actor: z.infer<typeof ActorRefSchema>): { pk: string; sk: string } {
   const parsed = actorParts(actor);
   return { pk: `DEVELOPER_CHANNEL_LINKS#${developerId}`, sk: `${parsed.channel}/${parsed.tenant}/${parsed.userId}` };
+}
+
+/**
+ * Owner decision 58 and 45.6: the same link keys under the company scope (`ORG#<company>#...`), for the in-process adapters, whose people are linked to a person of one company. The unscoped
+ * keys above are the registered (webhook) adapters' stored layout and keep refusing `slack` (the hosted product's own path serves that tool); an in-process adapter of any id, `slack` included, links through these.
+ */
+export function orgChannelLinkKey(orgId: OrgId, actor: z.infer<typeof ActorRefSchema>): OrgKey {
+  const parsed = ActorRefSchema.parse(actor);
+  return { pk: orgScoped(orgId, `CHANNEL_LINK#${parsed.channel}/${parsed.tenant}`), sk: `USER#${parsed.userId}` };
+}
+export function orgDeveloperChannelLinkKey(orgId: OrgId, developerId: string, actor: z.infer<typeof ActorRefSchema>): OrgKey {
+  const parsed = ActorRefSchema.parse(actor);
+  return { pk: orgScoped(orgId, `DEVELOPER_CHANNEL_LINKS#${developerId}`), sk: `${parsed.channel}/${parsed.tenant}/${parsed.userId}` };
+}
+export function orgChannelLinkCodeKey(orgId: OrgId, codeHash: string): OrgKey {
+  if (!/^[a-f0-9]{64}$/.test(codeHash)) throw new Error("link code hash must be a sha256 hex digest");
+  return { pk: orgScoped(orgId, `CHANNEL_LINK_CODE#${codeHash}`), sk: "META" };
 }
 
 /** FR-031: a channel user ID as the confirmation shows it, such as `+91 ••• 4821`. */

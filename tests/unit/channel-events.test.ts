@@ -86,6 +86,15 @@ describe("delivery", () => {
     expect(await run(JSON.stringify({ ...done, channel: "slack" }))).toEqual({ batchItemFailures: [] });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("drops an event that is a well-formed one for the chat tool the hosted product serves itself, whatever adapter record could be found", async () => {
+    const getAdapter = vi.fn(async () => adapter);
+    const { run, fetchMock } = setup({ getAdapter });
+    const slack = { ...done, channel: "slack", conversation: { channel: "slack", tenant: "T0AAAAAAA", space: "C0ROOM001", thread: "1700000000.000100" } };
+    expect(await run(JSON.stringify(slack))).toEqual({ batchItemFailures: [] });
+    expect(getAdapter).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("shaping (FR-023)", () => {

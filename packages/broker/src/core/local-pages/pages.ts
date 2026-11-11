@@ -7,7 +7,7 @@ import { esc, externalLink, layout, untrusted } from "./html.js";
 import type { FormBinding } from "./guard.js";
 import { PART_STATE_WORDS } from "../work-breakdown/view.js";
 import type {
-  ApprovalOffer, CommentView, DesignReviewView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView,
+  ApprovalOffer, ChatPageView, CommentView, DesignReviewView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView,
 } from "./views.js";
 import type { SecondReviewState } from "@agentx/contracts";
 
@@ -313,5 +313,49 @@ export function renderSecondReview(context: PageContext, state: SecondReviewStat
       + `${form("replay", "<label>Replay run (JSON)<br><textarea name=\"run\" maxlength=\"30000\" required></textarea></label>", "Store the replay run")}`
       + `${eligible.length === 0 ? "" : form("verdict", `<label>Model<br><select name="model">${options()}</select></label><label>Replay run id<br><input type="text" name="run" maxlength="64" required autocomplete="off"></label><label>Shadow window from (ISO time)<br><input type="text" name="from" maxlength="40" required autocomplete="off"></label><label>to<br><input type="text" name="to" maxlength="40" required autocomplete="off"></label>`, "Record the evidence")}</section>`
       + `<section class="panel"><h2>Models</h2>${rows.length === 0 ? "<p class=\"muted\">No model is available.</p>" : `<table><thead><tr><th>Model</th><th>Cost of one review</th><th>Fit</th></tr></thead><tbody>${rows.join("")}</tbody></table>`}</section>`,
+  });
+}
+
+// ---- Chat
+
+/**
+ * The chat page: the chat adapters this install runs, the accounts linked to you, the spaces bound to a project and where you are told. Everything on it is yours to change on this page only: a linked account can start work as
+ * you, a bound space starts work on a project, and a notice target receives the titles of your tasks. Nothing here approves anything: a plan is decided on its own page.
+ */
+export function renderChat(context: PageContext, view: ChatPageView, options: { preview?: { code: string; channel: string; tenant: string; userId: string } }): string {
+  const form = (action: string, subject: string, fields: string, button: string, danger = false): string =>
+    `<form class="row" method="post" action="${esc(context.base)}/chat/${esc(action)}">${fields}${hidden("ft", context.formToken({ action: `chat.${action}`, subject }))}<button type="submit"${danger ? " class=\"danger\"" : ""}>${esc(button)}</button></form>`;
+  const adapters = view.adapters.length === 0
+    ? "<p class=\"muted\">No chat is set up on this install. Name a chat plug-in in your plug-in config to add one.</p>"
+    : `<ul>${view.adapters.map((adapter) => `<li><strong>${untrusted(adapter.name)}</strong> <span class="muted">serves ${adapter.projects.map((project) => untrusted(project)).join(", ")}${adapter.proactive ? "" : "; cannot message first"}</span></li>`).join("")}</ul>`;
+  const preview = options.preview === undefined ? ""
+    : `<section class="panel" id="confirm"><h2>Link this account?</h2><p>The code names a <strong>${untrusted(options.preview.channel)}</strong> account: workspace <code>${untrusted(options.preview.tenant)}</code>, account <code>${untrusted(options.preview.userId)}</code>. Link it only if that is your own account and you just asked Rovara in the chat. Someone else's code is how a stranger gets to start work as you.</p>`
+      + `${form("link", options.preview.code, `${hidden("code", options.preview.code)}${hidden("confirmed", "yes")}`, "Yes, link it as me")}</section>`;
+  const linkForm = `<section class="panel" id="link"><h2>Link a chat account to you</h2><p>Message Rovara in a chat space that is bound to a project. If it does not know you yet it answers with a code. Paste the code here: the account is then yours, and its messages can start work as you.</p>`
+    + `<form class="decide" method="get" action="${esc(context.base)}/chat"><label>The code<br><input type="text" name="code" maxlength="64" autocomplete="off" required></label><div class="row"><button type="submit">Look at the code</button></div></form></section>`;
+  const links = view.links.length === 0 ? "<p class=\"muted\">No chat account is linked to you.</p>"
+    : `<table><thead><tr><th>Chat</th><th>Account</th><th>Linked</th><th></th></tr></thead><tbody>${view.links.map((link) => `<tr><td>${untrusted(link.channel)}</td><td><code>${untrusted(link.maskedUserId)}</code></td><td class="muted">${esc(link.linkedAt)}</td><td>${form("unlink", `${link.channel}/${link.tenant}/${link.userId}`, `${hidden("channel", link.channel)}${hidden("tenant", link.tenant)}${hidden("userId", link.userId)}`, "Remove", true)}</td></tr>`).join("")}</tbody></table>`;
+  const bindings = view.bindings.length === 0 ? "<p class=\"muted\">No space is bound to a project.</p>"
+    : `<table><thead><tr><th>Chat</th><th>Space</th><th>Project</th><th></th></tr></thead><tbody>${view.bindings.map((binding) => `<tr><td>${untrusted(binding.channel)}</td><td><code>${untrusted(binding.space)}</code></td><td>${untrusted(binding.project)}</td><td>${form("unbind", `${binding.channel}/${binding.tenant}/${binding.space}`, `${hidden("channel", binding.channel)}${hidden("tenant", binding.tenant)}${hidden("space", binding.space)}`, "Unbind", true)}</td></tr>`).join("")}</tbody></table>`;
+  const bindForm = view.adapters.length === 0 || view.projects.length === 0 ? "" : `<form class="decide" method="post" action="${esc(context.base)}/chat/bind">`
+    + `<label>Chat<br><select name="channel">${view.adapters.map((adapter) => `<option value="${esc(adapter.name)}">${untrusted(adapter.name)}</option>`).join("")}</select></label>`
+    + "<label>Workspace or team id<br><input type=\"text\" name=\"tenant\" maxlength=\"128\" required autocomplete=\"off\"></label><label>Space id (a channel)<br><input type=\"text\" name=\"space\" maxlength=\"128\" required autocomplete=\"off\"></label>"
+    + `<label>Project<br><select name="project">${view.projects.map((project) => `<option value="${esc(project)}">${untrusted(project)}</option>`).join("")}</select></label>`
+    + `${hidden("ft", context.formToken({ action: "chat.bind", subject: "new" }))}<div class="row"><button class="primary" type="submit">Bind the space</button></div></form>`;
+  const targets = view.notify.targets.length === 0 ? "<p class=\"muted\">You are not told anywhere. Rovara will not message you.</p>"
+    : `<table><thead><tr><th>Chat</th><th>Space</th><th>Thread</th><th></th></tr></thead><tbody>${view.notify.targets.map((target) => `<tr><td>${untrusted(target.channel)}</td><td><code>${untrusted(target.space)}</code></td><td><code>${untrusted(target.thread)}</code></td><td>${form("notice-remove", `${target.channel}/${target.tenant}/${target.space}/${target.thread}`, `${hidden("channel", target.channel)}${hidden("tenant", target.tenant)}${hidden("space", target.space)}${hidden("thread", target.thread)}`, "Remove", true)}</td></tr>`).join("")}</tbody></table>`;
+  const noticeForm = view.adapters.length === 0 ? "" : `<form class="decide" method="post" action="${esc(context.base)}/chat/notice-add">`
+    + `<label>Chat<br><select name="channel">${view.adapters.map((adapter) => `<option value="${esc(adapter.name)}">${untrusted(adapter.name)}</option>`).join("")}</select></label>`
+    + "<label>Workspace or team id<br><input type=\"text\" name=\"tenant\" maxlength=\"128\" required autocomplete=\"off\"></label><label>Space id (a channel or a direct message)<br><input type=\"text\" name=\"space\" maxlength=\"128\" required autocomplete=\"off\"></label>"
+    + "<label>Thread (leave empty for the top of the space)<br><input type=\"text\" name=\"thread\" maxlength=\"128\" autocomplete=\"off\"></label>"
+    + `${hidden("ft", context.formToken({ action: "chat.notice-add", subject: "new" }))}<div class="row"><button class="primary" type="submit">Tell me here</button></div></form>`;
+  const mute = form("mute", view.notify.muted ? "off" : "on", hidden("muted", view.notify.muted ? "no" : "yes"), view.notify.muted ? "Turn notices back on" : "Mute notices");
+  return layout({
+    title: "Chat", nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
+    body: "<h1>Chat</h1><p>A chat is where Rovara can tell you what needs you, and where you can start work. Nothing said in a chat approves anything: a plan is decided on its own page, where you sign in.</p>"
+      + `<section class="panel"><h2>Chats on this install</h2>${adapters}</section>${preview}${linkForm}`
+      + `<section class="panel"><h2>Accounts linked to you</h2>${links}</section>`
+      + `<section class="panel"><h2>Spaces bound to a project</h2>${bindings}${bindForm}</section>`
+      + `<section class="panel"><h2>Where you are told</h2><p>One message at most every few minutes: what needs you, in one list. ${view.notify.muted ? "<strong>Notices are muted.</strong>" : ""}</p>${targets}${noticeForm}<div class="row">${mute}</div></section>`,
   });
 }

@@ -4,7 +4,7 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  AdapterChannelIdSchema,
+  RegisteredChannelIdSchema,
   channelBindingKey,
   readChannelBindingItem,
   ChannelDecisionSchema,
@@ -85,7 +85,7 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
   return async (event: ChannelIngressEvent): Promise<ChannelIngressResponse> => {
     if (event.requestContext?.http?.method !== "POST") return refuse(405, "method_not_allowed");
     const route = /^\/v1\/channels\/([^/]+)\/(messages|decisions)$/.exec(event.rawPath ?? "");
-    const channel = route === null ? undefined : AdapterChannelIdSchema.safeParse(route[1]);
+    const channel = route === null ? undefined : RegisteredChannelIdSchema.safeParse(route[1]);
     if (route === null || channel === undefined || !channel.success) return refuse(404, "not_found");
     const kind = route[2] as "messages" | "decisions";
 
