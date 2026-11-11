@@ -64,7 +64,8 @@ function isLifecycleKey(key: string): boolean {
 /** How deep, counting the arguments object as depth 1, a tool that offers item paths is searched for lifecycle keys. */
 const LIFECYCLE_SEARCH_DEPTH = 4;
 
-const IN_HOUSE_READS: ReadonlySet<string> = new Set(["agentx_follow_up", "agentx_task_status", "agentx_task_result"]);
+// tool_search only loads tool descriptions into the model's next step; it reads nothing and changes nothing. Every tool it loads is gated on its own call.
+const IN_HOUSE_READS: ReadonlySet<string> = new Set(["agentx_follow_up", "agentx_task_status", "agentx_task_result", "tool_search"]);
 const DESTRUCTIVE_PULL_REQUEST_ACTIONS: ReadonlySet<string> = new Set(["close", "replace", "revert"]);
 
 /**

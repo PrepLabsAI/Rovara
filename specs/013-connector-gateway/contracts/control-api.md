@@ -73,17 +73,17 @@ never blocked on it). `problem` is set for the two failing statuses. `offered` l
 names the vendor actually presented; `skipped` lists `{ tool, reason }` for each approved tool it
 could not present.
 
-The response always includes `tools`: `{ maximum, warnAbove: 20, limit: 40 }`. `maximum` is the
+The response always includes `tools`: `{ maximum, warnAbove: 20, limit: 200 }`. `maximum` is the
 most tools the model could see for this project (six built-in plus every connector approval).
 `warnAbove` and `limit` are the fixed thresholds below, sent so a client never has to hardcode
 them.
 
-Independently of `preflight`, the response adds `warnings` whenever it is non-empty: one line if
-the project could expose more than 20 tools to the model (six built-in plus every connector
-approval; this needs no vendor call, so it appears whether or not preflight ran), one line per
+Independently of `preflight`, the response adds `warnings` whenever it is non-empty: one line per
 connector reported `not_connected` or `unavailable`, and one line per skipped tool.
 
-A project that could expose more than 40 tools, or whose presented name (`<connector>__<tool>`)
+A project that could expose more than 200 tools (this replaces the old limit of 40; tools above 20
+load on demand through `tool_search`, so the warning above 20 is gone, and the `tools.warnAbove`
+field now tells a client where on-demand loading starts), or whose presented name (`<connector>__<tool>`)
 exceeds 64 characters, refuses registration outright, naming the count or the tool; both checks
 run for a new revision only; a resubmitted, already-registered revision stays idempotent. A
 `target` argument collision on a connector with several scopes also refuses a new revision, but

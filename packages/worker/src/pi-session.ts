@@ -27,9 +27,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
-import { ROUTE_PROVIDER, createModelRuntimeWithFallback, routeUsageIdentity, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice, type ModelProxyOptions } from "@agentx/model-runtime";
+import { ROUTE_PROVIDER, TOOL_SEARCH_TOOL_NAME, createModelRuntimeWithFallback, excludeUnselectedBuiltIns, planToolExposure, routeUsageIdentity, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice, type ModelProxyOptions } from "@agentx/model-runtime";
 import { createPiSettingsManager } from "@agentx/model-runtime/pi-settings";
-import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type InvocationModelRoute, type ThinkingLevel } from "@agentx/contracts";
+import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, SEARCH_TEAM_KNOWLEDGE_TOOL, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type InvocationModelRoute, type ThinkingLevel } from "@agentx/contracts";
 import { compactionExtension, type CompactionSummariser, type SessionCompactionOptions } from "./compaction.js";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
@@ -186,7 +186,10 @@ export interface AgentRunSession {
 }
 
 /** The names no worker tool of an agent step may take: Pi's own, the shell and `read_skill`. */
-const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "read_skill", "read_knowledge"]);
+const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "powershell", "read_skill", "read_knowledge", TOOL_SEARCH_TOOL_NAME]);
+
+/** The worker's own tools that are always declared, however many connector or source tools there are: they are few and the model needs them every time. */
+const ALWAYS_DIRECT_TOOL_NAMES: ReadonlySet<string> = new Set(["choose_branch", SEARCH_TEAM_KNOWLEDGE_TOOL]);
 
 /**
  * Context sources are for the stages that read and judge, never for Build, where the shell is: untrusted live text must not reach the stage that can run
@@ -572,6 +575,11 @@ async function createDefaultSession(
     // The rovara MCP server, and no other: Pi's MCP extension is loaded only for a session with sources, held to that one server (context-sources/pi-mcp.ts).
     const sourceMcp = input.contextMcp === undefined ? undefined : rovaraMcpExtensions(input.contextMcp);
     const hasSources = sourceTools.length > 0 || input.contextMcp !== undefined;
+    // Connector tools (an agent step's grants) and source tools above DEFERRED_TOOLS_ABOVE are found with tool_search instead of being declared up front. They are
+    // the same tools: the broker bridge runs them, every tool_call handler sees them, and a stage that was not given a tool does not register it, so it cannot be found.
+    // The structured-answer tools (submit_review ...) and the rovara MCP server's tools (registered by Pi's MCP extension, not here) always stay direct.
+    const answerToolNames = new Set(answerTools.map(({ name }) => name));
+    const exposure = planToolExposure(runTools, { deferrable: ({ name }) => !ALWAYS_DIRECT_TOOL_NAMES.has(name) && !answerToolNames.has(name), namespaceOf: ({ label }) => label.split(" / ")[0], protectNames: ["mcp__"] });
     // The conversation-compaction hook (compaction.ts): the summary is made with this session's own model, key and stream, from messages with every source result stubbed.
     const live: { session?: AgentSession } = {};
     const summarise: CompactionSummariser = async (preparation, instructions, signal) => {
@@ -587,7 +595,7 @@ async function createDefaultSession(
       return compact(preparation, requestModel, auth?.auth.apiKey, headers, instructions, signal, live.session?.thinkingLevel, streamFunction, auth?.env, settingsManager.getRetrySettings(), retries);
     };
     const compaction = compactionExtension(input.compaction ?? {}, summarise, input.onDiagnostic === undefined ? undefined : (message) => { try { input.onDiagnostic?.(redactText(message)); } catch { /* reporting must not break a turn */ } });
-    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun, ...(sourceMcp?.extensions ?? []), compaction], loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : {}) });
+    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun, ...(sourceMcp?.extensions ?? []), ...exposure.extensions, compaction], ...(exposure.note === undefined ? {} : { toolSearchNote: exposure.note }), loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : {}) });
     // An AgentX extension that failed to load would leave its work silently undone, so the session does not start.
     // It is a deterministic AgentX bug, so not RUNTIME_UNAVAILABLE, which the broker reads as "retry" (M-10).
     const loadErrors = resourceLoader.getExtensions().errors;
@@ -611,7 +619,9 @@ async function createDefaultSession(
       thinkingLevel: requestedLevel ?? (model.reasoning ? "medium" : "off"),
       // read_skill is the worker's own tool, never a file tool: it is there only when the operation has skills.
       // With the rovara server, its tools are named by pattern; naming any MCP tool makes the list filter MCP tools, so no other server's could be active.
-      tools: [...stepTools.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...runTools.map(({ name }) => name), ...(input.contextMcp === undefined ? [] : [ROVARA_MCP_TOOL_PATTERN])],
+      tools: [...stepTools.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...exposure.names, ...(input.contextMcp === undefined ? [] : [ROVARA_MCP_TOOL_PATTERN])],
+      // Only the host tools this stage chose can be active: a deferred tool's `name*` entry (a tool called `wr`) must not switch on Pi's own `write`.
+      excludeTools: excludeUnselectedBuiltIns(stepTools.tools),
       // A custom tool with a built-in's name replaces it.
       customTools: [
         ...(stepTools.shell ? [agentShellTool(input.cwd, input.bashOperations, input.sequentialTools === true)] : []),
@@ -622,7 +632,7 @@ async function createDefaultSession(
             : devcontainerFileTools(input.cwd, input.devcontainerPaths).filter((tool) => stepTools.tools.includes(tool.name))),
         ...(skillFiles.length === 0 ? [] : [readSkillTool(skillFiles)]),
         ...knowledgeTool,
-        ...runTools,
+        ...exposure.tools,
       ],
       resourceLoader,
       settingsManager,
@@ -798,6 +808,8 @@ export async function createWorkerResources(
     systemPrompt?: string;
     /** The standing-instructions block (see PiSessionInput.standingInstructions); ignored when `systemPrompt` is given: an agent step carries the block inside its own system prompt. */
     standingInstructions?: string;
+    /** Added to the system prompt when some tools are deferred: says that tool_search loads them. */
+    toolSearchNote?: string;
   },
 ): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
   const skills = input.loadedSkills ?? [];
@@ -829,7 +841,7 @@ export async function createWorkerResources(
     // tool rules and documentation pointers; its addendum, project context and cwd sections are unchanged.
     // A step's skills are listed after it, naming read_skill: Pi's own list would point at the file and the read tool.
     systemPromptOverride: () => {
-      const base = input.systemPrompt ?? AGENTX_WORKER_PROMPT;
+      const base = `${input.systemPrompt ?? AGENTX_WORKER_PROMPT}${input.toolSearchNote === undefined ? "" : `\n\n${input.toolSearchNote}`}`;
       // With a standing-instructions block the skills list moves after it (below the company's rules, as the layer order says); without one the prompt is what it always was.
       return skills.length === 0 || standing !== undefined ? base : `${base}\n\n${skillsPromptSection(skills)}`;
     },
