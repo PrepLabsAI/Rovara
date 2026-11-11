@@ -52,15 +52,15 @@ describe("channel adapters infrastructure", () => {
     for (const route of routes) expect(route.AuthorizationType).toBe("NONE");
   });
 
-  it("lets the channel API read only adapters, bindings (Slack's too, for the built-in adapter) and links from the state table, by key", () => {
+  it("lets the channel API read only adapters, bindings (Slack's too, for the built-in adapter), links and shared task threads from the state table, by key", () => {
     const statements = statementsOf(named, roleOf(named, "ChannelApiIngress"));
     const onState = statements.filter((statement) => JSON.stringify(statement.Resource).includes("State") && !JSON.stringify(statement.Resource).includes("ChannelApiState"));
     expect(onState.map((statement) => [actions(statement), statement.Condition?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]])).toEqual([
-      [["dynamodb:GetItem"], ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*"]],
+      [["dynamodb:GetItem"], ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*", "SHARED_TASK#*"]],
       [["dynamodb:PutItem"], ["CHANNEL_LINK_CODE#*"]],
     ]);
-    // No query, no scan, no other write to the state table.
-    for (const statement of statements) {
+    // No query, no scan, no other write to the state table. (Slack's threads table is the Slack router's own, Phase 7c2.)
+    for (const statement of statements.filter((entry) => JSON.stringify(entry.Resource).includes("State"))) {
       for (const action of actions(statement)) expect(["dynamodb:Query", "dynamodb:Scan"]).not.toContain(action);
     }
   });
@@ -131,6 +131,16 @@ describe("channel adapters infrastructure", () => {
       const reads = statementsOf(named, roleOf(named, prefix)).filter((statement) => actions(statement).includes("secretsmanager:GetSecretValue"));
       expect(reads.map((statement) => JSON.stringify(statement.Resource)).join(), prefix).toContain("ChannelApiSlackAdapterSecret");
     }
+    // Phase 7c2: the channel API runs Slack's router: the neutral ingress and the router, with Slack's threads table and
+    // the broker; the orchestrator signs the commands for a routing card.
+    const ingress = functionNamed(named, "ChannelApiIngress")![1].Properties;
+    expect(ingress.Timeout).toBe(30);
+    expect((ingress.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ SHARED_TASKS: "enabled", SLACK_VIA_CHANNEL: { Ref: "SlackViaChannel" } });
+    const ingressStatements = JSON.stringify(statementsOf(named, roleOf(named, "ChannelApiIngress")));
+    expect(ingressStatements).toContain("SlackThreads");
+    expect(ingressStatements).toContain("lambda:InvokeFunction");
+    const orchestratorRole = ofType(named, "AWS::IAM::Role").find(([id]) => withoutHash(id).startsWith("SlackOrchestratorTaskRole"))![0];
+    expect(JSON.stringify(statementsOf(named, orchestratorRole))).toContain("ChannelApiSlackAdapterSecret");
     // A Canvas takes three Slack calls; the legacy Slack ingress keeps its 10 seconds.
     expect(functionNamed(named, "SlackIngress")![1].Properties.Timeout).toBe(30);
     expect(functionNamed(legacy, "SlackIngress")![1].Properties.Timeout).toBe(10);
