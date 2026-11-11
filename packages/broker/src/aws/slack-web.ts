@@ -163,8 +163,8 @@ export async function chatPostEphemeral(
 /** Spec 025 E13: edits a message the bot posted. Errors carry Slack's code only, as chatPostMessage's do. */
 export async function chatUpdate(
   botToken: string,
-  input: { channel: string; ts: string; text: string; blocks: unknown[] },
+  input: { channel: string; ts: string; text: string; blocks?: unknown[] | undefined },
   fetchImplementation: typeof fetch = fetch,
 ): Promise<void> {
-  await callSlack("chat.update", botToken, { channel: input.channel, ts: input.ts, text: input.text, blocks: input.blocks }, fetchImplementation);
+  await callSlack("chat.update", botToken, { channel: input.channel, ts: input.ts, text: input.text, ...(input.blocks === undefined ? {} : { blocks: input.blocks }) }, fetchImplementation);
 }

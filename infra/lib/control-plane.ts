@@ -889,7 +889,9 @@ export class ControlPlaneStack extends Stack {
         resources: [`arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:${alarmPrefix}*`],
       }));
       // Spec 062: channel adapters, off until the ChannelAdapters parameter is enabled.
-      const channelAdapters = new ChannelAdapters(this, "ChannelApi", { naming, env: naming.env, api, state, broker, orchestratorRole: slackOrchestratorRole, notifyOperator });
+      const channelAdapters = new ChannelAdapters(this, "ChannelApi", {
+        naming, env: naming.env, api, state, broker, orchestratorRole: slackOrchestratorRole, notifyOperator, slack: { ingress: slackIngress, integration: slackIntegration },
+      });
       new CfnOutput(this, "ChannelRequestQueueUrl", { value: channelAdapters.requests.queueUrl });
       new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
       // The channel request dead-letter queue is reported by its alarm only: one more queue ARN here pushes the broker

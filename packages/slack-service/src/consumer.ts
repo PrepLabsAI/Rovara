@@ -42,7 +42,10 @@ export interface ConsumerOptions<M> {
 /** Answers a page comment message from its parsed body; it reads and checks the body itself (slack-consumer.ts). */
 export type PageCommentHandler = (body: unknown, context: { handoff?: AbortSignal }) => Promise<void>;
 
-export type RequestHandler<M> = (message: M, context: {
+export type RequestHandler<M> = (message: M, context: RequestContext) => Promise<void>;
+
+/** What the queue runner tells a handler about the message it runs. */
+export type RequestContext = {
   finalAttempt: boolean;
   queuedBehind?: number;
   /** Task 21: route this plain request first (see QueueMessage.route). */
@@ -54,7 +57,7 @@ export type RequestHandler<M> = (message: M, context: {
   handoff?: AbortSignal;
   /** Issue 173: calls the listener on each SQS heartbeat while this message runs, so the turn can show it is alive. */
   onHeartbeat?: (listener: () => void) => void;
-}) => Promise<void>;
+};
 
 type GroupOptions<M> = Pick<ConsumerOptions<M>, "maxReceiveCount" | "visibilitySeconds" | "heartbeatMilliseconds" | "pageComment" | "read"> & {
   /** Once aborted, a later message of the group is released rather than started. */

@@ -1,5 +1,6 @@
 import {
   ChannelQueueItemSchema,
+  SLACK_CHANNEL,
   adapterMayDecide,
   parseChatGptCommand,
   parseEvalBatchCommand,
@@ -14,7 +15,7 @@ import {
 } from "@agentx/contracts";
 import { confirmationApprovalKind, confirmationDigest, type ConfirmationAnswer } from "./confirmations.js";
 import { PLAIN_FORMAT } from "./conversation-format.js";
-import type { RequestHandler } from "./consumer.js";
+import type { RequestContext, RequestHandler } from "./consumer.js";
 import { processConversationRequest, type ProcessorDependencies, type ProcessorMessage, type ServiceLog, type SurfaceCommand } from "./processor.js";
 
 /**
@@ -37,8 +38,28 @@ export function readChannelQueueItem(value: unknown): ChannelQueueItem | undefin
   return parsed.success ? parsed.data : undefined;
 }
 
+/** A queued conversation item: a message or a decision. */
+export type ConversationQueueItem = Exclude<ChannelQueueItem, { kind: "action" }>;
+
+/** The channel a queued item came through. */
+export function channelOf(item: ChannelQueueItem): string {
+  return item.kind === "message" ? item.message.channel : item.kind === "decision" ? item.decision.channel : item.action.channel;
+}
+
+/** An approval request event's data for a pending confirmation: Approve or Cancel, bound to its digest. */
+export function approvalRequestData(confirmation: PendingConfirmation, text: string): Extract<ChannelEvent, { type: "approval_request" }>["data"] {
+  return {
+    text,
+    kind: confirmationApprovalKind(confirmation),
+    requestId: confirmation.confirmationId,
+    expectedRevision: 1,
+    artifactDigest: confirmationDigest(confirmation),
+    actions: [{ decision: "APPROVE", label: "Approve" }, { decision: "REJECT", label: "Cancel" }],
+  };
+}
+
 /** The processor's request for a queued item; a decision becomes a "yes" or "cancel" bound to one confirmation. */
-export function channelTurn(item: Exclude<ChannelQueueItem, { kind: "action" }>): { message: ProcessorMessage<ConversationRef>; answer?: ConfirmationAnswer } {
+export function channelTurn(item: ConversationQueueItem): { message: ProcessorMessage<ConversationRef>; answer?: ConfirmationAnswer } {
   if (item.kind === "message") {
     const { message } = item;
     return { message: { eventId: message.eventId, thread: message.conversation, userId: message.actor.userId, text: message.text, receivedAt: message.receivedAt } };
@@ -62,6 +83,11 @@ export interface ChannelRequestDependencies {
    * Slack adapter's actions get theirs with Phases 7b and 7c.
    */
   actions?: Readonly<Record<string, ChannelActionHandler>>;
+  /**
+   * FR-073: channels the deployment runs its own way, by channel ID. The built-in Slack adapter's conversations run
+   * as Slack threads (Slack's subject, format, identity and turn records), answering with events all the same.
+   */
+  surfaces?: Readonly<Record<string, (item: ConversationQueueItem, context: RequestContext) => Promise<void>>>;
   now?: () => number;
   log: ServiceLog;
 }
@@ -93,6 +119,16 @@ export function channelRequestHandler(deps: ChannelRequestDependencies): Request
       await handler(item.action, { send: (event) => deps.send(event), finalAttempt: context.finalAttempt, log: deps.log });
       return;
     }
+    const surface = deps.surfaces?.[channelOf(item)];
+    if (surface !== undefined) {
+      await surface(item, context);
+      return;
+    }
+    // The built-in adapter's conversations need their own surface; without it nothing runs as an adapter's would.
+    if (channelOf(item) === SLACK_CHANNEL) {
+      deps.log("channel.surface_missing", { channel: SLACK_CHANNEL });
+      return;
+    }
     const { message, answer } = channelTurn(item);
     const conversation = message.thread;
     const event = <T extends ChannelEvent["type"]>(type: T, data: Extract<ChannelEvent, { type: T }>["data"]): ChannelEvent =>
@@ -104,14 +140,7 @@ export function channelRequestHandler(deps: ChannelRequestDependencies): Request
       if (trimmed.length > 0) await deps.send(event("message", { text: trimmed }));
     };
     const postConfirmation = async (_thread: ConversationRef, confirmation: PendingConfirmation, text: string) => {
-      await deps.send(event("approval_request", {
-        text,
-        kind: confirmationApprovalKind(confirmation),
-        requestId: confirmation.confirmationId,
-        expectedRevision: 1,
-        artifactDigest: confirmationDigest(confirmation),
-        actions: [{ decision: "APPROVE", label: "Approve" }, { decision: "REJECT", label: "Cancel" }],
-      }));
+      await deps.send(event("approval_request", approvalRequestData(confirmation, text)));
     };
     await processConversationRequest(message, {
       ...deps.processor,

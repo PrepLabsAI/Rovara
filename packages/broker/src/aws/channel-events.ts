@@ -2,9 +2,9 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { ChannelEventSchema, publicHttpsUrlProblem, steppedUpNote, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent } from "@agentx/contracts";
+import { ChannelEventSchema, publicHttpsUrlProblem, steppedUpNote, usableWebhookSecret, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent } from "@agentx/contracts";
 import { checkEndpointAddresses, EndpointRefused } from "@agentx/gateway";
-import { getChannelAdapter } from "./channel-adapters.js";
+import { adapterForChannel, builtInAdapterFromEnvironment } from "./channel-adapters.js";
 
 /**
  * Spec 062 FR-022, FR-023: delivers queued events to each adapter's callback URL, signed with its secret. At least
@@ -12,6 +12,9 @@ import { getChannelAdapter } from "./channel-adapters.js";
  * that may pass (a timeout, 408, 429, 5xx, an unreadable secret) is retried with a growing delay and then
  * dead-lettered by the queue; one that will not (a refused URL, another 4xx, a redirect, an adapter since removed)
  * is dropped and logged.
+ *
+ * The queue is FIFO, one group per conversation, so events arrive in the order they were sent. Once an event in a
+ * group is to be retried, the batch's later events in that group are retried with it, never delivered ahead of it.
  */
 
 const SEND_TIMEOUT_MS = 10_000;
@@ -29,7 +32,7 @@ export interface ChannelEventSenderDependencies {
   log?(entry: Record<string, unknown>): void;
 }
 
-export interface SqsRecord { messageId: string; body: string; receiptHandle?: string; attributes?: { ApproximateReceiveCount?: string } }
+export interface SqsRecord { messageId: string; body: string; receiptHandle?: string; attributes?: { ApproximateReceiveCount?: string; MessageGroupId?: string } }
 
 type Outcome = "delivered" | "dropped" | "retry";
 
@@ -124,13 +127,21 @@ export function createChannelEventSender(deps: ChannelEventSenderDependencies) {
 
   return async (event: { Records?: SqsRecord[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
     const failures: Array<{ itemIdentifier: string }> = [];
+    const heldGroups = new Set<string>();
     for (const record of event.Records ?? []) {
+      const group = record.attributes?.MessageGroupId;
+      if (group !== undefined && heldGroups.has(group)) {
+        // Behind an event that is being retried: it waits, so the conversation stays in order.
+        failures.push({ itemIdentifier: record.messageId });
+        continue;
+      }
       let outcome: Outcome;
       try { outcome = await deliver(record); } catch (error) {
         log({ event: "retry", reason: "unexpected", errorName: error instanceof Error ? error.name : "UnknownError" });
         outcome = "retry";
       }
       if (outcome !== "retry") continue;
+      if (group !== undefined) heldGroups.add(group);
       failures.push({ itemIdentifier: record.messageId });
       const receives = Number(record.attributes?.ApproximateReceiveCount ?? "1");
       if (deps.delay !== undefined && record.receiptHandle !== undefined) {
@@ -155,12 +166,14 @@ function createAwsChannelEventSender() {
   const sqs = new SQSClient(clientConfiguration);
   const tableName = requiredEnvironment("STATE_TABLE_NAME");
   const queueUrl = requiredEnvironment("CHANNEL_EVENT_QUEUE_URL");
+  const builtIn = builtInAdapterFromEnvironment(process.env);
+  const registry = process.env.CHANNEL_ADAPTERS === "enabled";
   return createChannelEventSender({
-    getAdapter: (channel) => getChannelAdapter({ documentClient, tableName }, channel),
+    getAdapter: (channel) => adapterForChannel({ documentClient, tableName }, channel, { builtIn, registry }),
     async getSecret(secretName) {
       try {
         const value = (await secretsManager.send(new GetSecretValueCommand({ SecretId: secretName }))).SecretString;
-        return value?.startsWith("whsec_") === true ? value : undefined;
+        return usableWebhookSecret(value);
       } catch {
         return undefined;
       }

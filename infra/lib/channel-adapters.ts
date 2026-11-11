@@ -1,6 +1,7 @@
 import {
   ArnFormat, CfnParameter, Duration, RemovalPolicy, Stack, aws_apigatewayv2 as apigwv2, aws_cloudwatch as cloudwatch, aws_dynamodb as dynamodb,
-  aws_iam as iam, aws_lambda_event_sources as eventSources, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions, type aws_lambda_nodejs as lambdaNodejs,
+  aws_iam as iam, aws_lambda_event_sources as eventSources, aws_secretsmanager as secretsmanager, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions,
+  type aws_lambda_nodejs as lambdaNodejs,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { packagedFunction } from "./control-plane.js";
@@ -15,6 +16,8 @@ export interface ChannelAdaptersProps {
   /** Spec 062 Phase 4: the hosted orchestrator, which runs the queued requests and sends their replies. */
   orchestratorRole: iam.IRole;
   notifyOperator: cloudwatchActions.SnsAction;
+  /** Spec 062 Phase 7b: Slack's ingress, which becomes the built-in Slack adapter when `SlackViaChannel` is on. */
+  slack: { ingress: lambdaNodejs.NodejsFunction; integration: apigwv2.CfnIntegration };
 }
 
 /**
@@ -42,6 +45,28 @@ export class ChannelAdapters extends Construct {
     const secretPrefix = `agentx/${props.env}/`;
     const adapterSecrets = stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${secretPrefix}channel-adapter/*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
 
+    // Spec 062 FR-073, FR-074: the built-in Slack adapter. The deployment registers it: its secret is generated here,
+    // and Slack's ingress signs with it what it hands the channel API and checks with it what comes back.
+    const slackViaChannel = new CfnParameter(stack, "SlackViaChannel", {
+      type: "String",
+      default: "disabled",
+      allowedValues: ["enabled", "disabled"],
+      description: "enabled: Slack conversations go through the channel API as the built-in Slack adapter (spec 062 Phase 7); disabled: Slack's own queue, as before",
+    }).valueAsString;
+    const slackAdapterSecretName = `${secretPrefix}channel-adapter/slack`;
+    const slackAdapterSecret = new secretsmanager.Secret(this, "SlackAdapterSecret", {
+      secretName: slackAdapterSecretName,
+      description: "Signing secret of the built-in Slack channel adapter (spec 062 FR-073); 64 letters and digits, read as base64",
+      generateSecretString: { passwordLength: 64, excludePunctuation: true, includeSpace: false },
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const builtInAdapter = {
+      BUILT_IN_ADAPTER: slackViaChannel,
+      BUILT_IN_ADAPTER_CHANNEL: "slack",
+      BUILT_IN_ADAPTER_CALLBACK_URL: `${props.api.attrApiEndpoint}/v1/slack/channel-events`,
+      BUILT_IN_ADAPTER_SECRET_NAME: slackAdapterSecretName,
+    };
+
     // The channel API's replay, duplicate and link-notice claims: short-lived, expired by expiresAt.
     const channelState = new dynamodb.Table(this, "State", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
@@ -65,9 +90,11 @@ export class ChannelAdapters extends Construct {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
     });
 
-    // Events to adapters: retried with a growing delay that the sender sets, then dead-lettered.
-    this.eventDeadLetters = new sqs.Queue(this, "EventDeadLetters", { retentionPeriod: Duration.days(14), enforceSSL: true, encryption: sqs.QueueEncryption.SQS_MANAGED });
+    // Events to adapters, in order per conversation (Phase 7b): retried with a growing delay that the sender sets, then
+    // dead-lettered.
+    this.eventDeadLetters = new sqs.Queue(this, "EventDeadLetters", { fifo: true, retentionPeriod: Duration.days(14), enforceSSL: true, encryption: sqs.QueueEncryption.SQS_MANAGED });
     const events = this.events = new sqs.Queue(this, "Events", {
+      fifo: true,
       retentionPeriod: Duration.days(1),
       visibilityTimeout: Duration.seconds(180),
       deadLetterQueue: { queue: this.eventDeadLetters, maxReceiveCount: 8 },
@@ -82,12 +109,14 @@ export class ChannelAdapters extends Construct {
       CHANNEL_REQUEST_QUEUE_URL: requests.queueUrl,
       CHANNEL_EVENT_QUEUE_URL: events.queueUrl,
       CHANNEL_LINK_ORIGIN: props.api.attrApiEndpoint,
+      ...builtInAdapter,
     }, Duration.seconds(10));
     // By key only: an adapter, a binding, a link; and it writes a new link code. Never a query, nothing else.
     ingress.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],
       resources: [props.state.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*"] } },
+      // SLACK_BINDING: the built-in Slack adapter's spaces are Slack channels, bound as they always were.
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*"] } },
     }));
     ingress.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:PutItem"],
@@ -120,8 +149,10 @@ export class ChannelAdapters extends Construct {
     });
 
     const sender = packagedFunction(this, "EventSender", "packages/broker/src/aws/channel-events.ts", {
+      CHANNEL_ADAPTERS: enabled,
       STATE_TABLE_NAME: props.state.tableName,
       CHANNEL_EVENT_QUEUE_URL: events.queueUrl,
+      ...builtInAdapter,
     }, Duration.seconds(30));
     sender.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],
@@ -130,6 +161,20 @@ export class ChannelAdapters extends Construct {
     }));
     sender.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [adapterSecrets] }));
     sender.addEventSource(new eventSources.SqsEventSource(events, { batchSize: 10, reportBatchItemFailures: true }));
+
+    // The built-in Slack adapter: Slack's ingress signs with the adapter's secret, hands requests to the channel API and
+    // takes the core's events for Slack on its own route. The route answers 404 while SlackViaChannel is off.
+    props.slack.ingress.addEnvironment("SLACK_VIA_CHANNEL", slackViaChannel);
+    props.slack.ingress.addEnvironment("CHANNEL_API_URL", props.api.attrApiEndpoint);
+    props.slack.ingress.addEnvironment("SLACK_ADAPTER_SECRET_NAME", slackAdapterSecretName);
+    slackAdapterSecret.grantRead(props.slack.ingress);
+    new apigwv2.CfnRoute(this, "SlackEventsRoute", {
+      apiId: props.api.ref, routeKey: "POST /v1/slack/channel-events", target: `integrations/${props.slack.integration.ref}`, authorizationType: "NONE",
+    });
+    props.slack.ingress.addPermission("ChannelEventsInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      sourceArn: `arn:${stack.partition}:execute-api:${stack.region}:${stack.account}:${props.api.ref}/*/*/v1/slack/channel-events`,
+    });
 
     // The broker registers adapters and writes their secrets. Links and link codes are in the state table, which it
     // already reads and writes; one statement only, since the broker role's policy is near IAM's size limit.
