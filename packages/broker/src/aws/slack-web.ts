@@ -88,13 +88,33 @@ export async function createTaskPlanCanvas(
   fetchImplementation: typeof fetch = fetch,
   onCreated?: (canvasId: string) => Promise<void>,
 ): Promise<{ canvasId: string; permalink: string }> {
-  if (!/^[CG][A-Z0-9]{8,}$/.test(input.channel) || !/^[A-Za-z0-9_-]{1,100}$/.test(input.taskId)
-    || input.title.trim() === "" || !Number.isSafeInteger(input.version) || input.version < 1 || input.markdown.trim() === ""
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(input.taskId) || input.title.trim() === "" || !Number.isSafeInteger(input.version) || input.version < 1) {
+    throw new Error("task plan Canvas input is invalid");
+  }
+  return createChannelCanvas(botToken, { channel: input.channel, title: taskPlanCanvasTitle(input.title, input.version), markdown: input.markdown }, fetchImplementation, onCreated);
+}
+
+/** A task plan Canvas's title. */
+export function taskPlanCanvasTitle(title: string, version: number): string {
+  return `Plan: ${title.slice(0, 120)} (v${version})`;
+}
+
+/**
+ * Spec 062 Phase 7c: a Canvas the channel's members can read, and its verified link. `onCreated` hears its ID as soon
+ * as it exists, before it is shared, so a failure after that can still remove it.
+ */
+export async function createChannelCanvas(
+  botToken: string,
+  input: { channel: string; title: string; markdown: string },
+  fetchImplementation: typeof fetch = fetch,
+  onCreated?: (canvasId: string) => Promise<void>,
+): Promise<{ canvasId: string; permalink: string }> {
+  if (!/^[CG][A-Z0-9]{8,}$/.test(input.channel) || input.title.trim() === "" || input.markdown.trim() === ""
     || Buffer.byteLength(input.markdown, "utf8") > 32_768) {
     throw new Error("task plan Canvas input is invalid");
   }
   const created = await callSlack("canvases.create", botToken, {
-    title: `Plan: ${input.title.slice(0, 120)} (v${input.version})`,
+    title: input.title,
     document_content: { type: "markdown", markdown: input.markdown },
   }, fetchImplementation);
   const canvasId = created.canvas_id;

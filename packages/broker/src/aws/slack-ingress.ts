@@ -40,7 +40,9 @@ import {
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
-import { SLACK_CHANNEL_EVENTS_PATH, createAwsSlackChannelEventsHandler, slackChannelForwarderFromEnvironment } from "./slack-adapter.js";
+import {
+  SLACK_CHANNEL_COMMANDS_PATH, SLACK_CHANNEL_EVENTS_PATH, createAwsSlackChannelCommandsHandler, createAwsSlackChannelEventsHandler, slackChannelForwarderFromEnvironment,
+} from "./slack-adapter.js";
 import { createAwsSlackInteractivityHandler } from "./slack-interactivity.js";
 import { chatPostEphemeral, chatUpdate, slackWebFetch } from "./slack-web.js";
 import { chatGptCommandReply, chatGptSlackCommand, isHandedOffChatGptFinish, readBrokerAnswer, type BrokerAnswer, type ChatGptSlackCommand, type HandedOffChatGptFinish } from "./slack-chatgpt.js";
@@ -1182,6 +1184,8 @@ export const SLACK_INTERACTIONS_PATH = "/v1/slack/interactions";
 let awsHandler: ReturnType<typeof createSlackIngressHandler> | undefined;
 let awsInteractivityHandler: ReturnType<typeof createAwsSlackInteractivityHandler> | undefined;
 let awsChannelEventsHandler: ReturnType<typeof createAwsSlackChannelEventsHandler> | undefined;
+let awsChannelCommandsHandler: ReturnType<typeof createAwsSlackChannelCommandsHandler> | undefined;
+let awsAdapterBotToken: (() => Promise<string>) | undefined;
 
 /** The bot token for the Slack adapter's posts, read as the ingress reads it. */
 function awsBotToken(): () => Promise<string> {
@@ -1209,8 +1213,15 @@ function awsBotToken(): () => Promise<string> {
 export const handler = (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish): Promise<HttpResponse> => {
   // Spec 062 Phase 7b: the core's events for Slack, when Slack goes through the channel API.
   if (!isHandedOffWorkflowStart(event) && !isHandedOffChatGptFinish(event) && event.rawPath === SLACK_CHANNEL_EVENTS_PATH) {
-    awsChannelEventsHandler ??= createAwsSlackChannelEventsHandler(awsBotToken());
+    awsAdapterBotToken ??= awsBotToken();
+    awsChannelEventsHandler ??= createAwsSlackChannelEventsHandler(awsAdapterBotToken);
     return awsChannelEventsHandler(event);
+  }
+  // Phase 7c: the core's commands for Slack (posts it must know the result of, Canvases).
+  if (!isHandedOffWorkflowStart(event) && !isHandedOffChatGptFinish(event) && event.rawPath === SLACK_CHANNEL_COMMANDS_PATH) {
+    awsAdapterBotToken ??= awsBotToken();
+    awsChannelCommandsHandler ??= createAwsSlackChannelCommandsHandler(awsAdapterBotToken);
+    return awsChannelCommandsHandler(event);
   }
   if (isHandedOffWorkflowStart(event) || isHandedOffChatGptFinish(event) || event.rawPath === SLACK_INTERACTIONS_PATH) {
     awsInteractivityHandler ??= createAwsSlackInteractivityHandler();

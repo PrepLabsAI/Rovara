@@ -91,7 +91,8 @@ export function builtInAdapterFromEnvironment(environment: Readonly<Record<strin
   const secretName = environment.BUILT_IN_ADAPTER_SECRET_NAME;
   if (!channel || !callbackUrl || !secretName) return undefined;
   try {
-    return builtInAdapterRecord({ channel, callbackUrl, secretName });
+    const commandsUrl = environment.BUILT_IN_ADAPTER_COMMANDS_URL || undefined;
+    return builtInAdapterRecord({ channel, callbackUrl, commandsUrl, secretName });
   } catch {
     // Settings that do not read stay off; registered adapters are unaffected.
     return undefined;

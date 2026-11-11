@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { ChannelEventSchema, publicHttpsUrlProblem, steppedUpNote, usableWebhookSecret, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent } from "@agentx/contracts";
+import { ChannelEventSchema, publicHttpsUrlProblem, steppedUpNote, usableWebhookSecret, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent, type MessagePart } from "@agentx/contracts";
 import { checkEndpointAddresses, EndpointRefused } from "@agentx/gateway";
 import { adapterForChannel, builtInAdapterFromEnvironment } from "./channel-adapters.js";
 
@@ -51,8 +51,9 @@ export function fitEventToAdapter(event: ChannelEvent, adapter: Pick<ChannelAdap
     return { ...event, data: { ...rest, text: `${cut(rest.text, limit - link.length)}${link}`, ...(keep ? { actions } : {}) } };
   }
   if (event.type === "message" || event.type === "direct") {
-    const { actions, ...rest } = event.data;
-    const fitted: ChannelEvent = { ...event, data: { ...rest, text: cut(rest.text), ...fitActions(actions, adapter.capabilities) } };
+    const { actions, parts, ...rest } = event.data;
+    const fittedParts = fitActionParts(parts, adapter.capabilities);
+    const fitted: ChannelEvent = { ...event, data: { ...rest, text: cut(rest.text), ...(fittedParts === undefined ? {} : { parts: fittedParts }), ...fitActions(actions, adapter.capabilities) } };
     return fitted;
   }
   if ("text" in event.data && typeof event.data.text === "string") return { ...event, data: { ...event.data, text: cut(event.data.text) } } as ChannelEvent;
@@ -67,6 +68,17 @@ function fitActions(actions: Extract<ChannelEvent, { type: "message" }>["data"][
   if (actions === undefined) return {};
   const shown = capabilities.forms === true ? actions : actions.filter((action) => action.type !== "form");
   return shown.length === 0 || shown.length > capabilities.buttons ? {} : { actions: shown };
+}
+
+/** Phase 7c: an `actions` part as the adapter can show it, by the same rule; one with nothing left goes. */
+function fitActionParts(parts: Extract<ChannelEvent, { type: "message" }>["data"]["parts"], capabilities: ChannelAdapterRecord["capabilities"]): typeof parts {
+  if (parts === undefined) return undefined;
+  const fitted = parts.flatMap((part): MessagePart[] => {
+    if (part.type !== "actions") return [part];
+    const kept = fitActions(part.actions, capabilities).actions;
+    return kept === undefined ? [] : [{ ...part, actions: kept }];
+  });
+  return fitted.length === 0 ? undefined : fitted;
 }
 
 /**
