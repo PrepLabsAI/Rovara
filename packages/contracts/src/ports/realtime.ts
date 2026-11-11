@@ -1,7 +1,8 @@
 // The `realtime` plug-in point (a new interface; the owner decides it alone, decision 63).
 //
 // Realtime push tells an open page that something it shows has changed, so it reads again. It is a HINT, never the data: a notice holds a type, ids and numbers
-// only (no title, no person's words, no secret), and a page that missed one still finds the change when it next reads (a host that keeps a catch-up feed writes it
+// only. The port refuses free text (`isRealtimeNotice`), but an id-shaped token can still carry anything: putting no title, no person's words and no secret in a
+// notice is the CORE's responsibility, not something the port can prove. And a page that missed one still finds the change when it next reads (a host that keeps a catch-up feed writes it
 // in its own store before it publishes; that feed is core logic, not this port). So a push that is lost, late or repeated does no harm.
 //
 //   - `publish` sends a batch of notices, each to one audience: everyone looking at one session, everyone looking at one project, or one person. It NEVER

@@ -36,7 +36,7 @@ import type { EmailSender } from "./email.js";
 import type { TeamRecordSource } from "./record-source.js";
 import type { WorkerMachines } from "./worker-machines.js";
 
-/** Every place an adapter can plug in. A new point is an interface change (both owners). */
+/** Every place an adapter can plug in. A new point is an interface change: the owner decides it (decision 63). */
 export const PLUGIN_POINTS = [
   "code-host",
   "tracker",

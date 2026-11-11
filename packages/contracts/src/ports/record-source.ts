@@ -27,7 +27,9 @@ export type RecordRetention = z.infer<typeof RecordRetentionSchema>;
 
 /** The most bytes of a row's text. */
 export const RECORD_TEXT_MAX_BYTES = 8_192;
-/** The most links (permalinks) one row carries. */
+/** The longest link (a permalink, `sourceRef.url`) kept. */
+export const RECORD_URL_MAX = 2_048;
+/** The most links (permalinks) a stored row keeps; a sink keeps the first this many valid ones and drops the rest (`recordLinks`), it never refuses a draft for them. */
 export const RECORD_LINKS_MAX = 20;
 
 /** A row kind: the source's family and the event, dotted lower-case words (`chat.message`, `ticket.comment`, `codehost.review`). The hosted record narrows these to its own list. */
@@ -49,7 +51,7 @@ export const RecordDraftSchema = z.object({
   sourceRef: z.object({
     system: ShortId,
     id: ShortId,
-    url: z.string().url().max(2_000).optional(),
+    url: z.string().url().max(RECORD_URL_MAX).optional(),
     parentId: ShortId.optional(),
     version: z.string().min(1).max(200),
     /** When this version was made (an edit's time). Absent: `occurredAt`. Versions are ordered by it, never by arrival. */
@@ -68,8 +70,8 @@ export const RecordDraftSchema = z.object({
   /** Already control-stripped and redacted by the source. Absent under retention A. */
   text: z.string().max(RECORD_TEXT_MAX_BYTES).optional(),
   structured: z.record(z.string().min(1).max(64), Scalar).optional(),
-  /** Permalinks only. */
-  links: z.array(z.string().url().max(2_000)).max(RECORD_LINKS_MAX),
+  /** Permalinks only. A sink keeps what `recordLinks` keeps (valid http(s) links of at most 2,048 characters, the first 20) and drops the rest. */
+  links: z.array(z.string()),
   retention: RecordRetentionSchema,
   /** The words came from a chat tool (a row Rovara made from a thread): the chat tool's keeping rule follows the words. */
   origin: z.string().regex(/^[a-z][a-z0-9-]{0,40}$/u).optional(),
@@ -116,9 +118,16 @@ export type RecordTombstoneCause = "source_deleted" | "person_erased" | "project
  *  - versions are ordered by `sourceRef.versionAt ?? occurredAt`, not by arrival: a `put` older than the stored version answers `duplicate` and changes nothing;
  *  - a draft whose `sourceRef.order` is set is a per-editor change row: it replaces nothing and is replaced by nothing;
  *  - a tombstone hides at once, and is STICKY: a later `put` for a tombstoned (workspace, system, id) is refused, so a delete that arrives before its put never
- *    brings the text back. A scope tombstone hides what exists then; only cause `excluded` also refuses later puts under that scope;
- *  - a scope matches itself and every scope under it (`chat:T1` covers `chat:T1/C9`);
- *  - a draft that is not a `RecordDraftSchema` draft, or whose restricted audience names another source, is refused (never stored as visible to anyone more).
+ *    brings the text back;
+ *  - a scope tombstone for cause `source_deleted` or `excluded` CLOSES the place: what is in it is hidden, and every later `put` in it or in a place under it is refused
+ *    (a deleted channel or repository never fills again from a late retry or a backfill). Causes `person_erased` and `project_archived` hide without closing;
+ *  - a scope matches itself and every scope under it (`chat:T1` covers `chat:T1/C9`, not `chat:T10`). A draft's place is its restricted snapshot's scope, else `scope`
+ *    (`recordDraftScope`);
+ *  - the stored trust is never higher than the lowest of the draft's trust, its actor's and its pieces' (the sink lowers it; it never raises it);
+ *  - under retention A or B no text is kept: the sink stores the row without its text, or does not store it (refused). B text reaches the distiller only
+ *    through `distillTransient`;
+ *  - links are trimmed to what `recordLinks` keeps, never a reason to refuse;
+ *  - a draft that is not a `RecordDraftSchema` draft is refused.
  */
 export interface RecordSink {
   put(draft: RecordDraft): Promise<RecordIngestOutcome>;
@@ -128,6 +137,11 @@ export interface RecordSink {
   changePrincipals(input: { workspaceId: string; scope: string; add?: readonly string[]; remove?: readonly string[]; at: string }): Promise<void>;
   /** A place that became private or public: every row of the scope takes the new audience. */
   replaceScopeAudience(input: { workspaceId: string; scope: string; audience: Audience; at: string }): Promise<void>;
+  /**
+   * Retention B (process then drop): the text is handed to the host's distiller in memory, after the same checks a stored row passes (a deleted item, a closed place),
+   * and no row with text is stored. Optional: a sink without it accepts no B text (a source then records the draft without its text, or nothing).
+   */
+  distillTransient?(draft: RecordDraft & { text: string }): Promise<{ accepted: boolean }>;
   /** Seeds the place's access record from its full, freshly read member list (nothing when already seeded). Optional. */
   ensureAccessSeed?(input: { workspaceId: string; scope: string; read: () => Promise<Audience | undefined> }): Promise<void>;
 }
@@ -215,18 +229,47 @@ export function recordScopeCovers(parent: string, scope: string): boolean {
   return scope === parent || scope.startsWith(`${parent}/`);
 }
 
-/**
- * Why a draft must be refused, in a fixed sentence, or `undefined`. The shape (`RecordDraftSchema`), and the rules the shape cannot say: no text under retention A or
- * B, a restricted audience whose snapshot names this draft's own source, a row trust no higher than its actor's or any piece's.
- */
+/** A draft's place: its restricted snapshot's scope, else its `scope` (the hosted record's rule). */
+export function recordDraftScope(draft: Pick<RecordDraft, "audience" | "scope">): string | undefined {
+  return draft.audience.kind === "restricted" ? draft.audience.acl.scope : draft.scope;
+}
+
+/** The links a stored row keeps: http(s) links of at most `RECORD_URL_MAX` characters with no credentials, the first `RECORD_LINKS_MAX` of them. */
+export function recordLinks(links: readonly string[]): string[] {
+  return links.filter((link) => {
+    if (link.length > RECORD_URL_MAX) return false;
+    try {
+      const url = new URL(link);
+      return (url.protocol === "https:" || url.protocol === "http:") && url.username === "" && url.password === "";
+    } catch {
+      return false;
+    }
+  }).slice(0, RECORD_LINKS_MAX);
+}
+
+/** The trust a stored row gets: the lowest of the draft's own, its actor's and its pieces'. */
+export function recordStoredTrust(draft: Pick<RecordDraft, "trust" | "actor" | "pieceTrusts">): TrustClass {
+  return minTrust(draft.trust, ...(draft.actor === undefined ? [] : [draft.actor.trust]), ...(draft.pieceTrusts ?? []));
+}
+
+/** Why a SINK must refuse a draft, in a fixed sentence, or `undefined`: it is not a `RecordDraftSchema` draft, or its text is over the byte limit. Everything else a sink repairs (trust, text under A or B, links). */
 export function recordDraftRefusal(draft: unknown): string | undefined {
   const parsed = RecordDraftSchema.safeParse(draft);
   if (!parsed.success) return "not a record draft";
-  const row = parsed.data;
-  if (row.text !== undefined && (row.retention === "A" || row.retention === "B")) return "retention A and B keep no text";
-  if (row.text !== undefined && new TextEncoder().encode(row.text).length > RECORD_TEXT_MAX_BYTES) return "the text is too long";
+  if (parsed.data.text !== undefined && new TextEncoder().encode(parsed.data.text).length > RECORD_TEXT_MAX_BYTES) return "the text is too long";
+  return undefined;
+}
+
+/**
+ * What a SOURCE must not write, in a fixed sentence, or `undefined` (the source conformance suite checks every draft with it): anything a sink refuses, text under
+ * retention A, a restricted snapshot naming another source, or a row trust above its actor's or a piece's. (Text under B is allowed: it goes to `distillTransient`.)
+ */
+export function recordSourceDraftProblem(draft: unknown): string | undefined {
+  const refusal = recordDraftRefusal(draft);
+  if (refusal !== undefined) return refusal;
+  const row = draft as RecordDraft;
+  if (row.text !== undefined && row.retention === "A") return "retention A keeps no text";
   if (row.audience.kind === "restricted" && row.audience.acl.source !== row.source) return "the permission snapshot names another source";
-  const lowest = minTrust(row.trust, ...(row.actor === undefined ? [] : [row.actor.trust]), ...(row.pieceTrusts ?? []), ...(row.quotedTrusts ?? []));
-  if (lowest !== row.trust) return "the row's trust is higher than one of its parts";
+  if (recordStoredTrust(row) !== row.trust) return "the row's trust is higher than one of its parts";
   return undefined;
 }
