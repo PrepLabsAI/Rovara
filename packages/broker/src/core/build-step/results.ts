@@ -42,7 +42,14 @@ export function runEndedReason(mode: "IMPLEMENT" | "CHECKS" | "REVIEW", status: 
 }
 
 /** A rerun of the checks that ran on other code than the code the task holds. */
-export const CHECKED_OTHER_CODE_REASON = "The checks ran on other code than the code on the pull request. Send the task back to coding, or close it.";
+export const CHECKED_OTHER_CODE_REASON = WORKFLOW_BLOCK_REASONS.checkedOtherCode;
+
+/** Whether the workflow's candidate is the code the open pull requests hold now: every open pull request's head is the commit the candidate has for its repository (and at least one is open). */
+export function candidateIsOnPullRequest(workflow: WorkflowSnapshot): boolean {
+  const open = (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN");
+  return open.length > 0 && open.every((pullRequest) => pullRequest.headSha !== undefined
+    && workflow.candidate?.repositories.some((repository) => repository.repositoryId === pullRequest.repositoryId && repository.commitSha === pullRequest.headSha) === true);
+}
 
 /** A blocked VERIFY or REVIEW is looked at by Rovara's own fixing right away (a row, committed with the block); anything else is for the owner. */
 export function autofixRowFor(deps: TaskFlowDeps, taskId: string, next: WorkflowSnapshot, now: string, cause?: "run-lost" | "dispatch-exhausted"): TransactItem[] {
@@ -213,7 +220,10 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     if (mode === "CHECKS" && workflow.candidate !== undefined && candidate.digest !== workflow.candidate.digest) { failure = CHECKED_OTHER_CODE_REASON; throw new Error("the checks ran on other code than the candidate"); }
     // An approved fix to an open pull request that leaves every repository's code as the pull request holds it changed nothing: there is nothing to check again or push.
     const pullRequestTrees = workflowPullRequestTrees(workflow);
-    if (mode === "IMPLEMENT" && pullRequestTrees !== undefined && candidate.repositories.every((repository) => pullRequestTrees.get(repository.repositoryId) === repository.treeSha)) {
+    // Not a Send back from the recheck of a merge of the base (no fix is under way and the candidate is what the pull requests hold): that coding run exports the merged code so its checks (E2E included)
+    // can run on it, and it may leave the code as it is.
+    const sentBackFromRecheck = workflow.fixSource === undefined && candidateIsOnPullRequest(workflow);
+    if (mode === "IMPLEMENT" && pullRequestTrees !== undefined && !sentBackFromRecheck && candidate.repositories.every((repository) => pullRequestTrees.get(repository.repositoryId) === repository.treeSha)) {
       failure = WORKFLOW_BLOCK_REASONS.fixChangedNothing; throw new Error("the fix left the pull request's code as it was");
     }
     if (checkedCandidate.digest !== candidate.digest) { failure = WORKFLOW_BLOCK_REASONS.codeChangedAfterChecks; throw new Error("checked candidate is stale"); }

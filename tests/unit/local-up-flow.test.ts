@@ -35,6 +35,8 @@ import { registerConnectionsCommand, registerModelsCommand, registerDiagnosisCom
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { BASE_MERGED_NEEDS_YOU_MILESTONE, BASE_MERGED_RECHECKING_MILESTONE, BASE_MERGED_RETRY_REASON, workflowAutoFixCounts, type Admission } from "@agentx/contracts";
+import { dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/branch-writers.js";
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
@@ -1762,24 +1764,36 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     expect(again).toMatchObject({ kind: "maintain", payload: { action: "append", expectedHeadCommit: t.commit, workflowCandidateTreeSha: t.fixTree } });
   });
 
-  it("does not take a merge of the base on its parents alone: wrong parents are refused, a failed run's merge is not recorded, and a good one is checked and reviewed again before the task waits for the merge", async () => {
-    // Wrong parents: not the recorded head and the base commit.
+  it("does not take a merge of the base on its parents alone: wrong parents are refused (swapped, extra), a merge the host does not show is not recorded, and a good one is checked and reviewed again before the task waits for the merge", async () => {
+    // Wrong parents: not the recorded head and the base commit; the same two in the other order; and the right two with a third.
     const a = await launch({ host: true });
     const wrong = await toSync(a);
     wrong.merge("7".repeat(40), "6".repeat(40), [wrong.commit, "5".repeat(40)]);
     expect((await a.callback(wrong.sync, "pull-request-update", wrong.call("7".repeat(40)))).body).toMatchObject({ error: { code: "STALE_FENCE" } });
+    wrong.merge("7".repeat(40), "6".repeat(40), [wrong.newBase, wrong.commit]);
+    expect((await a.callback(wrong.sync, "pull-request-update", wrong.call("7".repeat(40)))).body).toMatchObject({ error: { code: "STALE_FENCE" } });
+    wrong.merge("7".repeat(40), "6".repeat(40), [wrong.commit, wrong.newBase, "5".repeat(40)]);
+    expect((await a.callback(wrong.sync, "pull-request-update", wrong.call("7".repeat(40)))).body).toMatchObject({ error: { code: "STALE_FENCE" } });
     expect(await recordHead(a, wrong.workspaceId)).toBe(wrong.commit);
 
-    // A run that failed after pushing a right-looking merge: the merge is not recorded.
+    // A run that failed with no merge on the host: nothing is recorded, and the task waits for the merge as it did.
     const b = await launch({ host: true });
-    const failed = await toSync(b);
+    const lost = await toSync(b);
+    await b.callback(lost.sync, "result", { status: "FAILED", error: "the readiness checks failed" });
+    const afterLost = await taskRecord(b, lost.taskId) as unknown as { workflow: { stage: string; branchSync?: unknown; pullRequests: Array<{ headSha: string }> } };
+    expect(afterLost.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", pullRequests: [{ headSha: lost.commit }] });
+    expect(afterLost.workflow.branchSync).toBeUndefined();
+    expect(await recordHead(b, lost.workspaceId)).toBe(lost.commit);
+
+    // A run that failed AFTER pushing a merge the host shows with exactly the right parents: that merge is on the pull request, so it is recorded as a new candidate (decision 67b), never left as "someone else's
+    // push"; its checks run again by themselves.
+    const f = await launch({ host: true });
+    const failed = await toSync(f);
     const mergeSha = failed.merge("8".repeat(40), "9".repeat(40), [failed.commit, failed.newBase]);
-    expect((await b.callback(failed.sync, "pull-request-update", failed.call(mergeSha))).status).toBe(200);
-    await b.callback(failed.sync, "result", { status: "FAILED", error: "the readiness checks failed" });
-    const afterFailed = await taskRecord(b, failed.taskId) as unknown as { workflow: { stage: string; branchSync?: unknown; pullRequests: Array<{ headSha: string }> } };
-    expect(afterFailed.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", pullRequests: [{ headSha: failed.commit }] });
-    expect(afterFailed.workflow.branchSync).toBeUndefined();
-    expect(await recordHead(b, failed.workspaceId)).toBe(failed.commit);
+    expect((await f.callback(failed.sync, "pull-request-update", failed.call(mergeSha))).status).toBe(200);
+    await f.callback(failed.sync, "result", { status: "FAILED", error: "the readiness checks failed" });
+    expect((await taskRecord(f, failed.taskId)).workflow).toMatchObject({ stage: "VERIFY", pullRequests: [{ headSha: mergeSha }] });
+    expect(await recordHead(f, failed.workspaceId)).toBe(mergeSha);
 
     // A good merge: new candidate. The checks run again on it, then the reviews; only then does the task wait for the merge again.
     const c = await launch({ host: true });
@@ -1796,6 +1810,145 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     await c.callback(review, "result", reviewsOf(review, "9".repeat(40), "pass", good.newBase, merged));
     await c.runtime.tick();
     expect((await taskRecord(c, good.taskId)).workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ headSha: merged }] });
+  });
+
+  // ---- decision 70(c): after a merge of the base the checks re-run by themselves (an AUTOFIX row, cause `base-merged`), inside the allowances, then the reviews, then the wait for the merge.
+  const milestonesOf = async (h: Harness, taskId: string) =>
+    (await queryAll(h.runtime.registry.require("storage"), { pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#" } })).map((item) => ({ kind: item["kind"] as string, text: item["text"] as string }));
+  const checksOperations = async (h: Harness, workspaceId: string) =>
+    (await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).items.filter((item) => item["workflowMode"] === "CHECKS");
+  /** The base moved on, the merge ran and is pushed: the sync's result is in, so the task stands at the recheck of the merged code. */
+  async function mergeLands(h: Harness) {
+    const t = await toSync(h);
+    const merged = t.merge("8".repeat(40), "9".repeat(40), [t.commit, t.newBase]);
+    return { ...t, merged, land: async () => {
+      expect((await h.callback(t.sync, "pull-request-update", t.call(merged))).status).toBe(200);
+      expect((await h.callback(t.sync, "result", { status: "SUCCEEDED", result: t.lifecycle(merged, "9".repeat(40)) })).status).toBe(200);
+    } };
+  }
+  type WorkflowOf = { stage: string; state: string; blockReason?: string; decisions: Array<{ source?: string; reason?: string; auto?: { stage: string; candidateDigest: string } }> };
+  const workflowOf = async (h: Harness, taskId: string) => (await taskRecord(h, taskId)).workflow as unknown as WorkflowOf;
+
+  it("re-runs the checks by itself after the base is merged: Rovara's own retry is recorded outside the task's lifetime actions, the milestone says it is re-checking, and the reviews follow", async () => {
+    const h = await launch({ host: true });
+    const t = await mergeLands(h);
+    await t.land();
+    // The merge is a new candidate: blocked at VERIFY with the base-merged reason until the re-run starts, which it does at once.
+    const checks = await h.nextJob(t.workspaceId, t.seen);
+    expect(checks).toMatchObject({ kind: "task", payload: { workflowMode: "CHECKS" } });
+    const running = await workflowOf(h, t.taskId);
+    expect(running).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+    const retries = running.decisions.filter((decision) => decision.source === "AUTO_RETRY");
+    expect(retries).toHaveLength(1);
+    expect(retries[0]!.reason).toBe(BASE_MERGED_RETRY_REASON);
+    expect(workflowAutoFixCounts(running.decisions as never).actions).toBe(0);
+    expect(await milestonesOf(h, t.taskId)).toEqual([{ kind: "fixing", text: BASE_MERGED_RECHECKING_MILESTONE }]);
+    await h.callback(checks, "result", builtResult("9".repeat(40), t.newBase, t.merged));
+    const review = await h.nextJob(t.workspaceId, t.seen);
+    await h.callback(review, "result", reviewsOf(review, "9".repeat(40), "pass", t.newBase, t.merged));
+    await h.runtime.tick();
+    expect(await workflowOf(h, t.taskId)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+  });
+
+  it("does not re-run the checks by itself where Rovara may not act: set to suggest, the setting unreadable, no company, or no autonomy seam; the owner is asked with the sentence that is true, and Retry checks is theirs", async () => {
+    const cases: Array<{ name: string; set: (h: Harness) => void; reason: string }> = [
+      { name: "suggest", set: (h) => { h.runtime.app.flow.deps.autonomy = async () => ({ autonomy: "suggest" }); }, reason: "autonomy-suggest" },
+      { name: "unreadable flag", set: (h) => { h.runtime.app.flow.deps.autonomy = async () => ({ autonomy: "suggest", unreadable: true }); }, reason: "autonomy-unreadable" },
+      { name: "read throws", set: (h) => { h.runtime.app.flow.deps.autonomy = async () => { throw new Error("the recipe store is down"); }; }, reason: "autonomy-unreadable" },
+      { name: "no company", set: (h) => { h.runtime.app.flow.deps.autonomy = async () => ({ autonomy: "suggest", noCompany: true }); }, reason: "autonomy-no-company" },
+      { name: "no seam", set: (h) => { delete h.runtime.app.flow.deps.autonomy; }, reason: "autonomy-suggest" },
+    ];
+    for (const { name, set, reason } of cases) {
+      const h = await launch({ host: true });
+      const t = await mergeLands(h);
+      set(h);
+      await t.land();
+      await h.runtime.tick();
+      const blocked = await taskRecord(h, t.taskId);
+      expect(blocked.workflow, name).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.baseMergedRecheck });
+      expect(blocked.autofixAsk, name).toMatchObject({ reason });
+      expect(await checksOperations(h, t.workspaceId), name).toHaveLength(0);
+      // "re-checking" was said when the row was written; the ask then says "needs you" (and Rovara is not acting).
+      expect((await milestonesOf(h, t.taskId)).map((milestone) => milestone.text).sort(), name).toEqual([BASE_MERGED_NEEDS_YOU_MILESTONE, BASE_MERGED_RECHECKING_MILESTONE].sort());
+      // The owner's Retry checks is their own go-ahead, whatever the setting says.
+      expect((await h.api(`/v1/dev/tasks/${t.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status, name).toBe(200);
+      expect(await h.nextJob(t.workspaceId, t.seen), name).toMatchObject({ kind: "task", payload: { workflowMode: "CHECKS" } });
+    }
+  });
+
+  it("does not re-run the checks on code the pull request no longer holds: a person pushed after the merge asks, and a head that cannot be read asks at once", async () => {
+    const pushed = await launch({ host: true });
+    const t = await mergeLands(pushed);
+    // The autonomy is read first; a person's push lands while the look is under way.
+    pushed.runtime.app.flow.deps.autonomy = async () => { pushed.model.commit(t.headBranch, { "README.md": "a person's change\n" }); return { autonomy: "prepare" }; };
+    await t.land();
+    expect((await taskRecord(pushed, t.taskId)).autofixAsk).toMatchObject({ reason: "head-moved" });
+    expect(await checksOperations(pushed, t.workspaceId)).toHaveLength(0);
+
+    const unreadable = await launch({ host: true });
+    const u = await mergeLands(unreadable);
+    unreadable.runtime.app.flow.deps.autonomy = async () => { unreadable.host.getChangeRequest = async () => { throw new Error("the host is down"); }; return { autonomy: "prepare" }; };
+    await u.land();
+    expect((await taskRecord(unreadable, u.taskId)).autofixAsk).toMatchObject({ reason: "needs-a-person" });
+    expect(await checksOperations(unreadable, u.workspaceId)).toHaveLength(0);
+  });
+
+  it("starts the re-run only inside the company's allowance (an Admission decision): a refusal makes the row wait without using an attempt, and an allowance that is back starts it", async () => {
+    const h = await launch({ host: true });
+    const requests: Array<{ action: string; idempotencyKey: string; subject?: { id: string } }> = [];
+    let allow = false;
+    const inner = h.runtime.app.flow.deps.admission;
+    const admission: Admission = {
+      ...inner,
+      async admit(request) {
+        if (request.action !== "autofix.base-merged") return inner.admit(request);
+        requests.push({ action: request.action, idempotencyKey: request.idempotencyKey, ...(request.subject === undefined ? {} : { subject: request.subject }) });
+        return allow ? { allowed: true } : { allowed: false, code: "rate_limited", message: "five re-runs in ten minutes are used" };
+      },
+    };
+    h.runtime.app.flow.deps.admission = admission;
+    const t = await mergeLands(h);
+    await t.land();
+    const blocked = await taskRecord(h, t.taskId);
+    expect(blocked.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.baseMergedRecheck });
+    expect(blocked.autofixAsk).toBeUndefined();
+    expect(await checksOperations(h, t.workspaceId)).toHaveLength(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ action: "autofix.base-merged", subject: { id: t.taskId } });
+    expect(requests[0]!.idempotencyKey).toMatch(new RegExp(`^autofix\\.base-merged:${t.taskId}:`, "u"));
+    // The row waits (a minute or more), with no attempt counted; the task is not asked about anything.
+    const store = h.runtime.registry.require("storage");
+    const rowKey = dispatchRowKey(IMPLICIT_COMPANY_ID, t.taskId, blocked.workflow.revision);
+    const row = (await store.get(rowKey))!;
+    expect(row["kind"]).toBe("AUTOFIX");
+    expect(row["cause"]).toBe("base-merged");
+    expect(row["attempts"]).toBe(0);
+    expect(Date.parse(row["nextAttemptAt"] as string)).toBeGreaterThan(Date.now() + 55_000);
+    // Not due yet: a sweep leaves it alone.
+    await h.runtime.tick();
+    expect(await checksOperations(h, t.workspaceId)).toHaveLength(0);
+    // The allowance is back and the row is due: the re-run starts, once.
+    allow = true;
+    const due = new Date(Date.now() - 1_000).toISOString();
+    await store.update({ key: rowKey, ops: [change.set("nextAttemptAt", due), change.set("dispatchDueSk", `${due}#${row["sk"]}`)] });
+    expect(await h.nextJob(t.workspaceId, t.seen)).toMatchObject({ kind: "task", payload: { workflowMode: "CHECKS" } });
+    expect((await workflowOf(h, t.taskId)).decisions.filter((decision) => decision.reason === BASE_MERGED_RETRY_REASON)).toHaveLength(1);
+  });
+
+  it("stops before the reviews of the merged code when Rovara's autonomy was lowered while its checks ran; the owner's Retry reviews runs them", async () => {
+    const h = await launch({ host: true });
+    const t = await mergeLands(h);
+    await t.land();
+    const checks = await h.nextJob(t.workspaceId, t.seen);
+    // Set to suggest by now: the paid reviews of a round Rovara decided itself do not start.
+    h.runtime.app.flow.deps.autonomy = async () => ({ autonomy: "suggest" });
+    await h.callback(checks, "result", builtResult("9".repeat(40), t.newBase, t.merged));
+    await h.runtime.tick();
+    expect(await workflowOf(h, t.taskId)).toMatchObject({ stage: "REVIEW", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.recheckAutonomyLowered });
+    // The owner's Retry reviews is their go-ahead.
+    expect((await h.api(`/v1/dev/tasks/${t.taskId}/workflow/retry`, { method: "POST", body: { requestId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd" } })).status).toBe(200);
+    const review = await h.nextJob(t.workspaceId, t.seen);
+    expect(review).toMatchObject({ kind: "task", payload: { workflowMode: "REVIEW" } });
   });
 
   it("blocks a merge whose checked code is not the code the host shows (extra changes in the merge)", async () => {

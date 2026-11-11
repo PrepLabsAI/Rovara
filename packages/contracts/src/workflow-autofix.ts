@@ -4,7 +4,7 @@ import {
   E2E_APPLICATION_SEND_BACK_CODES, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX, WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX,
   WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_AUTO_ACTION_LIMIT,
   WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_AUTO_RETRY_LIMIT, WORKFLOW_AUTO_SEND_BACK_LIMIT, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
-  WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, blockingFindings, workflowApplicationEvidenceCodes, workflowAutoFixCounts, workflowAutoSpendRefusal, workflowCheckResultBroken,
+  WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, BASE_MERGED_RETRIES_PER_DAY, baseMergedRetriesToday, blockingFindings, workflowApplicationEvidenceCodes, workflowAutoFixCounts, workflowAutoSpendRefusal, workflowCheckResultBroken,
   type WorkflowAutoSpend, type WorkflowSnapshot,
 } from "./task-workflow-node.js";
 
@@ -44,6 +44,8 @@ export const AUTO_FIX_CODES = [
   // DISPATCHEXHAUST: why a block was written outside a finished run (see `AutoFixBlockCause`): the start was tried until its budget ran out and the run was lost (Rovara's side, transient),
   // or the owner stopped the run (a person's choice, never retried).
   "dispatch-exhausted", "run-lost", "owner-stopped",
+  // Decision 70(c): the base branch was merged into the pull request (a new candidate): its checks run again by themselves (one automatic retry per candidate), never a fault of the code.
+  "base-merged",
   // Unclear fault.
   "e2e-evidence-unknown", "check-result-unknown", "check-failed-cause-unknown",
 ] as const;
@@ -59,6 +61,8 @@ export const AUTO_FIX_PERSON_GROUP_CODES = ["runtime-expired", "model-environmen
 /** Why Rovara asks instead of acting. The limit reasons name the limit the ask card tells the person about. */
 export const AUTO_FIX_ASK_REASONS = [
   "needs-a-person", "original-code-also-fails", "unclear-fault", "owner-stopped",
+  // Decision 70(c), a merged base's re-run: Rovara is set to suggest; the setting could not be read; the task has no company; someone pushed after the merge; the day's allowance is used.
+  "autonomy-suggest", "autonomy-unreadable", "autonomy-no-company", "head-moved", "base-merged-limit",
   "send-back-limit", "retry-limit", "total-limit", "spend-cap", "day-budget", "history-full", "inputs-missing",
 ] as const;
 export type AutoFixAskReason = (typeof AUTO_FIX_ASK_REASONS)[number];
@@ -73,7 +77,7 @@ export type GroupOriginalResult = OriginalCodeResult | "skipped" | "pending" | "
  * DISPATCHEXHAUST: how a block that no finished run wrote came about, recorded on the block's AUTOFIX row in the same write as the block (the block text alone cannot tell a lost run from a failed one).
  * `dispatch-exhausted` and `run-lost` are infrastructure faults (one automatic retry, then an ask, never a send back to coding); `owner-stopped` is the owner's choice (never retried).
  */
-export const AUTO_FIX_BLOCK_CAUSES = ["dispatch-exhausted", "run-lost", "owner-stopped"] as const;
+export const AUTO_FIX_BLOCK_CAUSES = ["dispatch-exhausted", "run-lost", "owner-stopped", "base-merged"] as const;
 export type AutoFixBlockCause = (typeof AUTO_FIX_BLOCK_CAUSES)[number];
 
 /** What the caller knows that the workflow does not store. Every member is optional: what is missing is unknown, and unknown never counts as a pass. */
@@ -125,6 +129,8 @@ export interface AutoFixBudget {
   dayBudgetHasRoom: boolean;
   /** How many original-code (baseline) rounds were already requested for the approved plan. At most one is. */
   baselineRequests: number;
+  /** The time now, in ms: the re-runs after a merge of the base are counted per day. Absent: the clock. */
+  nowMs?: number;
 }
 
 /** The default per-task cap for automatic fixing, in US dollars (owner decision 6). */
@@ -248,7 +254,8 @@ function blockSignals(workflow: WorkflowSnapshot, facts: AutoFixFacts): Signal[]
   if (facts.setupFailedInTask === true) signals.push(transient("setup-failed-in-task"));
   if (facts.hostBlocked === true) signals.push(transient("host-blocked"));
   if (facts.buildHostOffline === true) signals.push(transient("build-host-offline"));
-  if ((workflow.pullRequests?.length ?? 0) > 0) signals.push(person("pull-request-open"));
+  // The merge of the base into an open pull request is the one cause whose block is looked at while the pull request is open: its re-run is exactly the pull request's own checks (decision 70(c)).
+  if ((workflow.pullRequests?.length ?? 0) > 0 && facts.blockCause !== "base-merged") signals.push(person("pull-request-open"));
   // A blocked workflow with nothing readable is a person's: nothing is ever read as a pass.
   if (signals.length === 0) signals.push(person("unreadable"));
   return signals;
@@ -268,7 +275,7 @@ export const AUTO_FIX_CODE_CLASS: Readonly<Record<AutoFixCode, AutoFixClass>> = 
   "runtime-expired": "person", "runtime-environment-drifted": "transient", "model-environment-unsafe": "person", "login-failed": "person", "model-route-changed-reapprove": "person", "agent-route-not-approved": "person",
   "model-route-not-tested": "person", "runtime-unusable": "person", "selection-changed": "person", "accounts-changed": "person", "plan-not-approvable": "person", "history-rewritten": "person", "cancelled-by-owner": "person",
   "check-broken": "person", "fails-on-original-code": "person", "review-unusable": "person", "rule-files-unverified": "person", "leftover-processes": "person", "setup-changed-files": "person", "pull-request-open": "person",
-  "unknown-group-code": "person", "unreadable": "person", "dispatch-exhausted": "transient", "run-lost": "transient", "owner-stopped": "person",
+  "unknown-group-code": "person", "unreadable": "person", "dispatch-exhausted": "transient", "run-lost": "transient", "owner-stopped": "person", "base-merged": "transient",
   "e2e-evidence-unknown": "unclear", "check-result-unknown": "unclear", "check-failed-cause-unknown": "unclear",
 };
 
@@ -340,11 +347,15 @@ export function autoFixDecision(workflow: WorkflowSnapshot, facts: AutoFixFacts,
   if (inputsMissing(budget)) return ask("inputs-missing");
 
   const counts = workflowAutoFixCounts(workflow.decisions);
+  const baseMerged = facts.blockCause === "base-merged";
   const limitRefusal = (kind: "send-back" | "retry"): AutoFixAskReason | undefined => {
     if (workflow.decisions.length >= 100) return "history-full";
     if (kind === "send-back" && counts.sendBacksSincePlanApproval >= WORKFLOW_AUTO_SEND_BACK_LIMIT) return "send-back-limit";
     if (kind === "retry" && counts.retriesFor(stage, workflow.candidate?.digest) >= WORKFLOW_AUTO_RETRY_LIMIT) return "retry-limit";
-    if (counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) return "total-limit";
+    // A re-run after a merge of the base has its own allowance per task per day; it does not use the task's lifetime automatic actions.
+    if (baseMerged && kind === "retry") {
+      if (baseMergedRetriesToday(workflow.decisions, budget.nowMs ?? Date.now()) >= BASE_MERGED_RETRIES_PER_DAY) return "base-merged-limit";
+    } else if (counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) return "total-limit";
     return budgetRefusal(budget);
   };
   const sendBack = (): AutoFixDecision => {

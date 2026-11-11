@@ -9,11 +9,15 @@ import {
   BRANCH_SYNCS_PER_DAY_MAX, BRANCH_WORKFLOW_FILES_MESSAGE, CONFLICT_ROUNDS_MAX, WorkflowSnapshotSchema, WorkflowTransitionError, blockWorkflowBranchSync, branchConflictStopMessage, createCandidateManifest,
   createWorkflowSnapshot, endWorkflowBranchSync, isBranchSyncBlockReason, observeWorkflowPullRequest, recordWorkflowBranchSync, recordWorkflowPullRequestUpdate, recordWorkflowSyncConflict,
   recordWorkflowVerification, startWorkflowBranchSync, startWorkflowBranchSyncRun, startWorkflowFix, workflowFollowsOnlyMerge, type WorkflowProgram, type WorkflowSnapshot,
+  autoFixDecision, workflowAutomaticRetryDecision, workflowAutoFixCounts, wholeTaskSpendUsd, WORKFLOW_BLOCK_REASONS, BASE_MERGED_RETRY_REASON, BASE_MERGED_RETRIES_PER_DAY, baseMergedRetriesToday,
+  WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_ACTION_LIMIT, workflowAutoActionRequestId, holdWorkflowCandidateOnPullRequests, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE,
 } from "@agentx/contracts";
 import type { MergeTrackingItem } from "../../packages/contracts/src/rovara-code.js";
 import {
   branchSyncRequestId, bumpSyncs, classifySyncFailure, decideBranchSync, decideConflict, isWorkflowFilesRefusal, planBranchSyncOutcome, syncsToday, utcDay,
 } from "../../packages/broker/src/core/branch-sync/branch-sync.js";
+import { baseMergedRechecksItself } from "../../packages/broker/src/core/build-step/maintain.js";
+import { candidateIsOnPullRequest } from "../../packages/broker/src/core/build-step/results.js";
 
 const TASK_ID = "00000000-0000-4000-8000-0000000000a1";
 const HEAD_A = "a".repeat(40);
@@ -337,6 +341,137 @@ describe("when to merge the base", () => {
 
 // ---- what a finished merge is
 
+describe("every open pull request already holds the candidate (a merge of the base that was checked and reviewed again)", () => {
+  const atPullRequest = (extra: Record<string, unknown> = {}) => WorkflowSnapshotSchema.parse({ ...waiting(), stage: "PULL_REQUEST", state: "READY", ...extra });
+
+  it("moves the task to waiting for the merge, with a fix round finished and a publication block lifted", () => {
+    const ready = holdWorkflowCandidateOnPullRequests(atPullRequest(), at);
+    expect(ready).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", revision: 10 });
+    expect(ready.blockReason).toBeUndefined();
+    // The owner's Retry at a publication block does the same (it is not left blocked, nor refused).
+    const blocked = holdWorkflowCandidateOnPullRequests(atPullRequest({ state: "BLOCKED", blockReason: WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE }), at);
+    expect(blocked).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(blocked.blockReason).toBeUndefined();
+    const fixed = holdWorkflowCandidateOnPullRequests(atPullRequest({ fixSource: "ci", fixProblems: ["test"] }), at);
+    expect(fixed.fixSource).toBeUndefined();
+  });
+
+  it("is refused when any open pull request holds other code, when a merge of the base is marked, when none is open, or when the step is not a publication", () => {
+    const other = { ...PULL_REQUEST, candidateDigest: "7".repeat(64) };
+    expect(() => holdWorkflowCandidateOnPullRequests(atPullRequest({ pullRequests: [other] }), at)).toThrow(WorkflowTransitionError);
+    expect(() => holdWorkflowCandidateOnPullRequests(atPullRequest({ pullRequests: [{ ...PULL_REQUEST, headTreeSha: "8".repeat(40) }] }), at)).toThrow(WorkflowTransitionError);
+    expect(() => holdWorkflowCandidateOnPullRequests(atPullRequest({ pullRequests: [{ ...PULL_REQUEST, state: "MERGED" as const }] }), at)).toThrow(WorkflowTransitionError);
+    expect(() => holdWorkflowCandidateOnPullRequests(atPullRequest({ pullRequests: [PULL_REQUEST, { ...PULL_REQUEST, repositoryId: "other", number: 8, candidateDigest: "7".repeat(64) }] }), at)).toThrow(WorkflowTransitionError);
+    expect(() => holdWorkflowCandidateOnPullRequests(waiting(), at)).toThrow(WorkflowTransitionError);
+    expect(() => holdWorkflowCandidateOnPullRequests(atPullRequest({ state: "RUNNING" }), at)).toThrow(WorkflowTransitionError);
+  });
+});
+
+describe("whether the candidate is the code the pull requests hold (the refusal of checks that ran on other code)", () => {
+  const two = (secondHead: string) => {
+    const candidate2 = createCandidateManifest([
+      { repositoryId: "payments", commitSha: HEAD_A, treeSha: "b".repeat(40), baseCommitSha: BASE_OLD },
+      { repositoryId: "ledger", commitSha: "5".repeat(40), treeSha: "6".repeat(40), baseCommitSha: BASE_OLD },
+    ]);
+    return { ...waiting(), candidate: candidate2, pullRequests: [PULL_REQUEST, { ...PULL_REQUEST, repositoryId: "ledger", number: 8, headSha: secondHead }] } as unknown as WorkflowSnapshot;
+  };
+  it("needs every open pull request to be on the candidate's commit, not just one of them", () => {
+    expect(candidateIsOnPullRequest(two("5".repeat(40)))).toBe(true);
+    // One repository's pull request holds other code (a fix did not reach it): a rerun whose digest differs is not "other code than the pull requests".
+    expect(candidateIsOnPullRequest(two("4".repeat(40)))).toBe(false);
+    expect(candidateIsOnPullRequest({ ...waiting(), pullRequests: [] })).toBe(false);
+  });
+});
+
+describe("the checks re-run by themselves after a merge of the base (decision 70(c)): the policy", () => {
+  const { verification: _v, reviews: _r, ...base } = waiting();
+  void _v; void _r;
+  const recheck = (decisions: unknown[] = []) => WorkflowSnapshotSchema.parse({ ...base, stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.baseMergedRecheck, decisions });
+  const retryFor = (digest: string, n: number) => ({ requestId: workflowAutoActionRequestId(TASK_ID, 100 + n, "AUTO_RETRY"), workflowRevision: 100 + n, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID,
+    actorRole: "AGENTX", reason: "Rovara retried the checks by itself.", source: "AUTO_RETRY", auto: { stage: "VERIFY", candidateDigest: digest }, at });
+  const budget = (over: Partial<Parameters<typeof autoFixDecision>[2]> = {}): Parameters<typeof autoFixDecision>[2] => ({ enabled: true, spend: { spentUsd: wholeTaskSpendUsd(1), roundEstimateUsd: 3, capUsd: 15 }, dayBudgetHasRoom: true, baselineRequests: 0, ...over });
+  const cause = { blockCause: "base-merged" as const };
+
+  it("retries the checks once for the merged candidate, while a pull request is open (any other block with one open asks a person)", () => {
+    expect(autoFixDecision(recheck(), cause, budget())).toEqual({ action: "RETRY", stage: "VERIFY", codes: ["base-merged"] });
+    const without = autoFixDecision(recheck(), {}, budget());
+    expect(without).toMatchObject({ action: "ASK", reason: "needs-a-person" });
+    expect("codes" in without && without.codes).toContain("pull-request-open");
+  });
+
+  it("asks when the spend is over the cap, cannot be read, or the day budget has no room", () => {
+    expect(autoFixDecision(recheck(), cause, budget({ spend: { spentUsd: wholeTaskSpendUsd(14), roundEstimateUsd: 3, capUsd: 15 } }))).toMatchObject({ action: "ASK", reason: "spend-cap" });
+    expect(autoFixDecision(recheck(), cause, budget({ spend: { spentUsd: wholeTaskSpendUsd(Number.NaN), roundEstimateUsd: 3, capUsd: 15 } }))).toMatchObject({ action: "ASK", reason: "inputs-missing" });
+    expect(autoFixDecision(recheck(), cause, budget({ dayBudgetHasRoom: false }))).toMatchObject({ action: "ASK", reason: "day-budget" });
+  });
+
+  it("allows one automatic retry per candidate (a base that keeps moving is bounded by the re-run's daily allowance below)", () => {
+    const digest = candidate.digest;
+    // The retry was already used for this code: the second asks.
+    expect(autoFixDecision(recheck([retryFor(digest, 0)]), cause, budget())).toMatchObject({ action: "ASK", reason: "retry-limit" });
+    // Another candidate (the base moved again) has its own retry, until the task's automatic actions run out.
+    const others = Array.from({ length: WORKFLOW_AUTO_ACTION_LIMIT - 1 }, (_, n) => retryFor(`${String(n + 1).repeat(64)}`.slice(0, 64), n));
+    expect(autoFixDecision(recheck(others), cause, budget())).toEqual({ action: "RETRY", stage: "VERIFY", codes: ["base-merged"] });
+    // The task's lifetime automatic actions (its send backs and ordinary retries) are not the re-run's: with them used up a merged base still has its own daily allowance, while any other transient block asks.
+    const lifetime = [...others, retryFor("a".repeat(64), 50)];
+    expect(autoFixDecision(recheck(lifetime), cause, budget())).toEqual({ action: "RETRY", stage: "VERIFY", codes: ["base-merged"] });
+    expect(autoFixDecision({ ...recheck(lifetime), pullRequests: [] }, { blockCause: "run-lost" }, budget())).toMatchObject({ action: "ASK", reason: "total-limit" });
+  });
+});
+
+describe("the re-run's own allowance and its row writer (decision 70(c))", () => {
+  const { verification: _v, reviews: _r, ...base } = waiting();
+  void _v; void _r;
+  const recheck = (decisions: unknown[] = []) => WorkflowSnapshotSchema.parse({ ...base, stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.baseMergedRecheck, decisions });
+  const merged = (n: number, hoursAgo: number, digest = candidate.digest) => ({ requestId: workflowAutoActionRequestId(TASK_ID, 200 + n, "AUTO_RETRY"), workflowRevision: 200 + n, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID,
+    actorRole: "AGENTX", reason: BASE_MERGED_RETRY_REASON, source: "AUTO_RETRY", auto: { stage: "VERIFY", candidateDigest: digest }, at: new Date(Date.parse(at) - hoursAgo * 3_600_000).toISOString() });
+  const budget = (): Parameters<typeof autoFixDecision>[2] => ({ enabled: true, spend: { spentUsd: wholeTaskSpendUsd(1), roundEstimateUsd: 3, capUsd: 15 }, dayBudgetHasRoom: true, baselineRequests: 0, nowMs: Date.parse(at) });
+  const cause = { blockCause: "base-merged" as const };
+
+  it("gives a task three re-runs a day, of its own: they do not use the task's lifetime automatic actions, and a day later the allowance is back", () => {
+    const three = [0, 1, 2].map((n) => merged(n, n + 1, `${String(n + 1).repeat(64)}`.slice(0, 64)));
+    expect(baseMergedRetriesToday(recheck(three).decisions, Date.parse(at))).toBe(BASE_MERGED_RETRIES_PER_DAY);
+    // The third is the last: the fourth in the same day asks, with its own reason (not "total-limit").
+    expect(autoFixDecision(recheck(three), cause, budget())).toMatchObject({ action: "ASK", reason: "base-merged-limit" });
+    expect(autoFixDecision(recheck(three.slice(0, 2)), cause, budget())).toEqual({ action: "RETRY", stage: "VERIFY", codes: ["base-merged"] });
+    // Re-runs older than a day are not counted.
+    const old = [0, 1, 2].map((n) => merged(n, 25 + n, `${String(n + 1).repeat(64)}`.slice(0, 64)));
+    expect(autoFixDecision(recheck(old), cause, budget())).toEqual({ action: "RETRY", stage: "VERIFY", codes: ["base-merged"] });
+    // Many re-runs over many days never use the task's six lifetime actions: the lifetime limit does not ask here.
+    const many = Array.from({ length: 10 }, (_, n) => merged(n, 25 + n, `${String(n % 9 + 1).repeat(64)}`.slice(0, 64)));
+    expect(autoFixDecision(recheck(many), cause, budget())).toEqual({ action: "RETRY", stage: "VERIFY", codes: ["base-merged"] });
+  });
+
+  it("does not count the re-runs in the task's lifetime automatic actions: later ordinary actions still have all six", () => {
+    const three = [0, 1, 2].map((n) => merged(n, n + 1, `${String(n + 1).repeat(64)}`.slice(0, 64)));
+    // Five ordinary automatic retries of other candidates (the task's lifetime actions: five of six).
+    const ordinary = Array.from({ length: 5 }, (_, n) => ({ ...merged(10 + n, 30 + n, `${String(n + 4).repeat(64)}`.slice(0, 64)), reason: "Rovara retried the checks by itself." }));
+    const decisions = recheck([...three, ...ordinary]).decisions;
+    expect(workflowAutoFixCounts(decisions).actions).toBe(5);
+    // An ordinary transient block still gets its action (5 < 6); with the three re-runs counted it would have 8 and ask.
+    expect(autoFixDecision({ ...recheck([...three, ...ordinary]), pullRequests: [] }, { blockCause: "run-lost" }, budget())).toEqual({ action: "RETRY", stage: "VERIFY", codes: ["run-lost"] });
+  });
+
+  it("holds the daily allowance again in the system move: a fourth re-run in 24 hours is refused there too, an ordinary retry is not", () => {
+    const three = [0, 1, 2].map((n) => merged(n, n + 1, `${String(n + 1).repeat(64)}`.slice(0, 64)));
+    const input = (reason: string) => ({ expectedRevision: recheck(three).revision, stage: "VERIFY" as const, reason, spend: { spentUsd: wholeTaskSpendUsd(1), roundEstimateUsd: 3, capUsd: 15 }, now: at });
+    expect(() => workflowAutomaticRetryDecision(recheck(three), input(BASE_MERGED_RETRY_REASON))).toThrow(/used up for today/u);
+    expect(workflowAutomaticRetryDecision(recheck(three), input("Rovara retried the checks by itself.")).source).toBe("AUTO_RETRY");
+    // Two earlier today: the third is allowed.
+    expect(workflowAutomaticRetryDecision(recheck(three.slice(0, 2)), { ...input(BASE_MERGED_RETRY_REASON), expectedRevision: recheck(three.slice(0, 2)).revision }).reason).toBe(BASE_MERGED_RETRY_REASON);
+  });
+
+  it("re-runs by itself only where automatic fixing is on and no E2E (a clean conflict merge on an E2E task stays the owner's)", () => {
+    const e2e = { e2e: { required: true } } as never;
+    expect(baseMergedRechecksItself({ autofix: { enabled: true, capUsd: 15, roundEstimateUsd: 3 } }, {})).toBe(true);
+    expect(baseMergedRechecksItself({ autofix: { enabled: true, capUsd: 15, roundEstimateUsd: 3 } }, e2e)).toBe(false);
+    expect(baseMergedRechecksItself({ autofix: { enabled: false, capUsd: 15, roundEstimateUsd: 3 } }, {})).toBe(false);
+    // Code's own switch is on unless it says false (Cloud's is off unless it says true).
+    expect(baseMergedRechecksItself({}, {})).toBe(true);
+  });
+});
+
+
 describe("what a finished merge of the base is", () => {
   const binding = { repositoryId: "payments", number: 7, baseCommit: BASE_NEW, expectedHeadCommit: HEAD_A };
   const result = (overrides: Record<string, unknown> = {}) => ({
@@ -359,16 +494,22 @@ describe("what a finished merge of the base is", () => {
     expect(outcome).toMatchObject({ headSha: MERGE, headTreeSha: MERGED_TREE, previousHeadSha: HEAD_A, baseCommitSha: BASE_NEW });
   });
 
-  it("is a merge even when the worker's result was lost, if GitHub shows it: but Rovara's checks are unproven then, so no head is kept for an approval to carry from", () => {
-    const outcome = plan({ status: "FAILED", error: "RUNTIME_UNAVAILABLE: compute lost", result: undefined });
-    expect(outcome.kind).toBe("synced");
-    if (outcome.kind !== "synced") return;
-    expect(outcome.workflow.pullRequests?.[0]).toMatchObject({ headSha: MERGE });
-    expect(outcome.workflow.pullRequests?.[0]?.syncedFrom).toBeUndefined();
-    expect(outcome.workflow.candidate?.repositories[0]).toMatchObject({ commitSha: MERGE, baseCommitSha: BASE_NEW });
+  it("is a merge even when the worker's result was lost, if GitHub shows exactly [recorded head, asked base]: the same new candidate, but no head is kept for an approval to carry from (decision 67b)", () => {
+    for (const status of ["FAILED", "INTERRUPTED", "CANCELLED"] as never[]) {
+      const outcome = plan({ status, error: "RUNTIME_UNAVAILABLE: compute lost", result: undefined });
+      expect(outcome.kind, status).toBe("synced");
+      if (outcome.kind !== "synced") continue;
+      expect(outcome.workflow.pullRequests?.[0], status).toMatchObject({ headSha: MERGE });
+      expect(outcome.workflow.pullRequests?.[0]?.syncedFrom, status).toBeUndefined();
+      expect(outcome.workflow.candidate?.repositories[0], status).toMatchObject({ commitSha: MERGE, baseCommitSha: BASE_NEW });
+    }
     // The same merge with its result in hand is one Rovara's checks passed on.
     const verified = plan({});
     expect(verified.kind === "synced" && verified.workflow.pullRequests?.[0]?.syncedFrom).toBe(HEAD_A);
+    // A failed run is still not recorded when the host does not show exactly that merge.
+    for (const bad of [{ parents: [HEAD_A] }, { parents: [HEAD_A, "1".repeat(40)] }, { parents: undefined }]) {
+      expect(plan({ status: "FAILED", error: "RUNTIME_UNAVAILABLE: compute lost", result: undefined, github: github(bad) }).kind, JSON.stringify(bad)).toBe("unchanged");
+    }
   });
 
   it("is refused when the merge commit's second parent is not the base commit, or its first is not the recorded head, or the tree is not the one reported", () => {

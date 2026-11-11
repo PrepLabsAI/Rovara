@@ -88,7 +88,7 @@ export const RESULT_RULES: Readonly<Record<AutoFixCode, Rule>> = {
   "selection-changed": ASK, "accounts-changed": ASK, "plan-not-approvable": ASK, "history-rewritten": ASK, "cancelled-by-owner": ASK, "unknown-group-code": ASK, "unreadable": ASK,
   "review-unusable": { kind: "review" }, "rule-files-unverified": { kind: "review" },
   "pull-request-open": { kind: "neutral" },
-  "dispatch-exhausted": ASK, "run-lost": ASK, "owner-stopped": ASK,
+  "dispatch-exhausted": ASK, "run-lost": ASK, "owner-stopped": ASK, "base-merged": ASK,
   "e2e-evidence-unknown": { kind: "unclear" }, "check-result-unknown": { kind: "unclear" }, "check-failed-cause-unknown": { kind: "unclear" },
 };
 

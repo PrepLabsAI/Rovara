@@ -579,6 +579,10 @@ function verifyBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
     return { text: "The required E2E evidence is incomplete or unavailable. Some required runtime checks may not have run. Nothing was sent to GitHub.",
       buttons: [...exits.sendBack(), ...exits.retryChecks(), exits.close] };
   }
+  // The base branch was merged into the pull request: the merged code is a new candidate, and its checks run again on the owner's Retry (nothing failed, so there is no sentence about the code not running).
+  if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.baseMergedRecheck) {
+    return { text: plainBlockReason(workflow.blockReason), buttons: [...exits.sendBack(), ...exits.retryChecks(), exits.close] };
+  }
   // Review only: no check runs, so the way on is coding again, or a check the owner chooses when the project has one.
   if (workflowIsReviewOnly(workflow.checkPolicy)) {
     const reason = REVIEW_ONLY_VERIFY_REASONS[workflow.blockReason ?? ""] ?? plainBlockReason(workflow.blockReason);

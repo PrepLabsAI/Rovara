@@ -21,6 +21,7 @@ import {
   MERGE_NOT_READY_MESSAGES as M,
   MERGE_VIEW_MESSAGE_MAX,
   MergePressBodySchema,
+  WORKFLOW_BLOCK_REASONS,
   agentXError,
   approvalProofKey,
   change,
@@ -90,6 +91,8 @@ export interface ReadinessWorkflow {
   fixSource?: unknown;
   branchSync?: unknown;
   feedbackReview?: { status?: string | undefined } | undefined;
+  /** Whether the task's changes need browser or API checks: its branch is not brought up to date by Rovara, which could not check the merged code again. */
+  e2e?: { required?: boolean | undefined } | undefined;
 }
 
 export interface ReadinessInput {
@@ -138,6 +141,8 @@ function codeOwnerRefusal(verdict: CodeOwnerVerdict | undefined): string | undef
 
 function workflowRefusal(workflow: ReadinessWorkflow): string | undefined {
   if (workflow.stage === "MERGED" || workflow.stage === "CLOSED") return M.taskClosed;
+  // The base branch was merged in and the merged code needs its checks and reviews again: the owner's Retry checks, not "still changing".
+  if (workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.baseMergedRecheck) return M.baseMerged;
   if (workflow.stage !== "WAIT_FOR_MERGE") return M.changing;
   if (workflow.state === "BLOCKED") {
     if (isCiFixBlockReason(workflow.blockReason)) return M.checks;
@@ -173,7 +178,7 @@ export function mergeReadiness(input: ReadinessInput): Readiness {
       : !approval.approved ? approvalMessage(approval.reason, pr.repositoryId, input)
       : owner !== undefined ? owner
       // Only a branch that is approved is brought up to date (an approval none counts needs no up-to-date branch yet).
-      : pr.branch === "behind" && pr.behindRequired ? M.behind(pr.baseBranch)
+      : pr.branch === "behind" && pr.behindRequired ? (input.workflow.e2e?.required === true ? M.behindByHand(pr.baseBranch) : M.behind(pr.baseBranch))
       : undefined;
     if (reason !== undefined) return notReady(several ? M.repository(pr.repositoryId, reason) : reason);
   }

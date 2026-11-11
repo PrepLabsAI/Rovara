@@ -83,6 +83,29 @@ describe("the sync slot", () => {
   });
 });
 
+describe("a task whose changes need browser or API checks (decision 70(c))", () => {
+  const digests = { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64), executionPlanDigest: "4".repeat(64) };
+  const ROUND = "55555555-5555-4555-8555-555555555555";
+  const GROUP = "66666666-6666-4666-8666-666666666666";
+  /** A workflow the schema takes whose changes need the browser and API round (it stands at the wait for the merge, so its round qualified), or, with `required: false`, has the record but needs none. */
+  const withE2E = (required: boolean): WorkflowSnapshot => waiting({
+    e2e: required
+      ? { ...digests, required, currentRoundId: ROUND, currentGroupRunIds: [GROUP], resultRefs: [], qualifiedRound: { ...digests, candidateDigest: candidate.digest, roundId: ROUND, groupRunIds: [GROUP], admissionSha256: "7".repeat(64), evidenceSha256: "8".repeat(64) } }
+      : { ...digests, required, currentGroupRunIds: [], resultRefs: [] },
+  });
+
+  it("is not brought up to date by Rovara: its merged code could not be checked again, while the same task without that need is", () => {
+    expect(syncDecider(input({ workflow: withE2E(true) })), "e2e required").toBeUndefined();
+    expect(syncDecider(input({ workflow: withE2E(false) }))?.slot, "e2e recorded, not required").toBe("sync");
+    expect(syncDecider(input())?.slot, "no e2e").toBe("sync");
+  });
+
+  it("still merges the base into a conflicted branch: that fix goes through coding, which exports its source", () => {
+    const conflicted = { branch: "conflicted" as const, review: "requested" as const, approval: undefined };
+    expect(conflictDecider(input({ itemOverrides: conflicted, workflow: withE2E(true) }))?.slot).toBe("conflict");
+  });
+});
+
 describe("the conflict slot", () => {
   const conflicted = { branch: "conflicted" as const, review: "requested" as const, approval: undefined };
 

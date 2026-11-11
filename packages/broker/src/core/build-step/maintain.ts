@@ -8,9 +8,9 @@
 // Left out: the rewrite of the pull request's description with the feedback fixes (feedback rounds are not in Code's wave 1), the merged-state bookkeeping that a merge found here would
 // also settle (merge tracking finds a merge on its own pass), and Cloud's autonomy re-read before a paid conflict round (the decider already read it when it asked for the merge).
 import {
-  PullRequestLifecycleResultSchema, WORKFLOW_FIX_DROPS_BASE_CHANGES, WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED, agentXError, blockWorkflowPullRequestUpdate, change, endWorkflowBranchSync,
+  BASE_MERGED_NEEDS_YOU_MILESTONE, BASE_MERGED_RECHECKING_MILESTONE, PullRequestLifecycleResultSchema, WORKFLOW_BLOCK_REASONS, WORKFLOW_FIX_DROPS_BASE_CHANGES, WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED, agentXError, blockWorkflowPullRequestUpdate, change, endWorkflowBranchSync,
   WorkflowSnapshotSchema, nextWorkflowPullRequestUpdate, observeWorkflowPullRequestMergedWithFix, recordWorkflowBranchSync, recordWorkflowPullRequestUpdate, startWorkflowBranchSyncRun, startWorkflowPullRequestUpdate, when,
-  workflowRequestId, CONFLICT_ROUNDS_MAX,
+  workflowRequestId, CONFLICT_ROUNDS_MAX, WorkflowTransitionError, holdWorkflowCandidateOnPullRequests,
   type CodeHost, type TransactItem, type WorkflowPullRequestUpdateCause, type WorkflowSnapshot,
   COMMIT_ID_PATTERN,
 } from "@agentx/contracts";
@@ -25,7 +25,7 @@ import { dispatchRowItem, resolveRowItem } from "../task-flow/dispatch-rows.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
 import { acceptStep, commitWorkflow, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
-import { jsonOf, locate, settled, startChecksRerun, type Located, type RowRef } from "./start.js";
+import { jsonOf, locate, settled, type Located, type RowRef } from "./start.js";
 import { pullRequestRecordKey, pullRequestRecordOf, taskOfOperation } from "./records.js";
 import type { Ended } from "./results.js";
 
@@ -47,17 +47,16 @@ export async function startPullRequestUpdate(deps: TaskFlowDeps, row: RowRef, lo
   const pullRequest = nextWorkflowPullRequestUpdate(workflow);
   const repository = workflow.candidate.repositories.find((entry) => entry.repositoryId === pullRequest?.repositoryId);
   const baseCommitSha = workflow.reviewBase?.find((entry) => entry.repositoryId === repository?.repositoryId)?.baseCommitSha;
-  if (workflow.state !== "READY") return settled(deps, row, "STALE");
   if (pullRequest === undefined) {
-    // Every open pull request already holds the candidate (a merge of the base that was checked and reviewed again, or a fix whose push landed before its result): there is nothing to push, and
-    // the task waits for the merge.
-    const holds = (workflow.pullRequests ?? []).every((entry) => (entry.state !== "OPEN" && entry.state !== "UNKNOWN") || (entry.candidateDigest === workflow.candidate.digest && entry.headTreeSha === workflow.candidate.repositories.find((r) => r.repositoryId === entry.repositoryId)?.treeSha));
-    if (!holds) return settled(deps, row, "STALE");
-    const { blockReason: _blockReason, ...rest } = workflow;
-    void _blockReason;
-    await commitWorkflow(deps, task, WorkflowSnapshotSchema.parse({ ...rest, revision: workflow.revision + 1, stage: "WAIT_FOR_MERGE", state: "WAITING", updatedAt: iso(deps) }), [resolveRowItem(deps, task.taskId, row.workflowRevision)]);
+    // Every open pull request already holds the candidate (a merge of the base that was checked and reviewed again, or a fix whose push landed before its result): there is nothing to push, and the task
+    // waits for the merge. The owner's Retry at a publication block does the same, so a repeat finds it done (the revision moved on) and an unrepeated one is not left blocked.
+    let held: WorkflowSnapshot | undefined;
+    try { held = holdWorkflowCandidateOnPullRequests(workflow, iso(deps)); } catch (error) { if (!(error instanceof WorkflowTransitionError)) throw error; }
+    if (held === undefined) return settled(deps, row, "STALE");
+    if (!await commitWorkflow(deps, task, held, [resolveRowItem(deps, task.taskId, row.workflowRevision)])) return settled(deps, row, "STALE");
     return "STARTED";
   }
+  if (workflow.state !== "READY") return settled(deps, row, "STALE");
   if (repository === undefined) return settled(deps, row, "STALE");
   const block = async (cause?: WorkflowPullRequestUpdateCause): Promise<StepStart> => {
     await commitWorkflow(deps, task, blockWorkflowPullRequestUpdate(workflow, { numbers: [pullRequest.number], ...(cause === undefined ? {} : { cause }), now: iso(deps) }), [resolveRowItem(deps, task.taskId, row.workflowRevision)]);
@@ -210,8 +209,13 @@ async function restoreRecordHead(deps: TaskFlowDeps, task: TaskRecord, operation
   }).catch(() => undefined);
 }
 
-/** Why a task that was waiting for the merge is being checked again: the base was merged into its branch, and a merge is not trusted on its parents alone. */
-export const SYNC_RECHECK_REASON = "The base branch was merged into this pull request. Rovara is checking the merged code again before it is called ready.";
+/**
+ * Whether Rovara re-runs the checks of a merged base by itself (decision 70(c)): automatic fixing is on and the task does not need E2E (its recheck has no source export, so it stays the owner's Retry).
+ * It decides whether the AUTOFIX row (cause `base-merged`) is written and which milestone is said: "re-checking" when it is, "needs you" when it is not.
+ */
+export function baseMergedRechecksItself(deps: Pick<TaskFlowDeps, "autofix">, recheck: Pick<WorkflowSnapshot, "e2e">): boolean {
+  return deps.autofix?.enabled !== false && recheck.e2e?.required !== true;
+}
 
 /** The link of a pull request to its task names the candidate it holds; a fix or a merge gives a new one. Conditional on the digest read, so a link that moved meanwhile is the newer writer's. */
 async function rekeyItems(deps: TaskFlowDeps, host: CodeHost, definitionUrl: string, task: TaskRecord, before: WorkflowSnapshot, after: WorkflowSnapshot): Promise<TransactItem[]> {
@@ -335,6 +339,7 @@ async function recordSynced(deps: TaskFlowDeps, task: TaskRecord, workflow: Work
   const reported = parsed?.success === true && parsed.data.repository === maintenance.repository ? parsed.data : undefined;
   // What the host shows now. A merge the worker says it pushed is never judged without it (the result is then recorded by the next attempt); for a merge that failed, an unreadable host shows nothing.
   let github: BranchSyncGithub | undefined;
+  let parentsFailure: Error | undefined;
   let host: ReturnType<typeof codeHostForRecord> | undefined;
   try {
     if (definition === undefined || deps.codeHosts === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "cannot verify the merged pull request against the merge");
@@ -348,10 +353,13 @@ async function recordSynced(deps: TaskFlowDeps, task: TaskRecord, workflow: Work
       if (branchHead !== undefined && branchHead !== head && SHA.test(branchHead)) head = branchHead;
     }
     const headTreeSha = await host.tree(repositoryRef, head, scope);
-    const parents = head !== binding.expectedHeadCommit ? await host.commitParents(repositoryRef, head, scope).catch(() => undefined) : undefined;
+    // A parents read that fails is not "no merge": the merge is judged on them, so the failure is retried by the next attempt.
+    const parents = head !== binding.expectedHeadCommit
+      ? await host.commitParents(repositoryRef, head, scope).catch((failure: unknown) => { parentsFailure = failure instanceof Error ? failure : new Error("the merge's parents could not be read"); return undefined; }) : undefined;
+    if (parentsFailure !== undefined) throw parentsFailure;
     github = { state: remote.state, headBranch: remote.sourceBranch, headCommit: head, headTreeSha, parents };
   } catch (error) {
-    if (reported !== undefined && reported.commit !== binding.expectedHeadCommit) throw error;
+    if (parentsFailure !== undefined || (reported !== undefined && reported.commit !== binding.expectedHeadCommit)) throw error;
   }
   const outcome = planBranchSyncOutcome({
     askFirst: false, workflow, binding: { repositoryId: marker.repositoryId, number: marker.number, baseCommit: binding.baseCommit, expectedHeadCommit: binding.expectedHeadCommit },
@@ -362,13 +370,8 @@ async function recordSynced(deps: TaskFlowDeps, task: TaskRecord, workflow: Work
     pullRequests: [{ repository: marker.repositoryId, number: marker.number, url: pullRequest.url }],
   }, n);
   let committed: boolean;
-  // A merge from a run that did not succeed is not recorded (owner decision b): nothing proves the checks passed on it, so the task waits for the merge as it did, and a head that is not the one
-  // recorded is read by merge tracking as someone else's.
-  if (outcome.kind === "synced" && ended.status !== "SUCCEEDED") {
-    await commitWorkflow(deps, task, endWorkflowBranchSync(workflow, now));
-    await restoreRecordHead(deps, task, operation);
-    return;
-  }
+  // A merge that ends without being recorded (nothing pushed, a failed or lost run with no merge on the host, a stop): the pull request's record goes back to the head Rovara had, so a head it did not
+  // accept is not read as its own. A merge the host shows with the right parents is recorded whatever the run's status: it is a new candidate that is checked and reviewed again (decision 67b).
   if (outcome.kind === "unchanged") { committed = await commitWorkflow(deps, task, outcome.workflow); await restoreRecordHead(deps, task, operation); }
   else if (outcome.kind === "stopped" || outcome.kind === "asked" || outcome.kind === "gave_up") { committed = await commitWorkflow(deps, task, outcome.workflow, milestone("stuck", outcome.message, outcome.workflow.revision)); await restoreRecordHead(deps, task, operation); }
   else if (outcome.kind === "conflict") {
@@ -378,24 +381,30 @@ async function recordSynced(deps: TaskFlowDeps, task: TaskRecord, workflow: Work
       ...milestone("fixing", `The branch conflicts with ${maintenance.baseBranch}, so Rovara is resolving it (try ${String(round)} of ${String(CONFLICT_ROUNDS_MAX)}).`, outcome.workflow.revision),
     ]);
   } else {
-    // A clean merge, at the host, from a run that succeeded. It is a NEW CANDIDATE, not a trusted one (owner decision b): the host shows the right parents, but not what the merge's tree holds beyond
-    // them, so the checks and the reviews run again on it before the task may wait for the merge and the pull request may be called ready. The record learns the head (it is Rovara's), the link
-    // follows the new candidate, and the new head is indexed; the earlier checks and reviews are not carried over.
+    // A clean merge, on the host. It is a NEW CANDIDATE, not a trusted one (owner decision 67b): the host shows the right parents, but not what the merge's tree holds beyond them, so the checks and the
+    // reviews run again on it before the task may wait for the merge and the pull request may be called ready. The earlier checks, reviews and accepted findings are not carried over; the task is blocked at
+    // VERIFY with the reason (the owner's Retry checks runs them, or Rovara's own automatic retry below; merge tracking marks a pull request ready only while the task waits for the merge).
     if (host === undefined || definition === undefined) return;
     const record = await pullRequestRecordOf(deps, task.workspaceId, maintenance.repository, maintenance.pullRequestNumber);
     const { verification: _verification, reviews: _reviews, acceptedFindings: _accepted, ...merged } = outcome.workflow;
     void _verification; void _reviews; void _accepted;
-    const recheck = WorkflowSnapshotSchema.parse({ ...merged, stage: "VERIFY", state: "BLOCKED", blockReason: SYNC_RECHECK_REASON, updatedAt: now });
+    const recheck = WorkflowSnapshotSchema.parse({ ...merged, stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.baseMergedRecheck, updatedAt: now });
+    const rechecksItself = baseMergedRechecksItself(deps, recheck);
     committed = await commitWorkflow(deps, task, recheck, [
+      // Said in the milestone feed once, truthfully: Rovara re-checking by itself (information), or the task waiting for the owner (needs you). When the row is written Rovara may still end up asking (the autonomy,
+      // the spend and the allowances are read at the look): that ask writes the "needs you" line then.
+      ...milestone(rechecksItself ? "fixing" : "stuck", rechecksItself ? BASE_MERGED_RECHECKING_MILESTONE : BASE_MERGED_NEEDS_YOU_MILESTONE, recheck.revision),
+      // Decision 70(c): the checks re-run by themselves. The AUTOFIX row (cause `base-merged`) commits with the block; the policy reads the autonomy again (`suggest` asks), the spend and the day budget, and
+      // allows one automatic retry per candidate and three a day per task (its own allowance, not the task's lifetime automatic actions); admission holds the company's allowance per ten minutes. A task that
+      // needs E2E is not synced (and its conflict merge, were it clean, stays the owner's Retry): its recheck has no source export.
+      ...(rechecksItself ? [dispatchRowItem(deps, task.taskId, recheck.revision, "AUTOFIX", now, now, "base-merged")] : []),
       ...(await rekeyItems(deps, host, definition.url, task, workflow, outcome.workflow)),
       ...(record !== undefined && record.expectedHeadCommit !== outcome.headSha
         ? [{ kind: "update" as const, key: pullRequestRecordKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber), ops: [change.set("expectedHeadCommit", outcome.headSha), change.set("state", "open"), change.set("updatedAt", now)], condition: when.eq("expectedHeadCommit", maintenance.expectedHeadCommit) }] : []),
       ...prHeadItems({ orgId: deps.companyId, repositoryKey: requireRepositoryKey(providerOf(host), definition.url), headSha: outcome.headSha, taskId: task.taskId, repositoryId: marker.repositoryId, number: marker.number, branch: maintenance.headBranch }, Date.parse(now)),
     ]);
-    if (committed) {
-      await startChecksRerun(deps, { taskId: task.taskId, workflowRevision: recheck.revision }, { requestId: `sync-recheck-${task.taskId}-${String(recheck.revision)}`, actorId: workflow.ownerId })
-        .catch((error: unknown) => log(deps, { event: "build_step.start_failed", taskId: task.taskId, kind: "SYNC_RECHECK", error: error instanceof Error ? error.name : "unknown" }));
-    }
+    // The row is looked at right away; a sweep finds it if this process dies first.
+    if (committed && rechecksItself) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: recheck.revision, kind: "AUTOFIX" }).catch((error: unknown) => log(deps, { event: "build_step.start_failed", taskId: task.taskId, kind: "AUTOFIX", error: error instanceof Error ? error.name : "unknown" }));
   }
   if (committed && outcome.kind === "conflict") await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: outcome.workflow.revision, kind: "IMPLEMENT" }).catch((error: unknown) => log(deps, { event: "build_step.start_failed", taskId: task.taskId, kind: "IMPLEMENT", error: error instanceof Error ? error.name : "unknown" }));
 }
