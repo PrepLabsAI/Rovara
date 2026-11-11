@@ -162,10 +162,25 @@ export const ChannelActionSchema = z.object({
 });
 export type ChannelAction = z.infer<typeof ChannelActionSchema>;
 
+/**
+ * Phase 7c2: what the core's router decided before queueing a message. `suggest`: a plain new request, to be routed
+ * to an answer or a suggested task. `task_question`: a mention saved as a task's note, answered if it is a question.
+ */
+export const QueuedRoutingSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("suggest") }).strict(),
+  z.object({ kind: z.literal("task_question"), taskId: z.string().min(1).max(100), noteId: ChannelOpaqueIdSchema, chat: z.boolean() }).strict(),
+]);
+export type QueuedRouting = z.infer<typeof QueuedRoutingSchema>;
+
 export const ChannelQueueItemSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("action"), action: ChannelActionSchema, projectName: AgentXNameSchema.optional(), developerId: z.string().min(1).max(200).optional(), stepUp: QueuedStepUp }).strict(),
   // FR-073: the built-in adapter's items carry no developer; its actors keep the surface's verified identity.
-  z.object({ kind: z.literal("message"), message: InboundMessageSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200).optional(), stepUp: QueuedStepUp }).strict(),
+  z.object({
+    kind: z.literal("message"), message: InboundMessageSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200).optional(), stepUp: QueuedStepUp,
+    /** Phase 7c2: how many earlier requests the conversation was told this one waits behind. */
+    queuedBehind: z.number().int().min(0).max(10_000).optional(),
+    routing: QueuedRoutingSchema.optional(),
+  }).strict(),
   z.object({ kind: z.literal("decision"), decision: ChannelDecisionSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200).optional(), stepUp: QueuedStepUp }).strict(),
 ]);
 export type ChannelQueueItem = z.infer<typeof ChannelQueueItemSchema>;
