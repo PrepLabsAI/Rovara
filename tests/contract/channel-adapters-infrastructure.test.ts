@@ -46,9 +46,9 @@ describe("channel adapters infrastructure", () => {
     expect(functionNamed(legacy, "ChannelApiIngress")).toBeUndefined();
   });
 
-  it("routes only the two signed POSTs to the channel API, with no API Gateway authorizer", () => {
+  it("routes only the three signed POSTs to the channel API, with no API Gateway authorizer", () => {
     const routes = ofType(named, "AWS::ApiGatewayV2::Route").map(([, route]) => route.Properties).filter((route) => String(route.RouteKey).includes("/v1/channels/"));
-    expect(routes.map((route) => route.RouteKey).sort()).toEqual(["POST /v1/channels/{channel}/decisions", "POST /v1/channels/{channel}/messages"]);
+    expect(routes.map((route) => route.RouteKey).sort()).toEqual(["POST /v1/channels/{channel}/actions", "POST /v1/channels/{channel}/decisions", "POST /v1/channels/{channel}/messages"]);
     for (const route of routes) expect(route.AuthorizationType).toBe("NONE");
   });
 

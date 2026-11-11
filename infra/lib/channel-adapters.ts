@@ -109,7 +109,7 @@ export class ChannelAdapters extends Construct {
       apiId: props.api.ref, integrationType: "AWS_PROXY", integrationUri: ingress.functionArn, payloadFormatVersion: "2.0",
     });
     // The adapter signs each request itself (Standard Webhooks); the Lambda verifies it, as Slack ingress does Slack's.
-    for (const [routeId, kind] of [["MessagesRoute", "messages"], ["DecisionsRoute", "decisions"]] as const) {
+    for (const [routeId, kind] of [["MessagesRoute", "messages"], ["DecisionsRoute", "decisions"], ["ActionsRoute", "actions"]] as const) {
       new apigwv2.CfnRoute(this, routeId, {
         apiId: props.api.ref, routeKey: `POST /v1/channels/{channel}/${kind}`, target: `integrations/${integration.ref}`, authorizationType: "NONE",
       });

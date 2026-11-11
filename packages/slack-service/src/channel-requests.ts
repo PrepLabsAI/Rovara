@@ -6,6 +6,7 @@ import {
   parseSwebenchCommand,
   channelEventId,
   conversationSubject,
+  type ChannelAction,
   type ChannelEvent,
   type ChannelQueueItem,
   type ConversationRef,
@@ -37,7 +38,7 @@ export function readChannelQueueItem(value: unknown): ChannelQueueItem | undefin
 }
 
 /** The processor's request for a queued item; a decision becomes a "yes" or "cancel" bound to one confirmation. */
-export function channelTurn(item: ChannelQueueItem): { message: ProcessorMessage<ConversationRef>; answer?: ConfirmationAnswer } {
+export function channelTurn(item: Exclude<ChannelQueueItem, { kind: "action" }>): { message: ProcessorMessage<ConversationRef>; answer?: ConfirmationAnswer } {
   if (item.kind === "message") {
     const { message } = item;
     return { message: { eventId: message.eventId, thread: message.conversation, userId: message.actor.userId, text: message.text, receivedAt: message.receivedAt } };
@@ -56,6 +57,11 @@ export interface ChannelRequestDependencies {
     | "subjectOf" | "plainReplies" | "format" | "commands" | "mayApprove" | "onFinished">;
   /** Queues an event for the adapter; the event sender signs and delivers it. */
   send(event: ChannelEvent): Promise<void>;
+  /**
+   * FR-071: what runs a person's press or form, by its action ID. An action with no handler is logged and dropped; the
+   * Slack adapter's actions get theirs with Phases 7b and 7c.
+   */
+  actions?: Readonly<Record<string, ChannelActionHandler>>;
   now?: () => number;
   log: ServiceLog;
 }
@@ -71,10 +77,22 @@ const chatGptElsewhere: SurfaceCommand<ConversationRef> = (message) =>
     ? undefined
     : { disposition: "abandoned", run: async (context) => { await context.post(CHATGPT_ELSEWHERE_TEXT); } };
 
+/** Runs one action (FR-071) for a conversation; it may answer with events through `send`. */
+export type ChannelActionHandler = (action: ChannelAction, context: { send: (event: ChannelEvent) => Promise<void>; finalAttempt: boolean; log: ServiceLog }) => Promise<void>;
+
 /** The consumer's handler for the channel request queue. */
 export function channelRequestHandler(deps: ChannelRequestDependencies): RequestHandler<ChannelQueueItem> {
   const now = deps.now ?? Date.now;
   return async (item, context) => {
+    if (item.kind === "action") {
+      const handler = deps.actions?.[item.action.actionId];
+      if (handler === undefined) {
+        deps.log("channel.action_unhandled", { channel: item.action.channel, actionId: item.action.actionId, eventId: item.action.eventId });
+        return;
+      }
+      await handler(item.action, { send: (event) => deps.send(event), finalAttempt: context.finalAttempt, log: deps.log });
+      return;
+    }
     const { message, answer } = channelTurn(item);
     const conversation = message.thread;
     const event = <T extends ChannelEvent["type"]>(type: T, data: Extract<ChannelEvent, { type: T }>["data"]): ChannelEvent =>

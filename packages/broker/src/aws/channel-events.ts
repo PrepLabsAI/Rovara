@@ -47,8 +47,33 @@ export function fitEventToAdapter(event: ChannelEvent, adapter: Pick<ChannelAdap
     const keep = !steppedUp && actions !== undefined && actions.length <= adapter.capabilities.buttons;
     return { ...event, data: { ...rest, text: `${cut(rest.text, limit - link.length)}${link}`, ...(keep ? { actions } : {}) } };
   }
+  if (event.type === "message" || event.type === "direct") {
+    const { actions, ...rest } = event.data;
+    const fitted: ChannelEvent = { ...event, data: { ...rest, text: cut(rest.text), ...fitActions(actions, adapter.capabilities) } };
+    return fitted;
+  }
   if ("text" in event.data && typeof event.data.text === "string") return { ...event, data: { ...event.data, text: cut(event.data.text) } } as ChannelEvent;
   return event;
+}
+
+/**
+ * FR-070: a message's actions as the adapter can show them. Form buttons go without `forms`; and with more actions than
+ * the adapter's buttons, none go, since the text stands on its own.
+ */
+function fitActions(actions: Extract<ChannelEvent, { type: "message" }>["data"]["actions"], capabilities: ChannelAdapterRecord["capabilities"]): { actions?: NonNullable<typeof actions> } {
+  if (actions === undefined) return {};
+  const shown = capabilities.forms === true ? actions : actions.filter((action) => action.type !== "form");
+  return shown.length === 0 || shown.length > capabilities.buttons ? {} : { actions: shown };
+}
+
+/**
+ * FR-070: why an event cannot go to this adapter at all. A private or direct message to an adapter that cannot keep it
+ * private is dropped, never shown to the whole conversation.
+ */
+export function unsendableReason(event: ChannelEvent, adapter: Pick<ChannelAdapterRecord, "capabilities">): string | undefined {
+  if (event.type === "direct" && adapter.capabilities.direct !== true) return "direct_unsupported";
+  if (event.type === "message" && event.data.audience?.kind === "ephemeral" && adapter.capabilities.ephemeral !== true) return "ephemeral_unsupported";
+  return undefined;
 }
 
 export function createChannelEventSender(deps: ChannelEventSenderDependencies) {
@@ -79,6 +104,8 @@ export function createChannelEventSender(deps: ChannelEventSenderDependencies) {
     const secret = await deps.getSecret(adapter.secretName);
     if (secret === undefined) { log({ event: "retry", reason: "secret_unavailable", channel: event.channel, eventId: event.id }); return "retry"; }
 
+    const unsendable = unsendableReason(event, adapter);
+    if (unsendable !== undefined) { log({ event: "dropped", reason: unsendable, channel: event.channel, eventId: event.id }); return "dropped"; }
     const body = JSON.stringify(fitEventToAdapter(event, adapter));
     const headers = { "content-type": "application/json", ...webhookHeaders({ secret, id: event.id, timestamp: Math.floor(deps.now() / 1000), body }) };
     let status: number;

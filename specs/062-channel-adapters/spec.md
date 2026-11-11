@@ -162,6 +162,44 @@ phase. A thread started before the change resumes its workspace after it.
 - **FR-052:** A WhatsApp adapter maps a chat to a conversation, uses at most 3 reply buttons, and uses an
   approved template when it may not message first.
 
+### Slack through the channel API (Phase 7)
+
+Decided 2026-11-10, replacing Phase 5b's in-process adapter: Slack reaches the core only through the channel API, as
+any adapter does. The Slack adapter runs inside Rovara's stacks and is registered by the deploy, so installation is
+unchanged (the same Slack app, tokens and Add to Slack; the app's URLs point at the adapter). Slack sign-in stays an
+identity provider, not a channel.
+
+The protocol grows by three primitives, each behind a capability an adapter declares:
+
+- **FR-070 (rich messages):** a `message` event may carry `parts` (sections, fields, context lines, links, images by
+  URL) and `actions` (buttons with an `actionId` and `value`, link buttons, selects, and forms; see FR-071) besides its
+  plain `text`, which every adapter can show. A `key` names the message: a later event with the same key replaces it
+  where the adapter has `edits`, and is a new message elsewhere. An `audience` of one actor makes it private in the
+  conversation (`ephemeral`), and a `direct` audience sends it to the actor outside any conversation (`direct`).
+- **FR-071 (actions):** `POST /v1/channels/{channel}/actions` carries a person's press or form submission:
+  `{ eventId, conversation?, actor, actionId, value, form?, messageKey? }`, signed as messages are. A button may declare a
+  form (title, fields, submit label); the adapter opens it itself, since surfaces such as Slack require a form within
+  seconds of the press, and posts the submission as one action. Decisions (FR-021) stay as they are.
+- **FR-072 (commands):** the core asks the adapter and waits for its answer, signed both ways with the adapter's
+  secret: `start_conversation` (post the first message in a space; answers the new thread), `create_document`
+  (a titled Markdown document readable in a space; answers its link), `delete_document`, `space_members`, `user`
+  and `user_by_email` (directory reads for task access). An adapter answers only the commands its capabilities name;
+  the core never relies on one it lacks.
+- **FR-073 (the built-in Slack adapter):** the deploy registers channel `slack` with its own secret and capabilities
+  (`threads`, `buttons`, `edits`, `ephemeral`, `direct`, `forms`, `documents`, `directory`). Its actors keep Slack's
+  verified identity (FR-033): no linking, and no step-up refusal for decisions Slack can make today. Slack's subjects,
+  owner keys and bindings stay exactly as they are (SC-001).
+- **FR-074 (rollout):** `SlackViaChannel` (`enabled` | `disabled`, default `disabled`) routes Slack through the adapter;
+  disabled, today's Slack path runs unchanged. It is enabled in TEST first; the old path is removed only after.
+
+Phases: 7a the primitives (contracts, signing, the core's command client, capabilities); 7b Slack's conversation path
+through the adapter behind `SlackViaChannel`; 7c the task workflow, notices and directory through the adapter; 7d
+TEST, then the old path's removal.
+
+Constitution: Principle I requires an adapter's actors to be linked and refuses step-up decisions from adapters.
+FR-073 needs a MINOR amendment before 7b: the built-in Slack adapter is registered by the deploy, and its actors are
+verified by Slack, as today.
+
 ## Security considerations
 
 **Untrusted actors:** adapters and anyone who can write to a bound space; the text they send; anyone holding a

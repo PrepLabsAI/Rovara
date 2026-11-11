@@ -7,6 +7,7 @@ import {
   AdapterChannelIdSchema,
   channelBindingKey,
   readChannelBindingItem,
+  ChannelActionSchema,
   ChannelDecisionSchema,
   InboundMessageSchema,
   LINK_REQUIRED_INTERVAL_SECONDS,
@@ -84,10 +85,10 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
 
   return async (event: ChannelIngressEvent): Promise<ChannelIngressResponse> => {
     if (event.requestContext?.http?.method !== "POST") return refuse(405, "method_not_allowed");
-    const route = /^\/v1\/channels\/([^/]+)\/(messages|decisions)$/.exec(event.rawPath ?? "");
+    const route = /^\/v1\/channels\/([^/]+)\/(messages|decisions|actions)$/.exec(event.rawPath ?? "");
     const channel = route === null ? undefined : AdapterChannelIdSchema.safeParse(route[1]);
     if (route === null || channel === undefined || !channel.success) return refuse(404, "not_found");
-    const kind = route[2] as "messages" | "decisions";
+    const kind = route[2] as "messages" | "decisions" | "actions";
 
     const body = event.isBase64Encoded === true ? Buffer.from(event.body ?? "", "base64").toString("utf8") : event.body ?? "";
     if (Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) return refuse(413, "too_large");
@@ -119,11 +120,14 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
 
       let json: unknown;
       try { json = JSON.parse(body); } catch { return refuse(400, "invalid_json"); }
-      const parsed = kind === "messages" ? InboundMessageSchema.safeParse(json) : ChannelDecisionSchema.safeParse(json);
+      const parsed = kind === "messages" ? InboundMessageSchema.safeParse(json) : kind === "decisions" ? ChannelDecisionSchema.safeParse(json) : ChannelActionSchema.safeParse(json);
       if (!parsed.success) return refuse(400, "invalid_body");
       const item = parsed.data;
       if (item.channel !== adapter.channel) return refuse(403, "channel_mismatch");
-      const { conversation, actor } = item;
+      const { actor } = item;
+      // FR-071: an action on a direct message has no conversation; those arrive with the task workflow (Phase 7c).
+      const conversation = item.conversation;
+      if (conversation === undefined) return refuse(400, "conversation_required");
       if (actor.tenant !== conversation.tenant) return refuse(403, "actor_tenant_mismatch");
 
       const binding = await deps.getBinding({ channel: conversation.channel, tenant: conversation.tenant, space: conversation.space });
@@ -148,9 +152,12 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
         return respond(202, { status: "link_required" });
       }
 
+      const checked = { projectName: binding.projectName, developerId, stepUp: adapter.stepUp };
       const queued: ChannelQueueItem = kind === "messages"
-        ? { kind: "message", message: InboundMessageSchema.parse(item), projectName: binding.projectName, developerId, stepUp: adapter.stepUp }
-        : { kind: "decision", decision: ChannelDecisionSchema.parse(item), projectName: binding.projectName, developerId, stepUp: adapter.stepUp };
+        ? { kind: "message", message: InboundMessageSchema.parse(item), ...checked }
+        : kind === "decisions"
+          ? { kind: "decision", decision: ChannelDecisionSchema.parse(item), ...checked }
+          : { kind: "action", action: ChannelActionSchema.parse(item), ...checked };
       await deps.enqueue(queued, groupOf(conversation));
       if (kind === "messages") {
         // Queued already: a failed ack must not fail the request, or the adapter's retry would queue it twice.
@@ -236,8 +243,7 @@ function createAwsChannelIngressHandler() {
       await sqs.send(new SendMessageCommand({
         QueueUrl: requestQueueUrl, MessageBody: JSON.stringify(item), MessageGroupId: groupId,
         // Per channel and kind, hashed so a 128-character event ID never truncates into another's.
-        MessageDeduplicationId: createHash("sha256").update(item.kind === "message"
-          ? `${item.message.channel}:message:${item.message.eventId}` : `${item.decision.channel}:decision:${item.decision.eventId}`).digest("hex"),
+        MessageDeduplicationId: createHash("sha256").update(queueItemIdentity(item)).digest("hex"),
       }));
     },
     async sendEvent(channelEvent) {
@@ -245,6 +251,13 @@ function createAwsChannelIngressHandler() {
     },
     now: Date.now,
   });
+}
+
+/** The channel, kind and adapter event ID a queued item is dropped as a duplicate by. */
+export function queueItemIdentity(item: ChannelQueueItem): string {
+  if (item.kind === "message") return `${item.message.channel}:message:${item.message.eventId}`;
+  if (item.kind === "decision") return `${item.decision.channel}:decision:${item.decision.eventId}`;
+  return `${item.action.channel}:action:${item.action.eventId}`;
 }
 
 let awsHandler: ReturnType<typeof createChannelIngressHandler> | undefined;

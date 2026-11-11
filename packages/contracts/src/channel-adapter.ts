@@ -21,6 +21,19 @@ export const ChannelCapabilitiesSchema = z.object({
   maxTextLength: z.number().int().min(200).max(100_000),
   /** Whether the adapter may message a conversation first, as a reminder or a finished task does. */
   proactive: z.boolean(),
+  /** Spec 062 Phase 7 (FR-070 to FR-072); each is off unless the adapter says so, as on an older registration. */
+  /** A message shown only to one person in the conversation. */
+  ephemeral: z.boolean().optional(),
+  /** A message to a person outside any conversation. */
+  direct: z.boolean().optional(),
+  /** Forms a button opens, posted back as one action. */
+  forms: z.boolean().optional(),
+  /** `create_document` and `delete_document` commands. */
+  documents: z.boolean().optional(),
+  /** `space_members`, `user` and `user_by_email` commands. */
+  directory: z.boolean().optional(),
+  /** `start_conversation` commands. */
+  startConversations: z.boolean().optional(),
 }).strict();
 export type ChannelCapabilities = z.infer<typeof ChannelCapabilitiesSchema>;
 
@@ -35,6 +48,8 @@ const uniqueList = <T extends z.ZodTypeAny>(item: T, max: number, label: string)
 /** FR-020: what an administrator sends to register or replace an adapter. The channel is in the path. */
 export const ChannelAdapterRegistrationSchema = z.object({
   callbackUrl: publicHttpsUrlSchema("callbackUrl"),
+  /** FR-072: where the core sends commands and waits for the answer; without it the adapter takes none. */
+  commandsUrl: publicHttpsUrlSchema("commandsUrl").optional(),
   capabilities: ChannelCapabilitiesSchema,
   projects: uniqueList(AgentXNameSchema, 64, "projects").refine((projects) => projects.length > 0, "an adapter must be registered for at least one project"),
   stepUp: uniqueList(StepUpKindSchema, 2, "stepUp").default([...DEFAULT_STEP_UP]),
@@ -45,6 +60,7 @@ export type ChannelAdapterRegistration = z.infer<typeof ChannelAdapterRegistrati
 export const ChannelAdapterRecordSchema = z.object({
   channel: AdapterChannelIdSchema,
   callbackUrl: publicHttpsUrlSchema("callbackUrl"),
+  commandsUrl: publicHttpsUrlSchema("commandsUrl").optional(),
   capabilities: ChannelCapabilitiesSchema,
   projects: uniqueList(AgentXNameSchema, 64, "projects"),
   stepUp: uniqueList(StepUpKindSchema, 2, "stepUp"),
@@ -101,7 +117,29 @@ export type ChannelDecision = z.infer<typeof ChannelDecisionSchema>;
 /** The adapter's step-up set when the item was accepted; an item without one is stepped up for every kind. */
 const QueuedStepUp = uniqueList(StepUpKindSchema, 2, "stepUp").default([...DEFAULT_STEP_UP]);
 
+/**
+ * FR-071: a person's press of a button or select, or a form's submission, on a message Rovara sent. `messageKey` names
+ * that message when it had one. A direct message's action has no conversation.
+ */
+export const ChannelActionSchema = z.object({
+  version: z.literal(1),
+  channel: ChannelIdSchema,
+  eventId: ChannelOpaqueIdSchema,
+  conversation: ConversationRefSchema.optional(),
+  actor: ActorRefSchema,
+  actionId: z.string().regex(/^[a-z][a-z0-9_.:-]{0,127}$/),
+  value: z.string().max(2_000),
+  form: z.record(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/), z.string().max(3_000)).refine((form) => Object.keys(form).length <= 20, "at most 20 fields").optional(),
+  messageKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/).optional(),
+  receivedAt: z.string().datetime(),
+}).strict().superRefine((action, context) => {
+  if (action.conversation !== undefined && action.conversation.channel !== action.channel) context.addIssue({ code: "custom", path: ["conversation", "channel"], message: "must equal channel" });
+  if (action.actor.channel !== action.channel) context.addIssue({ code: "custom", path: ["actor", "channel"], message: "must equal channel" });
+});
+export type ChannelAction = z.infer<typeof ChannelActionSchema>;
+
 export const ChannelQueueItemSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("action"), action: ChannelActionSchema, projectName: AgentXNameSchema.optional(), developerId: z.string().min(1).max(200).optional(), stepUp: QueuedStepUp }).strict(),
   z.object({ kind: z.literal("message"), message: InboundMessageSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200), stepUp: QueuedStepUp }).strict(),
   z.object({ kind: z.literal("decision"), decision: ChannelDecisionSchema, projectName: AgentXNameSchema, developerId: z.string().min(1).max(200), stepUp: QueuedStepUp }).strict(),
 ]);
@@ -113,10 +151,72 @@ const Text = z.string().min(1).max(40_000);
 const HttpsUrl = z.string().url().max(2_048).refine((url) => url.startsWith("https://"), "must be an https URL");
 const ApprovalAction = z.object({ decision: ChannelDecisionValueSchema, label: z.string().min(1).max(80) }).strict();
 
+// ---- Rich messages (FR-070) ----
+
+const Label = z.string().trim().min(1).max(75);
+/** Names a message, so a later one with the same key replaces it where the adapter can edit. */
+export const MessageKeySchema = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/);
+/** An action's ID, which comes back with a press or a form (FR-071). */
+export const ActionIdSchema = z.string().regex(/^[a-z][a-z0-9_.:-]{0,127}$/);
+const ActionValue = z.string().max(2_000);
+const Choice = z.object({ label: Label, value: ActionValue }).strict();
+
+/** What a message shows besides its text, which every adapter can show on its own. */
+export const MessagePartSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("section"), text: Text }).strict(),
+  z.object({ type: z.literal("fields"), fields: z.array(z.object({ label: Label, value: z.string().min(1).max(2_000) }).strict()).min(1).max(10) }).strict(),
+  z.object({ type: z.literal("context"), text: z.string().min(1).max(3_000) }).strict(),
+  z.object({ type: z.literal("divider") }).strict(),
+  z.object({ type: z.literal("image"), url: HttpsUrl, alt: z.string().min(1).max(200) }).strict(),
+]);
+export type MessagePart = z.infer<typeof MessagePartSchema>;
+
+export const FormFieldSchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+  label: Label,
+  kind: z.enum(["text", "multiline", "select"]),
+  required: z.boolean().default(true),
+  initial: z.string().max(3_000).optional(),
+  maxLength: z.number().int().min(1).max(3_000).optional(),
+  options: z.array(Choice).min(1).max(100).optional(),
+}).strict().superRefine((field, context) => {
+  if (field.kind === "select" && field.options === undefined) context.addIssue({ code: "custom", path: ["options"], message: "a select needs options" });
+  if (field.kind !== "select" && field.options !== undefined) context.addIssue({ code: "custom", path: ["options"], message: "only a select has options" });
+});
+export type FormField = z.infer<typeof FormFieldSchema>;
+
+/** What a person can do on a message. A form is opened by the adapter itself, and its submission comes back as one action. */
+export const MessageActionSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("button"), actionId: ActionIdSchema, value: ActionValue, label: Label, style: z.enum(["primary", "danger"]).optional() }).strict(),
+  z.object({ type: z.literal("link"), label: Label, url: HttpsUrl }).strict(),
+  z.object({ type: z.literal("select"), actionId: ActionIdSchema, placeholder: Label, options: z.array(Choice).min(1).max(100) }).strict(),
+  z.object({
+    type: z.literal("form"), actionId: ActionIdSchema, value: ActionValue, label: Label,
+    form: z.object({ title: z.string().trim().min(1).max(24), submitLabel: z.string().trim().min(1).max(24), fields: z.array(FormFieldSchema).min(1).max(10) }).strict(),
+  }).strict(),
+]);
+export type MessageAction = z.infer<typeof MessageActionSchema>;
+
+/** Who sees a message in its conversation: everyone (the default), or one person only (needs `ephemeral`). */
+export const MessageAudienceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("conversation") }).strict(),
+  z.object({ kind: z.literal("ephemeral"), actor: ActorRefSchema }).strict(),
+]);
+
+const richMessage = {
+  text: Text,
+  key: MessageKeySchema.optional(),
+  parts: z.array(MessagePartSchema).max(50).optional(),
+  actions: z.array(MessageActionSchema).max(25).optional(),
+};
+
 const eventData = {
   ack: z.object({ inReplyTo: ChannelOpaqueIdSchema }).strict(),
-  /** A message from Rovara in the conversation: a reply, a notice or a question it asks in prose. */
-  message: z.object({ text: Text }).strict(),
+  /**
+   * A message from Rovara in the conversation: a reply, a notice or a question it asks in prose. FR-070: it may carry
+   * parts, actions, a key that a later message replaces, and an audience of one.
+   */
+  message: z.object({ ...richMessage, audience: MessageAudienceSchema.optional() }).strict(),
   progress: z.object({ text: Text }).strict(),
   question: z.object({ text: Text, choices: z.array(z.string().min(1).max(200)).max(10).optional() }).strict(),
   approval_request: z.object({
@@ -137,8 +237,8 @@ const eventData = {
   error: z.object({ code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/), text: Text }).strict(),
   link_required: z.object({ linkUrl: HttpsUrl, expiresAt: z.string().datetime(), actor: ActorRefSchema }).strict(),
 } as const;
-export type ChannelEventType = keyof typeof eventData;
-export const CHANNEL_EVENT_TYPES = Object.keys(eventData) as ChannelEventType[];
+export type ChannelEventType = keyof typeof eventData | "direct";
+export const CHANNEL_EVENT_TYPES = [...Object.keys(eventData), "direct"] as ChannelEventType[];
 
 const eventBase = {
   version: z.literal(1),
@@ -159,8 +259,20 @@ export const ChannelEventSchema = z.discriminatedUnion("type", [
   z.object({ ...eventBase, type: z.literal("done"), data: eventData.done }).strict(),
   z.object({ ...eventBase, type: z.literal("error"), data: eventData.error }).strict(),
   z.object({ ...eventBase, type: z.literal("link_required"), data: eventData.link_required }).strict(),
+  /** FR-070: a message to one person outside any conversation (needs `direct`). */
+  z.object({
+    version: eventBase.version, id: eventBase.id, channel: eventBase.channel, createdAt: eventBase.createdAt,
+    type: z.literal("direct"), to: ActorRefSchema, data: z.object(richMessage).strict(),
+  }).strict(),
 ]).superRefine((event, context) => {
+  if (event.type === "direct") {
+    if (event.to.channel !== event.channel) context.addIssue({ code: "custom", path: ["to", "channel"], message: "must equal channel" });
+    return;
+  }
   if (event.conversation.channel !== event.channel) context.addIssue({ code: "custom", path: ["conversation", "channel"], message: "must equal channel" });
+  if (event.type === "message" && event.data.audience?.kind === "ephemeral" && event.data.audience.actor.channel !== event.channel) {
+    context.addIssue({ code: "custom", path: ["data", "audience", "actor", "channel"], message: "must equal channel" });
+  }
 });
 export type ChannelEvent = z.infer<typeof ChannelEventSchema>;
 
@@ -189,6 +301,68 @@ export function steppedUpNote(taskUrl: string | undefined): string {
 /** Whether an adapter may post a decision for a request of this kind (FR-032). */
 export function adapterMayDecide(adapter: Pick<ChannelAdapterRecord, "stepUp">, kind: "plan_approval" | "admin" | "other"): boolean {
   return kind === "other" || !adapter.stepUp.includes(kind);
+}
+
+// ---- Commands the core sends an adapter and waits for (FR-072) ----
+
+/** The command kinds, and the capability an adapter must declare to be sent each. */
+export const COMMAND_CAPABILITY = {
+  start_conversation: "startConversations",
+  create_document: "documents",
+  delete_document: "documents",
+  space_members: "directory",
+  user: "directory",
+  user_by_email: "directory",
+} as const;
+export type ChannelCommandKind = keyof typeof COMMAND_CAPABILITY;
+
+const commandBase = {
+  version: z.literal(1),
+  /** Unique per command; also its `webhook-id`, which the answer's signature repeats. */
+  id: z.string().regex(/^cmd_[A-Za-z0-9_-]{16,64}$/),
+  channel: ChannelIdSchema,
+  createdAt: z.string().datetime(),
+};
+
+export const ChannelCommandSchema = z.discriminatedUnion("kind", [
+  /** Posts the first message in a space; answers the new conversation's thread. */
+  z.object({ ...commandBase, kind: z.literal("start_conversation"), tenant: ChannelOpaqueIdSchema, space: ChannelOpaqueIdSchema, message: z.object(richMessage).strict() }).strict(),
+  /** A titled Markdown document people in the space can read, such as a task's plan; answers its ID and link. */
+  z.object({ ...commandBase, kind: z.literal("create_document"), tenant: ChannelOpaqueIdSchema, space: ChannelOpaqueIdSchema, title: z.string().trim().min(1).max(150), markdown: z.string().min(1).max(100_000) }).strict(),
+  z.object({ ...commandBase, kind: z.literal("delete_document"), documentId: ChannelOpaqueIdSchema }).strict(),
+  /** One page of the people in a space. */
+  z.object({ ...commandBase, kind: z.literal("space_members"), tenant: ChannelOpaqueIdSchema, space: ChannelOpaqueIdSchema, cursor: z.string().min(1).max(500).optional() }).strict(),
+  z.object({ ...commandBase, kind: z.literal("user"), tenant: ChannelOpaqueIdSchema, userId: ChannelOpaqueIdSchema }).strict(),
+  z.object({ ...commandBase, kind: z.literal("user_by_email"), tenant: ChannelOpaqueIdSchema, email: z.string().email().max(320) }).strict(),
+]);
+export type ChannelCommand = z.infer<typeof ChannelCommandSchema>;
+
+/** What each command answers on success. */
+export const ChannelCommandResultSchemas = {
+  start_conversation: z.object({ thread: ChannelOpaqueIdSchema }).strict(),
+  create_document: z.object({ documentId: ChannelOpaqueIdSchema, url: HttpsUrl }).strict(),
+  delete_document: z.object({ deleted: z.boolean() }).strict(),
+  space_members: z.object({ members: z.array(ChannelOpaqueIdSchema).max(1_000), nextCursor: z.string().min(1).max(500).optional() }).strict(),
+  user: z.object({
+    user: z.object({ userId: ChannelOpaqueIdSchema, name: z.string().min(1).max(200).optional(), email: z.string().email().max(320).optional(), bot: z.boolean(), deleted: z.boolean() }).strict().optional(),
+  }).strict(),
+  user_by_email: z.object({ userId: ChannelOpaqueIdSchema.optional() }).strict(),
+} as const;
+export type ChannelCommandResult<K extends ChannelCommandKind> = z.infer<(typeof ChannelCommandResultSchemas)[K]>;
+
+/** An adapter's answer: the command's result, or a refusal with a code and a message written for an administrator. */
+export const ChannelCommandAnswerSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), result: z.unknown() }).strict(),
+  z.object({ ok: z.literal(false), error: z.object({ code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/), message: z.string().max(500) }).strict() }).strict(),
+]);
+
+export function channelCommandId(): string {
+  return `cmd_${randomBytes(18).toString("base64url")}`;
+}
+
+/** Whether an adapter takes a command kind: it names a commands URL and declares the kind's capability. */
+export function adapterTakesCommand(adapter: Pick<ChannelAdapterRecord, "capabilities" | "commandsUrl">, kind: ChannelCommandKind): boolean {
+  return adapter.commandsUrl !== undefined && adapter.capabilities[COMMAND_CAPABILITY[kind]] === true;
 }
 
 // ---- Standard Webhooks signing ----
