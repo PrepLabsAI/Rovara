@@ -147,7 +147,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
   const title = redactedTitle(request);
   const ownerKey = taskOwnerKey(developerId, taskId);
   const requestText = storedRequestText(request.instructions);
-  const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt });
+  const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt, ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
   // The approved test environment the task starts with, pinned in the start's own transaction: a later approval changes the NEXT task, never this one.
   const testEnvironment = asWorkflow ? await deps.testEnvironment?.forStart({ project: request.project, taskId }) : undefined;
 
@@ -185,6 +185,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     client, project: request.project, title, workspaceId, ownerKey, conversationId, startingRevision: revision, charge, shared: false,
     // A workflow task quotes the request in each plan's "why".
     ...(asWorkflow ? { requestText } : {}),
+    // A task intake started from a ticket says so, so its request is shown as the ticket's words and not as the owner's.
+    ...(caller.ticket === undefined ? {} : { ticket: { system: caller.ticket.system, id: caller.ticket.id } }),
     ...(designFirst?.designFirst === true ? { designFirst: { by: developerId, at: receivedAt } } : {}),
     createdAt: receivedAt, updatedAt: receivedAt,
     ...(extras?.sessionId === undefined ? {} : { sessionId: extras.sessionId }),

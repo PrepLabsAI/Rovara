@@ -11,6 +11,7 @@ import { codeHostForRecord } from "../../plugins/routing.js";
 import { CHANGED_PATH_PAGES, changeRequestRef } from "../merge/host-port.js";
 import { parseChangedFiles } from "../proof/changed-files.js";
 import { recomputeRisk, type ChangedFilesRead, type LessonsUsedSection } from "../proof/pull-request-body.js";
+import { linearIssueKeyOfBindings } from "../proof/linear-close.js";
 import { workflowPullRequestBody } from "../proof/workflow-pull-request-body.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { workspaceOperations } from "../task-flow/reads.js";
@@ -150,11 +151,12 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   const plan = await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined);
   const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
+  const linearIssueKey = await ticketIssueKeyOf(deps, task);
   for (const entry of hosts) {
     try {
       // Each repository's description names the lessons that repository's readers may read.
       const lessonsUsed = await lessonsUsedOf(deps, task, entry.repositoryId);
-      const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
+      const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
       const record = await pullRequestRecordOf(deps, task.workspaceId, entry.repositoryId, entry.number);
       const ref = changeRequestRef(entry.url, entry.number);
       beforeRequest?.();
@@ -177,4 +179,17 @@ export async function verifiedChangedFiles(deps: Pick<TaskFlowDeps, "store">, wo
   const row = await deps.store.get(verifiedFilesKey(workspaceId, candidateDigest));
   if (row === undefined || !Array.isArray(row["files"])) return undefined;
   return { files: row["files"] as unknown as ChangedFilesRead["files"][number][], complete: row["complete"] === true };
+}
+
+/**
+ * The Linear issue the task's session follows (the ticket intake started it from): the pull request's description then says `Fixes <KEY>`, which Linear's own GitHub integration closes the issue on when it merges.
+ * A read that fails leaves the line out (the next rewrite of the description adds it). 51 gap: the closing line is Linear's; a second tracker would need its own behind the Tracker port.
+ */
+export async function ticketIssueKeyOf(deps: Pick<TaskFlowDeps, "sessionBindings" | "companyId">, task: Pick<TaskRecord, "sessionId">): Promise<string | undefined> {
+  if (deps.sessionBindings === undefined || task.sessionId === undefined) return undefined;
+  try {
+    return linearIssueKeyOfBindings(await deps.sessionBindings.read(deps.companyId, task.sessionId));
+  } catch {
+    return undefined;
+  }
 }

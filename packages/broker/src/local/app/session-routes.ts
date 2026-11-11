@@ -10,6 +10,7 @@ import { AGENT_SESSION_CONTRACT_VERSION } from "@agentx/contracts";
 import type { ControlResult } from "../../core/sessions/control.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import { listSessions, sessionSnapshot } from "../../core/sessions/read.js";
+import { sessionBindingsOf } from "../../core/sessions/bindings.js";
 import { SessionStore } from "../../core/sessions/store.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
@@ -74,7 +75,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
       cost: { spentUsd: session.summary.costUsd, ...(session.summary.runLimitUsd === undefined ? {} : { runLimitUsd: session.summary.runLimitUsd }), payer: { kind: "member", name: session.owner.name } },
       approvals: [], followers: session.followerCount, viewingNow: await viewingNow(store, session, (flow.deps.now?.() ?? new Date()).getTime()),
       you: { level: "edit", owner: true, following: true, actions: SESSION_ACTIONS.filter((action) => snapshot.actions.includes(action as never) || action === "close") },
-      link: `${deps.origin()}/v1/app/sessions/${session.sessionId}`, bindings: [], legs: session.legs, revision: session.revision, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
+      link: `${deps.origin()}/v1/app/sessions/${session.sessionId}`, bindings: await sessionBindingsOf(store, session.orgId, session.sessionId), legs: session.legs, revision: session.revision, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
       body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest)) },
     })) as Record<string, unknown>;
   };

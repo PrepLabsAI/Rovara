@@ -49,6 +49,7 @@ import { scriptTokensEnabled } from "../core/script-tokens/switch.js";
 import { isScriptTokenHeader } from "../core/script-tokens/token-format.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createLocalCodeHosts } from "./github-code-host.js";
+import { createLocalTrackers } from "./trackers.js";
 import { listProjects } from "./app/projects.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { codeHostForRepositoryAddress } from "../plugins/routing.js";
@@ -381,6 +382,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(configured("audit-sink") ? {} : { auditSink: { name: "document", sink: new DocumentAuditSink({ store: () => registry.require("storage") }) } }),
     secrets: createLocalSecrets(stateDirectory, options.environment),
     ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
+    // The outside accounts that are the owner's own (config `linkedAccounts`): a ticket asks for work as the owner only when its tracker says one of these made the act.
+    ...(config.linkedAccounts === undefined ? {} : { linkedAccounts: config.linkedAccounts }),
     displayName: ownerName(),
     isValidSession: (value) => constantTimeEqual(value, sessionToken),
     // An approval is proved by a token the local pages sign over one request, revision and digest; the sign-in secret above is never an approval proof.
@@ -499,6 +502,10 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, secrets: registrySecrets, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
     if (registry.get("code-host", host.kind) !== undefined) continue;
     if ((await host.resolveCredentials?.())?.found === true) registry.register("code-host", host.kind, host, { isDefault: true });
+  }
+  // The trackers the owner has signed in to (a Linear key, a Jira site and token), each under its own kind; a configured `tracker` plug-in of that name is used instead.
+  for (const tracker of await createLocalTrackers({ environment: options.environment, secrets: registrySecrets, companyId: config.companyId, fetch: options.fetch })) {
+    if (registry.get("tracker", tracker.kind) === undefined) registry.register("tracker", tracker.kind, tracker, { isDefault: true });
   }
   // Every record the core writes expires by `indexExpiresAt`. A store that sweeps another attribute (the SQLite plug-in's own default is `expiresAt`) would keep them for ever without a word,
   // so such a store is refused here, saying what to set.

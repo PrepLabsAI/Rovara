@@ -11,7 +11,8 @@ import {
   agentSessionKey, canonicalPlanJson, change, createCandidateManifest, projectMetaKey, secondReviewModelKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
-import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
+import { bindSessionSurface } from "../../packages/broker/src/core/sessions/bindings.js";
+import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { createSessionControlHost } from "../../packages/broker/src/local/app/host.js";
 import { planDocument } from "../support/plan-documents.js";
 import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
@@ -2225,8 +2226,9 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
 });
 
 /** A task through publication with the given files in its commit, and the worker's own report of what it changed (its `workspace.diff`) as given. */
-async function published(h: Awaited<ReturnType<typeof launch>>, files: Record<string, string>, reportedDiff: string | undefined) {
+async function published(h: Awaited<ReturnType<typeof launch>>, files: Record<string, string>, reportedDiff: string | undefined, beforePublish?: (taskId: string) => Promise<void>) {
   const { taskId, workspaceId, seen, coding } = await toCoding(h);
+  await beforePublish?.(taskId);
   const commit = h.model.commit("work", files);
   const tree = h.model.revision(commit).tree;
   if (reportedDiff !== undefined) await h.callback(coding, "artifacts", { name: "workspace.diff", mediaType: "text/plain", content: reportedDiff });
@@ -3447,6 +3449,32 @@ describe("rovara up: the second review on the pull request", () => {
     // The description was rewritten with the files read from the host, and still says so.
     expect(cr.body).toContain("1 file changed");
     expect(cr.body).toContain("Second review did not run");
+  });
+
+  it("says which Linear issue a task that started from a ticket fixes, in the description it opens the pull request with and in the one it rewrites from the files the host reads", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const linear = { kind: "tracker_item" as const, system: "linear", id: "ENG-142", url: "https://linear.app/acme/issue/ENG-142/refunds" };
+    const { cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined, async (taskId) => {
+      await bindSessionSurface({ store: h.runtime.registry.require("storage"), now: () => Date.now() }, { orgId: IMPLICIT_COMPANY_ID, sessionId: taskSessionId(taskId), binding: linear });
+    });
+    expect(openingBody).toContain("Fixes ENG-142");
+    await h.runtime.tick();
+    // The rewrite from the host's own list of changed files keeps the line (a rewrite that forgot it would stop Linear closing the issue).
+    expect(cr.body).toContain("1 file changed");
+    expect(cr.body).toContain("Fixes ENG-142");
+  });
+
+  it("says nothing of a ticket for a task that did not start from one, or from a tracker that is not Linear", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const jira = { kind: "tracker_item" as const, system: "jira", id: "PAY-12", url: "https://acme.atlassian.net/browse/PAY-12" };
+    const { cr, openingBody } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined, async (taskId) => {
+      await bindSessionSurface({ store: h.runtime.registry.require("storage"), now: () => Date.now() }, { orgId: IMPLICIT_COMPANY_ID, sessionId: taskSessionId(taskId), binding: jira });
+    });
+    expect(openingBody).not.toContain("Fixes ");
+    await h.runtime.tick();
+    expect(cr.body).not.toContain("Fixes ");
   });
 
   it("a shadow second review puts nothing in the description", async () => {

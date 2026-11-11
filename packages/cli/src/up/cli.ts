@@ -1,5 +1,6 @@
 // Port lane L4: `rovara up`, the local runtime in one process, and `rovara up --check`, its doctor. No task flow and no pages yet: this
 // starts the HTTP server on 127.0.0.1 over the plug-in registry, the Docker worker machines, and one implicit company.
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TaskDiagnosisViewReaderSchema, agentXError, diagnosisProposalLine } from "@agentx/contracts";
@@ -106,6 +107,100 @@ export function registerSecondReviewCommand(program: Command, context: Pick<UpCo
       // The evidence is the owner's act on the page, in a page session opened just now: this command only opens the page; the token never writes it.
       await localCall(context, options.stateDir, "POST", "/v1/local/pages/open", { path: "/second-review" });
       context.stdout.write(globals.json ? `${JSON.stringify({ ok: true, data: { opened: true } })}\n` : "Opened the second review page in your browser. Record the replay run and the evidence under \"Evidence\" there, within ten minutes.\n");
+    });
+}
+
+/**
+ * `rovara intake`: tickets that ask for work. A project's intake rule names where its work is asked for (a label put on a ticket, a ticket assigned to Rovara's account) in a tracker `rovara up` has signed in to
+ * (Linear, Jira); `rovara up` reads those places on a timer. A ticket starts a task only from an act of yours (an account you linked in the config, `linkedAccounts`); anyone else's ticket waits in the list for you to start
+ * or dismiss it. A ticket never approves anything: the plan still waits for your approval on its page.
+ */
+export function registerIntakeCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
+  const intake = program.command("intake").description("tickets that ask for work: the project's intake rule, the tickets that wait for you, and what is written back to a ticket");
+  const path = (project: string, tail = ""): string => `/v1/app/projects/${encodeURIComponent(project)}/intake${tail}`;
+  const emit = (command: Command, data: unknown, text: string): void => {
+    context.stdout.write(command.optsWithGlobals<{ json: boolean }>().json ? `${JSON.stringify({ ok: true, data })}\n` : `${text}\n`);
+  };
+  intake
+    .command("list <project>", { isDefault: true })
+    .description("show the tickets that wait for you, the places the project's work is asked for, and any notice")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (project: string, options: { stateDir?: string }, command: Command) => {
+      const state = await localCall(context, options.stateDir, "GET", path(project)) as {
+        items: Array<{ itemId: string; system: string; id: string; title: string; reason: string; requester: { display: string } }>;
+        sources: Array<{ ref: { channel: string; system?: string; when: { label?: string; assignedToRovara?: true } }; failing: boolean; lastError?: string }>;
+      };
+      const noticed = await localCall(context, options.stateDir, "GET", path(project, "/notices")) as { notices: Array<{ text: string }> };
+      const full = { ...state, notices: noticed.notices };
+      emit(command, full, [
+        state.sources.length === 0 ? "No place is set up: work is not asked for from any tracker. Add one with `rovara intake add`." : `Asked for in: ${state.sources.map((source) => `${source.ref.system ?? source.ref.channel}${source.ref.when.label === undefined ? "" : ` label "${plainWords(source.ref.when.label)}"`}${source.ref.when.assignedToRovara === true ? " assigned to Rovara" : ""}${source.failing ? ` (failing${source.lastError === undefined ? "" : `: ${source.lastError}`})` : ""}`).join("; ")}.`,
+        ...(state.items.length === 0 ? ["No ticket waits for you."] : [`${state.items.length} ${state.items.length === 1 ? "ticket waits" : "tickets wait"} for you:`, ...state.items.map((item) => `  ${item.itemId}  ${plainWords(item.system)} ${plainWords(item.id)}  "${plainWords(item.title)}"  (${item.reason}, from ${plainWords(item.requester.display)})`), "Start one with `rovara intake start <project> <id>`, or drop it with `rovara intake dismiss <project> <id>`."]),
+        ...noticed.notices.slice(0, 3).map((notice) => plainWords(notice.text)),
+      ].join("\n"));
+    });
+  intake
+    .command("start <project> <id>")
+    .description("start a task from a ticket that waits for you (the task is yours; its plan still waits for your approval)")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (project: string, id: string, options: { stateDir?: string }, command: Command) => {
+      if (!/^[a-f0-9]{32}$/u.test(id)) throw agentXError("CONFIG_INVALID", "name the ticket by its id from `rovara intake list` (32 letters and digits)");
+      const answer = await localCall(context, options.stateDir, "POST", path(project, `/${id}/start`), { requestId: randomUUID() }) as { started: boolean; taskId?: string; reason?: string; state?: string };
+      emit(command, answer, answer.started ? `Started task ${answer.taskId ?? ""}. Its plan waits for your approval: rovara open ${answer.taskId ?? ""}`.trim() : `Not started${answer.reason === undefined ? "" : ` (${answer.reason})`}${answer.state === undefined ? "" : ` (the ticket is ${answer.state})`}.`);
+    });
+  intake
+    .command("dismiss <project> <id>")
+    .description("drop a ticket that waits for you; it is not asked about again until it is forgotten")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (project: string, id: string, options: { stateDir?: string }, command: Command) => {
+      if (!/^[a-f0-9]{32}$/u.test(id)) throw agentXError("CONFIG_INVALID", "name the ticket by its id from `rovara intake list` (32 letters and digits)");
+      const answer = await localCall(context, options.stateDir, "POST", path(project, `/${id}/dismiss`), { requestId: randomUUID() }) as { dismissed: boolean };
+      emit(command, answer, answer.dismissed ? "Dropped." : "Nothing was dropped.");
+    });
+  intake
+    .command("add <project> <tracker>")
+    .description("ask a tracker for work: tickets that carry a label, or are assigned to the account Rovara signs in with (replaces the project's places with the existing ones and this one)")
+    .option("--label <label>", "the label someone puts on a ticket to ask for work")
+    .option("--assigned", "tickets assigned to the account Rovara signs in with ask for work (with your own key: every ticket you assign to yourself starts a task)")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (project: string, tracker: string, options: { label?: string; assigned?: boolean; stateDir?: string }, command: Command) => {
+      if (options.label === undefined && options.assigned !== true) throw agentXError("CONFIG_INVALID", "name what asks for work: --label <label> or --assigned");
+      if (!/^[a-z][a-z0-9_-]{0,31}$/u.test(tracker)) throw agentXError("CONFIG_INVALID", "name the tracker as it is registered (linear, jira)");
+      const current = await localCall(context, options.stateDir, "GET", path(project)) as { sources: Array<{ ref: Record<string, unknown> }> };
+      const ref = { channel: tracker === "jira" ? "jira" : "tracker", ...(tracker === "jira" ? {} : { system: tracker }), when: { ...(options.label === undefined ? {} : { label: options.label }), ...(options.assigned === true ? { assignedToRovara: true } : {}) } };
+      const saved = await localCall(context, options.stateDir, "POST", path(project, "/sources"), { sources: [...current.sources.map((source) => source.ref), ref] }) as { sources: unknown[] };
+      emit(command, saved, `The project now asks ${saved.sources.length} ${saved.sources.length === 1 ? "place" : "places"} for work.`);
+    });
+  intake
+    .command("clear <project>")
+    .description("stop asking any tracker for work for this project")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (project: string, options: { stateDir?: string }, command: Command) => {
+      await localCall(context, options.stateDir, "POST", path(project, "/sources"), { sources: [] });
+      emit(command, { cleared: true }, "No tracker is asked for work for this project now.");
+    });
+  intake
+    .command("updates <project>")
+    .description("show what is written back to the ticket a task started from; --comments and --status change it")
+    .option("--comments <on|off>", "comment on the ticket at each moment (started, plan ready, pull request opened, merged, closed)")
+    .option("--status <on|off>", "also move the ticket's status (off unless you turn it on)")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (project: string, options: { comments?: string; status?: string; stateDir?: string }, command: Command) => {
+      const view = await localCall(context, options.stateDir, "GET", path(project, "/updates")) as { settings: { comments: boolean; changeStatus: boolean; statuses: Record<string, string> }; access: Array<{ tracker: string; state: string }> };
+      const flag = (value: string | undefined, name: string): boolean | undefined => {
+        if (value === undefined) return undefined;
+        if (value !== "on" && value !== "off") throw agentXError("CONFIG_INVALID", `${name} is on or off`);
+        return value === "on";
+      };
+      const comments = flag(options.comments, "--comments");
+      const status = flag(options.status, "--status");
+      const shown = comments === undefined && status === undefined ? view : await localCall(context, options.stateDir, "POST", path(project, "/updates"), {
+        requestId: randomUUID(), settings: { ...view.settings, ...(comments === undefined ? {} : { comments }), ...(status === undefined ? {} : { changeStatus: status }) },
+      }) as typeof view;
+      emit(command, shown, [
+        `Comments on the ticket: ${shown.settings.comments ? "on" : "off"}. Status changes: ${shown.settings.changeStatus ? "on" : "off"}${shown.settings.changeStatus ? ` (${Object.entries(shown.settings.statuses).map(([moment, name]) => `${moment} to ${plainWords(name)}`).join(", ")})` : ""}.`,
+        ...(shown.settings.comments ? ["A comment is internal only where the tracker has internal comments (Jira Service Management). A Linear comment, with the pull request's link, is visible to everyone who can see the ticket."] : []),
+        ...(shown.access ?? []).filter((entry) => entry.state !== "ok").map((entry) => `${entry.tracker}: Rovara can't write there: its sign-in may only read.`),
+      ].join("\n"));
     });
 }
 

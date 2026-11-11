@@ -66,11 +66,13 @@ export function parseLinearIssue(text: string): { issueId: string; url: string }
  * different issues are no key at all, a link that is not Linear's makes the binding unusable, and a Slack thread has none.
  */
 export function linearIssueKeyOf(binding: SessionBinding): string | undefined {
-  if (binding.kind !== "linear_issue") return undefined;
+  // A ticket a task started from, in the tracker that registered as `linear`, is a Linear issue like any other: the same checks apply to its id and link.
+  const id = binding.kind === "linear_issue" ? binding.issueId : binding.kind === "tracker_item" && binding.system === "linear" ? binding.id : undefined;
+  if (binding.kind === "slack_thread" || id === undefined) return undefined;
   // A link that is not Linear's makes the binding unusable, whatever its id says.
   const url = linearUrl(binding.url);
   if (url === undefined) return undefined;
-  const fromId = normalizeIssueKey(binding.issueId);
+  const fromId = normalizeIssueKey(id);
   const fromLink = keyOfUrl(url);
   if (fromId !== undefined && fromLink !== undefined && fromId !== fromLink) return undefined;
   return fromId ?? fromLink;

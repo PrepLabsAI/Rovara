@@ -116,6 +116,11 @@ export interface DeveloperTaskRecord {
   /** The owner's original request, redacted and cut to 4,000 characters; the first entry of each plan's "why". Tasks created earlier have none. */
   requestText?: string;
   /**
+   * The ticket the task started from (set by intake only; no request can carry it). The task's request is then the ticket's words, so the plan's "why" credits them to the ticket and never to the owner.
+   * The tracker's name and the ticket's id, both checked characters.
+   */
+  ticket?: { system: string; id: string };
+  /**
    * Second review by another AI company: kept BESIDE the workflow, never inside it, so a second review never reaches a first review's transition and an older build ignores these keys.
    * `secondOpinion` is its result for one candidate; `secondReviewAcknowledged` holds the keys the task owner acknowledged (`secondReviewAcknowledgement`).
    */

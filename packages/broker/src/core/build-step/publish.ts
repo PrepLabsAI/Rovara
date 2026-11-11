@@ -10,7 +10,7 @@ import {
   type ChangeRequestRef, type CodeHost, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { codeHostForRecord, providerOf } from "../../plugins/routing.js";
-import { lessonsUsedOf, riskFromFiles } from "./changed-files.js";
+import { lessonsUsedOf, riskFromFiles, ticketIssueKeyOf } from "./changed-files.js";
 import { openBranchWriters } from "../branch-sync/branch-writers.js";
 import { linkedChangeRequestStep } from "../proof/revert/linked-change-requests.js";
 import { pullRequestTitle, workflowPullRequestBody } from "../proof/workflow-pull-request-body.js";
@@ -75,7 +75,8 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
   const proof = await deps.designReview?.proofContext?.(deps, task, workflow).catch(() => undefined);
   const secondLines = deps.secondReview?.prLines(task, candidate.digest, workflow.acceptedFindings) ?? [];
   const lessonsUsed = await lessonsUsedOf(deps, task, repository.repositoryId);
-  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
+  const linearIssueKey = await ticketIssueKeyOf(deps, task);
+  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(proof === undefined ? {} : { proof }) });
   const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha;
   const operationId = newId(deps);
   const headBranch = headBranchOf(operationId);

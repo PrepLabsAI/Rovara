@@ -9,6 +9,7 @@
 import { isBuiltin } from "node:module";
 import { z } from "zod";
 import { PluginKindSchema } from "../plugins/common.js";
+import { ExternalAccountRefSchema } from "../outside-account.js";
 import type { ChannelCapabilities, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
 import type { InboundMessage } from "../conversation.js";
 import type { CodeHost } from "../plugins/code-host.js";
@@ -288,6 +289,12 @@ export const PluginConfigSchema = z.object({
    * Absent or false: such a token is refused for a worker, and a fine-grained token limited to the project's repositories is required. A cloud install ignores it.
    */
   allowBroadTokenForWorker: z.boolean().optional(),
+  /**
+   * Laptop only, owner-set: the outside accounts that are the owner's own, in the neutral shape (`provider`, `tenant`, `accountId`): a Linear user id (`{ "provider": "linear", "tenant": "", "accountId": "..." }`), a Jira account id
+   * (`tenant` is the site, `acme.atlassian.net`). A ticket asks for work as the owner only when its tracker says an account listed here made the act (a label put on it, an assignment); anyone else's act makes the ticket wait for the
+   * owner to say "Start". Absent: no tracker account is the owner's, and every ticket waits.
+   */
+  linkedAccounts: z.array(ExternalAccountRefSchema).max(50).optional(),
   /**
    * Port lane L13 (laptop only, owner-set): the model a task step calls, e.g. `{ "provider": "openrouter", "id": "anthropic/claude-sonnet-4.6" }`; the provider is any registered `model-provider` (item K2). Absent: the install's first provider with a key
    * (Anthropic, then OpenAI, then OpenRouter) and that provider's default model. Read only from the owner's own config; a project or a task cannot set it.

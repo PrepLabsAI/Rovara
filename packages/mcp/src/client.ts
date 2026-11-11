@@ -96,6 +96,15 @@ export interface CallOptions {
 /** One task's design review as a client reads it (read only: the owner's acts on it are made on the local page). */
 export type DesignReviewStateReadView = z.infer<typeof DesignReviewStateReaderSchema>;
 
+/** The tickets that wait for the owner, the places a project's work is asked for (the answer of `GET /v1/app/projects/<project>/intake`). */
+export const IntakeListReaderSchema = z.object({
+  items: z.array(z.object({ itemId: z.string(), system: z.string(), id: z.string(), title: z.string(), reason: z.string(), waitingSince: z.string(), requester: z.object({ display: z.string() }).passthrough() }).passthrough()),
+  sources: z.array(z.object({ sourceId: z.string(), failing: z.boolean(), lastError: z.string().optional(), ref: z.object({ channel: z.string(), system: z.string().optional(), when: z.object({ label: z.string().optional(), assignedToRovara: z.boolean().optional() }).passthrough() }).passthrough() }).passthrough()),
+}).passthrough();
+export type IntakeListRead = z.infer<typeof IntakeListReaderSchema>;
+export const IntakeStartReaderSchema = z.object({ started: z.boolean(), taskId: z.string().optional(), reason: z.string().optional(), state: z.string().optional() }).passthrough();
+export type IntakeStartRead = z.infer<typeof IntakeStartReaderSchema>;
+
 /** The second review's state as a client reads it: a mode this build does not know reads `unknown` (forward-compatible reader). */
 export type SecondReviewStateRead = z.infer<typeof SecondReviewStateReaderSchema>;
 
@@ -136,6 +145,12 @@ export interface ControlPlaneClient {
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
   /** The second review's settings and state (read only: the owner changes them on the local page). Absent route: the install has no second review. */
   getSecondReview(query: { project?: string; builder?: readonly string[] }): Promise<SecondReviewStateRead>;
+  /** The tickets that wait for the owner in a project, and where its work is asked for (read only). */
+  getIntake(project: string): Promise<IntakeListRead>;
+  /** Starts a task from a ticket that waits (the owner's act: the task is theirs, and its plan still waits for their approval). */
+  startIntakeTicket(project: string, itemId: string, requestId: string): Promise<IntakeStartRead>;
+  /** Drops a ticket that waits ("not this one"). */
+  dismissIntakeTicket(project: string, itemId: string, requestId: string): Promise<{ dismissed: boolean }>;
   /** One task's design review: how it stands, the findings, and what waits for the owner (read only). */
   getDesignReview(taskId: string): Promise<DesignReviewStateReadView>;
   /** A task's error, whether Fix with agent is offered for it, and the diagnosis of it (read only: the owner starts one on the task's page). Absent route: the install has no Fix with agent. */
@@ -397,6 +412,9 @@ export function httpControlPlaneClient(options: {
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
     getDesignReview: async (taskId) => (await call(z.object({ designReview: DesignReviewStateReaderSchema }).passthrough(), "GET", path(taskId, "/design-review"))).designReview,
     getTaskDiagnosis: (taskId) => call(TaskDiagnosisViewReaderSchema, "GET", path(taskId, "/diagnosis")),
+    getIntake: (project) => call(IntakeListReaderSchema, "GET", `/v1/app/projects/${encodeURIComponent(project)}/intake`),
+    startIntakeTicket: (project, itemId, requestId) => call(IntakeStartReaderSchema, "POST", `/v1/app/projects/${encodeURIComponent(project)}/intake/${encodeURIComponent(itemId)}/start`, { requestId }),
+    dismissIntakeTicket: (project, itemId, requestId) => call(z.object({ dismissed: z.boolean() }).passthrough(), "POST", `/v1/app/projects/${encodeURIComponent(project)}/intake/${encodeURIComponent(itemId)}/dismiss`, { requestId }),
     getSecondReview: async (query) => {
       const search = new URLSearchParams();
       if (query.project !== undefined) search.set("project", query.project);

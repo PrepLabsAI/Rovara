@@ -27,7 +27,7 @@ import type {
 import type { RepositoryGrantService } from "../../repository-access.js";
 import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
 import type { StepOutcome } from "./outcome.js";
-import type { CodeMilestones } from "../merge/seams.js";
+import type { CodeMilestones, SessionBindingsReader } from "../merge/seams.js";
 import type { PlaybookMode } from "../playbook/service.js";
 import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
@@ -41,6 +41,10 @@ import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 export interface TaskCaller {
   principal: Principal;
   client?: string | undefined;
+  /**
+   * Set only by intake, never by a request body: the task starts from this ticket, so the request text is the ticket's (the plan's "why" credits it to the ticket, not to the person who started the task).
+   */
+  ticket?: { system: string; id: string; url: string } | undefined;
   /**
    * Set only by the script token check: the request is a script token's, scoped to these projects and permissions. The start gives such a task the fixed client "Script token", whatever
    * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
@@ -115,6 +119,8 @@ export interface StartExtrasInput {
   principal: Principal;
   client: string;
   receivedAt: string;
+  /** The ticket the task starts from (intake only): the session is bound to it in the same transaction, so the task and its ticket follow each other or the start does not commit. */
+  ticket?: { system: string; id: string; url: string } | undefined;
 }
 
 /** Reads what a worker saved (a plan, a document) by its object key. At most `maxBytes` are read; undefined when it is not there. Lane L9a's object-storage port fills it. */
@@ -257,6 +263,8 @@ export interface TaskFlowDeps {
   modelCalls?: (operationId: string) => ReadonlySet<string> | undefined;
   /** Called once an operation reached a terminal status (the model proxy frees its tokens and spend record). Never throws into the flow. */
   onOperationEnded?: (operationId: string) => void;
+  /** The outside places a task's session follows, read when a pull request's description is made (the ticket a task started from is closed by the pull request that fixes it). A read that fails leaves the line out; the next rewrite adds it. */
+  sessionBindings?: SessionBindingsReader;
   /**
    * Second review by another AI company: asked when the REVIEW step starts (does this review carry a second reviewer?) and when it ends (what is the opinion of this code?). Absent: no second review, the
    * review is exactly what it was. It only ADDS an opinion beside the reviews; it never changes what the first reviews decide, except that an `on` opinion that blocks holds the step.

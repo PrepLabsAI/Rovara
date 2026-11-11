@@ -27,7 +27,7 @@ export interface PlanAnswerInput {
   kind: PlanDocumentKind;
   workflow: Pick<WorkflowSnapshot, "definitionVersion" | "checkPolicy">;
   /** The task: its id (a work breakdown is bound to it), the owner's request and the name it was made under. */
-  task: { taskId: string; requestText?: string | undefined; developerName?: string | undefined };
+  task: { taskId: string; requestText?: string | undefined; developerName?: string | undefined; ticket?: { system: string; id: string } | undefined };
   /** The project revision the task started on: its repositories (the plan's checks run in one of them). */
   repositories: ReadonlyArray<{ name: string; path: string }>;
   /** Every earlier structured document of this task, oldest first: the claim numbers they dropped may not come back. */
@@ -42,9 +42,14 @@ export type PlanAnswer =
   | { ok: true; plan: PlanDocument; canonical: string; proposal?: WorkflowCheckProposal | undefined; noChangeNeeded: boolean }
   | { ok: false; errors: string[] };
 
+/** How the plan page credits the words of a task that started from a ticket: "from ticket ENG-1". */
+export const TICKET_WHY_AUTHOR_PREFIX = "from ticket ";
+
 /** The "why" of a stored plan: the owner's own request first, credited to the owner (the planner's own entries are discarded). A task that kept no request keeps the planner's, under Rovara's name for them. */
-export function planWhyOf(task: { requestText?: string | undefined; developerName?: string | undefined }, plannerEntries: PlanDocument["why"]): PlanDocument["why"] {
+export function planWhyOf(task: { requestText?: string | undefined; developerName?: string | undefined; ticket?: { system: string; id: string } | undefined }, plannerEntries: PlanDocument["why"]): PlanDocument["why"] {
   if (task.requestText === undefined) return plannerEntries.map((entry) => ({ text: entry.text, author: PLANNER_WHY_AUTHOR }));
+  // A task started from a ticket asks what the ticket says: its words are the ticket's, and the owner reading the plan must not take them for their own.
+  if (task.ticket !== undefined) return [{ text: hideEmailAddresses(cutText(task.requestText, PLAN_WHY_REQUEST_MAX_CHARS)), author: cutText(`${TICKET_WHY_AUTHOR_PREFIX}${task.ticket.id}`, 80) }];
   const name = cutText(task.developerName ?? "", 80);
   return [{ text: hideEmailAddresses(cutText(task.requestText, PLAN_WHY_REQUEST_MAX_CHARS)), author: name === "" ? TASK_OWNER_LABEL : taskOwnerLabel(name) }];
 }

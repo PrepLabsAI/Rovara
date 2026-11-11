@@ -2,17 +2,18 @@
 //   - `comment`  posts through the `LinearReplyPort` (the way an Ask's answer reaches Linear);
 //   - `events`   verifies a delivery (the `Linear-Signature` HMAC, the hook's own Linear organization and team) and maps the issue it carries (`webhook.ts`);
 //   - key rules  are `normalizeIssueKey`'s: an item id is an issue key, never free text.
-// What Linear does not have is left out rather than invented: there is no status write (Linear closes an issue itself when a pull request that says "Fixes <KEY>" merges) and no link write,
-// so `setStatus` and `link` are absent and the capabilities say so. Reading an issue needs a read of Linear that the install gives as `readIssue` (this port only reads an item fresh), and
-// without it `readItem` refuses with a fixed sentence.
+// What the install does not give is left out rather than invented. A comment, an issue read, what is asked for now (a laptop reads Linear by asking: `asked`) and a move to a named workflow status (`moveIssue`) come
+// from the install's access (`api.ts` makes them from the owner's API key); without `moveIssue` there is no `setStatusByName`, and `setStatus` (the neutral statuses) and `link` are absent: Linear closes an issue itself
+// when a pull request that says "Fixes <KEY>" merges. Reading an issue needs a read of Linear that the install gives as `readIssue` (this port only reads an item fresh), and without it `readItem` refuses with a fixed sentence.
 //
-// Linear's trigger source (work started by the payer rules of an assignment) is NOT moved onto this adapter; the neutral start is a member's act (Cloud's intake engine, a later lane).
+// Linear's trigger source (work started by the payer rules of an assignment) is NOT moved onto this adapter; the neutral start is a member's act (`core/intake`).
 import { createHash } from "node:crypto";
 import {
   agentXError, HostScopeSchema, TrackerEventSchema, TrackerItemSchema,
-  type HostScope, type NeutralStatus, type RawDelivery, type Tracker, type TrackerCapabilities, type TrackerEvent, type TrackerEvents, type TrackerItem,
+  type HostScope, type NeutralStatus, type RawDelivery, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerEvent, type TrackerEvents, type TrackerItem,
   type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
+import { workspaceOfIssueUrl } from "./api.js";
 import { linearIssueCreated, normalizeIssueKey, verifyLinearSignature, type LinearHook } from "./webhook.js";
 
 /** The company a call speaks for (Cloud calls it an organization id): the `orgId` of an organization scope. */
@@ -55,6 +56,13 @@ export interface LinearTrackerAccess {
   readIssue?: ((orgId: OrgId, key: string) => Promise<LinearIssueRead | undefined>) | undefined;
   /** The Linear hook (its tenant and signing secret) a delivery under this scope belongs to. Absent: the adapter accepts no delivery. */
   hook?: ((scope: HostScope) => Promise<{ hook: LinearHook; secret: string } | undefined>) | undefined;
+  /**
+   * What is asked for now in the install's Linear (issues that carry the label, or are assigned to the key's own account), with who did it from Linear's own history. Absent: the adapter has no `askedFor`
+   * (a laptop reads Linear by asking, since it has no webhook). The answer's accounts are in the neutral outside-account shape.
+   */
+  asked?: ((input: { label?: string | undefined; assignedToRovara?: true | undefined; limit: number; signal: AbortSignal }) => Promise<readonly TrackerAskedItem[]>) | undefined;
+  /** Moves an issue to the workflow status named (matched without regard to case). Absent: the adapter has no `setStatusByName`. A refusal is a `TrackerWriteRefusedError`. */
+  moveIssue?: ((key: string, statusName: string) => Promise<"moved" | "no_such_status">) | undefined;
   /** The organization an install's system scope speaks for (a single-company install has exactly one). Absent: a system scope has no organization, so nothing is written or read for it. */
   installOrg?: (() => OrgId | undefined) | undefined;
 }
@@ -148,7 +156,8 @@ export function linearTracker(access: LinearTrackerAccess = {}): Tracker {
     return orgId;
   };
   const capabilities: TrackerCapabilities = {
-    startTasks: true, comment: access.reply !== undefined, status: false, link: false, events: access.hook !== undefined ? "webhook" : "none",
+    startTasks: true, comment: access.reply !== undefined, status: access.moveIssue !== undefined, link: false, events: access.hook !== undefined ? "webhook" : access.asked !== undefined ? "poll" : "none",
+    ...(access.asked === undefined ? {} : { intake: true }),
   };
   const tracker: Tracker = {
     kind: LINEAR_TRACKER_KIND,
@@ -173,11 +182,28 @@ export function linearTracker(access: LinearTrackerAccess = {}): Tracker {
   };
   if (access.reply !== undefined) {
     const reply = access.reply;
-    tracker.comment = async (ref: TrackerItemRef, body: UntrustedText, scope: HostScope): Promise<void> => {
+    tracker.comment = async (ref: TrackerItemRef, body: UntrustedText, scope: HostScope, options?: TrackerCommentOptions): Promise<void> => {
       const orgId = orgOf(scope);
       const key = keyOf(ref);
       if (body.length === 0 || body.length > COMMENT_MAX_CHARS) throw agentXError("CONFIG_INVALID", "the comment is empty or too long");
-      await reply.reply({ orgId, issueKey: key, text: body });
+      // The issue found must be in the ticket's own workspace (an issue key repeats across workspaces), and the same key again is the same comment.
+      const workspace = ref.url === undefined ? undefined : workspaceOfIssueUrl(ref.url);
+      await reply.reply({ orgId, issueKey: key, text: body, ...(options?.key === undefined ? {} : { commentKey: options.key }), ...(workspace === undefined ? {} : { workspace }) });
+    };
+  }
+  if (access.moveIssue !== undefined) {
+    const move = access.moveIssue;
+    tracker.setStatusByName = async (ref: TrackerItemRef, name: string, scope: HostScope) => {
+      orgOf(scope);
+      if (name.trim() === "" || name.length > 100) throw agentXError("CONFIG_INVALID", "the status name is empty or too long");
+      return move(keyOf(ref), name.trim());
+    };
+  }
+  if (access.asked !== undefined) {
+    const ask = access.asked;
+    tracker.askedFor = async (query: TrackerAskedQuery, scope: HostScope): Promise<readonly TrackerAskedItem[]> => {
+      orgOf(scope);
+      return ask({ ...(query.when.label === undefined ? {} : { label: query.when.label }), ...(query.when.assignedToRovara === true ? { assignedToRovara: true as const } : {}), limit: query.limit, signal: query.signal });
     };
   }
   return tracker;

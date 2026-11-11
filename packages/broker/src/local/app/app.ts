@@ -91,6 +91,8 @@ import { createSessionStartExtras } from "./session-start.js";
 import { createLocalDesignReview } from "./design-review.js";
 import { checkDesignApproval, designApprovalRecordItems, gradeApprovalRisk } from "../../core/design-review/decision.js";
 import { createLocalChat } from "./chat.js";
+import { createLocalIntake } from "./intake.js";
+import { sessionBindingsOf } from "../../core/sessions/bindings.js";
 import { createChannelSink } from "../../core/channel/sink.js";
 import { readTaskThread } from "../../core/channel/threads.js";
 import { deliverAttention, queueAttention } from "../../core/notify/attention.js";
@@ -342,6 +344,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.operationEnded === undefined ? {} : { onOperationEnded: options.operationEnded }),
     ...(options.modelCalls === undefined ? {} : { modelCalls: options.modelCalls }),
     startExtras: createSessionStartExtras(companyId),
+    // The ticket a task started from: a pull request's description says which issue it fixes.
+    sessionBindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) },
     milestones,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
@@ -350,6 +354,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
   });
+
+  // Tickets that ask for work (the project's intake rule, the poll, the owner's list) and the write-back to the ticket a task started from. It registers its milestone handler now, before any milestone is written.
+  const intake = createLocalIntake({ registry, flow, companyId, owner, milestones, now: () => clock().getTime(), fenceKey: deriveKey(rootKey, "intake-ticket-fence"), log });
 
   // The design review stage (a Full task's design is read by fresh reviewers before anyone approves it). It fills `flow.deps.designReview`; with the switch off no task enters it.
   const designReview = createLocalDesignReview({
@@ -400,7 +407,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
     // A person is told what needs them through the chat adapters the registry holds (`core/notify`); with none, nothing is queued. The row is only a queue entry: it is checked again before anything is sent.
-    onChange: [async (change) => { if (registry.names("channel").length > 0) await queueAttention({ store, now: clock, log }, change); }],
+    onChange: [async (change) => { if (registry.names("channel").length > 0) await queueAttention({ store, now: clock, log }, change); }, (change) => intake.onSessionChange(change)],
     // A step that read a message's note settles the message `delivered`; a session that ended closes the ones no step took.
     afterRefresh: (orgId, sessionId) => settleSteerDeliveriesFor({ store, ...(options.now === undefined ? {} : { now: options.now }), log }, orgId, sessionId),
   };
@@ -540,7 +547,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -564,6 +571,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const tickTracking = async (): Promise<void> => {
     await tracking.sweep().catch(logFailure("local_app.tracking_failed"));
     await comments.poll().catch(logFailure("local_app.comments_failed"));
+    // The tickets that ask for work are read through the trackers the registry holds; a source that is not due costs nothing.
+    await intake.poll().catch(logFailure("local_app.intake_failed"));
   };
   // What Rovara learns from finished tasks takes model calls that last tens of seconds, so it has its own timer: neither the dispatch nor the pull request reads wait for it.
   const tickLessons = async (): Promise<void> => {

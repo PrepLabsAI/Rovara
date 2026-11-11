@@ -163,3 +163,20 @@ describe("a binding whose link is not Linear's", () => {
     expect(linearIssueKeyOf(issue("ENG-5", "https://linear.app/issue/ENG-5"))).toBe("ENG-5");
   });
 });
+
+describe("a ticket a task started from, in the tracker that registered as linear", () => {
+  const ticket = (id: string, url = "https://linear.app/acme/issue/ENG-142/fix-the-retry-bug", system = "linear"): SessionBinding => ({ kind: "tracker_item", system, id, url });
+
+  it("is a Linear issue like any other: the key is read from its id and link, with the same checks", () => {
+    expect(linearIssueKeyOf(ticket("ENG-142"))).toBe("ENG-142");
+    expect(linearIssueKeyOf(ticket("eng-142"))).toBe("ENG-142");
+    expect(linearIssueKeyOfBindings([THREAD, ticket("ENG-142")])).toBe("ENG-142");
+  });
+
+  it("is nothing for a ticket of another tracker, an id and a link that disagree, or a link that is not Linear's", () => {
+    expect(linearIssueKeyOf(ticket("ENG-142", "https://acme.atlassian.net/browse/ENG-142", "jira"))).toBeUndefined();
+    expect(linearIssueKeyOf(ticket("ENG-142", "https://linear.app/acme/issue/OPS-9/x"))).toBeUndefined();
+    expect(linearIssueKeyOf(ticket("ENG-142", "https://evil.example/acme/issue/ENG-142/x"))).toBeUndefined();
+    expect(linearIssueKeyOf(ticket("ENG-142", "https://linear.app.evil.example/acme/issue/ENG-142/x"))).toBeUndefined();
+  });
+});

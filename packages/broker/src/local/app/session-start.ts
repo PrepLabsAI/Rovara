@@ -1,5 +1,6 @@
 // Lane L9-wire: the task's session is created in the task's own start transaction (L6b's `createTaskSessionItems`), so the task and its session exist together or not at all.
 import { ROVARA_CODE_AGENT_ID, type OrgId, type WorkOrigin } from "@agentx/contracts";
+import { bindingItems } from "../../core/sessions/bindings.js";
 import { createTaskSessionItems, developerIdOf, taskSessionId } from "../../core/sessions/create.js";
 import type { StartExtrasInput, StartExtras } from "../../core/task-flow/deps.js";
 
@@ -13,13 +14,15 @@ export function createSessionStartExtras(companyId: OrgId): (input: StartExtrasI
     const sessionId = taskSessionId(input.taskId);
     return {
       sessionId,
-      items: createTaskSessionItems({
+      items: [...createTaskSessionItems({
         orgId: companyId, sessionId, taskId: input.taskId, project: input.project,
         // Code has one built-in agent; the draft version is the current one on an install with no agent versions.
         agent: { agentId: ROVARA_CODE_AGENT_ID, name: "Rovara Code", version: "draft" },
         title: input.title, owner: input.principal, origin: originOf(input.client),
         payer: { kind: "member", developerId: developerIdOf(input.principal) }, now: input.receivedAt,
       }),
+      // A task that starts from a ticket follows it from the first moment (the same transaction), so a ticket that already follows another session refuses this start.
+      ...(input.ticket === undefined ? [] : bindingItems(companyId, sessionId, { kind: "tracker_item", system: input.ticket.system, id: input.ticket.id, url: input.ticket.url }, input.receivedAt))]
     };
   };
 }

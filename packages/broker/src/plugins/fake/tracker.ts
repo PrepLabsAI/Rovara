@@ -1,8 +1,8 @@
 // A Tracker over an in-memory set of items. Writes are recorded so a test can see exactly what went out; reads give the text as stored (untrusted).
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
-  agentXError, HostScopeSchema, NeutralStatusSchema, TrackerEventSchema, TrackerItemRefSchema,
-  type ChangeRequestRef, type HostScope, type NeutralStatus, type RawDelivery, type Tracker, type TrackerCapabilities, type TrackerEvent, type TrackerEvents, type TrackerItem,
+  agentXError, HostScopeSchema, TrackerSearchError, NeutralStatusSchema, TrackerEventSchema, TrackerItemRefSchema,
+  type ChangeRequestRef, type HostScope, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCommentOptions, type NeutralStatus, type RawDelivery, type Tracker, type TrackerCapabilities, type TrackerEvent, type TrackerEvents, type TrackerItem,
   type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
 
@@ -31,8 +31,15 @@ export class FakeTracker implements Tracker {
   readonly capabilities: TrackerCapabilities = { startTasks: true, comment: true, status: true, link: true, events: "webhook" };
   readonly events: TrackerEvents;
   readonly items = new Map<string, TrackerItem>();
-  /** What Rovara wrote, in order. */
-  readonly writes: Array<{ kind: "comment" | "status" | "link"; item: string; value: string }> = [];
+  /** What Rovara wrote, in order. A comment carries its key and whether it was asked to be private. */
+  readonly writes: Array<{ kind: "comment" | "status" | "link"; item: string; value: string; key?: string | undefined; requirePrivate?: boolean | undefined }> = [];
+  /** Test driver: what the tracker says is asked for now (`askedFor`), or an error code the next read fails with. */
+  asked: readonly TrackerAskedItem[] = [];
+  askedFailure: ConstructorParameters<typeof TrackerSearchError>[0] | undefined;
+  /** The queries `askedFor` was called with. */
+  readonly queries: Array<Omit<TrackerAskedQuery, "signal">> = [];
+  /** The status names this fake's items can be moved to by name (`setStatusByName`). */
+  statusNames: readonly string[] = ["In Progress", "In Review", "Done"];
   private readonly allowed: ReadonlySet<NeutralStatus>;
   private readonly secret: string;
 
@@ -66,12 +73,29 @@ export class FakeTracker implements Tracker {
     return ({ ...this.item(ref), labels: [...this.item(ref).labels] });
   }
 
-  async comment(ref: TrackerItemRef, body: UntrustedText, scope: HostScope): Promise<void> {
+  async comment(ref: TrackerItemRef, body: UntrustedText, scope: HostScope, options?: TrackerCommentOptions): Promise<void> {
     this.scope(scope);
     const item = this.item(ref);
     if (body.length === 0 || body.length > 65_536) throw agentXError("CONFIG_INVALID", "the comment is empty or too long");
-    this.writes.push({ kind: "comment", item: item.ref.id, value: body });
+    // The same key again is the same comment (a retry is never a second post).
+    if (options?.key !== undefined && this.writes.some((write) => write.kind === "comment" && write.key === options.key)) return;
+    this.writes.push({ kind: "comment", item: item.ref.id, value: body, ...(options?.key === undefined ? {} : { key: options.key }), ...(options?.requirePrivate === undefined ? {} : { requirePrivate: options.requirePrivate }) });
     return;
+  }
+
+  async setStatusByName(ref: TrackerItemRef, name: string, scope: HostScope): Promise<"moved" | "no_such_status"> {
+    this.scope(scope);
+    const item = this.item(ref);
+    if (!this.statusNames.some((known) => known.toLowerCase() === name.toLowerCase())) return "no_such_status";
+    this.writes.push({ kind: "status", item: item.ref.id, value: name });
+    return "moved";
+  }
+
+  async askedFor(query: TrackerAskedQuery, scope: HostScope): Promise<readonly TrackerAskedItem[]> {
+    this.scope(scope);
+    this.queries.push({ when: query.when, ...(query.connection === undefined ? {} : { connection: query.connection }), limit: query.limit });
+    if (this.askedFailure !== undefined) throw new TrackerSearchError(this.askedFailure);
+    return this.asked.slice(0, query.limit);
   }
 
   async setStatus(ref: TrackerItemRef, status: NeutralStatus, scope: HostScope): Promise<void> {

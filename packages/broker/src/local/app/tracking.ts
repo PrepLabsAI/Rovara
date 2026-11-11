@@ -27,6 +27,7 @@ import { soleOwnerPeople } from "../../core/merge/people.js";
 import { registryRepositoryResolver } from "../../core/merge/resolver.js";
 import type { CodeMilestones, MergeTask, SessionTimeline } from "../../core/merge/seams.js";
 import { recoveryRowKey, workflowUpdateItem } from "../../core/merge/store.js";
+import { sessionBindingsOf } from "../../core/sessions/bindings.js";
 import { sessionEventItem } from "../../core/sessions/store.js";
 import { verifyPublishedChanges } from "../../core/build-step/changed-files.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
@@ -205,7 +206,7 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
       const next = observeWorkflowPullRequest(workflow, { repositoryId: pullRequest.repositoryId, number: pullRequest.number, candidateDigest: pullRequest.candidateDigest, state, source: "CODE_HOST", observedAt: at }, at);
       const items: TransactItem[] = [
         workflowUpdateItem(taskId, next, workflow.revision),
-        ...await mergedMilestoneItems({ milestones, bindings: { read: async () => [] } }, task, workflow, next, at),
+        ...await mergedMilestoneItems({ milestones, bindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) } }, task, workflow, next, at),
         ...await mergedStateItems({ store, timeline, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }) }, task, workflow, next, at,
           state === "MERGED" ? [{ repositoryId: pullRequest.repositoryId, number: pullRequest.number, ...(details.mergedBy === undefined ? {} : { mergedBy: details.mergedBy }), ...(details.mergeRevision === undefined ? {} : { mergeCommit: details.mergeRevision }) }] : []),
       ];
