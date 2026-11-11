@@ -1,7 +1,7 @@
 // The text of `.rovara/lessons.md`: deterministic order, no dates or links, cleaned text, surgical changes that leave the team's own bytes alone.
 import { describe, expect, it } from "vitest";
 import {
-  FILE_HEADER, WHOLE_REPOSITORY, applyFileChanges, blockOf, cleanLessonLine, compareHeadings, normalizeBlockText, parseLessonsFile, renderLessonsFile, textHash, wrapBullet,
+  FILE_HEADER, WHOLE_REPOSITORY, applyFileChanges, blockOf, cleanLessonLine, compareHeadings, looseItems, normalizeBlockText, parseLessonsFile, renderLessonsFile, textHash, wrapBullet,
 } from "../../../packages/broker/src/lessons/repo-file-format.js";
 
 type B = { id: string; heading: string; text: string };
@@ -155,5 +155,29 @@ describe("a file the team has also written in", () => {
     expect(applyFileChanges(dup, { remove: ["les_aaaa"], replace: [{ id: "les_aaaa", text: "x" }], add: [] })).toBe(dup);
     expect(applyFileChanges(dup, { remove: ["les_nope"], replace: [], add: [] })).toBe(dup);
     expect(parseLessonsFile(renderLessonsFile([])).blocks).toEqual([]);
+  });
+});
+
+describe("bullets the team wrote (R3)", () => {
+  const file = "# Team lessons\n\nEdit freely.\n\n## Whole repository\n\n<!-- rovara:les_aaaa -->\n- Marked one.\n\n- Loose one,\n  wrapped.\n* Loose two.\n\n## src/**\n\n- Under paths.\n\n```\n- fenced\n```\n";
+  it("looseItems finds the list items outside id blocks, with their section, in comparison form, and skips fences and paragraphs", () => {
+    const items = looseItems(parseLessonsFile(file));
+    expect(items.map((i) => [i.heading, i.text])).toEqual([["Whole repository", "Loose one, wrapped."], ["Whole repository", "Loose two."], ["src/**", "Under paths."]]);
+  });
+  it("an id block is one bullet: a second bullet right under it is the next item, not more text of the block", () => {
+    const parsed = parseLessonsFile("<!-- rovara:les_aaaa -->\n- First,\n  wrapped.\n- Second.\n");
+    expect(parsed.blocks.map((b) => b.text)).toEqual(["First, wrapped."]);
+    expect(looseItems(parsed).map((i) => i.text)).toEqual(["Second."]);
+  });
+  it("tag puts an id line before the FIRST bullet with that text and leaves every other byte; the result parses as a block of the same text", () => {
+    const out = applyFileChanges(file, { remove: [], replace: [], add: [], tag: [{ id: "les_bbbb", textHash: textHash("Loose two.") }, { id: "les_cccc", textHash: textHash("Under paths.") }, { id: "les_dddd", textHash: textHash("No such bullet.") }] });
+    expect(out).toBe(file.replace("* Loose two.", "<!-- rovara:les_bbbb -->\n* Loose two.").replace("- Under paths.", "<!-- rovara:les_cccc -->\n- Under paths."));
+    const parsed = parseLessonsFile(out);
+    expect(parsed.blocks.map((b) => [b.id, b.text])).toEqual([["les_aaaa", "Marked one."], ["les_bbbb", "Loose two."], ["les_cccc", "Under paths."]]);
+    expect(applyFileChanges(out, { remove: [], replace: [], add: [], tag: [{ id: "les_bbbb", textHash: textHash("Loose two.") }] })).toBe(out);
+  });
+  it("tags in a CRLF file keep its line endings", () => {
+    const out = applyFileChanges("## A\r\n\r\n- Loose.\r\n", { remove: [], replace: [], add: [], tag: [{ id: "les_bbbb", textHash: textHash("Loose.") }] });
+    expect(out).toBe("## A\r\n\r\n<!-- rovara:les_bbbb -->\r\n- Loose.\r\n");
   });
 });

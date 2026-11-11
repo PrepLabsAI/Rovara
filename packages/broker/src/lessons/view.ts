@@ -64,11 +64,15 @@ async function namePeople(deps: LessonViewDeps, orgId: OrgId, me: string, ids: r
     }));
   }
   return (id) => {
+    // A lesson written in the repository file is approved by the repository edit, not by a person (read-back, decision 76.1): shown as that.
+    if (id === REPOSITORY_APPROVER) return { name: "repository edit" };
     const name = found.get(normId(id));
     return name === undefined ? { name: FORMER } : { name, ...(sameId(id, me) ? { you: true as const } : {}) };
   };
 }
 
+/** The `by` of the approval read-back gives (`repo-file-readback.ts`). */
+const REPOSITORY_APPROVER = "system:repository-edit";
 const personIdsOf = (lesson: Lesson): string[] => [...lesson.provenance.authors, ...lesson.approvals.map((a) => a.by)];
 
 /** What a pending lesson still needs: the people the policy asks for, who approved first, and the groups not yet represented. */

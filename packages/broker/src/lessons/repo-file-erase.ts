@@ -11,7 +11,7 @@
 // No model call. Provider-neutral: everything outside lessons code is the `CodeHost` port.
 import { randomBytes } from "node:crypto";
 import { LESSON_FILE_MAX_BYTES, LESSON_FILE_PATH } from "@agentx/contracts";
-import { applyFileChanges, parseLessonsFile, textHash } from "./repo-file-format.js";
+import { applyFileChanges, looseItems, normalizeBlockText, parseLessonsFile, textHash } from "./repo-file-format.js";
 import { Unconfirmed, freshBranchName, guardTarget, headOf, readOwnPr, verifyRepository, watchRowOf, type RepoFileTarget } from "./repo-file-host.js";
 import { requireAudit } from "./policy.js";
 import type { LessonAuditSink } from "./ports.js";
@@ -20,7 +20,7 @@ import type { LessonStore, ScopeKey } from "./store.js";
 
 /** What the sweep is handed. Note what is NOT here: no publish state. */
 export interface EraseSweepDeps {
-  store: Pick<LessonStore, "goneOf">;
+  store: Pick<LessonStore, "goneOf" | "textFingerprints" | "goneFingerprintsOf" | "clearGoneFingerprint">;
   rows: PrRowStore;
   audit: LessonAuditSink;
   now(): number;
@@ -28,11 +28,11 @@ export interface EraseSweepDeps {
   log?(event: string, fields: Record<string, string | number>): void;
 }
 /** The sweep's dependencies out of the pass's: only the lesson store's tombstone lookup, the pull request rows, the ledger and the clock. The publish state is left behind on purpose. */
-export function sweepDepsOf(deps: { store: Pick<LessonStore, "goneOf">; state: PrRowStore; rows?: PrRowStore; audit: LessonAuditSink; now(): number; randomHex?(): string; log?(event: string, fields: Record<string, string | number>): void }): EraseSweepDeps {
+export function sweepDepsOf(deps: { store: Pick<LessonStore, "goneOf" | "textFingerprints" | "goneFingerprintsOf" | "clearGoneFingerprint">; state: PrRowStore; rows?: PrRowStore; audit: LessonAuditSink; now(): number; randomHex?(): string; log?(event: string, fields: Record<string, string | number>): void }): EraseSweepDeps {
   return { store: deps.store, rows: deps.rows ?? deps.state, audit: deps.audit, now: () => deps.now(), randomHex: () => deps.randomHex?.() ?? randomBytes(6).toString("hex"), log: (event, fields) => deps.log?.(event, fields) };
 }
 /** What one repository's sweep did. `unreachable`: the host would not let Rovara read the repository at all (an uninstalled app, a repository that is gone). `strayBranches`: Rovara branches the host cannot match to a pull request. `unconfirmed`: open pull requests that were NOT closed because the host could not show them or did not say Rovara made them (shown on the status, tried again). */
-export interface EraseSweepResult { closed: number; removalOpened: boolean; failures: number; unreachable: boolean; strayBranches: number; unconfirmed: number }
+export interface EraseSweepResult { closed: number; removalOpened: boolean; failures: number; unreachable: boolean; strayBranches: number; unconfirmed: number; /** Fingerprints of the marked copies the file held when it was read; absent when it was not read. */ marks?: string[] }
 
 /** A closed pull request's row is kept this long, so one a person reopens is found and closed again. */
 export const CLOSED_ROW_KEEP_MS = 90 * 86_400_000;
@@ -122,6 +122,11 @@ const REMOVAL_LEASE = "lease-removal";
 const coversRow = (row: PrRow, inFile: readonly string[], fileHash: string, now: number): boolean =>
   row.kind === "removal" && row.closedAt === undefined && (isProvisional(row) ? now - row.at < IN_FLIGHT_MS : inFile.every((id) => row.ids.includes(id)) && row.fileHash === fileHash);
 
+/** Releases the marks (of an earlier successful sweep of this repository) that no copy in the file has any more. */
+async function releaseMarks(deps: EraseSweepDeps, key: ScopeKey, earlier: readonly string[], present: ReadonlySet<string>): Promise<void> {
+  for (const fingerprint of earlier) if (!present.has(fingerprint)) await deps.store.clearGoneFingerprint(key, fingerprint);
+}
+
 /** Half two: blocks of gone lessons on the default branch come out through a removal-only pull request; one made stale (its blocks are gone from main, or main's file changed under it) is closed and made again. */
 async function removeErasedBlocks(deps: EraseSweepDeps, key: ScopeKey, target: RepoFileTarget, identity: { defaultBranch?: string | undefined }, rows: readonly PrRow[], result: EraseSweepResult): Promise<void> {
   const { host, repository, scope } = target;
@@ -129,13 +134,29 @@ async function removeErasedBlocks(deps: EraseSweepDeps, key: ScopeKey, target: R
   if (identity.defaultBranch === undefined) return;
   const defaultBranch = identity.defaultBranch;
   const head = await host.baseBranchHead(repository, defaultBranch, scope);
-  if (await host.pathKind(repository, LESSON_FILE_PATH, head, scope) !== "file") return;
+  const kind = await host.pathKind(repository, LESSON_FILE_PATH, head, scope);
+  const earlier = rows.find((row) => row.kind === "watch")?.marks ?? [];
+  // A file that is not there holds no copy: the marks this repository's sweeps recorded are released. Any other file that cannot be read says nothing (nothing is released).
+  if (kind === "none") { await releaseMarks(deps, key, earlier, new Set()); result.marks = []; return; }
+  if (kind !== "file") return;
   const text = await host.fileAtRevision(repository, LESSON_FILE_PATH, head, scope, { maxBytes: LESSON_FILE_MAX_BYTES });
   if (text === undefined) return;
   const parsed = parseLessonsFile(text);
-  const ids = [...new Set(parsed.blocks.map((block) => block.id))].filter((id) => !parsed.duplicates.includes(id));
+  // Every id in the file, a duplicated one too: a gone lesson's text comes out of every block that carries its id.
+  const ids = [...new Set(parsed.blocks.map((block) => block.id))];
   const gone = ids.length === 0 ? new Map() : await deps.store.goneOf(key, ids);
-  const inFile = ids.filter((id) => gone.has(id));
+  // A copy of an erased lesson's text whose id line was stripped (a formatter, a deleted comment) is found by the mark read-back put on the text (`LessonStore.markGoneText`): it comes out too. Its "id" in the rows is `txt_<hash>`.
+  const loose = looseItems(parsed);
+  const looseHashes = [...new Set(loose.map((item) => textHash(normalizeBlockText(item.text))))];
+  const copyHashes = [...new Set([...looseHashes, ...parsed.blocks.map((block) => textHash(normalizeBlockText(block.text)))])];
+  const fingerprints = copyHashes.length === 0 ? new Map<string, string>() : await deps.store.textFingerprints(key, target.place, copyHashes);
+  const marked = fingerprints.size === 0 ? new Set<string>() : await deps.store.goneFingerprintsOf(key, [...fingerprints.values()]);
+  const looseGone = looseHashes.filter((hash) => marked.has(fingerprints.get(hash) ?? "-"));
+  // The file was read: a mark this repository's earlier sweeps recorded that no copy has any more is released; the ones with a copy stay (and are what the row remembers now).
+  const present = new Set(copyHashes.map((hash) => fingerprints.get(hash)!));
+  await releaseMarks(deps, key, earlier, present);
+  result.marks = [...new Set([...earlier.filter((fp) => present.has(fp)), ...[...marked].filter((fp) => present.has(fp))])]
+  const inFile = [...ids.filter((id) => gone.has(id)), ...looseGone.map((hash) => `txt_${hash}`)];
   const fileHash = textHash(text);
   const openRemovals = rows.filter((r) => r.kind === "removal" && r.closedAt === undefined && !isProvisional(r));
   // A removal pull request that no longer matches main is out of date: its blocks are already gone, or main's file changed under it. It is closed (and, if blocks remain, made again below).
@@ -152,7 +173,7 @@ async function removeErasedBlocks(deps: EraseSweepDeps, key: ScopeKey, target: R
   if (inFile.length === 0 || covered) return;
   // Another sweep may be in the middle of making one (its provisional row is younger than half an hour).
   if (rows.some((r) => isProvisional(r) && coversRow(r, inFile, fileHash, deps.now()))) return;
-  const next = applyFileChanges(text, { remove: inFile, replace: [], add: [] });
+  const next = applyFileChanges(text, { remove: [], removeAll: inFile.filter((id) => !id.startsWith("txt_")), removeLoose: looseGone, replace: [], add: [] });
   if (next === text || host.deleteBranch === undefined) return;
   // ONE SWEEP AT A TIME makes a removal pull request: a lease row is claimed (written only if there is none), and the rows are read again under it, so two sweeps that started together cannot open two. A lease nobody released
   // (the Lambda died) is taken over after 15 minutes.

@@ -71,7 +71,8 @@ const NOTICES: Record<string, string> = {
   resumed: "Picked up again.",
   lesson: "Lesson updated.",
   lessonrepo: "Saved. A switched-on repository gets its first pull request within a day.",
-  lessonfresh: "Switching a repository's lessons file on needs a page you opened in the last few minutes. Run `rovara open lessons` to open one.",
+  lessonretire: "Saved. Lessons you confirmed are retired by the next nightly pass; lessons you kept are proposed back in the next pull request.",
+  lessonfresh: "Switching a repository's lessons file on, or retiring lessons that went missing from it, needs a page you opened in the last few minutes. Run `rovara open lessons` to open one.",
   revoked: "That script token is revoked.",
   envapproved: "Approved. Tasks that start from now on use it.",
   imageapproved: "Approved and pinned. Test services use it from the next `rovara up`.",
@@ -425,14 +426,20 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const project = request.form?.get("project") ?? "";
       const repo = request.form?.get("repo") ?? "";
       const action = request.form?.get("action");
-      const actions = ["on", "off", "resume", "pointer_add", "pointer_decline"] as const;
+      const actions = ["on", "off", "resume", "pointer_add", "pointer_decline", "retire_confirm", "retire_keep"] as const;
       const chosen = actions.find((candidate) => candidate === action);
-      if (options.actions.lessonRepoAction === undefined || chosen === undefined || project === "" || project.length > 200 || repo === "" || repo.length > 200) return redirect(`${request.base}/lessons?n=invalid`);
-      if (!verified(request, { action: "lesson.repo", subject: `${project}:${repo}:${chosen}` })) return redirect(`${request.base}/lessons?n=form`);
+      // Only the two answers about lessons missing from the file carry the digest of the set the person saw (16 hex); no other action takes one.
+      const heldRaw = request.form?.get("held") ?? undefined;
+      const retiring = chosen === "retire_confirm" || chosen === "retire_keep";
+      const held = heldRaw !== undefined && /^[0-9a-f]{16}$/u.test(heldRaw) ? heldRaw : undefined;
+      if (options.actions.lessonRepoAction === undefined || chosen === undefined || project === "" || project.length > 200 || repo === "" || repo.length > 200 || (retiring ? held === undefined : heldRaw !== undefined)) return redirect(`${request.base}/lessons?n=invalid`);
+      if (!verified(request, { action: "lesson.repo", subject: `${project}:${repo}:${chosen}${held === undefined ? "" : `:${held}`}` })) return redirect(`${request.base}/lessons?n=form`);
+      // Retiring lessons takes them out of use for good: like switching on, it asks for a page opened a few minutes ago.
+      if (chosen === "retire_confirm" && !tokenPageIsFresh(request)) return redirect(`${request.base}/lessons?n=lessonfresh`);
       // Switching on makes Rovara open pull requests in a repository: it asks for a page opened a few minutes ago, as a long-lived credential does.
       if (chosen === "on" && !tokenPageIsFresh(request)) return redirect(`${request.base}/lessons?n=lessonfresh`);
-      const result = await options.actions.lessonRepoAction({ project, repo, action: chosen, fresh: tokenPageIsFresh(request) });
-      return redirect(`${request.base}/lessons?n=${outcomeCode(result, "lessonrepo")}`);
+      const result = await options.actions.lessonRepoAction({ project, repo, action: chosen, ...(held === undefined ? {} : { held }), fresh: tokenPageIsFresh(request) });
+      return redirect(`${request.base}/lessons?n=${outcomeCode(result, retiring ? "lessonretire" : "lessonrepo")}`);
     } },
     { method: "POST", pattern: /^\/lessons\/act$/, handle: async (request) => {
       const lessonId = request.form?.get("lessonId") ?? "";

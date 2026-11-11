@@ -4,7 +4,7 @@
 import { OrgIdSchema } from "@agentx/contracts";
 import { rotated } from "./nightly-state.js";
 import type { RepoFileTarget } from "./repo-file-host.js";
-import { finishClosings, runRepoFilePass, type RepoFileDeps } from "./repo-file-pass.js";
+import { finishClosings, runRepoFilePass, runRetireRead, type RepoFileDeps } from "./repo-file-pass.js";
 import { sweepProject } from "./repo-file-sweep.js";
 
 /** What the job and the routes need beyond the pass's own dependencies: how to find a project's repositories (with their code hosts). */
@@ -75,6 +75,8 @@ export async function lessonsRepoFilePublishJob(runtime: RepoFileRuntime, orgId:
           continue;
         }
         if (!state.enabled) { await finishClosings(deps, key, target, (await runtime.deps.state.get(key, state.place)) ?? state); continue; }
+        // A confirmed retire (owner decision 78) is carried out whether or not this repository's weekly pass is due: read-back only, no pull request, no change to the pass's own clock. It comes first, so a pass that is due sees its result.
+        if (state.readBackHeld?.verdict === "retire") await runRetireRead(deps, key, target);
         const result = await runRepoFilePass(deps, key, target);
         if (result.status === "opened") counts.repoFilePrsOpened += 1;
         else if (result.status === "left") counts.repoFileLeft += 1;

@@ -454,7 +454,7 @@ async function visibleToDraft(deps: CurateDeps, key: ScopeKey, draft: LessonDraf
 }
 
 /** RETIRE as a delta: one conditional commit that retires a lesson. Used by approvals, auto-retire and supersede. */
-export async function retireLesson(deps: LessonDeps & { store: LessonStore; vectors?: LessonVectors }, key: ScopeKey, id: string, reason: string, actor: string | undefined, action: "lesson.retired" | "lesson.auto_retired" | "lesson.trial_retired" = "lesson.retired", options: { /** Harmful marks did this: the new version says so (`retiredByHarm`), so only an erasure that takes those marks back can undo exactly this retirement. */ byHarm?: boolean } = {}): Promise<boolean> {
+export async function retireLesson(deps: LessonDeps & { store: LessonStore; vectors?: LessonVectors }, key: ScopeKey, id: string, reason: string, actor: string | undefined, action: "lesson.retired" | "lesson.auto_retired" | "lesson.trial_retired" = "lesson.retired", options: { /** Harmful marks did this: the new version says so (`retiredByHarm`), so only an erasure that takes those marks back can undo exactly this retirement. */ byHarm?: boolean; /** A fixed word the ledger records as the retirement's cause (`lesson.retired`'s `cause` fact; absent: "person"). */ cause?: string } = {}): Promise<boolean> {
   for (let attempt = 0; attempt < MAX_COMMIT_TRIES; attempt += 1) {
     const lesson = await deps.store.get(key, id);
     if (lesson === undefined || lesson.status === "retired" || lesson.status === "rejected" || lesson.status === "withdrawn") return false;
@@ -464,7 +464,7 @@ export async function retireLesson(deps: LessonDeps & { store: LessonStore; vect
     if (result.ok) {
       // A retired lesson is no neighbour of anything: its vector goes with it.
       await dropVector(deps.vectors, key, id);
-      await emitAudit(deps.audit, { action, workspaceId: key.workspaceId, project: key.project, lessonId: id, ...(actor === undefined ? {} : { actor }), facts: { reason, tier: lesson.tier } });
+      await emitAudit(deps.audit, { action, workspaceId: key.workspaceId, project: key.project, lessonId: id, ...(actor === undefined ? {} : { actor }), facts: { reason, tier: lesson.tier, ...(options.cause === undefined ? {} : { cause: options.cause }) } });
       return true;
     }
   }

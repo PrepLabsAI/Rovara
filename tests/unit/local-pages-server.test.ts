@@ -345,6 +345,75 @@ describe("lessons", () => {
     } finally { await aged.close(); }
   });
 
+  describe("lessons that went missing from a file (decision 78)", () => {
+    const DIGEST = "0123456789abcdef";
+    const missingRow = (over: Record<string, unknown> = {}) => ({ repo: "api", enabled: true, fileDeleted: false, pointer: "added" as const, notices: [], retireConfirm: { missing: 7, digest: DIGEST }, ...over });
+    /** Every form on the page that posts to /lessons/repo, with its hidden fields. */
+    const repoForms = (page: string) => [...page.matchAll(/<form[^>]*action="([^"]+\/lessons\/repo)"[^>]*>([\s\S]*?)<\/form>/g)].map((match) => {
+      const fields: Record<string, string> = {};
+      for (const input of (match[2] ?? "").matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) fields[input[1] ?? ""] = input[2] ?? "";
+      return { action: match[1] ?? "", fields };
+    });
+
+    it("shows how many are missing with Retire and Keep, each carrying the digest of the set the owner saw", async () => {
+      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow()], available: [] }];
+      const page = (await get(`${base}/lessons`)).body;
+      expect(page).toContain("7 lessons are missing from this file. Retire them, or keep them?");
+      const forms = repoForms(page);
+      expect(forms.map((form) => form.fields["action"])).toEqual(["retire_confirm", "retire_keep", "off"]);
+      expect(forms[0]!.fields["held"]).toBe(DIGEST);
+      expect(forms[1]!.fields["held"]).toBe(DIGEST);
+      expect(forms[2]!.fields["held"]).toBeUndefined();
+      // No card while nothing waits for an answer.
+      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow({ retireConfirm: undefined })], available: [] }];
+      expect((await get(`${base}/lessons`)).body).not.toContain("missing from this file");
+    });
+
+    it("keep and retire reach the action with the digest; the form token binds that digest and the action", async () => {
+      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow()], available: [] }];
+      const [retire, keep] = repoForms((await get(`${base}/lessons`)).body);
+      expect(String((await post(keep!.action, keep!.fields)).headers.location)).toContain("n=lessonretire");
+      expect(world.actions.calls[0]).toMatchObject({ name: "lessonRepoAction", input: { project: "payments", repo: "api", action: "retire_keep", held: DIGEST } });
+      expect(String((await post(retire!.action, retire!.fields)).headers.location)).toContain("n=lessonretire");
+      expect(world.actions.calls[1]).toMatchObject({ input: { action: "retire_confirm", held: DIGEST, fresh: true } });
+      const calls = world.actions.calls.length;
+      // The keep token cannot retire, and a digest of another set is not the one the token was made for.
+      expect(String((await post(keep!.action, { ...keep!.fields, action: "retire_confirm" })).headers.location)).toContain("n=form");
+      expect(String((await post(keep!.action, { ...keep!.fields, held: "f".repeat(16) })).headers.location)).toContain("n=form");
+      expect(world.actions.calls).toHaveLength(calls);
+    });
+
+    it("refuses a missing or malformed digest on these two answers, and a digest on any other action", async () => {
+      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow()], available: [] }];
+      const [retire, , off] = repoForms((await get(`${base}/lessons`)).body);
+      for (const held of [undefined, "nope", "0123456789ABCDEF", `${DIGEST}0`]) {
+        const { held: _drop, ...rest } = retire!.fields;
+        void _drop;
+        expect(String((await post(retire!.action, held === undefined ? rest : { ...rest, held })).headers.location), String(held)).toContain("n=invalid");
+      }
+      expect(String((await post(off!.action, { ...off!.fields, held: DIGEST })).headers.location)).toContain("n=invalid");
+      expect(world.actions.calls).toEqual([]);
+    });
+
+    it("retiring needs a page opened in the last few minutes; keeping does not", async () => {
+      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow()], available: [] }];
+      let clock = Date.parse("2026-11-10T10:00:00.000Z");
+      const aged = await createLocalPagesServer({ data: world.data, actions: world.actions, now: () => clock });
+      try {
+        const agedBase = `/s/${aged.sessions.mint().token}`;
+        const aHost = new URL(aged.origin).host;
+        const page = (await raw(aged.origin, { path: `${agedBase}/lessons`, headers: { host: aHost } })).body;
+        const postAged = (path: string, fields: Record<string, string>) => raw(aged.origin, { method: "POST", path, body: formBody(fields), headers: { host: aHost, origin: aged.origin, "content-type": "application/x-www-form-urlencoded" } });
+        const [retire, keep] = repoForms(page);
+        clock += 11 * 60 * 1000;
+        expect(String((await postAged(retire!.action, retire!.fields)).headers.location)).toContain("n=lessonfresh");
+        expect(world.actions.calls).toEqual([]);
+        expect(String((await postAged(keep!.action, keep!.fields)).headers.location)).toContain("n=lessonretire");
+        expect(world.actions.calls[0]).toMatchObject({ input: { action: "retire_keep", fresh: false } });
+      } finally { await aged.close(); }
+    });
+  });
+
   it("binds a lesson's approval to its own text and version, and hands the action a proof signed for exactly that", async () => {
     const offer = { requestId: "lesson:L1:3", revision: 3, artifactDigest: "d".repeat(64), risk: "medium" as const };
     world.data.lessons = world.data.lessons.map((lesson) => (lesson.id === "L1" ? { ...lesson, offer } : lesson));

@@ -52,20 +52,25 @@ async function waitingLessons(deps: EraseSweepDeps, key: ScopeKey, rows: readonl
 }
 
 /** Records what the sweep found on the repository's watch row, and only when it changed (an unreachable repository is recorded once). Best effort. */
-async function remember(deps: EraseSweepDeps, key: ScopeKey, place: SweepPlace, found: { unreachable: boolean; strayBranches: number; unconfirmed: number }): Promise<void> {
+async function remember(deps: EraseSweepDeps, key: ScopeKey, place: SweepPlace, found: { unreachable: boolean; strayBranches: number; unconfirmed: number; marks?: string[] | undefined }): Promise<void> {
   const watch = place.watch;
   if (watch === undefined) return;
   const at = deps.now();
   const { unreachableAt: _a, unreachableLessons: _l, triedAt: _t, strayBranches: _s, unconfirmedCloses: _u, ...rest } = watch;
   void _a; void _l; void _t; void _s; void _u;
   let next: PrRow = { ...rest, ...(found.strayBranches > 0 ? { strayBranches: found.strayBranches } : {}), ...(found.unconfirmed > 0 ? { unconfirmedCloses: found.unconfirmed } : {}) };
+  // The marked copies the sweep found in the file (a sweep that did not read the file leaves what the row remembered): released only by a later successful sweep that finds none.
+  const { marks: _m, ...withoutMarks } = next;
+  void _m;
+  const marks = found.marks ?? watch.marks;
+  next = { ...withoutMarks, ...(marks === undefined || marks.length === 0 ? {} : { marks }) };
   if (found.unreachable) {
     const lessons = await waitingLessons(deps, key, place.rows);
     next = { ...next, unreachableAt: watch.unreachableAt ?? at, unreachableLessons: lessons, triedAt: at };
     if (watch.unreachableAt === undefined) deps.log?.("lessons_repo_file.repository_unreachable", { lessons });
   }
-  const same = watch.unreachableAt === next.unreachableAt && watch.unreachableLessons === next.unreachableLessons && watch.strayBranches === next.strayBranches && watch.unconfirmedCloses === next.unconfirmedCloses && (!found.unreachable || watch.triedAt === next.triedAt);
-  if (!same) await deps.rows.putPr(key, next).catch(() => undefined);
+  const same = watch.unreachableAt === next.unreachableAt && watch.unreachableLessons === next.unreachableLessons && watch.strayBranches === next.strayBranches && watch.unconfirmedCloses === next.unconfirmedCloses && JSON.stringify(watch.marks ?? []) === JSON.stringify(next.marks ?? []) && (!found.unreachable || watch.triedAt === next.triedAt);
+  if (!same) await deps.rows.putPr(key, next).catch(() => { deps.log?.("lessons_repo_file.watch_row_not_saved", {}); });
 }
 
 /**

@@ -10,6 +10,7 @@ import { builtinModelProviderBook } from "../../packages/broker/src/local/model-
 import { LESSON_LOAD_DEADLINE_MS, createLocalLessons, type LocalLessons } from "../../packages/broker/src/local/app/lessons.js";
 import { resolveLearning, setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { localLessonsEnabled } from "../../packages/broker/src/lessons/switch.js";
+import { newRepoFileState } from "../../packages/broker/src/lessons/repo-file-state.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { CodeMilestoneHandler } from "../../packages/broker/src/core/milestones/milestones.js";
 import { COMPANY, createHarness, definition, type Harness } from "../support/task-flow-harness.js";
@@ -123,6 +124,54 @@ describe("the lessons page's repository switches", () => {
     expect(await w.lessons.repoSwitch({ project: "payments", repo: "nothing", action: "on", fresh: true })).toMatchObject({ ok: false, reason: "not_found" });
     expect(await w.lessons.repoSwitch({ project: "payments", repo: "nothing", action: "off", fresh: false })).toMatchObject({ ok: false, reason: "not_found" });
     expect(await w.lessons.repoSwitches()).toEqual(expect.any(Array));
+  });
+});
+
+describe("the lessons page's answer for lessons that went missing from a file (decision 78)", () => {
+  const DIGEST = "0123456789abcdef";
+  const WEEK = 7 * 86_400_000;
+  /** A repository switched on whose file lost seven lessons in one change `ageMs` ago: past the week, a person is being asked. (The fake code host cannot write, so the state is seeded, as the nightly pass would have left it.) */
+  async function asking(ageMs = WEEK + 86_400_000): Promise<World> {
+    const w = await world();
+    const repoFile = w.lessons.runtime.repoFile!;
+    const target = (await repoFile.targets(COMPANY, "payments"))[0]!;
+    expect(await repoFile.deps.state.put(w.key, { ...newRepoFileState(target.place, target.name), enabled: true, readBackHeld: { missing: 7, digest: DIGEST, at: w.h.clock.now - ageMs } }, 0)).toBeDefined();
+    return w;
+  }
+  const heldOf = async (w: World) => (await w.lessons.runtime.repoFile!.deps.state.list(w.key))[0]!.readBackHeld;
+
+  it("the page's row carries the card (how many, and the digest) only while a person is asked", async () => {
+    const w = await asking();
+    expect((await w.lessons.repoSwitches())[0]!.repos[0]).toMatchObject({ repo: "demo", enabled: true, retireConfirm: { missing: 7, digest: DIGEST } });
+    // Before the week's hold is over nobody is asked yet.
+    const early = await asking(86_400_000);
+    expect((await early.lessons.repoSwitches())[0]!.repos[0]).not.toHaveProperty("retireConfirm");
+  });
+
+  it("retiring needs a fresh page session; keeping does not; each answer is recorded for exactly the set the owner saw, by the owner", async () => {
+    const w = await asking();
+    const stale = await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_confirm", held: DIGEST, fresh: false });
+    expect(stale).toMatchObject({ ok: false, reason: "refused" });
+    expect(JSON.stringify(stale)).toContain("last few minutes");
+    expect((await heldOf(w))!.verdict).toBeUndefined();
+    // Another set (the file changed), or no digest at all: stale, nothing recorded.
+    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_keep", held: "f".repeat(16), fresh: false })).toMatchObject({ ok: false, reason: "stale" });
+    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_keep", fresh: false })).toMatchObject({ ok: false, reason: "stale" });
+    expect(w.h.audit.some((event) => event.action === "lesson.repo_file_retire_decided")).toBe(false);
+    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_keep", held: DIGEST, fresh: false })).toEqual({ ok: true, message: "Saved." });
+    expect(await heldOf(w)).toMatchObject({ missing: 7, verdict: "keep" });
+    const decided = w.h.audit.filter((event) => event.action === "lesson.repo_file_retire_decided");
+    expect(decided).toHaveLength(1);
+    expect(decided[0]).toMatchObject({ actor: { id: localOwnerPrincipal({ companyId: COMPANY }).personId }, details: { verdict: "keep", missing: 7 } });
+    // A person who changes their mind may still retire a kept set, on a fresh page.
+    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_confirm", held: DIGEST, fresh: true })).toEqual({ ok: true, message: "Saved." });
+    expect(await heldOf(w)).toMatchObject({ verdict: "retire" });
+  });
+
+  it("nothing is asked before the week's hold is over: an answer is a conflict", async () => {
+    const w = await asking(86_400_000);
+    expect(await w.lessons.repoSwitch({ project: "payments", repo: "demo", action: "retire_keep", held: DIGEST, fresh: true })).toMatchObject({ ok: false, reason: "stale" });
+    expect((await heldOf(w))!.verdict).toBeUndefined();
   });
 });
 

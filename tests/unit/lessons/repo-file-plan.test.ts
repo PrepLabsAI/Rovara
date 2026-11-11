@@ -8,6 +8,8 @@ import { newRepoFileState } from "../../../packages/broker/src/lessons/repo-file
 import { parseLessonsFile, renderLessonsFile } from "../../../packages/broker/src/lessons/repo-file-format.js";
 import { OTHER_PLACE, PLACE, repoLesson } from "./repo-file-helpers.js";
 
+const NOW_T = 1_000_000;
+
 const input = (over: Partial<PlanInput> = {}): PlanInput => ({ place: PLACE, repoName: "api", lessons: [], names: ["Ann Lee"], fileText: undefined, rendered: {}, declined: [], addsPaused: false, preset: "standard", ...over });
 
 describe("sections", () => {
@@ -149,14 +151,62 @@ describe("the pull request words and the status lines", () => {
   it("status lines: waiting removals, paused, held, deleted file, pointer missing and a problem, in fixed words", () => {
     const state = { ...newRepoFileState(PLACE, "api"), enabled: true, unmerged: 3, held: ["les_aaaa0001", "les_aaaa0002"], pointerProposed: true, pointerMissing: true, problem: "file_too_big" as const,
       open: { branch: "rovara/lessons-000000000001" as const, number: "7", url: "https://github.com/acme/api/pull/7", headRevision: "a".repeat(40), baseRevision: "b".repeat(40), digest: "d", openedAt: 1, removals: 4, edits: 0, adds: 0, added: {}, edited: {}, removed: [], pointer: false } };
-    expect(noticesOf(state)).toEqual([
+    expect(noticesOf(state, NOW_T)).toEqual([
       ".rovara/lessons.md is over 64 KB, so Rovara left it alone",
       "Rovara has paused new lessons until a lessons PR is merged; 4 removals are waiting",
       "2 lessons your team edited are left as written",
       "Pointer missing: no agent file names .rovara/lessons.md",
     ]);
-    expect(rowOf(state)).toMatchObject({ repo: "api", additionsPaused: true, removalsWaiting: 4, held: 2, pointer: "missing", pr: { number: "7", removals: 4 } });
-    expect(noticesOf({ ...newRepoFileState(PLACE, "api"), fileDeleted: true })).toEqual(["The lessons file was deleted, so Rovara stopped proposing. Resume to start again."]);
-    expect(noticesOf({ ...newRepoFileState(PLACE, "api"), unmerged: 1, open: { ...state.open, removals: 2 } })).toEqual(["2 removals waiting in your lessons PR"]);
+    expect(rowOf(state, NOW_T)).toMatchObject({ repo: "api", additionsPaused: true, removalsWaiting: 4, held: 2, pointer: "missing", pr: { number: "7", removals: 4 } });
+    expect(noticesOf({ ...newRepoFileState(PLACE, "api"), fileDeleted: true }, NOW_T)).toEqual(["The lessons file was deleted, so Rovara stopped proposing. Resume to start again."]);
+    expect(noticesOf({ ...newRepoFileState(PLACE, "api"), unmerged: 1, open: { ...state.open, removals: 2 } }, NOW_T)).toEqual(["2 removals waiting in your lessons PR"]);
+  });
+});
+
+describe("bullets the team wrote (R3)", () => {
+  const text = (lesson: string): string => `${renderLessonsFile([])}\n## Whole repository\n\n- ${lesson}\n`;
+  it("a lesson whose text is already a bullet in the file gets an id line (a tag edit), not a second copy", () => {
+    const lesson = repoLesson("les_aaaa0001", { body: "Use the shared helper." });
+    const plan = planRepoFile(input({ lessons: [lesson], fileText: text("Use the shared helper.") }));
+    expect(plan.adds).toEqual([]);
+    expect(plan.edits).toMatchObject([{ id: "les_aaaa0001", tag: true, moved: false }]);
+    expect(plan.nextText).toContain("<!-- rovara:les_aaaa0001 -->\n- Use the shared helper.");
+    expect(plan.nextText!.match(/Use the shared helper\./gu)).toHaveLength(1);
+  });
+  it("an id Rovara merged whose line a tool stripped is not declined while its text is there: it is tagged; without the text it is declined", () => {
+    const lesson = repoLesson("les_aaaa0001", { body: "Use the shared helper." });
+    const other = repoLesson("les_aaaa0002", { body: "Another lesson." });
+    const stripped = `${text("Use the shared helper.")}\n<!-- rovara:les_aaaa0002 -->\n- Another lesson.\n`;
+    const plan = planRepoFile(input({ lessons: [lesson, other], fileText: stripped, rendered: { les_aaaa0001: "x:y", les_aaaa0002: "x:y" } }));
+    expect(plan.newlyDeclined).toEqual([]);
+    expect(plan.edits.filter((e) => e.tag === true).map((e) => e.id)).toEqual(["les_aaaa0001"]);
+    expect(planRepoFile(input({ lessons: [lesson, other], fileText: `${text("Something else.")}\n<!-- rovara:les_aaaa0002 -->\n- Another lesson.\n`, rendered: { les_aaaa0001: "x:y", les_aaaa0002: "x:y" } })).newlyDeclined).toEqual(["les_aaaa0001"]);
+  });
+  it("a file with no marker at all declines nothing (it says nothing about who was removed)", () => {
+    const lesson = repoLesson("les_aaaa0001");
+    expect(planRepoFile(input({ lessons: [lesson], fileText: text("Unrelated."), rendered: { les_aaaa0001: "x:y" } })).newlyDeclined).toEqual([]);
+  });
+  it("while additions wait, nothing is tagged (and nothing declined for a stripped id)", () => {
+    const lesson = repoLesson("les_aaaa0001", { body: "Use the shared helper." });
+    const plan = planRepoFile(input({ lessons: [lesson], fileText: `${text("Use the shared helper.")}\n<!-- rovara:les_zzzz9999 -->\n- Other.\n`, rendered: { les_aaaa0001: "x:y" }, addsPaused: true }));
+    expect(plan.edits).toEqual([]);
+    expect(plan.newlyDeclined).toEqual([]);
+  });
+  it("a tag edit is worded in the pull request and counted as an edit", () => {
+    const lesson = repoLesson("les_aaaa0001", { body: "Use the shared helper." });
+    const plan = planRepoFile(input({ lessons: [lesson], fileText: text("Use the shared helper.") }));
+    expect(prBody(plan, { pointerFiles: [], unmerged: 0 })).toContain("puts the id line before the bullet your team wrote");
+    expect(prTitle(plan)).toContain("1 edit");
+  });
+});
+
+describe("what the status says about read-back (R3)", () => {
+  it("an unreadable file says what to do, a bulk disappearance says what Rovara will do, and a refused line is counted without its text", () => {
+    const state = { ...newRepoFileState(PLACE, "api"), problem: "file_unreadable" as const, readBackHeld: { missing: 4, digest: "0123456789abcdef", at: 1 }, refused: { "0123456789abcdef": "names_a_person" as const } };
+    const notices = noticesOf(state, NOW_T).join("\n");
+    expect(notices).toContain("delete the file to pause Rovara here");
+    expect(notices).toContain("4 lessons are missing from the lessons file; on or after");
+    expect(notices).toContain("a person will be asked to confirm retiring them unless they are restored");
+    expect(notices).toContain("1 line in the lessons file was not read as lessons");
   });
 });

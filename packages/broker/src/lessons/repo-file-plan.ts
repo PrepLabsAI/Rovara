@@ -8,14 +8,17 @@
 //   - One home per lesson (50a): the text in the merged file is the team's. A block whose text or section no longer matches what Rovara rendered was edited by a person: it is left exactly as written and that lesson is HELD
 //     (no edit, no removal) until read-back takes the team's text in. It is recorded, never silently skipped.
 //   - A block a person removed is `declined`: never proposed back.
+//   - Read-back (R3, `repo-file-readback.ts`) runs before the plan: a hand edit has become the lesson's own text by then, so a block that is not what Rovara rendered is only the team's MOVE of a block (held) or a refused wording.
+//     A bullet the team wrote with no id line (or whose id line a tool stripped) whose lesson Rovara knows is not added a second time: the pull request puts the id line before the bullet (a `tag` edit), and nothing is declined
+//     for an id whose text is still in the file.
 //   - After 3 weekly pull requests in a row that nobody merged, additions and edits stop; removals go on.
 //   - Caps: 300 lessons and 64 KB; adds stop at a cap, removals are never blocked.
 import { createHash } from "node:crypto";
 import { LESSON_FILE_MAX_BYTES, LESSON_FILE_MAX_LESSONS } from "@agentx/contracts";
 import { hasStaleCitation } from "./trial.js";
-import { hasPersonApproval, repoFileBlockers, type RepoFileBlocker } from "./repo-eligibility.js";
+import { TEAM_FILE_TEXT, hasPersonApproval, repoFileBlockers, type RepoFileBlocker } from "./repo-eligibility.js";
 import {
-  WHOLE_REPOSITORY, applyFileChanges, blockOf, byteLength, cleanLessonLine, compareIds, normalizeBlockText, parseLessonsFile, textHash, type ParsedFile,
+  WHOLE_REPOSITORY, applyFileChanges, blockOf, byteLength, cleanLessonLine, compareIds, looseItems, normalizeBlockText, parseLessonsFile, textHash, textPartOfFingerprint, type ParsedFile,
 } from "./repo-file-format.js";
 import type { Lesson } from "./types.js";
 
@@ -61,7 +64,11 @@ export interface PlanRemoval {
   /** The team reworded this block: it is proposed for removal anyway (a privacy reason), and the pull request says so. */
   edited?: true;
 }
-export interface PlanEdit { id: string; title: string; heading: string; text: string; fingerprint: string; moved: boolean }
+export interface PlanEdit {
+  id: string; title: string; heading: string; text: string; fingerprint: string; moved: boolean;
+  /** Not a change of wording: the team wrote this bullet without an id line (or a tool stripped the line), and the pull request only puts the id line before it. The bullet's own bytes stay. */
+  tag?: true;
+}
 export interface PlanAdd { id: string; title: string; heading: string; text: string; fingerprint: string }
 export interface RepoFilePlan {
   removals: PlanRemoval[]; edits: PlanEdit[]; adds: PlanAdd[];
@@ -96,6 +103,13 @@ export interface PlanInput {
   /** A Rovara pull request a person pushed to is still open: only removals are proposed until it is closed or merged. */
   teamPr?: boolean;
   preset: "standard" | "regulated";
+  /** Ids read-back holds for a pass (a bulk disappearance from the file, review M1): not declined, not removed and not added back until the next pass decides. */
+  heldIds?: ReadonlySet<string>;
+  /**
+   * Ids a person chose to KEEP after they went missing from the file (owner decision 78): never declined, never removed, and proposed back into the file as additions (they respect the pause after unmerged pull requests like any
+   * addition).
+   */
+  keepIds?: ReadonlySet<string>;
 }
 
 /** Why a lesson that is in the file should come out, from the lesson's own state. First match wins. */
@@ -139,12 +153,23 @@ export function planRepoFile(input: PlanInput): RepoFilePlan {
   const newlyDeclined: string[] = [];
   const inFile = new Set((file?.blocks ?? []).map((block) => block.id));
   skipped.ambiguous = file?.duplicates.length ?? 0;
+  // The team's own bullets (no id line) by their text: a lesson Rovara knows whose text is here is that bullet, not a new block.
+  const loose = file === undefined ? [] : looseItems(file);
+  const looseByHash = new Map<string, (typeof loose)[number]>();
+  for (const item of loose) if (!looseByHash.has(textHash(item.text))) looseByHash.set(textHash(item.text), item);
+  // By the lesson's own text, or by the line it was made from (read-back remembers it: the cleaned text can differ from the team's line).
+  const looseOf = (lesson: Lesson): (typeof loose)[number] | undefined => looseByHash.get(textHash(normalizeBlockText(cleanLessonLine(lesson.body)))) ?? looseByHash.get(textPartOfFingerprint(input.rendered[lesson.id]) ?? "-");
+  const tagged = new Set<string>();
 
   // Erasure is driven by the FILE: every block that carries a marker of a lesson Rovara knows (or knew and erased) is looked at, however it got there. An id nobody knows is a team block and is left alone.
   const known = [...inFile].filter((id) => !file!.duplicates.includes(id) && (input.rendered[id] !== undefined || everyLesson.has(id) || goneIds.has(id))).sort(compareIds);
   for (const id of known) {
     const block = blockOf(file!, id)!;
     const lesson = everyLesson.get(id);
+    // A lesson that only waits for the company's approver group with the team's own text (read-back, review M3) is the team's block: not an add, not a removal for "not active", left as written until the group decides.
+    // (A group that never decided in time is not a decision: the lesson expires with no approval ever given, and the team's block stays as written. A group's rejection is one, and a removal is proposed then.)
+    if (lesson !== undefined && lesson.tierReasons.includes(TEAM_FILE_TEXT) && lesson.provenance.repoOnly?.place === input.place
+      && (lesson.status === "pending" || (lesson.status === "expired" && lesson.approvals.length === 0))) { held.push(id); continue; }
     if (input.rendered[id] === undefined && !byId.has(id)) {
       // Not Rovara's to edit or hold: only a privacy reason acts (a lesson of another repository, one that is not repo-only, or one that is gone).
       const reason = privacyReasonOf(lesson, lesson === undefined ? [] : repoFileBlockers(lesson, input.place, input.names));
@@ -179,17 +204,35 @@ export function planRepoFile(input: PlanInput): RepoFilePlan {
 
   // Owned ids Rovara merged before that are gone from the file: the team removed them.
   // (Only when there is a file to compare with: a repository the team deleted the file of and resumed starts from nothing, and nothing is "removed by the team".)
-  if (file !== undefined) for (const id of Object.keys(input.rendered)) if (!inFile.has(id)) newlyDeclined.push(id);
+  // A file with no marker at all says nothing about who was removed (read-back treats it as unreadable unless every text is still there; the plan never declines on it).
+  if (file !== undefined) {
+    for (const id of Object.keys(input.rendered)) {
+      if (inFile.has(id) || (input.heldIds?.has(id) ?? false) || (input.keepIds?.has(id) ?? false)) continue;
+      const lesson = everyLesson.get(id);
+      // (An erased lesson is declined whatever the file holds, so its record does not outlive the last block: a re-paste afterwards is the team's new lesson.)
+      if (file.blocks.length === 0 && lesson !== undefined && !goneIds.has(id)) continue;
+      // The id line is gone but the text is still a bullet: a formatter stripped it, the team did not remove the lesson. The pull request puts the line back (unless additions wait), and nothing is declined.
+      const item = lesson === undefined || goneIds.has(id) ? undefined : looseOf(lesson);
+      if (item === undefined) { newlyDeclined.push(id); continue; }
+      if (!paused) { tagged.add(id); edits.push({ id, title: titleOfBlock(item.text), heading: item.heading, text: item.text, fingerprint: fingerprintOf(item.text, item.heading), moved: false, tag: true }); }
+    }
+  }
   const declined = new Set([...input.declined, ...newlyDeclined]);
 
   // Adds.
   let adds: PlanAdd[] = [];
   if (!paused) {
     const candidates = [...byId.values()]
-      .filter((lesson) => !inFile.has(lesson.id) && !declined.has(lesson.id) && !goneIds.has(lesson.id) && lesson.provenance.repoOnly?.place === input.place)
+      .filter((lesson) => !inFile.has(lesson.id) && !declined.has(lesson.id) && !(input.heldIds?.has(lesson.id) ?? false) && !goneIds.has(lesson.id) && lesson.provenance.repoOnly?.place === input.place)
       .filter((lesson) => repoFileBlockers(lesson, input.place, input.names).length === 0 && (input.preset !== "regulated" || hasPersonApproval(lesson)))
       .sort((a, b) => a.createdAt - b.createdAt || compareIds(a.id, b.id));
     for (const lesson of candidates) {
+      // The team already wrote this lesson as a bullet (read-back made the lesson from it): it gets its id line instead of a second copy.
+      const item = looseOf(lesson);
+      if (item !== undefined) {
+        if (!tagged.has(lesson.id)) { tagged.add(lesson.id); edits.push({ id: lesson.id, title: titleOfBlock(item.text), heading: item.heading, text: item.text, fingerprint: fingerprintOf(item.text, item.heading), moved: false, tag: true }); }
+        continue;
+      }
       const rendered = renderLesson(lesson, input.repoName);
       if (rendered === undefined) { skipped.unrenderable += 1; continue; }
       adds.push({ id: rendered.id, title: rendered.title, heading: rendered.heading, text: rendered.text, fingerprint: rendered.fingerprint });
@@ -199,8 +242,9 @@ export function planRepoFile(input: PlanInput): RepoFilePlan {
   // Apply, and keep within the caps by dropping adds from the end (removals are never blocked).
   const change = (list: readonly PlanAdd[]): string => applyFileChanges(input.fileText, {
     remove: [...removals.map((r) => r.id), ...edits.filter((e) => e.moved).map((e) => e.id)],
-    replace: edits.filter((e) => !e.moved).map((e) => ({ id: e.id, text: e.text })),
+    replace: edits.filter((e) => !e.moved && e.tag !== true).map((e) => ({ id: e.id, text: e.text })),
     add: [...edits.filter((e) => e.moved).map((e) => ({ id: e.id, heading: e.heading, text: e.text })), ...list.map((a) => ({ id: a.id, heading: a.heading, text: a.text }))],
+    tag: edits.filter((e) => e.tag === true).map((e) => ({ id: e.id, textHash: textHash(normalizeBlockText(e.text)) })),
   });
   const within = (text: string): boolean => byteLength(text) <= LESSON_FILE_MAX_BYTES && parseLessonsFile(text).blocks.length <= LESSON_FILE_MAX_LESSONS;
   let next = removals.length + edits.length + adds.length === 0 ? undefined : change(adds);

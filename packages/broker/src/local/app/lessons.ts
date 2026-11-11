@@ -106,7 +106,7 @@ export interface LocalLessons {
   /** The repository lessons file switches of each project, for the lessons page. */
   repoSwitches(): Promise<LessonReposView[]>;
   /** One switch from the lessons page. Switching on needs `fresh`: a page session opened in the last few minutes. */
-  repoSwitch(input: { project: string; repo: string; action: "on" | "off" | "resume" | "pointer_add" | "pointer_decline"; fresh: boolean }): Promise<LocalActionResult>;
+  repoSwitch(input: { project: string; repo: string; action: "on" | "off" | "resume" | "pointer_add" | "pointer_decline" | "retire_confirm" | "retire_keep"; held?: string | undefined; fresh: boolean }): Promise<LocalActionResult>;
   /** What the dispatch of a step asks: the lessons to give it (ids are the library's; the worker gets text). `features` are the worker's. */
   learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }): Promise<{ learnedContext?: LearnedContext }>;
   /** What the callbacks tell after a batch of a worker's events: the load report of a step, applied to the manifest its dispatch recorded. Never throws. */
@@ -338,7 +338,7 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     for (const project of await projectNames()) {
       try {
         const status = await repoFileStatus(repoFile, { workspaceId: companyId, project });
-        views.push({ project, canEnable: status.canEnable, repos: status.repos.map((row) => ({ repo: row.repo, enabled: row.enabled, fileDeleted: row.fileDeleted, pointer: row.pointer, notices: row.notices })), available: status.available });
+        views.push({ project, canEnable: status.canEnable, repos: status.repos.map((row) => ({ repo: row.repo, enabled: row.enabled, fileDeleted: row.fileDeleted, pointer: row.pointer, notices: row.notices, ...(row.retireConfirm === undefined ? {} : { retireConfirm: { missing: row.retireConfirm.missing, digest: row.retireConfirm.digest } }) })), available: status.available });
       } catch { /* a project whose repositories cannot be read now shows no switches */ }
     }
     return views;
@@ -349,11 +349,13 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     if (repoFile === undefined) return refuse("Lessons are not available for this project.", "not_found");
     // Switching on makes Rovara open pull requests in a repository: it needs the owner's page opened a few minutes ago (a form with a fresh session), never the API token.
     if (input.action === "on" && !input.fresh) return refuse("Switching this on needs a page you opened in the last few minutes.");
-    const result = await repoFileAction(repoFile, { workspaceId: companyId, project: input.project }, { action: input.action, repo: input.repo });
+    // Retiring or keeping lessons that went missing from a file is the owner's answer (this page is the owner's); the library records who. Retiring needs the fresh page the server checked.
+    if (input.action === "retire_confirm" && !input.fresh) return refuse("Retiring these lessons needs a page you opened in the last few minutes.");
+    const result = await repoFileAction(repoFile, { workspaceId: companyId, project: input.project }, { action: input.action, repo: input.repo, ...(input.held === undefined ? {} : { held: input.held }) }, input.action === "retire_confirm" || input.action === "retire_keep" ? { developerId: ownerId } : undefined);
     if (result.ok) return { ok: true, message: "Saved." };
     return refuse(({
       not_found: "No such repository in this project.", unreadable: "Rovara cannot read this project's repositories right now. Try again.", host_cannot_write: "This repository's code host cannot take a pull request from Rovara.",
-      audit_unavailable: "That could not be recorded, so nothing changed.", conflict: "This setting changed while you were looking at it. Read the page again.",
+      audit_unavailable: "That could not be recorded, so nothing changed.", conflict: "This setting changed while you were looking at it. Read the page again.", not_permitted: "Only the owner can decide this.",
     } as const)[result.code], result.code === "not_found" ? "not_found" : result.code === "conflict" ? "stale" : "refused");
   }
 
