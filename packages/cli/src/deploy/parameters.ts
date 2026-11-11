@@ -323,7 +323,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),
         // Spec 062: present once the control plane has the channel API.
-        ...optionalOutputs(outputs, "control-plane", ["ChannelRequestQueueUrl", "ChannelEventQueueUrl"]),
+        ...optionalOutputs(outputs, "control-plane", ["ChannelRequestQueueUrl", "ChannelEventQueueUrl", "SlackAdapterCommandsUrl", "SlackAdapterSecretName"]),
         SlackThreadsTableName: required(outputs, "control-plane", "SlackThreadsTableName", answers.env),
         TurnRecordsTableName: required(outputs, "control-plane", "TurnRecordsTableName", answers.env),
         ThreadSessionBucketName: required(outputs, "control-plane", "SlackThreadSessionBucketName", answers.env),

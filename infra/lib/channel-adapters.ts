@@ -17,7 +17,14 @@ export interface ChannelAdaptersProps {
   orchestratorRole: iam.IRole;
   notifyOperator: cloudwatchActions.SnsAction;
   /** Spec 062 Phase 7b: Slack's ingress, which becomes the built-in Slack adapter when `SlackViaChannel` is on. */
-  slack: { ingress: lambdaNodejs.NodejsFunction; integration: apigwv2.CfnIntegration };
+  slack: {
+    ingress: lambdaNodejs.NodejsFunction;
+    integration: apigwv2.CfnIntegration;
+    /** Phase 7c2: what the channel API's Slack router reads and writes, and its settings, as Slack's ingress has them. */
+    threads: dynamodb.Table;
+    appPostedMessages: string;
+    threadTurnsPerMinute: string;
+  };
 }
 
 /**
@@ -31,6 +38,7 @@ export class ChannelAdapters extends Construct {
   readonly requestDeadLetters: sqs.Queue;
   readonly requests: sqs.Queue;
   readonly events: sqs.Queue;
+  readonly ingress: lambdaNodejs.NodejsFunction;
   private readonly slackViaChannel: string;
   private readonly slackAdapterSecret: secretsmanager.Secret;
   private readonly builtInAdapter: Record<string, string>;
@@ -108,7 +116,9 @@ export class ChannelAdapters extends Construct {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
     });
 
-    const ingress = packagedFunction(this, "Ingress", "packages/broker/src/aws/channel-ingress.ts", {
+    // Phase 7c2: the neutral channel ingress with the built-in Slack adapter's router, which may call the broker and the
+    // adapter's commands; Slack has its answer before the hand-off, so the API may take longer than Slack would wait.
+    const ingress = this.ingress = packagedFunction(this, "Ingress", "packages/broker/src/aws/channel-api-lambda.ts", {
       CHANNEL_ADAPTERS: enabled,
       STATE_TABLE_NAME: props.state.tableName,
       CHANNEL_STATE_TABLE_NAME: channelState.tableName,
@@ -116,13 +126,19 @@ export class ChannelAdapters extends Construct {
       CHANNEL_EVENT_QUEUE_URL: events.queueUrl,
       CHANNEL_LINK_ORIGIN: props.api.attrApiEndpoint,
       ...builtInAdapter,
-    }, Duration.seconds(10));
+      SLACK_THREADS_TABLE_NAME: props.slack.threads.tableName,
+      BROKER_FUNCTION_NAME: props.broker.functionName,
+      SHARED_TASKS: "enabled",
+      SLACK_APP_POSTED_MESSAGES: props.slack.appPostedMessages,
+      SLACK_THREAD_TURNS_PER_MINUTE: props.slack.threadTurnsPerMinute,
+    }, Duration.seconds(30));
     // By key only: an adapter, a binding, a link; and it writes a new link code. Never a query, nothing else.
     ingress.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],
       resources: [props.state.tableArn],
-      // SLACK_BINDING: the built-in Slack adapter's spaces are Slack channels, bound as they always were.
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*"] } },
+      // SLACK_BINDING: the built-in Slack adapter's spaces are Slack channels, bound as they always were; SHARED_TASK: its
+      // router reads whether a thread is a shared task's, as Slack's ingress does.
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*", "SHARED_TASK#*"] } },
     }));
     ingress.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:PutItem"],
@@ -136,6 +152,9 @@ export class ChannelAdapters extends Construct {
     ingress.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [adapterSecrets] }));
     requests.grantSendMessages(ingress);
     events.grantSendMessages(ingress);
+    // The Slack router's own state (claims, turn counts, choices, pending counts) and the broker it asks.
+    props.slack.threads.grantReadWriteData(ingress);
+    props.broker.grantInvoke(ingress);
     // The orchestrator runs what was queued and queues the conversation's replies; the broker checks each call again.
     requests.grantConsumeMessages(props.orchestratorRole);
     events.grantSendMessages(props.orchestratorRole);
@@ -174,6 +193,8 @@ export class ChannelAdapters extends Construct {
     props.slack.ingress.addEnvironment("CHANNEL_API_URL", props.api.attrApiEndpoint);
     props.slack.ingress.addEnvironment("SLACK_ADAPTER_SECRET_NAME", slackAdapterSecretName);
     slackAdapterSecret.grantRead(props.slack.ingress);
+    // Phase 7c2: the orchestrator posts a routing card and a private answer through the adapter's commands.
+    slackAdapterSecret.grantRead(props.orchestratorRole);
     new apigwv2.CfnRoute(this, "SlackEventsRoute", {
       apiId: props.api.ref, routeKey: "POST /v1/slack/channel-events", target: `integrations/${props.slack.integration.ref}`, authorizationType: "NONE",
     });
@@ -222,11 +243,12 @@ export class ChannelAdapters extends Construct {
    * Phase 7c: a function that posts to Slack for the core (the developer task notifier, the session reconciler) does it
    * through the Slack adapter's commands while SlackViaChannel is on, and may read the adapter's secret to sign them.
    */
-  connectSlackPoster(fn: lambdaNodejs.NodejsFunction, slackTeamId: string): void {
+  connectSlackPoster(fn: lambdaNodejs.NodejsFunction, slackTeamId: string, options: { readsAdapterSecrets?: true } = {}): void {
     fn.addEnvironment("SLACK_VIA_CHANNEL", this.slackViaChannel);
     // Its own name: the notifier gets none of developer sign-in's settings.
     fn.addEnvironment("SLACK_ADAPTER_TEAM_ID", slackTeamId);
     for (const [name, value] of Object.entries(this.builtInAdapter)) fn.addEnvironment(name, value);
-    this.slackAdapterSecret.grantRead(fn);
+    // The channel API already reads every adapter's secret, by name only.
+    if (options.readsAdapterSecrets !== true) this.slackAdapterSecret.grantRead(fn);
   }
 }

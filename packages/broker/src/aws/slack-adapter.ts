@@ -6,10 +6,14 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import {
+  SLACK_CONFIRMATION_ACTION_ID,
+  ChannelActionSchema,
   ChannelCommandSchema,
+  InboundMessageSchema,
   ChannelEventSchema,
   SLACK_CHANNEL,
   confirmationBlocks,
+  conversationFromSlackThread,
   inboundFromSlackRequest,
   slackBlocksOf,
   slackThreadOf,
@@ -17,9 +21,11 @@ import {
   usableWebhookSecret,
   verifyWebhook,
   webhookHeaders,
+  type ChannelAction,
   type ChannelCommand,
   type ChannelEvent,
   type DirectoryUser,
+  type InboundMessage,
   type MessageAction,
   type MessagePart,
   type SlackRequestMessage,
@@ -28,11 +34,22 @@ import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createChannelCanvas, deleteTaskPlanCanvas, postMayHaveLanded, slackWebFetch } from "./slack-web.js";
 
 export const SLACK_CHANNEL_EVENTS_PATH = "/v1/slack/channel-events";
+
+/** A confirmation press, already claimed and counted by Slack's interactivity, as the action the channel API takes. */
+export function confirmationAction(message: SlackRequestMessage): ChannelAction {
+  return ChannelActionSchema.parse({
+    version: 1, channel: SLACK_CHANNEL, eventId: message.eventId, conversation: conversationFromSlackThread(message.thread),
+    actor: { channel: SLACK_CHANNEL, tenant: message.thread.teamId, userId: message.userId },
+    actionId: SLACK_CONFIRMATION_ACTION_ID, value: message.text, receivedAt: message.receivedAt,
+  });
+}
 /** Phase 7c: where the core's commands for Slack come, each answered at once. */
 export const SLACK_CHANNEL_COMMANDS_PATH = "/v1/slack/channel-commands";
 
-/** Slack waits 3 seconds for the ingress's answer; the channel API gets most of what is left. */
-const FORWARD_TIMEOUT_MILLISECONDS = 2_500;
+/** Phase 7c2: Slack has its answer before the hand-off, so the channel API may take its time (its own limit is 10 s). */
+const FORWARD_TIMEOUT_MILLISECONDS = 9_000;
+/** How long a thread Rovara posted in has its plain replies read; each post renews it. */
+const ROVARA_THREAD_SECONDS = 90 * 24 * 60 * 60;
 /** Longer than the event sender's retries (8 tries, at most 15 minutes apart), so a retry is never posted twice. */
 const EVENT_CLAIM_SECONDS = 24 * 60 * 60;
 /** How long a keyed message (a progress note) can still be edited. */
@@ -54,12 +71,16 @@ export interface SlackChannelForwarderDependencies {
  * Hands one Slack request to the channel API, which checks and queues it as it does any adapter's. Throws unless the
  * API accepted it or already had it, so the ingress undoes its records and Slack retries.
  */
-export function createSlackChannelForwarder(deps: SlackChannelForwarderDependencies): (message: SlackRequestMessage) => Promise<void> {
+export function createSlackChannelForwarder(deps: SlackChannelForwarderDependencies): (message: SlackRequestMessage | InboundMessage | ChannelAction) => Promise<void> {
   const fetchFn = deps.fetch ?? fetch;
   const now = deps.now ?? Date.now;
-  const url = new URL(`/v1/channels/${SLACK_CHANNEL}/messages`, deps.channelApiUrl);
+  const messagesUrl = new URL(`/v1/channels/${SLACK_CHANNEL}/messages`, deps.channelApiUrl);
+  // Phase 7c2: a press (a confirmation's Approve or Cancel) is an action.
+  const actionsUrl = new URL(`/v1/channels/${SLACK_CHANNEL}/actions`, deps.channelApiUrl);
   return async (message) => {
-    const body = JSON.stringify(inboundFromSlackRequest(message));
+    const action = "actionId" in message;
+    const url = action ? actionsUrl : messagesUrl;
+    const body = JSON.stringify(action ? ChannelActionSchema.parse(message) : message.version === 2 ? InboundMessageSchema.parse(message) : inboundFromSlackRequest(message));
     const secret = await deps.secret();
     // A new ID for each attempt: the channel API drops a repeat by the Slack event ID, for a day.
     const headers = { "content-type": "application/json", ...webhookHeaders({ secret, id: `msg_${randomUUID()}`, timestamp: Math.floor(now() / 1_000), body }) };
@@ -82,6 +103,8 @@ export interface SlackChannelEventsDependencies {
   /** Claims an event ID until `expiresAtSeconds`; false when it is already claimed. */
   claim(eventId: string, expiresAtSeconds: number): Promise<boolean>;
   release(eventId: string): Promise<void>;
+  /** Phase 7c2: remembers a thread Rovara posted in, whose plain replies are then read. Best effort. */
+  markThread?: (channelId: string, threadTs: string, expiresAtSeconds: number) => Promise<void>;
   /** The Slack timestamp of the message a key names in a thread, for an edit. */
   messageTs: {
     get(subject: string, key: string): Promise<string | undefined>;
@@ -203,6 +226,11 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
     try {
       const outcome = await render(event);
       log("slack_adapter.event", { eventId: event.id, type: event.type, outcome });
+      if (outcome === "posted" && event.type !== "direct" && deps.markThread !== undefined) {
+        const thread = slackThreadOf(event.conversation);
+        await deps.markThread(thread.channelId, thread.threadTs, Math.floor(now() / 1_000) + ROVARA_THREAD_SECONDS)
+          .catch(() => log("slack_adapter.thread_not_marked", { eventId: event.id }));
+      }
       return respond(200, { status: outcome });
     } catch (error) {
       try {
@@ -222,6 +250,8 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
 
 export interface SlackChannelCommandsDependencies {
   secret(): Promise<string | undefined>;
+  /** Phase 7c2: remembers a thread Rovara posted in. Best effort. */
+  markThread?: (channelId: string, threadTs: string, expiresAtSeconds: number) => Promise<void>;
   botToken(): Promise<string>;
   fetch?: typeof fetch;
   now?: () => number;
@@ -314,7 +344,9 @@ export function createSlackChannelCommandsHandler(deps: SlackChannelCommandsDepe
           return { space: command.space };
         }
         const posted = await chatPostMessage(token, { channel: command.space, threadTs: command.thread, text: command.message.text, blocks }, fetchFn);
-        return { space: posted.channel ?? command.space, messageId: posted.ts, thread: command.thread ?? posted.ts };
+        const thread = command.thread ?? posted.ts;
+        await deps.markThread?.(command.space, thread, Math.floor(now() / 1_000) + ROVARA_THREAD_SECONDS).catch(() => log("slack_adapter.thread_not_marked", {}));
+        return { space: posted.channel ?? command.space, messageId: posted.ts, thread };
       }
       case "direct_message": {
         // A post to a person's ID lands in the bot's direct message with them, whose ID Slack answers.
@@ -460,7 +492,7 @@ export function slackAdapterSecretReader(secretsManager: Pick<SecretsManagerClie
  * The forwarder when the deployment routes Slack through the channel API (`SlackViaChannel`), otherwise undefined and
  * Slack requests go on the Slack request queue as before.
  */
-export function slackChannelForwarderFromEnvironment(secretsManager: Pick<SecretsManagerClient, "send">): ((message: SlackRequestMessage) => Promise<void>) | undefined {
+export function slackChannelForwarderFromEnvironment(secretsManager: Pick<SecretsManagerClient, "send">): ((message: SlackRequestMessage | InboundMessage | ChannelAction) => Promise<void>) | undefined {
   const channelApiUrl = process.env.CHANNEL_API_URL;
   const secretName = process.env.SLACK_ADAPTER_SECRET_NAME;
   if (process.env.SLACK_VIA_CHANNEL !== "enabled" || !channelApiUrl || !secretName) return undefined;
@@ -475,13 +507,30 @@ export function slackChannelForwarderFromEnvironment(secretsManager: Pick<Secret
   });
 }
 
+/** Phase 7c2: the threads Rovara posted in, in Slack's threads table, so their plain replies are read. */
+export function rovaraThreads(documentClient: Pick<DynamoDBDocumentClient, "send">, tableName: string) {
+  const key = (channelId: string, threadTs: string) => ({ pk: `ROVARA_THREAD#${channelId}#${threadTs}`, sk: "META" });
+  return {
+    async mark(channelId: string, threadTs: string, expiresAtSeconds: number): Promise<void> {
+      await documentClient.send(new PutCommand({ TableName: tableName, Item: { ...key(channelId, threadTs), expiresAt: expiresAtSeconds } }));
+    },
+    async has(channelId: string, threadTs: string): Promise<boolean> {
+      const response = await documentClient.send(new GetCommand({ TableName: tableName, Key: key(channelId, threadTs), ConsistentRead: true }));
+      const expiresAt: unknown = (response.Item as Record<string, unknown> | undefined)?.expiresAt;
+      return typeof expiresAt === "number" && expiresAt > Math.floor(Date.now() / 1_000);
+    },
+  };
+}
+
 /** The AWS handler for POST /v1/slack/channel-commands; nothing is reachable unless Slack goes through the channel API. */
 export function createAwsSlackChannelCommandsHandler(botToken: () => Promise<string>): (request: HttpApiV2Event) => Promise<HttpResponse> {
   if (process.env.SLACK_VIA_CHANNEL !== "enabled" || !process.env.SLACK_ADAPTER_SECRET_NAME) return async () => respond(404, { error: "not_found" });
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const threads = rovaraThreads(DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration)), requiredEnvironment("SLACK_THREADS_TABLE_NAME"));
   return createSlackChannelCommandsHandler({
     secret: slackAdapterSecretReader(new SecretsManagerClient(clientConfiguration), requiredEnvironment("SLACK_ADAPTER_SECRET_NAME")),
     botToken,
+    markThread: (channelId, threadTs, expiresAtSeconds) => threads.mark(channelId, threadTs, expiresAtSeconds),
     log(event, fields) {
       console.log(JSON.stringify({ component: "slack-adapter", event, ...fields }));
     },
@@ -495,7 +544,9 @@ export function createAwsSlackChannelEventsHandler(botToken: () => Promise<strin
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
   const secretsManager = new SecretsManagerClient(clientConfiguration);
   const tableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
+  const threads = rovaraThreads(documentClient, tableName);
   return createSlackChannelEventsHandler({
+    markThread: (channelId, threadTs, expiresAtSeconds) => threads.mark(channelId, threadTs, expiresAtSeconds),
     secret: slackAdapterSecretReader(secretsManager, requiredEnvironment("SLACK_ADAPTER_SECRET_NAME")),
     botToken,
     async claim(eventId, expiresAtSeconds) {

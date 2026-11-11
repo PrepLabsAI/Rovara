@@ -87,7 +87,7 @@ export interface ChannelRequestDependencies {
    * FR-073: channels the deployment runs its own way, by channel ID. The built-in Slack adapter's conversations run
    * as Slack threads (Slack's subject, format, identity and turn records), answering with events all the same.
    */
-  surfaces?: Readonly<Record<string, (item: ConversationQueueItem, context: RequestContext) => Promise<void>>>;
+  surfaces?: Readonly<Record<string, (item: ChannelQueueItem, context: RequestContext) => Promise<void>>>;
   now?: () => number;
   log: ServiceLog;
 }
@@ -110,6 +110,12 @@ export type ChannelActionHandler = (action: ChannelAction, context: { send: (eve
 export function channelRequestHandler(deps: ChannelRequestDependencies): RequestHandler<ChannelQueueItem> {
   const now = deps.now ?? Date.now;
   return async (item, context) => {
+    // A channel the deployment runs its own way takes its actions too (Phase 7c2: Slack's confirmation presses).
+    const surface = deps.surfaces?.[channelOf(item)];
+    if (surface !== undefined) {
+      await surface(item, context);
+      return;
+    }
     if (item.kind === "action") {
       const handler = deps.actions?.[item.action.actionId];
       if (handler === undefined) {
@@ -117,11 +123,6 @@ export function channelRequestHandler(deps: ChannelRequestDependencies): Request
         return;
       }
       await handler(item.action, { send: (event) => deps.send(event), finalAttempt: context.finalAttempt, log: deps.log });
-      return;
-    }
-    const surface = deps.surfaces?.[channelOf(item)];
-    if (surface !== undefined) {
-      await surface(item, context);
       return;
     }
     // The built-in adapter's conversations need their own surface; without it nothing runs as an adapter's would.

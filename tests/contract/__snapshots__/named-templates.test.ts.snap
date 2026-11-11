@@ -1823,6 +1823,25 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "Ref": "SessionsProvisioner9C44055B",
       },
     },
+    "SlackAdapterCommandsUrl": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "/v1/slack/channel-commands",
+          ],
+        ],
+      },
+    },
+    "SlackAdapterSecretName": {
+      "Value": "agentx/staging/channel-adapter/slack",
+    },
     "SlackEventsUrl": {
       "Value": {
         "Fn::Join": [
@@ -3905,6 +3924,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "Environment": {
           "Variables": {
+            "BROKER_FUNCTION_NAME": {
+              "Ref": "BrokerE1355FD6",
+            },
             "BUILT_IN_ADAPTER": {
               "Ref": "SlackViaChannel",
             },
@@ -3956,6 +3978,22 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "CHANNEL_STATE_TABLE_NAME": {
               "Ref": "ChannelApiStateE5478A65",
             },
+            "SHARED_TASKS": "enabled",
+            "SLACK_ADAPTER_TEAM_ID": {
+              "Ref": "SlackTeamId",
+            },
+            "SLACK_APP_POSTED_MESSAGES": {
+              "Ref": "SlackAppPostedMessages",
+            },
+            "SLACK_THREADS_TABLE_NAME": {
+              "Ref": "SlackThreads36E14C1E",
+            },
+            "SLACK_THREAD_TURNS_PER_MINUTE": {
+              "Ref": "SlackThreadTurnsPerMinute",
+            },
+            "SLACK_VIA_CHANNEL": {
+              "Ref": "SlackViaChannel",
+            },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
             },
@@ -3981,7 +4019,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "Value": "staging",
           },
         ],
-        "Timeout": 10,
+        "Timeout": 30,
         "TracingConfig": {
           "Mode": "Active",
         },
@@ -4122,6 +4160,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     "BINDING#*",
                     "CHANNEL_LINK#*",
                     "SLACK_BINDING#*",
+                    "SHARED_TASK#*",
                   ],
                 },
               },
@@ -4215,6 +4254,70 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   "Arn",
                 ],
               },
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreads36E14C1E",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreads36E14C1E",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "BrokerE1355FD6",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "BrokerE1355FD6",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
             },
           ],
           "Version": "2012-10-17",
@@ -12201,6 +12304,16 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 ],
               },
             },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "ChannelApiSlackAdapterSecret5DDDDC01",
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -15107,6 +15220,16 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
       "Description": "Private subnets with NAT egress, such as AgentXProductionFoundation's PrivateSubnetIds",
       "Type": "List<AWS::EC2::Subnet::Id>",
     },
+    "SlackAdapterCommandsUrl": {
+      "AllowedPattern": "^$|^https://.+$",
+      "Default": "",
+      "Type": "String",
+    },
+    "SlackAdapterSecretName": {
+      "AllowedPattern": "^$|^agentx/[a-z0-9-]+/channel-adapter/slack$",
+      "Default": "",
+      "Type": "String",
+    },
     "SlackRequestQueueUrl": {
       "AllowedPattern": "^https://sqs\\..+\\.fifo$",
       "Type": "String",
@@ -16320,6 +16443,18 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
                 "Name": "CHANNEL_EVENT_QUEUE_URL",
                 "Value": {
                   "Ref": "ChannelEventQueueUrl",
+                },
+              },
+              {
+                "Name": "SLACK_ADAPTER_COMMANDS_URL",
+                "Value": {
+                  "Ref": "SlackAdapterCommandsUrl",
+                },
+              },
+              {
+                "Name": "SLACK_ADAPTER_SECRET_NAME",
+                "Value": {
+                  "Ref": "SlackAdapterSecretName",
                 },
               },
               {

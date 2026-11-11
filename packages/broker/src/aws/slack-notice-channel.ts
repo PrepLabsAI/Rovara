@@ -31,7 +31,7 @@ export interface SlackNoticeChannelDependencies extends ChannelCommandDependenci
 export interface SlackNoticeChannel {
   post: (input: { channel: string; threadTs?: string; text: string; blocks?: unknown[] }) => Promise<{ ts: string; channel?: string }>;
   update: (input: { channel: string; ts: string; text: string; blocks?: unknown[] }) => Promise<void>;
-  postEphemeral: (input: { channel: string; threadTs: string; user: string; text: string }) => Promise<void>;
+  postEphemeral: (input: { channel: string; threadTs: string; user: string; text: string; blocks?: unknown[] }) => Promise<void>;
   createPlanCanvas: (input: { channel: string; taskId: string; title: string; version: number; markdown: string }, onCreated?: (canvasId: string) => Promise<void>) => Promise<{ canvasId: string; permalink: string }>;
   deleteCanvas: (canvasId: string) => Promise<"deleted" | "unknown">;
 }
@@ -98,7 +98,7 @@ export function createSlackNoticeChannel(deps: SlackNoticeChannelDependencies): 
       await command("update_message", { tenant: deps.teamId, space: input.channel, messageId: input.ts, message: messageOf(input.text, input.blocks) });
     },
     async postEphemeral(input) {
-      await command("post_message", { tenant: deps.teamId, space: input.channel, thread: input.threadTs, message: { text: input.text }, audience: { kind: "ephemeral", actor: person(input.user) } });
+      await command("post_message", { tenant: deps.teamId, space: input.channel, thread: input.threadTs, message: messageOf(input.text, input.blocks), audience: { kind: "ephemeral", actor: person(input.user) } });
     },
     async createPlanCanvas(input, onCreated) {
       if (!/^[A-Za-z0-9_-]{1,100}$/.test(input.taskId) || input.title.trim() === "" || !Number.isSafeInteger(input.version) || input.version < 1 || input.markdown.trim() === "") {
