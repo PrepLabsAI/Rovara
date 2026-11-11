@@ -37,6 +37,7 @@ import { localLessonsEnabled } from "../lessons/switch.js";
 import { DocumentAuditSink, FileCompanyInstructions, createIntervalScheduler, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService, startAuditCopy, startAuditCopyFromPrimary } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
+import type { AutomationSwitch } from "../core/automation/switch.js";
 import type { BrowserOpener } from "./open-browser.js";
 import { createLocalApp, type LocalApp } from "./app/app.js";
 import { localAllowedDomains } from "./isolation/allow-list.js";
@@ -222,6 +223,11 @@ export interface LocalRuntimeOptions {
   now?: () => Date;
   /** Run the dispatch, sweep and session timers. Default true; tests call `runtime.tick()`. */
   timers?: boolean;
+  /**
+   * Switch on automation (chains, triggers, automatic runs, custom agents), which starts paid work with no person present. Default: off, unless the environment of the process that runs `rovara up` says
+   * `ROVARA_AUTOMATION=on`. Only this process's own owner reaches it: no route, token or page changes it.
+   */
+  automation?: boolean | AutomationSwitch | undefined;
   /**
    * Lane L9a (K1): what a worker's callback capability entitles it to in the model proxy. The task flow supplies it (`capabilityModelGrants`); until
    * it is wired nothing is granted, and a worker asking for model access is refused.
@@ -572,6 +578,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       return usableWorkerCredential(host, credential);
     },
     ...(options.timers === undefined ? {} : { timers: options.timers }),
+    automation: options.automation ?? options.environment["ROVARA_AUTOMATION"] === "on",
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.commentThreadsPerPoll === undefined ? {} : { commentThreadsPerPoll: options.commentThreadsPerPoll }),
     ...(options.connectionsFetch === undefined ? {} : { connectionsFetch: options.connectionsFetch }),

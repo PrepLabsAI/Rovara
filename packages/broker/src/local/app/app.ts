@@ -95,6 +95,9 @@ import { checkDesignApproval, designApprovalRecordItems, gradeApprovalRisk } fro
 import { createLocalChat } from "./chat.js";
 import { createLocalIntake } from "./intake.js";
 import { sessionBindingsOf } from "../../core/sessions/bindings.js";
+import { createLocalAutomation, type LocalAutomation } from "./automation.js";
+import { fixedAutomationSwitch, type AutomationSwitch } from "../../core/automation/switch.js";
+import { createScheduleRouter } from "../../core/automation/schedule-router.js";
 import { createChannelSink } from "../../core/channel/sink.js";
 import { readTaskThread } from "../../core/channel/threads.js";
 import { deliverAttention, queueAttention } from "../../core/notify/attention.js";
@@ -167,6 +170,11 @@ export interface LocalAppOptions {
   scriptTokensEnabled?: () => boolean;
   /** The signed service catalog a dependency is pinned from (absent: no dependency can be pinned). */
   serviceCatalog?: ServiceCatalogSource | undefined;
+  /**
+   * Whether automation (chains, triggers, automatic runs, custom agents) is on. OFF unless the owner switched it on when the install started: a boolean, or a switch the host reads on each use. It is never read from a
+   * route, a token or a page. Off, nothing of it is mounted, shown or run.
+   */
+  automation?: boolean | AutomationSwitch;
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
   timers?: boolean;
   now?: () => Date;
@@ -200,6 +208,8 @@ export interface LocalApp {
   readonly playbook: PlaybookService;
   /** The setup agent: its routes, its page and the hosts the owner approved. */
   readonly setupAgent: LocalSetupAgent;
+  /** Chains, triggers, automatic runs and custom agents: hidden, off unless the owner switched them on. */
+  readonly automation: LocalAutomation;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
   routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
   /** The worker's callbacks (`/v1/internal/...`). */
@@ -500,6 +510,13 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     flow: flow.deps, registry, companyId, owner, tagKey: deriveKey(rootKey, "diagnosis-tag"), enabled: options.diagnosis ?? true, log, ...(options.now === undefined ? {} : { now: options.now }),
     answerer: createLocalDiagnosisModel({ choice: chosen, providers, proxy: () => options.modelProxy?.(), operations: oneShot }),
   });
+  // Automation (hidden): off unless the owner switched it on. Built either way so the switch is read on each use, but while it is off it mounts, shows and runs nothing.
+  // The scheduler keeps ONE handler, and the nightly run and schedule triggers both listen to it: they subscribe through one router, which subscribes once and lets each feature ignore the other's fires.
+  const scheduleRouter = createScheduleRouter(registry.require("scheduler"));
+  const automation = createLocalAutomation({
+    store, companyId, owner, flow, projects: projectSource, admission: registry.require("admission"), audit: registry.require("audit-sink"), approvers: registry.require("approvers"),
+    automation: typeof options.automation === "object" ? options.automation : fixedAutomationSwitch(options.automation === true), now: () => clock().getTime(), scheduler: scheduleRouter.view, dollarsEnforced: !registry.names("admission").includes("allow-all"), log,
+  });
   const pages = await createLocalPagesServer({
     data: {
       ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview, diagnosis, lessons }),
@@ -511,9 +528,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       getChatPage: () => chat.view(),
       previewChatLink: (code) => chat.preview(code),
       ...(setupAgent.enabled ? { listSetupProjects: () => setupAgent.page.projects(), getSetupPage: (project: string) => setupAgent.page.view(project) } : {}),
+      ...automation.pageData,
     },
     actions: {
       ...chat.actions,
+      ...automation.pageActions,
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, connectionAction: (input, context) => connections.action(input, context), decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       ...(setupAgent.enabled ? {
@@ -565,7 +584,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -579,6 +598,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await flow.sweepOnce().catch(logFailure("local_app.sweep_failed"));
     await milestones.deliverDue().catch(logFailure("local_app.milestones_failed"));
     await designReview.sweepWaits().catch(logFailure("local_app.design_wait_sweep_failed"));
+    await automation.tick().catch(logFailure("local_app.automation_failed"));
     await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
     // What needs the owner reaches them in their chat, batched (one message at most every few minutes). The sweep of the sessions above is what queues it.
     if (registry.names("channel").length > 0) {
@@ -633,18 +653,23 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     every(2_000, tickCore);
     every(5_000, tickTracking);
     // The nightly test run hears of its fires here. Without a way to start a model-free run (this install has none yet), a fire is answered "unavailable" and nothing is charged or claimed.
-    nightly = subscribeNightly({ scheduler: registry.require("scheduler"), deps: testEnvironment.deps, ...(options.environment === undefined ? {} : { env: options.environment }), log: (entry) => log({ component: "nightly", ...entry }) });
+    await automation.startSchedules();
+    const nightlyHeard = subscribeNightly({ scheduler: scheduleRouter.view, deps: testEnvironment.deps, ...(options.environment === undefined ? {} : { env: options.environment }), log: (entry) => log({ component: "nightly", ...entry }) });
+    // Subscribed ONCE, after both features added their handlers. Stopping stops the nightly's handler, ours and the scheduler's subscription together.
+    const routed = scheduleRouter.start();
+    nightly = { stop: async () => { await nightlyHeard.stop(); await routed.stop(); } };
     every(10_000, tickLessons);
   }
 
   return {
-    flow, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, diagnosis, milestones, scriptTokens, playbook, setupAgent,
+    flow, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,
     async stop() {
       for (const timer of timers) clearInterval(timer);
       await nightly?.stop();
+      await automation.stop().catch(() => undefined);
       for (const one of listening) await one.stop().catch(() => undefined);
       await tracking.idle();
       await projector?.stop();

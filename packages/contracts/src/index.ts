@@ -151,6 +151,7 @@ export * from "./connection-types-observability.js";
 export * from "./agent-recipe-node.js";
 export * from "./comment-triggers.js";
 export * from "./agent-run-node.js";
+export * from "./agent-guardrails.js";
 export * from "./agent-templates.js";
 export * from "./app-projects.js";
 export * from "./public-suffix.js";

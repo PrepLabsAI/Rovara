@@ -7,7 +7,7 @@ import { esc, externalLink, layout, untrusted } from "./html.js";
 import type { FormBinding } from "./guard.js";
 import { PART_STATE_WORDS } from "../work-breakdown/view.js";
 import type {
-  ApprovalOffer, ChatPageView, CommentView, DesignReviewView, LessonReposView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView, TestEnvironmentPageView,
+  ApprovalOffer, AutomationPageView, ChatPageView, CommentView, DesignReviewView, LessonReposView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView, TestEnvironmentPageView,
 } from "./views.js";
 import type { SecondReviewState } from "@agentx/contracts";
 
@@ -375,6 +375,34 @@ export function renderSecondReview(context: PageContext, state: SecondReviewStat
       + `${form("replay", "<label>Replay run (JSON)<br><textarea name=\"run\" maxlength=\"30000\" required></textarea></label>", "Store the replay run")}`
       + `${eligible.length === 0 ? "" : form("verdict", `<label>Model<br><select name="model">${options()}</select></label><label>Replay run id<br><input type="text" name="run" maxlength="64" required autocomplete="off"></label><label>Shadow window from (ISO time)<br><input type="text" name="from" maxlength="40" required autocomplete="off"></label><label>to<br><input type="text" name="to" maxlength="40" required autocomplete="off"></label>`, "Record the evidence")}</section>`
       + `<section class="panel"><h2>Models</h2>${rows.length === 0 ? "<p class=\"muted\">No model is available.</p>" : `<table><thead><tr><th>Model</th><th>Cost of one review</th><th>Fit</th></tr></thead><tbody>${rows.join("")}</tbody></table>`}</section>`,
+  });
+}
+
+// ---- Automation
+
+/**
+ * The automation page: the triggers (what starts work with no one watching) and the chain runs waiting at a gate. Turning a trigger on and deciding a gate are the owner's acts here and nowhere else: each form carries a
+ * proof signed over exactly what it shows, so a trigger or a gate that changed since the page was drawn is refused.
+ */
+export function renderAutomation(context: PageContext, view: AutomationPageView): string {
+  const form = (op: string, fields: string, label: string, subject: string, cls = ""): string =>
+    `<form class="decide" method="post" action="${esc(context.base)}/automation/act">${hidden("op", op)}${fields}${hidden("ft", context.formToken({ action: "automation.act", subject: `${op}:${subject}` }))}<div class="row"><button${cls === "" ? "" : ` class="${cls}"`} type="submit">${esc(label)}</button></div></form>`;
+  const offerFields = (offer: ApprovalOffer): string => hidden("requestId", offer.requestId) + hidden("revision", offer.revision) + hidden("digest", offer.artifactDigest);
+  const triggers = view.triggers.length === 0 ? "<p class=\"muted\">No trigger is set up.</p>" : `<table><thead><tr><th>Starts</th><th>When</th><th>State</th><th></th></tr></thead><tbody>${view.triggers.map((trigger) => {
+    const state = trigger.enabled ? "<span class=\"ok\">on</span>" : `<span class="muted">off</span>${trigger.disabledReason === undefined ? "" : `<br><span class="warn">${untrusted(trigger.disabledReason)}</span>`}`;
+    const problems = trigger.problems.map((problem) => `<br><span class="warn">${untrusted(problem)}</span>`).join("");
+    const act = trigger.enabled ? form("trigger-off", hidden("triggerId", trigger.triggerId), "Turn off", trigger.triggerId, "danger")
+      : trigger.offer === undefined ? "" : form("trigger-on", hidden("triggerId", trigger.triggerId) + offerFields(trigger.offer), "Turn on", trigger.triggerId, "primary");
+    return `<tr><td>${untrusted(trigger.target)}<br><span class="muted">on ${untrusted(trigger.project)}</span></td><td>${untrusted(trigger.what)}${trigger.lastFiredAt === undefined ? "" : `<br><span class="muted">last started ${esc(trigger.lastFiredAt)}</span>`}</td><td>${state}${problems}</td><td>${act}</td></tr>`;
+  }).join("")}</tbody></table>`;
+  const waiting = view.waiting.length === 0 ? "<p class=\"muted\">No chain run is waiting for you.</p>" : `<ul>${view.waiting.map((gate) => `<li><strong>${untrusted(gate.chain)}</strong>: ${untrusted(gate.step)}<br>${untrusted(gate.prompt)} <span class="muted">since ${esc(gate.since)}</span>`
+    + form("gate", hidden("runId", gate.runId) + hidden("seq", gate.seq) + hidden("decision", "approved") + offerFields(gate.offers.approved), "Go on", `${gate.runId}#${String(gate.seq)}#approved`, "primary")
+    + form("gate", hidden("runId", gate.runId) + hidden("seq", gate.seq) + hidden("decision", "declined") + offerFields(gate.offers.declined), "Stop here", `${gate.runId}#${String(gate.seq)}#declined`)
+    + form("run-cancel", hidden("runId", gate.runId), "Cancel the run", gate.runId, "danger") + "</li>").join("")}</ul>`;
+  return layout({
+    title: "Automation", nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
+    body: `<h1>Automation</h1><p class="muted">Work that starts with no one at the keyboard: an event or a schedule starts it, within the limits you set. It never approves anything: a plan, a design or a merge it reaches waits for you. A trigger is turned on here, by you, and only for what it is now.</p>`
+      + `<section class="panel"><h2>Triggers</h2>${triggers}</section><section class="panel"><h2>Waiting for you</h2>${waiting}</section>`,
   });
 }
 

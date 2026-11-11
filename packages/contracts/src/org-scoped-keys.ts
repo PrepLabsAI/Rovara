@@ -270,6 +270,11 @@ export function agentRequestKey(orgId: OrgId, developerId: string, requestId: st
   return { pk: orgScoped(orgId, `AGENT_REQUEST#${developerId}`), sk: requestId };
 }
 
+/** A company's agent guardrails: one row holding the document and its revision. */
+export function agentGuardrailsKey(orgId: OrgId): OrgKey {
+  return { pk: orgScoped(orgId, "AGENT_GUARDRAILS"), sk: "META" };
+}
+
 /** An org's company AI sources (Plan 3 Task 24b): one item holding the sources, their order and its revision. */
 export function modelSourcesKey(orgId: OrgId): OrgKey {
   return { pk: orgScoped(orgId, "MODEL_SOURCES"), sk: "META" };

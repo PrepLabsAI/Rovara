@@ -16,8 +16,8 @@ export interface ApprovalOffer {
   requestId: string;
   revision: number;
   artifactDigest: string;
-  /** `plan`, `design`, `test-environment`, `setup` (a project's setup commands, or a website for a setup run): the W0 approval kind. */
-  kind: "plan" | "design" | "test-environment" | "setup";
+  /** `plan`, `design`, `test-environment`, `setup` (a project's setup commands, or a website for a setup run), `automation` (turning a trigger on, deciding a chain's gate): the W0 approval kind. */
+  kind: "plan" | "design" | "test-environment" | "setup" | "automation";
   risk?: "low" | "medium" | "high";
 }
 
@@ -391,12 +391,33 @@ export interface LocalPageData {
   getSourcesPage?(project: string, discover?: string): Promise<SourcesPageView | undefined>;
   /** The chat page. Absent, or undefined: no chat adapter is set up here and the page is not found. */
   getChatPage?(): Promise<ChatPageView | undefined>;
+  /** The automation page (triggers, chain runs waiting at a gate). Absent, or undefined while automation is off: the page is not found, so nothing about it is shown. */
+  getAutomationPage?(): Promise<AutomationPageView | undefined>;
   /** What a code of a chat account names (the channel and the masked account), for the confirmation the owner reads before linking; undefined for an unknown, used or expired code. */
   previewChatLink?(code: string): Promise<{ channel: string; tenant: string; userId: string } | undefined>;
   /** The setup agent's page for a project, and the projects it can be opened for. Absent: the setup agent is off here and its pages are not found. */
   listSetupProjects?(): Promise<string[]>;
   getSetupPage?(project: string): Promise<SetupPageView | undefined>;
 }
+
+/** What the automation page shows. Every word is fixed or a name the owner gave; nothing a repository, an event or a model wrote reaches it unredacted. */
+export interface AutomationPageView {
+  triggers: Array<{
+    triggerId: string; target: string; what: string; project: string; enabled: boolean; disabledReason?: string; lastFiredAt?: string;
+    /** What the trigger needs and does not have; empty when it can be turned on. */
+    problems: string[];
+    /** Present for a trigger that is off and qualifies: what the owner's proof is bound to. */
+    offer?: ApprovalOffer;
+  }>;
+  waiting: Array<{ runId: string; chain: string; seq: number; step: string; prompt: string; since: string; /** One offer for each answer: the proof is bound to the answer it is for. */ offers: { approved: ApprovalOffer; declined: ApprovalOffer } }>;
+}
+
+/** The owner's own acts on the automation page. The proof is the page session's, signed over exactly the request shown. */
+export type AutomationPageAction =
+  | { action: "trigger-on"; triggerId: string; approval: ApprovalOffer; proof: ApprovalProof }
+  | { action: "trigger-off"; triggerId: string }
+  | { action: "gate"; runId: string; seq: number; decision: "approved" | "declined"; approval: ApprovalOffer; proof: ApprovalProof }
+  | { action: "run-cancel"; runId: string };
 
 /** One change of the second review's settings, as the owner made it on the page (every one is the owner's own act, in this browser session). */
 export type SecondReviewPageAction =
@@ -459,6 +480,8 @@ export interface LocalPageActions {
   revokeScriptToken?(input: { tokenId: string }): Promise<LocalActionResult>;
   /** Approves a proved test environment proposal as the project's next revision. Like a plan decision it is the owner's own act on a page: it carries a proof for exactly this request, revision and digest. */
   decideTestEnvironment?(input: { project: string; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
+  /** The owner's acts on the automation page: turn a trigger on (with their proof), off, decide a chain's gate (with their proof), stop a run. */
+  automation?(input: AutomationPageAction): Promise<LocalActionResult>;
   /** A change of the second review's settings. Refused (with its fixed words) when the owner may not or the setting moved. */
   secondReview?(input: SecondReviewPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
   /** Fix with agent: the owner asks for a diagnosis of the error the task page showed (`errorKey` names the error as shown; `requestId` is this press). Spends the owner's own model key, so it is the owner's act on a page. */

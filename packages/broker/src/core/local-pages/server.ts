@@ -12,10 +12,10 @@ import type { ApprovalProof } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
 import { renderConnections, renderSources } from "./connection-pages.js";
-import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, renderTestEnvironment, type PageContext } from "./pages.js";
+import { renderAutomation, renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, renderTestEnvironment, type PageContext } from "./pages.js";
 import { renderHowWeWork, renderHowWeWorkIndex } from "./how-we-work-page.js";
 import { renderSetupIndex, renderSetupPage } from "./setup-page.js";
-import type { ApprovalOffer, ConnectionPageAction, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
+import type { ApprovalOffer, AutomationPageAction, ConnectionPageAction, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
 
 export interface LocalPagesServer {
   /** `http://127.0.0.1:<port>`. */
@@ -252,7 +252,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     return [...value].length > TEXT_MAX ? [...value].slice(0, TEXT_MAX).join("") : value;
   };
   const tokenPageIsFresh = (request: Req): boolean => now() - request.session.createdAt <= SCRIPT_TOKEN_FRESH_MS;
-  const offerOf = (request: Req, kind: "plan" | "design" | "test-environment" | "setup"): ApprovalOffer | undefined => {
+  const offerOf = (request: Req, kind: "plan" | "design" | "test-environment" | "setup" | "automation"): ApprovalOffer | undefined => {
     const revision = Number(request.form?.get("revision"));
     const requestId = request.form?.get("requestId") ?? "";
     const artifactDigest = request.form?.get("digest") ?? "";
@@ -512,6 +512,31 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const project = "project" in parsed.action ? parsed.action.project : "";
       const view = await options.data.getSourcesPage(project);
       return view === undefined ? notFound() : page(request, (context) => renderSources({ ...context, notice: result.message ?? (result.ok ? "Done." : "That did not work.") }, view, { fresh: tokenPageIsFresh(request) }));
+    } },
+    { method: "GET", pattern: /^\/automation$/, handle: async (request) => {
+      const view = await options.data.getAutomationPage?.();
+      return view === undefined ? notFound() : page(request, (context) => renderAutomation(context, view));
+    } },
+    { method: "POST", pattern: /^\/automation\/act$/, handle: async (request) => {
+      const back = `${request.base}/automation`;
+      const op = request.form?.get("op") ?? "";
+      const act = options.actions.automation?.bind(options.actions);
+      if (act === undefined || !/^[a-z-]{1,20}$/u.test(op)) return redirect(`${back}?n=invalid`);
+      const get = (name: string): string => request.form?.get(name) ?? "";
+      const subject = op === "gate" ? `${get("runId")}#${get("seq")}#${get("decision")}` : op === "trigger-on" || op === "trigger-off" ? get("triggerId") : get("runId");
+      if (!verified(request, { action: "automation.act", subject: `${op}:${subject}` })) return redirect(`${back}?n=form`);
+      let input: AutomationPageAction | undefined;
+      if (op === "trigger-on" || op === "gate") {
+        const offer = offerOf(request, "automation");
+        if (offer === undefined) return redirect(`${back}?n=invalid`);
+        const seq = Number(get("seq"));
+        const decision = get("decision");
+        input = op === "trigger-on" ? { action: "trigger-on", triggerId: get("triggerId"), approval: offer, proof: proofFor(request, offer) }
+          : (decision === "approved" || decision === "declined") && Number.isSafeInteger(seq) && seq > 0 ? { action: "gate", runId: get("runId"), seq, decision, approval: offer, proof: proofFor(request, offer) } : undefined;
+      } else if (op === "trigger-off") input = { action: "trigger-off", triggerId: get("triggerId") };
+      else if (op === "run-cancel") input = { action: "run-cancel", runId: get("runId") };
+      if (input === undefined || ("triggerId" in input && !/^ctr_[0-9a-z]{20}$/u.test(input.triggerId)) || ("runId" in input && !/^crn_[0-9a-z]{20}$/u.test(input.runId))) return redirect(`${back}?n=invalid`);
+      return redirect(`${back}?n=${outcomeCode(await act(input), "saved")}`);
     } },
     { method: "GET", pattern: /^\/second-review$/, handle: async (request) => {
       const state = await options.data.getSecondReview?.();

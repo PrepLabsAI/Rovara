@@ -172,6 +172,9 @@ describe("the health route's grants (A13)", () => {
       // connection change (7 days). A connection's own record, a project's source document and a registered server are durable and carry no expiry.
       "packages/broker/src/context-sources/store.ts", "packages/broker/src/context-sources/usage.ts", "packages/broker/src/context-sources/quotes.ts", "packages/broker/src/context-sources/citations.ts",
       "packages/broker/src/connections/request-marks.ts",
+      // Automation: a request row (7 days), a trigger's activity (30 days), its hourly and daily counters and its subject note (2 hours to 2 days), the automatic runs' month and claim rows, started and paused markers and the run watch (62 days at most, 14 days for the watch) and the open record of an unattended run with its reservation (62 days).
+      "packages/broker/src/core/automation/kit.ts", "packages/broker/src/core/automation/run-seam.ts", "packages/broker/src/core/triggers/store.ts", "packages/broker/src/core/triggers/dispatch.ts",
+      "packages/broker/src/core/automatic-runs/cap.ts", "packages/broker/src/core/automatic-runs/start.ts", "packages/broker/src/core/automatic-runs/end.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
