@@ -1,6 +1,6 @@
 import {
   ArnFormat, CfnParameter, Duration, RemovalPolicy, Stack, aws_apigatewayv2 as apigwv2, aws_cloudwatch as cloudwatch, aws_dynamodb as dynamodb,
-  aws_iam as iam, aws_lambda_event_sources as eventSources, aws_secretsmanager as secretsmanager, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions,
+  aws_iam as iam, type aws_lambda as lambda, aws_lambda_event_sources as eventSources, aws_secretsmanager as secretsmanager, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions,
   type aws_lambda_nodejs as lambdaNodejs,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
@@ -31,6 +31,9 @@ export class ChannelAdapters extends Construct {
   readonly requestDeadLetters: sqs.Queue;
   readonly requests: sqs.Queue;
   readonly events: sqs.Queue;
+  private readonly slackViaChannel: string;
+  private readonly slackAdapterSecret: secretsmanager.Secret;
+  private readonly builtInAdapter: Record<string, string>;
 
   constructor(scope: Construct, id: string, props: ChannelAdaptersProps) {
     super(scope, id);
@@ -53,17 +56,20 @@ export class ChannelAdapters extends Construct {
       allowedValues: ["enabled", "disabled"],
       description: "enabled: Slack conversations go through the channel API as the built-in Slack adapter (spec 062 Phase 7); disabled: Slack's own queue, as before",
     }).valueAsString;
+    this.slackViaChannel = slackViaChannel;
     const slackAdapterSecretName = `${secretPrefix}channel-adapter/slack`;
-    const slackAdapterSecret = new secretsmanager.Secret(this, "SlackAdapterSecret", {
+    const slackAdapterSecret = this.slackAdapterSecret = new secretsmanager.Secret(this, "SlackAdapterSecret", {
       secretName: slackAdapterSecretName,
       description: "Signing secret of the built-in Slack channel adapter (spec 062 FR-073); 64 letters and digits, read as base64",
       generateSecretString: { passwordLength: 64, excludePunctuation: true, includeSpace: false },
       removalPolicy: RemovalPolicy.DESTROY,
     });
-    const builtInAdapter = {
+    const builtInAdapter = this.builtInAdapter = {
       BUILT_IN_ADAPTER: slackViaChannel,
       BUILT_IN_ADAPTER_CHANNEL: "slack",
       BUILT_IN_ADAPTER_CALLBACK_URL: `${props.api.attrApiEndpoint}/v1/slack/channel-events`,
+      // Phase 7c: posts the core must know the result of, and Canvases.
+      BUILT_IN_ADAPTER_COMMANDS_URL: `${props.api.attrApiEndpoint}/v1/slack/channel-commands`,
       BUILT_IN_ADAPTER_SECRET_NAME: slackAdapterSecretName,
     };
 
@@ -175,6 +181,15 @@ export class ChannelAdapters extends Construct {
       principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
       sourceArn: `arn:${stack.partition}:execute-api:${stack.region}:${stack.account}:${props.api.ref}/*/*/v1/slack/channel-events`,
     });
+    new apigwv2.CfnRoute(this, "SlackCommandsRoute", {
+      apiId: props.api.ref, routeKey: "POST /v1/slack/channel-commands", target: `integrations/${props.slack.integration.ref}`, authorizationType: "NONE",
+    });
+    props.slack.ingress.addPermission("ChannelCommandsInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      sourceArn: `arn:${stack.partition}:execute-api:${stack.region}:${stack.account}:${props.api.ref}/*/*/v1/slack/channel-commands`,
+    });
+    // A Canvas takes three Slack calls of up to 10 seconds each; the legacy ingress keeps its 10 seconds.
+    (props.slack.ingress.node.defaultChild as lambda.CfnFunction).timeout = 30;
 
     // The broker registers adapters and writes their secrets. Links and link codes are in the state table, which it
     // already reads and writes; one statement only, since the broker role's policy is near IAM's size limit.
@@ -201,5 +216,17 @@ export class ChannelAdapters extends Construct {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(props.notifyOperator);
+  }
+
+  /**
+   * Phase 7c: a function that posts to Slack for the core (the developer task notifier, the session reconciler) does it
+   * through the Slack adapter's commands while SlackViaChannel is on, and may read the adapter's secret to sign them.
+   */
+  connectSlackPoster(fn: lambdaNodejs.NodejsFunction, slackTeamId: string): void {
+    fn.addEnvironment("SLACK_VIA_CHANNEL", this.slackViaChannel);
+    // Its own name: the notifier gets none of developer sign-in's settings.
+    fn.addEnvironment("SLACK_ADAPTER_TEAM_ID", slackTeamId);
+    for (const [name, value] of Object.entries(this.builtInAdapter)) fn.addEnvironment(name, value);
+    this.slackAdapterSecret.grantRead(fn);
   }
 }

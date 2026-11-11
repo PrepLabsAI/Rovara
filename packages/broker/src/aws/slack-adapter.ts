@@ -6,28 +6,29 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import {
+  ChannelCommandSchema,
   ChannelEventSchema,
-  DETAILS_ACTION,
   SLACK_CHANNEL,
-  TURN_DETAILS_ACTION_ID,
   confirmationBlocks,
-  detailsReplyBlocks,
   inboundFromSlackRequest,
+  slackBlocksOf,
   slackThreadOf,
   slackThreadSubject,
-  splitSectionText,
   usableWebhookSecret,
   verifyWebhook,
   webhookHeaders,
+  type ChannelCommand,
   type ChannelEvent,
   type MessageAction,
   type MessagePart,
   type SlackRequestMessage,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
-import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, postMayHaveLanded } from "./slack-web.js";
+import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createChannelCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
 
 export const SLACK_CHANNEL_EVENTS_PATH = "/v1/slack/channel-events";
+/** Phase 7c: where the core's commands for Slack come, each answered at once. */
+export const SLACK_CHANNEL_COMMANDS_PATH = "/v1/slack/channel-commands";
 
 /** Slack waits 3 seconds for the ingress's answer; the channel API gets most of what is left. */
 const FORWARD_TIMEOUT_MILLISECONDS = 2_500;
@@ -218,34 +219,117 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
   };
 }
 
-/** Slack's own action IDs for the core's, where its interactivity already answers them. */
-const SLACK_ACTION_IDS: Readonly<Record<string, string>> = { [TURN_DETAILS_ACTION_ID]: DETAILS_ACTION };
+export interface SlackChannelCommandsDependencies {
+  secret(): Promise<string | undefined>;
+  botToken(): Promise<string>;
+  fetch?: typeof fetch;
+  now?: () => number;
+  log?: Log;
+}
 
-/** A message's parts and actions as Block Kit, or undefined for text alone. */
-export function blocksOf(text: string, parts: readonly MessagePart[] | undefined, actions: readonly MessageAction[] | undefined): unknown[] | undefined {
-  if (parts === undefined && actions === undefined) return undefined;
-  // The Details button alone keeps exactly the blocks Slack's replies have always had (spec 014 FR-024).
-  const only = actions?.length === 1 ? actions[0] : undefined;
-  if (parts === undefined && only?.type === "button" && only.actionId === TURN_DETAILS_ACTION_ID) return detailsReplyBlocks(text, only.value);
-  const section = (value: string) => splitSectionText(value).map((part) => ({ type: "section", text: { type: "mrkdwn", text: part } }));
-  const blocks: unknown[] = [...section(text)];
-  for (const part of parts ?? []) {
-    if (part.type === "section") blocks.push(...section(part.text));
-    else if (part.type === "fields") blocks.push({ type: "section", fields: part.fields.map((field) => ({ type: "mrkdwn", text: `*${field.label}*\n${field.value}` })) });
-    else if (part.type === "context") blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: part.text }] });
-    else if (part.type === "divider") blocks.push({ type: "divider" });
-    else blocks.push({ type: "image", image_url: part.url, alt_text: part.alt });
+/** A command answered with a refusal: nothing it asked for is left done. */
+class Refused extends Error {
+  constructor(readonly code: string, message: string) { super(message); }
+}
+
+/**
+ * Phase 7c: the core's commands for Slack. Each is checked against the adapter's secret, run, and answered signed with
+ * the command's own ID: Slack's result, or Slack's error code when Slack refused, so nothing was done. A failure that
+ * may have reached Slack (a timeout, a lost connection) is answered 503, which the core reads as "may have run".
+ */
+export function createSlackChannelCommandsHandler(deps: SlackChannelCommandsDependencies) {
+  const now = deps.now ?? Date.now;
+  const log: Log = deps.log ?? (() => undefined);
+  const fetchFn = deps.fetch ?? fetch;
+
+  async function run(command: ChannelCommand): Promise<unknown> {
+    // Nothing reached Slack without a token.
+    const token = await deps.botToken().catch(() => { throw new Refused("token_unavailable", "the Slack bot token could not be read"); });
+    switch (command.kind) {
+      case "post_message": {
+        const blocks = slackBlocksOf(command.message);
+        if (command.audience?.kind === "ephemeral") {
+          await chatPostEphemeral(token, { channel: command.space, threadTs: command.thread, user: command.audience.actor.userId, text: command.message.text, blocks }, fetchFn);
+          return { space: command.space };
+        }
+        const posted = await chatPostMessage(token, { channel: command.space, threadTs: command.thread, text: command.message.text, blocks }, fetchFn);
+        return { space: posted.channel ?? command.space, messageId: posted.ts, thread: command.thread ?? posted.ts };
+      }
+      case "direct_message": {
+        // A post to a person's ID lands in the bot's direct message with them, whose ID Slack answers.
+        const posted = await chatPostMessage(token, { channel: command.to.userId, text: command.message.text, blocks: slackBlocksOf(command.message) }, fetchFn);
+        return { space: posted.channel ?? command.to.userId, messageId: posted.ts };
+      }
+      case "update_message":
+        await chatUpdate(token, { channel: command.space, ts: command.messageId, text: command.message.text, blocks: slackBlocksOf(command.message) }, fetchFn);
+        return { updated: true };
+      case "create_document": {
+        // A Canvas is shared with a channel (C or G); Slack holds 32 KB of Markdown in one.
+        if (!/^[CG][A-Z0-9]{8,}$/.test(command.space) || Buffer.byteLength(command.markdown, "utf8") > 32_768) throw new Refused("invalid_input", "the document's channel or size is not one Slack takes");
+        let created: string | undefined;
+        try {
+          const canvas = await createChannelCanvas(token, { channel: command.space, title: command.title, markdown: command.markdown }, fetchFn, async (canvasId) => { created = canvasId; });
+          return { documentId: canvas.canvasId, url: canvas.permalink };
+        } catch (error) {
+          if (created === undefined) throw error;
+          // The core never heard of a Canvas that failed after it was made, so it is removed here, and the answer is a
+          // refusal: Slack's own code where Slack refused, so the core reads it as it always has.
+          await deleteTaskPlanCanvas(token, created, fetchFn).catch(() => log("slack_adapter.canvas_cleanup_failed", {}));
+          const code = error instanceof SlackPostError && !postMayHaveLanded(error) ? error.slackError : "canvas_unavailable";
+          throw new Refused(code, "the Canvas could not be shared");
+        }
+      }
+      case "delete_document":
+        return { deleted: (await deleteTaskPlanCanvas(token, command.documentId, fetchFn)) === "deleted" };
+      default:
+        throw new Refused("unsupported", `the Slack adapter does not take ${command.kind} commands`);
+    }
   }
-  const elements = (actions ?? []).flatMap((action, index): unknown[] => {
-    const label = (value: string) => ({ type: "plain_text", text: value });
-    if (action.type === "button") return [{ type: "button", action_id: SLACK_ACTION_IDS[action.actionId] ?? action.actionId, text: label(action.label), value: action.value, ...(action.style === undefined ? {} : { style: action.style }) }];
-    if (action.type === "link") return [{ type: "button", action_id: `link_${index}`, text: label(action.label), url: action.url }];
-    if (action.type === "select") return [{ type: "static_select", action_id: action.actionId, placeholder: label(action.placeholder), options: action.options.map((option) => ({ text: label(option.label), value: option.value })) }];
-    // Forms are not declared for the built-in adapter yet (Phase 7c).
-    return [];
-  });
-  if (elements.length > 0) blocks.push({ type: "actions", elements });
-  return blocks;
+
+  return async (request: HttpApiV2Event): Promise<HttpResponse> => {
+    if (request.requestContext?.http?.method !== "POST") return respond(405, { error: "method_not_allowed" });
+    const body = request.isBase64Encoded === true ? Buffer.from(request.body ?? "", "base64").toString("utf8") : request.body ?? "";
+    const secret = await deps.secret();
+    if (secret === undefined) return respond(503, { error: "unavailable" });
+    const nowSeconds = Math.floor(now() / 1_000);
+    const verified = verifyWebhook({ secret, headers: request.headers ?? {}, body, nowSeconds });
+    if (!verified.ok) {
+      log("slack_adapter.command_refused", { reason: verified.reason });
+      return respond(401, { error: verified.reason });
+    }
+    let command: ChannelCommand;
+    try {
+      const parsed = ChannelCommandSchema.safeParse(JSON.parse(body));
+      if (!parsed.success || parsed.data.id !== verified.id || parsed.data.channel !== SLACK_CHANNEL) return respond(400, { error: "invalid_command" });
+      command = parsed.data;
+    } catch {
+      return respond(400, { error: "invalid_json" });
+    }
+    const answer = (value: Record<string, unknown>): HttpResponse => {
+      const text = JSON.stringify(value);
+      return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store", ...webhookHeaders({ secret, id: command.id, timestamp: Math.floor(now() / 1_000), body: text }) }, body: text };
+    };
+    try {
+      const result = await run(command);
+      log("slack_adapter.command", { kind: command.kind, outcome: "ok" });
+      return answer({ ok: true, result });
+    } catch (error) {
+      if (error instanceof Refused) {
+        log("slack_adapter.command", { kind: command.kind, outcome: "refused", code: error.code });
+        return answer({ ok: false, error: { code: error.code, message: error.message } });
+      }
+      const slackError = error instanceof SlackPostError ? error.slackError : undefined;
+      log("slack_adapter.command", { kind: command.kind, outcome: "failed", errorName: error instanceof Error ? error.name : "unknown", ...(slackError === undefined ? {} : { slackError }) });
+      if (slackError !== undefined && !postMayHaveLanded(error)) return answer({ ok: false, error: { code: slackError, message: `Slack refused the ${command.kind} command` } });
+      // Anything else may have reached Slack.
+      return respond(503, { error: "try_again" });
+    }
+  };
+}
+
+/** A message's parts and actions as Block Kit, or undefined for text alone (the shared Slack renderer). */
+export function blocksOf(text: string, parts: readonly MessagePart[] | undefined, actions: readonly MessageAction[] | undefined): unknown[] | undefined {
+  return slackBlocksOf({ text, ...(parts === undefined ? {} : { parts: [...parts] }), ...(actions === undefined ? {} : { actions: [...actions] }) });
 }
 
 /** The adapter's signing secret from Secrets Manager, reread at most once a minute so a rotation takes effect. */
@@ -278,6 +362,19 @@ export function slackChannelForwarderFromEnvironment(secretsManager: Pick<Secret
       const value = await read();
       if (value === undefined) throw new Error("the Slack adapter's signing secret could not be read");
       return value;
+    },
+  });
+}
+
+/** The AWS handler for POST /v1/slack/channel-commands; nothing is reachable unless Slack goes through the channel API. */
+export function createAwsSlackChannelCommandsHandler(botToken: () => Promise<string>): (request: HttpApiV2Event) => Promise<HttpResponse> {
+  if (process.env.SLACK_VIA_CHANNEL !== "enabled" || !process.env.SLACK_ADAPTER_SECRET_NAME) return async () => respond(404, { error: "not_found" });
+  const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  return createSlackChannelCommandsHandler({
+    secret: slackAdapterSecretReader(new SecretsManagerClient(clientConfiguration), requiredEnvironment("SLACK_ADAPTER_SECRET_NAME")),
+    botToken,
+    log(event, fields) {
+      console.log(JSON.stringify({ component: "slack-adapter", event, ...fields }));
     },
   });
 }

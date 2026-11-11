@@ -840,6 +840,8 @@ export class ControlPlaneStack extends Stack {
       resources: [`arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/v1/service/*`],
     }));
 
+    // Spec 062 Phase 7c: the channel API's built-in Slack adapter, for the posters made after it.
+    let slackChannelAdapter: ChannelAdapters | undefined;
     // Spec 025 phase 25a: developer sign-in, named environments only (R3).
     if (naming.env !== undefined && signInParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
@@ -892,6 +894,8 @@ export class ControlPlaneStack extends Stack {
       const channelAdapters = new ChannelAdapters(this, "ChannelApi", {
         naming, env: naming.env, api, state, broker, orchestratorRole: slackOrchestratorRole, notifyOperator, slack: { ingress: slackIngress, integration: slackIntegration },
       });
+      channelAdapters.connectSlackPoster(notifier.function, signInParameters.slackTeamId.valueAsString);
+      slackChannelAdapter = channelAdapters;
       new CfnOutput(this, "ChannelRequestQueueUrl", { value: channelAdapters.requests.queueUrl });
       new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
       // The channel request dead-letter queue is reported by its alarm only: one more queue ARN here pushes the broker
@@ -985,6 +989,7 @@ export class ControlPlaneStack extends Stack {
     // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
     // legacy template is unchanged.
     if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKey.valueAsString);
+    if (slackChannelAdapter !== undefined && signInParameters !== undefined) slackChannelAdapter.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
     grantProviderKeySecrets(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);

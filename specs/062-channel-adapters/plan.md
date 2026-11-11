@@ -283,3 +283,26 @@ sequenceDiagram
 
 Set `SlackViaChannel` to `disabled`: new requests go on Slack's own queue again. Replies still queued for Slack are then
 dropped (the built-in adapter is gone), so switch it off once the channel queues are empty.
+
+## Phase 7c1: the notifier's posts through the Slack adapter
+
+With `SlackViaChannel` on, nothing in the core calls Slack's Web API for task notices: the developer task notifier and
+the session reconciler send signed commands to the Slack adapter, which makes the Slack calls and answers.
+
+| Layer | Change |
+|---|---|
+| contracts | Commands `post_message`, `direct_message`, `update_message` (FR-076); `create_document` may omit the tenant. Parts are a message's whole rich form; an `actions` part; a link may keep its action ID. The built-in adapter takes `direct` and `documents` and names a commands URL. `slack-blocks.ts`: `slackBlocksOf` (one Slack renderer for events and commands) and `channelMessageOfSlackBlocks`, which reads the notifier's cards into parts that render back to the same blocks. `splitTextAtLines`, neutral. |
+| broker | `ChannelCommandFailed`: `refused` (the adapter's code, or a 4xx) or `unanswered` (may have run). `slack-adapter.ts` takes `POST /v1/slack/channel-commands`: posts, direct messages, private messages, edits, Canvases (made, shared and linked in one command, and removed by the adapter if sharing fails), answered signed with the command's ID. `slack-notice-channel.ts`: the notifier's Slack client over those commands; a refusal is Slack's own error code and no answer is a post that may have landed, so the notifier's delivery rules are unchanged. A card that would not render back the same is logged (`slack_notice.blocks_changed`). |
+| infra | The commands route; the commands URL in the built-in adapter's settings; the notifier and reconciler get the adapter's settings, its secret and `SLACK_ADAPTER_TEAM_ID`; Slack ingress gets 30 seconds in named environments (a Canvas is three Slack calls). |
+
+### Decisions
+
+- **Commands, not events, for notices.** The notifier keeps a card's timestamp to edit it, a thread's first post's
+  timestamp as the task thread, and Slack's answer to decide what to retry. Only an answered command keeps all three.
+- **Cards are read from Block Kit at the edge.** The notifier's card builders are unchanged; its client turns their
+  blocks into neutral parts, which the adapter renders back to the same blocks. Rewriting the builders neutrally is
+  left for later; nothing outside Slack shows them.
+
+### Rollback
+
+Set `SlackViaChannel` to `disabled`: the notifier and reconciler post to Slack themselves again.

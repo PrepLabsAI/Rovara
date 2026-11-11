@@ -196,10 +196,16 @@ The protocol grows by three primitives, each behind a capability an adapter decl
 - **FR-075 (order):** a conversation's events reach its adapter in the order the core sent them. The event queue is
   FIFO, one group per conversation (per person for a direct message); an event being retried holds the group's later
   events behind it.
+- **FR-076 (posts the core must know about):** `post_message` (in a space, in a thread or starting one, or privately to
+  one person), `direct_message` and `update_message` commands, answered with the message's ID and thread. A message's
+  `parts`, when present, are its whole rich form (an `actions` part places buttons among them); `text` is its plain
+  form. The developer task notifier and the session reconciler post to Slack only through these commands and the
+  document commands once `SlackViaChannel` is on.
 
 Phases: 7a the primitives (contracts, signing, the core's command client, capabilities); 7b Slack's conversation path
-through the adapter behind `SlackViaChannel`; 7c the task workflow, notices and directory through the adapter; 7d
-TEST, then the old path's removal.
+through the adapter behind `SlackViaChannel`; 7c the task workflow, notices and directory through the adapter, in parts
+(7c1 the notifier's and reconciler's posts and Canvases; 7c1b directory reads; 7c2 mentions and replies routed by the
+core; 7c3 presses and forms as actions); 7d TEST, then the old path's removal.
 
 Constitution: Principle I requires an adapter's actors to be linked and refuses step-up decisions from adapters.
 FR-073 needs a MINOR amendment before 7b: the built-in Slack adapter is registered by the deploy, and its actors are

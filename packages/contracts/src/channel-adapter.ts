@@ -76,16 +76,20 @@ export const ChannelAdapterRecordSchema = z.object({
 }).strict();
 export type ChannelAdapterRecord = z.infer<typeof ChannelAdapterRecordSchema>;
 
-/** FR-073: what the built-in adapter can show: threads, buttons, edits and private replies. */
+/**
+ * FR-073: what the built-in adapter can show and do: threads, buttons, edits, private and direct messages, and
+ * documents (Phase 7c).
+ */
 export const BUILT_IN_ADAPTER_CAPABILITIES: ChannelCapabilities = {
-  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true,
+  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true, direct: true, documents: true,
 };
 
 /** FR-073: the built-in adapter's record, made from the deployment's settings rather than read from the registry. */
-export function builtInAdapterRecord(input: { channel: string; callbackUrl: string; secretName: string; deployedAt?: string }): ChannelAdapterRecord {
+export function builtInAdapterRecord(input: { channel: string; callbackUrl: string; commandsUrl?: string | undefined; secretName: string; deployedAt?: string }): ChannelAdapterRecord {
   const at = input.deployedAt ?? "1970-01-01T00:00:00.000Z";
   return {
     channel: ChannelIdSchema.parse(input.channel), callbackUrl: publicHttpsUrlSchema("callbackUrl").parse(input.callbackUrl),
+    ...(input.commandsUrl === undefined ? {} : { commandsUrl: publicHttpsUrlSchema("commandsUrl").parse(input.commandsUrl) }),
     capabilities: { ...BUILT_IN_ADAPTER_CAPABILITIES }, projects: [], stepUp: [], secretName: input.secretName,
     createdAt: at, updatedAt: at, updatedBy: "deployment", builtIn: true,
   };
@@ -184,16 +188,6 @@ export const TURN_DETAILS_ACTION_ID = "turn.details";
 const ActionValue = z.string().max(2_000);
 const Choice = z.object({ label: Label, value: ActionValue }).strict();
 
-/** What a message shows besides its text, which every adapter can show on its own. */
-export const MessagePartSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("section"), text: Text }).strict(),
-  z.object({ type: z.literal("fields"), fields: z.array(z.object({ label: Label, value: z.string().min(1).max(2_000) }).strict()).min(1).max(10) }).strict(),
-  z.object({ type: z.literal("context"), text: z.string().min(1).max(3_000) }).strict(),
-  z.object({ type: z.literal("divider") }).strict(),
-  z.object({ type: z.literal("image"), url: HttpsUrl, alt: z.string().min(1).max(200) }).strict(),
-]);
-export type MessagePart = z.infer<typeof MessagePartSchema>;
-
 export const FormFieldSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
   label: Label,
@@ -211,7 +205,8 @@ export type FormField = z.infer<typeof FormFieldSchema>;
 /** What a person can do on a message. A form is opened by the adapter itself, and its submission comes back as one action. */
 export const MessageActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("button"), actionId: ActionIdSchema, value: ActionValue, label: Label, style: z.enum(["primary", "danger"]).optional() }).strict(),
-  z.object({ type: z.literal("link"), label: Label, url: HttpsUrl }).strict(),
+  // A link's own action ID, where the surface reports its press too (Slack does).
+  z.object({ type: z.literal("link"), label: Label, url: HttpsUrl, actionId: ActionIdSchema.optional() }).strict(),
   z.object({ type: z.literal("select"), actionId: ActionIdSchema, placeholder: Label, options: z.array(Choice).min(1).max(100) }).strict(),
   z.object({
     type: z.literal("form"), actionId: ActionIdSchema, value: ActionValue, label: Label,
@@ -219,6 +214,20 @@ export const MessageActionSchema = z.discriminatedUnion("type", [
   }).strict(),
 ]);
 export type MessageAction = z.infer<typeof MessageActionSchema>;
+
+/**
+ * A message's rich form, in order. When a message has parts they are all of it: its `text` is the plain form, which an
+ * adapter shows where it cannot show parts, and the notification. An `actions` part places buttons among the parts.
+ */
+export const MessagePartSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("section"), text: Text }).strict(),
+  z.object({ type: z.literal("fields"), fields: z.array(z.object({ label: Label, value: z.string().min(1).max(2_000) }).strict()).min(1).max(10) }).strict(),
+  z.object({ type: z.literal("context"), text: z.string().min(1).max(3_000) }).strict(),
+  z.object({ type: z.literal("divider") }).strict(),
+  z.object({ type: z.literal("image"), url: HttpsUrl, alt: z.string().min(1).max(200) }).strict(),
+  z.object({ type: z.literal("actions"), actions: z.array(MessageActionSchema).min(1).max(25) }).strict(),
+]);
+export type MessagePart = z.infer<typeof MessagePartSchema>;
 
 /** Who sees a message in its conversation: everyone (the default), or one person only (needs `ephemeral`). */
 export const MessageAudienceSchema = z.discriminatedUnion("kind", [
@@ -343,6 +352,9 @@ export function adapterMayDecide(adapter: Pick<ChannelAdapterRecord, "stepUp">, 
 /** The command kinds, and the capability an adapter must declare to be sent each. */
 export const COMMAND_CAPABILITY = {
   start_conversation: "startConversations",
+  post_message: "proactive",
+  direct_message: "direct",
+  update_message: "edits",
   create_document: "documents",
   delete_document: "documents",
   space_members: "directory",
@@ -362,8 +374,20 @@ const commandBase = {
 export const ChannelCommandSchema = z.discriminatedUnion("kind", [
   /** Posts the first message in a space; answers the new conversation's thread. */
   z.object({ ...commandBase, kind: z.literal("start_conversation"), tenant: ChannelOpaqueIdSchema, space: ChannelOpaqueIdSchema, message: z.object(richMessage).strict() }).strict(),
+  /**
+   * Phase 7c: posts a message in a space, in a thread or as a new one, or privately to one person there; answers the
+   * message's ID and its thread. Used where the core must know what was posted, such as a card it edits later.
+   */
+  z.object({
+    ...commandBase, kind: z.literal("post_message"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, thread: ChannelOpaqueIdSchema.optional(),
+    message: z.object(richMessage).strict(), audience: MessageAudienceSchema.optional(),
+  }).strict(),
+  /** A message to one person outside any conversation; answers where it went and its ID. */
+  z.object({ ...commandBase, kind: z.literal("direct_message"), to: ActorRefSchema, message: z.object(richMessage).strict() }).strict(),
+  /** Replaces a message the adapter posted for the core. */
+  z.object({ ...commandBase, kind: z.literal("update_message"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, messageId: ChannelOpaqueIdSchema, message: z.object(richMessage).strict() }).strict(),
   /** A titled Markdown document people in the space can read, such as a task's plan; answers its ID and link. */
-  z.object({ ...commandBase, kind: z.literal("create_document"), tenant: ChannelOpaqueIdSchema, space: ChannelOpaqueIdSchema, title: z.string().trim().min(1).max(150), markdown: z.string().min(1).max(100_000) }).strict(),
+  z.object({ ...commandBase, kind: z.literal("create_document"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, title: z.string().trim().min(1).max(150), markdown: z.string().min(1).max(100_000) }).strict(),
   z.object({ ...commandBase, kind: z.literal("delete_document"), documentId: ChannelOpaqueIdSchema }).strict(),
   /** One page of the people in a space. */
   z.object({ ...commandBase, kind: z.literal("space_members"), tenant: ChannelOpaqueIdSchema, space: ChannelOpaqueIdSchema, cursor: z.string().min(1).max(500).optional() }).strict(),
@@ -375,6 +399,10 @@ export type ChannelCommand = z.infer<typeof ChannelCommandSchema>;
 /** What each command answers on success. */
 export const ChannelCommandResultSchemas = {
   start_conversation: z.object({ thread: ChannelOpaqueIdSchema }).strict(),
+  /** A private message has no ID to edit. */
+  post_message: z.object({ space: ChannelOpaqueIdSchema, messageId: ChannelOpaqueIdSchema.optional(), thread: ChannelOpaqueIdSchema.optional() }).strict(),
+  direct_message: z.object({ space: ChannelOpaqueIdSchema, messageId: ChannelOpaqueIdSchema }).strict(),
+  update_message: z.object({ updated: z.literal(true) }).strict(),
   create_document: z.object({ documentId: ChannelOpaqueIdSchema, url: HttpsUrl }).strict(),
   delete_document: z.object({ deleted: z.boolean() }).strict(),
   space_members: z.object({ members: z.array(ChannelOpaqueIdSchema).max(1_000), nextCursor: z.string().min(1).max(500).optional() }).strict(),
