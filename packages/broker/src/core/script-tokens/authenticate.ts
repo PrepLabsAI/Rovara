@@ -49,7 +49,7 @@ export function scriptTokenRoute(method: string, pathname: string): AllowedRoute
 }
 
 /** What a script token's caller carries: the token, scoped. */
-export interface ScriptTokenScope { tokenId: string; name: string; permissions: readonly ("read" | "start")[]; projects: readonly string[] }
+export interface ScriptTokenScope { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] }
 
 export interface ScriptTokenAuthDependencies extends ScriptTokenDependencies {
   /** The install's company: a token of another company is refused as an unknown one. */

@@ -216,7 +216,7 @@ export async function createScriptToken(deps: ScriptTokenDependencies, caller: S
   const input = parsed.data;
   const days = input.days ?? SCRIPT_TOKEN_DEFAULT_DAYS;
   const projects = [...input.projects].sort();
-  const permissions = (["read", "start"] as const).filter((permission) => input.permissions.includes(permission));
+  const permissions = (["read", "start", "lessons"] as const).filter((permission) => input.permissions.includes(permission));
   const { orgId, developerId } = caller;
   const fingerprint = sha256({ route: "script_token_create", name: input.name, projects, permissions, days });
   const markKey = agentRequestKey(orgId, developerId, input.requestId);
