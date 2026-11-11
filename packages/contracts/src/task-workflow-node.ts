@@ -2498,6 +2498,22 @@ export function workflowFindingProblem(role: "CRITIC" | "SECURITY", finding: { t
   return { source: REVIEW_ROLE_NAMES[role], text: `${finding.text}${where}` };
 }
 
+/** How many of the owner's plan-review instructions a coding run is given (the newest). */
+export const OWNER_PLAN_INSTRUCTIONS_MAX = 5;
+/** The longest one of them, in characters. */
+export const OWNER_PLAN_INSTRUCTION_MAX_CHARS = 500;
+
+/**
+ * The owner's own instructions from plan review: the reasons of their Request changes decisions at the plan gate, the newest few, each cut to 500 characters. Only those: not the
+ * owner's page comments, thread replies, check or review output, Rovara's own decisions (actor AGENTX) or a decision made another way than the gate (a send-back, a feedback decision).
+ * The coding prompt repeats them as the owner's words, and the worker keeps them through conversation compaction (the `workflowApprovedPlan` field), so what counts as one is decided here, once.
+ */
+export function ownerPlanInstructions(workflow: Pick<WorkflowSnapshot, "decisions">): string[] {
+  return workflow.decisions
+    .filter((decision) => decision.decision === "REQUEST_CHANGES" && decision.actorRole !== "AGENTX" && (decision.source === undefined || decision.source === "GATE"))
+    .slice(-OWNER_PLAN_INSTRUCTIONS_MAX).map((decision) => decision.reason.slice(0, OWNER_PLAN_INSTRUCTION_MAX_CHARS));
+}
+
 /**
  * The problems a send-back asks the coder to fix, about the current code only: each review finding the change
  * introduced, as "text (file:line)", each selected check that failed, as "<label> failed", and each test a review-only

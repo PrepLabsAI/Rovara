@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BUDGET_EXHAUSTED_FAILURE_MESSAGE, taskGraphDigest, type TaskGraphV1 } from "@agentx/contracts";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
+import { PART_SCOPE_SENTENCE, SERIAL_SCOPE_SENTENCE } from "../../packages/worker/src/compaction.js";
 import { runTaskInvocation, type TaskInvocationResult } from "../../packages/worker/src/run-task.js";
 import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 
@@ -44,9 +45,11 @@ interface Scenario {
   sequenceStart?: number;
   /** The repository's path in the manifest; default repo/app. */
   manifestPath?: string;
+  /** The approved plan the broker sent as its own field. */
+  approvedPlan?: { markdown: string; sha256: string; ownerInstructions?: string[] };
 }
 
-async function run(scenario: Scenario): Promise<{ result?: TaskInvocationResult; error?: Error; events: Ev[]; cwds: string[]; peak: number; operationId: string; artifacts: string[] }> {
+async function run(scenario: Scenario): Promise<{ result?: TaskInvocationResult; error?: Error; events: Ev[]; cwds: string[]; peak: number; operationId: string; artifacts: string[]; facts: Array<{ title: string; facts: string | undefined }> }> {
   const git = (...args: string[]) => execFileSync("git", ["-C", repository, ...args], { encoding: "utf8" }).trim();
   const resolvedCommit = git("rev-parse", "HEAD");
   const at = new Date().toISOString();
@@ -61,8 +64,10 @@ async function run(scenario: Scenario): Promise<{ result?: TaskInvocationResult;
   const running = { now: 0, peak: 0 };
   const events: Ev[] = [];
   const artifacts: string[] = [];
+  // What each session's compaction options would keep, read when its prompt runs (a serial run changes it per item).
+  const facts: Array<{ title: string; facts: string | undefined }> = [];
   const adapter = {
-    async create({ sessionDirectory, cwd }: { sessionDirectory: string; cwd: string }) {
+    async create({ sessionDirectory, cwd, compaction }: { sessionDirectory: string; cwd: string; compaction?: { planFacts?: () => string | undefined } }) {
       cwds.push(cwd);
       const spent = cwds.length * 10;
       const sessionFile = join(sessionDirectory, `fixture-${cwds.length}.jsonl`);
@@ -73,6 +78,7 @@ async function run(scenario: Scenario): Promise<{ result?: TaskInvocationResult;
         sessionFile, conversationId: "fixture",
         async prompt(text: string) {
           const title = /Title: (.*)/u.exec(text)?.[1] ?? "main";
+          facts.push({ title, facts: compaction?.planFacts?.() });
           running.now += 1;
           running.peak = Math.max(running.peak, running.now);
           let failure: string | undefined;
@@ -89,16 +95,16 @@ async function run(scenario: Scenario): Promise<{ result?: TaskInvocationResult;
     },
   };
   const invocation = { protocolVersion: 1, kind: "task", operationId, workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64),
-    payload: { conversationId: randomUUID(), prompt: "Implement", workflowMode: "IMPLEMENT", workflowBase: [{ repositoryId: "app", baseCommitSha: resolvedCommit }],
+    payload: { conversationId: randomUUID(), prompt: "Implement", workflowMode: "IMPLEMENT", ...(scenario.approvedPlan === undefined ? {} : { workflowApprovedPlan: scenario.approvedPlan }), workflowBase: [{ repositoryId: "app", baseCommitSha: resolvedCommit }],
       workflowDependencies: { graph, ...(scenario.parallel === undefined ? {} : { parallel: scenario.parallel }), ...(scenario.sequenceStart === undefined ? {} : { sequenceStart: scenario.sequenceStart }),
         ...(scenario.resumeProgress === undefined ? {} : { resumeProgress: scenario.resumeProgress }),
         approval: { artifactDigest: "a".repeat(64), graphDigest: taskGraphDigest(graph), workflowRevision: 2, actorId: "b".repeat(64), runId } } } };
   try {
     const result = await runTaskInvocation(invocation as never, { rootPath: root, model: { provider: "fixture", modelId: "fixture" }, piAdapter: adapter,
       ...(scenario.controller === undefined ? {} : { cancellationController: scenario.controller }), eventSink: async (batch) => { events.push(...(batch as unknown as Ev[])); }, artifactSink: async (artifact) => { artifacts.push(artifact.name); } });
-    return { result, events, cwds, peak: running.peak, operationId, artifacts };
+    return { result, events, cwds, peak: running.peak, operationId, artifacts, facts };
   } catch (error) {
-    return { error: error as Error, events, cwds, peak: running.peak, operationId, artifacts };
+    return { error: error as Error, events, cwds, peak: running.peak, operationId, artifacts, facts };
   }
 }
 
@@ -279,5 +285,43 @@ describe("a v2 task's parts, run by the worker", () => {
     const findings = (outcome.error as { noChangeFindings?: { commands: unknown[]; conclusion?: string } } | undefined)?.noChangeFindings;
     expect(findings?.commands).toEqual([{ command: "check A", output: "output of A" }, { command: "check B", output: "output of B" }]);
     expect(findings?.conclusion).toBe("Part 1:\nA done\n\nPart 2:\nB done");
+  });
+});
+
+describe("what a coding run keeps through a conversation compaction", () => {
+  const PLAN = { markdown: ["# Plan v1: Three items", "## Claims", "- 1. Build A", "- 2. Build B", "## Not changing", "- the public API"].join("\n"), sha256: "d".repeat(64) };
+  const items = [item(A, "Alpha"), item(B, "Bravo")];
+
+  it("gives each parallel part only its own item and the sentence that limits it, never the plan or its siblings", async () => {
+    const outcome = await run({
+      graph: { schemaVersion: 1, taskId: randomUUID(), version: 1, items }, parallel: { max: 2 }, approvedPlan: PLAN,
+      act: async (title, cwd) => { await writeFile(join(cwd, `${title}.txt`), "x\n"); return undefined; },
+    });
+    expect(outcome.error).toBeUndefined();
+    for (const title of ["Alpha", "Bravo"]) {
+      const kept = outcome.facts.find((entry) => entry.title === title)?.facts;
+      expect(kept).toBeDefined();
+      expect(kept).toContain(`Title: ${title}`);
+      expect(kept).toContain(PART_SCOPE_SENTENCE);
+      const sibling = title === "Alpha" ? "Bravo" : "Alpha";
+      expect(kept).not.toContain(sibling);
+      expect(kept).not.toContain("Build A");
+      expect(kept).not.toContain("the public API");
+    }
+  });
+
+  it("keeps the plan and the current item for a serial run, and the next item replaces the last", async () => {
+    const outcome = await run({
+      graph: { schemaVersion: 1, taskId: randomUUID(), version: 1, items }, approvedPlan: PLAN,
+      act: async (title, cwd) => { await writeFile(join(workFolder(cwd), `${title}.txt`), "x\n"); return undefined; },
+    });
+    expect(outcome.error).toBeUndefined();
+    const first = outcome.facts.find((entry) => entry.title === "Alpha")?.facts;
+    const second = outcome.facts.find((entry) => entry.title === "Bravo")?.facts;
+    for (const kept of [first, second]) { expect(kept).toContain("Build A"); expect(kept).toContain("the public API"); expect(kept).toContain(SERIAL_SCOPE_SENTENCE); }
+    expect(first).toContain("Title: Alpha");
+    expect(first).not.toContain("Title: Bravo");
+    expect(second).toContain("Title: Bravo");
+    expect(second).not.toContain("Title: Alpha");
   });
 });

@@ -171,6 +171,18 @@ describe("deciding and commenting on the task page, end to end", () => {
     expect(implement).toContain("> Above reads better on a phone.");
     expect(implement).toContain("> Keep the banner copy short.");
     expect(codingRuns(e2e)).toHaveLength(1);
+    // The worker also gets the plan as its own field, with the owner's answer, for its conversation summaries: it never reads the plan back out of the prompt.
+    const coding = e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "IMPLEMENT");
+    expect(coding.length).toBeGreaterThan(0);
+    for (const run of coding) {
+      expect(Object.keys(run.kind === "task" ? run.payload : {})).toContain("workflowApprovedPlan");
+      const kept = (run.kind === "task" ? run.payload.workflowApprovedPlan : undefined);
+      expect(kept?.markdown).toContain("Owner chose: Above (AgentX recommended: Below)");
+      expect(kept?.sha256).toMatch(/^[a-f0-9]{64}$/u);
+      // The owner's page comments went to the coder inside the prompt, marked untrusted; they are not the owner's plan-review instructions and are not in this field.
+      expect(kept?.ownerInstructions).toEqual([]);
+      expect(JSON.stringify(kept?.ownerInstructions)).not.toContain("banner");
+    }
     // The code reviewers judge the change against the plan as the owner answered it.
     const reviews = e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW");
     expect(reviews.length).toBeGreaterThan(0);

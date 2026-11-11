@@ -3,6 +3,7 @@ import { mkdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
+  compact,
   createAgentSession,
   createBashToolDefinition,
   createEditToolDefinition,
@@ -13,6 +14,7 @@ import {
   createWriteToolDefinition,
   DefaultResourceLoader,
   type BashOperations,
+  type AgentSession,
   type BashSpawnContext,
   type InlineExtension,
   type ModelRuntime,
@@ -23,10 +25,12 @@ import {
   type SessionStats,
   type Skill,
 } from "@earendil-works/pi-coding-agent";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { ROUTE_PROVIDER, createModelRuntimeWithFallback, routeUsageIdentity, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice, type ModelProxyOptions } from "@agentx/model-runtime";
 import { createPiSettingsManager } from "@agentx/model-runtime/pi-settings";
 import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type InvocationModelRoute, type ThinkingLevel } from "@agentx/contracts";
+import { compactionExtension, type CompactionSummariser, type SessionCompactionOptions } from "./compaction.js";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import type { FileOpsTarget } from "./file-ops-exec.js";
@@ -162,6 +166,11 @@ export interface PiSessionInput {
    * judges (Understand, Plan, the plan check, a review); never to Build or a setup run. After `ANSWER_REFUSALS_MAX` refused answers in a row the session is told to answer in plain text instead.
    */
   answerTools?: readonly ToolDefinition[];
+  /**
+   * What the conversation-compaction hook knows (compaction.ts): the stage's source-text guard, the approved plan's facts and where to report a compaction. The hook is on in every
+   * session; without these it still stubs any source result in what it summarises.
+   */
+  compaction?: SessionCompactionOptions;
   /** Tool calls of one assistant message run one after another, never side by side (the setup agent's limits are counted per command). Default: pi's own (parallel). */
   sequentialTools?: boolean;
   /** The most output tokens one model turn may produce: the model's own limit is lowered to this when it is higher. Default: the model's. */
@@ -259,6 +268,8 @@ export async function createWorkspacePiSession(
     contextMcp?: ContextMcpSession;
     /** Structured answers: the tool(s) the step delivers its answer through (see PiSessionInput.answerTools). */
     answerTools?: readonly ToolDefinition[];
+    /** The compaction hook's inputs (see PiSessionInput.compaction). */
+    compaction?: SessionCompactionOptions;
     /** Where the agent works, when that is not the workspace root: a folder inside it (a parallel part's working copy). Its saved transcript and settings stay in the root's. */
     workingDirectory?: string;
     /**
@@ -326,6 +337,7 @@ export async function createWorkspacePiSession(
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
     ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
     ...(input.answerTools === undefined ? {} : { answerTools: input.answerTools }),
+    ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return withLoadedKnowledge(handle, knowledgeLoad?.manifest);
@@ -361,6 +373,7 @@ export async function openRegisteredWorkspacePiSession(
     contextMcp?: ContextMcpSession;
     /** As for `createWorkspacePiSession`. */
     answerTools?: readonly ToolDefinition[];
+    compaction?: SessionCompactionOptions;
     /** As for `createWorkspacePiSession`. */
     contextFilesAt?: "working-tree" | "base-commit";
     baseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
@@ -412,6 +425,7 @@ export async function openRegisteredWorkspacePiSession(
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
     ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
     ...(input.answerTools === undefined ? {} : { answerTools: input.answerTools }),
+    ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return withLoadedKnowledge(handle, knowledgeLoad?.manifest);
@@ -558,7 +572,22 @@ async function createDefaultSession(
     // The rovara MCP server, and no other: Pi's MCP extension is loaded only for a session with sources, held to that one server (context-sources/pi-mcp.ts).
     const sourceMcp = input.contextMcp === undefined ? undefined : rovaraMcpExtensions(input.contextMcp);
     const hasSources = sourceTools.length > 0 || input.contextMcp !== undefined;
-    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun, ...(sourceMcp?.extensions ?? [])], loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : {}) });
+    // The conversation-compaction hook (compaction.ts): the summary is made with this session's own model, key and stream, from messages with every source result stubbed.
+    const live: { session?: AgentSession } = {};
+    const summarise: CompactionSummariser = async (preparation, instructions, signal) => {
+      const model = live.session?.model ?? sessionModel;
+      // As Pi does: with the default stream, a key that cannot be resolved is an error to see; with a custom stream (the worker's own runtimes carry their key) it is left to the stream.
+      const streamFunction = live.session?.agent.streamFunction;
+      let auth: Awaited<ReturnType<ModelRuntime["getAuth"]>>;
+      try { auth = await modelRuntime.getAuth(model, { signal }); } catch (error) { if (signal.aborted || streamFunction === streamSimple) throw error; auth = undefined; }
+      const requestModel = auth?.auth.baseUrl ? { ...model, baseUrl: auth.auth.baseUrl } : model;
+      const headers = auth?.auth.headers === undefined ? undefined : (Object.fromEntries(Object.entries(auth.auth.headers).filter((entry) => entry[1] !== null)) as Record<string, string>);
+      // A retry of the summary is reported as a fixed sentence (the provider's own words are not).
+      const retries = { onRetryScheduled: (attempt: number, maxAttempts: number) => { try { input.onDiagnostic?.(`conversation compaction: the summary will be tried again (${String(attempt)} of ${String(maxAttempts)})`); } catch { /* reporting must not break a turn */ } } };
+      return compact(preparation, requestModel, auth?.auth.apiKey, headers, instructions, signal, live.session?.thinkingLevel, streamFunction, auth?.env, settingsManager.getRetrySettings(), retries);
+    };
+    const compaction = compactionExtension(input.compaction ?? {}, summarise, input.onDiagnostic === undefined ? undefined : (message) => { try { input.onDiagnostic?.(redactText(message)); } catch { /* reporting must not break a turn */ } });
+    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun, ...(sourceMcp?.extensions ?? []), compaction], loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : {}) });
     // An AgentX extension that failed to load would leave its work silently undone, so the session does not start.
     // It is a deterministic AgentX bug, so not RUNTIME_UNAVAILABLE, which the broker reads as "retry" (M-10).
     const loadErrors = resourceLoader.getExtensions().errors;
@@ -599,6 +628,7 @@ async function createDefaultSession(
       settingsManager,
       sessionManager: manager,
     });
+    live.session = session;
     // Both the shell tool (executionMode) and the agent's own setting: a message with several tool calls runs them one at a time.
     if (input.sequentialTools === true) session.agent.toolExecution = "sequential";
     // Structured answers: a refused answer (Pi's schema check, or the step's own reader) is retried by the model in the same run. After ANSWER_REFUSALS_MAX in a row the model is told once to answer in plain text,

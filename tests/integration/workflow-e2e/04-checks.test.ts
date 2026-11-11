@@ -44,6 +44,14 @@ describe("Suite 4: checks", () => {
     // The coder was told what failed.
     const [fix] = modelInputs(e2e, mark).filter((input) => input.includes(SENT_BACK));
     expect(fix).toContain(projectLabel(e2e));
+    // Every coding run, the send-back included, carries the approved plan as the worker's own field (for its conversation summaries), not only inside the prompt.
+    const coding = e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "IMPLEMENT");
+    expect(coding.length).toBeGreaterThanOrEqual(2);
+    for (const run of coding) {
+      expect(run.kind === "task" ? run.payload.workflowApprovedPlan?.sha256 : undefined).toMatch(/^[a-f0-9]{64}$/u);
+      // The owner's Send back is a decision at another gate than plan review: it is not one of the plan-review instructions.
+      expect(run.kind === "task" ? run.payload.workflowApprovedPlan?.ownerInstructions : undefined).toEqual([]);
+    }
     const workflow = e2e.workflow();
     expect(workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     const fixedTree = workflow.candidate!.repositories[0]!.treeSha;

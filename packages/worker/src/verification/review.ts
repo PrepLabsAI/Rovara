@@ -47,6 +47,7 @@ import { isTestPath } from "./test-paths.js";
 import { z } from "zod";
 import { answerSchemaOf, answerToolInstruction, createAnswerChannel, structuredAnswersEnabled, type AnswerChannel } from "../structured-answer.js";
 import { reviewAnswerSpec, specWalkAnswerSpec } from "../structured-answer-specs.js";
+import type { SessionCompactionOptions } from "../compaction.js";
 
 export { isTestPath };
 
@@ -736,6 +737,8 @@ export async function runWorkflowReviews(input: {
    * sources' labels. A finding that cites a source and no code or test is made advisory (downgradeSourceOnlyFindings), so a ticket can neither block nor excuse a change.
    */
   sources?: { tools: readonly ToolDefinition[]; /** The same sources through Pi's own MCP client (the rovara server) in place of `tools`. */ mcp?: ContextMcpSession; note: string; labels: readonly { label: string }[] };
+  /** What each reviewer's conversation compaction needs (compaction.ts): the stage's source-text guard, and where a compaction is reported. */
+  compaction?: SessionCompactionOptions;
   /** The broker's base commit per repository, for the reviewers' rule files. Required: no caller can fall back to a base the agent could write. */
   ruleFileBaseCommits: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   piAdapter?: PiSessionAdapter;
@@ -863,6 +866,7 @@ export async function runWorkflowReviews(input: {
         baseCommits: input.ruleFileBaseCommits,
         ...(input.sources === undefined ? {} : { contextTools: input.sources.tools, contextNote: input.sources.note, ...(input.sources.mcp === undefined ? {} : { contextMcp: input.sources.mcp }) }),
         ...(reviewAnswers === undefined ? {} : { answerTools: [reviewAnswers.tool, ...(walkAnswers === undefined ? [] : [walkAnswers.tool])] }),
+        ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
       }, input.piAdapter);
       try { const loaded = session.loadedKnowledge?.(); if (loaded !== undefined) input.onLoadedKnowledge?.({ ...loaded, role }, role); } catch { /* a record that cannot be made is left out */ }
       const actualModel = session.getModel();

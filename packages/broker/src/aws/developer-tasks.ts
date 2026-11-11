@@ -78,6 +78,8 @@ import {
   type ProjectCommand,
   type WorkflowReviewBase,
   type WorkflowReviewChecks,
+  ownerPlanInstructions,
+  type WorkflowApprovedPlan,
   type WorkflowReviewPlan,
   type WorkflowReviewFeedback,
   type WorkflowFeedbackReviewReport,
@@ -2113,7 +2115,7 @@ export async function decideTaskWorkflow(
           ...applicationConditions,
           accessFence(deps, access),
         ];
-      }, { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }),
+      }, { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(mode === "IMPLEMENT" ? approvedPlanOf(workflow, plan, currentPlan.sha256) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }),
         // M1.3 Task 3.7b (owner decision D2): the coding run also exports the unchanged code, for the approved application plan's baseline round.
         ...(mode === "IMPLEMENT" && baselineSource ? { workflowE2EBaselineSource: true as const } : {}) });
     });
@@ -2627,7 +2629,6 @@ async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow
 }
 
 /** How many of the owner's plan-review instructions a coding prompt repeats (the newest): each is at most 500 characters. */
-const OWNER_PLAN_INSTRUCTIONS_MAX = 5;
 
 /**
  * What every later round of the coder must keep to, whoever sent the work back (the owner's Send back, a finding to fix, a restart, or Rovara by itself): the owner's own instructions from
@@ -2636,9 +2637,7 @@ const OWNER_PLAN_INSTRUCTIONS_MAX = 5;
  * Empty when there is nothing to carry.
  */
 function ownerConstraintsSection(workflow: WorkflowSnapshot, plan: { notChanging?: string[] }): string {
-  const instructions = workflow.decisions
-    .filter((decision) => decision.decision === "REQUEST_CHANGES" && decision.actorRole !== "AGENTX" && (decision.source === undefined || decision.source === "GATE"))
-    .slice(-OWNER_PLAN_INSTRUCTIONS_MAX).map((decision) => decision.reason);
+  const instructions = ownerPlanInstructions(workflow);
   // A plan with nothing that stays as it is says "None".
   const staying = (plan.notChanging ?? []).filter((entry) => entry.trim().toLowerCase() !== "none");
   const lines = [
@@ -2741,6 +2740,7 @@ async function queueWorkflowCoding(
   const { task } = access;
   const { workflow } = task;
   const receivedAt = iso(deps);
+  const approvedPlan = await workflowApprovedPlanOption(deps, workflow);
   try {
     await withCurrentThreadNotes(deps, task, input.requestId, (current, notes) => {
       const fed = fedThroughUpdate(notes);
@@ -2773,7 +2773,7 @@ async function queueWorkflowCoding(
           request: input.request, response: `${input.response} as operation ${operation.id}.`, operationId: operation.id,
         })),
         accessFence(deps, access),
-      ], { sharedTask: task.shared === true, workflowMode: "IMPLEMENT", ...selectedCheckCommands(input.next), ...taskBaseOption(task, input.next), ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }) });
+      ], { sharedTask: task.shared === true, workflowMode: "IMPLEMENT", ...selectedCheckCommands(input.next), ...taskBaseOption(task, input.next), ...approvedPlan, ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }) });
     });
   } catch (error) {
     if (isConditional(error)) await authorizeTaskAction(deps, caller, task.taskId, "control");
@@ -3086,6 +3086,26 @@ async function workflowReviewPlanOption(deps: DeveloperTaskRouteDependencies, wo
     markdown: shortenMarkdown(approved.text, WORKFLOW_PLAN_MAX_BYTES), sha256: approved.sha256,
     ...(approved.e2eIntent === undefined ? {} : { e2eIntent: approved.e2eIntent }),
   } };
+}
+
+/**
+ * The approved plan as structured data for the coding worker's conversation compaction (it keeps the plan's key facts in every summary): the Markdown copy, its digest and the owner's
+ * own plan-review instructions. The worker reads the plan from here and never out of the prompt, which can hold a teammate's reply or a page comment. Absent when the plan cannot be read.
+ */
+async function workflowApprovedPlanOption(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ workflowApprovedPlan?: WorkflowApprovedPlan }> {
+  let approved: Awaited<ReturnType<typeof approvedCodingPlan>>;
+  try {
+    approved = await approvedCodingPlan(deps, workflow);
+  } catch (error) {
+    if (error instanceof AgentXError && error.code === "WORKSPACE_NOT_READY") return {};
+    throw error;
+  }
+  return approvedPlanOf(workflow, approved.text, approved.sha256);
+}
+
+/** The approved plan as the worker's own field: the Markdown copy (cut to the plan limit), its digest and the owner's own plan-review instructions. */
+function approvedPlanOf(workflow: Pick<WorkflowSnapshot, "decisions">, markdown: string, sha256: string): { workflowApprovedPlan: WorkflowApprovedPlan } {
+  return { workflowApprovedPlan: { markdown: shortenMarkdown(markdown, WORKFLOW_PLAN_MAX_BYTES), sha256, ownerInstructions: ownerPlanInstructions(workflow) } };
 }
 
 /**

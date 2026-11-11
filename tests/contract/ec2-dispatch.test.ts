@@ -347,6 +347,25 @@ describe("ec2-ebs delivery", () => {
       log.mockRestore();
     });
 
+    it("gives a coding run the approved plan it keeps through compaction only on a worker that lists it; an older worker runs without it and keeps the other fields", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];
+      const workflowApprovedPlan = { markdown: "# Plan\n\nDo the thing.", sha256: "b".repeat(64), ownerInstructions: ["Do not touch package.json"] };
+      const record = taskRecord({ workflowMode: "IMPLEMENT", workflowBase, workflowApprovedPlan });
+      const base = ["task.workflowMode", "task.workflowBase"];
+      const capable = delivery({ workerFeatures: async () => [...base, "task.workflowApprovedPlan.v1"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).workflowApprovedPlan).toEqual(workflowApprovedPlan);
+      const older = delivery({ workerFeatures: async () => base });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowApprovedPlan");
+      expect(postedPayload(older.post).workflowBase).toEqual(workflowBase);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.approved_plan_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
     it("gives reviewers the approved plan only on a worker that lists it; an older worker reviews without it and keeps the other fields", async () => {
       const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
       const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];

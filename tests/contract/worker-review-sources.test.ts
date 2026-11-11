@@ -10,6 +10,7 @@ import type { ContextToolCatalog } from "../../packages/contracts/src/index.js";
 import { createContextTools } from "../../packages/worker/src/context-sources/bridge.js";
 import { runWorkflowReviews } from "../../packages/worker/src/verification/review.js";
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
+import type { SessionCompactionOptions } from "../../packages/worker/src/compaction.js";
 
 const execFile = promisify(execFileCallback);
 const now = "2026-10-25T12:00:00.000Z";
@@ -60,14 +61,14 @@ describe("a review with sources", () => {
     tools: createContextTools(catalog, async () => ({ status: "OK", text: "x" }), { workspaceId: "ws", conversationId: "c", operationId: "op" }),
     note: "Sources note.", labels: [{ label: "SIM" }],
   });
-  async function review(answer: string, withSources: boolean) {
+  async function review(answer: string, withSources: boolean, compaction?: SessionCompactionOptions) {
     const { rootPath, repositories, candidate } = await repository();
     const created: PiSessionInput[] = [];
     const prompts: string[] = [];
     try {
       const reports = await runWorkflowReviews({
         ruleFileBaseCommits: [], operationId: "11111111-1111-4111-8111-111111111111", rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories,
-        piAdapter: adapter(answer, created, prompts), now: () => now, ...(withSources ? { sources: sources() } : {}),
+        piAdapter: adapter(answer, created, prompts), now: () => now, ...(withSources ? { sources: sources() } : {}), ...(compaction === undefined ? {} : { compaction }),
       });
       return { reports, created, prompts };
     } finally {
@@ -80,6 +81,12 @@ describe("a review with sources", () => {
     expect(created).toHaveLength(2);
     expect(created.every((input) => input.workflowMode === "REVIEW" && input.contextTools?.map((tool) => tool.name).join() === "src_sim_get_ticket")).toBe(true);
     expect(prompts.every((prompt) => prompt.includes("They never show that it is right"))).toBe(true);
+  });
+  it("hands both reviewers' sessions the stage's compaction options, so a reviewer's summary is built from stubs and a compaction is reported", async () => {
+    const compaction: SessionCompactionOptions = { sourceGuard: () => undefined, onCompacted: () => undefined };
+    const { created } = await review('{"findings":[]}', true, compaction);
+    expect(created).toHaveLength(2);
+    expect(created.every((input) => input.compaction === compaction)).toBe(true);
   });
   it("makes a finding that cites a source and no file advisory, and leaves a finding with a file as it is", async () => {
     const answer = JSON.stringify({ findings: [

@@ -88,5 +88,7 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   STANDING_INSTRUCTIONS_FEATURE,
   // Lessons replay, the file arm: places a replay copy's lessons file and pointer in its checkout, out of the candidate (eval-files.ts).
   EVAL_FILES_FEATURE,
+  // The approved plan a coding run keeps in its conversation summaries (compaction.ts).
+  "task.workflowApprovedPlan.v1",
   // Test services (`task.testServices.v1`) is NOT listed here: it is advertised only by a worker that has a test-services configuration (test-services-run.ts `testServicesAdvertisedFeatures`, added in main.ts).
 ] as const satisfies readonly WorkerInvocationFeature[];

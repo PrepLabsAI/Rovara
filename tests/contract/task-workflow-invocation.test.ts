@@ -82,6 +82,23 @@ describe("workflow-mode worker invocation", () => {
     expect(WORKER_INVOCATION_FEATURES).toContain("task.evidenceCapture.v1");
   });
 
+  it("carries the approved plan a coding run keeps through compaction, with its digest and the owner's instructions, only on a coding operation and within 32,768 bytes", () => {
+    const sha256 = "a".repeat(64);
+    const plan = (workflowApprovedPlan: unknown, workflowMode: string | undefined = "IMPLEMENT") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, ...(workflowMode === undefined ? {} : { workflowMode }), workflowApprovedPlan } }).success;
+    expect(plan({ markdown: "# Plan\n\nDo the thing.", sha256 })).toBe(true);
+    expect(plan({ markdown: "# Plan", sha256, ownerInstructions: ["Do not touch package.json"] })).toBe(true);
+    expect(plan({ markdown: "# Plan", sha256 }, undefined)).toBe(true);
+    expect(plan({ markdown: "x".repeat(32_769), sha256 })).toBe(false);
+    expect(plan({ markdown: "", sha256 })).toBe(false);
+    expect(plan({ markdown: "# Plan", sha256: "nope" })).toBe(false);
+    expect(plan({ markdown: "# Plan", sha256, extra: 1 })).toBe(false);
+    expect(plan({ markdown: "# Plan", sha256, ownerInstructions: ["x".repeat(501)] })).toBe(false);
+    expect(plan({ markdown: "# Plan", sha256, ownerInstructions: Array.from({ length: 6 }, () => "x") })).toBe(false);
+    expect(plan({ markdown: "# Plan", sha256 }, "REVIEW")).toBe(false);
+    expect(plan({ markdown: "# Plan", sha256 }, "PLAN")).toBe(false);
+    expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowApprovedPlan.v1");
+  });
+
   it("carries the approved plan for the reviewers, with its digest, only on a review operation and within 32,768 bytes", () => {
     const sha256 = "a".repeat(64);
     const plan = (workflowReviewPlan: unknown, workflowMode = "REVIEW") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, workflowReviewPlan } }).success;

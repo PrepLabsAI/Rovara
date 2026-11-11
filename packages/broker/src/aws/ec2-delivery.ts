@@ -301,6 +301,7 @@ async function forWorkerFeatures(
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
   const carriesReviewChecks = invocation.kind === "task" && (invocation.payload.workflowReviewChecks !== undefined || invocation.payload.workflowReviewPlan !== undefined
     || invocation.payload.workflowReviewFeedback !== undefined || invocation.payload.workflowReviewNote !== undefined);
+  const carriesApprovedPlan = invocation.kind === "task" && invocation.payload.workflowApprovedPlan !== undefined;
   const carriesWorkflowMode = invocation.kind === "task" && invocation.payload.workflowMode !== undefined;
   const carriesFeedbackReview = invocation.kind === "task" && invocation.payload.workflowMode === "FEEDBACK_REVIEW";
   const carriesFeedbackApproval = invocation.kind === "task" && invocation.payload.workflowFeedbackApproval !== undefined;
@@ -321,7 +322,7 @@ async function forWorkerFeatures(
   const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
   const carriesChatGpt = invocation.kind === "task" && invocation.payload.chatgpt !== undefined;
   const carriesProjectSetupSmoke = invocation.kind === "project-setup-smoke";
-  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesPlanQuality && !carriesApplicationPlans && !carriesApplicationAdmission && !carriesAgentSteps && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
+  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesApprovedPlan && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesPlanQuality && !carriesApplicationPlans && !carriesApplicationAdmission && !carriesAgentSteps && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -495,8 +496,18 @@ async function forWorkerFeatures(
       workspaceId: invocation.workspaceId,
     }));
   }
-  const withFeedback = withoutReviewFeedback(withPlan, features);
-  if (withFeedback !== withPlan) {
+  const withKeptPlan = withoutApprovedPlan(withPlan, features);
+  if (withKeptPlan !== withPlan) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.approved_plan_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
+  const withFeedback = withoutReviewFeedback(withKeptPlan, features);
+  if (withFeedback !== withKeptPlan) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.review_feedback_omitted",
@@ -639,6 +650,16 @@ function withoutReviewChecks(invocation: WorkerInvocation, features: readonly st
   if (invocation.kind !== "task" || invocation.payload.workflowReviewChecks === undefined || features.includes("task.workflowReviewChecks")) return invocation;
   const payload = { ...invocation.payload };
   delete payload.workflowReviewChecks;
+  return { ...invocation, payload };
+}
+
+/**
+ * A coding run without the approved plan it keeps through compaction, for a worker that does not parse it. Such a worker's conversation summaries carry no plan, as before.
+ */
+function withoutApprovedPlan(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.workflowApprovedPlan === undefined || features.includes("task.workflowApprovedPlan.v1")) return invocation;
+  const payload = { ...invocation.payload };
+  delete payload.workflowApprovedPlan;
   return { ...invocation, payload };
 }
 

@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import {
   WORKFLOW_REGRESSION_INSTRUCTION, workflowSelectedChecks,
-  type ProjectCommand, type WorkflowCheckPolicy, type WorkflowSendBackProblem, type WorkflowSnapshot,
+  type ProjectCommand, type WorkflowCheckPolicy, type WorkflowSendBackProblem, type WorkflowSnapshot, ownerPlanInstructions,
 } from "@agentx/contracts";
 import { inertReplyText } from "../../developer/prompt-text.js";
 
@@ -30,18 +30,13 @@ export function sendBackProblemsPromptSection(problems: readonly WorkflowSendBac
     ...(problems.some((problem) => problem.regressed === true) ? [WORKFLOW_REGRESSION_INSTRUCTION] : [])].join("\n");
 }
 
-/** How many of the owner's plan-review instructions a coding prompt repeats (the newest): each is at most 500 characters. */
-const OWNER_PLAN_INSTRUCTIONS_MAX = 5;
-
 /**
  * What every later round of the coder must keep to, whoever sent the work back: the owner's own instructions from plan review (their Request changes reasons) and the approved plan's
  * Not changing list. A fix prompted only by "the app stopped" cannot then undo what the owner told the planner. The owner's words stand outside the untrusted problem tags. Empty when
  * there is nothing to carry.
  */
 export function ownerConstraintsSection(workflow: WorkflowSnapshot, plan: { notChanging?: readonly string[] | undefined }): string {
-  const instructions = workflow.decisions
-    .filter((decision) => decision.decision === "REQUEST_CHANGES" && decision.actorRole !== "AGENTX" && (decision.source === undefined || decision.source === "GATE"))
-    .slice(-OWNER_PLAN_INSTRUCTIONS_MAX).map((decision) => decision.reason);
+  const instructions = ownerPlanInstructions(workflow);
   const staying = (plan.notChanging ?? []).filter((entry) => entry.trim().toLowerCase() !== "none");
   const lines = [
     ...(instructions.length === 0 ? [] : ["The owner's instructions from plan review (the owner's own words). They still hold: this change must not undo them.", ...instructions.map((reason, index) => `${index + 1}. ${reason}`)]),

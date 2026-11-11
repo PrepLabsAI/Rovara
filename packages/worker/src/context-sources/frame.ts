@@ -43,6 +43,15 @@ export function stubFor(framedText: string): string {
   return `[${entries.join("; ")} · see Sources]`;
 }
 
+/**
+ * `text` with every source frame in it replaced by the stub of that frame, for text that is not a tool result (a conversation summary): the frame's body is gone, and a
+ * frame tag that is left over (a frame cut off in the middle) loses its angle bracket. Text with no frame comes back as it was. There is no pre-check for the word: the defuser reads look-alike spellings (fullwidth brackets, other hyphens) that a plain match would miss.
+ */
+export function stubSourceFrames(text: string): string {
+  const replaced = text.replace(FRAME, (_all, source: string, item: string, body: string) => `[${source} ${item} · ${kib(Buffer.byteLength(body, "utf8"))} · see Sources]`);
+  return neutralizeFrameTags(replaced);
+}
+
 /** The label of the project's first source, cleaned, for the example: the prompt is the same for every customer except for their own names. */
 function exampleLabel(catalog: ContextToolCatalog): string {
   const label = catalog.sources[0]?.label ?? "Source";
