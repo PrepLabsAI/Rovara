@@ -184,7 +184,7 @@ describe("the adapter's command route", () => {
 
   it("refuses a command it does not run, and one for another channel", async () => {
     const { handler, slack } = system();
-    expect(JSON.parse((await handler(signed({ ...base, kind: "space_members", tenant: TEAM, space: CHANNEL }))).body)).toMatchObject({ ok: false, error: { code: "unsupported" } });
+    expect(JSON.parse((await handler(signed({ ...base, kind: "start_conversation", tenant: TEAM, space: CHANNEL, message: { text: "hi" } }))).body)).toMatchObject({ ok: false, error: { code: "unsupported" } });
     expect((await handler(signed({ ...base, channel: "chatops", kind: "post_message", space: CHANNEL, message: { text: "hi" } }))).statusCode).toBe(400);
     expect((await handler(signed({ ...base, kind: "post_message", space: CHANNEL, message: { text: "hi" } }, generateWebhookSecret()))).statusCode).toBe(401);
     expect(slack.calls).toEqual([]);

@@ -77,11 +77,11 @@ export const ChannelAdapterRecordSchema = z.object({
 export type ChannelAdapterRecord = z.infer<typeof ChannelAdapterRecordSchema>;
 
 /**
- * FR-073: what the built-in adapter can show and do: threads, buttons, edits, private and direct messages, and
- * documents (Phase 7c).
+ * FR-073: what the built-in adapter can show and do: threads, buttons, edits, private and direct messages, documents
+ * and the directory (Phase 7c).
  */
 export const BUILT_IN_ADAPTER_CAPABILITIES: ChannelCapabilities = {
-  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true, direct: true, documents: true,
+  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true, direct: true, documents: true, directory: true,
 };
 
 /** FR-073: the built-in adapter's record, made from the deployment's settings rather than read from the registry. */
@@ -360,6 +360,9 @@ export const COMMAND_CAPABILITY = {
   space_members: "directory",
   user: "directory",
   user_by_email: "directory",
+  space: "directory",
+  spaces: "directory",
+  check: "directory",
 } as const;
 export type ChannelCommandKind = keyof typeof COMMAND_CAPABILITY;
 
@@ -390,11 +393,35 @@ export const ChannelCommandSchema = z.discriminatedUnion("kind", [
   z.object({ ...commandBase, kind: z.literal("create_document"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, title: z.string().trim().min(1).max(150), markdown: z.string().min(1).max(100_000) }).strict(),
   z.object({ ...commandBase, kind: z.literal("delete_document"), documentId: ChannelOpaqueIdSchema }).strict(),
   /** One page of the people in a space. */
-  z.object({ ...commandBase, kind: z.literal("space_members"), tenant: ChannelOpaqueIdSchema, space: ChannelOpaqueIdSchema, cursor: z.string().min(1).max(500).optional() }).strict(),
-  z.object({ ...commandBase, kind: z.literal("user"), tenant: ChannelOpaqueIdSchema, userId: ChannelOpaqueIdSchema }).strict(),
-  z.object({ ...commandBase, kind: z.literal("user_by_email"), tenant: ChannelOpaqueIdSchema, email: z.string().email().max(320) }).strict(),
+  z.object({ ...commandBase, kind: z.literal("space_members"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema, cursor: z.string().min(1).max(500).optional() }).strict(),
+  z.object({ ...commandBase, kind: z.literal("user"), tenant: ChannelOpaqueIdSchema.optional(), userId: ChannelOpaqueIdSchema }).strict(),
+  z.object({ ...commandBase, kind: z.literal("user_by_email"), tenant: ChannelOpaqueIdSchema.optional(), email: z.string().email().max(320) }).strict(),
+  /** Phase 7c1b: a space's name and whether it is private; answers none for a space the adapter does not know. */
+  z.object({ ...commandBase, kind: z.literal("space"), tenant: ChannelOpaqueIdSchema.optional(), space: ChannelOpaqueIdSchema }).strict(),
+  /** One page of the tenant's public, open spaces, to find one by name. */
+  z.object({ ...commandBase, kind: z.literal("spaces"), tenant: ChannelOpaqueIdSchema.optional(), cursor: z.string().min(1).max(500).optional() }).strict(),
+  /** Whether the adapter can reach its surface, and the tenant it serves (Rovara's health check). */
+  z.object({ ...commandBase, kind: z.literal("check") }).strict(),
 ]);
 export type ChannelCommand = z.infer<typeof ChannelCommandSchema>;
+
+/**
+ * Phase 7c1b: a person as the adapter's directory knows them. `tenant` is their own; `linkedTenants` are others they
+ * belong to (Slack Enterprise Grid). `external` is a person from another organisation in a shared space.
+ */
+export const DirectoryUserSchema = z.object({
+  userId: ChannelOpaqueIdSchema,
+  tenant: ChannelOpaqueIdSchema.optional(),
+  linkedTenants: z.array(ChannelOpaqueIdSchema).max(200).optional(),
+  name: z.string().min(1).max(200).optional(),
+  displayName: z.string().max(200).optional(),
+  realName: z.string().max(200).optional(),
+  email: z.string().email().max(320).optional(),
+  bot: z.boolean(),
+  deleted: z.boolean(),
+  external: z.boolean().optional(),
+}).strict();
+export type DirectoryUser = z.infer<typeof DirectoryUserSchema>;
 
 /** What each command answers on success. */
 export const ChannelCommandResultSchemas = {
@@ -406,10 +433,15 @@ export const ChannelCommandResultSchemas = {
   create_document: z.object({ documentId: ChannelOpaqueIdSchema, url: HttpsUrl }).strict(),
   delete_document: z.object({ deleted: z.boolean() }).strict(),
   space_members: z.object({ members: z.array(ChannelOpaqueIdSchema).max(1_000), nextCursor: z.string().min(1).max(500).optional() }).strict(),
-  user: z.object({
-    user: z.object({ userId: ChannelOpaqueIdSchema, name: z.string().min(1).max(200).optional(), email: z.string().email().max(320).optional(), bot: z.boolean(), deleted: z.boolean() }).strict().optional(),
+  /** None for a person the adapter does not know. */
+  user: z.object({ user: DirectoryUserSchema.optional() }).strict(),
+  user_by_email: z.object({ user: DirectoryUserSchema.optional() }).strict(),
+  space: z.object({ space: z.object({ name: z.string().min(1).max(200), private: z.boolean() }).strict().optional() }).strict(),
+  spaces: z.object({
+    spaces: z.array(z.object({ space: ChannelOpaqueIdSchema, name: z.string().min(1).max(200), private: z.boolean() }).strict()).max(1_000),
+    nextCursor: z.string().min(1).max(500).optional(),
   }).strict(),
-  user_by_email: z.object({ userId: ChannelOpaqueIdSchema.optional() }).strict(),
+  check: z.object({ tenant: ChannelOpaqueIdSchema }).strict(),
 } as const;
 export type ChannelCommandResult<K extends ChannelCommandKind> = z.infer<(typeof ChannelCommandResultSchemas)[K]>;
 

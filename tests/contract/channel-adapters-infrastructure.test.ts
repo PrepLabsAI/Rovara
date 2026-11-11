@@ -119,12 +119,13 @@ describe("channel adapters infrastructure", () => {
     expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-events")).toBe(false);
   });
 
-  it("takes the core's commands for Slack, and lets the notifier and reconciler sign them (Phase 7c)", () => {
+  it("takes the core's commands for Slack, and lets the notifier, reconciler and sign-in sign them (Phase 7c)", () => {
     const route = ofType(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => resource.Properties).find((properties) => properties.RouteKey === "POST /v1/slack/channel-commands");
     expect(route).toMatchObject({ AuthorizationType: "NONE" });
     expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-commands")).toBe(false);
     const variables = (prefix: string) => (functionNamed(named, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-    for (const prefix of ["DeveloperTaskNotifierFunction", "SessionsReconciler"]) {
+    // Phase 7c1b: sign-in's Slack directory reads too.
+    for (const prefix of ["DeveloperTaskNotifierFunction", "SessionsReconciler", "DeveloperSignInFunction"]) {
       expect(variables(prefix), prefix).toMatchObject({ SLACK_VIA_CHANNEL: { Ref: "SlackViaChannel" }, SLACK_ADAPTER_TEAM_ID: { Ref: "SlackTeamId" }, BUILT_IN_ADAPTER_SECRET_NAME: "agentx/staging/channel-adapter/slack" });
       expect(JSON.stringify(variables(prefix).BUILT_IN_ADAPTER_COMMANDS_URL)).toContain("/v1/slack/channel-commands");
       const reads = statementsOf(named, roleOf(named, prefix)).filter((statement) => actions(statement).includes("secretsmanager:GetSecretValue"));

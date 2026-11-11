@@ -201,6 +201,11 @@ The protocol grows by three primitives, each behind a capability an adapter decl
   `parts`, when present, are its whole rich form (an `actions` part places buttons among them); `text` is its plain
   form. The developer task notifier and the session reconciler post to Slack only through these commands and the
   document commands once `SlackViaChannel` is on.
+- **FR-077 (directory):** `user` and `user_by_email` answer a directory person (their tenant and linked tenants,
+  names, email, whether a bot, deleted or external); `space` answers a space's name and privacy, `spaces` one page of
+  the tenant's public spaces, and `check` the tenant the adapter serves. Developer sign-in's Slack directory reads
+  (task access, channel names, the health check) go through these once `SlackViaChannel` is on, with its caches,
+  call budgets and eligibility rules unchanged.
 
 Phases: 7a the primitives (contracts, signing, the core's command client, capabilities); 7b Slack's conversation path
 through the adapter behind `SlackViaChannel`; 7c the task workflow, notices and directory through the adapter, in parts
