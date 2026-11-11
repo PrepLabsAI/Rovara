@@ -32,6 +32,8 @@ import type { PlaybookMode } from "../playbook/service.js";
 import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
 import type { SecondReview } from "../second-review/service.js";
+import type { ModelSelectionService } from "../model-selection/service.js";
+import type { UsableModels } from "../model-selection/usable-models.js";
 import type { ProofContext } from "../proof/proof-section.js";
 import type { E2EVerificationDeps } from "../e2e/authority.js";
 import type { LearnedContext } from "@agentx/contracts";
@@ -266,6 +268,15 @@ export interface TaskFlowDeps {
    * gets lists the `model-access` action. Undefined from `route()`: no provider key is set up, and the step gets neither (the worker then has no model access and fails with its own reason).
    */
   modelAccess?: { route(): Promise<InvocationModelRoute | undefined> };
+  /**
+   * The install's per-step model rule: the model each workflow step runs on, chosen as the step is handed to a worker and kept on the operation. Absent: every step runs on `modelAccess`'s one model, as before.
+   * Where it answers, its route replaces `modelAccess.route()` for that step (the worker is told that route, and the model proxy's grant names it).
+   */
+  stepModels?: Pick<ModelSelectionService, "choose">;
+  /** Called once after a task was closed (its machine and allowances went back): the install records what the run cost, for the estimates of the next runs. Never throws into the close. */
+  onTaskClosed?: (task: TaskRecord, closedAt: string) => Promise<void>;
+  /** The record of models a call to which was refused: told when a step fails for its model, so the next choice leaves it out. Absent: nothing is learned. */
+  usableModels?: UsableModels;
   /** The model aliases an operation's calls went out on, from the model proxy (the second opinion counts only when its model was really called). Present: an operation the proxy saw no call for has an empty answer. Absent: the install cannot tell. */
   modelCalls?: (operationId: string) => ReadonlySet<string> | undefined;
   /** Called once an operation reached a terminal status (the model proxy frees its tokens and spend record). Never throws into the flow. */

@@ -1,7 +1,7 @@
 // Lane L8: what the local review pages read and do. The pages know nothing about task records, the document store or a code host: the task flow
 // (lanes L6a and L6b) implements these two interfaces and hands them to `createLocalPagesServer`. Reads are plain view models; every write names
 // the exact revision and digest the person saw, and an approval carries a proof for the W0 `Approvers` seam to check.
-import type { ApprovalProof, CreatedScriptToken, PlanDocument, PlanEvidenceBundle, ScriptTokenView, SecondReviewContext, SecondReviewMode, SecondReviewModelRef, SecondReviewState } from "@agentx/contracts";
+import type { ApprovalProof, CreatedScriptToken, ModelSelectionBody, ModelSelectionState, PlanDocument, PlanEvidenceBundle, ScriptTokenView, SecondReviewContext, SecondReviewMode, SecondReviewModelRef, SecondReviewState } from "@agentx/contracts";
 
 /** Why a write did not happen, in words fit to show. `stale`: the content moved on since the page was drawn. */
 export type LocalActionResult = { ok: true; message?: string } | { ok: false; reason: "stale" | "refused" | "not_found" | "invalid" | "reauth"; message: string };
@@ -94,6 +94,8 @@ export interface PlanPageView {
   attention?: AttentionView;
   /** What a second model made of the coding plan (the plan check), one line each, in Rovara's fixed words; the points are the second model's text and are drawn as untrusted. Absent: the plan was not checked. */
   critique?: string[];
+  /** What the task is expected to cost, what it has cost so far and the model each step ran on, one fixed line each (model names are data). Absent: none of it is known yet. */
+  costAndModels?: string[];
   /** The parts of an ordered run (spec 059): what the plan lists and where each stands. Absent for a plan with no work breakdown. */
   breakdown?: WorkBreakdownView;
   /** The second review of the code the task holds: its lines, and whether the owner must acknowledge that it did not run before the task can be merged. Absent: none to show. */
@@ -389,6 +391,8 @@ export interface LocalPageData {
   getConnectionsPage?(): Promise<ConnectionsPageView | undefined>;
   /** A project's Sources page. With `discover`, also the tools of that server (listing them calls the server; nothing is saved). */
   getSourcesPage?(project: string, discover?: string): Promise<SourcesPageView | undefined>;
+  /** The model each step uses: the owner's setting, what each step would run on and the models a step could be set to. Absent: the page is not there. */
+  getModelSelection?(): Promise<ModelSelectionState | undefined>;
   /** The chat page. Absent, or undefined: no chat adapter is set up here and the page is not found. */
   getChatPage?(): Promise<ChatPageView | undefined>;
   /** The automation page (triggers, chain runs waiting at a gate). Absent, or undefined while automation is off: the page is not found, so nothing about it is shown. */
@@ -431,6 +435,9 @@ export type SecondReviewPageAction =
   | { action: "replay"; run: unknown }
   | { action: "verdict"; model: SecondReviewModelRef; replayRunId: string; startedAt: string; endedAt: string }
   | { action: "notice-seen"; key: string };
+
+/** One change of the per-step model setting, as the owner made it on the page (the owner's own act, in a page opened within ten minutes). */
+export type ModelSelectionPageAction = ModelSelectionBody;
 
 /** What a page write names. `proof` is built by the server from the page session; the action hands it to the `Approvers` seam. */
 export interface PlanDecisionInput {
@@ -482,6 +489,8 @@ export interface LocalPageActions {
   decideTestEnvironment?(input: { project: string; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
   /** The owner's acts on the automation page: turn a trigger on (with their proof), off, decide a chain's gate (with their proof), stop a run. */
   automation?(input: AutomationPageAction): Promise<LocalActionResult>;
+  /** A change of the per-step model setting. Refused (with its fixed words) when the owner may not, the page was not opened lately, or the setting moved. */
+  modelSelection?(input: ModelSelectionPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
   /** A change of the second review's settings. Refused (with its fixed words) when the owner may not or the setting moved. */
   secondReview?(input: SecondReviewPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
   /** Fix with agent: the owner asks for a diagnosis of the error the task page showed (`errorKey` names the error as shown; `requestId` is this press). Spends the owner's own model key, so it is the owner's act on a page. */

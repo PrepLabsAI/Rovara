@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { DIAGNOSIS_LIGHT_BUDGET_USD } from "@agentx/contracts";
 import type { DiagnosisModelProblem } from "../../packages/broker/src/core/diagnosis/index.js";
-import { createLocalDiagnosisModel, modelRatesOf, type LocalDiagnosisModelOptions } from "../../packages/broker/src/local/diagnosis-model.js";
+import { createLocalDiagnosisModel, modelRatesOf, reasonOfAnswer, type LocalDiagnosisModelOptions } from "../../packages/broker/src/local/diagnosis-model.js";
 import { MODEL_PROXY_PREFIX, OneShotOperations, WORKSPACE_HEADER, builtinModelProviderBook, localRoute } from "../../packages/broker/src/local/model-proxy/index.js";
 import { askForToken, startModelProxyWorld, type ModelProxyWorld } from "../support/model-proxy-world.js";
 
@@ -86,7 +86,13 @@ describe("a diagnosis's model call", () => {
     const zero = { input: 0, output: 15, cacheRead: 0, cacheWrite: 0 };
     expect(modelRatesOf("anthropic", "listed", undefined, () => zero)).toBeUndefined();
     expect(modelRatesOf("anthropic", "listed", undefined, () => ({ ...zero, input: 3, output: 0 }))).toBeUndefined();
-    expect(modelRatesOf("anthropic", "listed", undefined, () => ({ ...zero, input: 3 }))).toEqual({ input: 3, output: 15, cacheRead: 0, cacheWrite: 0 });
+    // (A cache price the catalog does not list counts at the input price: the shared price lookup never under-counts it.)
+    expect(modelRatesOf("anthropic", "listed", undefined, () => ({ ...zero, input: 3 }))).toEqual({ input: 3, output: 15, cacheRead: 3, cacheWrite: 3 });
+    // A cap never assumes less than the catalog's list price (a slip in a plug-in's table must not make a paid model cheap), and a plug-in that is dearer than the catalog is believed.
+    expect(modelRatesOf("anthropic", "m-1", row, () => ({ input: 9, output: 9, cacheRead: 9, cacheWrite: 9 }))).toEqual({ input: 9, output: 9, cacheRead: 9, cacheWrite: 9 });
+    expect(modelRatesOf("anthropic", "m-1", row, () => ({ input: 0.5, output: 2, cacheRead: 0.5, cacheWrite: 0.5 }))).toEqual({ input: 1, output: 4, cacheRead: 1, cacheWrite: 1 });
+    // A proxy refusal that says the model has no price is a refusal made before the call was sent, and reads as "not priced".
+    expect(reasonOfAnswer(403, JSON.stringify({ type: "error", error: { type: "model_not_priced", code: "model_not_priced", message: "this model has no price on this computer" } }))).toMatchObject({ reason: "not_priced", beforeSend: true });
   });
 
   it("is not offered when the most this call could cost, for this much data, is over the cap, and is the same worst case the proxy holds it to", async () => {

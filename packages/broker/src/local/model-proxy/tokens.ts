@@ -44,6 +44,11 @@ export interface TokenRecord {
 export interface OperationLedger {
   currency: string | undefined;
   spentMicros: number;
+  /**
+   * What calls cost that the Metering port could not record (priced without recording). It counts against THIS operation's budget but is not in `spentBy`: the task's cost ledger does not hold it, so a token made
+   * again for this operation must not take it off the ledger's total as if it were there.
+   */
+  unrecordedMicros: number;
   /** The worst-case cost of the calls running now, held against the budget until each settles to what it really used. */
   reservedMicros: number;
   /** Calls whose cost could not be priced (an unknown model): they are counted, never guessed. */
@@ -90,7 +95,7 @@ export class ModelTokenBook {
       workspaceId: grant.workspaceId, operationId: grant.operationId, fence: grant.fence, taskId: grant.taskId, projectName: grant.projectName,
       routes: new Map(grant.routes.map((route) => [route.alias, route])), budget: grant.budget, slot: grant.slot, assumedPrice: grant.assumedPrice, keyId, ledgerId, expiresAt,
     });
-    if (!this.#ledgers.has(ledgerId)) this.#ledgers.set(ledgerId, { currency: undefined, spentMicros: 0, reservedMicros: 0, unpriced: 0, inFlight: 0 });
+    if (!this.#ledgers.has(ledgerId)) this.#ledgers.set(ledgerId, { currency: undefined, spentMicros: 0, unrecordedMicros: 0, reservedMicros: 0, unpriced: 0, inFlight: 0 });
     if (grant.slot !== undefined) {
       this.#slotLedgers.set(keyId, ledgerId);
       // A slot's spend record outlives its operation (the round is recorded after the operation ends and reads it); the oldest are dropped past a bound, but never the record of a token that is still live: its spend would start again from nothing.
@@ -115,10 +120,16 @@ export class ModelTokenBook {
     return { ok: true, record };
   }
 
+  /** What one operation has spent so far in this process, or undefined when it has no record (nothing is made for it). */
+  spentBy(operationId: string): { micros: number; currency: string | undefined } | undefined {
+    const ledger = this.#ledgers.get(operationId);
+    return ledger === undefined ? undefined : { micros: ledger.spentMicros, currency: ledger.currency };
+  }
+
   ledger(operationId: string): OperationLedger {
     let ledger = this.#ledgers.get(operationId);
     if (ledger === undefined) {
-      ledger = { currency: undefined, spentMicros: 0, reservedMicros: 0, unpriced: 0, inFlight: 0 };
+      ledger = { currency: undefined, spentMicros: 0, unrecordedMicros: 0, reservedMicros: 0, unpriced: 0, inFlight: 0 };
       this.#ledgers.set(operationId, ledger);
     }
     return ledger;

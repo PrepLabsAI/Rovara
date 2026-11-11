@@ -975,6 +975,8 @@ describe("L3: the budget's currency is checked when a token is asked for too", (
     const priced = await fresh.send({ path: MESSAGES, headers: asWorker(eur), body: anthropicBody() });
     expect(priced.status).toBe(403);
     expect(errorOf(priced).message).toMatch(/another currency/u);
+    // Refused as "not priced" (a price in the budget's own currency is none), so the broker learns the model and leaves it out.
+    expect(errorOf(priced).code).toBe("model_not_priced");
     expect(fresh.provider.calls).toHaveLength(0);
   });
 });

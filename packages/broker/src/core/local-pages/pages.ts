@@ -124,6 +124,12 @@ function breakdownHtml(view: NonNullable<PlanPageView["breakdown"]>): string {
   return `<section class="panel"><h2>Work in parts</h2><p class="muted">${esc(how)}${view.approved ? " The plan's approval covers these parts." : ""}</p><ol>${rows}</ol></section>`;
 }
 
+/** What the task is expected to cost, what it has cost so far and the model each step used. Rovara's words around data (a model's name is drawn as untrusted text). */
+function costAndModelsHtml(view: PlanPageView): string {
+  if (view.costAndModels === undefined || view.costAndModels.length === 0) return "";
+  return `<section class="panel" id="cost"><h2>Cost and models</h2>${view.costAndModels.map((line) => `<p>${untrusted(line)}</p>`).join("")}</section>`;
+}
+
 /** The second review of this code: its lines, and the owner's acknowledgement when an `on` review did not run (the merge waits for it). */
 function secondReviewHtml(context: PageContext, view: PlanPageView): string {
   const second = view.secondReview;
@@ -210,7 +216,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${attentionHtml(context, view)}${diagnosisHtml(context, view)}${critiqueHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${designReviewHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${diagnosisHtml(context, view)}${critiqueHtml(view)}${costAndModelsHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${designReviewHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 

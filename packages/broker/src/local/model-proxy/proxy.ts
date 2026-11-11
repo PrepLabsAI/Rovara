@@ -99,6 +99,9 @@ export interface LocalModelProxy {
   handle(request: IncomingMessage, response: ServerResponse): Promise<void>;
 }
 
+/** What a budgeted call to a model with no price is refused with (the model has no price in its provider's table or the catalog, so the budget cannot be held). */
+export const MODEL_NOT_PRICED_MESSAGE = "this model has no price on this computer, so the task budget cannot be held: add its price to its model provider, or choose a model that has one";
+
 class Refusal extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly headers: Record<string, string> = {}) {
     super(message);
@@ -259,7 +262,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
     const ledger = tokens.ledger(grant.operationId);
     if (grant.budget !== undefined && grant.slot === undefined) {
       if (ledger.currency !== undefined && ledger.currency !== grant.budget.currency) return notAllowed("this task's budget is in another currency than its spend");
-      if (ledger.spentMicros + ledger.reservedMicros >= grant.budget.micros) return budgetAccessRefusal();
+      if (ledger.spentMicros + ledger.unrecordedMicros + ledger.reservedMicros >= grant.budget.micros) return budgetAccessRefusal();
     }
     let minted: ReturnType<ModelTokenBook["mint"]> | undefined;
     try {
@@ -285,7 +288,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       return;
     }
     response.writeHead(refusal.status, { ...JSON_HEADERS, connection: "close", ...refusal.headers });
-    response.end(refusalBody(refusal.code, refusal.message, refusal.code === "budget_exceeded" ? "budget_exceeded" : undefined));
+    response.end(refusalBody(refusal.code, refusal.message, refusal.code === "budget_exceeded" || refusal.code === "model_not_priced" ? refusal.code : undefined));
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -362,9 +365,10 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
         routeSlot.spentMicros += Math.ceil(used.input * rates.input + used.output * rates.output + used.cacheRead * rates.cacheRead + used.cacheWrite * rates.cacheWrite);
       }
       if (seen === undefined) tell({ event: "unmetered", code: "charged_maximum", operationId: token.operationId, provider: route.provider });
-      await record(token, route, seen ?? worst, ledger, token.assumedPrice).catch(() => {
+      await record(token, route, seen ?? worst, ledger, token.assumedPrice).catch(async () => {
         tell({ event: "unmetered", code: "meter_failed", operationId: token.operationId, provider: route.provider });
         failClosed(token, ledger);
+        await chargeUnrecorded(token, route, seen ?? worst, ledger);
       });
     };
     let route: ProxyRoute | undefined;
@@ -417,12 +421,15 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       if (token.budget !== undefined) {
         if (ledger.currency !== undefined && ledger.currency !== token.budget.currency) throw new Refusal(403, "model_not_allowed", "this task's budget is in another currency than its spend");
         const maximum = await worstCaseCost(route, worst, token.assumedPrice);
-        if (maximum === null) throw new Refusal(403, "model_not_allowed", "this model has no price on this computer, so the task budget cannot be held");
-        if (maximum.currency !== token.budget.currency) throw new Refusal(403, "model_not_allowed", "this model is priced in another currency than the task's budget");
+        // An unpriced model is refused where a cap applies, and refused as "not priced" (its own error type): the worker reads it as a model this install cannot use, and the broker learns it
+        // the way it learns a model an account refused, so the next choice leaves it out instead of trying it again (the same words as the hosted proxy's guard: `model_not_priced`).
+        if (maximum === null) throw new Refusal(403, "model_not_priced", MODEL_NOT_PRICED_MESSAGE);
+        // A price in another currency than the budget is no price to it: refused as not priced too, so the broker learns the model and leaves it out.
+        if (maximum.currency !== token.budget.currency) throw new Refusal(403, "model_not_priced", "this model is priced in another currency than the task's budget, so the budget cannot be held");
         // Nothing awaits between this check and the reservation below. A budget that is spent, or cannot pay for this call even with nothing else running, ends the task (422).
         // A call that would fit alone but not beside the calls running now is told to wait (429): their reservations come back when they settle.
-        if (ledger.spentMicros + maximum.micros > token.budget.micros) throw budgetRefusal();
-        if (ledger.spentMicros + ledger.reservedMicros + maximum.micros > token.budget.micros) throw new Refusal(429, "budget_held", "other model calls of this task hold the budget for now; try again shortly", { "retry-after": "2" });
+        if (ledger.spentMicros + ledger.unrecordedMicros + maximum.micros > token.budget.micros) throw budgetRefusal();
+        if (ledger.spentMicros + ledger.unrecordedMicros + ledger.reservedMicros + maximum.micros > token.budget.micros) throw new Refusal(429, "budget_held", "other model calls of this task hold the budget for now; try again shortly", { "retry-after": "2" });
         reserved = maximum.micros;
         ledger.reservedMicros += reserved;
       }
@@ -526,6 +533,18 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       ledger.inFlight -= 1;
       if (route !== undefined) tell({ event: "call_finished", operationId: token.operationId, provider: route.provider });
     }
+  }
+
+  /**
+   * A call the Metering port could not record still counts against the operation's own budget, priced without recording it (it is not in the cost ledger the next step's budget is taken from; this keeps the operation itself bounded, and is kept apart from the
+   * spend that is in the ledger so a token made again does not take it off the ledger's total). An unpriceable call is charged nothing here: it was refused before it was sent when the budget could not price it.
+   */
+  async function chargeUnrecorded(token: { budget: Cost | undefined; slot?: string | undefined }, route: ProxyRoute, usage: TokenUsage, ledger: { currency: string | undefined; unrecordedMicros: number }): Promise<void> {
+    if (token.slot !== undefined || token.budget === undefined) return;
+    const cost = await options.metering.price({ provider: route.provider, modelId: route.model, tokens: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite } }).catch(() => null);
+    if (cost === null || cost.currency !== token.budget.currency) return;
+    ledger.currency = cost.currency;
+    ledger.unrecordedMicros += cost.micros;
   }
 
   /** A design-review slot whose call could not be counted is charged its whole ceiling: its later calls are refused, and the broker reads the full ceiling as what it spent. Never under-counted. */

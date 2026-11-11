@@ -3,6 +3,7 @@
 // on the same points.
 import { createUnavailableImageRegistry } from "./fake-image-registry.js";
 import { createUnavailableScheduler } from "./fake-scheduler.js";
+import { costMicrosOf, type ModelPrices } from "../core/cost/price-table.js";
 import { checkCommentProof, type CommentRequestContext, type FetchedComment } from "../core/pr-commands/comment-checks.js";
 import {
   IMPLICIT_COMPANY_ID,
@@ -183,28 +184,31 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
   };
 }
 
-/** Metering that multiplies tokens by a price table. A model not in the table is priced `null` and recorded as `unknown`. A repeated `entryId` is counted once. */
-export function createPriceTableMetering(table: PriceTable, onRecord?: (entry: MeterEntry, result: MeterResult) => void | Promise<void>): Metering {
+/**
+ * Metering that multiplies tokens by a price table. A model not in the table is priced `null` and recorded as `unknown`. A repeated `entryId` is counted once.
+ * `prices` (the layered lookup of `core/cost/price-table.ts`: the provider's own table, then the catalog) is asked after the static table, so a table a caller fills by hand still wins. `price` (what a call could cost, held against a
+ * budget) never assumes less than the catalog's list price; `record` (what a call did cost) is the model's own price.
+ */
+export function createPriceTableMetering(table: PriceTable, onRecord?: (entry: MeterEntry, result: MeterResult) => void | Promise<void>, prices?: ModelPrices): Metering {
   const recorded = new Map<string, MeterResult>();
-  const price = (usage: ModelUsage): Cost | null => {
-    const model = table.models[`${usage.provider}/${usage.modelId}`];
-    if (model === undefined) return null;
-    const perMillion =
-      usage.tokens.input * model.inputMicrosPerMillionTokens +
-      usage.tokens.output * model.outputMicrosPerMillionTokens +
-      usage.tokens.cacheRead * (model.cacheReadMicrosPerMillionTokens ?? model.inputMicrosPerMillionTokens) +
-      usage.tokens.cacheWrite * (model.cacheWriteMicrosPerMillionTokens ?? model.inputMicrosPerMillionTokens);
-    return { micros: Math.round(perMillion / 1_000_000), currency: table.currency };
+  /** `capped`: the price a budget must assume (never below the catalog's list price). A cost that is recorded is the model's own price. */
+  const priceOf = (usage: ModelUsage, capped: boolean): Cost | null => {
+    const own = table.models[`${usage.provider}/${usage.modelId}`];
+    if (own !== undefined) return { micros: costMicrosOf(own, usage.tokens), currency: table.currency };
+    const model = { provider: usage.provider, modelId: usage.modelId };
+    const found = capped ? prices?.findCap(model) : prices?.find(model);
+    return found === undefined ? null : { micros: costMicrosOf(found.price, usage.tokens), currency: found.currency };
   };
   return {
+    // What a call could cost, for a reservation against a budget: the capped price.
     async price(usage) {
-      return price(usage);
+      return priceOf(usage, true);
     },
     async record(entry) {
       const key = `${entry.companyId}\u0000${entry.entryId}`;
       const earlier = recorded.get(key);
       if (earlier !== undefined) return earlier;
-      const cost = price(entry.usage);
+      const cost = priceOf(entry.usage, false);
       const result: MeterResult = cost === null ? { cost: null, source: "unknown" } : { cost, source: "price-table" };
       recorded.set(key, result);
       await onRecord?.(entry, result);
@@ -215,6 +219,8 @@ export function createPriceTableMetering(table: PriceTable, onRecord?: (entry: M
 
 export interface CodeDefaultsOptions extends LocalOwnerIdentityOptions {
   priceTable: PriceTable;
+  /** The layered price lookup (the providers' own tables, then the catalog). Absent: only `priceTable`. */
+  prices?: ModelPrices;
   approvers?: LocalOwnerApproversOptions;
   onMeter?: (entry: MeterEntry, result: MeterResult) => void | Promise<void>;
   /** Code's model keys (environment, file). Absent: none is registered and the caller must configure one. */
@@ -236,7 +242,7 @@ export function registerCodeDefaults(registry: AdapterRegistry, options: CodeDef
   const verifySession = options.approvers?.verifySession;
   registry.register("approvers", "local-owner", createLocalOwnerApprovers({ ...options.approvers, owner, ...(verifySession === undefined ? {} : { verifySession }) }), { isDefault: true });
   registry.register("identity", LOCAL_OWNER_PROVIDER, createLocalOwnerIdentity(options), { isDefault: true });
-  registry.register("metering", "price-table", createPriceTableMetering(options.priceTable, options.onMeter), { isDefault: true });
+  registry.register("metering", "price-table", createPriceTableMetering(options.priceTable, options.onMeter, options.prices), { isDefault: true });
   if (options.modelKeys !== undefined) registry.register("model-keys", "local", options.modelKeys, { isDefault: true });
   if (options.secrets !== undefined) registry.register("secrets", "local", options.secrets, { isDefault: true });
   // Saved environments and the nightly test run need these two; until a real one is registered they say plainly that none is set up (they never pretend).

@@ -59,7 +59,7 @@ describe("the lint shards: which files they lint", () => {
   });
 
   it("keep the folders of tests/unit in a shard of their own", () => {
-    expect(SHARD_DIRECTORIES.find((shard) => shard.name === "tests-unit-folders")?.directories).toEqual(["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/lessons"]);
+    expect(SHARD_DIRECTORIES.find((shard) => shard.name === "tests-unit-folders")?.directories).toEqual(["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/intake", "tests/unit/lessons"]);
   });
 
   it("lint, together, exactly the files that `eslint .` lints, each file in exactly one shard", () => {

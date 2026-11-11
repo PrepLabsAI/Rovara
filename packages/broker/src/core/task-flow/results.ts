@@ -7,6 +7,7 @@ import type { OperationResult, StepOutcome } from "./outcome.js";
 import { readTask, taskViewOf } from "./reads.js";
 import { fromDocument, toDocument, type OperationRecord, type TaskPointerRecord } from "./records.js";
 import { onOperationEnded, readWorkspace } from "./stage-machine.js";
+import { learnModelNotEnabled } from "../model-selection/learn-not-enabled.js";
 import { iso } from "./support.js";
 import { taskPointerKey } from "./keys.js";
 
@@ -74,6 +75,8 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
   // The model proxy frees the operation's tokens and spend record now, not at its next refused call (a repeat of the result does it again, harmlessly).
   try { deps.onOperationEnded?.(ended.id); } catch { /* a proxy's bookkeeping never fails a result */ }
   await deps.secondReview?.operationEnded(ended);
+  // A step that failed because its model could not be called (not enabled for the account, or not priced under a limit) teaches the next choice to leave that model out for a while. Best effort: it never changes the result.
+  await learnModelNotEnabled(deps.usableModels, { model: ended.modelChoice?.model }, ended.status, ended.error, ended.result);
   // The next move is made from what was RECORDED, never from a repeat's own words: a late retry cannot turn a failure into a success.
   const recorded = (ended.result as { outcome?: StepOutcome } | undefined)?.outcome;
   await onOperationEnded(deps, ended, { status: ended.status as OperationResult["status"], ...(ended.error === undefined ? {} : { error: ended.error }), ...(recorded === undefined ? {} : { outcome: recorded }) });

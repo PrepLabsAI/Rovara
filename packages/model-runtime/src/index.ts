@@ -460,9 +460,14 @@ const MODEL_NOT_ENABLED_SHAPE = [
   /\byou don't have access to the model with the specified model id\b/iu,
   /\bmodel use case details have not been submitted for this account\b/iu,
 ];
+/**
+ * The model proxy's own 403 for a model it has no price for, on a budgeted key (`model_not_priced`). The model cannot be used on this install any more than one Bedrock refused, so it is read the same way and the broker
+ * learns it. Only the error TYPE token counts, as a JSON member (on the Anthropic route it sits inside an escaped message, hence the optional backslashes).
+ */
+const MODEL_NOT_PRICED_TYPE = /\\?"type\\?"\s*:\s*\\?"model_not_priced\\?"/u;
 /** Whether a proxy 403 body says the account cannot use the model. Only matched; nothing of the body is kept. */
 export function modelNotEnabledBody(body: string): boolean {
-  return MODEL_NOT_ENABLED_CLASS.test(body) && MODEL_NOT_ENABLED_SHAPE.some((pattern) => pattern.test(body));
+  return (MODEL_NOT_ENABLED_CLASS.test(body) && MODEL_NOT_ENABLED_SHAPE.some((pattern) => pattern.test(body))) || MODEL_NOT_PRICED_TYPE.test(body);
 }
 
 /** The fixed sentence for a model the account cannot use (the worker reads it as `key-rejected ModelNotEnabled`, which the broker learns from). */

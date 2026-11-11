@@ -7,7 +7,7 @@ import {
   E2ESharedViewSchema, inertName, isBranchConflictAskReason, isBranchSyncBlockReason, isBranchSyncGiveUpReason, isCiFixBlockReason, knownTaskView, openReviewFindings, workflowIsReviewOnly, workflowKeepPullRequestsOffered, type DeveloperTaskClientView,
   TaskPeopleRoleSchema, RUN_CONTEXT_KINDS, RUN_INPUT_TEXT_MAX_BYTES, ApprovalIdSchema, RunInputSchema, type RunInput, type StartAgentSelection,
   INTENT_NOT_WAITING_MESSAGE, INTENT_QUESTIONS_MAX, SessionIdSchema, CRITIC_NOT_CHECKED_LINE, CRITIC_STOPPED_AT_LIMIT_LINE, CRITIC_STOPPED_AT_SPENDING_LIMIT_LINE, formatMinutes, type WorkflowCritique,
-  sessionTaskStatus, taskStatusNext, taskStatusText, formatRunLimitUsd, runLimitRaiseText, diagnosisProposalLine,
+  sessionTaskStatus, taskStatusNext, taskStatusText, formatRunLimitUsd, runLimitRaiseText, diagnosisProposalLine, modelSelectionLines,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { AdminControlPlaneClient } from "./admin-client.js";
@@ -1396,6 +1396,32 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       const text = [`Second review mode: ${state.mode} (company: ${state.modes.company}).`, ...(structured.reviewing_now === undefined ? [] : [structured.reviewing_now]), ...structured.notice,
         ...(state.models.some((entry) => entry.suggested) ? [`Suggested: ${state.suggested.map((model) => model.modelId).join(", ")}.`] : []), "Change it on the local page: rovara open second-review."].join("\n");
       return { structured, text };
+    },
+  },
+  {
+    name: "agentx_get_model_selection",
+    title: "Show the model each step uses",
+    description: "Shows the model each step of a task would run on now (understand, plan, plan check, build, code review, security review, pull request feedback), why, its thinking level, and what it costs per million tokens (the provider's own price, else the catalog's list price; no price means its cost shows as unknown, and it cannot be used where a run limit is held). This only reads: the owner changes the models on the local page (`rovara open models`), never through a tool.",
+    inputSchema: {},
+    outputSchema: {
+      steps: z.array(z.object({ step: z.string(), model: z.string().optional(), set_by_owner: z.boolean(), same_model_as_checked: z.boolean().optional(), thinking: z.string().optional(), fell_back_from: z.string().optional(), price_usd_per_million: z.object({ input: z.number(), output: z.number() }).optional(), problem: z.string().optional() })),
+      checking_default: z.string(), run_limit_held: z.boolean(), revision: z.number(),
+    },
+    async handler(context) {
+      const state = await context.client.getModelSelection();
+      const structured = {
+        steps: state.steps.map((step) => ({
+          step: plainText(step.stage, ""), set_by_owner: step.setting !== null,
+          ...(step.effective === undefined ? { problem: plainText(step.refusal?.words ?? "no model can be used", "") } : {
+            model: plainText(`${step.effective.model.provider}:${step.effective.model.modelId}`, ""), same_model_as_checked: step.effective.sameModelAsChecked,
+            ...(step.effective.thinkingLevel === null ? {} : { thinking: plainText(step.effective.thinkingLevel, "") }),
+            ...(step.effective.fallback === undefined ? {} : { fell_back_from: plainText(step.effective.fallback.wanted ?? "its first choice", "") }),
+            ...(step.effective.priceUsdPerMillion === undefined ? {} : { price_usd_per_million: { input: step.effective.priceUsdPerMillion.input, output: step.effective.priceUsdPerMillion.output } }),
+          }),
+        })),
+        checking_default: state.reviewDefault, run_limit_held: state.runLimit.enforced, revision: state.revision,
+      };
+      return { structured, text: [...modelSelectionLines(state), "Change it on the local page: rovara open models."].join("\n") };
     },
   },
   {

@@ -67,6 +67,8 @@ export async function finishClose(deps: TaskFlowDeps, task: TaskRecord, parts: P
   const closed = await readWorkspace(deps, task.workspaceId);
   await stopMachines(deps, [workspace?.machine?.machineId, closed?.machine?.machineId], [workspace?.machineReservationId, closed?.machineReservationId, task.admissionReservationId]);
   await deps.taskEnded?.({ orgId: deps.companyId, taskId: task.taskId }).catch((error: unknown) => log(deps, { event: "task_flow.task_ended_failed", error: error instanceof Error ? error.name : "unknown" }));
+  // What the run cost goes to the estimates of the next runs. Best effort: a cost that cannot be read now is simply not counted, and the close stands.
+  try { await deps.onTaskClosed?.(task, now); } catch (error) { log(deps, { event: "task_flow.run_cost_not_recorded", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }); }
 }
 
 export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskView> {

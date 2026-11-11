@@ -9,8 +9,9 @@
 // Decision 53: artifacts live in the registry's `object-storage` adapter (lane L9a); a worker's model calls go through the model proxy (lane L9a), which the task flow grants per operation.
 import { createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
+import { AgentXError as ScriptTokenAgentXError, IMPLICIT_COMPANY_ID, providerFormat, type AdapterRegistry, type Metering, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
+import { registryModelPrices } from "../model-prices.js";
 import { LOCAL_MODEL_PROVIDER_ORDER, chooseLocalModel, type LocalModelChoice, type LocalModelSetting } from "../model-choice.js";
 import { createSecondReview, type SecondReview } from "../../core/second-review/index.js";
 import { createLocalSecondReviewSeams } from "./second-review.js";
@@ -18,6 +19,11 @@ import { SecondReviewerSchema } from "@agentx/contracts";
 import type { ProxyRoute } from "../model-proxy/types.js";
 import { OneShotOperations, capabilityModelGrants, localRoute, readyProviders, registryModelProviderBook, withOneShotOperations, type LocalModelProxy, type LoopbackProxy, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
+import { estimatePathOf, recordRunCost, runCostInputOf } from "../../core/cost/estimate.js";
+import { remainingUsd, taskLimitUsd } from "../../core/cost/limits.js";
+import { createModelSelection, type ModelSelectionService } from "../../core/model-selection/service.js";
+import { createUsableModels } from "../../core/model-selection/usable-models.js";
+import { createLocalModelSelectionSeams } from "./model-selection.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../../core/decisions/local-actions.js";
 import { createWorkflowDocumentSubject, currentDocumentType } from "../../core/decisions/workflow-subject.js";
@@ -54,9 +60,10 @@ import { createStoreProjectSource } from "../../core/task-flow/project-source.js
 import { createStandingInstructions } from "../../core/instructions/step-block.js";
 import { createCodeHostPlaybookSource } from "../../core/playbook/source.js";
 import { createPlaybookService, type PlaybookService } from "../../core/playbook/service.js";
-import { readTask } from "../../core/task-flow/reads.js";
+import { readTask, workspaceOperations } from "../../core/task-flow/reads.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
 import { isTerminalStatus } from "../../core/task-flow/results.js";
+import type { OperationModelChoice } from "../../core/task-flow/step-model.js";
 import { planFeedbackKey } from "../../core/task-flow/stage-machine.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { localOwnerPrincipal } from "../../ports/policy-defaults.js";
@@ -113,6 +120,8 @@ const LOCAL_OWNER_PERSON_ID = "local-owner";
 export interface LocalAppOptions {
   /** Tells the model proxy an operation ended (it frees the operation's tokens and spend record). Set by the runtime, which makes the proxy after the servers. */
   operationEnded?: (operationId: string) => void;
+  /** What one operation has spent through the model proxy so far in this process (the runtime reads it from the proxy). A re-minted token starts from the task's spend less this, so an operation's own spend is counted once. */
+  operationSpend?: (operationId: string) => { micros: number; currency: string | undefined } | undefined;
   /** The model aliases an operation's calls went out on, from the model proxy: a second opinion counts only when its model was really called. Absent: the install cannot tell, and the opinion is taken as reported. */
   modelCalls?: (operationId: string) => ReadonlySet<string> | undefined;
   /** The environment the install runs in (the design review's switch is read from it). */
@@ -142,6 +151,11 @@ export interface LocalAppOptions {
   askFetch?: typeof fetch | undefined;
   /** Whether a message to a running step is handed to the worker as it is sent. The runtime sets it from `ROVARA_LIVE_STEER` (`0` turns it off); default on. */
   liveSteer?: boolean;
+  /**
+   * Whether the install holds a run limit: each task's model calls are held to the planning allowance plus the run limit its plan carries, on the model proxy, and a model with no price is then not used (the proxy
+   * would refuse it). The runtime sets it from `ROVARA_RUN_LIMIT` (`0` turns it off); default on.
+   */
+  runLimit?: boolean;
   /** Whether the planning, understanding and coding steps read the people's notes. The runtime sets it from `ROVARA_STEP_NOTES` (`0` turns it off); default on. */
   stepNotes?: boolean;
   /** Whether Ask about a task is served. The runtime sets it from `ROVARA_ASK` (`0` turns it off); default on. */
@@ -200,6 +214,10 @@ export interface LocalApp {
   readonly diagnosis: LocalDiagnosis;
   /** Lessons: what was learned, the owner's decisions on it, and the pass that reflects on finished tasks. */
   readonly lessons: LocalLessons;
+  /** The Metering the model proxy records through: a call of a task goes into the task's cost ledger. */
+  readonly meter: Metering;
+  /** The model each step uses: the owner's per-step setting, what each step would run on, and the choice made for a step (read on the local page, the API, the CLI and the MCP tool). */
+  readonly modelSelection: ModelSelectionService;
   /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
   readonly modelGrants: ModelGrantSource;
   /** Script tokens: serving a request that carries one, and the settings the local pages and routes use. */
@@ -271,12 +289,33 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
   const modelRoute = async () => { const choice = await chosen(); return choice === undefined ? undefined : routeOf(choice).workerRoute; };
 
+  // What a model costs (its provider's own table, then the catalog): the one lookup the metering port, the second review's cap and the per-step model rule share.
+  const modelPrices = registryModelPrices(registry);
   const clock = (): Date => options.now?.() ?? new Date();
+  // The model each step uses: the owner's per-step setting on the document store (the hosted layout), what the install can call and what a call costs. A model a call to which was refused (not enabled, or not priced under a
+  // limit) is remembered for a while and left out of default choices.
+  const usableModels = createUsableModels({ store, now: () => clock().getTime(), onProblem: (event, errorName) => log({ component: "model_selection", event, errorName }) });
+  const modelSelection = createModelSelection({
+    store, companyId, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), prices: modelPrices, usable: usableModels,
+    seams: createLocalModelSelectionSeams({ companyId, providers, keys, chosen }), capApplies: () => options.runLimit !== false, now: () => clock().getTime(),
+  });
   // The second review. It asks the install what it can serve (the providers with a key), reaches a model through the same proxy, and keeps its settings and evidence in the document store under Cloud's keys.
   const projectSource = createStoreProjectSource(store, companyId);
   const secondReview = createSecondReview({
     store, companyId, audit: registry.require("audit-sink"), approvers: registry.require("approvers"), admission: registry.require("admission"),
-    seams: createLocalSecondReviewSeams({ companyId, providers, keys, chosen, projects: projectSource }),
+    seams: createLocalSecondReviewSeams({
+      companyId, providers, keys, chosen, projects: projectSource, prices: modelPrices,
+      // What each step ran on is kept on its operation (the install's rule chose it); a step from before that was kept ran on the install's one model.
+      taskModels: async (task) => {
+        const record = await readTask(flow.deps, task.taskId);
+        const fallback = await chosen();
+        const installModel = fallback === undefined ? undefined : { provider: fallback.provider, modelId: fallback.model };
+        const operations = record === undefined ? [] : await workspaceOperations(flow.deps, record.workspaceId);
+        const builds = operations.filter((operation) => operation.workflowMode === "IMPLEMENT").map((operation) => operation.modelChoice?.model ?? installModel);
+        const reviewed = operations.filter((operation) => operation.workflowMode === "REVIEW").at(-1);
+        return { builds: builds.length === 0 && installModel !== undefined ? [installModel] : builds, firstReviewer: reviewed === undefined ? installModel : (reviewed.modelChoice?.model ?? installModel) };
+      },
+    }),
     now: () => clock().getTime(), log,
   });
   // Lane L12: the milestones ("fixing", "stuck", "ready") are rows and lines on the task's session, written in the transaction of the change that caused them.
@@ -285,6 +324,19 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const milestones = createLocalMilestones({ store, now: () => clock().getTime(), log: (event, fields) => log({ component: "milestones", event, ...fields }) });
 
   const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
+  // What the model proxy meters. A call of a task is recorded in the task's cost ledger (the Metering port prices it, the ledger keeps it once), so the ledger is what the task has spent: the next step's budget, the plan page,
+  // the cost line and the record the next estimate learns from all read it. A call with no task is recorded by the port alone. A record that fails is tried a few times, as concurrent calls of one task contend on its total.
+  const meter: Metering = {
+    price: (usage) => ledger.price(usage),
+    async record(entry) {
+      if (entry.taskId === undefined) return registry.require("metering").record(entry);
+      let last: unknown;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        try { return await ledger.recordUsage(entry); } catch (error) { last = error; }
+      }
+      throw last;
+    },
+  };
 
   // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
   const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs });
@@ -365,6 +417,16 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // No code host adapter registered (none is set up on a fresh laptop): a start is not refused for a host nobody knows, and publishing a pull request is simply not offered.
     checkCodeHosts: registry.names("code-host").length > 0,
     modelAccess: { route: modelRoute },
+    stepModels: modelSelection,
+    usableModels,
+    // A closed task's cost (what its model calls cost, from the ledger) is kept for the estimate of the next runs of the project; a run with a call that had no price is marked, and never teaches the estimator.
+    onTaskClosed: async (task, closedAt) => {
+      const outcome = await recordRunCost({ store }, {
+        orgId: companyId, project: task.project, taskId: task.taskId, path: estimatePathOf(task), endedAt: closedAt,
+        ...runCostInputOf(await ledger.taskCost(companyId, task.taskId)),
+      });
+      log({ component: "cost", event: "cost.run_recorded", outcome });
+    },
     // Every step runs on the install's one model, so the plan check says the model that wrote the plan checked it.
     installModel: async () => { const choice = await chosen(); return choice === undefined ? undefined : { provider: choice.provider, modelId: choice.model }; },
     ...(options.operationEnded === undefined ? {} : { onOperationEnded: options.operationEnded }),
@@ -406,8 +468,6 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     async describe(operation) {
       // A design review's operation has no key of its own: only its slots get one (`describeSlot`).
       if (await designReview.isDesignReviewOperation(operation)) return undefined;
-      const choice = await chosen();
-      if (choice === undefined) return undefined;
       const pointer = fromDocument<TaskPointerRecord>(await store.get(taskPointerKey(operation.workspaceId)));
       const task = pointer === undefined ? undefined : await readTask(flow.deps, pointer.taskId);
       // Second review: the models this REVIEW operation may also call are the ones the broker chose for its second reviewer (never the worker's say), each through its own route.
@@ -416,8 +476,27 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       const caps = (operationRecord?.["secondReviewPlan"] as { caps?: Record<string, ProxyRoute["cap"]> } | undefined)?.caps ?? {};
       // Every extra route carries its own cap (never the first review's route): a second model is called within a limit of its own.
       const extra: ProxyRoute[] = second.success ? second.data.candidates.flatMap((candidate) => (candidate.modelRoute === undefined ? [] : [{ alias: candidate.modelRoute.alias, provider: candidate.model.provider, model: candidate.model.modelId, api: candidate.modelRoute.api, ...(caps[candidate.modelRoute.alias] === undefined ? {} : { cap: caps[candidate.modelRoute.alias] }) }])) : [];
-      const own = routeOf(choice).route;
-      return { routes: [own, ...extra.filter((route) => route.alias !== own.alias)], ...(task === undefined ? {} : { taskId: task.taskId, projectName: task.project }) };
+      // The model the install's rule chose for this step (kept on the operation when it was handed to the worker), else the install's one model.
+      const stepChoice = (operationRecord as { modelChoice?: OperationModelChoice } | undefined)?.modelChoice;
+      let own: ProxyRoute;
+      if (stepChoice !== undefined) own = { alias: stepChoice.route.alias, provider: stepChoice.model.provider, model: stepChoice.model.modelId, api: stepChoice.route.api };
+      else {
+        const choice = await chosen();
+        if (choice === undefined) return undefined;
+        own = routeOf(choice).route;
+      }
+      // A held run limit: the proxy is given what is left of the task's limit, so a call that could not fit is refused before it is made (and a model with no price is refused as not priced).
+      // A task that cannot be read has nothing to be held to, so nothing is left: the proxy refuses rather than let a call through unheld.
+      // The task's spend is what the cost ledger holds, which already includes this operation's own calls: they are counted once, by taking back what the proxy holds for this operation (it keeps counting those itself, and
+      // survives a token being made again).
+      let budget: { micros: number; currency: string } | undefined;
+      if (options.runLimit !== false) {
+        const own = options.operationSpend?.(operation.operationId);
+        const ownUsd = own === undefined || (own.currency !== undefined && own.currency !== "USD") ? 0 : own.micros / 1_000_000;
+        const spent = task === undefined ? undefined : costUsdOf(await ledger.taskCost(companyId, task.taskId));
+        budget = { micros: task === undefined ? 0 : Math.round(remainingUsd(taskLimitUsd(task), spent === undefined ? undefined : Math.max(0, spent - ownUsd)) * 1_000_000), currency: "USD" };
+      }
+      return { routes: [own, ...extra.filter((route) => route.alias !== own.alias)], ...(budget === undefined ? {} : { budget }), ...(task === undefined ? {} : { taskId: task.taskId, projectName: task.project }) };
     },
     async holds(operation) {
       const [record, workspace] = await Promise.all([store.get(operationKey(operation.workspaceId, operation.operationId)), store.get(workspaceKey(operation.workspaceId))]);
@@ -519,7 +598,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const pages = await createLocalPagesServer({
     data: {
-      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview, diagnosis, lessons }),
+      ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, modelSelection, cost: ledger, designReview, diagnosis, lessons }),
       howWeWork: howWeWork.page,
       getConnectionsPage: () => connections.getConnectionsPage(),
       getSourcesPage: (project, discover) => connections.getSourcesPage(project, discover),
@@ -534,7 +613,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       ...chat.actions,
       ...automation.pageActions,
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, connectionAction: (input, context) => connections.action(input, context), decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
-      ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
+      ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, modelSelection, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       ...(setupAgent.enabled ? {
         setupStart: setupAgent.page.start, setupStop: setupAgent.page.stop, setupCommand: setupAgent.page.command, setupConfirm: setupAgent.page.confirm, setupDiscard: setupAgent.page.discard, setupForgetHost: setupAgent.page.forgetHost,
         setupCheck: setupAgent.page.check, setupDecideHost: setupAgent.page.decideHost, setupDecideProposal: setupAgent.page.decideProposal,
@@ -572,7 +651,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}) });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, modelSelection, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
     store, audit: registry.require("audit-sink"), admission: registry.require("admission"), enabled: options.ask ?? true, artifacts: blobs, readers: () => ({ diff: createAskDiffReader({ peek: createPeekClient(flow.deps) }) }), questionHashKey: deriveKey(rootKey, "ask-question"), log,
@@ -662,7 +741,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation,
+    flow, meter, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, modelSelection, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

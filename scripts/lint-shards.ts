@@ -51,7 +51,7 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   { name: "tests-unit-g-q", directories: ["tests/unit/g*.ts", "tests/unit/h*.ts", "tests/unit/i*.ts", "tests/unit/j*.ts", "tests/unit/k*.ts", "tests/unit/l*.ts", "tests/unit/m*.ts", "tests/unit/n*.ts", "tests/unit/o*.ts", "tests/unit/p*.ts", "tests/unit/q*.ts"] },
   { name: "tests-unit-r-v", directories: ["tests/unit/r*.ts", "tests/unit/s*.ts", "tests/unit/t*.ts", "tests/unit/u*.ts", "tests/unit/v*.ts"] },
   { name: "tests-unit-w-z", directories: ["tests/unit/w*.ts", "tests/unit/x*.ts", "tests/unit/y*.ts", "tests/unit/z*.ts"] },
-  { name: "tests-unit-folders", directories: ["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/lessons"] },
+  { name: "tests-unit-folders", directories: ["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/intake", "tests/unit/lessons"] },
   { name: "tests-integration", directories: ["tests/integration"] },
   { name: "tests-support", directories: ["tests/support"] },
   { name: "broker", directories: ["packages/broker"] },

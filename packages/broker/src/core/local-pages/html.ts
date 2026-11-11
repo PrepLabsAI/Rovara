@@ -50,7 +50,7 @@ export function layout(input: { title: string; nonce: string; base: string; body
     "<meta name=\"referrer\" content=\"same-origin\"><meta name=\"robots\" content=\"noindex, nofollow\">",
     `<title>${esc(input.title)}</title>`,
     `<style nonce="${esc(input.nonce)}">${TASK_PAGE_STYLE}${EXTRA_STYLE}</style></head><body>`,
-    `<nav class="pages" aria-label="Rovara pages"><a href="${esc(input.base)}/">Waiting for you</a><a href="${esc(input.base)}/how-we-work">How we work</a><a href="${esc(input.base)}/lessons">Lessons</a><a href="${esc(input.base)}/tokens">Script tokens</a><a href="${esc(input.base)}/connections">Connections</a><a href="${esc(input.base)}/second-review">Second review</a><a href="${esc(input.base)}/chat">Chat</a><a href="${esc(input.base)}/setup">Set up a project</a></nav>`,
+    `<nav class="pages" aria-label="Rovara pages"><a href="${esc(input.base)}/">Waiting for you</a><a href="${esc(input.base)}/how-we-work">How we work</a><a href="${esc(input.base)}/lessons">Lessons</a><a href="${esc(input.base)}/tokens">Script tokens</a><a href="${esc(input.base)}/connections">Connections</a><a href="${esc(input.base)}/models">Models</a><a href="${esc(input.base)}/second-review">Second review</a><a href="${esc(input.base)}/chat">Chat</a><a href="${esc(input.base)}/setup">Set up a project</a></nav>`,
     input.notice === undefined ? "" : `<p class="notice" role="status">${esc(input.notice)}</p>`,
     input.body,
     "</body></html>",

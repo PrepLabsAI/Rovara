@@ -13,6 +13,7 @@ import {
   TASK_VIEW_HEADER,
   TASK_VIEW_VERSION,
   SecondReviewStateReaderSchema,
+  ModelSelectionStateReaderSchema,
   DesignReviewStateReaderSchema,
   TaskDiagnosisViewReaderSchema,
   SessionListReaderSchema,
@@ -127,6 +128,9 @@ export const ContextSourcesReadSchema = z.object({
 }).passthrough();
 export type ContextSourcesRead = z.infer<typeof ContextSourcesReadSchema>;
 
+/** The model each step uses, as a client reads it (read only: the owner changes it on the local page). */
+export type ModelSelectionStateRead = z.infer<typeof ModelSelectionStateReaderSchema>;
+
 export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
   configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string; confirm?: AgentXConfigurationConfirm }>;
@@ -171,6 +175,8 @@ export interface ControlPlaneClient {
   listConnections(): Promise<ConnectionsRead>;
   /** A project's context sources and the changes waiting for the owner (read only). */
   getContextSources(project: string): Promise<ContextSourcesRead>;
+  /** The model each step uses, what it would run on now and what it costs (read only: the owner changes it on the local page). Absent route: the install has no per-step model setting. */
+  getModelSelection(): Promise<ModelSelectionStateRead>;
   /** One task's design review: how it stands, the findings, and what waits for the owner (read only). */
   getDesignReview(taskId: string): Promise<DesignReviewStateReadView>;
   /** A task's error, whether Fix with agent is offered for it, and the diagnosis of it (read only: the owner starts one on the task's page). Absent route: the install has no Fix with agent. */
@@ -443,6 +449,7 @@ export function httpControlPlaneClient(options: {
       for (const builder of query.builder ?? []) search.append("builder", builder);
       return call(SecondReviewStateReaderSchema, "GET", `/v1/dev/second-review${search.size === 0 ? "" : `?${search.toString()}`}`);
     },
+    getModelSelection: () => call(ModelSelectionStateReaderSchema, "GET", "/v1/dev/model-selection"),
     getTaskPeople: async (taskId) => (await call(TaskPeopleViewResponseSchema, "GET", path(taskId, "/people"))).view,
     getTaskPeopleRequest: async (taskId, requestId) => (await call(TaskPeopleChangeResponseSchema, "GET", path(taskId, `/people/requests/${encodeURIComponent(requestId)}`))).change,
     setTaskPerson: async (taskId, request) => (await call(TaskPeopleChangeResponseSchema, "POST", path(taskId, "/people/role"), request)).change,

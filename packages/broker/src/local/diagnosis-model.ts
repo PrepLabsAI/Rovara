@@ -6,6 +6,7 @@
 // (a model with no price is refused, never guessed; a price of zero counts as no price unless the plug-in says the model is free).
 import { DIAGNOSIS_LIGHT_BUDGET_USD, providerFormat, type ModelProviderAdapter } from "@agentx/contracts";
 import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
+import { createModelPrices, usdPerMillion } from "../core/cost/price-table.js";
 import { DiagnosisModelProblem, type DiagnosisAnswerer, type DiagnosisModelFailure } from "../core/diagnosis/service.js";
 import { requestBody, textOf } from "./ask-model.js";
 import type { LocalModelChoice } from "./model-choice.js";
@@ -28,19 +29,12 @@ export interface LocalDiagnosisModelOptions {
   rates?: ((provider: string, model: string, row: ModelProviderAdapter | undefined) => ProxyRouteCap["usdPerMTok"] | undefined) | undefined;
 }
 
-/** A model's rates in dollars per million tokens: the catalog's, else the provider plug-in's own table (in dollars only). Undefined when neither knows a real price. A model the plug-in marks `free` is priced, at zero. */
+/**
+ * A model's rates in dollars per million tokens, from the install's one price lookup (`core/cost/price-table.ts`): the provider plug-in's own table first, then the catalog's list price. Undefined when neither knows a
+ * real price, or the price is not in dollars (the cap is in dollars: a currency worth more than the dollar would under-cap the call, so such a model counts as unpriced). A model the plug-in marks `free` is priced, at zero.
+ */
 export function modelRatesOf(provider: string, model: string, row: ModelProviderAdapter | undefined, catalog: typeof listPricesPerMillion = listPricesPerMillion): ProxyRouteCap["usdPerMTok"] | undefined {
-  const listed = catalog({ provider, modelId: model });
-  if (listed !== undefined) return listed.input > 0 && listed.output > 0 ? { input: listed.input, output: listed.output, cacheRead: listed.cacheRead, cacheWrite: listed.cacheWrite } : undefined;
-  // The cap is in dollars: a price table in another currency is not read as dollars (a currency worth more than the dollar would under-cap the call), so such a model counts as unpriced.
-  if (row?.prices?.currency !== "USD") return undefined;
-  const own = row.prices.models[model];
-  if (own === undefined) return undefined;
-  const free = (own as { free?: boolean }).free === true;
-  if (!free && (own.inputMicrosPerMillionTokens <= 0 || own.outputMicrosPerMillionTokens <= 0)) return undefined;
-  const dollars = (micros: number | undefined, fallback: number): number => (micros === undefined ? fallback : micros / 1_000_000);
-  const input = own.inputMicrosPerMillionTokens / 1_000_000;
-  return { input, output: own.outputMicrosPerMillionTokens / 1_000_000, cacheRead: dollars(own.cacheReadMicrosPerMillionTokens, input), cacheWrite: dollars(own.cacheWriteMicrosPerMillionTokens, input) };
+  return usdPerMillion(createModelPrices({ providers: () => (row === undefined ? [] : [row]), catalog }).findCap({ provider, modelId: model }));
 }
 
 /**
@@ -49,7 +43,7 @@ export function modelRatesOf(provider: string, model: string, row: ModelProvider
  */
 const BEFORE_SEND = new Set([
   "not_found", "invalid_token", "token_expired", "other_workspace", "operation_ended", "too_many_requests", "request_too_large", "invalid_json", "request_not_allowed", "model_not_allowed", "budget_exceeded",
-  "budget_held", "provider_sign_in_failed", "method_not_allowed",
+  "budget_held", "provider_sign_in_failed", "method_not_allowed", "model_not_priced",
 ]);
 
 /** What the proxy's refusal or the provider's error means for the person, as a fixed word. The proxy's own words are never passed on. */
@@ -58,7 +52,7 @@ function problemOf(status: number, text: string): DiagnosisModelProblem {
   return new DiagnosisModelProblem(problem.reason, !problem.beforeSend);
 }
 
-function reasonOfAnswer(status: number, text: string): { reason: DiagnosisModelFailure; beforeSend: boolean } {
+export function reasonOfAnswer(status: number, text: string): { reason: DiagnosisModelFailure; beforeSend: boolean } {
   let code = "";
   let message = "";
   try {
@@ -70,6 +64,7 @@ function reasonOfAnswer(status: number, text: string): { reason: DiagnosisModelF
   const word = (reason: DiagnosisModelFailure): { reason: DiagnosisModelFailure; beforeSend: boolean } => ({ reason, beforeSend });
   if (code === "budget_exceeded" || code === "budget_held") return word("limit_reached");
   if (code === "provider_refused_key" || code === "provider_sign_in_failed" || code === "provider_clock_skew") return word("key_invalid");
+  if (code === "model_not_priced") return word("not_priced");
   if (code === "model_not_allowed") return word(/\bno (?:\S+ )?(?:key|sign-in)\b/u.test(message) ? "key_invalid" : /no price/u.test(message) ? "not_priced" : "model_rejected");
   if (code === "request_not_allowed") return word("model_rejected");
   if (code === "provider_error" && (status === 400 || status === 404 || status === 422)) return word("model_rejected");

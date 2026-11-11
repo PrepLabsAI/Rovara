@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { TaskDiagnosisViewReaderSchema, agentXError, diagnosisProposalLine } from "@agentx/contracts";
+import { TaskDiagnosisViewReaderSchema, agentXError, diagnosisProposalLine, modelSelectionLines, type ModelSelectionState } from "@agentx/contracts";
 import { createDockerRunner, defaultStateDirectory, startLocalRuntime, type DockerRunner, type LocalRuntime, type LocalRuntimeOptions } from "@agentx/broker/local";
 import type { Command } from "commander";
 import type { TextWriter } from "../init/prompts.js";
@@ -236,6 +236,32 @@ export function registerConnectionsCommand(program: Command, context: Pick<UpCom
     });
 }
 
+/**
+ * `rovara models`: the model each step of a task uses, and what it costs. Choosing the models happens on the models page (`rovara open models`): it is the owner's own act in the browser, never a token's.
+ */
+export function registerModelsCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
+  const models = program.command("models").description("show the model each step of a task uses; change it with `rovara open models`");
+  models
+    .command("status", { isDefault: true })
+    .description("show what each step would run on now, why, and what it costs")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (options: { stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      const state = await localCall(context, options.stateDir, "GET", "/v1/dev/model-selection") as ModelSelectionState;
+      if (globals.json) { context.stdout.write(`${JSON.stringify({ ok: true, data: state })}\n`); return; }
+      context.stdout.write([...modelSelectionLines(state), "Change it on the page: rovara open models"].join("\n") + "\n");
+    });
+  models
+    .command("open")
+    .description("open the models page in your browser, where you change the models (within ten minutes of opening it)")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (options: { stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      await localCall(context, options.stateDir, "POST", "/v1/local/pages/open", { path: "/models", fresh: true });
+      context.stdout.write(globals.json ? `${JSON.stringify({ ok: true, data: { opened: true } })}\n` : "Opened the models page in your browser. Change the models there within ten minutes.\n");
+    });
+}
+
 const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
 /** Model words (a finding, a question) are shown as plain text: no control characters, no line breaks. */
@@ -314,18 +340,18 @@ export function registerDiagnosisCommand(program: Command, context: Pick<UpComma
 export function registerOpenCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
   program
     .command("open [task]")
-    .description("open the local review page for a task (or for everything that waits for you, `second-review`, `lessons` or `connections`) in your browser; `rovara up` must be running")
+    .description("open the local review page for a task (or for everything that waits for you, `second-review`, `models`, `lessons` or `connections`) in your browser; `rovara up` must be running")
     .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
     .action(async (task: string | undefined, options: { stateDir?: string }, command: Command) => {
       const globals = command.optsWithGlobals<{ json: boolean }>();
-      if (task !== undefined && task !== "second-review" && task !== "lessons" && task !== "connections" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), `second-review`, `lessons`, `connections`, or leave it out");
+      if (task !== undefined && task !== "second-review" && task !== "lessons" && task !== "connections" && task !== "models" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), `second-review`, `lessons`, `connections`, `models`, or leave it out");
       const { url, secret } = await requireLocalRuntime(context.home ?? homedir(), options.stateDir);
       let response: Response;
       try {
         response = await context.fetch(`${url}/v1/local/pages/open`, {
           method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
           // The lessons page opens in a new page session: switching on a repository's lessons file asks for one opened in the last few minutes.
-          body: JSON.stringify(task === "lessons" ? { path: "/lessons", fresh: true } : task === "connections" ? { path: "/connections", fresh: true } : { path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
+          body: JSON.stringify(task === "lessons" ? { path: "/lessons", fresh: true } : task === "connections" ? { path: "/connections", fresh: true } : task === "models" ? { path: "/models", fresh: true } : { path: task === undefined ? "/" : task === "second-review" ? "/second-review" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
         });
       } catch {
         throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is not answering at its address. Start it again with `rovara up`.");

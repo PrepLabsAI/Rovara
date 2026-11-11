@@ -3,7 +3,7 @@
 //
 // Not wired yet (each answers "nothing there" so the page says so, rather than inventing a view): design reviews (the design review stage is not ported), lessons (the lessons store is
 // lane L11's) and the proof report (slice 3: it reads the verification and the pull request the publish step records).
-import type { ObjectStorage } from "@agentx/contracts";
+import { formatRunLimitUsd, type ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
   queryAll, taskGraphDigest, when, type OrgId, type Principal, type WorkflowArtifact, type WorkflowSnapshot,
@@ -12,7 +12,8 @@ import { CHANGED_OUTSIDE_NOTE, checkPullRequestHeads } from "../../core/build-st
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { ApprovalOffer, AttentionView, CommentView, LocalActionResult, LocalPageActions, LocalPageData, PendingItemView, PlanPageView, PlanVersionView, ProofReportView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
-import { listTasks, readTask } from "../../core/task-flow/reads.js";
+import { listTasks, readTask, workspaceOperations } from "../../core/task-flow/reads.js";
+import { costLine, type CostLedger } from "../../core/cost/ledger.js";
 import { fromDocument, type OperationRecord, type TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
@@ -40,6 +41,7 @@ import { planGraphOf } from "../../core/work-breakdown/plan-graph.js";
 import { workBreakdownView, type WorkBreakdownView } from "../../core/work-breakdown/view.js";
 import { operationKey } from "../../core/task-flow/keys.js";
 import type { SecondReview } from "../../core/second-review/index.js";
+import type { ModelSelectionService } from "../../core/model-selection/service.js";
 import { designNotRunLine } from "../../core/design-review/not-run.js";
 import type { LocalDiagnosis } from "./diagnosis.js";
 
@@ -83,6 +85,10 @@ export interface PageDataDeps {
   diagnosis?: Pick<LocalDiagnosis, "pageView" | "diagnose">;
   /** The lessons page: what Rovara has learned, and the owner's decisions on it. Absent: the page says there is nothing. */
   lessons?: Pick<LocalLessons, "list" | "act" | "repoSwitches" | "repoSwitch">;
+  /** The model each step uses. Absent: no models page. */
+  modelSelection?: ModelSelectionService;
+  /** The cost ledger: what the task has cost so far. Absent: the page says nothing of it. */
+  cost?: Pick<CostLedger, "taskCost">;
 }
 
 /** The attention view with where the plan is posted: the attached thread and the project's repositories, only while a code host reads comments. */
@@ -103,6 +109,29 @@ async function attentionWithThread(deps: PageDataDeps, task: TaskRecord, view: A
   const project = await deps.flow.projects.revision(task.project, task.startingRevision);
   const attached = await deps.comments.attachedThread(task.taskId);
   return { ...view, thread: { ...(attached === undefined ? {} : { attached }), repositories: (project?.definition.repositories ?? []).map((repository) => repository.name) } };
+}
+
+const STAGE_LINE: Readonly<Record<string, string>> = { understand: "Understand", plan: "Plan", plan_check: "Plan check", build: "Build", code_review: "Review", pull_request: "Feedback" };
+
+/** What the task is expected to cost, what it has cost so far and the model each step ran on (the newest of each step), as lines for the plan page. */
+async function costAndModelsOfPlanPage(deps: PageDataDeps, task: TaskRecord): Promise<Pick<PlanPageView, "costAndModels">> {
+  const lines: string[] = [];
+  const estimate = task.runEstimate;
+  if (estimate !== undefined) {
+    lines.push(`Expected cost: about ${formatRunLimitUsd(estimate.lowUsd)} to ${formatRunLimitUsd(estimate.highUsd)} (${estimate.basis === "history" ? `from ${String(estimate.samples)} earlier runs of this kind` : "the default for this kind of task, until there are enough earlier runs"}). Run limit: ${formatRunLimitUsd(estimate.runLimitUsd)}.`);
+  }
+  if (deps.cost !== undefined) {
+    const spent = await deps.cost.taskCost(deps.companyId, task.taskId).catch(() => undefined);
+    if (spent !== undefined && spent.entries > 0) lines.push(`Spent so far: ${costLine(spent)}.`);
+  }
+  const newest = new Map<string, string>();
+  for (const operation of await workspaceOperations(deps.flow, task.workspaceId).catch(() => [])) {
+    const choice = operation.modelChoice;
+    if (choice === undefined) continue;
+    newest.set(choice.stage, `${STAGE_LINE[choice.stage] ?? choice.stage}: ${choice.model.provider}:${choice.model.modelId}${choice.sameModelAsChecked === true ? " (the same model as the step it checks)" : ""}`);
+  }
+  if (newest.size > 0) lines.push(`Models used: ${[...newest.values()].join("; ")}.`);
+  return lines.length === 0 ? {} : { costAndModels: lines };
 }
 
 /** The second review's lines for the plan page, and the acknowledgement the owner owes before a merge (Cloud's task view `secondReview`). */
@@ -220,10 +249,12 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         ...secondReviewOfPlanPage(deps, task),
         // Fix with agent: the button for the error the task shows, or the diagnosis already asked for.
         ...(await diagnosisOfPlanPage(deps, taskId)),
+        ...await costAndModelsOfPlanPage(deps, task),
       };
     },
 
     async getSecondReview() { return deps.secondReview?.enabled() === true ? deps.secondReview.state() : undefined; },
+    async getModelSelection() { return deps.modelSelection?.state(); },
     async getDesignReview() { return undefined; },
     async readMockup() { return undefined; },
     async listLessons() { return deps.lessons === undefined ? [] : deps.lessons.list(); },
@@ -242,10 +273,16 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
 }
 
 /** The writes of the pages that the decision gate does not own: a comment on a plan, and the lessons (none here yet). */
-export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview" | "diagnosis" | "lessons"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "lessonRepoAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "diagnose" | "acknowledgeSecondReview"> {
+export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview" | "modelSelection" | "diagnosis" | "lessons"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "lessonRepoAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "diagnose" | "modelSelection" | "acknowledgeSecondReview"> {
   return {
     async diagnose(input): Promise<LocalActionResult> {
       return deps.diagnosis === undefined ? { ok: false, reason: "not_found", message: "That is no longer there." } : deps.diagnosis.diagnose(input);
+    },
+    async modelSelection(input, context): Promise<LocalActionResult> {
+      if (deps.modelSelection === undefined) return { ok: false, reason: "not_found", message: "That is no longer there." };
+      const result = await deps.modelSelection.apply(deps.owner, input, { fresh: context.fresh });
+      if (result.ok) return { ok: true, message: "Saved." };
+      return { ok: false, reason: result.code === "reauth_required" ? "reauth" : result.code === "stale" ? "stale" : result.code === "invalid" ? "invalid" : "refused", message: result.words };
     },
     async secondReview(input, context): Promise<LocalActionResult> {
       if (deps.secondReview === undefined) return { ok: false, reason: "not_found", message: "That is no longer there." };

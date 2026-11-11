@@ -166,12 +166,13 @@ export async function recordCritiqued(
     const text = await criticAnswerOf(deps, operation).catch(() => undefined);
     const read = text === undefined ? undefined : readPlanCritique(text);
     if (read === undefined || !read.ok) { await move(closePlanCritique(workflow, { expectedRevision: workflow.revision, status: "done", now })); return; }
-    const model: ModelIdentifier = (await deps.installModel?.()) ?? { provider: "unknown", modelId: "unknown" };
+    // The model the install's rule chose for the check (kept on the operation), else the install's one model, which also wrote the plan.
+    const model: ModelIdentifier = operation.modelChoice?.model ?? (await deps.installModel?.()) ?? { provider: "unknown", modelId: "unknown" };
     const next = submitPlanCritique(workflow, {
       expectedRevision: workflow.revision, now,
       critique: { verdict: read.verdict, points: read.points, model: critiqueModelOf(model) },
-      // The install runs every step on its one model, so the plan was checked by the model that wrote it, and the plan says so.
-      sameModelAsPlanner: true,
+      // With one model for every step the plan was checked by the model that wrote it, and the plan says so; a check the rule gave a model of its own says whether it is the planner's.
+      ...(operation.modelChoice === undefined || operation.modelChoice.sameModelAsChecked === true ? { sameModelAsPlanner: true as const } : {}),
     });
     // A blocking point sends the plan back to the planner once, by a row of its own; anything else is the person's now.
     const revise = next.stage === "PLAN" && next.state === "READY";

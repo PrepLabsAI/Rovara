@@ -28,6 +28,7 @@ import {
   type DeveloperTaskShare,
   type DeveloperTaskStatus,
   type Operation,
+  type RunEstimate,
   type WorkflowSnapshot,
   type WorkflowReviewBase,
   type DeveloperSignInMethod,
@@ -126,6 +127,10 @@ export interface DeveloperTaskRecord {
    */
   secondOpinion?: StoredSecondOpinion;
   secondReviewAcknowledged?: string[];
+  /** What the run is expected to cost and the limit that follows, worked out when its coding plan was stored (Cloud's field, same shape). */
+  runEstimate?: RunEstimate;
+  /** When the run's cost was kept for the next estimate: a run is counted once however often its end is told. */
+  runCostRecordedAt?: string;
 }
 
 /** C1: a shared task's thread, as the task record keeps it. */

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost, TaskDiagnosisView } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
-  agentSessionKey, canonicalPlanJson, change, createCandidateManifest, projectMetaKey, secondReviewModelKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
+  ModelSelectionStateSchema, agentSessionKey, canonicalPlanJson, change, createCandidateManifest, orgSettingsKey, queryAll, runCostKey, projectMetaKey, secondReviewModelKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 import { bindSessionSurface } from "../../packages/broker/src/core/sessions/bindings.js";
@@ -31,7 +31,7 @@ import { OPENS_PER_MINUTE } from "../../packages/broker/src/local/app/routes.js"
 import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
 import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
 import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/local/app/host.js";
-import { registerConnectionsCommand, registerDiagnosisCommand, registerOpenCommand, registerSecondReviewCommand } from "../../packages/cli/src/up/cli.js";
+import { registerConnectionsCommand, registerModelsCommand, registerDiagnosisCommand, registerOpenCommand, registerSecondReviewCommand } from "../../packages/cli/src/up/cli.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
@@ -54,6 +54,9 @@ import { secondReviewReplayKey, secondReviewVerdictKey } from "../../packages/br
 import { plain, replayRun, verdictFor } from "../support/second-review-world.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { startFakeProvider } from "../support/model-proxy-world.js";
+import { catalogModelIds, listPricesPerMillion } from "../../packages/model-runtime/src/catalog.js";
+import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
+import { catalogPriceOf, costMicrosOf } from "../../packages/broker/src/core/cost/price-table.js";
 import { planAnswer, testedPlanDocument } from "../support/plan-documents.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
 
@@ -929,18 +932,19 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
       formats: [{ format: "openai-completions", pathOverride: "/chat/completions", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "none", reasoningReturned: false, promptCaching: false, streamUsage: true } },
         { format: "openai-responses", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "effort", reasoningReturned: true, promptCaching: false, streamUsage: true } }] }; } };\n`;
     const keyed = await launch({
-      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" },
+      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real", ROVARA_RUN_LIMIT: "0" },
       files: { "gateway.mjs": gateway("company-gateway", '{ kind: "bearer-key" }', "https://models.example.test/v1") },
       config: { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model: { provider: "company-gateway", id: "house-model" } },
     });
     expect((await understandStep(keyed)).payload).toMatchObject({ modelRoute: { alias: "company-gateway/house-model", api: "openai-completions", catalog: "house-model" } });
     const responses = await launch({
-      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" },
+      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real", ROVARA_RUN_LIMIT: "0" },
       files: { "gateway.mjs": gateway("company-gateway", '{ kind: "bearer-key" }', "https://models.example.test/v1") },
       config: { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model: { provider: "company-gateway", api: "openai-responses", id: "house-model" } },
     });
     expect((await understandStep(responses)).payload).toMatchObject({ modelRoute: { api: "openai-responses" } });
     const open = await launch({
+      environment: { ROVARA_RUN_LIMIT: "0" },
       files: { "local.mjs": gateway("local-llm", '{ kind: "none" }', "http://127.0.0.1:11434") },
       config: { version: 1, plugins: [{ point: "model-provider", name: "local-llm", module: "./local.mjs" }], model: { provider: "local-llm", id: "tiny" } },
     });
@@ -4548,7 +4552,7 @@ describe("rovara up: Fix with agent for a task's error, on the owner's own key, 
     expect(shownNone.shown.body).toContain("runs on your own model key");
     expect(shownNone.shown.body).not.toContain("/diagnose");
 
-    const unpriced = await launch({ environment: { ANTHROPIC_API_KEY: KEY() }, config: { version: 1, plugins: [], model: { provider: "anthropic", id: "claude-model-nobody-listed" } } });
+    const unpriced = await launch({ environment: { ANTHROPIC_API_KEY: KEY(), ROVARA_RUN_LIMIT: "0" }, config: { version: 1, plugins: [], model: { provider: "anthropic", id: "claude-model-nobody-listed" } } });
     const taskUnpriced = await blockedTask(unpriced);
     const noPrice = await read(unpriced, taskUnpriced);
     expect(noPrice.offered).toBe(false);
@@ -4829,5 +4833,489 @@ describe("connections and context sources on rovara up", () => {
     const program = new Command();
     registerConnectionsCommand(program, { home: h.root, fetch, stdout: { write: () => true } });
     expect(program.commands.find((command) => command.name() === "connections")!.commands.map((command) => command.name()).sort()).toEqual(["list", "sources"]);
+  });
+});
+
+// ---- What a task costs and the model each step uses
+const GPT_ID = catalogModelIds("openai").find((id) => /^gpt-5/u.test(id) && !/mini|nano|chat|codex|pro/u.test(id) && listPricesPerMillion({ provider: "openai", modelId: id }) !== undefined) ?? "gpt-5";
+/** The operations of a task's workspace, oldest first, as stored. */
+const operationsOfTask = async (h: Awaited<ReturnType<typeof launch>>, taskId: string): Promise<OperationRecord[]> => {
+  const store = h.runtime.registry.require("storage");
+  const workspaceId = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+  return (await queryAll(store, { pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).map((item) => item as unknown as OperationRecord).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.fence - b.fence);
+};
+/** The form of the models page that carries `op` (and, for a step, its stage): the page holds many forms for one address. */
+function modelsForm(page: string, op: string, stage = ""): Record<string, string> {
+  const decode = (text: string) => text.replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  for (const match of page.matchAll(/<form[^>]*action="([^"]+)"[^>]*>([\s\S]*?)<\/form>/g)) {
+    if (!decode(match[1] ?? "").endsWith("/models/act")) continue;
+    const fields: Record<string, string> = {};
+    for (const input of (match[2] ?? "").matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) fields[decode(input[1] ?? "")] = decode(input[2] ?? "");
+    if (fields["op"] === op && fields["stage"] === stage) return fields;
+  }
+  throw new Error(`no ${op} form for ${stage} on the models page`);
+}
+/** The owner makes one change on the models page, in a session of their own, and answers where the page sent them. */
+async function changeModels(h: Awaited<ReturnType<typeof launch>>, op: string, stage: string, choice: Record<string, string>): Promise<string> {
+  const link = await h.browse("/models");
+  const page = await raw_(h, link);
+  expect(page.status).toBe(200);
+  const fields = modelsForm(page.body, op, stage);
+  const post = await raw(h.runtime.pagesUrl, { method: "POST", path: `/s/${link.pathname.split("/")[2]}/models/act`, body: formBody({ ...fields, ...choice }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+  return String(post.headers["location"]);
+}
+
+describe("rovara up: what a task costs, and the model each step uses", () => {
+  it("a plan carries the expected cost of the run, shown to tools and on the decision's risk; closing the task keeps what it cost for the next estimate, once", async () => {
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: ["sk", "ant", "c".repeat(24)].join("-") } });
+    const { taskId } = await toPlanReview(h);
+    // No history yet: the default for the task's path, and a run limit that follows from it.
+    const seen = (await h.api(`/v1/dev/tasks/${taskId}`)).body.task as unknown as { runEstimate?: unknown };
+    expect(seen.runEstimate).toEqual({ lowUsd: 1, highUsd: 3, runLimitUsd: 6, stopAtUsd: 6, basis: "default", samples: 0 });
+    expect((await taskRecord(h, taskId) as unknown as { runEstimate?: unknown }).runEstimate).toEqual(seen.runEstimate);
+    // What its model calls cost is in the cost ledger; a close keeps it for the estimates of the next runs.
+    const store = h.runtime.registry.require("storage");
+    await store.put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: "TOTAL", entityType: "COST_TOTAL", taskId, companyId: IMPLICIT_COMPANY_ID, currency: "USD", micros: 2_750_000, tokensInput: 1, tokensOutput: 1, tokensCacheRead: 0, tokensCacheWrite: 0, entries: 4, unpricedEntries: 0 } });
+    // The plan's page says what it is expected to cost, what it has cost, and the model each step ran on.
+    const planPage = (await raw_(h, await h.browse(`/plan/${taskId}`))).body;
+    expect(planPage).toContain("Cost and models");
+    expect(planPage).toContain("Expected cost: about $1 to $3 (the default for this kind of task, until there are enough earlier runs). Run limit: $6.");
+    expect(planPage).toContain("Spent so far: $2.75.");
+    expect(planPage).toMatch(/Models used: Understand: anthropic:[^;]+; Plan: anthropic:[^;]+; Plan check: anthropic:[^<]*\(the same model as the step it checks\)\./u);
+    expect((await h.api(`/v1/dev/tasks/${taskId}/close`, { method: "POST", body: {} })).status).toBe(200);
+    const kept = (await store.query({ pk: runCostKey(IMPLICIT_COMPANY_ID, "payments", "rovara-code", "QUICK", "2000-01-01T00:00:00.000Z", "-").pk, descending: true })).items;
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ entityType: "RUN_COST", project: "payments", agentId: "rovara-code", path: "QUICK", taskId, costUsd: 2.75 });
+    expect(await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" })).toMatchObject({ runCostRecordedAt: (expect.any(String) as string) });
+    // Closing again counts nothing more.
+    await h.api(`/v1/dev/tasks/${taskId}/close`, { method: "POST", body: {} });
+    expect((await store.query({ pk: kept[0]!["pk"] })).items).toHaveLength(1);
+  });
+
+  it("a run with a call that had no price is marked and never teaches the estimator, which would otherwise think runs cheap", async () => {
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: ["sk", "ant", "d".repeat(24)].join("-") } });
+    const { taskId } = await toPlanReview(h, "33333333-3333-4333-8333-333333333333");
+    const store = h.runtime.registry.require("storage");
+    await store.put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: "TOTAL", entityType: "COST_TOTAL", taskId, companyId: IMPLICIT_COMPANY_ID, currency: "USD", micros: 400_000, tokensInput: 1, tokensOutput: 1, tokensCacheRead: 0, tokensCacheWrite: 0, entries: 3, unpricedEntries: 1 } });
+    await h.api(`/v1/dev/tasks/${taskId}/close`, { method: "POST", body: {} });
+    expect((await store.query({ pk: runCostKey(IMPLICIT_COMPANY_ID as never, "payments", "rovara-code", "QUICK", "2000-01-01T00:00:00.000Z", "-").pk })).items).toHaveLength(0);
+    expect(await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" })).toMatchObject({ runCostRecordedAt: (expect.any(String) as string) });
+  });
+
+  it("with nothing set every step runs on the install's model, the plan check says it is the same one, and each operation keeps the choice made for it", async () => {
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: ["sk", "ant", "e".repeat(24)].join("-") } });
+    const { taskId, understand, plan, critique } = await toPlanReview(h);
+    for (const job of [understand, plan, critique]) expect(job.payload).toMatchObject({ modelRoute: { alias: (expect.stringMatching(/^anthropic\//u) as string), api: "anthropic-messages" } });
+    const choices = (await operationsOfTask(h, taskId)).flatMap((operation) => (operation.modelChoice === undefined ? [] : [{ mode: operation.workflowMode, ...operation.modelChoice }]));
+    expect(choices.map((choice) => choice.stage)).toEqual(["understand", "plan", "plan_check"]);
+    expect(choices.map((choice) => choice.reason)).toEqual(["BUILTIN_DEFAULT", "BUILTIN_DEFAULT", "INSTALL_MODEL"]);
+    expect(choices[2]).toMatchObject({ sameModelAsChecked: true });
+    // The token of a step may call that step's model and no other.
+    expect((await h.runtime.app.modelGrants.grant(understand.callbackCapability).catch(() => ({ routes: [] }))).routes.length).toBeLessThanOrEqual(1);
+    // The plan check says it was the same model.
+    const critiqueNote = ((await taskRecord(h, taskId)) as unknown as { workflow: { critique?: { sameModelAsPlanner?: boolean } } }).workflow.critique;
+    expect(critiqueNote?.sameModelAsPlanner).toBe(true);
+  });
+
+  it("the owner chooses a model for a step on the models page: the step is sent that route and thinking level, its token may call it alone, and a tool can read the setting but not change it", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    expect(await changeModels(h, "set", "understand", { model: `openai::${GPT_ID}`, fallback: "", thinking: "high", different: "" })).toContain("n=saved");
+    const { taskId, prepare, understand, plan, critique } = await toPlanReview(h);
+    // The preparation has no model; understanding and planning share one setting; the others keep the install's.
+    expect(prepare.payload).not.toHaveProperty("modelRoute");
+    for (const job of [understand, plan]) {
+      expect(job.payload).toMatchObject({ modelRoute: { alias: `openai/${GPT_ID}` }, model: { provider: "openai", modelId: GPT_ID, thinkingLevel: "high" } });
+    }
+    expect(critique.payload).toMatchObject({ modelRoute: { alias: (expect.stringMatching(/^anthropic\//u) as string) } });
+    expect(critique.payload).not.toHaveProperty("model");
+    const ops = (await operationsOfTask(h, taskId)).filter((operation) => operation.modelChoice !== undefined);
+    expect(ops.map((operation) => [operation.modelChoice!.stage, operation.modelChoice!.model.provider, operation.modelChoice!.reason])).toEqual([["understand", "openai", "COMPANY_DEFAULT"], ["plan", "openai", "COMPANY_DEFAULT"], ["plan_check", "anthropic", "INSTALL_MODEL"]]);
+    // A tool reads it ...
+    const read = await h.api("/v1/dev/model-selection");
+    expect(read.status).toBe(200);
+    expect(read.body).toMatchObject({ version: 1, revision: 1, reviewDefault: "install-model", runLimit: { enforced: true } });
+    const steps = (read.body as unknown as { steps: Array<{ stage: string; setting: unknown; effective?: { model: { provider: string }; thinkingLevel: string | null } }> }).steps;
+    expect(steps.find((step) => step.stage === "plan")).toMatchObject({ setting: { model: { provider: "openai", modelId: GPT_ID }, thinkingLevel: "high" }, effective: { model: { provider: "openai" }, thinkingLevel: "high" } });
+    // ... and cannot change it, whatever it sends.
+    const refused = await h.api("/v1/dev/model-selection", { method: "POST", body: { action: "clear", stage: "plan", expectedRevision: 1 } });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error?.message).toContain("rovara open models");
+    // (The local server answers only GET and POST at all.)
+    expect((await h.api("/v1/dev/model-selection", { method: "PUT", body: {} })).status).toBe(405);
+    expect((await h.api("/v1/dev/model-selection")).body).toMatchObject({ revision: 1 });
+  });
+
+  it("a checking step the owner asked to use a different company's model runs on one, and the plan says it was not the planner's own model", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    expect(await changeModels(h, "set", "understand", { model: `openai::${GPT_ID}`, fallback: "", thinking: "", different: "" })).toContain("n=saved");
+    expect(await changeModels(h, "review-default", "", { value: "different-company" })).toContain("n=saved");
+    const { taskId, plan, critique } = await toPlanReview(h);
+    expect(plan.payload).toMatchObject({ modelRoute: { alias: `openai/${GPT_ID}` } });
+    expect(critique.payload).toMatchObject({ modelRoute: { alias: (expect.stringMatching(/^anthropic\//u) as string) } });
+    const check = (await operationsOfTask(h, taskId)).find((operation) => operation.workflowMode === "PLAN_CRITIQUE")!.modelChoice!;
+    expect(check).toMatchObject({ stage: "plan_check", reason: "DEFAULT_DIFFERENT_COMPANY" });
+    expect(check.sameModelAsChecked).toBeUndefined();
+    expect(((await taskRecord(h, taskId)) as unknown as { workflow: { critique?: { sameModelAsPlanner?: boolean } } }).workflow.critique?.sameModelAsPlanner).toBeUndefined();
+    // The owner's change is audited and kept in the hosted layout.
+    const policy = await h.runtime.registry.require("storage").get(orgSettingsKey(IMPLICIT_COMPANY_ID, "MODEL_SELECTION_POLICY"));
+    expect(policy).toMatchObject({ revision: 2, reviewDefault: "different-company" });
+  });
+
+  it("a form the page did not sign is refused, a form is good once, and a copy of the page drawn before another change cannot write over it", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    const link = await h.browse("/models");
+    const page = await raw_(h, link);
+    const fields = modelsForm(page.body, "set", "build");
+    // A second copy of the page, drawn at the same revision (another tab).
+    const other = modelsForm((await raw_(h, link)).body, "set", "build");
+    const send = (extra: Record<string, string>) => raw(h.runtime.pagesUrl, { method: "POST", path: `/s/${link.pathname.split("/")[2]}/models/act`, body: formBody({ ...fields, ...extra }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    // The same form sent with another model than the one it was drawn for is not the form the page signed.
+    const wrongStage = await raw(h.runtime.pagesUrl, { method: "POST", path: `/s/${link.pathname.split("/")[2]}/models/act`, body: formBody({ ...fields, stage: "plan", model: `openai::${GPT_ID}` }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(String(wrongStage.headers["location"])).toContain("n=form");
+    expect(String((await send({ model: `openai::${GPT_ID}`, fallback: "", thinking: "", different: "" })).headers["location"])).toContain("n=saved");
+    // The other copy was drawn at revision 0 and the setting is at 1 now: it cannot write over what it never saw. (The form that was just used cannot be sent again either.)
+    expect(String((await send({ model: "", fallback: "", thinking: "", different: "" })).headers["location"])).toContain("n=form");
+    const second = await raw(h.runtime.pagesUrl, { method: "POST", path: `/s/${link.pathname.split("/")[2]}/models/act`, body: formBody({ ...other, model: "", fallback: "", thinking: "", different: "" }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(String(second.headers["location"])).toContain("n=stale");
+    expect(await h.runtime.registry.require("storage").get(orgSettingsKey(IMPLICIT_COMPANY_ID as never, "MODEL_SELECTION_POLICY"))).toMatchObject({ revision: 1 });
+  });
+
+  it("`rovara models` shows what each step uses and what it costs, and `models open` and `open models` open the page in a fresh session; neither can change a model", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    const printed: string[] = [];
+    const run = async (...args: string[]) => {
+      const program = new Command().exitOverride().option("--json");
+      const context = { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } };
+      registerModelsCommand(program, context);
+      registerOpenCommand(program, context);
+      await program.parseAsync(["node", "rovara", ...args]);
+    };
+    await run("models", "--state-dir", h.stateDirectory);
+    const text = printed.join("");
+    expect(text).toMatch(/^understand: anthropic:[^\n]+ \(default; /u);
+    expect(text).toContain("plan check: anthropic:");
+    expect(text).toContain("the same model as the step it checks");
+    expect(text).toContain("A run limit is held");
+    expect(text).toContain("Change it on the page: rovara open models");
+    printed.length = 0;
+    await run("--json", "models", "status", "--state-dir", h.stateDirectory);
+    expect(JSON.parse(printed.join(""))).toMatchObject({ ok: true, data: { version: 1, revision: 0, steps: (expect.any(Array) as unknown[]) } });
+    // Both open the page (the process opens it itself; no address is printed), asking for a session opened just now.
+    for (const args of [["models", "open"], ["open", "models"]]) {
+      printed.length = 0;
+      const before = h.opened.length;
+      await run(...args, "--state-dir", h.stateDirectory);
+      expect(printed.join("")).toMatch(/^Opened /u);
+      expect(printed.join("")).not.toMatch(/\/s\//);
+      expect(h.opened).toHaveLength(before + 1);
+      const once = new URL(h.opened.at(-1)!);
+      const link = new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
+      expect(link.pathname).toMatch(/\/models$/u);
+    }
+    // The command has no way to set anything.
+    await expect(run("models", "set", "plan", "x", "--state-dir", h.stateDirectory)).rejects.toThrow();
+    expect((await h.api("/v1/dev/model-selection")).body).toMatchObject({ revision: 0 });
+  });
+
+  it("a step that failed because its model cannot be used teaches the next choice to leave it out, and an ordinary failure teaches nothing", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    await h.api("/v1/admin/projects", { method: "POST", body: h.project });
+    const start = async (requestId: string) => {
+      const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId, project: "payments", instructions: "Add a /health endpoint", workflow: true } })).body.task.taskId;
+      const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+      const seen = new Set<string>();
+      await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: h.base }] } });
+      return { taskId, understand: await h.nextJob(workspaceId, seen) };
+    };
+    const usable = async () => (await h.api("/v1/dev/model-selection")).body as unknown as { models: Array<{ model: { provider: string; modelId: string }; usable: boolean }> };
+    const usabilityRow = () => h.runtime.registry.require("storage").get({ pk: "SETTINGS", sk: "MODEL_USABILITY" });
+    // A failure that says nothing about the model teaches nothing.
+    const first = await start("77777777-7777-4777-8777-777777777777");
+    const ran = (first.understand.payload as { modelRoute: { alias: string } }).modelRoute.alias;
+    expect((await h.callback(first.understand, "result", { status: "FAILED", error: "the model call failed: key-rejected attempt 1" })).status).toBe(200);
+    expect(await usabilityRow()).toBeUndefined();
+    expect((await usable()).models.every((entry) => entry.usable)).toBe(true);
+    // One that says the account cannot use the model marks it: it is shown as refused lately, and the record is the hosted row.
+    const second = await start("88888888-8888-4888-8888-888888888888");
+    expect((await h.callback(second.understand, "result", { status: "FAILED", error: "the model call failed: key-rejected ModelNotEnabled HTTP 403" })).status).toBe(200);
+    const row = (await usabilityRow())!;
+    expect(Object.keys(row).filter((name) => name.startsWith("failed#"))).toHaveLength(1);
+    const refused = (await usable()).models.filter((entry) => !entry.usable).map((entry) => `${entry.model.provider}/${entry.model.modelId}`);
+    expect(refused).toEqual([ran]);
+  });
+
+  /** What the worker's egress gateway does with a call to the broker's listener: the broker's name for the host, the worker's own workspace stamped on it. */
+  const callProxy = (h: Awaited<ReturnType<typeof launch>>, job: WorkerInvocation, method: string, path: string, headers: Record<string, string>, body?: unknown) => new Promise<{ status: number; text: string }>((resolve, reject) => {
+    const text = body === undefined ? undefined : JSON.stringify(body);
+    const req = httpRequest({
+      host: "127.0.0.1", port: h.runtime.callbackPort, method, path, setHost: false,
+      headers: { host: `host.docker.internal:${h.runtime.callbackPort}`, "x-rovara-workspace": job.workspaceId, ...(text === undefined ? {} : { "content-type": "application/json" }), ...headers },
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => resolve({ status: response.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("error", reject);
+    req.end(text);
+  });
+  /** One model call of a running step, through the proxy, exactly as its worker makes it: a token from the broker, then the call with it. The fake provider answers with a known usage. */
+  async function workerCall(h: Awaited<ReturnType<typeof launch>>, job: WorkerInvocation): Promise<void> {
+    const minted = await callProxy(h, job, "GET", "/v1/internal/model-access", { "x-agentx-callback-capability": job.callbackCapability });
+    expect(minted.status, minted.text).toBe(200);
+    const access = JSON.parse(minted.text) as { apiKey: string };
+    const route = (job.payload as { modelRoute: { alias: string } }).modelRoute;
+    const reply = await callProxy(h, job, "POST", "/v1/internal/model-proxy/v1/messages", { "x-api-key": access.apiKey }, { model: route.alias, max_tokens: 100, messages: [{ role: "user", content: "hi" }] });
+    expect(reply.status, reply.text).toBe(200);
+  }
+  const ledgerTotal = async (h: Awaited<ReturnType<typeof launch>>, taskId: string) => h.runtime.registry.require("storage").get({ pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: "TOTAL" });
+  const budgetOf = async (h: Awaited<ReturnType<typeof launch>>, job: WorkerInvocation) => (await h.runtime.app.modelGrants.grant(job.callbackCapability)).budget;
+
+  it("what a worker's call costs is kept in the task's cost ledger: the next step, a retry and a send-back are held to what is left, and a token made again counts its own spend once", async () => {
+    const provider = await startFakeProvider();
+    cleanup.push(() => provider.close());
+    const key = ["sk", "ant", "m".repeat(24)].join("-");
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: key }, modelProviderEndpoints: { anthropic: provider.url } });
+    await h.api("/v1/admin/projects", { method: "POST", body: h.project });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "99999999-9999-4999-8999-999999999999", project: "payments", instructions: "Add a /health endpoint", workflow: true } })).body.task.taskId;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: h.base }] } });
+    const understand = await h.nextJob(workspaceId, seen);
+    const limit = 2_000_000;
+    expect(await budgetOf(h, understand)).toEqual({ micros: limit, currency: "USD" });
+    // One call, priced at the model's price (the fake provider says what it used).
+    await workerCall(h, understand);
+    const model = (understand.payload as { modelRoute: { catalog: string } }).modelRoute.catalog;
+    const listed = listPricesPerMillion({ provider: "anthropic", modelId: model })!;
+    const spent = costMicrosOf(catalogPriceOf(listed)!, { input: 1_000, output: 200, cacheRead: 5_000, cacheWrite: 400 });
+    expect(spent).toBeGreaterThan(0);
+    expect(await ledgerTotal(h, taskId)).toMatchObject({ micros: spent, entries: 1, unpricedEntries: 0, currency: "USD" });
+    // A token made again for the SAME step counts that step's own spend once: the proxy holds it (and keeps counting it), so the budget is what it was.
+    expect(await budgetOf(h, understand)).toEqual({ micros: limit, currency: "USD" });
+    // The next step starts from what the task has spent.
+    await h.callback(understand, "artifacts", { name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify({ kind: "ready", path: "QUICK", restatement: "Add a /health endpoint that answers 200.", assumptions: [] }) });
+    await h.callback(understand, "result", { status: "SUCCEEDED" });
+    const plan = await h.nextJob(workspaceId, seen);
+    expect(await budgetOf(h, plan)).toEqual({ micros: limit - spent, currency: "USD" });
+    // That step fails and the owner retries it: the new step is held to what is left, not to the whole limit again.
+    expect((await h.callback(plan, "result", { status: "FAILED", error: "the model did not answer" })).status).toBe(200);
+    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
+    const retried = await h.nextJob(workspaceId, seen);
+    expect(await budgetOf(h, retried)).toEqual({ micros: limit - spent, currency: "USD" });
+    // Each further call of the retried step is on the ledger too, and is taken off the next step.
+    await workerCall(h, retried);
+    expect(await ledgerTotal(h, taskId)).toMatchObject({ micros: 2 * spent, entries: 2 });
+    expect(await budgetOf(h, retried)).toEqual({ micros: limit - spent, currency: "USD" });
+    // The plan is answered and checked; the owner sends it back: the revision is held to what is left of the whole task.
+    await answerPlan(h, retried, PLAN_TEXT);
+    const check = await answerCritique(h, workspaceId, seen);
+    expect(await budgetOf(h, check).catch(() => undefined)).toBeUndefined();
+    const link = await h.browse(`/plan/${taskId}`);
+    const form = formOf((await raw_(h, link)).body, "/decide");
+    const sent = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody({ ...form.fields, decision: "changes", note: "Also log the request id." }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+    expect(sent.headers["location"]).toContain("n=changes");
+    const revised = await h.nextJob(workspaceId, seen);
+    // (The stored plan now carries its estimate: the task may spend the planning allowance and the run limit, $2 and $6.)
+    expect(await budgetOf(h, revised)).toEqual({ micros: 8_000_000 - 2 * spent, currency: "USD" });
+    // The page's spend line and the record a close keeps are the real figures.
+    await h.callback(revised, "result", { status: "FAILED", error: "stopped" });
+    expect((await raw_(h, await h.browse(`/plan/${taskId}`))).body).toContain(`Spent so far: $${(2 * spent / 1_000_000).toFixed(2)}`);
+    expect((await h.api(`/v1/dev/tasks/${taskId}/close`, { method: "POST", body: {} })).status).toBe(200);
+    const kept = (await h.runtime.registry.require("storage").query({ pk: runCostKey(IMPLICIT_COMPANY_ID, "payments", "rovara-code", "QUICK", "2000-01-01T00:00:00.000Z", "-").pk })).items;
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ taskId, costUsd: (2 * spent) / 1_000_000 });
+  });
+
+  it("a call whose record fails is tried again, and one that cannot be kept counts against its own step only: it never cancels what other steps of the task spent", async () => {
+    const provider = await startFakeProvider();
+    cleanup.push(() => provider.close());
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: ["sk", "ant", "u".repeat(24)].join("-") }, modelProviderEndpoints: { anthropic: provider.url } });
+    await h.api("/v1/admin/projects", { method: "POST", body: h.project });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "95959595-9595-4595-8595-959595959595", project: "payments", instructions: "Add a /health endpoint", workflow: true } })).body.task.taskId;
+    const store = h.runtime.registry.require("storage");
+    const workspaceId = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: h.base }] } });
+    const understand = await h.nextJob(workspaceId, seen);
+    const model = (understand.payload as { modelRoute: { catalog: string } }).modelRoute.catalog;
+    const call = costMicrosOf(catalogPriceOf(listPricesPerMillion({ provider: "anthropic", modelId: model }))!, { input: 1_000, output: 200, cacheRead: 5_000, cacheWrite: 400 });
+    const limit = 2_000_000;
+    // Other steps of the task spent this much before: it is in the ledger.
+    const earlier = limit - call - 1;
+    await store.put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: "TOTAL", entityType: "COST_TOTAL", taskId, companyId: IMPLICIT_COMPANY_ID, currency: "USD", micros: earlier, tokensInput: 1, tokensOutput: 1, tokensCacheRead: 0, tokensCacheWrite: 0, entries: 2, unpricedEntries: 0 } });
+    expect(await budgetOf(h, understand)).toEqual({ micros: limit - earlier, currency: "USD" });
+    // The ledger write fails twice, then works: the call is kept (it is tried again), and nothing is counted twice.
+    const real = store.transact.bind(store);
+    let failures = 2;
+    const failing = (items: Parameters<typeof store.transact>[0]) => items.some((item) => item.kind === "put" && item.item["entityType"] === "COST_ENTRY");
+    store.transact = async (items) => { if (failing(items) && failures > 0) { failures -= 1; throw new Error("the disk is busy"); } return real(items); };
+    await workerCall(h, understand);
+    expect(failures).toBe(0);
+    expect(await ledgerTotal(h, taskId)).toMatchObject({ micros: earlier + call, entries: 3 });
+    // The budget of a token made again takes back the step's own recorded spend: what is left is what it was.
+    expect(await budgetOf(h, understand)).toEqual({ micros: limit - earlier, currency: "USD" });
+    // The write keeps failing: the call counts against THIS step (a second call that no longer fits is refused before the provider), but it is not in the ledger and is not taken off the ledger's total when a token is made again.
+    store.transact = async (items) => { if (failing(items)) throw new Error("the disk is gone"); return real(items); };
+    const before = provider.calls.length;
+    await store.put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: "TOTAL", entityType: "COST_TOTAL", taskId, companyId: IMPLICIT_COMPANY_ID, currency: "USD", micros: limit - call - 1, tokensInput: 1, tokensOutput: 1, tokensCacheRead: 0, tokensCacheWrite: 0, entries: 2, unpricedEntries: 0 } });
+    const minted = JSON.parse((await callProxy(h, understand, "GET", "/v1/internal/model-access", { "x-agentx-callback-capability": understand.callbackCapability })).text) as { apiKey: string };
+    const route = (understand.payload as { modelRoute: { alias: string } }).modelRoute;
+    const send = () => callProxy(h, understand, "POST", "/v1/internal/model-proxy/v1/messages", { "x-api-key": minted.apiKey }, { model: route.alias, max_tokens: 100, messages: [{ role: "user", content: "hi" }] });
+    // (The first call here is not kept in the ledger and is charged to this step; it fits. The second no longer does.)
+    expect((await send()).status).toBe(200);
+    expect(provider.calls.length).toBe(before + 1);
+    expect((await send()).status).toBeGreaterThanOrEqual(400);
+    expect(provider.calls.length).toBe(before + 1);
+    const total = await ledgerTotal(h, taskId);
+    expect(total).toMatchObject({ micros: limit - call - 1, entries: 2 });
+    // A token made again for this step: the task's spend less only what the ledger holds of this step's own, so the unkept call does not cancel the other steps' spend.
+    const own = h.runtime.modelProxy.tokens.spentBy(understand.operationId)!.micros;
+    expect(own).toBe(call);
+    expect(await budgetOf(h, understand)).toEqual({ micros: Math.max(0, limit - (limit - call - 1) + own), currency: "USD" });
+  });
+
+  it("a task that has spent its limit gets a budget of nothing: the worker is given no token to call with, and the provider is never reached", async () => {
+    const provider = await startFakeProvider();
+    cleanup.push(() => provider.close());
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: ["sk", "ant", "n".repeat(24)].join("-") }, modelProviderEndpoints: { anthropic: provider.url } });
+    await h.api("/v1/admin/projects", { method: "POST", body: h.project });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "98989898-9898-4898-8898-989898989898", project: "payments", instructions: "Add a /health endpoint", workflow: true } })).body.task.taskId;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: h.base }] } });
+    const understand = await h.nextJob(workspaceId, seen);
+    // The planning allowance is spent by earlier calls (kept in the ledger as the proxy keeps them).
+    await h.runtime.registry.require("storage").put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: "TOTAL", entityType: "COST_TOTAL", taskId, companyId: IMPLICIT_COMPANY_ID, currency: "USD", micros: 2_000_000, tokensInput: 1, tokensOutput: 1, tokensCacheRead: 0, tokensCacheWrite: 0, entries: 3, unpricedEntries: 0 } });
+    expect(await budgetOf(h, understand)).toEqual({ micros: 0, currency: "USD" });
+    const minted = await callProxy(h, understand, "GET", "/v1/internal/model-access", { "x-agentx-callback-capability": understand.callbackCapability });
+    // Nothing is left, so the worker is given no token to call with; and nothing reached the provider.
+    expect(minted.status).toBeGreaterThanOrEqual(400);
+    expect(minted.text).not.toContain("apiKey");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("when two deliveries of one step race, the choice the first recorded is the one the step runs on: a later one reads it and uses it, and never overwrites it", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    const store = h.runtime.registry.require("storage");
+    const deps = h.runtime.app.flow.deps;
+    const real = deps.stepModels!;
+    const other = { stage: "understand", model: { provider: "openai", modelId: GPT_ID }, route: { alias: `openai/${GPT_ID}`, api: "openai-responses", catalog: GPT_ID }, reason: "COMPANY_DEFAULT" };
+    let raced = 0;
+    // Another delivery of the same job gets its choice recorded between this one's choice and its claim.
+    deps.stepModels = {
+      async choose(input) {
+        const answer = await real.choose(input);
+        if (input.stage === "understand" && raced === 0) {
+          raced += 1;
+          const waiting = (await queryAll(store, { pk: `WORKSPACE#${currentWorkspace}`, sk: { op: "beginsWith", prefix: "OPERATION#" } })).find((item) => item["workflowMode"] === "UNDERSTAND");
+          await store.update({ key: { pk: String(waiting!["pk"]), sk: String(waiting!["sk"]) }, ops: [change.set("modelChoice", other)] });
+        }
+        return answer;
+      },
+    };
+    let currentWorkspace = "";
+    await h.api("/v1/admin/projects", { method: "POST", body: h.project });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "96969696-9696-4696-8696-969696969696", project: "payments", instructions: "Add a /health endpoint", workflow: true } })).body.task.taskId;
+    currentWorkspace = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(currentWorkspace, seen), "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: h.base }] } });
+    const understand = await h.nextJob(currentWorkspace, seen);
+    expect(raced).toBe(1);
+    expect(understand.payload).toMatchObject({ modelRoute: { alias: `openai/${GPT_ID}` } });
+    const kept = (await operationsOfTask(h, taskId)).find((operation) => operation.workflowMode === "UNDERSTAND")!;
+    expect(kept.modelChoice?.model).toEqual({ provider: "openai", modelId: GPT_ID });
+    expect((await h.runtime.app.modelGrants.grant(understand.callbackCapability)).routes.map((route) => route.alias)).toEqual([`openai/${GPT_ID}`]);
+  });
+
+  it("a plug-in that calls a model free that the catalog prices stops the start, and says which; one for a model the catalog lists no price for is believed", async () => {
+    const listed = catalogModelIds("anthropic").find((id) => listPricesPerMillion({ provider: "anthropic", modelId: id }) !== undefined)!;
+    const plugin = (model: string) => `export const plugin = { point: "model-provider", name: "anthropic", create() { return { kind: "anthropic", name: "Anthropic", address: "https://api.anthropic.com", signIn: { kind: "named-header", header: "x-api-key" },
+      formats: [{ format: "anthropic-messages", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "thinking", reasoningReturned: true, promptCaching: true, streamUsage: true } }],
+      prices: { currency: "USD", models: { "${model}": { inputMicrosPerMillionTokens: 0, outputMicrosPerMillionTokens: 0, free: true } } } }; } };\n`;
+    const config = { version: 1, plugins: [{ point: "model-provider", name: "anthropic", module: "./anthropic.mjs" }] };
+    await expect(launch({ files: { "anthropic.mjs": plugin(listed) }, config })).rejects.toThrow(new RegExp(`${listed.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")} is marked free, but the catalog lists a price`, "u"));
+    const believed = await launch({ files: { "anthropic.mjs": plugin("an-unlisted-local-tune") }, config });
+    expect(believed.runtime.registry.require("model-provider", "anthropic").prices?.models["an-unlisted-local-tune"]).toMatchObject({ free: true });
+  });
+
+  it("the owner's OpenRouter free model runs with the run limit on by default: it is priced at exactly zero, its calls are kept at no cost, and its budget is never used up", async () => {
+    const provider = await startFakeProvider();
+    cleanup.push(() => provider.close());
+    const key = ["sk", "or", "v1", "f".repeat(24)].join("-");
+    const h = await launch({ environment: { OPENROUTER_API_KEY: key }, modelProviderEndpoints: { openrouter: provider.url }, config: { version: 1, plugins: [], model: { provider: "openrouter", id: "meta-llama/llama-3.3-70b-instruct:free" } } });
+    await h.api("/v1/admin/projects", { method: "POST", body: h.project });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "97979797-9797-4797-8797-979797979797", project: "payments", instructions: "Add a /health endpoint", workflow: true } })).body.task.taskId;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: h.base }] } });
+    const understand = await h.nextJob(workspaceId, seen);
+    expect(understand.payload).toMatchObject({ modelRoute: { alias: "openrouter/meta-llama/llama-3.3-70b-instruct:free", api: "openai-completions" } });
+    expect(await budgetOf(h, understand)).toEqual({ micros: 2_000_000, currency: "USD" });
+    const minted = await callProxy(h, understand, "GET", "/v1/internal/model-access", { "x-agentx-callback-capability": understand.callbackCapability });
+    const access = JSON.parse(minted.text) as { apiKey: string };
+    const reply = await callProxy(h, understand, "POST", "/v1/internal/model-proxy/v1/chat/completions", { authorization: `Bearer ${access.apiKey}` }, { model: "openrouter/meta-llama/llama-3.3-70b-instruct:free", messages: [{ role: "user", content: "hi" }], stream: false });
+    expect(reply.status, reply.text).toBe(200);
+    expect(provider.calls[0]).toMatchObject({ body: { model: "meta-llama/llama-3.3-70b-instruct:free" } });
+    // Kept as a call that cost nothing (not as one with no price), so nothing is spent and the run is not marked partial.
+    expect(await ledgerTotal(h, taskId)).toMatchObject({ micros: 0, entries: 1, unpricedEntries: 0 });
+    expect(await budgetOf(h, understand)).toEqual({ micros: 2_000_000, currency: "USD" });
+    const page = ModelSelectionStateSchema.parse((await h.api("/v1/dev/model-selection")).body);
+    expect(page.runLimit.enforced).toBe(true);
+    expect(page.steps.find((step) => step.stage === "plan")?.effective?.priceUsdPerMillion).toEqual({ input: 0, output: 0, source: "built-in" });
+  });
+
+  it("a run limit (held by default) gives each step's token what is left of the task's limit, and refuses a model with no price before any machine starts", async () => {
+    const gateway = (prices: string) => `export const plugin = { point: "model-provider", name: "company-gateway", create() { return { kind: "company-gateway", name: "Gateway", address: "https://models.example.test/v1", signIn: { kind: "bearer-key" }, ${prices}
+      formats: [{ format: "openai-completions", pathOverride: "/chat/completions", capabilities: { forcedToolChoice: true, parallelToolCalls: true, reasoning: "none", reasoningReturned: false, promptCaching: false, streamUsage: true } }] }; } };\n`;
+    const config = { version: 1, plugins: [{ point: "model-provider", name: "company-gateway", module: "./gateway.mjs" }], model: { provider: "company-gateway", id: "house-model" } };
+    // A priced model: the step's token carries a budget (the planning allowance before a plan has an estimate).
+    const priced = await launch({
+      environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" },
+      files: { "gateway.mjs": gateway('prices: { currency: "USD", models: { "house-model": { inputMicrosPerMillionTokens: 1000000, outputMicrosPerMillionTokens: 2000000 } } },') }, config,
+    });
+    await priced.api("/v1/admin/projects", { method: "POST", body: priced.project });
+    const pricedTask = (await priced.api("/v1/dev/tasks", { method: "POST", body: { requestId: "55555555-5555-4555-8555-555555555555", project: "payments", instructions: "Add a /health endpoint", workflow: true } })).body.task.taskId;
+    const pricedWorkspace = (await priced.runtime.registry.require("storage").get({ pk: `DEVTASK#${pricedTask}`, sk: "META" }))!["workspaceId"] as string;
+    const pricedSeen = new Set<string>();
+    await priced.callback(await priced.nextJob(pricedWorkspace, pricedSeen), "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: priced.base }] } });
+    const understandJob = await priced.nextJob(pricedWorkspace, pricedSeen);
+    expect(understandJob.payload).toMatchObject({ modelRoute: { alias: "company-gateway/house-model" } });
+    // Planning has an allowance of its own before a plan carries an estimate (a quick task's is $2, a full one's $6).
+    const first = await priced.runtime.app.modelGrants.grant(understandJob.callbackCapability);
+    expect(first.routes.map((route) => route.alias)).toEqual(["company-gateway/house-model"]);
+    expect(first.budget).toEqual({ micros: 2_000_000, currency: "USD" });
+    // What the task has spent is taken off: the token is given what is left.
+    await priced.runtime.registry.require("storage").put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, pricedTask), sk: "TOTAL", entityType: "COST_TOTAL", taskId: pricedTask, companyId: IMPLICIT_COMPANY_ID, currency: "USD", micros: 1_500_000, tokensInput: 1, tokensOutput: 1, tokensCacheRead: 0, tokensCacheWrite: 0, entries: 1, unpricedEntries: 0 } });
+    expect((await priced.runtime.app.modelGrants.grant(understandJob.callbackCapability)).budget).toEqual({ micros: 500_000, currency: "USD" });
+    // A spend in another currency leaves nothing to spend: the proxy refuses rather than guess.
+    await priced.runtime.registry.require("storage").update({ key: { pk: costPartition(IMPLICIT_COMPANY_ID, pricedTask), sk: "TOTAL" }, ops: [{ op: "set", path: ["currency"], value: "EUR" }] });
+    expect((await priced.runtime.app.modelGrants.grant(understandJob.callbackCapability)).budget).toEqual({ micros: 0, currency: "USD" });
+    // A task that cannot be read has nothing to be held to: nothing is left, so the proxy refuses rather than let a call through unheld.
+    await priced.runtime.registry.require("storage").delete({ key: { pk: `WORKSPACE#${pricedWorkspace}`, sk: "DEVELOPER_TASK" } });
+    expect((await priced.runtime.app.modelGrants.grant(understandJob.callbackCapability)).budget).toEqual({ micros: 0, currency: "USD" });
+    // Without a held limit no budget is given.
+    const open = await launch({ environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real", ROVARA_RUN_LIMIT: "0" }, files: { "gateway.mjs": gateway('prices: { currency: "USD", models: { "house-model": { inputMicrosPerMillionTokens: 1000000, outputMicrosPerMillionTokens: 2000000 } } },') }, config });
+    await open.api("/v1/admin/projects", { method: "POST", body: open.project });
+    const openTask = (await open.api("/v1/dev/tasks", { method: "POST", body: { requestId: "66666666-6666-4666-8666-666666666666", project: "payments", instructions: "Add a /health endpoint", workflow: true } })).body.task.taskId;
+    const openWorkspace = (await open.runtime.registry.require("storage").get({ pk: `DEVTASK#${openTask}`, sk: "META" }))!["workspaceId"] as string;
+    const openSeen = new Set<string>();
+    await open.callback(await open.nextJob(openWorkspace, openSeen), "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: open.base }] } });
+    expect((await open.runtime.app.modelGrants.grant((await open.nextJob(openWorkspace, openSeen)).callbackCapability)).budget).toBeUndefined();
+    // An unpriced model under a held limit: the first step ends with the reason, and no worker is asked to run it.
+    const unpriced = await launch({ environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real" }, files: { "gateway.mjs": gateway("") }, config });
+    await unpriced.api("/v1/admin/projects", { method: "POST", body: unpriced.project });
+    const started = await unpriced.api("/v1/dev/tasks", { method: "POST", body: { requestId: "44444444-4444-4444-8444-444444444444", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+    const unpricedTask = started.body.task.taskId;
+    const workspaceId = (await unpriced.runtime.registry.require("storage").get({ pk: `DEVTASK#${unpricedTask}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    const prepare = await unpriced.nextJob(workspaceId, seen);
+    await unpriced.callback(prepare, "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: unpriced.base }] } });
+    await expect(unpriced.nextJob(workspaceId, seen)).rejects.toThrow("did not hand a job");
+    const ended = (await operationsOfTask(unpriced, unpricedTask)).find((operation) => operation.workflowMode === "UNDERSTAND")!;
+    expect(ended.status).toBe("FAILED");
+    expect(ended.error).toContain("company-gateway/house-model has no price, and a run limit is held");
+    // Without the limit the same install runs the step, and the cost shows as unknown.
+    const free = await launch({ environment: { ROVARA_MODEL_COMPANY_GATEWAY_API_KEY: "gateway-key-never-real", ROVARA_RUN_LIMIT: "0" }, files: { "gateway.mjs": gateway("") }, config });
+    expect((await toPlanReview(free)).plan.payload).toMatchObject({ modelRoute: { alias: "company-gateway/house-model" } });
   });
 });

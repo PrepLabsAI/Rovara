@@ -6,6 +6,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
 import { costLine, costUsdOf, createCostLedger } from "../../packages/broker/src/core/cost/ledger.js";
 import { estimatePathOf, estimateRun, planRunLimit, recordRunCost, runCostInputOf } from "../../packages/broker/src/core/cost/estimate.js";
+import { remainingUsd, taskLimitUsd } from "../../packages/broker/src/core/cost/limits.js";
 
 const ORG = "org_00000000000000000000" as OrgId;
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
@@ -185,5 +186,28 @@ describe("the cost ledger", () => {
     const ledger = createCostLedger({ store, metering });
     await expect(ledger.recordUsage(entry("e1"))).rejects.toThrow();
     expect((await ledger.taskCost(ORG, TASK)).entries).toBe(0);
+  });
+});
+
+describe("the limit a task's model calls are held to", () => {
+  it("planning has an allowance of its own by path until a plan carries an estimate, then the planning allowance and the run limit in all", () => {
+    expect(taskLimitUsd({ workflow: { path: "QUICK" } })).toBe(2);
+    expect(taskLimitUsd({ workflow: { path: "FULL" } })).toBe(6);
+    expect(taskLimitUsd({})).toBe(6);
+    const estimate = { runLimitUsd: 6, stopAtUsd: 6 };
+    expect(taskLimitUsd({ workflow: { path: "QUICK" }, runEstimate: estimate })).toBe(8);
+    expect(taskLimitUsd({ workflow: { path: "FULL" }, runEstimate: { runLimitUsd: 20, stopAtUsd: 20 } })).toBe(26);
+    // A smaller stop (the agent's own cap) is what counts, and a start that asked for a lower limit may only lower it.
+    expect(taskLimitUsd({ workflow: { path: "FULL" }, runEstimate: { runLimitUsd: 20, stopAtUsd: 12 } })).toBe(18);
+    expect(taskLimitUsd({ workflow: { path: "FULL" }, runEstimate: { runLimitUsd: 20, stopAtUsd: 20 }, requestedRunLimitUsd: 4 })).toBe(10);
+    expect(taskLimitUsd({ workflow: { path: "FULL" }, runEstimate: { runLimitUsd: 20, stopAtUsd: 12 }, requestedRunLimitUsd: 50 })).toBe(18);
+  });
+
+  it("what is left is the limit less the spend, never below nothing, and nothing at all when the spend is not in dollars", () => {
+    expect(remainingUsd(8, 1.5)).toBe(6.5);
+    expect(remainingUsd(8, 8)).toBe(0);
+    expect(remainingUsd(8, 9.25)).toBe(0);
+    expect(remainingUsd(2.1, 0.3)).toBe(1.8);
+    expect(remainingUsd(8, undefined)).toBe(0);
   });
 });

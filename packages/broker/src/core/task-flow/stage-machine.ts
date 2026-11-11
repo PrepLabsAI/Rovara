@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import {
   AgentXError,
   agentXError,
+  ROVARA_CODE_AGENT_ID,
   WORKFLOW_BLOCK_REASONS,
   WorkflowSnapshotSchema,
   WorkflowTransitionError,
@@ -26,11 +27,14 @@ import {
   type DocumentKey,
   type JsonValue,
   type Operation,
+  type RunEstimate,
   type TransactItem,
   type WorkflowDependencyInvocation,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
+import { workflowDocumentType } from "../../developer/workflow-messages.js";
+import { estimatePathOf, estimateRun } from "../cost/estimate.js";
 import { isReapprovalStop, settleLiveSteerReapproval } from "../sessions/live-steer-reapproval.js";
 import { clearLiveDeliveredSince } from "../sessions/steer.js";
 import { notesFedUpdate, stepNotes, type NotesForStep } from "../sessions/notes.js";
@@ -536,7 +540,9 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
       });
       // A version 2 coding plan is read by a second step before a person sees it: the check is a row like every automatic step, written with the plan.
       const toCheck = next.stage === "PLAN_CRITIQUE" && next.state === "READY";
-      const committed = await commitWorkflow(deps, task, next, toCheck ? [dispatchRowItem(deps, task.taskId, next.revision, "CRITIQUE", iso(deps))] : [], task.planUnreadable === undefined ? [] : [change.remove("planUnreadable")]);
+      // What the run is expected to cost, from the cost of the project's earlier runs (or the default for the path), kept on the task beside the plan: the plan page, the decision card's risk, the session and the tools read it.
+      const estimate = await planRunEstimate(deps, task, next);
+      const committed = await commitWorkflow(deps, task, next, toCheck ? [dispatchRowItem(deps, task.taskId, next.revision, "CRITIQUE", iso(deps))] : [], [...(task.planUnreadable === undefined ? [] : [change.remove("planUnreadable")]), ...(estimate === undefined ? [] : [change.set("runEstimate", estimate as unknown as JsonValue)])]);
       if (committed && toCheck) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "CRITIQUE" });
       // The code the plan cites is read after the plan is committed, so a slow or failing code host never holds the plan up.
       if (committed && outcome.cites !== undefined) {
@@ -567,6 +573,21 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
   // A result with no outcome the step understands: the step ended without what it was asked for.
   if (operation.workflowMode === "UNDERSTAND" || operation.workflowMode === "PLAN") {
     await blockTaskWorkflow(deps, task.taskId, workflow.revision, "Rovara could not read the result of this step; retry it.");
+  }
+}
+
+/**
+ * The expected cost of the run a coding plan starts: from the project's earlier runs once there are enough, else the default for the path (`core/cost/estimate.ts`). Undefined when the plan is not a coding plan or the history
+ * cannot be read: the task then shows no estimate, which is never read as a cheap one. Best effort; it never holds the plan up.
+ */
+async function planRunEstimate(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<RunEstimate | undefined> {
+  if (workflowDocumentType(workflow) !== "plan") return undefined;
+  try {
+    return await estimateRun({ store: deps.store }, {
+      orgId: deps.companyId, project: task.project, agentId: ROVARA_CODE_AGENT_ID, path: estimatePathOf({ workflow }),
+    });
+  } catch {
+    return undefined;
   }
 }
 

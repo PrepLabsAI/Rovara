@@ -31,6 +31,8 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     ...(workflow === undefined ? {} : { workflow: { ...workflow, ...(planContent === undefined ? {} : { planContent }) } }),
     ...(view.failure === undefined ? {} : { failure: view.failure }),
     ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),
+    // What the run is expected to cost (kept with the plan), for the tools and the CLI.
+    ...(task.runEstimate === undefined ? {} : { runEstimate: task.runEstimate }),
     ...(secondReview === undefined || secondReview.lines.length === 0 ? {} : { secondReview: { ...secondReview, ...(secondReview.needsAcknowledgement && !secondReview.acknowledged ? { canAcknowledge: true } : {}) } }),
   })) as Record<string, unknown>;
 }

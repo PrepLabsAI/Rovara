@@ -4,6 +4,7 @@ import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { SecretValue, modelPriceRows, type Cost, type MeterEntry, type ModelProviderAdapter } from "@agentx/contracts";
+import { modelNotEnabledBody } from "../../packages/model-runtime/src/index.js";
 import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
 import {
   MODEL_PROXY_PREFIX, WORKSPACE_HEADER, builtinModelProviderBook, createLocalModelProxy, localRoute, type LocalModelProxy, type ModelProviderBook, type ProxyRoute,
@@ -112,6 +113,12 @@ describe("a plug-in provider with its own address, path and key", () => {
     const noPrice = await unpriced.call(route, userMessage, { budget: { micros: 1_000_000, currency: "USD" } });
     expect(noPrice.status).toBe(403);
     expect(upstream.calls).toHaveLength(0);
+    // It is refused as "not priced" (its own error type), which the model runtime reads like a model the account may not use: the worker names it, and the broker learns it and leaves the model out next time.
+    expect(noPrice.json().error).toMatchObject({ code: "model_not_priced", type: "model_not_priced" });
+    expect(modelNotEnabledBody(noPrice.text)).toBe(true);
+    // An ordinary refusal or a spent budget is not that.
+    expect(modelNotEnabledBody(refused.text)).toBe(false);
+    expect(modelNotEnabledBody(JSON.stringify({ type: "error", error: { type: "invalid_request_error", code: "model_not_allowed", message: "this task may not call that model, model_not_priced" } }))).toBe(false);
   });
 
   it("sends a key in the header the provider names", async () => {
@@ -384,6 +391,7 @@ describe("the words for a failed sign-in and a skewed clock (review L2, info)", 
     const refused = await call(localRoute("amazon-bedrock", "m", "anthropic-messages").route, { messages: [{ role: "user", content: "x" }], max_tokens: 5 }, { budget: { micros: 1_000_000, currency: "USD" } });
     expect(refused.status).toBe(403);
     expect(refused.text).toContain("no price");
+    expect(refused.json().error.code).toBe("model_not_priced");
     expect(upstream.calls).toHaveLength(0);
   });
 });

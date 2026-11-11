@@ -15,6 +15,7 @@ import type {
 import type { DeveloperTaskPointerRecord, DeveloperTaskRecord } from "../../developer/task-records.js";
 import type { WorkspaceCharge } from "./keys.js";
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
+import type { OperationModelChoice } from "./step-model.js";
 
 /** The task record: Cloud's `DEVTASK#<id>/META` item. `provider` is the identity adapter's name (a string), not Cloud's closed sign-in list. */
 export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
@@ -118,6 +119,8 @@ export interface OperationRecord extends Operation {
   secondReviewPlan?: SecondReviewOperationPlan;
   /** Design review: the binding the broker stored when it dispatched a design-review round (the reviewers' slots and models, the merge step, the pinned commits). The worker is sent it in the payload; the packets and the keys are served only for the slots it names. */
   designReview?: DesignReviewBinding;
+  /** The model the install's rule chose for this step, and why (see `step-model.ts`). Absent: the step ran on the install's one model. */
+  modelChoice?: OperationModelChoice;
   /** The source that serves the operation's models (a design-review round records it on each reviewer run). */
   modelSourceId?: string;
   /** The ids of the model keys the operation's calls used (the planner's resolve run, whose spend the review counts). */

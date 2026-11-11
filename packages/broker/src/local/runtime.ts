@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { COMPANY_INSTRUCTIONS_FILE_NAME, IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, assertModelProvider, modelPriceRows, type AdapterRegistry, type ModelKeyStore, type ModelPrice, type PluginConfig, type PluginPoint, type SecretRef, type SecretStore } from "@agentx/contracts";
+import { COMPANY_INSTRUCTIONS_FILE_NAME, IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, assertModelProvider, modelPriceRows, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint, type SecretRef, type SecretStore } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
@@ -30,6 +30,9 @@ import {
 } from "../ports/index.js";
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
 import { registerNativeMonitoring } from "../monitoring/native-adapters.js";
+import { registryModelPrices } from "./model-prices.js";
+import { catalogPriceOf } from "../core/cost/price-table.js";
+import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
 import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
 import { createLocalLearningAdapter } from "../lessons/local-embedder.js";
@@ -386,8 +389,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // The providers whose key is looked for (item K2): the built-ins, then each `model-provider` plug-in once the config is loaded (below). The array is read at each call.
   const keyedProviders: string[] = [...LOCAL_MODEL_PROVIDERS];
   const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment, registrySecrets, keyedProviders);
-  // Item K2: what each provider costs comes from its plug-in. The table is filled after the config is loaded; the metering port reads it at each call.
-  const priceTable: { currency: string; models: Record<string, ModelPrice> } = { currency: "USD", models: {} };
+  // What a model costs: the provider's own table (the `prices` of its `model-provider` plug-in), then the catalog's list price (`core/cost/price-table.ts`). The providers are loaded after the config,
+  // so the lookup reads the registry at each call; a model neither table knows is unpriced, never free.
+  const modelPrices = registryModelPrices(registry);
   registerCodeDefaults(registry, {
     // Port lane P6 (item L2): the audit record commits with the change, as a row in the same store; a configured `audit-sink` plug-in replaces it.
     ...(configured("audit-sink") ? {} : { auditSink: { name: "document", sink: new DocumentAuditSink({ store: () => registry.require("storage") }) } }),
@@ -405,8 +409,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       commentsOn: () => comments.current?.available() === true,
     },
     modelKeys,
-    // Nothing is priced until a `model-provider` plug-in brings a price table: usage is recorded as "unknown", never guessed.
-    priceTable,
+    // A model with no price in its provider's table or the catalog is recorded as "unknown", never guessed.
+    priceTable: { currency: "USD", models: {} },
+    prices: modelPrices,
   });
   // The learning point: how lessons are compared. Code's own compares on keywords and cited paths; `ROVARA_LESSONS_EMBEDDER=local` adds the small embedder that runs in this process. A configured `learning` plug-in is used instead.
   registry.register("learning", "local", createLocalLearningAdapter({ embedder: options.environment["ROVARA_LESSONS_EMBEDDER"] === "local" }), { isDefault: true });
@@ -505,9 +510,16 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     }
     if (!keyedProviders.includes(provider.kind)) keyedProviders.push(provider.kind);
   }
-  const priced = modelPriceRows(providerRows);
-  priceTable.currency = priced.currency ?? "USD";
-  Object.assign(priceTable.models, priced.models);
+  // The providers' tables must agree on one currency (a task budget is in one); the lookup above reads the rows themselves.
+  modelPriceRows(providerRows);
+  // A plug-in may not call a model free that the catalog prices: `free` is for a model nobody lists a price for, and a slip here would let a paid model run under every budget as if it cost nothing.
+  for (const provider of providerRows) {
+    for (const [modelId, row] of Object.entries(provider.prices?.models ?? {})) {
+      if (row.free === true && catalogPriceOf(listPricesPerMillion({ provider: provider.kind, modelId })) !== undefined) {
+        throw new LocalStateError(`model provider ${provider.kind.slice(0, 40)}: the model ${modelId.slice(0, 80)} is marked free, but the catalog lists a price for it; remove "free" or its row`);
+      }
+    }
+  }
   // Owner decision 60 (M1): a configured `secrets` plug-in is the source of truth, so this runs AFTER the config's adapters are loaded: a host is registered when the registry's `secrets` adapter (the plug-in, else
   // Code's) says there is a sign-in, and a host a plug-in or `registerAdapters` already registered under that kind is left alone.
   for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, secrets: registrySecrets, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
@@ -556,6 +568,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(options.openBrowser === undefined ? {} : { openBrowser: options.openBrowser }),
     // The model proxy is made after the servers (it is served on the callback listener); the app asks it, late, to forget an operation that ended.
     operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
+    operationSpend: (operationId) => modelProxyHolder.current?.tokens.spentBy(operationId),
     scriptTokensEnabled: () => scriptTokensEnabled(options.environment),
     ...(testServices.catalog === undefined ? {} : { serviceCatalog: releaseServiceCatalogSource(options.environment) }),
     modelCalls: (operationId) => modelProxyHolder.current?.tokens.calledAliases(operationId),
@@ -587,7 +600,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(options.planFormat === undefined ? {} : { planFormat: options.planFormat }),
     ...(options.modelProviderEndpoints === undefined ? {} : { modelProviderEndpoints: options.modelProviderEndpoints }),
     // The flip-back settings of the session features (`0` turns one off; anything else leaves it on).
-    liveSteer: options.environment["ROVARA_LIVE_STEER"] !== "0", stepNotes: options.environment["ROVARA_STEP_NOTES"] !== "0", ask: options.environment["ROVARA_ASK"] !== "0", lessonsEnabled: () => localLessonsEnabled(options.environment),
+    liveSteer: options.environment["ROVARA_LIVE_STEER"] !== "0", stepNotes: options.environment["ROVARA_STEP_NOTES"] !== "0", ask: options.environment["ROVARA_ASK"] !== "0", lessonsEnabled: () => localLessonsEnabled(options.environment), runLimit: options.environment["ROVARA_RUN_LIMIT"] !== "0",
     diagnosis: options.environment["ROVARA_DIAGNOSIS"] !== "0",
     // The setup agent (`ROVARA_SETUP_AGENT=0` turns it off): a run that sets a project up by running its commands in a sandbox.
     setupAgent: options.environment["ROVARA_SETUP_AGENT"] !== "0",
@@ -660,7 +673,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const modelProxy = createLocalModelProxy({
     keys: registry.require("model-keys"),
     ...(secretsPluginWords(registry) === undefined ? {} : { keySource: secretsPluginWords(registry) }),
-    metering: registry.require("metering"),
+    // Through the app's meter: what a worker's call costs is kept in the task's cost ledger (the limit, the page and the next estimate read it there).
+    metering: app.meter,
     companyId: config.companyId ?? IMPLICIT_COMPANY_ID,
     providers: registryModelProviderBook(registry),
     // What a worker may call is the task flow's decision (the grants over the flow's operations); a caller's own source (tests) replaces it.

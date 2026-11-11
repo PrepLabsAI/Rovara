@@ -8,14 +8,15 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
-import type { ApprovalProof } from "@agentx/contracts";
+import { STAGE_IDS, STAGE_REFERENCE, StepThinkingLevelSchema, type ApprovalProof, type StageId } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
 import { renderConnections, renderSources } from "./connection-pages.js";
 import { renderAutomation, renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, renderTestEnvironment, type PageContext } from "./pages.js";
 import { renderHowWeWork, renderHowWeWorkIndex } from "./how-we-work-page.js";
+import { renderModelSelection } from "./models-page.js";
 import { renderSetupIndex, renderSetupPage } from "./setup-page.js";
-import type { ApprovalOffer, AutomationPageAction, ConnectionPageAction, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
+import type { ApprovalOffer, AutomationPageAction, ConnectionPageAction, LocalActionResult, LocalPageActions, LocalPageData, ModelSelectionPageAction, SecondReviewPageAction } from "./views.js";
 
 export interface LocalPagesServer {
   /** `http://127.0.0.1:<port>`. */
@@ -89,6 +90,7 @@ const NOTICES: Record<string, string> = {
   saved: "Saved.",
   acknowledged: "Acknowledged and recorded.",
   reauth: "That change needs a recent sign-in. Close this page and run `rovara open second-review` again, then make the change within ten minutes.",
+  modelreauth: "That change needs a recent sign-in. Close this page and run `rovara open models` again, then make the change within ten minutes.",
   stale: "It changed while you were looking. Read it again, then decide.",
   refused: "That was not accepted.",
   invalid: "That was not understood.",
@@ -205,6 +207,34 @@ function secondReviewActionOf(op: string, form: URLSearchParams | undefined): Se
     case "notice-seen": return /^[a-f0-9]{32}$/u.test(get("key")) ? { action: "notice-seen", key: get("key") } : undefined;
     default: return undefined;
   }
+}
+/** The change a model-setting form asks for, or undefined when it is not one this page offers. A group of steps that share a setting is named by any one of them. */
+function modelSelectionActionOf(op: string, form: URLSearchParams | undefined): ModelSelectionPageAction | undefined {
+  const get = (name: string): string => form?.get(name) ?? "";
+  const expectedRevision = /^\d{1,9}$/u.test(get("revision")) ? Number(get("revision")) : undefined;
+  if (expectedRevision === undefined) return undefined;
+  if (op === "review-default") return get("value") === "install-model" || get("value") === "different-company" ? { action: "review-default", value: get("value") as "install-model" | "different-company", expectedRevision } : undefined;
+  const stage = STAGE_IDS.find((candidate) => candidate === get("stage"));
+  if (stage === undefined) return undefined;
+  if (op === "clear") return { action: "clear", stage, expectedRevision };
+  if (op !== "set") return undefined;
+  const model = get("model") === "" ? undefined : modelRefOf(get("model"));
+  const fallbackModel = get("fallback") === "" ? undefined : modelRefOf(get("fallback"));
+  if ((get("model") !== "" && model === undefined) || (get("fallback") !== "" && fallbackModel === undefined)) return undefined;
+  const thinking = get("thinking");
+  const level = thinking === "" ? undefined : thinking === "default" ? null : StepThinkingLevelSchema.safeParse(thinking).data;
+  if (thinking !== "" && level === undefined) return undefined;
+  const different = get("different");
+  if (different !== "" && different !== "model" && different !== "vendor") return undefined;
+  const reference = STAGE_REFERENCE[stage as keyof typeof STAGE_REFERENCE] as StageId | undefined;
+  if (different !== "" && reference === undefined) return undefined;
+  return {
+    action: "set", stage, expectedRevision,
+    choice: {
+      ...(model === undefined ? {} : { model }), ...(level === undefined ? {} : { thinkingLevel: level }), ...(fallbackModel === undefined ? {} : { fallbackModel }),
+      ...(different === "" || reference === undefined ? {} : { differentFrom: { stage: reference, level: different } }),
+    },
+  };
 }
 /** The same request address with a notice code set, for a page that explains its own answer (a code that does not read). */
 const withNotice = (url: URL, notice: string): URL => {
@@ -552,6 +582,23 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (parsed === undefined) return redirect(`${back}?n=invalid`);
       // A change that needs a recent sign-in (lowering, withdrawing, the evidence) is good only in a page session opened within the last ten minutes (the same check as making a script token).
       return redirect(`${back}?n=${outcomeCode(await act(parsed, { fresh: tokenPageIsFresh(request) }), "saved")}`);
+    } },
+    { method: "GET", pattern: /^\/models$/, handle: async (request) => {
+      const state = await options.data.getModelSelection?.();
+      return state === undefined ? notFound() : page(request, (context) => renderModelSelection(context, state));
+    } },
+    { method: "POST", pattern: /^\/models\/act$/, handle: async (request) => {
+      const back = `${request.base}/models`;
+      const op = request.form?.get("op") ?? "";
+      const stage = request.form?.get("stage") ?? "";
+      const act = options.actions.modelSelection?.bind(options.actions);
+      if (act === undefined || !/^[a-z-]{1,20}$/u.test(op) || !/^[a-z_]{0,20}$/u.test(stage)) return redirect(`${back}?n=invalid`);
+      if (!verified(request, { action: "models.act", subject: `${op}:${stage}` })) return redirect(`${back}?n=form`);
+      const parsed = modelSelectionActionOf(op, request.form);
+      if (parsed === undefined) return redirect(`${back}?n=invalid`);
+      // Every change of the model setting is good only in a page session opened within the last ten minutes (the same check as making a script token).
+      const result = await act(parsed, { fresh: tokenPageIsFresh(request) });
+      return redirect(`${back}?n=${!result.ok && result.reason === "reauth" ? "modelreauth" : outcomeCode(result, "saved")}`);
     } },
     { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/second-review-acknowledge$`), handle: async (request, match) => {
       const taskId = match[1] ?? "";

@@ -17,6 +17,7 @@ import {
   workerProjectDefinition,
   workflowPublicationContext,
   workflowPublicationContextDigest,
+  type JsonValue,
   type Queue,
   type ReceivedMessage,
   type StandingInstructionsPayload,
@@ -34,6 +35,7 @@ import { readWorkspace } from "./stage-machine.js";
 import { dispatchQueueName, iso, log } from "./support.js";
 import type { OperationRecord, WorkspaceRecord } from "./records.js";
 import type { PlaybookMode } from "../playbook/service.js";
+import { chooseStepModel, heldStepModel, type OperationModelChoice, type StepModelOutcome } from "./step-model.js";
 
 /** How long a capability the worker is given lives: nine hours, as Cloud's. */
 const CAPABILITY_SECONDS = 32_400;
@@ -135,6 +137,10 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
   }
   if (message.receiveCount > DISPATCH_ATTEMPTS_MAX) return endAndAck("FAILED", DISPATCH_EXHAUSTED_ERROR);
 
+  // The model of this step (the install's per-step rule), before any machine is started for it: a step no model can serve ends here, with the reason in words, and costs nothing.
+  const stepModel = await chooseStepModel(deps, operation);
+  if (stepModel?.ok === false) return endAndAck("FAILED", stepModel.sentence);
+
   let reservationId: string | undefined;
   // A machine that does not exist yet is new spend: ask admission once for it (each machine of the workspace has its own key), before it starts.
   if (workspace.machine === undefined) {
@@ -170,15 +176,25 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     if (health.state !== "ready" && health.state !== "busy") return retryLater(); // starting, stopping, stopped (the start above wakes it) or unhealthy
     // A step whose tool boundary the worker cannot enforce is refused, never sent without it: a read-only step must stay read-only.
     // A model route is never dropped: a worker that cannot take one is refused the step rather than sent it without.
-    const routed = operation.dispatch.kind === "task" && (await deps.modelAccess?.route()) !== undefined;
+    const routed = operation.dispatch.kind === "task" && (stepModel?.ok === true || (await deps.modelAccess?.route()) !== undefined);
     const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : [])].filter((feature) => !health.features.includes(feature));
     if (missing.length > 0) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
     // A block is never dropped: a worker that cannot place it is refused the step (the rules were read above, before any machine was asked for).
     if (standing !== undefined && !health.features.includes(STANDING_INSTRUCTIONS_FEATURE)) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
     // The claim: in one transaction, the workspace is still held by this operation at its fence and is not closing, and the operation is handed over.
     // Nothing is issued to the worker (no grant, no capability) before it applies.
-    if (!(await claimDispatch(deps, operation, handle.machineId))) return abandon(deps, queue, message, operation, handle.machineId, reservationId ?? workspace.machineReservationId);
-    const invocation = await buildInvocation(deps, operation, workspace, health.features, standing);
+    let sent = stepModel?.ok === true ? stepModel : undefined;
+    let claimed = await claimDispatch(deps, operation, handle.machineId, sent?.fresh === true ? sent.choice : undefined);
+    if (!claimed && sent?.fresh === true) {
+      // The claim of a fresh choice holds only while the operation has none: another delivery of this job may have recorded its own first. That one is the choice the step runs on, so it is read and used (never overwritten).
+      const current = await readOperation(deps, operation.workspaceId, operation.id);
+      if (current?.modelChoice !== undefined) {
+        sent = heldStepModel(current.modelChoice);
+        claimed = await claimDispatch(deps, operation, handle.machineId);
+      }
+    }
+    if (!claimed) return abandon(deps, queue, message, operation, handle.machineId, reservationId ?? workspace.machineReservationId);
+    const invocation = await buildInvocation(deps, operation, workspace, health.features, standing, sent);
     if (typeof invocation === "string") return endAndAck("FAILED", invocation);
     await deps.machines.deliver(handle.machineId, invocation);
     await queue.ack(message.receiptHandle);
@@ -232,15 +248,16 @@ async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessag
 }
 
 /** Builds the worker's invocation, or a sentence saying why this operation cannot be sent to this worker. */
-async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, features: readonly string[], standing: StandingInstructionsPayload | undefined): Promise<WorkerInvocation | string> {
+async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, features: readonly string[], standing: StandingInstructionsPayload | undefined, stepModel?: Extract<StepModelOutcome, { ok: true }>): Promise<WorkerInvocation | string> {
   const spec = operation.dispatch;
   const secret = Buffer.from(deps.callbackSigningKey);
-  const modelRoute = spec.kind === "task" ? await deps.modelAccess?.route() : undefined;
+  // The step's own model when the install's rule chose one (its thinking level goes with it), else the install's one model.
+  const modelRoute = stepModel !== undefined ? stepModel.choice.route : spec.kind === "task" ? await deps.modelAccess?.route() : undefined;
   const capability = new CallbackCapabilities(secret).issue({
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
     actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
-  let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }) };
+  let payload: Record<string, unknown> = { ...spec.payload, ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }), ...(stepModel?.selection.thinkingLevel === undefined ? {} : { model: stepModel.selection }) };
   // The lessons the step is given are chosen now, from the lessons as they are at this moment (a lesson retired since the step was queued is not sent). A worker that does not list the feature gets none.
   if (spec.kind === "task" && deps.learned !== undefined) {
     const learned = await deps.learned({ workspaceId: workspace.id, operationId: operation.id, workflowMode: operation.workflowMode, features }).catch(() => undefined);
@@ -349,11 +366,11 @@ async function forgetMachine(deps: TaskFlowDeps, workspaceId: string, machineId:
  * Hands the operation over, fenced: the workspace is still held by this operation, at its fence, and is not closing, in the same transaction that marks the
  * operation DISPATCHING. A worker that reported RUNNING already keeps its newer state (the operation's condition then does not hold, which is a repeat).
  */
-async function claimDispatch(deps: TaskFlowDeps, operation: OperationRecord, machineId: string): Promise<boolean> {
+async function claimDispatch(deps: TaskFlowDeps, operation: OperationRecord, machineId: string, modelChoice?: OperationModelChoice): Promise<boolean> {
   const now = iso(deps);
   const claimed = await deps.store.transact([
     { kind: "check", key: workspaceKey(operation.workspaceId), condition: when.and(when.eq("fence", operation.fence), when.eq("activeOperationId", operation.id), when.not(when.or(when.eq("status", "CLOSED"), when.eq("status", "CLOSING")))) },
-    { kind: "update", key: operationKey(operation.workspaceId, operation.id), ops: [change.set("status", "DISPATCHING"), change.set("machineId", machineId), change.set("deliveredAt", now), change.set("updatedAt", now)], condition: when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING")) },
+    { kind: "update", key: operationKey(operation.workspaceId, operation.id), ops: [change.set("status", "DISPATCHING"), change.set("machineId", machineId), change.set("deliveredAt", now), change.set("updatedAt", now), ...(modelChoice === undefined ? [] : [change.set("modelChoice", modelChoice as unknown as JsonValue)])], condition: when.and(when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING")), ...(modelChoice === undefined ? [] : [when.notExists("modelChoice")])) },
   ]);
   return claimed.applied;
 }

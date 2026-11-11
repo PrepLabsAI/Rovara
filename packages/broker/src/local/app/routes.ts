@@ -19,6 +19,7 @@ import { createLocalSessionControl, createSessionControlHost } from "./host.js";
 import { listProjects, registerProject } from "./projects.js";
 import { developerTaskListItem, developerTaskView } from "./task-view.js";
 import type { SecondReview } from "../../core/second-review/index.js";
+import type { ModelSelectionService } from "../../core/model-selection/service.js";
 import { designReviewStateOf } from "../../core/design-review/state-view.js";
 import { DIAGNOSIS_LAPTOP_REFUSALS } from "../../core/diagnosis/words.js";
 import type { LocalDiagnosis } from "./diagnosis.js";
@@ -37,6 +38,8 @@ export interface OwnerRoutesDeps {
   version: string;
   /** The second review. Absent: its route is not there. */
   secondReview?: SecondReview;
+  /** The model each step uses. Absent: its route is not there. */
+  modelSelection?: ModelSelectionService;
   /** The design review: what a client reads of it (the owner's acts on it are the page's). Absent: the review's route answers that the task has none. */
   designReview?: { allowSkip(project: string): Promise<boolean>; unpricedNote(): string };
   /** Fix with agent. Absent: its routes are not there. */
@@ -52,6 +55,8 @@ function bodyOf(request: BrokerRequest): unknown {
 
 export const SECOND_REVIEW_ON_THE_PAGE = "The second review's model, mode and evidence are changed on its local page, by you, in a page session opened within the last ten minutes. Run `rovara open second-review` to open it; an assistant cannot change them for you, and neither can this token.";
 export const SECOND_REVIEW_PATH = "/v1/dev/second-review";
+export const MODEL_SELECTION_ON_THE_PAGE = "The model each step uses is changed on its local page, by you, in a page session opened within the last ten minutes. Run `rovara open models` to open it; an assistant cannot change it for you, and neither can this token.";
+export const MODEL_SELECTION_PATH = "/v1/dev/model-selection";
 /** Cloud's staff routes for the evidence that lets a model block. Here they are refused with the page message: the evidence is written on the local page (see `SECOND_REVIEW_ON_THE_PAGE`). */
 export const SECOND_REVIEW_EVIDENCE_PATH = /^\/v1\/admin\/second-review\/(replay|verdict)$/u;
 export const ATTACH_ON_THE_PAGE = "Saying where a task's plan is posted is done on the task's page, in your browser (run `rovara open <task>`): it lets a comment there decide the plan, so a tool with the API token cannot do it.";
@@ -99,7 +104,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
   };
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
-    const isOurs = NOT_ON_THIS_INSTALL.test(path) || path === SECOND_REVIEW_PATH || SECOND_REVIEW_EVIDENCE_PATH.test(path) || DIAGNOSES.test(path) || path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/open";
+    const isOurs = NOT_ON_THIS_INSTALL.test(path) || path === SECOND_REVIEW_PATH || path === MODEL_SELECTION_PATH || SECOND_REVIEW_EVIDENCE_PATH.test(path) || DIAGNOSES.test(path) || path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/open";
     if (!isOurs) return undefined;
     try {
       if (NOT_ON_THIS_INSTALL.test(path)) throw agentXError("NOT_AVAILABLE_HERE", NOT_ON_THIS_INSTALL_MESSAGE);
@@ -107,6 +112,12 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         if (deps.secondReview?.enabled() !== true) throw agentXError("NOT_FOUND", "route not found");
         // The evidence that lets a model block is the owner's act on the local page, in a page session opened within ten minutes: this token is held by every local tool, so it never writes it.
         throw agentXError("FORBIDDEN", SECOND_REVIEW_ON_THE_PAGE);
+      }
+      if (path === MODEL_SELECTION_PATH) {
+        if (deps.modelSelection === undefined) throw agentXError("NOT_FOUND", "route not found");
+        // Reading is for any holder of the token; changing is the owner's act on the local page (the same rule as the second review's settings).
+        if (request.method === "GET") return json(200, await deps.modelSelection.state());
+        throw agentXError("FORBIDDEN", MODEL_SELECTION_ON_THE_PAGE);
       }
       if (path === SECOND_REVIEW_PATH) {
         if (deps.secondReview?.enabled() !== true) throw agentXError("NOT_FOUND", "route not found");
@@ -143,8 +154,8 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         // The server opens the page in the owner's browser; the address (which carries the page session and can approve) never leaves this process.
         const body = bodyOf(request) as { path?: unknown; fresh?: unknown };
         const target = typeof body.path === "string" && /^\/[A-Za-z0-9/_-]{0,200}$/u.test(body.path) ? body.path : "/";
-        // A page that makes a long-lived credential or changes who can act as the owner asks for a page session opened a few minutes ago: only the script tokens page, the chat, lessons and connections pages may ask the page server for a new one.
-        const fresh = body.fresh === true && (target === "/tokens" || target === "/chat" || target === "/lessons" || target === "/connections");
+        // A page that makes a long-lived credential or changes who can act as the owner asks for a page session opened a few minutes ago: only the script tokens page, the chat, lessons, connections and models pages (the last changes which models a task uses) may ask the page server for a new one.
+        const fresh = body.fresh === true && (target === "/tokens" || target === "/chat" || target === "/lessons" || target === "/connections" || target === "/models");
         // A few a minute, one at a time: a holder of the API token cannot open a pile of browser tabs and processes.
         const now = (flow.deps.now?.() ?? new Date()).getTime();
         while (opens.length > 0 && opens[0]! <= now - OPEN_WINDOW_MS) opens.shift();
