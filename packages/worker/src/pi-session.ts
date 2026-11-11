@@ -24,9 +24,9 @@ import {
   type Skill,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
-import { ROUTE_PROVIDER, createModelRuntimeWithFallback, routeUsageIdentity, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice, type ModelProxyOptions } from "@agentx/model-runtime";
+import { ROUTE_PROVIDER, TOOL_SEARCH_TOOL_NAME, createModelRuntimeWithFallback, excludeUnselectedBuiltIns, planToolExposure, routeUsageIdentity, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice, type ModelProxyOptions } from "@agentx/model-runtime";
 import { createPiSettingsManager } from "@agentx/model-runtime/pi-settings";
-import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type InvocationModelRoute, type ThinkingLevel } from "@agentx/contracts";
+import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, SEARCH_TEAM_KNOWLEDGE_TOOL, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type InvocationModelRoute, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import type { FileOpsTarget } from "./file-ops-exec.js";
@@ -160,7 +160,10 @@ export interface AgentRunSession {
 }
 
 /** The names no worker tool of an agent step may take: Pi's own, the shell and `read_skill`. */
-const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "read_skill", "read_knowledge"]);
+const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write", "read", "grep", "find", "ls", "powershell", "read_skill", "read_knowledge", TOOL_SEARCH_TOOL_NAME]);
+
+/** The worker's own tools that are always declared, however many connector or source tools there are: they are few and the model needs them every time. */
+const ALWAYS_DIRECT_TOOL_NAMES: ReadonlySet<string> = new Set(["choose_branch", SEARCH_TEAM_KNOWLEDGE_TOOL]);
 
 /**
  * Context sources are for the stages that read and judge, never for Build, where the shell is: untrusted live text must not reach the stage that can run
@@ -505,7 +508,10 @@ async function createDefaultSession(
     const knowledge = input.agentRun === undefined ? input.knowledgeSession : undefined;
     const knowledgeTool = knowledge?.offersTool === true ? [readKnowledgeTool(knowledge)] : [];
     const midRun = knowledge?.allowsMidRun === true ? [knowledgeExtension(knowledge, input.onDiagnostic)] : [];
-    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun], loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : {}) });
+    // Connector tools (an agent step's grants) and source tools above DEFERRED_TOOLS_ABOVE are found with tool_search instead of being declared up front. They are
+    // the same tools: the broker bridge runs them, every tool_call handler sees them, and a stage that was not given a tool does not register it, so it cannot be found.
+    const exposure = planToolExposure(runTools, { deferrable: ({ name }) => !ALWAYS_DIRECT_TOOL_NAMES.has(name), namespaceOf: ({ label }) => label.split(" / ")[0], protectNames: ["mcp__"] });
+    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun, ...exposure.extensions], ...(exposure.note === undefined ? {} : { toolSearchNote: exposure.note }), loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : {}) });
     // An AgentX extension that failed to load would leave its work silently undone, so the session does not start.
     // It is a deterministic AgentX bug, so not RUNTIME_UNAVAILABLE, which the broker reads as "retry" (M-10).
     const loadErrors = resourceLoader.getExtensions().errors;
@@ -528,7 +534,9 @@ async function createDefaultSession(
       model: sessionModel,
       thinkingLevel: requestedLevel ?? (model.reasoning ? "medium" : "off"),
       // read_skill is the worker's own tool, never a file tool: it is there only when the operation has skills.
-      tools: [...stepTools.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...runTools.map(({ name }) => name)],
+      tools: [...stepTools.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...exposure.names],
+      // Only the host tools this stage chose can be active: a deferred tool's `name*` entry (a tool called `wr`) must not switch on Pi's own `write`.
+      excludeTools: excludeUnselectedBuiltIns(stepTools.tools),
       // A custom tool with a built-in's name replaces it.
       customTools: [
         ...(stepTools.shell ? [agentShellTool(input.cwd, input.bashOperations, input.sequentialTools === true)] : []),
@@ -539,7 +547,7 @@ async function createDefaultSession(
             : devcontainerFileTools(input.cwd, input.devcontainerPaths).filter((tool) => stepTools.tools.includes(tool.name))),
         ...(skillFiles.length === 0 ? [] : [readSkillTool(skillFiles)]),
         ...knowledgeTool,
-        ...runTools,
+        ...exposure.tools,
       ],
       resourceLoader,
       settingsManager,
@@ -669,6 +677,8 @@ export async function createWorkerResources(
     loadedSkills?: readonly Skill[];
     /** An agent step's system prompt (Task 23), in place of the coding worker's; with it, neither Pi's discovered context files nor AgentX's coding preamble are added. */
     systemPrompt?: string;
+    /** Added to the system prompt when some tools are deferred: says that tool_search loads them. */
+    toolSearchNote?: string;
   },
 ): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
   const skills = input.loadedSkills ?? [];
@@ -699,7 +709,7 @@ export async function createWorkerResources(
     // tool rules and documentation pointers; its addendum, project context and cwd sections are unchanged.
     // A step's skills are listed after it, naming read_skill: Pi's own list would point at the file and the read tool.
     systemPromptOverride: () => {
-      const base = input.systemPrompt ?? AGENTX_WORKER_PROMPT;
+      const base = `${input.systemPrompt ?? AGENTX_WORKER_PROMPT}${input.toolSearchNote === undefined ? "" : `\n\n${input.toolSearchNote}`}`;
       return skills.length === 0 ? base : `${base}\n\n${skillsPromptSection(skills)}`;
     },
     // Spec 051 FR-001/FR-010: the same preamble for coding tasks and eval runs, rendered as Pi's <addendum>. An agent step writes no code.

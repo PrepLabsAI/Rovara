@@ -8,6 +8,8 @@ export { ModelBudgetExhaustedError, ModelNotAllowedError, budgetExhaustedFromMar
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
 // The governed e2e model route (M1.4): its own surface, never reached through the coding-task fallback above.
 export * from "./e2e-route.js";
+export { DEFERRED_TOOLS_NOTE, MAX_LOADED_DEFERRED_TOOLS, MAX_SEARCH_LIMIT, PI_BUILT_IN_TOOL_NAMES, TOOL_SEARCH_TOOL_NAME, excludeUnselectedBuiltIns, planToolExposure, toolSearchExtension } from "./deferred-tools.js";
+export type { ToolExposure, ToolExposureOptions } from "./deferred-tools.js";
 export { createE2EProviderInvoke } from "./e2e-provider-invoke.js";
 export type { E2EProviderInvoke, E2EProviderInvokeDependencies } from "./e2e-provider-invoke.js";
 export * from "./e2e-environment-guard.js";
