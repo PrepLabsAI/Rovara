@@ -11,6 +11,7 @@ import type { ChannelByNameRequest, ChannelInfoRequest, ChannelMembersRequest, D
 import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
 import { createDeveloperIdentityHandler, type DeveloperIdentityConfig } from "../developer/server.js";
 import { slackDirectory } from "../developer/slack-directory.js";
+import { slackDirectoryCallFromEnvironment } from "./slack-directory-channel.js";
 import { DeveloperSignInStore, methodSince } from "../developer/store.js";
 import { kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
@@ -174,11 +175,18 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
     },
     directory: slackDirectory({
       teamId: config.slack.teamId, botToken: async () => (await slackSecret()).botToken, fetch, now,
+      // Spec 062 Phase 7c1b: through the Slack adapter when Slack goes through the channel API.
+      ...directoryCall(secrets),
       report: (problem) => log({ event: "signin.slack_problem", ...problem }),
     }),
     now,
     log,
   });
+}
+
+function directoryCall(secrets: SecretsManagerClient): { call?: NonNullable<Parameters<typeof slackDirectory>[0]["call"]> } {
+  const call = slackDirectoryCallFromEnvironment(secrets);
+  return call === undefined ? {} : { call };
 }
 
 export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest) => {

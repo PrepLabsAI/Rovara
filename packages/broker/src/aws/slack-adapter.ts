@@ -19,12 +19,13 @@ import {
   webhookHeaders,
   type ChannelCommand,
   type ChannelEvent,
+  type DirectoryUser,
   type MessageAction,
   type MessagePart,
   type SlackRequestMessage,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
-import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createChannelCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
+import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createChannelCanvas, deleteTaskPlanCanvas, postMayHaveLanded, slackWebFetch } from "./slack-web.js";
 
 export const SLACK_CHANNEL_EVENTS_PATH = "/v1/slack/channel-events";
 /** Phase 7c: where the core's commands for Slack come, each answered at once. */
@@ -227,6 +228,66 @@ export interface SlackChannelCommandsDependencies {
   log?: Log;
 }
 
+/** Slack's directory reads take 1,000 members, or 200 channels, a page. */
+const MEMBERS_PAGE = "1000";
+const CHANNELS_PAGE = "200";
+
+/** No readable answer from Slack (a timeout, a 429 or 5xx): the core reads the command as unanswered. */
+class Unanswered extends Error {}
+
+/** One Web API read: Slack's answer when it is ok, a refusal by Slack's code, or Unanswered. */
+async function slackRead(token: string, method: string, query: Record<string, string>, fetchFn: typeof fetch): Promise<Record<string, unknown>> {
+  let response: Response;
+  try {
+    response = await slackWebFetch(method, token, { query, signal: AbortSignal.timeout(5_000) }, fetchFn);
+  } catch {
+    throw new Unanswered(method);
+  }
+  let body: unknown;
+  try { body = await response.json(); } catch { body = undefined; }
+  const record = typeof body === "object" && body !== null ? body as Record<string, unknown> : undefined;
+  if (response.status === 429 || response.status >= 500 || record === undefined) throw new Unanswered(method);
+  if (record.ok !== true) {
+    const code = typeof record.error === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(record.error) ? record.error : "no_error_code";
+    throw new Refused(code, `Slack refused ${method}`);
+  }
+  return record;
+}
+
+const text200 = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value.slice(0, 200) : undefined);
+const cursorOf = (body: Record<string, unknown>) => {
+  const next = (body.response_metadata as { next_cursor?: unknown } | undefined)?.next_cursor;
+  return typeof next === "string" && next !== "" ? next.slice(0, 500) : undefined;
+};
+
+/** A Slack user as the directory's person; one Slack describes oddly is refused, so the core never guesses. */
+function directoryUserOf(user: unknown): DirectoryUser {
+  const value = typeof user === "object" && user !== null ? user as Record<string, unknown> : {};
+  const profile = typeof value.profile === "object" && value.profile !== null ? value.profile as Record<string, unknown> : {};
+  const enterprise = value.enterprise_user as { teams?: unknown } | undefined;
+  if (typeof value.id !== "string" || typeof value.is_bot !== "boolean" || (value.deleted !== undefined && typeof value.deleted !== "boolean")
+    || (value.is_stranger !== undefined && typeof value.is_stranger !== "boolean")
+    || (enterprise !== undefined && (!Array.isArray(enterprise.teams) || !enterprise.teams.every((team) => typeof team === "string")))) {
+    throw new Refused("malformed_user", "Slack described the person in a way the directory cannot read");
+  }
+  const email = typeof profile.email === "string" && /^[^@\s]+@[^@\s]+$/.test(profile.email) && profile.email.length <= 320 ? profile.email : undefined;
+  const name = text200(value.name);
+  const displayName = text200(profile.display_name);
+  const realName = text200(profile.real_name) ?? text200(value.real_name);
+  return {
+    userId: value.id,
+    ...(typeof value.team_id === "string" ? { tenant: value.team_id } : {}),
+    ...(enterprise === undefined ? {} : { linkedTenants: (enterprise.teams as string[]).slice(0, 200) }),
+    ...(name === undefined ? {} : { name }),
+    ...(displayName === undefined ? {} : { displayName }),
+    ...(realName === undefined ? {} : { realName }),
+    ...(email === undefined ? {} : { email }),
+    bot: value.is_bot,
+    deleted: value.deleted === true,
+    ...(value.is_stranger === undefined ? {} : { external: value.is_stranger }),
+  };
+}
+
 /** A command answered with a refusal: nothing it asked for is left done. */
 class Refused extends Error {
   constructor(readonly code: string, message: string) { super(message); }
@@ -281,6 +342,50 @@ export function createSlackChannelCommandsHandler(deps: SlackChannelCommandsDepe
       }
       case "delete_document":
         return { deleted: (await deleteTaskPlanCanvas(token, command.documentId, fetchFn)) === "deleted" };
+      // Phase 7c1b: the directory's reads.
+      case "user":
+        try {
+          return { user: directoryUserOf((await slackRead(token, "users.info", { user: command.userId }, fetchFn)).user) };
+        } catch (error) {
+          if (error instanceof Refused && error.code === "user_not_found") return {};
+          throw error;
+        }
+      case "user_by_email":
+        try {
+          return { user: directoryUserOf((await slackRead(token, "users.lookupByEmail", { email: command.email }, fetchFn)).user) };
+        } catch (error) {
+          if (error instanceof Refused && error.code === "users_not_found") return {};
+          throw error;
+        }
+      case "space_members": {
+        const body = await slackRead(token, "conversations.members", { channel: command.space, limit: MEMBERS_PAGE, ...(command.cursor === undefined ? {} : { cursor: command.cursor }) }, fetchFn);
+        if (!Array.isArray(body.members) || !body.members.every((member) => typeof member === "string")) throw new Refused("malformed_members", "Slack's member list cannot be read");
+        const nextCursor = cursorOf(body);
+        return { members: body.members, ...(nextCursor === undefined ? {} : { nextCursor }) };
+      }
+      case "space":
+        try {
+          const channel = (await slackRead(token, "conversations.info", { channel: command.space }, fetchFn)).channel as { name?: unknown; is_private?: unknown } | undefined;
+          if (typeof channel?.name !== "string") throw new Refused("malformed_channel", "Slack's channel cannot be read");
+          // Fail closed: a channel is public only when Slack says so.
+          return { space: { name: channel.name.slice(0, 200), private: channel.is_private !== false } };
+        } catch (error) {
+          if (error instanceof Refused && error.code === "channel_not_found") return {};
+          throw error;
+        }
+      case "spaces": {
+        const body = await slackRead(token, "conversations.list", { types: "public_channel", exclude_archived: "true", limit: CHANNELS_PAGE, ...(command.cursor === undefined ? {} : { cursor: command.cursor }) }, fetchFn);
+        if (!Array.isArray(body.channels)) throw new Refused("malformed_channels", "Slack's channel list cannot be read");
+        const spaces = (body.channels as Array<{ id?: unknown; name?: unknown; is_private?: unknown }>).flatMap((channel) =>
+          typeof channel.id === "string" && typeof channel.name === "string" && channel.name !== "" ? [{ space: channel.id, name: channel.name.slice(0, 200), private: channel.is_private !== false }] : []);
+        const nextCursor = cursorOf(body);
+        return { spaces, ...(nextCursor === undefined ? {} : { nextCursor }) };
+      }
+      case "check": {
+        const body = await slackRead(token, "auth.test", {}, fetchFn);
+        if (typeof body.team_id !== "string") throw new Refused("no_team", "Slack named no team for the bot token");
+        return { tenant: body.team_id };
+      }
       default:
         throw new Refused("unsupported", `the Slack adapter does not take ${command.kind} commands`);
     }
@@ -314,6 +419,10 @@ export function createSlackChannelCommandsHandler(deps: SlackChannelCommandsDepe
       log("slack_adapter.command", { kind: command.kind, outcome: "ok" });
       return answer({ ok: true, result });
     } catch (error) {
+      if (error instanceof Unanswered) {
+        log("slack_adapter.command", { kind: command.kind, outcome: "unanswered" });
+        return respond(503, { error: "try_again" });
+      }
       if (error instanceof Refused) {
         log("slack_adapter.command", { kind: command.kind, outcome: "refused", code: error.code });
         return answer({ ok: false, error: { code: error.code, message: error.message } });

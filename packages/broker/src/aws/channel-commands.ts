@@ -56,6 +56,8 @@ export async function sendChannelCommand<K extends ChannelCommandKind>(
   adapter: ChannelAdapterRecord,
   kind: K,
   input: ChannelCommandInput<K>,
+  /** The caller's own deadline, as well as the command's. */
+  options: { signal?: AbortSignal } = {},
 ): Promise<ChannelCommandResult<K>> {
   if (!adapterTakesCommand(adapter, kind) || adapter.commandsUrl === undefined) {
     throw agentXError("CONFIG_INVALID", `the ${adapter.channel} adapter does not take ${kind} commands`);
@@ -79,7 +81,8 @@ export async function sendChannelCommand<K extends ChannelCommandKind>(
   let text: string;
   try {
     const timeout = kind === "create_document" || kind === "delete_document" ? DOCUMENT_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
-    response = await deps.fetch(url, { method: "POST", headers, body, redirect: "manual", signal: AbortSignal.timeout(timeout) });
+    const signal = options.signal === undefined ? AbortSignal.timeout(timeout) : AbortSignal.any([options.signal, AbortSignal.timeout(timeout)]);
+    response = await deps.fetch(url, { method: "POST", headers, body, redirect: "manual", signal });
     text = await response.text();
   } catch {
     throw new ChannelCommandFailed("unanswered", `the ${adapter.channel} adapter did not answer the ${kind} command`);

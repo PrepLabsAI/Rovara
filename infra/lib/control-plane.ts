@@ -895,6 +895,8 @@ export class ControlPlaneStack extends Stack {
         naming, env: naming.env, api, state, broker, orchestratorRole: slackOrchestratorRole, notifyOperator, slack: { ingress: slackIngress, integration: slackIntegration },
       });
       channelAdapters.connectSlackPoster(notifier.function, signInParameters.slackTeamId.valueAsString);
+      // Phase 7c1b: sign-in's Slack directory reads (task access, channel names, the health check).
+      channelAdapters.connectSlackPoster(developerSignIn.function, signInParameters.slackTeamId.valueAsString);
       slackChannelAdapter = channelAdapters;
       new CfnOutput(this, "ChannelRequestQueueUrl", { value: channelAdapters.requests.queueUrl });
       new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });

@@ -62,6 +62,8 @@ export interface DeveloperSignInProps {
 export class DeveloperSignIn extends Construct {
   /** Existing table, exposed without changing its construct path or permissions. */
   readonly table: dynamodb.Table;
+  /** Spec 062 Phase 7c1b: the sign-in function, whose Slack directory reads go through the Slack adapter when asked. */
+  readonly function: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: DeveloperSignInProps) {
     super(scope, id);
@@ -91,7 +93,7 @@ export class DeveloperSignIn extends Construct {
     });
 
     const oidcSecretName = `agentx/${props.env}/developer-oidc`;
-    const fn = packagedFunction(this, "Function", "packages/broker/src/aws/developer-identity.ts", {
+    const fn = this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-identity.ts", {
       AGENTX_ENV: props.env,
       DEVELOPER_TOKEN_ISSUER: issuer,
       DEVELOPER_SIGNIN_TABLE_NAME: table.tableName,
