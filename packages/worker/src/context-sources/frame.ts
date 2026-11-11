@@ -7,9 +7,12 @@ import { defuseFrameTags, stripHiddenCharacters, SEARCH_TEAM_KNOWLEDGE_TOOL, typ
 const FRAME = /<source-result source="([^"]{0,120})" item="([^"]{0,120})"[^>]*>\n([\s\S]*?)\n<\/source-result>/gu;
 const MAX_ANSWER_CHARS = 220_000;
 
-/** Whether a tool name is one of the context tools (a source tool or the combined search). */
+/** Whether a tool name is one of the context tools (a source tool or the combined search), as the worker's own tool or as a tool of the rovara MCP server. */
 export function isContextToolName(name: unknown): boolean {
-  return typeof name === "string" && (name === SEARCH_TEAM_KNOWLEDGE_TOOL || /^src_[a-z][a-z0-9]{1,15}_/u.test(name));
+  if (typeof name !== "string") return false;
+  // Pi names an MCP tool `mcp__<server>__<tool>`, shortened with a hash past 64 characters: the prefix stays.
+  const bare = name.startsWith("mcp__rovara__") ? name.slice("mcp__rovara__".length) : name;
+  return bare === SEARCH_TEAM_KNOWLEDGE_TOOL || /^src_[a-z][a-z0-9]{1,15}_/u.test(bare);
 }
 
 /** What the model reads for an answer. Text of an `OK` answer that is not framed is framed here, as untrusted. */

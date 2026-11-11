@@ -94,6 +94,15 @@ export const LOCAL_WORKER_IMAGE_BUILD_HINT = "build it from a Rovara checkout: d
 /** Where a worker calls the broker's model proxy: its own network's name for the broker (the gateway answers it) plus the proxy's path. */
 export const modelProxyWorkerUrl = (): string => `http://${BROKER_ALIAS}:${CALLBACK_RELAY_PORT}${MODEL_PROXY_PREFIX}`;
 
+/**
+ * The owner's ROVARA_PI_MCP when running `rovara up`: unset or "1" turns the agent's MCP client on (the default); any other value ("0", "false", "off", a typo)
+ * flips back to the worker's own source tools. The worker itself is then told exactly "1" or "0", and turns it on for "1" only.
+ */
+export function ownerWantsPiMcp(environment: NodeJS.ProcessEnv): boolean {
+  const value = environment["ROVARA_PI_MCP"];
+  return value === undefined || value === "1";
+}
+
 /** Names the worker sets itself: a spec's environment cannot override them (a project cannot turn on the local shell). */
 const RESERVED_ENVIRONMENT = new Set([
   "AGENTX_WORKSPACE_ROOT",
@@ -106,6 +115,8 @@ const RESERVED_ENVIRONMENT = new Set([
   "AGENTX_SANDBOX_NETWORK",
   // Lane L9a: the model proxy's address is the broker's to set (below). A spec cannot point the worker's model calls elsewhere.
   "AGENTX_MODEL_PROXY_URL",
+  // How the agent reaches its sources is the operator's switch, never a project's.
+  "ROVARA_PI_MCP",
   // Test services: the broker alone says which registry, catalog environment and run folder the worker uses and which image is its own; a project cannot point them elsewhere.
   "AGENTX_TEST_SERVICES_REGISTRY",
   "AGENTX_TEST_SERVICES_ENV",
@@ -151,6 +162,11 @@ export interface DockerWorkerMachinesOptions {
   callback: () => { tcpPort: number; socketDirectory?: string | undefined };
   /** Lane L9a: the broker serves the local model proxy on its callback listener; tell the worker where it is (`AGENTX_MODEL_PROXY_URL`). */
   modelProxy?: boolean | undefined;
+  /**
+   * The stage's sources reach the agent through Pi's own MCP client, as one server the gateway serves (`ROVARA_PI_MCP=1` on the worker). Default on; the owner's
+   * `ROVARA_PI_MCP=0` goes back to the worker's own source tools for one release. A worker without the variable keeps its own tools.
+   */
+  piMcp?: boolean | undefined;
   /**
    * Port lane P6 (item B1): the profiles of the registered `build-system` adapters (`collectBuildSystemProfiles`), asked each time a machine starts. They go to the worker in `ROVARA_BUILD_SYSTEMS`
    * (never in a job). A change re-creates an idle machine, like any other change of its environment.
@@ -592,6 +608,7 @@ export class DockerWorkerMachines implements WorkerMachines {
       // Lane L9a: the broker's model proxy, reached through the same relay. An address, not a secret: the worker asks for its token with its callback
       // capability (`GET /v1/internal/model-access`), and a setup run starts only when this is set (setup-agent-invocation.ts), so its spend is counted.
       ...(this.#options.modelProxy === true ? { AGENTX_MODEL_PROXY_URL: modelProxyWorkerUrl() } : {}),
+      ROVARA_PI_MCP: this.#options.piMcp === false ? "0" : "1",
       ...(buildSystems.length === 0 ? {} : { [BUILD_SYSTEM_PROFILES_ENV]: serializeBuildSystemProfiles(buildSystems) }),
       // The Docker calls go to the guard, which holds the socket; the sandboxes join the sandbox network, which the worker does not make itself.
       DOCKER_HOST: `tcp://${SOCKET_GUARD_ALIAS}:${SOCKET_GUARD_PORT}`,

@@ -337,6 +337,15 @@ describe("rovara up runtime", () => {
     expect(answer.body).not.toContain("sk-ant");
   });
 
+  it("tells workers to reach their sources through Pi's own MCP client, and any owner ROVARA_PI_MCP but 1 (here \"off\") flips that back", async () => {
+    const on = await launch();
+    const fresh = await on.runtime.registry.require("worker-machines", "docker").start({ machineKey: "ws-mcp", companyId: IMPLICIT_COMPANY_ID });
+    expect(on.docker.containers.get(fresh.machineId)!.environment.ROVARA_PI_MCP).toBe("1");
+    const back = await launch({ environment: { ROVARA_PI_MCP: "off" } });
+    const old = await back.runtime.registry.require("worker-machines", "docker").start({ machineKey: "ws-mcp-back", companyId: IMPLICIT_COMPANY_ID });
+    expect(back.docker.containers.get(old.machineId)!.environment.ROVARA_PI_MCP).toBe("0");
+  });
+
   it("wires the model providers: the three built-ins, plus a model-provider plug-in whose prices reach the metering port (item K2)", async () => {
     const module = `export const plugin = { point: "model-provider", name: "company-gateway", create(context) { return { kind: "company-gateway", name: "Company gateway", address: "https://models.example.test/v1", signIn: { kind: "bearer-key" },
       defaultModel: "house-model", prices: { currency: "USD", models: { "house-model": { inputMicrosPerMillionTokens: 1000000, outputMicrosPerMillionTokens: 2000000 } } },

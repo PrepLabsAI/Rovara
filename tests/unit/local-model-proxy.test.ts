@@ -357,6 +357,12 @@ describe("the egress gateway's route table (the program the helper container run
         expect(route("POST", bad), bad).toMatchObject({ status: 404 });
         expect(route("GET", bad), bad).toHaveProperty("status");
       }
+      // The same tools as one MCP server: POST on one exact path (no GET stream, no session to DELETE), the workspace stamped.
+      expect(route("POST", "/v1/internal/mcp")).toEqual({ kind: "mcp" });
+      for (const method of ["GET", "DELETE", "PUT"]) expect(route(method, "/v1/internal/mcp"), method).toMatchObject({ status: 405 });
+      for (const bad of ["/v1/internal/mcp/", "/v1/internal/mcp?x=1", "/v1/internal/mcp/extra", "/v1/internal/mcpx", "/v1/internal/mcp/../model-access", "/mcp", "/v1/mcp"]) {
+        expect(route("POST", bad), bad).toMatchObject({ status: 404 });
+      }
       for (const path of ["messages", "responses", "chat/completions"]) expect(route("POST", `/v1/internal/model-proxy/v1/${path}`), path).toEqual({ kind: "model-call" });
       expect(route("POST", "/v1/internal/model-proxy/v1/messages?beta=true")).toEqual({ kind: "model-call" });
       expect(route("GET", "/v1/internal/model-proxy/v1/messages")).toMatchObject({ status: 405 });
@@ -366,6 +372,47 @@ describe("the egress gateway's route table (the program the helper container run
       }
     } finally {
       await gateway.dispose();
+    }
+  });
+});
+
+describe("the egress gateway's relay of the rovara MCP endpoint", () => {
+  it("stamps its own workspace over a forged one, hands the bearer on unchanged, and relays nothing else at that path", async () => {
+    const { createServer, request: httpRequest } = await import("node:http");
+    const seen: Array<{ method: string | undefined; url: string | undefined; workspace: string | string[] | undefined; authorization: string | undefined; body: string }> = [];
+    const broker = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        seen.push({ method: request.method, url: request.url, workspace: request.headers["x-rovara-workspace"], authorization: request.headers.authorization, body: Buffer.concat(chunks).toString("utf8") });
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("{}");
+      });
+    });
+    await new Promise<void>((resolve) => broker.listen(0, "127.0.0.1", resolve));
+    const brokerPort = (broker.address() as { port: number }).port;
+    const gateway = await loadGatewayRelay({ workspaceId: "ws-own", callbackPort: brokerPort });
+    const send = (method: string, path: string, headers: Record<string, string>, body?: string) => new Promise<number>((resolve, reject) => {
+      const url = new URL(gateway.url);
+      const out = httpRequest({ host: url.hostname, port: url.port, method, path, headers: { authorization: "Bearer cap.value", ...headers, ...(body === undefined ? {} : { "content-type": "application/json" }) } }, (answer) => { answer.resume(); answer.on("end", () => resolve(answer.statusCode ?? 0)); });
+      out.on("error", reject);
+      out.end(body);
+    });
+    const message = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    try {
+      expect(await send("POST", "/v1/internal/mcp", { "x-rovara-workspace": "ws-forged" }, message)).toBe(200);
+      expect(await send("POST", "/v1/internal/mcp", {}, message)).toBe(200);
+      expect(seen).toEqual([
+        { method: "POST", url: "/v1/internal/mcp", workspace: "ws-own", authorization: "Bearer cap.value", body: message },
+        { method: "POST", url: "/v1/internal/mcp", workspace: "ws-own", authorization: "Bearer cap.value", body: message },
+      ]);
+      expect(await send("GET", "/v1/internal/mcp", { accept: "text/event-stream" })).toBe(405);
+      expect(await send("DELETE", "/v1/internal/mcp", {})).toBe(405);
+      expect(await send("POST", "/v1/internal/mcp/extra", {}, message)).toBe(404);
+      expect(seen).toHaveLength(2);
+    } finally {
+      await gateway.dispose();
+      await new Promise<void>((resolve) => { broker.close(() => resolve()); broker.closeAllConnections(); });
     }
   });
 });

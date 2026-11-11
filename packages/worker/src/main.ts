@@ -21,6 +21,7 @@ import { createDefaultPiSessionAdapter } from "./pi-session.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
 import { agentSkillsSource } from "./agent-step.js";
 import { brokerContextCall, contextToolsCatalogSource } from "./context-sources/bridge.js";
+import { piMcpEnabled } from "./context-sources/pi-mcp.js";
 import { designReviewBindingOf, designReviewDependencies, operationModelProxy } from "./design-review-sessions.js";
 import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "./project-setup-executor.js";
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
@@ -185,6 +186,8 @@ const state = createWorkerServerState(
           contextSources: {
             catalog: contextToolsCatalogSource({ brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability, onDiagnostic: (message) => console.log(JSON.stringify({ component: "worker", event: "context_sources", message })) }),
             call: brokerContextCall({ brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability }),
+            // Pi's own MCP client, with the one server the egress gateway serves; ROVARA_PI_MCP=0 goes back to the worker's own tools for one release.
+            ...(piMcpEnabled(process.env) ? { mcp: { brokerUrl: controlPlaneUrl, capability: invocation.callbackCapability } } : {}),
           },
           ...(invocation.payload.workflowE2EAdmission === undefined ? {} : {
             workflowE2EEvidenceRoot: requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR"),

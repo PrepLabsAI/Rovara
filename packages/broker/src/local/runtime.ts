@@ -59,7 +59,7 @@ import { listProjects } from "./app/projects.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { codeHostForRepositoryAddress } from "../plugins/routing.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
-import { DockerWorkerMachines } from "./docker-worker-machines.js";
+import { DockerWorkerMachines, ownerWantsPiMcp } from "./docker-worker-machines.js";
 import { assertGithubRepositoryAddress, type GhRunner } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
@@ -463,6 +463,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // The registries a project's dev container may pull from: the owner's `ROVARA_DEVCONTAINER_REGISTRIES` (`0` turns dev containers off); with none said, the default list on a Docker that runs in a virtual machine and none on a host where root in a container is root.
     devcontainerRegistries: await devcontainerRegistriesForInstall(options.environment, options.docker ?? createDockerRunner(options.environment)),
     modelProxy: true,
+    // The stage's sources through Pi's own MCP client (the gateway's one server); any owner ROVARA_PI_MCP but unset or "1" flips back to the worker's own tools for one release.
+    piMcp: ownerWantsPiMcp(options.environment),
     // Port lane P6 (item B1): what the registered build-system adapters supply (extra detectors, setup programs) goes to the worker's start-up environment; read late, because the config's adapters load after this.
     buildSystems: () => collectBuildSystemProfiles(registry),
     signer: await loadInvokeSigner(stateDirectory),

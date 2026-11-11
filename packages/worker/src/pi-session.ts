@@ -53,6 +53,7 @@ import type { KnowledgeStage } from "./knowledge/model.js";
 import type { ResolvedKnowledge } from "./knowledge/resolve.js";
 import type { PiCacheRetention } from "./usage.js";
 import { stubPersistedContextResults } from "./context-sources/transcript.js";
+import { ROVARA_MCP_TOOL_PATTERN, rovaraMcpExtensions, type ContextMcpSession, type RovaraMcpWatch } from "./context-sources/pi-mcp.js";
 
 export type PiThinkingLevel = ThinkingLevel;
 export type PiWorkflowMode = "PLAN" | "IMPLEMENT" | "REVIEW" | "UNDERSTAND" | "SETUP";
@@ -150,6 +151,11 @@ export interface PiSessionInput {
    * only. They run in the worker and call the broker; a session in Build (IMPLEMENT) or an agent run is refused them (assertContextToolsAllowed).
    */
   contextTools?: readonly ToolDefinition[];
+  /**
+   * The same sources through Pi's own MCP client: one server, "rovara", served by the egress gateway (context-sources/pi-mcp.ts). The same stages only; a
+   * session is given this or `contextTools`, never both.
+   */
+  contextMcp?: ContextMcpSession;
   /** Tool calls of one assistant message run one after another, never side by side (the setup agent's limits are counted per command). Default: pi's own (parallel). */
   sequentialTools?: boolean;
   /** The most output tokens one model turn may produce: the model's own limit is lowered to this when it is higher. Default: the model's. */
@@ -171,8 +177,9 @@ const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "edit", "write
  * Context sources are for the stages that read and judge, never for Build, where the shell is: untrusted live text must not reach the stage that can run
  * commands (design 3.6, Q7). A session that is given source tools in any other mode, or as an agent run, does not start.
  */
-export function assertContextToolsAllowed(input: { workflowMode?: PiWorkflowMode | undefined; agentRun?: unknown; contextTools?: readonly ToolDefinition[] | undefined }): void {
-  if (input.contextTools === undefined || input.contextTools.length === 0) return;
+export function assertContextToolsAllowed(input: { workflowMode?: PiWorkflowMode | undefined; agentRun?: unknown; contextTools?: readonly ToolDefinition[] | undefined; contextMcp?: ContextMcpSession | undefined }): void {
+  if (input.contextTools !== undefined && input.contextTools.length > 0 && input.contextMcp !== undefined) throw agentXError("CONFIG_INVALID", "a session reaches its sources one way: its own tools or the rovara MCP server");
+  if ((input.contextTools === undefined || input.contextTools.length === 0) && input.contextMcp === undefined) return;
   const mode = input.workflowMode ?? "IMPLEMENT";
   if (mode === "IMPLEMENT" || mode === "SETUP" || input.agentRun !== undefined) {
     throw agentXError("FORBIDDEN", "context sources are not available to a session that can run commands or change files");
@@ -234,6 +241,8 @@ export async function createWorkspacePiSession(
     /** Lane E: the context-source tools and the note that tells the model about them (see PiSessionInput.contextTools). */
     contextTools?: readonly ToolDefinition[];
     contextNote?: string;
+    /** The same sources through Pi's own MCP client (see PiSessionInput.contextMcp). */
+    contextMcp?: ContextMcpSession;
     /** Where the agent works, when that is not the workspace root: a folder inside it (a parallel part's working copy). Its saved transcript and settings stay in the root's. */
     workingDirectory?: string;
     /**
@@ -275,7 +284,7 @@ export async function createWorkspacePiSession(
   const knowledgeLoad = input.agentRun === undefined && input.workflowMode !== "SETUP" ? await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths, input.contextFilesAt, input.baseCommits, { workflowMode: input.workflowMode, knowledge: input.knowledge, onLoaded: input.onKnowledgeLoaded }) : undefined;
   const contextFiles = knowledgeLoad?.files ?? [];
   const knowledgeSession = knowledgeLoad?.session;
-  if (input.contextNote !== undefined && input.contextTools !== undefined && input.contextTools.length > 0) contextFiles.push({ path: "AGENTX-SOURCES.md", content: input.contextNote });
+  if (input.contextNote !== undefined && ((input.contextTools !== undefined && input.contextTools.length > 0) || input.contextMcp !== undefined)) contextFiles.push({ path: "AGENTX-SOURCES.md", content: input.contextNote });
   const handle = await adapter.create({
     ...(knowledgeSession === undefined ? {} : { knowledgeSession }),
     cwd: workingDirectory,
@@ -298,6 +307,7 @@ export async function createWorkspacePiSession(
     ...(input.agentRun === undefined ? {} : { agentRun: input.agentRun }),
     ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
+    ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return withLoadedKnowledge(handle, knowledgeLoad?.manifest);
@@ -330,6 +340,7 @@ export async function openRegisteredWorkspacePiSession(
     /** Lane E, as for `createWorkspacePiSession`. */
     contextTools?: readonly ToolDefinition[];
     contextNote?: string;
+    contextMcp?: ContextMcpSession;
     /** As for `createWorkspacePiSession`. */
     contextFilesAt?: "working-tree" | "base-commit";
     baseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
@@ -356,7 +367,7 @@ export async function openRegisteredWorkspacePiSession(
   // A setup run reads no repository context file when it is reopened either: the repository's rule files are data, never loaded into the session that has a shell.
   const knowledgeLoad = input.workflowMode === "SETUP" ? undefined : await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths, input.contextFilesAt, input.baseCommits, { workflowMode: input.workflowMode, knowledge: input.knowledge, onLoaded: input.onKnowledgeLoaded });
   const contextFiles = knowledgeLoad?.files ?? [];
-  if (input.contextNote !== undefined && input.contextTools !== undefined && input.contextTools.length > 0) contextFiles.push({ path: "AGENTX-SOURCES.md", content: input.contextNote });
+  if (input.contextNote !== undefined && ((input.contextTools !== undefined && input.contextTools.length > 0) || input.contextMcp !== undefined)) contextFiles.push({ path: "AGENTX-SOURCES.md", content: input.contextNote });
   const handle = await adapter.open({
     ...(knowledgeLoad?.session === undefined ? {} : { knowledgeSession: knowledgeLoad.session }),
     cwd: rootPath,
@@ -378,6 +389,7 @@ export async function openRegisteredWorkspacePiSession(
     ...(mergeSkills(input.skills, knowledgeLoad?.skills ?? []) === undefined ? {} : { skills: mergeSkills(input.skills, knowledgeLoad?.skills ?? [])! }),
     ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
     ...(input.contextTools === undefined ? {} : { contextTools: input.contextTools }),
+    ...(input.contextMcp === undefined ? {} : { contextMcp: input.contextMcp }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return withLoadedKnowledge(handle, knowledgeLoad?.manifest);
@@ -519,7 +531,10 @@ async function createDefaultSession(
     const knowledge = input.agentRun === undefined ? input.knowledgeSession : undefined;
     const knowledgeTool = knowledge?.offersTool === true ? [readKnowledgeTool(knowledge)] : [];
     const midRun = knowledge?.allowsMidRun === true ? [knowledgeExtension(knowledge, input.onDiagnostic)] : [];
-    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun], loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : {}) });
+    // The rovara MCP server, and no other: Pi's MCP extension is loaded only for a session with sources, held to that one server (context-sources/pi-mcp.ts).
+    const sourceMcp = input.contextMcp === undefined ? undefined : rovaraMcpExtensions(input.contextMcp);
+    const hasSources = sourceTools.length > 0 || input.contextMcp !== undefined;
+    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun, ...(sourceMcp?.extensions ?? [])], loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : {}) });
     // An AgentX extension that failed to load would leave its work silently undone, so the session does not start.
     // It is a deterministic AgentX bug, so not RUNTIME_UNAVAILABLE, which the broker reads as "retry" (M-10).
     const loadErrors = resourceLoader.getExtensions().errors;
@@ -542,7 +557,8 @@ async function createDefaultSession(
       model: sessionModel,
       thinkingLevel: requestedLevel ?? (model.reasoning ? "medium" : "off"),
       // read_skill is the worker's own tool, never a file tool: it is there only when the operation has skills.
-      tools: [...stepTools.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...runTools.map(({ name }) => name)],
+      // With the rovara server, its tools are named by pattern; naming any MCP tool makes the list filter MCP tools, so no other server's could be active.
+      tools: [...stepTools.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...runTools.map(({ name }) => name), ...(input.contextMcp === undefined ? [] : [ROVARA_MCP_TOOL_PATTERN])],
       // A custom tool with a built-in's name replaces it.
       customTools: [
         ...(stepTools.shell ? [agentShellTool(input.cwd, input.bashOperations, input.sequentialTools === true)] : []),
@@ -586,18 +602,30 @@ async function createDefaultSession(
       throw error;
     }
     const savedFile: string = sessionFile;
+    // A refusal of the operation's capability on any request to the rovara server stops the session at once; the prompt then ends the stage with it.
+    sourceMcp?.watch.onRefused(() => { void session.abort().catch(() => undefined); });
+    let mcpReady = false;
+    // Set when the caller stops the session (its step limit, a cancel): a wait for the rovara server's tools ends with it, and no prompt starts after it.
+    let stopped = false;
     return {
       conversationId: conversationId ?? session.sessionId,
       sessionFile,
       prompt: async (text) => {
-        try { await session.prompt(text, { expandPromptTemplates: false }); }
+        try {
+          const run = () => session.prompt(text, { expandPromptTemplates: false });
+          if (sourceMcp === undefined) await run();
+          else {
+            await promptWithSources(sourceMcp.watch, run, () => stopped, mcpReady);
+            mcpReady = true;
+          }
+        }
         // A session with source tools keeps stubs, not the sources' text, in its saved transcript (stubPersistedContextResults). The live session still holds what the model read.
-        finally { if (sourceTools.length > 0) await stubPersistedContextResults(savedFile).catch(() => undefined); }
+        finally { if (hasSources) await stubPersistedContextResults(savedFile).catch(() => undefined); }
       },
       // Pi 0.99 returns a disposition ("handled" | "queued"); the adapter's contract stays Promise<void>.
       steer: async (text) => { await session.steer(text); },
       isStreaming: () => session.isStreaming,
-      abort: async () => session.abort(),
+      abort: async () => { stopped = true; await session.abort(); },
       // A routed session runs on rovara-route under the company's alias; it is reported as the catalog model the route names (Task 27).
       getModel: () => ({
         ...reportedModel(),
@@ -609,8 +637,25 @@ async function createDefaultSession(
       getSessionStats: () => conversationStats(session.getSessionStats(), session.sessionManager.getEntries()),
       systemPromptText: () => session.systemPrompt,
       subscribe: (listener) => session.subscribe((event) => { if (!isSystemMessageEvent(event)) listener(withoutStructuredContent(withoutSystemMessages(event))); }),
-      dispose: () => { session.dispose(); if (sourceTools.length > 0) void stubPersistedContextResults(savedFile).catch(() => undefined); },
+      dispose: () => { session.dispose(); if (hasSources) void stubPersistedContextResults(savedFile).catch(() => undefined); },
     };
+}
+
+/**
+ * One prompt of a session whose sources come from the rovara MCP server. Never without the team's sources, silently: before the first prompt the server's tools
+ * are there, or the stage stops and says why; a session stopped while it waits (its step's limit) asks the model nothing; and a refusal of the operation's
+ * capability seen on any request ends the stage with that reason, also when the prompt itself failed because the session was stopped for it.
+ */
+export async function promptWithSources(watch: Pick<RovaraMcpWatch, "ready" | "failure">, run: () => Promise<void>, stopped: () => boolean, ready: boolean): Promise<void> {
+  if (!ready) await watch.ready(undefined, stopped);
+  if (stopped()) return;
+  try {
+    await run();
+  } catch (error) {
+    throw watch.failure() ?? error;
+  }
+  const refused = watch.failure();
+  if (refused !== undefined) throw refused;
 }
 
 /**

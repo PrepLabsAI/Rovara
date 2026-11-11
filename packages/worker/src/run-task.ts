@@ -85,6 +85,7 @@ import { READ_ONLY_STEP_MODES, STOPS_PROGRAMS_FIRST_MODES, stopProgramsBeforeRea
 import { createContextTools, type ContextBridgeCall } from "./context-sources/bridge.js";
 import { contextSourcesNote } from "./context-sources/frame.js";
 import { stubContextEvent } from "./context-sources/events.js";
+import type { ContextMcpSession } from "./context-sources/pi-mcp.js";
 import { createSourceTextGuard, guardArtifactSink, guardEventSink, type SourceTextGuard } from "./context-sources/text-guard.js";
 import { isContextSourceStage, type ContextToolCatalog } from "@agentx/contracts";
 import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
@@ -191,7 +192,12 @@ export interface TaskInvocationDependencies {
    * Lane E: where an Understand, Plan, Plan-check or Review stage reaches the project's MCP context sources, through the broker with the invocation's own capability.
    * Asked only when the invocation says the stage has sources (`contextSources`). Without it such a stage does not run (it would run without the team's sources, silently).
    */
-  contextSources?: { catalog: () => Promise<ContextToolCatalog | undefined>; call: ContextBridgeCall };
+  contextSources?: {
+    catalog: () => Promise<ContextToolCatalog | undefined>;
+    call: ContextBridgeCall;
+    /** Present: the stage reaches its sources through Pi's own MCP client, as the one server "rovara" (context-sources/pi-mcp.ts), and `call` is not used. */
+    mcp?: { brokerUrl: string; capability: string };
+  };
   /**
    * Where an agent step (Task 23) reaches the broker's connector tools, with the invocation's own capability. Without it the
    * worker cannot run an agent step. Tests supply fakes for the catalogs and the call.
@@ -775,15 +781,19 @@ async function runTask(
   // The agent's shell: the devcontainer's or the sandbox's, or the local one when it was chosen.
   const agentShell = bashOperations ?? (localShell ? localBashOperations({ explicit: true }) : undefined);
   // Lane E: the project's context sources, in the stages that may read them only. Build never gets them, whatever the invocation says.
-  let sourceSession: { contextTools: ToolDefinition[]; contextNote: string; labels: Array<{ label: string }> } | undefined;
+  let sourceSession: { contextTools: ToolDefinition[]; contextMcp?: ContextMcpSession; contextNote: string; labels: Array<{ label: string }> } | undefined;
   if (invocation.payload.contextSources === true && isContextSourceStage(payloadMode)) {
     if (dependencies.contextSources === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot reach this project's context sources");
     const catalog = await dependencies.contextSources.catalog();
     if (catalog !== undefined && (catalog.tools.length > 0 || catalog.searchTeamKnowledge)) {
       const guard = createSourceTextGuard();
       sourceGuard.current = guard;
+      const mcp = dependencies.contextSources.mcp;
       sourceSession = {
-        contextTools: createContextTools(catalog, dependencies.contextSources.call, { workspaceId: invocation.workspaceId, conversationId, operationId: invocation.operationId }, { onText: (text) => { guard.remember(text); } }),
+        // Pi's own MCP client and the rovara server by default; the worker's own tools when the switch is off (ROVARA_PI_MCP=0).
+        ...(mcp === undefined
+          ? { contextTools: createContextTools(catalog, dependencies.contextSources.call, { workspaceId: invocation.workspaceId, conversationId, operationId: invocation.operationId }, { onText: (text) => { guard.remember(text); } }) }
+          : { contextTools: [], contextMcp: { brokerUrl: mcp.brokerUrl, capability: mcp.capability, catalog, onText: (text: string) => { guard.remember(text); } } }),
         contextNote: contextSourcesNote(catalog),
         labels: catalog.sources.map((source) => ({ label: source.label })),
       };
@@ -807,7 +817,7 @@ async function runTask(
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
         ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
         ...stepSession,
-        ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote }),
+        ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
       },
       dependencies.piAdapter,
     );
@@ -821,7 +831,7 @@ async function runTask(
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
         ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
         ...stepSession,
-        ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote }),
+        ...(sourceSession === undefined ? {} : { contextTools: sourceSession.contextTools, contextNote: sourceSession.contextNote, ...(sourceSession.contextMcp === undefined ? {} : { contextMcp: sourceSession.contextMcp }) }),
       },
       dependencies.piAdapter,
     );
@@ -1567,7 +1577,7 @@ async function runTask(
           ...(learned.section === "" ? {} : { learnedBlock: learned.section }),
           ...(invocation.payload.workflowReviewers === undefined ? {} : { reviewers: invocation.payload.workflowReviewers }),
           ...(invocation.payload.workflowReviewRisk === true ? { reviewRisk: true } : {}),
-          ...(sourceSession === undefined ? {} : { sources: { tools: sourceSession.contextTools, note: sourceSession.contextNote, labels: sourceSession.labels } }),
+          ...(sourceSession === undefined ? {} : { sources: { tools: sourceSession.contextTools, ...(sourceSession.contextMcp === undefined ? {} : { mcp: sourceSession.contextMcp }), note: sourceSession.contextNote, labels: sourceSession.labels } }),
           ...(dependencies.secondReviewer === undefined || invocation.payload.workflowSecondReviewer === undefined ? {} : { secondReviewer: dependencies.secondReviewer, onSecondReview: (result: SecondReviewResult) => { secondReview = result; } }),
           ...(reviewTimeoutMs === undefined ? {} : { timeoutMs: reviewTimeoutMs }),
           ...(agentStep?.promptSection === undefined ? {} : { promptSection: agentStep.promptSection }),

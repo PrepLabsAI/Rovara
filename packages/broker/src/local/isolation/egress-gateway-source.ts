@@ -356,15 +356,18 @@ function startPlainForwarder(ip, cidr) {
 }
 
 // ---- the callback relay: the worker's calls to the broker, and only those
-// Three families. (1) The operation callbacks, POST. (2) The model proxy (lane L9a): POST to the three model routes; the broker's proxy holds the
+// Four families. (1) The operation callbacks, POST. (2) The model proxy (lane L9a): POST to the three model routes; the broker's proxy holds the
 // model key and the worker holds only a short-lived token. (3) GET /v1/internal/model-access, where the worker asks for that token with its callback
 // capability. The relay stamps the worker's own workspace id on (2) and (3) and removes any such header the worker sent, so a token taken from one
-// worker is refused when another worker's relay carries it.
+// worker is refused when another worker's relay carries it. (4) A stage's sources: the two context-tools routes and the one MCP endpoint, stamped the same way.
 const CALLBACK_PATH = /^\/v1\/internal\/(workspaces|project-setups)\/([A-Za-z0-9-]{1,64})\/operations\/([A-Za-z0-9._-]{1,128})\/([a-z0-9][a-z0-9\/_-]{0,120})$/;
 const MODEL_ACCESS_PATH = /^\/v1\/internal\/model-access(\?slot=[a-z0-9][a-z0-9_-]{0,31})?$/;
 const DESIGN_REVIEW_PACKET_PATH = /^\/v1\/internal\/design-review\/packet\?slot=[a-z0-9][a-z0-9_-]{0,31}$/;
 const CONTEXT_TOOLS_LIST_PATH = /^\/v1\/internal\/context-tools$/;
 const CONTEXT_TOOLS_CALL_PATH = /^\/v1\/internal\/context-tools\/call$/;
+// The same tools as ONE MCP server for the agent's own MCP client (streamable HTTP in its JSON-answer form): POST on one exact path, the workspace stamped.
+// No GET stream and no session to end, so GET and DELETE are refused here.
+const GATEWAY_MCP_PATH = /^\/v1\/internal\/mcp$/;
 const MODEL_PROXY_PATH = /^\/v1\/internal\/model-proxy\/v1\/(messages|responses|chat\/completions)(\?beta=true)?$/;
 const WORKSPACE_STAMP = "x-rovara-workspace";
 const MODEL_TIMEOUT_MS = 600000;
@@ -376,6 +379,7 @@ function callbackRoute(method, url, workspaceId) {
   if (DESIGN_REVIEW_PACKET_PATH.test(target)) return method === "GET" ? { kind: "packet" } : { status: 405, reason: "method_not_allowed" };
   if (CONTEXT_TOOLS_LIST_PATH.test(target)) return method === "GET" ? { kind: "context-tools" } : { status: 405, reason: "method_not_allowed" };
   if (CONTEXT_TOOLS_CALL_PATH.test(target)) return method === "POST" ? { kind: "context-tools" } : { status: 405, reason: "method_not_allowed" };
+  if (GATEWAY_MCP_PATH.test(target)) return method === "POST" ? { kind: "mcp" } : { status: 405, reason: "method_not_allowed" };
   if (MODEL_PROXY_PATH.test(target)) return method === "POST" ? { kind: "model-call" } : { status: 405, reason: "method_not_allowed" };
   if (method !== "POST") return { status: 405, reason: "method_not_allowed" };
   const match = CALLBACK_PATH.exec(target);

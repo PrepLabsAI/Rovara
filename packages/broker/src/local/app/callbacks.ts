@@ -30,7 +30,7 @@ import { processPlanAnswer } from "../../core/plan/process.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { readVerifiedText } from "./documents.js";
 import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../core/design-review/packet-route.js";
-import { CONTEXT_TOOLS_CALL_PATH, CONTEXT_TOOLS_PATH, handleContextTools } from "./context-tools.js";
+import { CONTEXT_TOOLS_CALL_PATH, CONTEXT_TOOLS_PATH, GATEWAY_MCP_PATH, handleContextTools, handleGatewayMcp } from "./context-tools.js";
 import type { ContextSourcesRuntime } from "../../context-sources/runtime.js";
 import { readDesignTemplate } from "../../core/design-review/template.js";
 import { DESIGN_REVIEW_RESULT_MAX_BYTES } from "../../core/design-review/outcome.js";
@@ -249,6 +249,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       const bare = request.path.split("?")[0] ?? "";
       if (request.method === "GET" && bare === CONTEXT_TOOLS_PATH) return await handleContextTools(deps.flow, capabilities, deps.contextSources, request, "list");
       if (request.method === "POST" && bare === CONTEXT_TOOLS_CALL_PATH) return await handleContextTools(deps.flow, capabilities, deps.contextSources, request, "call");
+      // The same tools as one MCP server for the agent's own MCP client: the exact path, POST only, the bearer the operation's own capability.
+      if (request.method === "POST" && request.path === GATEWAY_MCP_PATH) return await handleGatewayMcp(deps.flow, capabilities, deps.contextSources, request);
       const match = ROUTE.exec((request.path.split("?")[0]) ?? "");
       if (request.method !== "POST" || match === null) throw agentXError("NOT_FOUND", "route not found");
       const [, workspaceId, operationId, action] = match as unknown as [string, string, string, string];

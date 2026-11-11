@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENTX_PROTOCOL_VERSION, MachineError, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { DockerWorkerMachines, workspaceIdFor } from "../../packages/broker/src/local/docker-worker-machines.js";
+import { DockerWorkerMachines, workspaceIdFor, ownerWantsPiMcp } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
 import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-invocation.js";
 import { runWorkerMachinesConformance } from "../support/ports/worker-machines-conformance.js";
@@ -18,7 +18,7 @@ afterEach(async () => {
   while (cleanup.length > 0) await rm(cleanup.pop()!, { recursive: true, force: true });
 });
 
-async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null; stateDirectory?: string; callbackPort?: number; signer?: ReturnType<typeof createEphemeralInvokeSigner>; modelProxy?: boolean } = {}) {
+async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null; stateDirectory?: string; callbackPort?: number; signer?: ReturnType<typeof createEphemeralInvokeSigner>; modelProxy?: boolean; piMcp?: boolean } = {}) {
   const stateDirectory = options.stateDirectory ?? (await mkdtemp(join(tmpdir(), "rovara-l4-")));
   cleanup.push(stateDirectory);
   const docker = options.docker ?? new FakeDocker();
@@ -30,6 +30,7 @@ async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: num
     docker,
     fetch: docker.fetch,
     ...(options.modelProxy === undefined ? {} : { modelProxy: options.modelProxy }),
+    ...(options.piMcp === undefined ? {} : { piMcp: options.piMcp }),
     ...(options.maxConcurrentMachines === undefined ? {} : { maxConcurrentMachines: options.maxConcurrentMachines }),
   });
   return { stateDirectory, docker, machines };
@@ -455,5 +456,23 @@ describe("local docker worker machines and the model proxy (lane L9a)", () => {
     const plain = await build();
     const off = await plain.machines.start({ machineKey: "ws-setup-off", companyId: COMPANY });
     await expect(run(plain.docker.containers.get(off.machineId)!.environment)).rejects.toThrow(/no model proxy/);
+  });
+});
+
+describe("local docker worker machines and the agent's MCP client (the rovara server)", () => {
+  it("turns Pi's MCP client on by default, off when the owner flips back, and a spec cannot set it either way", async () => {
+    const on = await build();
+    const handle = await on.machines.start({ machineKey: "ws-mcp-on", companyId: COMPANY });
+    expect(on.docker.containers.get(handle.machineId)!.environment.ROVARA_PI_MCP).toBe("1");
+    const back = await build({ piMcp: false });
+    const old = await back.machines.start({ machineKey: "ws-mcp-off", companyId: COMPANY });
+    expect(back.docker.containers.get(old.machineId)!.environment.ROVARA_PI_MCP).toBe("0");
+    for (const value of ["0", "1"]) await expect(on.machines.start({ machineKey: `ws-mcp-spec-${value}`, companyId: COMPANY, environment: { ROVARA_PI_MCP: value } })).rejects.toMatchObject({ code: "rejected" });
+  });
+
+  it("reads the owner's switch strictly: unset or 1 is on, any other value flips back", () => {
+    expect(ownerWantsPiMcp({})).toBe(true);
+    expect(ownerWantsPiMcp({ ROVARA_PI_MCP: "1" })).toBe(true);
+    for (const value of ["0", "false", "off", "no", "", "true", "yes", "01"]) expect(ownerWantsPiMcp({ ROVARA_PI_MCP: value }), value).toBe(false);
   });
 });

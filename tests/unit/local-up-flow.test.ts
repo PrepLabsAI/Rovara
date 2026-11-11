@@ -4771,6 +4771,36 @@ describe("connections and context sources on rovara up", () => {
     const refused = await listener(plan, "POST", "/v1/internal/context-tools/call", capability, { requestId: "51515151-5151-4151-8151-515151515151", tool: "src_tracker_delete_item", arguments: {} });
     expect(JSON.parse(refused.text)).toMatchObject({ status: "REFUSED" });
     expect(asked).toHaveLength(1);
+
+    // The same tools as ONE MCP server for the agent's own MCP client: POST /v1/internal/mcp, the bearer the operation's own capability, every check of the two routes.
+    const bearer = { authorization: `Bearer ${plan.callbackCapability}` };
+    const rpc = (method: string, params?: unknown, id = 1) => ({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) });
+    const mcpTexts: string[] = [];
+    const mcp = async (headers: Record<string, string>, message: unknown, job: WorkerInvocation = plan) => { const reply = await listener(job, "POST", "/v1/internal/mcp", headers, message); mcpTexts.push(reply.text); return reply; };
+    const initialized = await mcp(bearer, rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "pi", version: "1" } }));
+    expect(initialized.status, initialized.text).toBe(200);
+    expect(JSON.parse(initialized.text)).toMatchObject({ result: { protocolVersion: "2025-06-18", serverInfo: { name: "rovara" } } });
+    expect((await mcp(bearer, { jsonrpc: "2.0", method: "notifications/initialized" })).status).toBe(202);
+    const mcpList = JSON.parse((await mcp(bearer, rpc("tools/list"))).text) as { result: { tools: Array<{ name: string }> } };
+    expect(mcpList.result.tools.map((tool) => tool.name)).toEqual(["src_tracker_search_items", "src_tracker_get_item", "search_team_knowledge"]);
+    const mcpCall = JSON.parse((await mcp(bearer, rpc("tools/call", { name: "src_tracker_search_items", arguments: { query: "login" } }))).text) as { result: { content: Array<{ text: string }>; structuredContent: { status: string } } };
+    expect(mcpCall.result.structuredContent.status).toBe("OK");
+    expect(mcpCall.result.content[0]!.text).toContain("Login fails");
+    expect(mcpCall.result.content[0]!.text).toMatch(/untrusted="true"/u);
+    expect(asked).toEqual(['search_items {"query":"login"}', 'search_items {"query":"login"}']);
+    // The write gate and the tick list hold through this door too: an unticked tool is refused by name and the server is not asked.
+    const mcpRefused = JSON.parse((await mcp(bearer, rpc("tools/call", { name: "src_tracker_delete_item", arguments: {} }))).text) as { result: { structuredContent: { status: string } } };
+    expect(mcpRefused.result.structuredContent.status).toBe("REFUSED");
+    expect(asked).toHaveLength(2);
+    // Another workspace's stamp, no bearer (the capability header alone is not this door's), a forged bearer and a capability without the action are all refused.
+    expect(JSON.parse((await mcp({ ...bearer, "x-rovara-workspace": "other-workspace" }, rpc("tools/list"))).text)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(JSON.parse((await mcp({ "x-agentx-callback-capability": plan.callbackCapability }, rpc("tools/list"))).text)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(JSON.parse((await mcp({ authorization: "Bearer not.a.capability" }, rpc("tools/list"))).text)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(JSON.parse((await mcp({ authorization: `Bearer ${understand.callbackCapability}` }, rpc("tools/list"), understand)).text)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect((await listener(plan, "GET", "/v1/internal/mcp", { ...bearer, accept: "text/event-stream" })).status).toBe(405);
+    expect(asked).toHaveLength(2);
+    // The source's own token never comes back through it.
+    expect(mcpTexts.join("\n")).not.toContain("tok_notarealtoken12345");
   });
 
   it("refuses, on the server, a form that was drawn while the page was fresh and posted after it stopped being fresh, and lists no tools from a stale page", async () => {

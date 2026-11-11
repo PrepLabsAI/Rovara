@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { isContextToolName, stubFor } from "./frame.js";
 
-interface Entry { type?: unknown; message?: { role?: unknown; toolName?: unknown; content?: unknown; details?: unknown } }
+interface Entry { type?: unknown; message?: { role?: unknown; toolName?: unknown; content?: unknown; details?: unknown; structuredContent?: unknown } }
 
 function textOf(content: unknown): string {
   return Array.isArray(content) ? content.map((block) => (typeof block === "object" && block !== null && typeof (block as { text?: unknown }).text === "string" ? (block as { text: string }).text : "")).join("\n") : "";
@@ -30,6 +30,8 @@ export async function stubPersistedContextResults(sessionFile: string): Promise<
     replaced += 1;
     const next = { ...entry, message: { ...message, content: [{ type: "text", text: stubFor(text) }] } };
     delete next.message.details;
+    // An MCP tool's result keeps the whole answer in its structured content too (Pi's rovara server tools).
+    delete next.message.structuredContent;
     return JSON.stringify(next);
   });
   if (replaced === 0) return 0;

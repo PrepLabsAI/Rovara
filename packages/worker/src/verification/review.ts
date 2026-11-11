@@ -1,3 +1,4 @@
+import type { ContextMcpSession } from "../context-sources/pi-mcp.js";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
@@ -713,7 +714,7 @@ export async function runWorkflowReviews(input: {
    * Lane E: the project's context sources for this review: the tools each reviewer gets (read-only lookups run by the broker), the note that tells it about them, and the
    * sources' labels. A finding that cites a source and no code or test is made advisory (downgradeSourceOnlyFindings), so a ticket can neither block nor excuse a change.
    */
-  sources?: { tools: readonly ToolDefinition[]; note: string; labels: readonly { label: string }[] };
+  sources?: { tools: readonly ToolDefinition[]; /** The same sources through Pi's own MCP client (the rovara server) in place of `tools`. */ mcp?: ContextMcpSession; note: string; labels: readonly { label: string }[] };
   /** The broker's base commit per repository, for the reviewers' rule files. Required: no caller can fall back to a base the agent could write. */
   ruleFileBaseCommits: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   piAdapter?: PiSessionAdapter;
@@ -831,7 +832,7 @@ export async function runWorkflowReviews(input: {
         ...(input.standingInstructions === undefined ? {} : { standingInstructions: input.standingInstructions }),
         contextFilesAt: "base-commit",
         baseCommits: input.ruleFileBaseCommits,
-        ...(input.sources === undefined ? {} : { contextTools: input.sources.tools, contextNote: input.sources.note }),
+        ...(input.sources === undefined ? {} : { contextTools: input.sources.tools, contextNote: input.sources.note, ...(input.sources.mcp === undefined ? {} : { contextMcp: input.sources.mcp }) }),
       }, input.piAdapter);
       try { const loaded = session.loadedKnowledge?.(); if (loaded !== undefined) input.onLoadedKnowledge?.({ ...loaded, role }, role); } catch { /* a record that cannot be made is left out */ }
       const actualModel = session.getModel();
