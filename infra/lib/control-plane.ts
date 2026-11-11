@@ -922,8 +922,9 @@ export class ControlPlaneStack extends Stack {
         resources: [state.tableArn],
         conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
       }));
-      // Slack plan buttons read only the task owner, share binding, and saved workflow policy by key.
-      slackIngress.addToRolePolicy(new iam.PolicyStatement({
+      // Slack plan buttons read only the task owner, share binding, and saved workflow policy by key. Spec 062 Phase
+      // 7c3: so does the channel API, which runs those buttons for the built-in Slack adapter.
+      const taskButtonRead = () => new iam.PolicyStatement({
         actions: ["dynamodb:GetItem"],
         resources: [state.tableArn],
         conditions: {
@@ -932,7 +933,9 @@ export class ControlPlaneStack extends Stack {
           StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
           Null: { "dynamodb:Attributes": "false" },
         },
-      }));
+      });
+      slackIngress.addToRolePolicy(taskButtonRead());
+      slackChannelAdapter?.ingress.addToRolePolicy(taskButtonRead());
       // Task 19 (gap 10h): a Quick or Full button takes the choice while Slack waits, then starts the task in an
       // asynchronous invoke of this same Lambda. A policy of its own, so the function does not wait on it (no cycle).
       new iam.Policy(this, "SlackIngressSelfInvoke", {
