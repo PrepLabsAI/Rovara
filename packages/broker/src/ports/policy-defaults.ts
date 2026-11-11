@@ -3,6 +3,8 @@
 // on the same points.
 import { createUnavailableImageRegistry } from "./fake-image-registry.js";
 import { createUnavailableScheduler } from "./fake-scheduler.js";
+import { createUnavailableEmailSender } from "./email.js";
+import { createInProcessRealtime } from "./realtime.js";
 import { costMicrosOf, type ModelPrices } from "../core/cost/price-table.js";
 import { checkCommentProof, type CommentRequestContext, type FetchedComment } from "../core/pr-commands/comment-checks.js";
 import {
@@ -249,4 +251,8 @@ export function registerCodeDefaults(registry: AdapterRegistry, options: CodeDef
   // Saved environments and the nightly test run need these two; until a real one is registered they say plainly that none is set up (they never pretend).
   registry.register("image-registry", "none", createUnavailableImageRegistry(), { isDefault: true });
   registry.register("scheduler", "none", createUnavailableScheduler(), { isDefault: true });
+  // Lane K1: realtime push goes to the install's own pages in this process (with no page listening it sends to nobody); email is not set up until an `email` plug-in is
+  // configured, so a person's email choice reads as unavailable and notices go through the channel adapters. No `team-record-source` is registered: Code keeps no team record.
+  registry.register("realtime", "in-process", createInProcessRealtime(), { isDefault: true });
+  registry.register("email", "none", createUnavailableEmailSender(), { isDefault: true });
 }

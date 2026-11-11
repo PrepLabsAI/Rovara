@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below), `image-registry` (a project's saved environment image, below) and `scheduler` (when something is due, below). A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below), `image-registry` (a project's saved environment image, below), `scheduler` (when something is due, below), `realtime` (a hint to open pages that something changed, below) and `email` (one plain notice to one address, below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -72,6 +72,12 @@ simply has no comment commands. Whether a comment is a command, fresh, edited, o
 live in the `storage` point (`DocumentLessonStore`, the keys of `lesson-keys.ts`, the same rows a hosted install keeps), their model calls go through the install's model, their spend through `admission` and `metering`, their audit through `audit-sink`
 (`lesson.*` actions; `rovara up` registers the document audit sink, so approvals, including the sole-owner exception, and retire requests are kept) and their approvals through `approvers` (`kind: "lesson"`, bound to the lesson's text and version). Code registers `local` (keywords) as the default; `ROVARA_LESSONS_EMBEDDER=local` makes it also give a hashing embedder
 that runs in the process (it finds shared words and word forms, not meaning). The point's cardinality is many; the first adapter that is not `local` is used. The lessons switch and the gate the library asks before a learning call are process-wide (one install per process), not per project or per company.
+
+The interface is the hosted product's own lessons seam, name for name (`LessonEmbedder`, `LessonVectors`, `StoredLessonVector`, `EmbedderCall`), so the hosted embedder service and its vector store sit behind it
+with no change to the TeamRecord rows they keep. Lane K1 added the checks: `tests/support/ports/learning-conformance.ts` has one suite for an embedder (`runLessonEmbedderConformance`: a spec, a fixed
+dimension, finite numbers, `embedMany` in order and equal to `embed`, deterministic) and one for vector storage (`runLessonVectorsConformance`: one vector per lesson, a new spec replaces the old one,
+nothing for another spec, idempotent `remove`, companies and projects apart, many ids in one call). Code's hashing embedder and `documentLessonVectors` pass them, as do the fakes
+(`createFixedLessonEmbedder`, `createMemoryLessonVectors`, `createMemoryLearningAdapter` in `packages/broker/src/ports/learning.ts`).
 
 ## Company scope
 
@@ -254,12 +260,30 @@ The file is outside every repository on purpose: a repository's writers cannot e
 The core builds the rules into the step's system prompt (`core/instructions`): the dispatch reads them at every step, so a step started after the file changed carries the newest, puts them first (Required, then Preferred), then the project's How we work (`docs/how-we-work.md`),
 and refuses the step with a sentence when the file is over the limits, cannot be read, or the whole block is over the worker's limit. A worker that does not list `task.standingInstructions.v1` is refused the step, never sent it without the block.
 
-### Team-record sources: the unknown-source rule (lane P6, item T1)
+### Team-record sources (lane K1; the unknown-source rule is lane P6, item T1)
 
-The `team-record-source` point is still a name only; its interface is defined when the team record moves to the plug-in. The rule it must keep is already shared (`record-trust.ts`): a source id that nothing registered is never read as
-"everyone in the project". `audienceForSource(row, knownSources)` keeps the audience a registered source declared. For ANY unregistered source it returns `unknownSourceAudience` (restricted to the project's maintainers,
+**A new interface: the owner decides it alone (decision 63).** `team-record-source` (`packages/contracts/src/ports/record-source.ts`, many adapters) is where an outside system's events become team record
+rows. The record itself (where rows are kept, how long, vectors, erasure) stays the hosted product's (decision 41); Code defines both sides of the seam so a source is written once:
+
+- **`TeamRecordSource`**, the adapter: `source` (the id its rows and permission snapshots carry: `chat`, `codehost:<name>`), `capabilities` (`delivery`: `push` and/or `poll`; `existence`; where its
+  permission snapshots come from: `item`, `place` or `none`; the retentions it can honour, `A` live only, `B` process then drop, `C` raw text 30 days, `D` full history) and up to three ways in: `receive(payload, sink)`
+  for one delivery the host's route already verified, `poll({ workspaceId, scope, cursor, limit, deadline }, sink)` for a page of changes, and `exists({ workspaceId, system, nativeIds })` (an item deleted at its source
+  is deleted everywhere; `forbidden` is never read as `missing`). Each answers counts (`written`, `duplicates`, `refused`, `failed`), never text; a write the sink threw on is `failed`, so the host delivers again.
+- **`RecordSink`**, the host's write side, handed to the source on every call: `put(draft)`, `tombstone({ sourceIds | scope, cause })`, `changePrincipals`, `replaceScopeAudience`, and optionally `ensureAccessSeed`. Its
+  contract makes arrival order, repeats and deletes safe: `put` is idempotent on company, source, system, item and version (`recordIdempotencyKey`); versions are ordered by `versionAt ?? occurredAt`, never by
+  arrival; a tombstone hides at once and is sticky (a put that arrives after the delete is refused); a scope covers the places under it (`recordScopeCovers`: `chat:T1` covers `chat:T1/C9`, not `chat:T10`); only an
+  `excluded` scope refuses new items; a per-editor change row (`sourceRef.order`) replaces nothing.
+- **`RecordDraft`** keeps the hosted record's field names (`workspaceId` is the company id) and is written out as an interface, so the hosted taps' closed source and kind lists are assignable to it. `RecordDraftSchema`
+  checks the shape; `recordDraftRefusal` adds what the shape cannot: no text under retention A or B, a restricted audience whose snapshot names the draft's own source, a row trust no higher than its actor's or any
+  piece's.
+- Who a source's account is, the source's settings and the capture switch are the adapter's own dependencies, given when it is made (the host's people and settings), not part of the seam.
+- **Code registers no source and keeps no record**: `createRefusingRecordSink()` answers every write "this install keeps no team record". The fakes are `createMemoryRecordSink()` (keeps the whole contract) and
+  `createFakeRecordSource()` (scripted deliveries and polls), in `packages/broker/src/ports/record-source.ts`. `tests/support/ports/record-source-conformance.ts` holds two suites: `runRecordSinkConformance` (for any
+  sink, the hosted one over a test table) and `runRecordSourceConformance` (for any source, fed recorded deliveries).
+
+The rule the point keeps is shared (`record-trust.ts`): a source id that nothing registered is never read as "everyone in the project". `audienceForSource(row, knownSources)` keeps the audience a registered source declared;
+`knownRecordSources(registry, builtIn)` gives the `source` ids of the registered adapters plus the recorders built in. For ANY unregistered source it returns `unknownSourceAudience` (restricted to the project's maintainers,
 `MAINTAINERS_GROUP`) and ignores what the source declared, even a restricted audience: a declared ACL can name any `acl.source` (so its principals would be read as another system's accounts), a broad group or any principal ids.
-`knownSources` is the ids of the registered `team-record-source` adapters and of the recorders built in.
 
 ## Model key store
 
@@ -323,6 +347,9 @@ Schema for each read-only tool) and `check(input)`. **This is a new interface (d
 - An adapter does not save a connection, approve a tool or widen what a tool may do: adding a connection and approving a tool are the owner's acts on a page (decision 66). Whatever a tool returns is data; the
   core frames it as untrusted text before a model sees it.
 - `connectionChecksFromRegistry(registry)` answers the connection store's checks from whatever adapters the registry holds; a kind with no adapter is "not available on this install".
+- Lane K1: `tests/support/ports/monitoring-conformance.ts` is the conformance suite (read-only, a plug-in name for its kind, unique tool names with closed arguments, ok only when the vendor says so, a refusal as
+  `{ ok: false }` that never quotes the secret, never ok when the vendor cannot be reached, no vendor call when a secret-taking kind has none, and no fetch but the one it is given). The fake
+  (`createFakeMonitoringAdapter`) and Code's Sentry adapter pass it; a hosted install's own adapters (its cloud's alarms, its context sources) run it too.
 
 ### Connection secrets
 
@@ -699,8 +726,7 @@ Cloud's own files keep only what is Cloud's (its adapters, its policies, its dat
   instead of a list length, base64 text instead of bytes. That changes the stored format, so it needs a one-time data migration in Cloud. Owner decision 60 settles it (item S2; this replaces
   "a decision for both owners"): **the document store stays small.** Sets and list append are NOT added to the port or to SQLite. Cloud's budget, limit and session code moves to one row per item
   (a marker row per charged task, a counter row) with a one-time migration on the Cloud side. L6a's workspace limits already use that pattern.
-- **Realtime push and email notices.** Each is a provider dependency of the core today and has no port yet (object storage has a provisional one, secrets have the `secrets` point above, and
-  the `scheduler` and `image-registry` points are below). The relay "from a timer" is the caller's timer.
+- **Realtime push and email notices** now have ports (`realtime` and `email`, lane K1, below), as do timers (`scheduler`) and the saved environment registry (`image-registry`). The outbox relay "from a timer" is still the caller's timer.
 - **Sign-in flows.** `IdentityProvider` answers who a credential is; begin/complete/sign-out, authentication freshness and member
   listing for single sign-on are interface additions for the lane that needs them.
 - A SQLite adapter must use UTF-8 text with BINARY collation for the code-point order and refuse lone surrogates in keys.
@@ -768,3 +794,28 @@ Cloud can switch to this code with no data move.
   recorded as not applied, with the reason); a coding or verification run is told the plan of the pinned revision and the worker features it needs (a worker that lacks one is refused the run, never sent it without).
 - **Switches** are environment variables read by leaf modules (`switch.ts`): `ROVARA_TEST_ENVIRONMENT` (on unless `0`), `ROVARA_TEST_SERVICES`, `ROVARA_TEST_ACCOUNTS`, `ROVARA_PROJECT_IMAGES`,
   `ROVARA_SAVED_ENVIRONMENTS` and `ROVARA_NIGHTLY_HEALTH` (each on only when exactly `1`).
+
+## Realtime (lane K1, a new interface: the owner decides it alone, decision 63)
+
+The `realtime` point (one adapter, `packages/contracts/src/ports/realtime.ts`) tells an open page that something it shows changed, so it reads again. A notice is a HINT, never the data: a dotted `type` and at most
+16 fields, each an id-shaped token, a finite number or a boolean, at most 1 KiB (`isRealtimeNotice`); no title, no person's words, no secret. A page that missed one still finds the change when it next reads (a host that
+keeps a catch-up feed writes it in its own store before it publishes; that feed is core logic, not this port), so a lost, late or repeated push does no harm.
+
+- `publish({ companyId, entries, deadline })` sends each entry to one audience: everyone watching a session (`{ kind: "session", sessionId }`), a project (`{ kind: "project", project }`) or one person
+  (`{ kind: "person", personId }`). It **never throws**: an entry that is not a notice or an audience, past the 200-entry batch, past the deadline or lost by the transport is counted in `failed`; it answers `{ sent, failed }`.
+- Who hears a change (the owner, the people a decision waits on, followers) is decided in the core before `publish`; who may LISTEN to an audience is the adapter's own sign-in check where listeners are outside the process.
+- **Code's default is `in-process`** (`createInProcessRealtime`, `packages/broker/src/ports/realtime.ts`): the install's own pages `listen(companyId, listener, audience?)` in the same process; with no listener a publish
+  reaches nobody, so registering it changes nothing for an install whose pages do not listen. It is also the fake (`published()`, `setDown`). The hosted adapter posts to its cloud events service and keeps its own
+  channel names for the three audiences, so nothing it stores or signs changes. `tests/support/ports/realtime-conformance.ts` is the suite.
+
+## Email (lane K1, a new interface: the owner decides it alone, decision 63)
+
+The `email` point (one adapter, `packages/contracts/src/ports/email.ts`) sends one plain notice to one address. The core writes every word; the adapter only sends. The sender's address, its sign-in and its limits are the
+adapter's settings, set by the owner: a call never names a sender.
+
+- `send({ companyId, purpose, to, subject, text, html?, unsubscribeUrl?, deadline? })` resolves when the transport took the message. It throws `EmailError`: `refused` (never retried) for what `emailRefusal` refuses (not one
+  plain address, a subject that is not one short line, an empty or over-long body, an unsubscribe link that is not plain https, a purpose that is not one word), `unavailable` (retry later) for a transport that is down or past
+  the deadline. Errors are fixed sentences, never the address or the subject.
+- `html` is an optional second form; an adapter without `capabilities.html` sends the text alone. `unsubscribeUrl` becomes the mail client's own unsubscribe offer where `capabilities.unsubscribeHeader` allows; the text carries the same link.
+- **Code's default is `none`** (`createUnavailableEmailSender`): every send is `unavailable`, so a person's email choice reads as not set up and notices go through the channel adapters, as before. The fake is
+  `createFakeEmailSender` (`packages/broker/src/ports/email.ts`). The hosted adapter is its cloud email service with today's sender address and grant. `tests/support/ports/email-conformance.ts` is the suite.
