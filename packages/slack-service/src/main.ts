@@ -15,7 +15,7 @@ import {
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
   SLACK_CHAT_ATTRIBUTE, SLACK_NOTE_TS_ATTRIBUTE, SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, SLACK_TASK_ID_ATTRIBUTE, channelEventGroupId, confirmationBlocks,
-  isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, type ChannelEvent, type ConversationRef, type SlackRequestMessage, type SlackThread,
+  isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, usableWebhookSecret, type ChannelEvent, type ConversationRef, type SlackRequestMessage, type SlackThread,
 } from "@agentx/contracts";
 import { channelRequestHandler, readChannelQueueItem } from "./channel-requests.js";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
@@ -25,6 +25,7 @@ import { createDynamoConfirmationStore } from "./confirmation-store.js";
 import { runConsumer as runQueueConsumer, type QueueClient } from "./consumer.js";
 import type { ProcessorMessage, ServiceLog, ThreadStore, TurnInput } from "./processor.js";
 import { runConsumer } from "./slack-consumer.js";
+import { createSlackAdapterClient } from "./slack-adapter-client.js";
 import { slackChannelRequests } from "./slack-channel.js";
 import { processSlackRequest } from "./slack-processor.js";
 import { createEvalBatchWatchApi, withSlackThreadRoutes, type SlackThreadServiceApi } from "./slack-thread-api.js";
@@ -61,6 +62,9 @@ const stateDirectory = process.env.STATE_DIRECTORY ?? "/tmp/agentx-slack";
 const channelRequestQueueUrl = process.env.CHANNEL_REQUEST_QUEUE_URL || undefined;
 const channelEventQueueUrl = process.env.CHANNEL_EVENT_QUEUE_URL || undefined;
 const channelConcurrency = Number.parseInt(process.env.CHANNEL_CONCURRENCY ?? "2", 10);
+// Spec 062 Phase 7c2: the built-in Slack adapter's commands, for the routing card and a task question's private answer.
+const slackAdapterCommandsUrl = process.env.SLACK_ADAPTER_COMMANDS_URL || undefined;
+const slackAdapterSecretName = process.env.SLACK_ADAPTER_SECRET_NAME || undefined;
 const concurrency = Number.parseInt(process.env.SLACK_CONCURRENCY ?? "4", 10);
 const model = {
   provider: process.env.AGENTX_ORCHESTRATOR_PROVIDER ?? "amazon-bedrock",
@@ -401,6 +405,19 @@ const batchWatcher = runEvalBatchWatcher({
   signal: controller.signal,
 });
 
+let adapterSecret: { value: Promise<string | undefined>; loadedAt: number } | undefined;
+/** The Slack adapter's signing secret, reread at most once a minute so a rotation takes effect. */
+function slackAdapterSecret(name: string): Promise<string | undefined> {
+  if (adapterSecret === undefined || Date.now() - adapterSecret.loadedAt > 60_000) {
+    const value = secretsManager.send(new GetSecretValueCommand({ SecretId: name })).then((response) => usableWebhookSecret(response.SecretString), () => undefined);
+    adapterSecret = { value, loadedAt: Date.now() };
+  }
+  return adapterSecret.value;
+}
+const slackAdapter = slackAdapterCommandsUrl === undefined || slackAdapterSecretName === undefined
+  ? undefined
+  : createSlackAdapterClient({ commandsUrl: slackAdapterCommandsUrl, secret: () => slackAdapterSecret(slackAdapterSecretName) });
+
 /** Queues an event for its adapter, in its conversation's order (the event queue is FIFO). */
 async function sendChannelEvent(url: string, event: ChannelEvent): Promise<void> {
   await sqs.send(new SendMessageCommand({ QueueUrl: url, MessageBody: JSON.stringify(event), MessageGroupId: channelEventGroupId(event), MessageDeduplicationId: event.id }));
@@ -431,6 +448,28 @@ const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueu
           userName: slackUserName,
         },
         send: (event) => sendChannelEvent(channelEventQueueUrl, event),
+        log,
+        // Phase 7c2: what the core's router marked, routed as Slack's own queue routes it, posting through the adapter.
+        ...(slackAdapter === undefined ? {} : {
+          routed: ({ message, routing, context, answer }) => routing.kind === "suggest"
+            ? routeSlackRequest(message, { ...(requestRouter === undefined ? {} : { route: requestRouter }),
+              offer: createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => slackAdapter.post(thread, text, blocks), log }),
+              notify: async (thread, text) => { await slackAdapter.post(thread, text); },
+              answer, finish: (subject) => threads.finish(subject), log })
+            : handleTaskQuestion(message, { taskId: routing.taskId, noteTs: routing.noteId, chat: routing.chat }, {
+              ...(requestRouter === undefined ? {} : { route: requestRouter }),
+              answer: (question) => runTaskAnswer(message, { taskId: routing.taskId, noteTs: routing.noteId, chat: routing.chat }, question,
+                { api: threadApi(message), runTurn, ...(context.handoff === undefined ? {} : { handoff: context.handoff }) }),
+              post: async (thread, text) => { await slackAdapter.post(thread, text); },
+              postPrivate: (thread, userId, text) => slackAdapter.postPrivate(thread, userId, text),
+              markAnswered: async (input) => {
+                const api = threadApi(message);
+                if (api.markThreadNoteAnswered === undefined) throw new Error("marking a note answered is unavailable in this deployment");
+                await api.markThreadNoteAnswered(input);
+              },
+              finish: (subject) => threads.finish(subject),
+              log }),
+        }),
       }),
     },
     log,

@@ -892,11 +892,15 @@ export class ControlPlaneStack extends Stack {
       }));
       // Spec 062: channel adapters, off until the ChannelAdapters parameter is enabled.
       const channelAdapters = new ChannelAdapters(this, "ChannelApi", {
-        naming, env: naming.env, api, state, broker, orchestratorRole: slackOrchestratorRole, notifyOperator, slack: { ingress: slackIngress, integration: slackIntegration },
+        naming, env: naming.env, api, state, broker, orchestratorRole: slackOrchestratorRole, notifyOperator, slack: { ingress: slackIngress, integration: slackIntegration, threads: slackThreads, appPostedMessages: appPostedMessages.valueAsString, threadTurnsPerMinute: threadTurnsPerMinute.valueAsString },
       });
       channelAdapters.connectSlackPoster(notifier.function, signInParameters.slackTeamId.valueAsString);
       // Phase 7c1b: sign-in's Slack directory reads (task access, channel names, the health check).
       channelAdapters.connectSlackPoster(developerSignIn.function, signInParameters.slackTeamId.valueAsString);
+      // Phase 7c2: the channel API's Slack router posts through the adapter too.
+      channelAdapters.connectSlackPoster(channelAdapters.ingress, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
+      new CfnOutput(this, "SlackAdapterCommandsUrl", { value: `${api.attrApiEndpoint}/v1/slack/channel-commands` });
+      new CfnOutput(this, "SlackAdapterSecretName", { value: `agentx/${naming.env}/channel-adapter/slack` });
       slackChannelAdapter = channelAdapters;
       new CfnOutput(this, "ChannelRequestQueueUrl", { value: channelAdapters.requests.queueUrl });
       new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
