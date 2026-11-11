@@ -3924,6 +3924,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "Environment": {
           "Variables": {
+            "ADMIN_CHANGES": "enabled",
             "BROKER_FUNCTION_NAME": {
               "Ref": "BrokerE1355FD6",
             },
@@ -3996,6 +3997,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
+            },
+            "TURN_RECORDS_TABLE_NAME": {
+              "Ref": "TurnRecords69ECFCD9",
             },
           },
         },
@@ -4351,6 +4355,54 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 ],
               },
             },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "exportPk",
+                    "exportSk",
+                    "eventId",
+                    "subject",
+                    "receivedAt",
+                    "requestedBy",
+                    "disposition",
+                    "durationMs",
+                    "model",
+                    "offeredTools",
+                    "calls",
+                    "callsTruncated",
+                    "emptyResponse",
+                    "usage",
+                    "usageError",
+                    "recordingErrors",
+                    "argumentsOmitted",
+                    "error",
+                    "expiresAt",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "THREAD#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "TurnRecords69ECFCD9",
+                  "Arn",
+                ],
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -4544,6 +4596,32 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::SQS::QueuePolicy",
+    },
+    "ChannelApiSelfInvoke127C4E1A": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiIngress9235D30E",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ChannelApiSelfInvoke127C4E1A",
+        "Roles": [
+          {
+            "Ref": "ChannelApiIngressServiceRole2BBC113A",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "ChannelApiSlackAdapterSecret5DDDDC01": {
       "DeletionPolicy": "Delete",

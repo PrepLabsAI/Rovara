@@ -145,6 +145,13 @@ describe("channel adapters infrastructure", () => {
     expect(ingressStatements).toContain("lambda:InvokeFunction");
     const orchestratorRole = ofType(named, "AWS::IAM::Role").find(([id]) => withoutHash(id).startsWith("SlackOrchestratorTaskRole"))![0];
     expect(JSON.stringify(statementsOf(named, orchestratorRole))).toContain("ChannelApiSlackAdapterSecret");
+    // Phase 7c3b: Slack's forms. Admin change presses, the Details view's field-limited turn read, and a ChatGPT
+    // connection finished in an asynchronous invoke of the channel API itself.
+    expect((ingress.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ ADMIN_CHANGES: "enabled" });
+    expect(ingressStatements).toContain("TurnRecords");
+    const selfInvoke = ofType(named, "AWS::IAM::Policy").find(([id]) => withoutHash(id).startsWith("ChannelApiSelfInvoke"));
+    expect(JSON.stringify(selfInvoke?.[1].Properties)).toContain("lambda:InvokeFunction");
+    expect(ofType(legacy, "AWS::IAM::Policy").some(([id]) => withoutHash(id).startsWith("ChannelApiSelfInvoke"))).toBe(false);
     // A Canvas takes three Slack calls; the legacy Slack ingress keeps its 10 seconds.
     expect(functionNamed(named, "SlackIngress")![1].Properties.Timeout).toBe(30);
     expect(functionNamed(legacy, "SlackIngress")![1].Properties.Timeout).toBe(10);

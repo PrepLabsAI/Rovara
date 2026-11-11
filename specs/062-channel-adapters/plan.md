@@ -371,3 +371,35 @@ Confirm and Cancel (in a direct message, which has no bound space).
 ### Rollback
 
 Set `SlackViaChannel` to `disabled`.
+
+## Phase 7c3b: Slack's forms in the core
+
+```mermaid
+sequenceDiagram
+  participant S as Slack
+  participant I as Slack interactivity (adapter)
+  participant C as Channel API (Slack press handlers)
+  S->>I: press (opens a form)
+  I->>C: action, waits (about 2.4 s)
+  C-->>I: answer: form to open
+  I->>S: views.open (the same modal)
+  S->>I: view_submission
+  I->>C: action with the submitted form, waits
+  C-->>I: answer: close, errors, or a new form
+  I-->>S: response_action
+```
+
+| Layer | Change |
+|---|---|
+| contracts | `channel-forms.ts`: `ChannelForm` (parts and typed fields, state), `ChannelFormSubmission`, `ChannelActionAnswer` (FR-080); `ChannelAction.formSubmission`; the `update_form` command; the built-in adapter takes `forms`. `slack-forms.ts`: `slackModalOf` and `formOfSlackModal` (a modal renders back to itself), `formValuesOfSlackState` and `slackStateOfFormValues`. |
+| broker | Slack interactivity: `createSlackSubmissionHandler` is extracted; `routeSubmission` and `routeAdminChange` join `routePress`. A press that opens a form, and a submission, wait for the core's answer (`createSlackChannelActionClient`); an admin change press is handed on. Submitted views lose Slack's own additions (`emoji` and the like) before they are read. The channel API's press handlers capture the form a handler opens (`formCapture`), rebuild Slack's submission from the neutral one, run Slack's own submission handler, answer as Slack's response does, run admin change presses (answered in a direct message), and finish a ChatGPT connection in an asynchronous invoke of themselves, updating its form through `update_form`. The channel ingress gives the built-in adapter's conversation-less actions to its press handlers; any other adapter's are refused as before. The test Slack double checks that every modal any test opens round-trips. |
+| infra | The channel API: admin changes on, the Details view's field-limited turn read, and a policy to invoke itself. |
+
+### Known risk
+
+A press that opens a form now crosses the channel API before Slack's three-second trigger expires. A cold channel API
+can miss it, and the person is told to press again.
+
+### Rollback
+
+Set `SlackViaChannel` to `disabled`.
