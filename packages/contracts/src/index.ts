@@ -139,6 +139,7 @@ export * from "./workflow-publication-context.js";
 export * from "./company-scope.js";
 export * from "./outside-account.js";
 export * from "./approval-sign-in.js";
+export * from "./approval-place.js";
 export * from "./run-estimate.js";
 export * from "./record-trust.js";
 export * from "./open-ids.js";
