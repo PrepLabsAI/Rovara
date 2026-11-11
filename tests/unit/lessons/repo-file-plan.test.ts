@@ -163,7 +163,7 @@ describe("the pull request words and the status lines", () => {
   });
 });
 
-describe("bullets the team wrote (R3)", () => {
+describe("bullets the team wrote", () => {
   const text = (lesson: string): string => `${renderLessonsFile([])}\n## Whole repository\n\n- ${lesson}\n`;
   it("a lesson whose text is already a bullet in the file gets an id line (a tag edit), not a second copy", () => {
     const lesson = repoLesson("les_aaaa0001", { body: "Use the shared helper." });
@@ -200,7 +200,7 @@ describe("bullets the team wrote (R3)", () => {
   });
 });
 
-describe("what the status says about read-back (R3)", () => {
+describe("what the status says about read-back", () => {
   it("an unreadable file says what to do, a bulk disappearance says what Rovara will do, and a refused line is counted without its text", () => {
     const state = { ...newRepoFileState(PLACE, "api"), problem: "file_unreadable" as const, readBackHeld: { missing: 4, digest: "0123456789abcdef", at: 1 }, refused: { "0123456789abcdef": "names_a_person" as const } };
     const notices = noticesOf(state, NOW_T).join("\n");

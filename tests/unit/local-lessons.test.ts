@@ -127,7 +127,7 @@ describe("the lessons page's repository switches", () => {
   });
 });
 
-describe("the lessons page's answer for lessons that went missing from a file (decision 78)", () => {
+describe("the lessons page's answer for lessons that went missing from a file", () => {
   const DIGEST = "0123456789abcdef";
   const WEEK = 7 * 86_400_000;
   /** A repository switched on whose file lost seven lessons in one change `ageMs` ago: past the week, a person is being asked. (The fake code host cannot write, so the state is seeded, as the nightly pass would have left it.) */

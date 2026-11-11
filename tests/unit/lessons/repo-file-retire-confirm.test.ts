@@ -1,5 +1,5 @@
-// Lessons in the repo, lane R3 (owner decision 78): lessons that went missing from `.rovara/lessons.md` in one change (more than max(3, 25%) of the known ones) are held a week, and then a PERSON is asked: the company owner or
-// someone who can approve lessons confirms the retire, or keeps the lessons (they stay live and R2 proposes their blocks back). A small number still retires at once. Nothing retires by itself after the week.
+// Lessons in the repo: lessons that went missing from `.rovara/lessons.md` in one change (more than max(3, 25%) of the known ones) are held a week, and then a PERSON is asked: the company owner or
+// someone who can approve lessons confirms the retire, or keeps the lessons (they stay live and the next weekly pull request proposes their blocks back). A small number still retires at once. Nothing retires by itself after the week.
 import { afterEach, describe, expect, it } from "vitest";
 import { LessonsRepoFileBodySchema } from "@agentx/contracts";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";

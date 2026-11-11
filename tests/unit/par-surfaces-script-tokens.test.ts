@@ -193,7 +193,7 @@ describe("the stored tokens (document store port)", () => {
     await expect(createScriptToken(w.deps, owner, { ...body(1), permissions: ["admin"] }, anyProject)).rejects.toThrow(/permissions/);
   });
 
-  it("the lessons permission (decision 46b) is one of the three a token may have, and it is kept as asked: a token made without it has no lessons permission", async () => {
+  it("the lessons permission is one of the three a token may have, and it is kept as asked: a token made without it has no lessons permission", async () => {
     expect(SCRIPT_TOKEN_PERMISSIONS).toEqual(["read", "start", "lessons"]);
     const asked = { requestId: REQUEST(1), name: "tool", projects: ["payments"] };
     expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons"] }).success).toBe(true);
@@ -611,7 +611,7 @@ describe("review fixes", () => {
     expect((await again.call(secret, "/v1/dev/tasks?project=payments")).status).toBe(200);
   });
 
-  it("M1: at the cap a fresh session is dropped before any other, however old the others are", () => {
+  it("at the cap a fresh session is dropped before any other, however old the others are", () => {
     const sessions = new LocalPageSessions();
     const normal = Array.from({ length: MAX_SESSIONS - 2 }, () => sessions.mint().token);
     const fresh = [sessions.mint({ fresh: true }).token, sessions.mint({ fresh: true }).token];
@@ -621,7 +621,7 @@ describe("review fixes", () => {
     for (const token of normal) expect(sessions.find(token)).toBeDefined();
   });
 
-  it("M1: fresh page sessions are few, short and dropped first, so repeated opens never push the owner's session out", async () => {
+  it("fresh page sessions are few, short and dropped first, so repeated opens never push the owner's session out", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-10T10:00:00.000Z"));
     const h = await launch();

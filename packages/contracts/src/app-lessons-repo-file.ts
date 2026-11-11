@@ -82,7 +82,7 @@ export const LessonsRepoFileRowSchema = z.object({
   lastPassAt: z.number().optional(),
   problem: z.enum(LESSON_FILE_PROBLEMS).optional(),
   /**
-   * Present only while a person is asked to confirm retiring lessons that went missing from the file in one change (more than a few at once, held a week first; owner decision 78): how many, since when (the first time this set
+   * Present only while a person is asked to confirm retiring lessons that went missing from the file in one change (more than a few at once, held a week first): how many, since when (the first time this set
    * was seen) and the digest the person's answer must carry back. Absent: nothing waits for a decision.
    */
   retireConfirm: z.object({ missing: z.number().int().min(1), since: z.number(), digest: z.string().regex(/^[0-9a-f]{16}$/u) }).strict().optional(),
@@ -114,7 +114,7 @@ export const LessonsRepoFileStatusReaderSchema = forwardReader(LessonsRepoFileSt
 
 /**
  * What a maintainer sends: switch a repository on or off, resume it after the team deleted the file, or answer the pointer. `pointers` are the agent files the person ticked (default: the ones Rovara finds).
- * `retire_confirm` and `retire_keep` answer the card for lessons that went missing from the file (owner decision 78; the company owner or a person who can approve lessons): they carry `held`, the digest of the row's `retireConfirm`.
+ * `retire_confirm` and `retire_keep` answer the card for lessons that went missing from the file (the company owner or a person who can approve lessons): they carry `held`, the digest of the row's `retireConfirm`.
  */
 export const LESSON_FILE_ACTIONS = ["on", "off", "resume", "pointer_add", "pointer_decline", "retire_confirm", "retire_keep"] as const;
 export const LessonsRepoFileBodySchema = z.object({

@@ -1,4 +1,4 @@
-// Company-approved extra images, wire side only (switch `pj`): the plan dependency `backing: "company"` and its `company` block parse, and Rovara Code's worker REFUSES such a plan by name: it has no way to fetch or verify
+// Company-approved extra images, wire side only: the plan dependency `backing: "company"` and its `company` block parse, and Rovara Code's worker REFUSES such a plan by name: it has no way to fetch or verify
 // an image of a company's own (it starts only the digests its catalog pins), so a company image is never started, not even with a digest the catalog pins. The approval process for company images is not in Rovara Code.
 // No Docker: a fake daemon (tests/support/fake-services-docker.ts).
 import { readFileSync } from "node:fs";

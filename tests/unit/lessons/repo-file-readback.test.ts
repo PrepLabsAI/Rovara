@@ -1,6 +1,5 @@
-// Lessons in the repo, lane R3 (decisions 50, 50a, 50b; design rev 2 section 6): read-back, file -> Rovara, one way, by id. The team's edits of the merged `.rovara/lessons.md` are taken into Rovara by the weekly pass:
+// Lessons in the repo: read-back, file -> Rovara, one way, by id. The team's edits of the merged `.rovara/lessons.md` are taken into Rovara by the weekly pass:
 // changed text = a correction, a removed id = retired by the team, a bullet with no id = a new person-approved lesson. Nothing is ever retired or changed on a read that failed, and an erased id is never brought back.
-// The mutation checks (retire on a parse failure, resurrect a gone id, let formatter churn make edits) are recorded in the lane report.
 import { afterEach, describe, expect, it } from "vitest";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
 import { applyFileChanges, bodyHashOf, parseLessonsFile } from "../../../packages/broker/src/lessons/repo-file-format.js";
@@ -58,7 +57,7 @@ describe("a changed block under a known id is the team's correction", () => {
     expect((await lesson(w, "les_aaaa0002"))!.version).toBe(1);
   });
 
-  it("a SUBSTANTIAL rewrite clears the thumbs-down and the pending removal from before it; help counts are kept (decision 76.2)", async () => {
+  it("a SUBSTANTIAL rewrite clears the thumbs-down and the pending removal from before it; help counts are kept", async () => {
     const w = await merged();
     await w.store.mutate(w.key, "les_aaaa0001", (l) => ({ counters: { ...l.counters, helpful: 3, harmful: 1 }, retireProposedAt: 5 }));
     changeFile(w, (t) => t.replace(FIRST, "Prefer the retry wrapper in the http client and give up after three tries."));
@@ -466,12 +465,12 @@ describe("idempotent, one way, and only where the file is switched on", () => {
   });
 });
 
-describe("review round 1 (rr3b)", () => {
+describe("read-back edge cases, part 1", () => {
   const TEAM = "Never read the config file before the logger is ready.";
   const strip = (id: string) => (t: string) => t.replace(new RegExp(`<!-- rovara:${id} -->\\n- [^\\n]*\\n\\n?`, "u"), "");
   const active = async (w: W, body: string) => (await w.store.listAllHeads(w.key)).filter((l) => l.body === body && l.status === "active");
 
-  describe("H1: an imported bullet is tracked from the moment it is imported", () => {
+  describe("an imported bullet is tracked from the moment it is imported", () => {
     it("A: deleted before the id-line pull request merges: retired, never proposed back, no live copy", async () => {
       const w = await merged();
       changeFile(w, (t) => `${t.trimEnd()}\n\n- ${TEAM}\n`);
@@ -508,7 +507,7 @@ describe("review round 1 (rr3b)", () => {
     });
   });
 
-  describe("H2: erased words do not come back as a new lesson when the id line is stripped", () => {
+  describe("erased words do not come back as a new lesson when the id line is stripped", () => {
     async function erased(w: W, id = "les_aaaa0001"): Promise<void> {
       const port = lessonDeletionPort({ store: w.store, vectors: { get: async () => new Map(), put: async () => undefined, remove: async () => undefined }, audit: w.deps.audit, now: w.clock.now });
       await port.withdraw(w.key.workspaceId, w.key.project, id, "sources_deleted");
@@ -532,7 +531,7 @@ describe("review round 1 (rr3b)", () => {
       expect((await w.store.listAllHeads(w.key)).filter((l) => l.provenance.reflectorRun === "repo_file")).toEqual([]);
       expect((await lesson(w, "les_aaaa0002"))!.status).toBe("active");
     });
-    it("a deliberate re-paste after the block was removed (no id line was ever stripped) is the team's new lesson (decision 76.3)", async () => {
+    it("a deliberate re-paste after the block was removed (no id line was ever stripped) is the team's new lesson", async () => {
       const w = await merged();
       await erased(w);
       // The removal pull request for the erased block is merged by the team.
@@ -546,7 +545,7 @@ describe("review round 1 (rr3b)", () => {
     });
   });
 
-  describe("M1: a bulk disappearance is held, not retired", () => {
+  describe("a bulk disappearance is held, not retired", () => {
     async function eight(): Promise<W> {
       const w = passSetup();
       await w.seedLessons(...Array.from({ length: 8 }, (_, i) => repoLesson(`les_bbbb000${String(i + 1)}`)));
@@ -575,7 +574,7 @@ describe("review round 1 (rr3b)", () => {
       expect((await w.store.listAllHeads(w.key)).filter((l) => l.status === "retired")).toEqual([]);
       expect((await w.current()).readBackHeld).toBeUndefined();
     });
-    it("the same lessons still missing after the week: NOT retired by themselves (decision 78); a person is asked, and the hold stays", async () => {
+    it("the same lessons still missing after the week: NOT retired by themselves; a person is asked, and the hold stays", async () => {
       const w = await eight();
       changeFile(w, (t) => t.slice(0, t.indexOf("<!-- rovara:les_bbbb0002 -->")));
       await pass(w);
@@ -602,7 +601,7 @@ describe("review round 1 (rr3b)", () => {
     });
   });
 
-  describe("M2: merge-conflict markers are unreadable", () => {
+  describe("merge-conflict markers are unreadable", () => {
     it("a file with conflict markers changes nothing", async () => {
       const w = await merged();
       changeFile(w, (t) => `<<<<<<< HEAD\n${t}=======\n${t.replace(FIRST, "Their side.")}>>>>>>> branch\n\n- ${TEAM}\n`);
@@ -616,7 +615,7 @@ describe("review round 1 (rr3b)", () => {
     });
   });
 
-  describe("M3: the company's required approver group is honoured", () => {
+  describe("the company's required approver group is honoured", () => {
     it("with a required group, a team bullet and a team edit wait for that group (pending, review required), and the team's block is neither added back nor removed", async () => {
       const w = await merged();
       w.deps.settings = settings({ preset: "standard", mode: "On", approval: { requiredGroup: "security" } });
@@ -633,7 +632,7 @@ describe("review round 1 (rr3b)", () => {
   });
 });
 
-describe("review round 2 (rr3c)", () => {
+describe("read-back edge cases, part 2", () => {
   const goneHash = (text: string): string => bodyHashOf(text);
   const mark = async (w: W, text = FIRST): Promise<boolean> => { const fp = (await w.store.textFingerprints(w.key, "github:repo/1001", [goneHash(text)])).get(goneHash(text))!; return (await w.store.goneFingerprintsOf(w.key, [fp])).size === 1; };
   const port = (w: W) => lessonDeletionPort({ store: w.store, vectors: { get: async () => new Map(), put: async () => undefined, remove: async () => undefined }, audit: w.deps.audit, now: w.clock.now });
@@ -736,7 +735,7 @@ describe("review round 2 (rr3c)", () => {
     });
   });
 
-  describe("M1: a bulk disappearance is held a week by the clock", () => {
+  describe("a bulk disappearance is held a week by the clock", () => {
     async function eight(): Promise<W> {
       const w = passSetup();
       await w.seedLessons(...Array.from({ length: 8 }, (_, i) => repoLesson(`les_bbbb000${String(i + 1)}`)));
@@ -760,7 +759,7 @@ describe("review round 2 (rr3c)", () => {
       }
       w.clock.advance(DAY);
       await w.run({ force: true });
-      // After the week nothing retires by itself: the hold stays, waiting for a person's answer (decision 78).
+      // After the week nothing retires by itself: the hold stays, waiting for a person's answer.
       expect(await retired(w)).toBe(0);
       expect((await w.current()).readBackHeld).toMatchObject({ missing: 7 });
       expect(rowOf(await w.current(), w.clock.now())).toMatchObject({ retireConfirm: { missing: 7 } });
@@ -810,7 +809,7 @@ describe("review round 2 (rr3c)", () => {
   });
 });
 
-describe("round 3 (rr3d): the mark is taken from the file, whatever way the block got there", () => {
+describe("the mark is taken from the file, whatever way the block got there", () => {
   const mark = async (w: W, text: string): Promise<boolean> => { const fp = (await w.store.textFingerprints(w.key, "github:repo/1001", [bodyHashOf(text)])).get(bodyHashOf(text))!; return (await w.store.goneFingerprintsOf(w.key, [fp])).size === 1; };
   const port = (w: W) => lessonDeletionPort({ store: w.store, vectors: { get: async () => new Map(), put: async () => undefined, remove: async () => undefined }, audit: w.deps.audit, now: w.clock.now });
   const ways: Array<[string, (w: W) => Promise<void>]> = [
@@ -923,7 +922,7 @@ describe("round 3 (rr3d): the mark is taken from the file, whatever way the bloc
   });
 });
 
-describe("round 4 (rr3e): fingerprints are recorded on every successful pass, before anything is erased", () => {
+describe("fingerprints are recorded on every successful pass, before anything is erased", () => {
   const place = "github:repo/1001";
   const fpOf = async (w: W, text: string): Promise<string> => (await w.store.textFingerprints(w.key, place, [bodyHashOf(text)])).get(bodyHashOf(text))!;
   const marked = async (w: W, text: string): Promise<boolean> => (await w.store.goneFingerprintsOf(w.key, [await fpOf(w, text)])).size === 1;
@@ -1045,7 +1044,7 @@ describe("round 4 (rr3e): fingerprints are recorded on every successful pass, be
     expect((await w.current()).duplicateIds).toBeUndefined();
   });
 
-  describe("a repository that left the project keeps its marks until a sweep of it finds no copy left (M-r5)", () => {
+  describe("a repository that left the project keeps its marks until a sweep of it finds no copy left", () => {
     const runtimeOf = (w: W, listed: boolean): RepoFileRuntime => ({ deps: w.deps, targets: async () => (listed ? [w.target] : []), reach: async () => w.target, newHolder: () => "n" });
     const closedRemovals = (w: W) => w.host.prs.filter((pr) => pr.title.includes("remove") && pr.state === "closed");
     async function erasedAndStripped(): Promise<W> {
@@ -1109,7 +1108,7 @@ describe("round 4 (rr3e): fingerprints are recorded on every successful pass, be
   });
 });
 
-describe("round 6 (rr3g): the erasure sweep removes every block of a gone id, however many copies", () => {
+describe("the erasure sweep removes every block of a gone id, however many copies", () => {
   const port = (w: W) => lessonDeletionPort({ store: w.store, vectors: { get: async () => new Map(), put: async () => undefined, remove: async () => undefined }, audit: w.deps.audit, now: w.clock.now });
   const copies = (id: string, n: number): string => Array.from({ length: n }, (_, i) => `<!-- rovara:${id} -->\n- A copy number ${String(i)} of the erased block.`).join("\n\n");
   it.each([2, 5, 50])("%i copies of a gone id: one removal change takes out every one of them, and the other lessons stay", async (n) => {

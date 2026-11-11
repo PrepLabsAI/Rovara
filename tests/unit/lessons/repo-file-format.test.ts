@@ -158,7 +158,7 @@ describe("a file the team has also written in", () => {
   });
 });
 
-describe("bullets the team wrote (R3)", () => {
+describe("bullets the team wrote", () => {
   const file = "# Team lessons\n\nEdit freely.\n\n## Whole repository\n\n<!-- rovara:les_aaaa -->\n- Marked one.\n\n- Loose one,\n  wrapped.\n* Loose two.\n\n## src/**\n\n- Under paths.\n\n```\n- fenced\n```\n";
   it("looseItems finds the list items outside id blocks, with their section, in comparison form, and skips fences and paragraphs", () => {
     const items = looseItems(parseLessonsFile(file));

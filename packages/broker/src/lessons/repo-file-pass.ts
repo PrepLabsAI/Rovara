@@ -264,7 +264,7 @@ export type RetireReadResult =
   | { status: "done"; retired: number };
 
 /**
- * The nightly RETIRE-ONLY read-back (owner decision 78): for a repository whose confirmed set (`readBackHeld.verdict === "retire"`) is waiting, read the file on the default branch and take it in (`takeInReadBack`): the lessons
+ * The nightly RETIRE-ONLY read-back: for a repository whose confirmed set (`readBackHeld.verdict === "retire"`) is waiting, read the file on the default branch and take it in (`takeInReadBack`): the lessons
  * of that same set are retired, a file that changed restarts the hold. It runs whether or not the weekly publish pass is due, and it NEVER opens, updates, reconciles or closes a pull request and never changes `unmerged` or
  * `lastPassAt`. Same gates as the pass: lessons switched on and loading, the repository switched on, the file not deleted, the lease. A fault is quiet (the next night tries again); it records no problem on the row.
  */
@@ -304,7 +304,7 @@ export async function runRetireRead(deps: RepoFileDeps, key: ScopeKey, rawTarget
 }
 
 /**
- * Read-back of the team's edits of the file (R3), on the file text just read: what the lessons and the state look like after it. Shared by the weekly pass and by the nightly retire-only pass; it writes nothing to the host and
+ * Read-back of the team's edits of the file, on the file text just read: what the lessons and the state look like after it. Shared by the weekly pass and by the nightly retire-only pass; it writes nothing to the host and
  * touches neither `unmerged` nor `lastPassAt`. Throws `Abort` when it could not finish safely.
  */
 async function takeInReadBack(deps: RepoFileDeps, key: ScopeKey, target: RepoFileTarget, leased: RepoFileState, fileText: string | undefined, requireGroup: boolean): Promise<{ state: RepoFileState; lessons: Lesson[]; gone: Set<string>; names: readonly string[]; readBack: ReadBackResult | undefined }> {
@@ -315,7 +315,7 @@ async function takeInReadBack(deps: RepoFileDeps, key: ScopeKey, target: RepoFil
   try { gone = new Set((await deps.store.goneOf(key, [...(fileText === undefined ? [] : parseLessonsFile(fileText).blocks.map((block) => block.id)), ...lessons.filter((lesson) => lesson.provenance.repoOnly?.place === target.place).map((lesson) => lesson.id), ...Object.keys(state.rendered)])).keys()); } catch { throw new Abort("repository_unreadable"); }
   let names: readonly string[];
   try { names = await deps.names(key, lessons); } catch { throw new Abort("names_unreadable"); }
-  // 5b. READ-BACK (R3, one way: file -> Rovara), on the file this pass just read, before anything is planned: the team's corrections become the lessons' text, ids the team removed are retired, bullets the team wrote become new
+  // 5b. READ-BACK (one way: file -> Rovara), on the file this pass just read, before anything is planned: the team's corrections become the lessons' text, ids the team removed are retired, bullets the team wrote become new
   // lessons. A file that cannot be trusted as read changes nothing and stops the pass (nothing is planned, declined or retired on it). No model, no further read.
   let readBack: ReadBackResult | undefined;
   if (fileText !== undefined) {

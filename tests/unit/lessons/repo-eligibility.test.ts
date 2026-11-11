@@ -171,7 +171,7 @@ describe("isRepoFileEligible: the rule", () => {
       expect(repoFileBlockers(lesson, A, names)).toContain(blocker);
     });
   }
-  it("a tier 2 lesson whose text is the team's own (read back from the file, R3) is not held back for its tier, but every other review reason still applies", () => {
+  it("a tier 2 lesson whose text is the team's own (read back from the file) is not held back for its tier, but every other review reason still applies", () => {
     expect(repoFileBlockers(eligible({ tier: 2, tierReasons: ["escalation_words", "team_file_text"] }), A, names)).toEqual([]);
     expect(repoFileBlockers(eligible({ tier: 2, tierReasons: ["team_file_text"], reviewRequired: true }), A, names)).toContain("needs_review");
     expect(repoFileBlockers(eligible({ tier: 2, tierReasons: ["escalation_words"] }), A, names)).toContain("needs_review");

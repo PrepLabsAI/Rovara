@@ -378,7 +378,7 @@ describe("removals come first, with reasons, and the ignored-PR rule", () => {
 });
 
 describe("the team's own edits are never overwritten (hand-edit hold, released by read-back)", () => {
-  it("a block a person reworded becomes the lesson's own text (R3), so Rovara's later wording never wins and nothing is held", async () => {
+  it("a block a person reworded becomes the lesson's own text, so Rovara's later wording never wins and nothing is held", async () => {
     const w = passSetup();
     await w.seedLessons(repoLesson("les_aaaa0001"), repoLesson("les_aaaa0002"));
     await w.enable();

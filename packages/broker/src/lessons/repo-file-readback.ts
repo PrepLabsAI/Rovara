@@ -1,15 +1,15 @@
-// Lessons in the repo, lane R3 (owner decisions 50, 50a, 50b, 76; LESSONS-REPO-FILE-DESIGN.md rev 2 section 6): read-back. The merged `.rovara/lessons.md` is the team's, so what the team does to it in git is taken into Rovara, ONE WAY
-// (file -> Rovara), once per weekly pass, from the file the pass already read on the default branch (no new read, no new loop). It is pure text: NO model call (decision 47), no host, no clock but the one it is given.
+// Lessons in the repo: read-back. The merged `.rovara/lessons.md` is the team's, so what the team does to it in git is taken into Rovara, ONE WAY
+// (file -> Rovara), once per weekly pass, from the file the pass already read on the default branch (no new read, no new loop). It is pure text: NO model call, no host, no clock but the one it is given.
 //   - A block whose text changed under a known id is the team's CORRECTION: the lesson's text becomes theirs, as a person edit (audited, actor "repository edit": the code host does not say who wrote it and read-back never needs to
-//     know, section 6). The lesson stays repository-only for this repository (the text is repository content) and R2's hand-edit hold is released (the fingerprint Rovara remembers for the block becomes the team's). A
-//     SUBSTANTIAL rewrite (`isSubstantialRewrite`) also clears harm marks and a pending removal from before it, help counts are kept; a small edit keeps them (decision 76.2).
-//   - A known id missing from the file is RETIRED BY THE TEAM (cause "removed_in_repository", audited). R2 never proposes it back. More than max(3, 25%) of the known ids missing in one change is held for a week instead (review M1), and after that week they are retired only when a person confirmed it (owner decision 78); kept ones stay live and R2 proposes them back.
-//   - A bullet with no id line is a NEW lesson, PERSON-APPROVED (decision 76.1: whoever can write to the repository is trusted, as with AGENTS.md; the approval is recorded honestly as the repository edit), repository-only for this
-//     repository. It is tracked from the moment it is made (its fingerprint goes in `rendered`, review H1), so deleting or rewording it before R2's id-line pull request merges is a normal retire/edit. A text that names a person, asks
-//     for a capability change, is empty, or is the text of an ERASED lesson whose id line was stripped (review H2) is NOT taken in; the line's fingerprint and a fixed reason are recorded. Where the company requires an approver group
-//     the lesson waits for that group (pending, review required) instead of being active (review M3).
+//     know). The lesson stays repository-only for this repository (the text is repository content) and the hand-edit hold is released (the fingerprint Rovara remembers for the block becomes the team's). A
+//     SUBSTANTIAL rewrite (`isSubstantialRewrite`) also clears harm marks and a pending removal from before it, help counts are kept; a small edit keeps them.
+//   - A known id missing from the file is RETIRED BY THE TEAM (cause "removed_in_repository", audited). Rovara never proposes it back. More than max(3, 25%) of the known ids missing in one change is held for a week instead, and after that week they are retired only when a person confirmed it; kept ones stay live and the weekly pull request proposes them back.
+//   - A bullet with no id line is a NEW lesson, PERSON-APPROVED (whoever can write to the repository is trusted, as with AGENTS.md; the approval is recorded honestly as the repository edit), repository-only for this
+//     repository. It is tracked from the moment it is made (its fingerprint goes in `rendered`), so deleting or rewording it before the id-line pull request merges is a normal retire/edit. A text that names a person, asks
+//     for a capability change, is empty, or is the text of an ERASED lesson whose id line was stripped is NOT taken in; the line's fingerprint and a fixed reason are recorded. Where the company requires an approver group
+//     the lesson waits for that group (pending, review required) instead of being active.
 //   - An id that is gone for good in Rovara (erased, withdrawn, purged) is NEVER touched here, whatever the file says: the erasure sweep owns it, independently. A deliberate re-paste of erased text AFTER its block was removed is the
-//     team's new lesson (decision 76.3); a stripped id line is told apart from it because Rovara still remembers the block (`rendered`) or already refused that very line (`refused`, kept while the line stays).
+//     team's new lesson; a stripped id line is told apart from it because Rovara still remembers the block (`rendered`) or already refused that very line (`refused`, kept while the line stays).
 //   - Formatters are tolerated: texts are compared in normal form (whitespace, wrapping, bullet marker, CRLF, NFC); a change only in those is not an edit. Ids stripped by a tool that drops HTML comments are re-attached by exact text
 //     (nothing is retired). A file that cannot be trusted as read (not valid text, merge-conflict markers, or one that lost EVERY marker while Rovara expects some) is UNREADABLE: nothing at all is changed this pass.
 //   - It acts only on what it can prove: a lookup that fails throws and changes nothing further; a lesson changed between the read and the write is a conflict that ends the pass (nothing is half-recorded: every step is repeatable).
@@ -40,9 +40,9 @@ export const MAX_IMPORTS_PER_PASS = 50;
 const MAX_TRIES = 3;
 /** The most blocks of one id read back (and fingerprinted); a file with more is unreadable. */
 export const MAX_BLOCKS_PER_ID = 16;
-/** More lessons than this (the larger of three and a quarter of the known ones) missing in one change are held, not retired (review M1). */
+/** More lessons than this (the larger of three and a quarter of the known ones) missing in one change are held, not retired. */
 const bulkLimit = (known: number): number => Math.max(3, Math.ceil(known * 0.25));
-/** A rewrite is substantial when the words of the two texts overlap by less than 80% (and at least three words differ): only then does it clear what the old wording earned (decision 76.2). */
+/** A rewrite is substantial when the words of the two texts overlap by less than 80% (and at least three words differ): only then does it clear what the old wording earned. */
 export function isSubstantialRewrite(before: string, after: string): boolean {
   const words = (text: string): Set<string> => new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word !== ""));
   const a = words(before);
@@ -76,7 +76,7 @@ export interface ReadBackInput {
   gone: ReadonlySet<string>;
   /** The people the text could name (display names). */
   names: readonly string[];
-  /** The company or the project requires an approver group: a lesson written in the repository waits for that group instead of being active (review M3). */
+  /** The company or the project requires an approver group: a lesson written in the repository waits for that group instead of being active. */
   requireGroup?: boolean;
   /** The fingerprints of marked blocks recorded on the last successful pass (`RepoFileState.seen`). */
   seen?: Readonly<Record<string, readonly string[]>>;
@@ -92,14 +92,14 @@ export interface ReadBackResult {
   /** The refused lines after this pass (old ones kept, bounded). */
   refused: Record<string, ReadBackRefusal>;
   counts: { edited: number; retired: number; imported: number; refused: number };
-  /** A bulk disappearance held for a pass (review M1): how many are missing and which ones (a digest). Absent: nothing is held. */
+  /** A bulk disappearance held for a pass: how many are missing and which ones (a digest). Absent: nothing is held. */
   /** The fingerprints of every marked block seen in the file on this successful pass, by id (`RepoFileState.seen`). */
   seen: Record<string, string[]>;
   /** How many ids are in more than one block of the file. */
   duplicateIds: number;
   /** Erased lessons whose text is still in the file: their fingerprints are kept so the mark on the text can be cleared when the last copy is gone. */
   pinned: string[];
-  held?: { missing: number; digest: string; ids: string[]; /** First seen: the hold lasts READ_BACK_HOLD_MS from here. */ at: number; /** A person's answer for this very set (owner decision 78); `keep`: the lessons stay live and are proposed back. */ verdict?: "retire" | "keep"; decidedAt?: number };
+  held?: { missing: number; digest: string; ids: string[]; /** First seen: the hold lasts READ_BACK_HOLD_MS from here. */ at: number; /** A person's answer for this very set; `keep`: the lessons stay live and are proposed back. */ verdict?: "retire" | "keep"; decidedAt?: number };
 }
 
 const hashOfBody = bodyHashOf;
@@ -165,7 +165,7 @@ function expectedIds(input: ReadBackInput, byId: ReadonlyMap<string, Lesson>): s
 /** A lesson Rovara may take the team's wording into: one it is using, or one that only waits for an approver group with the team's own text. */
 const editable = (lesson: Lesson): boolean => lesson.status === "active" || (lesson.status === "pending" && lesson.tierReasons.includes(TEAM_FILE_TEXT));
 
-/** What a lesson written in the repository is: person-approved by the repository edit (decision 76.1), or, where an approver group is required, waiting for that group (pending, review required, no approval). */
+/** What a lesson written in the repository is: person-approved by the repository edit, or, where an approver group is required, waiting for that group (pending, review required, no approval). */
 function approvalOf(deps: ReadBackDeps, now: number, requireGroup: boolean): Pick<Lesson, "status" | "approvals"> & Partial<Pick<Lesson, "reviewRequired" | "pendingExpiresAt">> {
   if (requireGroup) return { status: "pending", approvals: [], reviewRequired: true, pendingExpiresAt: pendingExpiry(now) };
   return { status: "active", approvals: [{ approvalId: (deps.newId ?? defaultLessonId)(), by: APPROVAL_BY, at: now, mode: "one" }] };
@@ -179,7 +179,7 @@ async function editLesson(deps: ReadBackDeps, key: ScopeKey, id: string, body: s
     if (fresh.body === body && fresh.tierReasons.includes(TEAM_FILE_TEXT)) return true;
     const now = deps.now();
     const working: Lesson = { ...fresh, title: titleOf(body), description: "", body };
-    // The tier is worked out again on the team's words (an edit can raise a tier, never lower it); the lesson keeps being the team's text (`TEAM_FILE_TEXT`), so R2 never takes the block out for its tier.
+    // The tier is worked out again on the team's words (an edit can raise a tier, never lower it); the lesson keeps being the team's text (`TEAM_FILE_TEXT`), so the weekly pass never takes the block out for its tier.
     const decision = classifyTier(working, { contradiction: fresh.contradictsWith !== undefined }, { tier: fresh.tier, reasons: fresh.tierReasons.filter((r) => r !== TEAM_FILE_TEXT) });
     if (decision.tier === "never") return false;
     // A person's edit is a new text: the approvals given to the old text do not carry over. The repository edit is the approval, and a trial the lesson was on is over. `reviewRequired` is never cleared here: only a person does that.
@@ -271,14 +271,14 @@ export async function readBackFile(deps: ReadBackDeps, input: ReadBackInput): Pr
   for (const block of file.blocks) {
     if (file.duplicates.includes(block.id) || input.gone.has(block.id)) continue;
     const lesson = byId.get(block.id);
-    // Only a lesson Rovara is using (or one waiting for its group with the team's text) takes the team's wording in; one that is expired, stale or retired keeps its block exactly as the team wrote it (R2's hold).
+    // Only a lesson Rovara is using (or one waiting for its group with the team's text) takes the team's wording in; one that is expired, stale or retired keeps its block exactly as the team wrote it (the hand-edit hold).
     if (lesson === undefined || !editable(lesson)) continue;
     const remembered = input.rendered[block.id];
     const match = remembered === undefined ? null : FINGERPRINT.exec(remembered);
     const baseline = match === null ? hashOfBody(lesson.body) : match[1]!;
     const now = hashOfBlock(block.text);
     if (now === baseline) continue;
-    // The heading part stays what Rovara remembered: a block the team only MOVED is not an edit (R2 keeps holding it), and a moved-and-reworded one keeps being a moved one.
+    // The heading part stays what Rovara remembered: a block the team only MOVED is not an edit (it stays held), and a moved-and-reworded one keeps being a moved one.
     const headingPart = match === null ? undefined : match[2]!;
     const decision = admit(block.text, input.names);
     if (!decision.ok) { refuse(now, decision.reason); continue; }
@@ -296,7 +296,7 @@ export async function readBackFile(deps: ReadBackDeps, input: ReadBackInput): Pr
   let retire = true;
   if (missing.length > bulkLimit(expected.length)) {
     // One bad merge or a truncated file must not retire most of the lessons at once: they are held for at least a week BY THE CLOCK, from the first time this same set was seen (a pass that fails or runs again changes nothing).
-    // After that the same ones still missing are NOT retired by themselves (owner decision 78): a person is asked, and only a "retire" answer for exactly this set retires them. A file that changed back, or another set missing,
+    // After that the same ones still missing are NOT retired by themselves: a person is asked, and only a "retire" answer for exactly this set retires them. A file that changed back, or another set missing,
     // starts over.
     const digest = createHash("sha256").update(missing.join("\n")).digest("hex").slice(0, 16);
     const same = input.held?.digest === digest;
@@ -387,7 +387,7 @@ export async function readBackFile(deps: ReadBackDeps, input: ReadBackInput): Pr
     if (aliveTexts.has(cleanedHash)) continue;
     const id = await importLesson(deps, input, item, decision.body);
     if (id === undefined) throw new ReadBackFailure("conflict");
-    // Tracked from now on, like a block Rovara merged: deleting or rewording the bullet before the id-line pull request merges is a retirement or an edit, never a second copy (review H1).
+    // Tracked from now on, like a block Rovara merged: deleting or rewording the bullet before the id-line pull request merges is a retirement or an edit, never a second copy.
     result.rendered[id] = `${hash}:${hashOfHeading(item.heading)}`;
     aliveTexts.add(hash); aliveTexts.add(cleanedHash);
     imports += 1;

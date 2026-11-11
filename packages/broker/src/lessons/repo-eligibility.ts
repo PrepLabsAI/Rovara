@@ -184,10 +184,10 @@ export function mergedRepoVisibility(target: Pick<LessonProvenance, "repoOnly" |
 /** The tier reason read-back (`repo-file-readback.ts`) puts on a lesson whose text is the team's own, merged into the repository's file. */
 export const TEAM_FILE_TEXT = "team_file_text";
 
-/** The approvals a PERSON gave (not the trial's or the automatic path's): 's "person-approved". */
+/** The approvals a PERSON gave (not the trial's or the automatic path's): the lessons that count as "person-approved". */
 const PERSON_APPROVAL_MODES: ReadonlySet<string> = new Set(["one", "second_person", "sole_owner_exception"]);
 
-/** Whether a PERSON approved the lesson ('s "person-approved": not the trial, not the automatic path). The Regulated preset proposes only these. */
+/** Whether a PERSON approved the lesson (a lesson counts as "person-approved" only then: not the trial, not the automatic path). The Regulated preset proposes only these. */
 export const hasPersonApproval = (lesson: Pick<Lesson, "approvals">): boolean => lesson.approvals.some((approval) => PERSON_APPROVAL_MODES.has(approval.mode));
 
 export type RepoFileBlocker =
@@ -216,7 +216,7 @@ export function repoFileBlockers(lesson: RepoEligibilityLesson, repo: string, na
   if (audience.kind !== "project" && !(readers !== undefined && readers.every((reader) => reader === repo))) blockers.push("restricted_audience");
   if (namesAPerson([lesson.title, lesson.description, lesson.body].join("\n"), names)) blockers.push("names_a_person");
   // The same soundness `isPublishable` asks of a lesson that leaves Rovara's store.
-  // Tier 2 (words about tests, checks, security...) asks for two people before Rovara PROPOSES a lesson. Text the team itself merged into the file (read back by R3) is not Rovara's proposal: its tier never takes the team's own block out.
+  // Tier 2 (words about tests, checks, security...) asks for two people before Rovara PROPOSES a lesson. Text the team itself merged into the file (read back from the file) is not Rovara's proposal: its tier never takes the team's own block out.
   if ((lesson.tier >= 2 && !(lesson.tierReasons ?? []).includes(TEAM_FILE_TEXT)) || lesson.reviewRequired === true || lesson.retireProposedAt !== undefined || lesson.counters.harmful > 0 || hasStaleCitation(lesson)) blockers.push("needs_review");
   return blockers;
 }
