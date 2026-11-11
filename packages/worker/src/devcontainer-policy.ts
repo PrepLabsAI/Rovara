@@ -41,6 +41,20 @@ const ALLOWED_CAPABILITY = /^(?:CAP_)?SYS_PTRACE$/iu;
 const onlyAllowedCapabilities = (value: unknown) =>
   Array.isArray(value) && value.every((entry) => typeof entry === "string" && ALLOWED_CAPABILITY.test(entry));
 
+/**
+ * What a dev container may be on a laptop (`rovara up`): an image that is ready to run. Anything that needs an image BUILD (a Dockerfile, a build section, features, which the dev container tool builds on top of the image) is
+ * refused there, because the Docker socket guard cannot read a build's own instructions and so does not allow one; the same dev container works on a cloud worker. Returns the first such setting, or undefined.
+ */
+export function localDevcontainerRefusal(config: unknown): string | undefined {
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return undefined;
+  const settings = config as Record<string, unknown>;
+  const present = (value: unknown): boolean => value !== undefined && value !== null && !(typeof value === "object" && Object.keys(value).length === 0);
+  if (present(settings.build)) return "build";
+  if (settings.dockerFile !== undefined || settings.context !== undefined) return "dockerFile";
+  if (present(settings.features)) return "features";
+  return undefined;
+}
+
 /** A plain reason naming the first setting AgentX does not allow, or undefined. */
 export function devcontainerConfigRefusal(config: unknown, context: DevcontainerPolicyContext): string | undefined {
   if (config === null || typeof config !== "object" || Array.isArray(config)) return undefined;
@@ -393,7 +407,8 @@ export function containerProblems(
   const nonEmpty = (value: readonly unknown[] | null | undefined) => (value?.length ?? 0) > 0;
   if (host.Privileged === true) problems.push("privileged");
   if (nonEmpty(host.CapAdd) && !onlyAllowedCapabilities(host.CapAdd)) problems.push("--cap-add");
-  if (nonEmpty(host.SecurityOpt)) problems.push("--security-opt");
+  // The one option AgentX itself asks for on a laptop (the Docker guard forces it): a dev container cannot gain privileges.
+  if (nonEmpty(host.SecurityOpt) && !host.SecurityOpt!.every((entry) => /^no-new-privileges(?:[:=]true)?$/u.test(entry))) problems.push("--security-opt");
   if (host.PidMode !== undefined && host.PidMode !== "" && host.PidMode !== "private") problems.push("--pid");
   for (const [mode, flag, containers] of [[host.IpcMode, "--ipc", true], [host.NetworkMode, "--network", true], [host.UsernsMode, "--userns", false], [host.UTSMode, "--uts", false], [host.CgroupnsMode, "--cgroupns", false]] as const) {
     if (mode === "host") problems.push(`${flag}=host`);

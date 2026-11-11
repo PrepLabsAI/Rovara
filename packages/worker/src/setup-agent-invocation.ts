@@ -10,7 +10,8 @@ import { runSetupAgent, type SetupRunResult } from "./setup-agent-run.js";
 import { createSetupSandbox } from "./setup-agent.js";
 import { assertSetupIsolation } from "./setup-isolation.js";
 import { setupWorkspaceKey, startRunNetwork } from "./setup-network.js";
-import { TASK_SANDBOX_IMAGE_ENVIRONMENT, type TaskShellSelection } from "./task-sandbox.js";
+import { TASK_SANDBOX_IMAGE_ENVIRONMENT, sandboxNetworkFromEnvironment, type TaskShellSelection } from "./task-sandbox.js";
+import type { RunNetwork } from "./setup-network.js";
 import { setupModelPrice } from "./setup-agent-price.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 
@@ -33,6 +34,11 @@ export interface SetupInvocationDependencies {
  */
 export function cancelledWithReport(controller: WorkerCancellationController | undefined, operationId: string, result: SetupRunResult): WorkerOperationCancelledError | undefined {
   return controller?.isCancelled(operationId) === true ? new WorkerOperationCancelledError(operationId, result) : undefined;
+}
+
+/** The run's network on a laptop: the machine's own sandbox network, which the run neither makes nor removes. It reports no blocked website (nothing watches DNS there). */
+export function sharedRunNetwork(name: string): RunNetwork {
+  return { name, subnet: "", gateway: "", helperName: "", helperIp: "", sandboxIp: "", readBlocked: async () => [], stop: async () => undefined };
 }
 
 /** The result a setup run reports (read again by the broker: the proposal by `sanitizeSetupProposal`, the summary by its schema). */
@@ -59,6 +65,9 @@ export async function runSetupAgentInvocation(
   const price = setupModelPrice(dependencies.model);
   const docker = dependencies.docker ?? createDockerCli();
   const callback = dependencies.setupAgent;
+  // On a laptop (`rovara up`) the worker is walled in by its own sandbox network and name server: the run joins that network, and the Docker socket guard does not let a worker make a network of its own or
+  // start a helper container. So there is no DNS watch there: no website is reported blocked, and a command that needs one fails like any other (the owner adds the site to the install's list).
+  const sharedNetwork = environment["AGENTX_RUNTIME"] === "ec2" ? undefined : sandboxNetworkFromEnvironment(environment);
   const events = new EventBatcher(dependencies.eventSink);
   const conversationId = invocation.payload.conversationId;
   const result = await runSetupAgent({
@@ -66,11 +75,13 @@ export async function runSetupAgentInvocation(
     repositories: manifest.repositories, commits: setup.commits,
     ...(manifest.meta === undefined ? {} : { metaRepo: manifest.meta.name }),
     ports: {
-      startNetwork: async () => startRunNetwork(docker, { taskId: invocation.operationId, image, workspace: await setupWorkspaceKey(canonicalRoot) }),
-      createSandbox: (network) => createSetupSandbox({
-        rootPath: canonicalRoot, taskId: invocation.operationId, docker, image, environment,
-        dns: [network.helperIp], network: { name: network.name, ip: network.sandboxIp },
-      }),
+      startNetwork: async () => (sharedNetwork !== undefined ? sharedRunNetwork(sharedNetwork) : startRunNetwork(docker, { taskId: invocation.operationId, image, workspace: await setupWorkspaceKey(canonicalRoot) })),
+      createSandbox: (network) => (sharedNetwork !== undefined
+        ? createSetupSandbox({ rootPath: canonicalRoot, taskId: invocation.operationId, docker, image, environment })
+        : createSetupSandbox({
+          rootPath: canonicalRoot, taskId: invocation.operationId, docker, image, environment,
+          dns: [network.helperIp], network: { name: network.name, ip: network.sandboxIp },
+        })),
       openSession: (parts) => createWorkspacePiSession({
         rootPath: dependencies.rootPath, model: dependencies.model, conversationId, onDiagnostic: () => undefined, extensionFactories: [], ...parts,
       }, dependencies.piAdapter),

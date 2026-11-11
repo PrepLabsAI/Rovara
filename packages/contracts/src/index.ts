@@ -180,6 +180,7 @@ export * from "./onboarding.js";
 export * from "./setup-draft.js";
 export * from "./seed-command.js";
 export * from "./setup-run.js";
+export * from "./setup-agent-web.js";
 export * from "./setup-proposal.js";
 export * from "./setup-proposal-read.js";
 

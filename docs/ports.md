@@ -513,6 +513,19 @@ or that carries a name other than the adapter's, stops the machine from starting
 
 The internal build-system detector stays an optional plug-in package outside the core (decision 45.11).
 
+## Setting a project up (the setup agent)
+
+The setup agent (`packages/broker/src/core/setup-agent/`, the owner's side in `docs/local.md`) is core code on the existing ports; it adds no plug-in interface and changes none.
+- `DocumentStore`: the run's pointer, journal, commands, website asks, the proposal row and the candidate revision are plain rows under Cloud's `SETUP_DRAFT#` and project keys; every race is a condition or a transaction (the single-run pointer, the command counter, the open-asks counter, the catalog move).
+- `Approvers` through the approval gate: two subjects, `setup-host` (a website a run asked for) and `setup-proposal` (a project's candidate setup commands). Both are `risk: "high"`, so only a strong method decides them (the local page's own session; a code host comment never does), and
+  both are bound to what the owner saw: the ask and its time, or the digest of the commands and the candidate revision. The proposal is waiting for a decision only once its candidate check passed.
+- `WorkerMachines`: the run and the check are ordinary operations (`workflowMode: "SETUP_AGENT"` with the limits and commits in the payload; a check is a preparation on the candidate revision); the machine's start reads the owner's approved websites (`extraAllowedDomains`).
+- `CodeHost`: the citation re-read is `fileAtRevision` at the commit the run read, through the project's own connection.
+- `BuildSystem` (see "Build systems" above): the worker's setup governor groups commands by the profiles' `setupPrograms`, and the machine launcher passes the registry's profiles in `ROVARA_BUILD_SYSTEMS` as for every worker; nothing in the setup flow names a build system, and the internal detector is not here (decision 45.11).
+- `Metering`/`ModelProvider`: a run's model calls go through the model proxy like any task step; a run without a model route is refused at the start.
+
+Provider-specific code in the flow: none. What stays Cloud-only: the company's locks and the second-admin rule for loosening them, the company switch that turns setup runs off, recipes the company offers its projects (`org/setup-recipes.ts`, `setup-recipe-*`), the audit ledger events of the setup rows (the gate's own audit records the decisions), and the browser step-up.
+
 ## Open ids for trackers and events, and the comment seam (lane P6, item E1)
 
 Event sources, event types, intake channels and connection types were fixed lists (`EVENT_SOURCES`/`EVENT_TYPES` in `trigger-specs.ts`, `INTAKE_CHANNELS` in `intake.ts`, `ConnectionTypeSchema` in `connections.ts`). They are **closed on purpose** now

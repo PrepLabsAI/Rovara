@@ -162,6 +162,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/second-review/track.ts",
       // Fix with agent: a diagnosis's request (a day while it waits, 30 days once settled), result and person rows, the open-place row and the rate rows all expire after a named retention.
       "packages/broker/src/core/diagnosis/store.ts",
+      // The setup agent: a run's journal, a person's commands and their request marks, the website asks (with their counters and index rows) and the per-run refusal counts, which are kept 31 days like Cloud's setup rows; and the check's record (31 days).
+      "packages/broker/src/core/setup-agent/keys.ts", "packages/broker/src/core/setup-agent/check.ts", "packages/broker/src/core/setup-agent/command.ts", "packages/broker/src/core/setup-agent/host-ask.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

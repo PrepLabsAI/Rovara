@@ -75,6 +75,7 @@ import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
 import { createSessionRoutes } from "./session-routes.js";
 import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens.js";
+import { createLocalSetupAgent, setupDecisionSubjects, type LocalSetupAgent } from "./setup-agent.js";
 
 import { createSessionStartExtras } from "./session-start.js";
 import { createLocalDesignReview } from "./design-review.js";
@@ -134,6 +135,10 @@ export interface LocalAppOptions {
   diagnosis?: boolean;
   /** Whether lessons are switched on. The runtime gives it from `ROVARA_LESSONS` (on unless exactly `0`); absent: the process environment, read the same way. */
   lessonsEnabled?: () => boolean;
+  /** Whether the setup agent is served (`ROVARA_SETUP_AGENT=0` turns it off). The runtime gives it from its environment; default on. */
+  setupAgent?: boolean;
+  /** The websites this install's machines reach by their own list, so a setup run's ask for one of them is "already allowed". */
+  installDomains?: () => readonly string[];
   /** Port of the review pages (0: a free one). */
   pagesPort?: number;
   /** The most pull request threads one comment poll reads (default 20): a test lowers it to see the rotation. */
@@ -171,6 +176,8 @@ export interface LocalApp {
   readonly modelGrants: ModelGrantSource;
   /** Script tokens: serving a request that carries one, and the settings the local pages and routes use. */
   readonly scriptTokens: LocalScriptTokens;
+  /** The setup agent: its routes, its page and the hosts the owner approved. */
+  readonly setupAgent: LocalSetupAgent;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
   routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
   /** The worker's callbacks (`/v1/internal/...`). */
@@ -356,7 +363,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // Decisions: the one gate, over the workflow document of the task. A change request starts planning again with the owner's words (L9-wire writes them where the planner's prompt reads them).
   const gate = createDecisionGate({
     store, approvers: registry.require("approvers"), audit: registry.require("audit-sink"),
-    subjects: [createWorkflowDocumentSubject({
+    subjects: [...setupDecisionSubjects(flow.deps), createWorkflowDocumentSubject({
       store,
       // The tier of the plan waiting now, read from the plan itself (the files it names, the claims nothing proves): a plan nobody could grade is never graded low, but a plan that names its files
       // and its proof is not high just for being a plan.
@@ -407,6 +414,12 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   flow.deps.learned = (input) => lessons.learnedFor(input);
   flow.deps.lessonsUsed = (task, repositoryId) => lessons.usedInPullRequest(task, repositoryId);
+  // The setup agent: a run that sets a project up by running its commands in a sandbox, its journal, the websites it asks for and the owner's use of what it found. Its decisions go through the gate above.
+  const setupAgent = createLocalSetupAgent({
+    flow: flow.deps, registry, gate, owner, companyId, now: () => clock().getTime(), enabled: options.setupAgent ?? true,
+    modelAccessConfigured: async () => (await chosen()) !== undefined,
+    ...(options.installDomains === undefined ? {} : { installDomains: options.installDomains }),
+  });
   const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, lessons, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
   // script tokens. The creator is asked of the identity port by Rovara id; the audit steps are the registry's sink's.
@@ -424,11 +437,16 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
       getChatPage: () => chat.view(),
       previewChatLink: (code) => chat.preview(code),
+      ...(setupAgent.enabled ? { listSetupProjects: () => setupAgent.page.projects(), getSetupPage: (project: string) => setupAgent.page.view(project) } : {}),
     },
     actions: {
       ...chat.actions,
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume,
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
+      ...(setupAgent.enabled ? {
+        setupStart: setupAgent.page.start, setupStop: setupAgent.page.stop, setupCommand: setupAgent.page.command, setupConfirm: setupAgent.page.confirm, setupDiscard: setupAgent.page.discard, setupForgetHost: setupAgent.page.forgetHost,
+        setupCheck: setupAgent.page.check, setupDecideHost: setupAgent.page.decideHost, setupDecideProposal: setupAgent.page.decideProposal,
+      } : {}),
       async createScriptToken(input) {
         try {
           return { ok: true, created: await scriptTokens.create(input) };
@@ -460,7 +478,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     replay: (taskId, key) => readWorkflowE2EReplayRecord({ store }, taskId, key),
     grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
-  const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, onEvents: (operation, events) => lessons.onEvents(operation, events) });
+  const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}) });
   const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
@@ -473,7 +491,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await lessonRoutes(request, caller)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -541,7 +559,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, diagnosis, milestones, scriptTokens,
+    flow, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, diagnosis, milestones, scriptTokens, setupAgent,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

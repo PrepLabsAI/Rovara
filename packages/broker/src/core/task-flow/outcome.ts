@@ -27,6 +27,11 @@ export type StepOutcome =
   | { kind: "reviewed"; result: unknown }
   /** A publication: the pull request the worker says it opened. Held to the operation's recorded expectation and checked at the host. */
   | { kind: "published"; result: unknown }
+  /**
+   * A setup run's answer (`core/setup-agent`): the worker's word, read again by the setup agent's end before any of it is kept (the proposal by `sanitizeSetupProposal`, the summary by its schema). A failed run's partial
+   * answer is carried the same way.
+   */
+  | { kind: "setup-run"; result: unknown }
   /** A run that needs no workflow move. */
   | { kind: "ended" };
 

@@ -15,8 +15,8 @@ export interface ApprovalOffer {
   requestId: string;
   revision: number;
   artifactDigest: string;
-  /** `plan`, `design`: the W0 approval kind. */
-  kind: "plan" | "design";
+  /** `plan`, `design`, `setup` (a project's setup commands, or a website for a setup run): the W0 approval kind. */
+  kind: "plan" | "design" | "setup";
   risk?: "low" | "medium" | "high";
 }
 
@@ -214,6 +214,54 @@ export interface ChatPageView {
 /** A token the page just made: the secret is shown on the answer to the form, once, and kept nowhere. */
 export type LocalCreateTokenResult = { ok: true; created: CreatedScriptToken } | { ok: false; reason: "refused" | "invalid" | "not_found"; message: string };
 
+/** One website a setup run asked for, as the page shows it: the name, where the ask stands, and the offer to decide it while it is open. */
+export interface SetupHostAskView {
+  host: string;
+  status: "open" | "approved" | "refused";
+  /** The repository file and line that led to it, shown quoted and marked as from the repository. */
+  from?: { path: string; line: number };
+  journalN?: number;
+  /** The name has a punycode label: it may look like another name. */
+  international: boolean;
+  approval?: ApprovalOffer;
+}
+
+/** One suggestion of a setup run, in fixed words (its text is the model's, shown untrusted). */
+export interface SetupItemView {
+  id: string;
+  kind: string;
+  lines: string[];
+  from: string[];
+  /** What re-reading its citations found: `verified`, `unverified`, or `unchecked`. */
+  verdict: "verified" | "unverified" | "unchecked";
+  /** Whether "Use this setup" can use it (a setup or test command). */
+  usable: boolean;
+}
+
+/** What the setup page shows for a project (the setup agent). */
+export interface SetupPageView {
+  project: string;
+  /** The project's latest revision: what "Use this setup" is bound to. */
+  revision: number;
+  status: "none" | "running" | "ready" | "failed";
+  failure?: string;
+  stoppedBy?: string;
+  limits: { commands: number; sameStepTries: number; wallClockMin: number; budgetCents: number; hostAsks: number };
+  /** Rovara cannot start a run (no model key, or the feature is off): the sentence. */
+  cannotStart?: string;
+  summary?: { commandsRun: number; spendCents: number; elapsedMin: number; hostAsks: number; partial: boolean; stop: string };
+  items: SetupItemView[];
+  verified: boolean;
+  journal: Array<{ n: number; source: "agent" | "person"; command: string; exitCode: number | null; timedOut: boolean; flagged: boolean; tail: string; blockedHosts: string[] }>;
+  hostAsks: SetupHostAskView[];
+  /** The project's own setup check. */
+  check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string };
+  /** A proposal waiting: the commands, and where the check on them stands. */
+  apply?: { candidateRevision: number; setup: string[]; readiness: string[]; check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string }; approval?: ApprovalOffer };
+  /** The websites the owner approved for this project, with when, each to be taken back on the page. */
+  approvedHosts: Array<{ host: string; at: string | undefined }>;
+}
+
 /** The read side: each method answers undefined for something that is not there. */
 export interface LocalPageData {
   /** What waits for the owner. */
@@ -234,6 +282,9 @@ export interface LocalPageData {
   getChatPage?(): Promise<ChatPageView | undefined>;
   /** What a code of a chat account names (the channel and the masked account), for the confirmation the owner reads before linking; undefined for an unknown, used or expired code. */
   previewChatLink?(code: string): Promise<{ channel: string; tenant: string; userId: string } | undefined>;
+  /** The setup agent's page for a project, and the projects it can be opened for. Absent: the setup agent is off here and its pages are not found. */
+  listSetupProjects?(): Promise<string[]>;
+  getSetupPage?(project: string): Promise<SetupPageView | undefined>;
 }
 
 /** One change of the second review's settings, as the owner made it on the page (every one is the owner's own act, in this browser session). */
@@ -312,4 +363,17 @@ export interface LocalPageActions {
   addNoticeTarget?(input: { channel: string; tenant: string; space: string; thread?: string }): Promise<LocalActionResult>;
   removeNoticeTarget?(input: { channel: string; tenant: string; space: string; thread: string }): Promise<LocalActionResult>;
   muteNotices?(input: { muted: boolean }): Promise<LocalActionResult>;
+  /** The setup agent (the owner's own acts on the setup page). A command, a website and the use of a setup are never decided by a route or a token. */
+  setupStart?(input: { project: string; requestId: string }): Promise<LocalActionResult>;
+  setupStop?(input: { project: string; requestId: string }): Promise<LocalActionResult>;
+  setupCommand?(input: { project: string; requestId: string; command: string }): Promise<LocalActionResult>;
+  setupConfirm?(input: { project: string; requestId: string; expectedRevision: number; itemIds: string[] | undefined }): Promise<LocalActionResult>;
+  setupDiscard?(input: { project: string }): Promise<LocalActionResult>;
+  /** Takes an approved website back (it narrows what a machine may reach, so it needs only the page's own form). */
+  setupForgetHost?(input: { project: string; host: string }): Promise<LocalActionResult>;
+  setupCheck?(input: { project: string; requestId: string }): Promise<LocalActionResult>;
+  /** Approves or refuses a website a setup run asked for. `proof` is the page session's proof over exactly this ask. */
+  setupDecideHost?(input: { project: string; host: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
+  /** Approves or rejects the waiting setup proposal of a project. */
+  setupDecideProposal?(input: { project: string; decision: "approve" | "reject"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
 }

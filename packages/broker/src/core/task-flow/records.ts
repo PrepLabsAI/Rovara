@@ -4,6 +4,11 @@ import type {
   DocumentKey,
   JsonValue,
   Operation,
+  SetupAgentLimits,
+  SetupProposal,
+  SetupRunEndWord,
+  SetupRunSummary,
+  SetupVerification,
   StoredDocument,
   WorkspaceStatus,
 } from "@agentx/contracts";
@@ -22,10 +27,30 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
   sessionId?: string;
   /** The person asked for the design to be reviewed before any code (`design first`), whatever the project's setting says. */
   designFirst?: { by: string; at: string };
+  /** What the task is for, when it is not ordinary work: a run that sets a project up by running its commands (`core/setup-agent`). */
+  purpose?: "setup_agent";
+  /** A setup run: the limits it started with. */
+  setupAgentLimits?: SetupAgentLimits;
+  /** A setup run: who pressed Stop and when. Written before the cancel, so the end can tell a person's stop from any other cancel. */
+  setupAgentStop?: { by: string; at: string };
+  /** A setup run: how many commands the journal holds, for the live view. */
+  setupAgentProgress?: { commands: number; at: string };
+  /** A setup run's end: the proposal and summary the broker read again from the worker's answer, or the fixed sentence for why there is none. */
+  setupAgentResult?:
+    | { status: "ready"; stop: SetupRunEndWord; proposal: SetupProposal; summary: SetupRunSummary }
+    | { status: "failed"; stop: SetupRunEndWord; failure: string; proposal?: SetupProposal; summary?: SetupRunSummary };
+  /** A setup run: what re-reading the proposal's citations from the code host found, kept once every verdict was final. */
+  setupAgentVerification?: { at: string; items: Record<string, SetupVerification> };
+  /** The end of a setup run, written once with its result. */
+  agentRunEnd?: { state: string; at: string };
 };
 
 /** Cloud's `WORKSPACE#<id>/DEVELOPER_TASK` pointer: how a worker callback finds the task. The requester names the identity adapter, not a closed sign-in list. */
-export type TaskPointerRecord = Omit<DeveloperTaskPointerRecord, "requester"> & { requester: { kind: "developer"; developerId: string; provider: string } };
+export type TaskPointerRecord = Omit<DeveloperTaskPointerRecord, "requester" | "pendingWorkflowMode"> & {
+  requester: { kind: "developer"; developerId: string; provider: string };
+  /** The mode the first run is queued with; a setup run's is its own (`SETUP_AGENT`). */
+  pendingWorkflowMode?: "PLAN" | "IMPLEMENT" | "SETUP_AGENT";
+};
 
 /** `WORKSPACE#<id>/META`: where a task's worker runs. `machine` is set once a worker machine was started for it. */
 export interface WorkspaceRecord {

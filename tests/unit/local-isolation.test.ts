@@ -189,7 +189,7 @@ describe("the egress gateway program", async () => {
 
 interface Guard {
   transformCreate(query: URLSearchParams, text: string): string;
-  checkExecBody(text: string): void;
+  checkExecBody(text: string, who: { kind: "sandbox" }): void;
   Refusal: new (message: string) => Error;
 }
 
@@ -333,12 +333,13 @@ describe("the Docker socket guard program", async () => {
   });
 
   it("lets a command run as the sandbox user and no other, never privileged", () => {
+    const sandbox = { kind: "sandbox" } as const;
     const ok = JSON.stringify({ AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: false, Cmd: ["sh", "-c", "true"], User: "1000:1000", Env: ["A=b"], WorkingDir: "/tmp" });
-    expect(() => guard.checkExecBody(ok)).not.toThrow();
-    expect(() => guard.checkExecBody(JSON.stringify({ Cmd: ["id"], User: "1000" }))).not.toThrow();
-    expect(() => guard.checkExecBody(JSON.stringify({ Cmd: ["id"], Privileged: false }))).not.toThrow();
+    expect(() => guard.checkExecBody(ok, sandbox)).not.toThrow();
+    expect(() => guard.checkExecBody(JSON.stringify({ Cmd: ["id"], User: "1000" }), sandbox)).not.toThrow();
+    expect(() => guard.checkExecBody(JSON.stringify({ Cmd: ["id"], Privileged: false }), sandbox)).not.toThrow();
     for (const bad of [{ Cmd: ["id"], User: "0" }, { Cmd: ["id"], User: "root" }, { Cmd: ["id"], Privileged: true }, { Cmd: [] }, {}, { Cmd: "id" }, { Cmd: ["id"], Extra: 1 }, { Cmd: ["id"], Env: "x" }]) {
-      expect(() => guard.checkExecBody(JSON.stringify(bad)), JSON.stringify(bad)).toThrow();
+      expect(() => guard.checkExecBody(JSON.stringify(bad), sandbox), JSON.stringify(bad)).toThrow();
     }
   });
 });

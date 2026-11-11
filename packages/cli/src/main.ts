@@ -78,6 +78,7 @@ import { registerDestroyCommand } from "./destroy/cli.js";
 import { registerDesignReviewCommand, registerDiagnosisCommand, registerOpenCommand, registerSecondReviewCommand, registerUpCommand, type UpCommandContext } from "./up/cli.js";
 import { registerTokenCommands } from "./up/token.js";
 import { registerChatCommands } from "./up/chat.js";
+import { registerSetupAgentCommands } from "./up/setup-agent.js";
 import type { DestroyDependencies } from "./destroy/run.js";
 import { registerUpgradeCommand } from "./upgrade/cli.js";
 import type { UpgradeDependencies } from "./upgrade/run.js";
@@ -488,6 +489,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   registerDesignReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerDiagnosisCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerChatCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerSetupAgentCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerUpgradeCommand(program, {
     ...(dependencies.upgrade === undefined ? {} : { overrides: dependencies.upgrade }),
     ...(dependencies.deploy === undefined ? {} : { deploy: dependencies.deploy }),

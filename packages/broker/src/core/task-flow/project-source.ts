@@ -32,8 +32,9 @@ export function createStoreProjectSource(store: Pick<DocumentStore, "get" | "que
         const named = revisionOf(await store.get(projectRevisionKey(orgId, project, catalog.latestRevision)), meta);
         if (named !== undefined) return named;
       }
-      const page = await store.query({ pk: projectPk(orgId, project), sk: { op: "beginsWith", prefix: PROJECT_REVISION_SK_PREFIX }, descending: true, limit: 1 });
-      return revisionOf(page.items[0], meta);
+      // A candidate revision (a setup waiting for the owner's approval) is never the project's latest, whatever the catalog says.
+      const page = await store.query({ pk: projectPk(orgId, project), sk: { op: "beginsWith", prefix: PROJECT_REVISION_SK_PREFIX }, descending: true, limit: 20 });
+      return revisionOf(page.items.find((item) => item["candidate"] !== true), meta);
     },
   };
 }

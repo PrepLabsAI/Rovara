@@ -45,6 +45,10 @@ import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecor
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
 import type { StepOutcome } from "./outcome.js";
+import { SETUP_AGENT_FEATURE } from "@agentx/contracts";
+import { setupAgentWireOf } from "../setup-agent/agent.js";
+import { endSetupAgentTask } from "../setup-agent/end.js";
+import { closeSetupCheck } from "../setup-agent/check.js";
 
 type ChangeOp = ReturnType<typeof change.set>;
 
@@ -413,8 +417,15 @@ export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promi
   const workspace = await readWorkspace(deps, task.workspaceId);
   if (workspace === undefined || workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
   const mode = pointer.pendingWorkflowMode === "PLAN" ? "PLAN" as const : undefined;
+  // A setup run's first step carries the limits it started with and the commits the preparation reported (read again now: the task passed in was read before the preparation's report was kept).
+  const setup = pointer.pendingWorkflowMode === "SETUP_AGENT" ? await readTask(deps, task.taskId) : undefined;
   const accepted = await acceptStep(deps, {
-    task, workspace, requestId: pointer.firstRequestId, prompt: pointer.pendingPrompt, ...(mode === undefined ? {} : { workflowMode: mode, requires: ["task.workflowMode"] }),
+    task, workspace, requestId: pointer.firstRequestId, prompt: pointer.pendingPrompt,
+    ...(mode === undefined ? {} : { workflowMode: mode, requires: ["task.workflowMode"] }),
+    ...(setup === undefined ? {} : {
+      workflowMode: "SETUP_AGENT" as const, requires: ["task.workflowMode", SETUP_AGENT_FEATURE], extraActions: ["setup-agent"],
+      payload: { setupAgent: JSON.parse(JSON.stringify(setupAgentWireOf(setup))) as JsonValue },
+    }),
     extra: [{ kind: "update", key: taskPointerKey(task.workspaceId), ops: [change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")], condition: when.exists("pendingPrompt") }],
   });
   if (accepted.result === "DUPLICATE") {
@@ -432,10 +443,20 @@ export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promi
  */
 export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void> {
   const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(taskPointerKey(operation.workspaceId)));
-  if (pointer === undefined) return;
+  if (pointer === undefined) {
+    // A workspace with no task is a project's setup check: its preparation ended, so its workspace and machine are closed.
+    if (operation.kind === "prepare") await closeSetupCheck(deps, operation.workspaceId);
+    return;
+  }
   const task = await readTask(deps, pointer.taskId);
   if (task === undefined || task.closedAt !== undefined) return;
   const succeeded = ended.status === "SUCCEEDED";
+
+  // A setup run's own operation, or its preparation failing, ends the run with what the broker reads of the worker's answer (idempotent: a repeat finds the result kept and changes nothing).
+  if (task.purpose === "setup_agent" && ((operation.kind === "task" && operation.workflowMode === "SETUP_AGENT") || (operation.kind === "prepare" && !succeeded))) {
+    await endSetupAgentTask(deps, task, operation, ended);
+    return;
+  }
 
   if (operation.kind === "prepare") {
     if (!succeeded) return;

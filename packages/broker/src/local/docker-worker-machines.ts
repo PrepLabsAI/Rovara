@@ -146,6 +146,16 @@ export interface DockerWorkerMachinesOptions {
   buildSystems?: (() => Promise<readonly BuildSystemProfile[]> | readonly BuildSystemProfile[]) | undefined;
   /** Websites the sandboxes and the worker may reach beyond the default list (the cloud's, without its own network's names). */
   allowedDomains?: readonly string[];
+  /**
+   * More websites for machines that START from now on, read at each start with the name of the project the machine is for: the hosts the owner approved for a setup run of THAT project. A change makes the machine's digest differ, so its next start remakes the machine with the new list
+   * (keeping its workspace); a machine that is running is not touched. A name the cloud would refuse is not added (it is left out, never passed on).
+   */
+  extraAllowedDomains?: (project: string | undefined) => Promise<readonly string[]> | readonly string[];
+  /**
+   * The registries a project's dev container may pull its image from (the Docker socket guard serves a dev container only from these). Default: none (the install decides, `devcontainerRegistriesForInstall`); an empty list is dev containers off.
+   * It is the owner's: it comes from the environment of `rovara up` and never from a project or a task.
+   */
+  devcontainerRegistries?: readonly string[];
   signer: InvokeSigner;
   docker: DockerRunner;
   /** Most machines running at once. Default 4. */
@@ -203,6 +213,17 @@ export class DockerWorkerMachines implements WorkerMachines {
     this.capabilities = { isolation: "container", persistentVolume: true, canStop: true, maxConcurrentMachines: options.maxConcurrentMachines === undefined ? 4 : options.maxConcurrentMachines };
   }
 
+  #devcontainerRegistries(): readonly string[] {
+    return this.#options.devcontainerRegistries ?? [];
+  }
+
+  /** The websites a machine starting now may reach: the install's list and the hosts the owner approved. An approved name the allow-list rules refuse is left out. */
+  async #allowedNow(project: string | undefined): Promise<string[]> {
+    const extra = (await this.#options.extraAllowedDomains?.(project)) ?? [];
+    const accepted = extra.filter((entry) => { try { localAllowedDomains([entry]); return true; } catch { return false; } });
+    return accepted.length === 0 ? this.#allowed : localAllowedDomains([...(this.#options.allowedDomains ?? []), ...accepted]);
+  }
+
   /** One start at a time in this process, so the limit on running machines holds and two starts of one key do not race. */
   start(spec: MachineSpec): Promise<MachineHandle> {
     const run = this.#queue.then(() => this.#start(spec));
@@ -223,8 +244,9 @@ export class DockerWorkerMachines implements WorkerMachines {
     const names = isolationNames(hash);
     const callback = this.#options.callback();
     const buildSystems = this.#options.buildSystems === undefined ? [] : [...(await this.#options.buildSystems())];
+    const allowed = await this.#allowedNow(spec.projectName);
     const environment = this.#environment(spec, workspaceDirectory, image, names, buildSystems);
-    const digest = createHash("sha256").update(JSON.stringify([image, Object.entries(environment).sort(([a], [b]) => (a < b ? -1 : 1)), ISOLATION_VERSION, this.#allowed, callback.tcpPort, callback.socketDirectory ?? null])).digest("hex");
+    const digest = createHash("sha256").update(JSON.stringify([image, Object.entries(environment).sort(([a], [b]) => (a < b ? -1 : 1)), ISOLATION_VERSION, allowed, this.#devcontainerRegistries(), callback.tcpPort, callback.socketDirectory ?? null])).digest("hex");
     const run: Run = dockerRun(this.#options.docker);
 
     const existing = await this.#inspect(name);
@@ -264,7 +286,7 @@ export class DockerWorkerMachines implements WorkerMachines {
       const nets = await ensureNetworks(run, names, [`${OWNER_LABEL}=${hash}`, `${STATE_LABEL}=${this.#stateKey}`]);
       const useSocket = callback.socketDirectory !== undefined;
       await createGateway(run, {
-        image, labels: baseLabels, names, nets, allowed: this.#allowed, workspaceId, callback,
+        image, labels: baseLabels, names, nets, allowed, workspaceId, callback,
         user: useSocket && typeof process.getuid === "function" && typeof process.getgid === "function" ? `${process.getuid()}:${process.getgid()}` : "1000:1000",
       });
       const gatewayStarted = await this.#docker(["start", names.gateway]);
@@ -275,6 +297,7 @@ export class DockerWorkerMachines implements WorkerMachines {
       await createGuard(run, {
         image, labels: [...baseLabels, gatewayLabel], names, socketPath: this.#socket, socketGroup: group, workspaceDirectory,
         workspaceKey: createHash("sha256").update(resolve(workspaceDirectory)).digest("hex").slice(0, 16), owner: hash, sandboxDns: addresses.sandbox,
+        devcontainerRegistries: this.#devcontainerRegistries(),
       });
       const guardStarted = await this.#docker(["start", names.guard]);
       if (guardStarted.exitCode !== 0) throw new MachineError("unavailable", `Docker could not start the Docker socket guard: ${this.#reason(guardStarted.stderr)}`);

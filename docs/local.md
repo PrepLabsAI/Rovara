@@ -141,8 +141,43 @@ Task code is a repository's code, so a local worker is built as if it were hosti
   input and output travel over an upgraded connection; the guard reads the start body itself, sends the daemon a request of its own
   making and passes bytes on only after the daemon has answered `101`, so nothing a worker pipelines behind a start ever reaches the
   daemon. Creates are made one at a time, so the limit of 16 sandboxes holds. Everything else is refused: other containers (yours
-  included), images, pulls, builds, volumes, networks, events, info, prune, copy. So a project's devcontainer, test services and the
-  setup run (which need those) do not work locally yet.
+  included), other images, builds, volumes, networks, info, prune and copy, except what a project's dev container needs (next
+  section). A project's test services need Docker calls that are still refused (see "Not in this lane").
+- **A project's dev container** (`isolation/docker-socket-guard-source.ts`, the `devcontainer` policy; setting up a project, below). When the owner lists
+  registries, the guard also lets the worker pull and inspect an image from one of those registries, read the events of its own
+  containers, and create, attach to, start, run commands in and remove a dev container. It is **an image that is ready to run**: a Dockerfile, a build section
+  or features need a build, whose instructions the guard cannot read, so the worker refuses them on a laptop with one fixed sentence (they work on a cloud
+  worker).
+  - **Where the list comes from, and where it is on by default.** `ROVARA_DEVCONTAINER_REGISTRIES=a.example,b.example` is the list (`0` turns dev containers off). With nothing set, the
+    default list (`mcr.microsoft.com`, `docker.io`, `ghcr.io`, `public.ecr.aws`, `quay.io`) is used **only when Docker runs in a virtual machine** that this computer reaches through its own socket
+    (Colima, Docker Desktop on macOS or Windows), or the daemon says it is Docker Desktop or rootless: there a container's root cannot be root on your computer. On a **rootful Linux Docker host, and whenever
+    this cannot be told, there is no default**: a dev container needs the variable set on purpose, because root in a container writing into the workspace folder is root on that host (it could leave a setuid file or files you cannot delete).
+  - **What the list is, and is not.** It controls where pulls come from (a name on the list, never an address or a private registry), **not what the images contain**: anyone can publish to docker.io, ghcr.io and quay.io. The daemon makes
+    the pull, so pulls **bypass the websites list** of the egress gateway, and a compromised worker can choose which public repository and tag to pull, or fill the disk. A dev container is the repository's own choice of image and holds the
+    same trust as the repository's code, which is why it is held to the rules below.
+  - **When a registry is listed, these dev container rules are the guard's floor.** A create whose image is not the worker's own is a dev container, so a compromised worker that wants a weaker container than a sandbox can have exactly this one:
+    it may run as root inside the container (most dev container images need it), with Docker's default capabilities minus `MKNOD` and `NET_RAW`, and **no-new-privileges always on** (so `sudo` and other setuid programs gain nothing inside it). The
+    sandbox's own stricter rules (every capability dropped, user 1000) still hold for the worker's image.
+  Why this is safe, rule by rule:
+  - *The daemon pulls, so the registry is the one place a name can reach.* The reference must be a plain name (a registry, a lower-case path, a tag or a digest) on
+    the owner's list; an address, `localhost`, a port-only name, a space, a backslash or an option is refused, and a pull passes on the reference and the
+    platform and nothing else (no import, no `changes`, no message). The list is the owner's: it comes from the environment of `rovara up`, never from a project.
+  - *The create is built from nothing*, as a sandbox's is, under Docker's exact field names. A dev container is always on the machine's sandbox network
+    with the sandbox name server (a request for another network is refused, not obeyed), never privileged, never in a host namespace, with no device, no port,
+    no link, no added host, no sysctl and the memory and process limits forced. It keeps Docker's default capabilities minus `MKNOD` and `NET_RAW`; the only one
+    it can add is `SYS_PTRACE`, and its security option is always `no-new-privileges` (forced; the worker's own check of the started container accepts exactly that one).
+    It carries the guard's labels, which the worker cannot set or remove, so the guard recognises it as its own.
+  - *Mounts are the workspace folder itself, at its own path, and the worker's mask volumes.* A bind of any other path is refused, and so is a path **below** the
+    workspace: a link a task makes inside the workspace could point a deeper path anywhere on your computer, and the guard cannot resolve links the daemon will.
+    The dev container tool would also mount the repository folder on its own, so the worker gives the tool the project's config with its workspace mount and
+    folder set to the workspace and the repository at their own paths (`--override-config`, written in the worker's own hidden folder); the project's own
+    `workspaceMount`/`workspaceFolder` are not used, and its other settings (`image`, `postCreateCommand`, `remoteUser`) are. Each mask volume of the worker over its own
+    folders becomes an empty read-only tmpfs mount over the same folder: no volume is ever made, and the worker's folders stay hidden.
+  - *Everything after the create goes through the owner label.* The guard asks the daemon itself whether a container is its own before any start, attach,
+    command, log or removal; the events it reads are filtered by that label (the guard adds the filter), so no other container of the daemon is named in an answer;
+    a command may name any plain user, `root` included (the worker itself runs one as root to prepare the container) and is never privileged; an attach takes the options a `docker run` uses and no body, and bytes pass only after the daemon
+    said `101`. `docker cp` into a container stays refused (the worker's file tools then use a sandbox of their own for the dev container, as they already do when the copy is refused).
+  With the list empty the guard answers exactly as before. The same worker code starts a dev container on a cloud worker as before (no override, the build allowed).
 - **The worker never sees the socket**, so `~/.rovara`, `~/.ssh` and the rest of your home folder are not one `docker run -v` away. The
   worker's `sweepWorkspaceContainers` (which removes every other container before a push) also finds no socket and skips; with the raw
   socket on a daemon you share with your own containers it would have removed all of them.
@@ -608,10 +643,37 @@ dispatch capability's `extraActions`; put `localRoute(...).workerRoute` in the i
   `modelGrants` source (`capabilityModelGrants`) that says which models and what budget an operation has (`localRoute` makes a model's route).
 
 
+## Setting a project up (the setup agent)
+
+`rovara setup-agent start <project>` (or the "Set up this project" button on `/setup/<project>`, which `rovara setup-agent open <project>` opens in your browser) asks Rovara to run the
+project's setup and test commands in a setup sandbox, read the errors and try again, inside fixed limits (40 commands, 3 tries of the same failing step, 45 minutes, about $4 of model use, 5 website asks),
+and to end with a **proposal**: the setup commands, test commands and other suggestions it found, each with the file and line it came from. A run is a task with `purpose: "setup_agent"`: it starts through the task flow
+(your access, the admission seam, the open-workspace limits), prepares its own workspace, and is paid for by your model key through the model proxy. It needs a model key and `ROVARA_SETUP_AGENT` not `0`.
+
+- **One run per project**, its limits fixed when it starts. Stop (`rovara setup-agent stop`) ends it; what the worker reports as it stops is kept as a partial, unproven proposal. The task flow's own cancel stops the worker's machine, so on a
+  laptop a stopped run keeps only what it had reported by then. The run's workspace, machine and slot are given back when it ends.
+- **A run never grants anything.** The worker's callback (`setup-agent`) is one action for a RUNNING setup operation: it reports commands (kept once per position, redacted again, at most 400), asks for a website and polls for
+  the owner's next command. The company, project and task come from the authenticated operation, never from the body, and a person is never named by the worker.
+- **Websites.** A name a command could not reach becomes an ask only after the broker's own checks: addresses, private names, paste, shortener, tunnel, webhook and open-hosting names are refused without a card and only counted. On a laptop the run shares the machine's
+  sandbox network and name server (the Docker guard allows no network or helper of its own), so **no blocked website is reported**: a command that needs a site the list lacks just fails. A host ask from a worker that does report one (a cloud worker) is an
+  ask row you decide on the page; approving it adds the name to the websites that **project's** machines may reach (the page lists what you allowed, with the date, and "Take it back" removes one from the next machines) **when one next starts** (`extraAllowedDomains`; a machine that is already running is not touched, and another project's never sees it).
+- **A command you type** is the owner's own act on the page (a signed page session, never a script token or the API login): one plain line of at most 1,000 characters, one at a time, at most 20 a run, refused if the redactor would change it. It runs in the sandbox, as
+  typed, and its result is shown to the agent as data.
+- **Using what it found.** "Use this setup" first re-reads every citation from the code host at the commit the run read (an item whose quote is not there is left out, and a re-read that could not finish is not a pass). It then stores the confirmed setup and test
+  commands as a **candidate** revision of the project (the next number, written but not made the project's latest, so no task can start on it) and starts a check on a **new workspace** with exactly those commands. Only when that check passed does the page offer the approval, and
+  the approval is the owner's page session through the approval gate and the Approvers seam, bound to the digest of those commands and the candidate revision. Approving moves the project to the candidate in the decision's transaction (and only if the project is still at the
+  revision you looked at); rejecting removes it. While one waits, another new revision of that project is refused. Only setup and test commands are applied this way: a repository, dev container, source, intake trigger and secret are shown and left to your own settings.
+- **The project's setup check** (`rovara setup-agent check`, and the last panel of the page): runs the project's setup and test commands at its latest revision on a fresh workspace. The status is derived on every read (unchecked, outdated, checking, failed with the step that failed, ready);
+  the check's workspace and machine are closed when it ends. A task of a project whose last check **failed** is refused at its start, naming the step (a setup run is let through, since it is how the setup gets fixed; a new revision of the project outdates the check); a project nobody checked starts as it always did.
+- **Dev containers** (the project's `devcontainer` setting) work on the local Docker worker for an image that is ready to run, from a registry on your list (see "What a worker can reach").
+- **Stored like Cloud's** (`SETUP_DRAFT#<project>` rows: `AGENT`, `JOURNAL#...`, `CMD#...`; `SETUP_HOST_ASK#<host>`, the open-asks counter and the company index in the project and company partitions). Different: the setup proposal row is `SETUP_DRAFT#<project>`/`APPLY` (Cloud keeps its marker with the test environment), and the project check mark is on the project's own record.
+
+Settings: `ROVARA_SETUP_AGENT=0` turns the setup agent off (every route, the page and the worker's callback answer as an unknown path); `ROVARA_DEVCONTAINER_REGISTRIES` is above.
+
 ## Not in this lane (L4)
 
-See the report of lane L4 for the list with file and line. In short: the published worker image. Devcontainers, test services and the setup run need Docker calls the
-guard refuses; they are not available locally until each is given a place in the guard's rules.
+The published worker image is not built here. Test services (their networks and helpers) need Docker calls the
+guard still refuses; they are not available locally until each is given a place in the guard's rules.
 
 ## Tests
 

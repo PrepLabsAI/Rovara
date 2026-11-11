@@ -69,10 +69,19 @@ export async function finishClose(deps: TaskFlowDeps, task: TaskRecord, parts: P
 }
 
 export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskView> {
-  let task = await loadOwnedTask(deps, caller, taskId);
+  return closeLoadedTask(deps, await loadOwnedTask(deps, caller, taskId), caller.principal.personId);
+}
+
+/**
+ * Closes a task the flow itself is finished with (a setup run that ended: its workspace, its machine and its slot are given back). `actorId` is who the audit names; the task's own person is
+ * the one the start named. It does the same as `closeTask`, with no caller to check: the flow has just read the task's own record.
+ */
+export async function closeLoadedTask(deps: TaskFlowDeps, loaded: TaskRecord, actorId: string): Promise<TaskView> {
+  const taskId = loaded.taskId;
+  let task = loaded;
   for (let attempt = 1; task.closedAt === undefined && attempt <= CLOSE_ATTEMPTS; attempt += 1) {
     const now = iso(deps);
-    const parts = await closeParts(deps, task, now, { type: "person", id: caller.principal.personId });
+    const parts = await closeParts(deps, task, now, { type: "person", id: actorId });
     const items: TransactItem[] = [{ kind: "update", key: taskKey(task.taskId), ops: parts.taskOps, condition: when.notExists("closedAt") }, ...parts.items];
     let applied;
     try {

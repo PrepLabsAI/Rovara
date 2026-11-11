@@ -33,6 +33,10 @@ import { loadOwnedTask, taskViewOf, type TaskView } from "./reads.js";
 import { toDocument, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 import { hashJson, iso, limitsOf, log, newId, redactedTitle, storedRequestText } from "./support.js";
 import { assertRepositoryHostsKnown } from "../../plugins/routing.js";
+import { setupAgentPointerItem } from "../setup-agent/agent.js";
+import { developerIdOf } from "../sessions/create.js";
+import { setupFailedMessage, setupStateOf } from "../setup-agent/check.js";
+import type { SetupAgentLimits } from "@agentx/contracts";
 
 export interface StartResult {
   task: TaskView;
@@ -51,7 +55,13 @@ function parseRequest(value: unknown): StartDeveloperTaskRequest {
   throw agentXError("CONFIG_INVALID", `${issue?.path.join(".") || "body"}: ${issue?.message ?? "invalid"}`);
 }
 
-export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: unknown): Promise<StartResult> {
+/**
+ * What a setup run adds to a start (`core/setup-agent`): the task is made for setting the project up by running its commands, with these limits, and the project's pointer to its current run is written in the start's own
+ * transaction. It holds only while the pointer is the one the caller read (`seenTaskId`), so two runs of one project cannot both start.
+ */
+export interface SetupAgentStart { limits: SetupAgentLimits; seenTaskId: string | undefined }
+
+export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: unknown, run?: { setupAgent?: SetupAgentStart }): Promise<StartResult> {
   const parsedRequest = parseRequest(value);
   const { principal } = caller;
   if (principal.companyId !== deps.companyId) throw agentXError("FORBIDDEN", "this person belongs to another company");
@@ -107,6 +117,12 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     }
   }
 
+  // A project whose own setup check failed starts no work until it is fixed and checked again (a setup run is how it gets fixed, so it is let through). A project nobody checked starts as it always did.
+  if (run?.setupAgent === undefined) {
+    const setup = await setupStateOf(deps, request.project, project.definition);
+    if (setup.status === "failed") return refused(agentXError("CONFIG_INVALID", setupFailedMessage(setup.failedStep ?? "setup")));
+  }
+
   // An external check nothing in this release runs is refused here, with the clear sentence, before the budget, the limits and any machine (lane P2, review M2).
   if (unrunnableExternalCheck(project.definition.repositories) !== undefined) return refused(agentXError("CONFIG_INVALID", UNRUNNABLE_EXTERNAL_CHECK_MESSAGE));
 
@@ -149,6 +165,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     ...(designFirst?.designFirst === true ? { designFirst: { by: developerId, at: receivedAt } } : {}),
     createdAt: receivedAt, updatedAt: receivedAt,
     ...(extras?.sessionId === undefined ? {} : { sessionId: extras.sessionId }),
+    ...(run?.setupAgent === undefined ? {} : { purpose: "setup_agent" as const, setupAgentLimits: run.setupAgent.limits }),
     ...(asWorkflow ? { workflow: createWorkflowSnapshot({
       taskId, ownerId: ownerKey, now: receivedAt, path: workflowPath, checkPolicy: taskWorkflowCheckPolicy(project.definition),
       // A 1.1.0 workflow alone may hold the Understand stage: it starts at UNDERSTAND/READY, and says whether the request or Understand chose the path.
@@ -164,6 +181,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     // FR-019: the instructions exactly as sent. A task that understands first queues no planning run: its first step is the flow's.
     ...(understandFirst ? {} : { pendingPrompt: request.instructions }),
     ...(asWorkflow && !understandFirst ? { pendingWorkflowMode: "PLAN" as const } : {}),
+    // A setup run's first step is its own, after the preparation: it runs the project's commands in a setup sandbox.
+    ...(run?.setupAgent === undefined ? {} : { pendingWorkflowMode: "SETUP_AGENT" as const }),
   };
   const steps = (staged: readonly TransactItem[], taskItem: TaskRecord): TransactItem[] => [
     ...chargeItems(charge, limits, taskId, receivedAt),
@@ -179,6 +198,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     // A task that understands first starts by understanding the request, as a dispatch row like every automatic step; it runs once the preparation has ended.
     ...(understandFirst ? [dispatchRowItem(deps, taskId, 1, "UNDERSTAND", receivedAt)] : []),
     ...(extras?.items ?? []),
+    ...(run?.setupAgent === undefined ? [] : [setupAgentPointerItem({ orgId: deps.companyId, project: request.project, taskId, requestId: request.requestId, requestedBy: developerIdOf(principal), basedOnRevision: revision, startedAt: receivedAt, limits: run.setupAgent.limits, seenTaskId: run.setupAgent.seenTaskId })]),
   ];
   const idempotencyIndex = (items: readonly TransactItem[]): number => items.findIndex((item) => item.kind === "put" && item.item.pk === idempotencyKey.pk && item.item.sk === idempotencyKey.sk);
 

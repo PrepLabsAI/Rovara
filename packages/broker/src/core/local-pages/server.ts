@@ -12,6 +12,7 @@ import type { ApprovalProof } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
 import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, type PageContext } from "./pages.js";
+import { renderSetupIndex, renderSetupPage } from "./setup-page.js";
 import type { ApprovalOffer, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
 
 export interface LocalPagesServer {
@@ -46,6 +47,8 @@ export const MAX_BODY_BYTES = 32 * 1024;
 const TEXT_MAX = 4000;
 const TASK_ID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const ID = "[A-Za-z0-9_-]{1,100}";
+const PROJECT = "[A-Za-z0-9][A-Za-z0-9_.-]{0,127}";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 /** a page session this young may make a script token (Cloud asks for a sign-in made in the last few minutes for the same reason: the credential lasts for weeks). */
@@ -77,6 +80,8 @@ const NOTICES: Record<string, string> = {
   unmuted: "Notices are on again.",
   badcode: "That code is not valid: it may have expired or been used. Message Rovara in the chat again for a new one.",
   chatfresh: "Changing chat settings needs a page you opened in the last few minutes. Run `rovara chat` to open one.",
+  setupdone: "Done.",
+  setupoff: "Setting a project up with Rovara is off on this install.",
   tokenfresh: "Making a token needs a page you opened in the last few minutes. Run `rovara token create` to open one.",
   saved: "Saved.",
   acknowledged: "Acknowledged and recorded.",
@@ -192,7 +197,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     return [...value].length > TEXT_MAX ? [...value].slice(0, TEXT_MAX).join("") : value;
   };
   const tokenPageIsFresh = (request: Req): boolean => now() - request.session.createdAt <= SCRIPT_TOKEN_FRESH_MS;
-  const offerOf = (request: Req, kind: "plan" | "design"): ApprovalOffer | undefined => {
+  const offerOf = (request: Req, kind: "plan" | "design" | "setup"): ApprovalOffer | undefined => {
     const revision = Number(request.form?.get("revision"));
     const requestId = request.form?.get("requestId") ?? "";
     const artifactDigest = request.form?.get("digest") ?? "";
@@ -463,6 +468,72 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       }
       if (data.removeNoticeTarget === undefined || thread === "") return redirect(`${back}?n=invalid`);
       return redirect(`${back}?n=${outcomeCode(await data.removeNoticeTarget({ channel, tenant, space, thread }), "unnoticed")}`);
+    } },
+    { method: "GET", pattern: /^\/setup$/, handle: async (request) => {
+      if (options.data.listSetupProjects === undefined) return notFound();
+      const projects = await options.data.listSetupProjects();
+      return page(request, (context) => renderSetupIndex(context, projects));
+    } },
+    { method: "GET", pattern: new RegExp(`^/setup/(${PROJECT})$`), handle: async (request, match) => {
+      const view = await options.data.getSetupPage?.(match[1] ?? "");
+      return view === undefined ? notFound() : page(request, (context) => renderSetupPage(context, view));
+    } },
+    { method: "POST", pattern: new RegExp(`^/setup/(${PROJECT})/(start|stop|command|confirm|discard|check|host|forget|apply)$`), handle: async (request, match) => {
+      const project = match[1] ?? "";
+      const verb = match[2] ?? "";
+      const back = `${request.base}/setup/${project}`;
+      const actions = options.actions;
+      const requestId = request.form?.get("requestId") ?? "";
+      const done = (result: LocalActionResult): Reply => redirect(`${back}?n=${outcomeCode(result, "setupdone")}`);
+      if (options.data.getSetupPage === undefined) return redirect(`${back}?n=setupoff`);
+      // A write that makes a request names it with a UUID the form carried; the form token binds the project, the action and that id.
+      if (["start", "stop", "command", "confirm", "check"].includes(verb) && !UUID.test(requestId)) return redirect(`${back}?n=invalid`);
+      switch (verb) {
+        case "start": case "stop": case "check": {
+          const name = verb === "start" ? "setupStart" : verb === "stop" ? "setupStop" : "setupCheck";
+          if (actions[name] === undefined) return redirect(`${back}?n=setupoff`);
+          if (!verified(request, { action: `setup.${verb}`, subject: project, requestId })) return redirect(`${back}?n=form`);
+          return done(await actions[name]({ project, requestId }));
+        }
+        case "command": {
+          if (actions.setupCommand === undefined) return redirect(`${back}?n=setupoff`);
+          if (!verified(request, { action: "setup.command", subject: project, requestId })) return redirect(`${back}?n=form`);
+          return done(await actions.setupCommand({ project, requestId, command: text(request, "command") }));
+        }
+        case "confirm": {
+          const revision = Number(request.form?.get("revision"));
+          if (actions.setupConfirm === undefined || !Number.isSafeInteger(revision) || revision < 0) return redirect(`${back}?n=invalid`);
+          if (!verified(request, { action: "setup.confirm", subject: project, requestId, revision })) return redirect(`${back}?n=form`);
+          const chosen = (request.form?.getAll("item") ?? []).filter((id) => /^[A-Za-z0-9_-]{1,100}$/u.test(id)).slice(0, 64);
+          return done(await actions.setupConfirm({ project, requestId, expectedRevision: revision, itemIds: chosen.length === 0 ? undefined : chosen }));
+        }
+        case "discard": {
+          if (actions.setupDiscard === undefined) return redirect(`${back}?n=setupoff`);
+          if (!verified(request, { action: "setup.discard", subject: project })) return redirect(`${back}?n=form`);
+          return done(await actions.setupDiscard({ project }));
+        }
+        case "forget": {
+          const host = request.form?.get("host") ?? "";
+          if (actions.setupForgetHost === undefined || !/^[A-Za-z0-9.-]{1,300}$/u.test(host)) return redirect(`${back}?n=invalid`);
+          if (!verified(request, { action: "setup.forget", subject: `${project}:${host}` })) return redirect(`${back}?n=form`);
+          return done(await actions.setupForgetHost({ project, host }));
+        }
+        case "host": {
+          const offer = offerOf(request, "setup");
+          const decision = request.form?.get("decision");
+          const host = request.form?.get("host") ?? "";
+          if (actions.setupDecideHost === undefined || offer === undefined || (decision !== "approve" && decision !== "reject") || !/^[A-Za-z0-9.-]{1,300}$/u.test(host)) return redirect(`${back}?n=invalid`);
+          if (!verified(request, { action: "setup.host", subject: `${project}:${host}`, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })) return redirect(`${back}?n=form`);
+          return done(await actions.setupDecideHost({ project, host, decision, approval: offer, proof: proofFor(request, offer) }));
+        }
+        default: {
+          const offer = offerOf(request, "setup");
+          const decision = request.form?.get("decision");
+          if (actions.setupDecideProposal === undefined || offer === undefined || (decision !== "approve" && decision !== "reject")) return redirect(`${back}?n=invalid`);
+          if (!verified(request, { action: "setup.apply", subject: project, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })) return redirect(`${back}?n=form`);
+          return done(await actions.setupDecideProposal({ project, decision, approval: offer, proof: proofFor(request, offer) }));
+        }
+      }
     } },
     { method: "GET", pattern: new RegExp(`^/proof/(${TASK_ID})$`), handle: async (request, match) => {
       const view = await options.data.getProofReport(match[1] ?? "");

@@ -20,7 +20,8 @@ export const HELPER_LABEL = "rovara.local.helper";
 export const SANDBOX_LABEL = "rovara.local.sandbox";
 export const ISOLATION_CONFIG_LABEL = "rovara.local.isolation";
 /** Bumped when the networks or helpers change shape, so a container made by an older build is replaced. */
-export const ISOLATION_VERSION = "2";
+// 3: the Docker socket guard can serve a project's dev container (an image from a listed registry), and a setup run joins the sandbox network.
+export const ISOLATION_VERSION = "3";
 
 export const GATEWAY_INGRESS_PORT = 8080;
 export const CALLBACK_RELAY_PORT = 8081;
@@ -167,6 +168,50 @@ export interface GuardInput extends HelperCommon {
   /** The gateway's address on the sandbox network: the name server every sandbox is given. */
   sandboxDns: string;
   maxSandboxes?: number;
+  /** The registries a project's dev container may pull its image from (lower-case names). Absent or empty: no dev container (the guard refuses every image but the worker's own). */
+  devcontainerRegistries?: readonly string[];
+}
+
+/** The registries a dev container may pull from when the owner says nothing, on a Docker that runs in a virtual machine (the common dev container images live on these). On a Docker host where a container's root is the host's root there is no default. */
+export const DEFAULT_DEVCONTAINER_REGISTRIES: readonly string[] = ["mcr.microsoft.com", "docker.io", "ghcr.io", "public.ecr.aws", "quay.io"];
+
+/** What `docker info` says that tells a virtual machine's daemon from a host's: the security options (rootless) and the operating system's name (Docker Desktop). */
+export interface DaemonFacts { operatingSystem?: string | undefined; securityOptions?: readonly string[] | undefined }
+
+/**
+ * Whether files a container's root writes into the workspace belong to the person on this computer, so a dev container running as root is no more than the person: a daemon that is rootless, Docker Desktop, or a daemon in a
+ * virtual machine that this computer reaches through its own socket (Colima, Docker Desktop on macOS or Windows). Everything else, and anything that cannot be told, is treated as a host where root in a container is root on the computer.
+ */
+export function daemonIsVmBacked(input: { platform: string; dockerHost: string | undefined; facts: DaemonFacts | undefined }): boolean {
+  if (input.facts?.securityOptions?.includes("name=rootless") === true) return true;
+  if (input.facts?.operatingSystem !== undefined && /^Docker Desktop/u.test(input.facts.operatingSystem)) return true;
+  return (input.platform === "darwin" || input.platform === "win32") && (input.dockerHost === undefined || /^(?:unix|npipe):/u.test(input.dockerHost));
+}
+
+/** The owner's list from the environment: `0` or empty is none, otherwise the comma-separated names (a name that is not a plain registry name is left out). */
+export function devcontainerRegistriesFrom(value: string): readonly string[] {
+  if (value.trim() === "" || value.trim() === "0") return [];
+  return [...new Set(value.split(",").map((entry) => entry.trim().toLowerCase()).filter((entry) => /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::[0-9]{1,5})?$/u.test(entry) && !/^[0-9.]+(?::[0-9]+)?$/u.test(entry) && entry !== "localhost"))];
+}
+
+/** What `docker info` says about the daemon on a Linux host, or undefined when it cannot be read (then the daemon is treated as a host's). */
+async function readDaemonFacts(docker: DockerRunner): Promise<DaemonFacts | undefined> {
+  const answer = await docker.run(["info", "--format", "{{json .SecurityOptions}}|{{.OperatingSystem}}"], { timeoutMs: 15_000 }).catch(() => undefined);
+  if (answer === undefined || answer.exitCode !== 0) return undefined;
+  const at = answer.stdout.indexOf("|");
+  if (at < 0) return undefined;
+  try {
+    const options: unknown = JSON.parse(answer.stdout.slice(0, at));
+    return { securityOptions: Array.isArray(options) ? options.filter((entry): entry is string => typeof entry === "string") : [], operatingSystem: answer.stdout.slice(at + 1).trim() };
+  } catch { return undefined; }
+}
+
+/** The registries a dev container may pull from on this install: the owner's `ROVARA_DEVCONTAINER_REGISTRIES` when set, else the default list on a virtual machine's daemon and none on a host's. */
+export async function devcontainerRegistriesForInstall(environment: NodeJS.ProcessEnv, docker: DockerRunner, platform: string = process.platform): Promise<readonly string[]> {
+  const given = environment["ROVARA_DEVCONTAINER_REGISTRIES"];
+  if (given !== undefined) return devcontainerRegistriesFrom(given);
+  const facts = platform === "linux" ? await readDaemonFacts(docker) : undefined;
+  return daemonIsVmBacked({ platform, dockerHost: environment["DOCKER_HOST"], facts }) ? DEFAULT_DEVCONTAINER_REGISTRIES : [];
 }
 
 export function guardPolicy(input: GuardInput): Record<string, unknown> {
@@ -181,6 +226,7 @@ export function guardPolicy(input: GuardInput): Record<string, unknown> {
     user: "1000:1000",
     port: SOCKET_GUARD_PORT,
     maxSandboxes: input.maxSandboxes ?? 16,
+    ...(input.devcontainerRegistries === undefined || input.devcontainerRegistries.length === 0 ? {} : { devcontainer: { registries: [...input.devcontainerRegistries] } }),
   };
 }
 

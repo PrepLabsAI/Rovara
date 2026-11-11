@@ -31,6 +31,7 @@ import { readVerifiedText } from "./documents.js";
 import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../core/design-review/packet-route.js";
 import { readDesignTemplate } from "../../core/design-review/template.js";
 import { DESIGN_REVIEW_RESULT_MAX_BYTES } from "../../core/design-review/outcome.js";
+import { handleSetupAgentCallback, type SetupAgentCallbackDeps } from "../../core/setup-agent/callback.js";
 import type { RepositoryCredential, RepositoryGrantService } from "../../repository-access.js";
 
 const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z-]+)$/u;
@@ -65,6 +66,8 @@ export interface CallbackDeps {
   e2e?: { records: RoundRecordReaders };
   /** Told after a batch of a worker's events was stored (the lessons' load report). Best effort: it never fails the batch and is not waited on past its own work. */
   onEvents?: ((operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>) => Promise<void>) | undefined;
+  /** A setup run's callback (`core/setup-agent`): what it needs beyond the flow's store. Absent: the action is not served. */
+  setupAgent?: Omit<SetupAgentCallbackDeps, "store" | "companyId" | "now"> | undefined;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -83,7 +86,7 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "pull-request", "pull-request-update"]);
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "pull-request", "pull-request-update", "setup-agent"]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -176,6 +179,7 @@ export async function readOutcome(deps: CallbackDeps, operation: OperationRecord
     const base = WorkflowReviewBaseSchema.safeParse((result as { preparedBase?: unknown } | undefined)?.preparedBase);
     return { kind: "prepared", ...(base.success ? { base: base.data } : {}) };
   }
+  if (operation.workflowMode === "SETUP_AGENT") return { kind: "setup-run", result: result ?? {} };
   if (operation.workflowMode === "UNDERSTAND") {
     const saved = await readArtifactText(deps, operation, UNDERSTAND_ARTIFACT_NAME, 32_768 + 1);
     if (saved === undefined) return undefined;
@@ -241,7 +245,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "repository-credentials") return json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) });
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-      if (!SERVED_ACTIONS.has(action)) {
+      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined)) {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.
         capabilities.verify(token, action as CallbackAction);
         throw agentXError("NOT_FOUND", "this callback is not available on this install");
@@ -261,6 +265,10 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       }
       if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
+      if (action === "setup-agent") {
+        const run = deps.setupAgent!;
+        return json(200, await handleSetupAgentCallback({ ...run, store: deps.flow.store, companyId: deps.flow.companyId, now: () => (deps.flow.now?.() ?? new Date()).getTime() }, operation, bodyOf(request)));
+      }
       const body = bodyOf(request);
       if (action === "events") {
         const recorded = await recordEvents(deps, operation, body);
@@ -273,7 +281,9 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       const error = typeof body["error"] === "string" ? body["error"] : undefined;
       // A coding run that left the code as it was reports what it found with its failure, so a failed coding run's result is handed over too (the build step reads only what it needs of it).
       const outcome = status === "SUCCEEDED" ? await readOutcome(deps, operation, body["result"])
-        : operation.workflowMode === "IMPLEMENT" && typeof body["result"] === "object" && body["result"] !== null ? { kind: "built" as const, result: body["result"] } : undefined;
+        : operation.workflowMode === "IMPLEMENT" && typeof body["result"] === "object" && body["result"] !== null ? { kind: "built" as const, result: body["result"] }
+        // A setup run that failed or was stopped may still carry what it learned (its partial proposal and summary): the broker reads that again at the end.
+        : operation.workflowMode === "SETUP_AGENT" && typeof body["result"] === "object" && body["result"] !== null ? { kind: "setup-run" as const, result: body["result"] } : undefined;
       const recorded = await recordOperationResult(deps.flow, { workspaceId, operationId, fence: capability.fence, status, ...(error === undefined ? {} : { error }), ...(outcome === undefined ? {} : { outcome }) });
       return json(200, { ok: true, duplicate: recorded.duplicate });
     } catch (error) {

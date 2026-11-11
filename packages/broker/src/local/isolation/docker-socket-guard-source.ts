@@ -14,6 +14,13 @@ const net = require("net");
 const policy = JSON.parse(process.env.ROVARA_SOCK_POLICY || "{}");
 const OWNER = "rovara.local.owner";
 const SANDBOX = "rovara.local.sandbox";
+const DEVCONTAINER_LABEL = "rovara.local.devcontainer";
+// A project's dev container (an image the project names, started by the worker through the dev container tool) is allowed only when the owner's policy lists registries to pull from. Without a list every
+// image call but the worker's own is refused, as before.
+const DEV = policy.devcontainer && Array.isArray(policy.devcontainer.registries) && policy.devcontainer.registries.length > 0 ? { registries: policy.devcontainer.registries.map(function (name) { return String(name).toLowerCase(); }) } : undefined;
+// The empty volumes the worker mounts over its own folders of the workspace (devcontainer.ts maskVolume). The guard never makes a volume: it turns each into a read-only tmpfs over the same place.
+const DEV_MASK = /^agentx-(?:docker-data-mask|mask-[a-z0-9_-]{1,40})-[a-f0-9]{8,32}$/;
+const DEV_USER = /^[A-Za-z0-9_.:-]{0,64}$/;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MAX_BODY = 262144;
 let createQueue = Promise.resolve();
@@ -45,15 +52,20 @@ function ask(method, path, body) {
     request.end(body);
   });
 }
-// The container's id when it is a sandbox of this worker, otherwise undefined.
-async function ownedContainer(reference) {
+// The container's id (and whether it is a dev container) when it is a sandbox or dev container of this worker, otherwise undefined.
+async function ownedInfo(reference) {
   if (!NAME.test(reference)) return undefined;
   const answer = await ask("GET", "/containers/" + encodeURIComponent(reference) + "/json");
   if (answer.status !== 200) return undefined;
   let parsed;
   try { parsed = JSON.parse(answer.body); } catch (error) { return undefined; }
   const labels = (parsed && parsed.Config && parsed.Config.Labels) || {};
-  return labels[OWNER] === policy.owner && labels[SANDBOX] === "1" && typeof parsed.Id === "string" ? parsed.Id : undefined;
+  if (!(labels[OWNER] === policy.owner && labels[SANDBOX] === "1" && typeof parsed.Id === "string")) return undefined;
+  return { id: parsed.Id, devcontainer: labels[DEVCONTAINER_LABEL] === "1" };
+}
+async function ownedContainer(reference) {
+  const info = await ownedInfo(reference);
+  return info === undefined ? undefined : info.id;
 }
 
 // ---- the rules for a sandbox
@@ -112,14 +124,44 @@ function booleanOr(value, name) {
   return value;
 }
 
-// The HostConfig a sandbox gets, built from the checked parts of what the worker sent.
-function buildHostConfig(host) {
+// A dev container is held to the sandbox's rules except where it must differ, and each difference is a value the guard forces or checks, never one it copies:
+//   - it keeps Docker's default capabilities (a dev container's own tools need them) minus MKNOD and NET_RAW; it can add only SYS_PTRACE, and its security option is always no-new-privileges (forced, so no
+//     setuid file gains a process privileges inside it; no other option is accepted);
+//   - it is on the sandbox network with the sandbox's name server whatever it asked, never another network;
+//   - its mounts are the workspace folder at its own path, and the worker's mask volumes, which the guard turns into read-only empty tmpfs MOUNTS over the same folders (no volume is ever made; a mount, not a --tmpfs
+//     setting, because Docker lists a mount of the started container and the worker checks that its folders are hidden by one).
+const DEV_HOST_USED = HOST_USED.concat(["Mounts", "CapAdd"]);
+const DEV_HOST_ZERO = HOST_ZERO.filter(function (name) { return name !== "Mounts" && name !== "CapAdd"; });
+const MOUNT_KEYS = ["Type", "Source", "Target", "ReadOnly", "Consistency"];
+const CONSISTENCY = ["", "default", "cached", "consistent", "delegated"];
+
+// The HostConfig a sandbox (or dev container) gets, built from the checked parts of what the worker sent.
+function buildHostConfig(host, dev) {
   if (host === null || typeof host !== "object" || Array.isArray(host)) deny("host config is missing");
-  knownKeys(host, HOST_USED, HOST_ZERO, "host setting");
+  knownKeys(host, dev ? DEV_HOST_USED : HOST_USED, dev ? DEV_HOST_ZERO : HOST_ZERO, "host setting");
   if (host.Privileged === true || (host.Privileged !== undefined && host.Privileged !== false && host.Privileged !== null)) deny("privileged mode is not allowed");
-  if (host.NetworkMode !== policy.network) deny("only the sandbox network is allowed");
-  if (!Array.isArray(host.CapDrop) || !host.CapDrop.some(function (cap) { return String(cap).toUpperCase() === "ALL"; })) deny("all capabilities must be dropped");
-  if (!stringList(host.SecurityOpt, 8) || host.SecurityOpt.length === 0 || !host.SecurityOpt.every(function (entry) { return /^no-new-privileges(:true|=true)?$/.test(entry); })) deny("only no-new-privileges is allowed as a security option");
+  if (dev) {
+    if (host.NetworkMode !== undefined && host.NetworkMode !== null && host.NetworkMode !== "" && host.NetworkMode !== "default" && host.NetworkMode !== policy.network) deny("only the sandbox network is allowed");
+  } else if (host.NetworkMode !== policy.network) deny("only the sandbox network is allowed");
+  let capDrop = ["ALL"];
+  let capAdd = [];
+  let securityOpt = ["no-new-privileges"];
+  if (dev) {
+    // What a dev container drops is its own to add to (a cap it drops is only less); MKNOD and NET_RAW are always dropped.
+    const given = host.CapDrop === undefined || host.CapDrop === null ? [] : host.CapDrop;
+    if (!stringList(given, 40) || !given.every(function (cap) { return /^(?:CAP_)?[A-Z_]{1,30}$/.test(cap); })) deny("CapDrop is not valid");
+    capDrop = ["MKNOD", "NET_RAW"].concat(given.filter(function (cap) { return cap !== "MKNOD" && cap !== "NET_RAW"; }));
+    const added = host.CapAdd === undefined || host.CapAdd === null ? [] : host.CapAdd;
+    if (!stringList(added, 4) || !added.every(function (cap) { return /^(?:CAP_)?SYS_PTRACE$/i.test(cap); })) deny("only SYS_PTRACE may be added");
+    capAdd = added;
+    const opts = host.SecurityOpt === undefined || host.SecurityOpt === null ? [] : host.SecurityOpt;
+    if (!stringList(opts, 8) || !opts.every(function (entry) { return /^no-new-privileges(:true|=true)?$/.test(entry); })) deny("only no-new-privileges is allowed as a security option");
+    // Always forced: a dev container's processes cannot gain privileges by a setuid file (so no sudo inside it).
+    securityOpt = ["no-new-privileges"];
+  } else {
+    if (!Array.isArray(host.CapDrop) || !host.CapDrop.some(function (cap) { return String(cap).toUpperCase() === "ALL"; })) deny("all capabilities must be dropped");
+    if (!stringList(host.SecurityOpt, 8) || host.SecurityOpt.length === 0 || !host.SecurityOpt.every(function (entry) { return /^no-new-privileges(:true|=true)?$/.test(entry); })) deny("only no-new-privileges is allowed as a security option");
+  }
   // Null (the default masks) is the only safe value: an empty list switches the masks off.
   if (host.MaskedPaths !== null && host.MaskedPaths !== undefined) deny("masked paths cannot be changed");
   if (host.ReadonlyPaths !== null && host.ReadonlyPaths !== undefined) deny("read-only paths cannot be changed");
@@ -136,6 +178,32 @@ function buildHostConfig(host) {
     const mode = /(?:^|,)(mode=[0-7]{3,4})(?:,|$)/.exec(tmpfs[path]);
     masks[path] = ["ro", "noexec", "nosuid", "nodev"].concat(size ? [size[1]] : [], mode ? [mode[1]] : []).join(",");
   });
+  const mounts = [];
+  const maskMounts = [];
+  if (dev && host.Mounts !== undefined && host.Mounts !== null) {
+    if (!Array.isArray(host.Mounts) || host.Mounts.length > 12) deny("mounts are not valid");
+    let workspaceMounts = 0;
+    host.Mounts.forEach(function (entry) {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) deny("a mount is not valid");
+      Object.keys(entry).forEach(function (key) { if (MOUNT_KEYS.indexOf(key) === -1) deny("mount setting " + key + " is not allowed"); });
+      if (entry.ReadOnly !== undefined && entry.ReadOnly !== false) deny("a mount is read-write");
+      if (entry.Consistency !== undefined && CONSISTENCY.indexOf(entry.Consistency) === -1) deny("mount consistency is not valid");
+      if (entry.Type === "bind") {
+        // Only the workspace folder, at its own path (the dev container tool mounts it so a path means the same file to the worker, the agent's tools and a command).
+        if (entry.Source !== policy.workspaceDir || entry.Target !== policy.workspaceDir) deny("only the workspace folder may be mounted");
+        workspaceMounts += 1;
+        if (workspaceMounts > 1) deny("the workspace folder is mounted once");
+        mounts.push({ Type: "bind", Source: policy.workspaceDir, Target: policy.workspaceDir, ReadOnly: false });
+      } else if (entry.Type === "volume") {
+        // The worker's mask volume over one of its own folders: not a volume, an empty read-only tmpfs over the same folder.
+        if (typeof entry.Source !== "string" || !DEV_MASK.test(entry.Source) || !inside(entry.Target) || entry.Target === policy.workspaceDir) deny("only a mask over a folder of the workspace may be a volume");
+        maskMounts.push(entry.Target);
+      } else if (entry.Type === "tmpfs") {
+        if (!inside(entry.Target) || entry.Target === policy.workspaceDir) deny("a tmpfs may only cover a folder inside the workspace");
+        maskMounts.push(entry.Target);
+      } else deny("mount type is not allowed");
+    });
+  }
   const memory = numberOr(host.Memory, 0, "Memory") || DEFAULT_MEMORY;
   const swap = numberOr(host.MemorySwap, 0, "MemorySwap");
   if (memory > MEMORY_CEILING || swap > 2 * MEMORY_CEILING) deny("the memory limit is higher than this machine has");
@@ -151,17 +219,17 @@ function buildHostConfig(host) {
   if (host.MemorySwappiness !== undefined && host.MemorySwappiness !== null && !(typeof host.MemorySwappiness === "number" && host.MemorySwappiness >= -1 && host.MemorySwappiness <= 100)) deny("MemorySwappiness is not valid");
   let ulimits = [];
   if (host.Ulimits !== undefined && host.Ulimits !== null) {
-    if (!(Array.isArray(host.Ulimits) && host.Ulimits.length <= 16 && host.Ulimits.every(function (entry) { return entry && typeof entry === "object" && typeof entry.Name === "string" && /^[a-z]{3,16}$/.test(entry.Name) && typeof entry.Soft === "number" && typeof entry.Hard === "number"; }))) deny("ulimits are not valid");
+    // Only the limits that cannot hurt the machine: open files, processes and core size (rtprio and memlock, for one, let a container starve the CPUs or lock memory).
+    if (!(Array.isArray(host.Ulimits) && host.Ulimits.length <= 8 && host.Ulimits.every(function (entry) { return entry && typeof entry === "object" && (entry.Name === "nofile" || entry.Name === "nproc" || entry.Name === "core") && typeof entry.Soft === "number" && typeof entry.Hard === "number"; }))) deny("ulimits are not valid");
     ulimits = host.Ulimits.map(function (entry) { return { Name: entry.Name, Soft: entry.Soft, Hard: entry.Hard }; });
   }
-  return {
+  const built = {
     Binds: binds.slice(),
     Tmpfs: masks,
     NetworkMode: policy.network,
     Dns: policy.dns,
     // Forced, not only checked.
-    CapDrop: ["ALL"],
-    SecurityOpt: ["no-new-privileges"],
+    CapDrop: capDrop,
     Privileged: false,
     PidsLimit: pids > 0 ? pids : DEFAULT_PIDS,
     Memory: memory,
@@ -176,6 +244,13 @@ function buildHostConfig(host) {
     Ulimits: ulimits,
     CpusetCpus: typeof host.CpusetCpus === "string" ? host.CpusetCpus : "",
   };
+  if (dev) {
+    // An empty read-only tmpfs over each folder the worker hides (Docker's tmpfs mounts are noexec, nosuid and nodev unless asked otherwise).
+    built.Mounts = mounts.concat(Array.from(new Set(maskMounts)).map(function (target) { return { Type: "tmpfs", Target: target, ReadOnly: true, TmpfsOptions: { SizeBytes: 1048576 } }; }));
+    built.CapAdd = capAdd;
+    built.SecurityOpt = securityOpt;
+  } else built.SecurityOpt = securityOpt;
+  return built;
 }
 
 function transformCreate(query, text) {
@@ -220,7 +295,7 @@ function transformCreate(query, text) {
     AttachStdout: body.AttachStdout === true,
     AttachStderr: body.AttachStderr === true,
     StdinOnce: body.StdinOnce === true,
-    HostConfig: buildHostConfig(body.HostConfig),
+    HostConfig: buildHostConfig(body.HostConfig, false),
     NetworkingConfig: { EndpointsConfig: {} },
   };
   if (typeof body.StopSignal === "string" && body.StopSignal !== "") out.StopSignal = body.StopSignal;
@@ -229,8 +304,96 @@ function transformCreate(query, text) {
   return JSON.stringify(out);
 }
 
-// The body of a command, rebuilt: the sandbox's user whatever was asked, never privileged, and only the fields below.
-function checkExecBody(text) {
+// ---- a project's dev container (only when the owner's policy lists registries)
+const IMAGE_PATH = /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$/;
+const IMAGE_TAG = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+const IMAGE_DIGEST = /^sha256:[a-f0-9]{64}$/;
+const REGISTRY_HOST = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::[0-9]{1,5})?$/;
+// The reason an image reference may not be pulled or started, or undefined. The daemon (not the worker) makes the pull, so the registry is the one place a name could reach: it must be on the owner's list,
+// a name and not an address, and the reference must be plain (a registry, a path, a tag or a digest, nothing else).
+function imageRefusal(ref) {
+  if (DEV === undefined) return "dev containers are not allowed on this install";
+  if (typeof ref !== "string" || ref.length === 0 || ref.length > 255 || ref !== ref.trim() || /[\u0000-\u001f\u007f\\\s]/.test(ref)) return "the image name is not valid";
+  const at = ref.indexOf("@");
+  const before = at === -1 ? ref : ref.slice(0, at);
+  if (at !== -1 && !IMAGE_DIGEST.test(ref.slice(at + 1))) return "the image digest is not valid";
+  const slash = before.lastIndexOf("/");
+  const colon = before.indexOf(":", slash + 1);
+  const name = colon === -1 ? before : before.slice(0, colon);
+  if (colon !== -1 && !IMAGE_TAG.test(before.slice(colon + 1))) return "the image tag is not valid";
+  const parts = name.split("/");
+  let registry = "docker.io";
+  let path = name;
+  if (parts.length > 1 && (parts[0].indexOf(".") !== -1 || parts[0].indexOf(":") !== -1 || parts[0] === "localhost")) { registry = parts[0].toLowerCase(); path = parts.slice(1).join("/"); }
+  if (registry === "index.docker.io") registry = "docker.io";
+  if (!REGISTRY_HOST.test(registry) || /^[0-9.]+(?::[0-9]+)?$/.test(registry) || registry.indexOf("[") !== -1 || registry === "localhost" || registry.indexOf("localhost:") === 0) return "the registry must be a name on the list";
+  if (DEV.registries.indexOf(registry) === -1) return "that registry is not on the list of registries a dev container may pull from";
+  if (!IMAGE_PATH.test(path) || path.length > 200) return "the image name is not valid";
+  return undefined;
+}
+
+// A dev container is created from a body this builds from nothing, exactly as a sandbox is, with the differences listed at buildHostConfig.
+function transformDevcontainerCreate(query, text) {
+  let body;
+  try { body = JSON.parse(text); } catch (error) { deny("the body is not JSON"); }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) deny("the body is not an object");
+  Array.from(query.keys()).forEach(function (key) { if (key !== "name") deny("create option " + key + " is not allowed"); });
+  const name = query.get("name");
+  if (name !== null && !/^agentx-dev-[A-Za-z0-9_.-]{1,100}$/.test(name)) deny("a dev container name starts with agentx-dev-");
+  knownKeys(body, TOP_USED, TOP_ZERO, "setting");
+  const refusal = imageRefusal(body.Image);
+  if (refusal !== undefined) deny(refusal);
+  if (body.User !== undefined && body.User !== null && (typeof body.User !== "string" || !DEV_USER.test(body.User))) deny("the user is not valid");
+  if (body.WorkingDir !== undefined && body.WorkingDir !== null && body.WorkingDir !== "" && (typeof body.WorkingDir !== "string" || body.WorkingDir.charAt(0) !== "/" || body.WorkingDir.length > 4096 || body.WorkingDir.indexOf("\0") !== -1)) deny("the working folder is not valid");
+  ["Cmd", "Entrypoint"].forEach(function (key) { if (body[key] !== undefined && body[key] !== null && !stringList(body[key], 256)) deny(key + " is not valid"); });
+  if (body.Env !== undefined && body.Env !== null && !stringList(body.Env, 500)) deny("Env is not valid");
+  const labels = body.Labels === null || body.Labels === undefined ? {} : body.Labels;
+  if (typeof labels !== "object" || Array.isArray(labels) || Object.keys(labels).length > 64) deny("labels are not valid");
+  const kept = {};
+  Object.keys(labels).forEach(function (key) {
+    if (key.indexOf("rovara.") === 0) return;
+    if (typeof labels[key] !== "string" || labels[key].length > 512 || key.length > 256) deny("labels are not valid");
+    kept[key] = labels[key];
+  });
+  // The guard's own labels, which the worker cannot set or remove: whose it is, and that it is a sandbox of the guard's kind and a dev container.
+  kept[OWNER] = policy.owner;
+  kept[SANDBOX] = "1";
+  kept[DEVCONTAINER_LABEL] = "1";
+  kept["agentx.workspace"] = policy.workspaceKey;
+  ["Tty", "OpenStdin", "AttachStdin", "AttachStdout", "AttachStderr", "StdinOnce"].forEach(function (key) { if (body[key] !== undefined && body[key] !== null && typeof body[key] !== "boolean") deny(key + " is not valid"); });
+  if (body.StopSignal !== undefined && body.StopSignal !== null && (typeof body.StopSignal !== "string" || !/^[A-Za-z0-9]{0,16}$/.test(body.StopSignal))) deny("StopSignal is not valid");
+  if (body.StopTimeout !== undefined && body.StopTimeout !== null && !(typeof body.StopTimeout === "number" && body.StopTimeout >= 0 && body.StopTimeout <= 600)) deny("StopTimeout is not valid");
+  const out = {
+    Image: body.Image,
+    User: typeof body.User === "string" ? body.User : "",
+    Cmd: body.Cmd === undefined ? null : body.Cmd,
+    Entrypoint: body.Entrypoint === undefined ? null : body.Entrypoint,
+    Env: body.Env === undefined ? null : body.Env,
+    WorkingDir: body.WorkingDir || "",
+    Labels: kept,
+    Tty: body.Tty === true,
+    OpenStdin: body.OpenStdin === true,
+    AttachStdin: body.AttachStdin === true,
+    AttachStdout: body.AttachStdout === true,
+    AttachStderr: body.AttachStderr === true,
+    StdinOnce: body.StdinOnce === true,
+    HostConfig: buildHostConfig(body.HostConfig, true),
+    NetworkingConfig: { EndpointsConfig: {} },
+  };
+  if (typeof body.StopSignal === "string" && body.StopSignal !== "") out.StopSignal = body.StopSignal;
+  if (typeof body.StopTimeout === "number") out.StopTimeout = body.StopTimeout;
+  out.NetworkingConfig.EndpointsConfig[policy.network] = {};
+  return JSON.stringify(out);
+}
+
+// The body of a command, rebuilt: never privileged, and only the fields below. "who" says whose command it is, as a tagged
+// kind so that a new kind of container is a new branch here and never a boolean that quietly widens an old one:
+//   { kind: "sandbox" }       the worker's own sandbox: the sandbox's user whatever was asked;
+//   { kind: "devcontainer" }  a dev container: its own remote user, named plainly (root included, see the docs).
+// Any other value is refused, so a caller that is not updated with a new kind fails closed.
+function checkExecBody(text, who) {
+  const dev = who !== null && typeof who === "object" && who.kind === "devcontainer";
+  if (!dev && !(who !== null && typeof who === "object" && who.kind === "sandbox")) deny("the kind of container for this command is not known");
   let body;
   try { body = JSON.parse(text); } catch (error) { deny("the body is not JSON"); }
   if (body === null || typeof body !== "object" || Array.isArray(body)) deny("the body is not an object");
@@ -240,13 +403,15 @@ function checkExecBody(text) {
   });
   if (body.Privileged !== undefined && body.Privileged !== false && body.Privileged !== null) deny("privileged exec is not allowed");
   if (body.ConsoleSize !== undefined && !emptyish(body.ConsoleSize)) deny("exec setting ConsoleSize is not allowed");
-  if (body.User !== undefined && body.User !== "" && body.User !== policy.user && body.User !== policy.user.split(":")[0]) deny("a command runs as the sandbox user");
+  // A sandbox's command runs as the sandbox user. A dev container's runs as its own remote user (the image's), named plainly; never privileged.
+  if (dev) { if (body.User !== undefined && body.User !== null && (typeof body.User !== "string" || !DEV_USER.test(body.User))) deny("the command user is not valid"); }
+  else if (body.User !== undefined && body.User !== "" && body.User !== policy.user && body.User !== policy.user.split(":")[0]) deny("a command runs as the sandbox user");
   if (!stringList(body.Cmd, 4096) || body.Cmd.length === 0) deny("Cmd is not valid");
   if (body.Env !== undefined && body.Env !== null && !stringList(body.Env, 500)) deny("Env is not valid");
   if (body.WorkingDir !== undefined && body.WorkingDir !== null && (typeof body.WorkingDir !== "string" || body.WorkingDir.length > 4096 || body.WorkingDir.indexOf("\0") !== -1)) deny("WorkingDir is not valid");
   if (body.DetachKeys !== undefined && body.DetachKeys !== null && (typeof body.DetachKeys !== "string" || !/^[A-Za-z0-9,@^\\[\]_-]{0,32}$/.test(body.DetachKeys))) deny("DetachKeys is not valid");
   ["AttachStdin", "AttachStdout", "AttachStderr", "Tty"].forEach(function (key) { if (body[key] !== undefined && body[key] !== null && typeof body[key] !== "boolean") deny(key + " is not valid"); });
-  const out = { AttachStdin: body.AttachStdin === true, AttachStdout: body.AttachStdout === true, AttachStderr: body.AttachStderr === true, Tty: body.Tty === true, Cmd: body.Cmd, User: policy.user, Privileged: false };
+  const out = { AttachStdin: body.AttachStdin === true, AttachStdout: body.AttachStdout === true, AttachStderr: body.AttachStderr === true, Tty: body.Tty === true, Cmd: body.Cmd, User: dev ? (typeof body.User === "string" ? body.User : "") : policy.user, Privileged: false };
   if (Array.isArray(body.Env)) out.Env = body.Env;
   if (typeof body.WorkingDir === "string" && body.WorkingDir !== "") out.WorkingDir = body.WorkingDir;
   if (typeof body.DetachKeys === "string" && body.DetachKeys !== "") out.DetachKeys = body.DetachKeys;
@@ -364,7 +529,11 @@ async function route(request, response) {
 
   if (method === "POST" && path === "/containers/create") {
     const text = await readBody(request);
-    const body = transformCreate(query, text);
+    // A body that names an image other than the worker's is a dev container's (only when registries are listed); it gets its own rules, never the sandbox's.
+    let image;
+    try { image = JSON.parse(text).Image; } catch (error) { image = undefined; }
+    const dev = DEV !== undefined && typeof image === "string" && image !== policy.image;
+    const body = dev ? transformDevcontainerCreate(query, text) : transformCreate(query, text);
     // One create at a time, so the count below is the count when this one is made.
     const turn = createQueue;
     let release = function () {};
@@ -382,8 +551,8 @@ async function route(request, response) {
       return response.end(JSON.stringify({ message: "rovara: too many task sandboxes at once" }));
     }
     const created = new URLSearchParams();
-    created.set("name", query.get("name"));
-    return await forward(request, response, "/containers/create?" + created.toString(), body);
+    if (query.get("name") !== null) created.set("name", query.get("name"));
+    return await forward(request, response, created.toString() === "" ? "/containers/create" : "/containers/create?" + created.toString(), body);
     } finally {
       release();
     }
@@ -412,10 +581,11 @@ async function route(request, response) {
   match = /^\/containers\/([^/]+)\/exec$/.exec(path);
   if (match !== null && method === "POST") {
     onlyQuery(query, []);
-    const id = await ownedContainer(decodeURIComponent(match[1]));
-    if (id === undefined) return send(response, 404, "no such sandbox of this worker");
+    const info = await ownedInfo(decodeURIComponent(match[1]));
+    if (info === undefined) return send(response, 404, "no such sandbox of this worker");
+    const id = info.id;
     const text = await readBody(request);
-    return forward(request, response, "/containers/" + id + "/exec", checkExecBody(text), function (status, answer) {
+    return forward(request, response, "/containers/" + id + "/exec", checkExecBody(text, info.devcontainer ? { kind: "devcontainer" } : { kind: "sandbox" }), function (status, answer) {
       if (status !== 201) return;
       const created = JSON.parse(answer);
       if (typeof created.Id === "string" && NAME.test(created.Id)) {
@@ -444,8 +614,45 @@ async function route(request, response) {
     onlyQuery(query, []);
     let name;
     try { name = decodeURIComponent(match[1]); } catch (error) { deny("image name is not valid"); }
-    if (name !== policy.image) deny("only the worker's image may be inspected");
+    if (name !== policy.image && imageRefusal(name) !== undefined) deny("only the worker's image, or a dev container's image from a listed registry, may be inspected");
     return forward(request, response, "/images/" + encodeURIComponent(name) + "/json");
+  }
+
+  // Pulling the image a dev container names: the daemon pulls, so the reference is checked the same way (a listed registry, a plain name), and nothing but the reference and the platform is passed on.
+  if (method === "POST" && path === "/images/create") {
+    onlyQuery(query, ["fromImage", "tag", "platform"]);
+    const from = query.get("fromImage");
+    const tag = query.get("tag");
+    if (from === null || (tag !== null && !/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,160}$/.test(tag))) deny("the image to pull is not valid");
+    const reference = tag === null || tag === "" ? from : from + (IMAGE_DIGEST.test(tag) ? "@" : ":") + tag;
+    const refusal = imageRefusal(reference);
+    if (refusal !== undefined) deny(refusal);
+    const platform = query.get("platform");
+    if (platform !== null && !/^[a-z0-9/._-]{1,40}$/.test(platform)) deny("the platform is not valid");
+    const pull = new URLSearchParams();
+    pull.set("fromImage", from);
+    if (tag !== null && tag !== "") pull.set("tag", tag);
+    if (platform !== null && platform !== "") pull.set("platform", platform);
+    return forward(request, response, "/images/create?" + pull.toString());
+  }
+
+  // The events of this worker's own containers only (the dev container tool waits for its container to start): the label filters are forced, so another container of the daemon is never named in an answer.
+  if (method === "GET" && path === "/events" && DEV !== undefined) {
+    onlyQuery(query, ["filters", "since", "until"]);
+    let filters = {};
+    if (query.has("filters")) {
+      try { filters = JSON.parse(query.get("filters")); } catch (error) { deny("filters are not valid"); }
+    }
+    if (filters === null || typeof filters !== "object" || Array.isArray(filters)) deny("filters are not valid");
+    const given = {};
+    Object.keys(filters).forEach(function (key) { if (key === "event" || key === "type") given[key] = filters[key]; });
+    given.type = { container: true };
+    given.label = {};
+    given.label[OWNER + "=" + policy.owner] = true;
+    given.label[SANDBOX + "=1"] = true;
+    ["since", "until"].forEach(function (key) { if (query.has(key) && !/^[0-9.]{1,32}$/.test(query.get(key))) deny(key + " is not valid"); });
+    query.set("filters", JSON.stringify(given));
+    return forward(request, response, rebuilt("/events", query));
   }
 
   match = /^\/networks\/([^/]+)$/.exec(path);
@@ -470,6 +677,51 @@ function onRequest(request, response) {
   });
 }
 
+// A dev container's docker run attaches to the container it just made (its output is the start-up line). Only the attach of an owned container, with the options below and no body; the guard sends the daemon a request
+// of its own making and passes bytes on only after the daemon has answered 101.
+function onAttach(request, socket, head, target, reference, refuse) {
+  const allowed = ["stream", "stdin", "stdout", "stderr", "logs", "detachKeys"];
+  let reference_;
+  try { reference_ = decodeURIComponent(reference); } catch (error) { reference_ = ""; }
+  const bad = Array.from(target.searchParams.keys()).some(function (key) { return allowed.indexOf(key) === -1; });
+  const length = request.headers["content-length"] === undefined ? 0 : Number(request.headers["content-length"]);
+  if (request.method !== "POST" || bad || request.headers["transfer-encoding"] !== undefined || length !== 0 || (head && head.length > 0)) {
+    log("refused", { method: request.method, route: "upgrade", rule: "not an attach of this worker" });
+    return refuse("403 Forbidden", "this upgrade is not allowed");
+  }
+  ownedContainer(reference_).then(function (id) {
+    if (id === undefined) return refuse("404 Not Found", "no such sandbox of this worker");
+    socket.on("error", function () {});
+    const upstream = net.connect({ path: policy.upstream });
+    let answer = Buffer.alloc(0);
+    upstream.on("error", function () { socket.destroy(); });
+    socket.on("close", function () { upstream.destroy(); });
+    upstream.on("close", function () { socket.destroy(); });
+    upstream.on("connect", function () {
+      const query = new URLSearchParams();
+      allowed.forEach(function (key) { if (target.searchParams.has(key)) query.set(key, target.searchParams.get(key)); });
+      const text = query.toString();
+      upstream.write("POST /containers/" + id + "/attach" + (text === "" ? "" : "?" + text) + " HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n");
+    });
+    upstream.on("data", function onAnswer(chunk) {
+      answer = Buffer.concat([answer, chunk]);
+      if (answer.length > 16384) return upstream.destroy();
+      if (answer.indexOf("\r\n\r\n") === -1) return;
+      upstream.removeListener("data", onAnswer);
+      upstream.pause();
+      if (!/^HTTP\/1\.1 101 /.test(answer.subarray(0, 16).toString("latin1"))) {
+        socket.end(answer);
+        upstream.destroy();
+        return;
+      }
+      socket.write(answer);
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+      upstream.resume();
+    });
+  }).catch(function () { refuse("502 Bad Gateway", "the request could not be handled"); });
+}
+
 // A command's input and output travel over an upgraded connection (docker exec). Nothing the client sends reaches the daemon unread:
 // the guard reads the start body itself, sends the daemon a request of its own making, and passes bytes on only after the daemon has
 // answered 101. Any other answer is the end of the connection, so a request pipelined behind this one is never read by the daemon
@@ -480,6 +732,8 @@ function onUpgrade(request, socket, head) {
   };
   const target = new URL(request.url || "/", "http://docker");
   const path = target.pathname.replace(/^\/v[0-9]+(\.[0-9]+)?(?=\/)/, "");
+  const attach = /^\/containers\/([^/]+)\/attach$/.exec(path);
+  if (attach !== null && DEV !== undefined) return onAttach(request, socket, head, target, attach[1], refuse);
   const match = /^\/exec\/([^/]+)\/start$/.exec(path);
   let id = "";
   try { id = match === null ? "" : decodeURIComponent(match[1]); } catch (error) { id = ""; }
@@ -557,7 +811,7 @@ function main() {
 }
 
 if (process.env.ROVARA_SOCK_LIBRARY === "1") {
-  module.exports = { transformCreate: transformCreate, checkExecBody: checkExecBody, createServer: createServer, Refusal: Refusal, policy: policy };
+  module.exports = { transformCreate: transformCreate, transformDevcontainerCreate: transformDevcontainerCreate, imageRefusal: imageRefusal, checkExecBody: checkExecBody, createServer: createServer, Refusal: Refusal, policy: policy };
 } else {
   main();
 }

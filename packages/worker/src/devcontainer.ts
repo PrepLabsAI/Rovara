@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { lstat, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -19,6 +19,7 @@ import {
   WORKER_STATE_VISIBLE,
   containerProblems,
   devcontainerConfigRefusal,
+  localDevcontainerRefusal,
   parseJsonc,
   hostPathResolver,
   type ContainerInspection,
@@ -26,6 +27,7 @@ import {
 import { inertContextText } from "./context-text.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
+import { sandboxNetworkFromEnvironment } from "./task-sandbox.js";
 import type { CommandResult } from "./readiness.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { hiddenWorkspaceDirectories, isMaskVolumeName } from "./workspace-state.js";
@@ -63,6 +65,11 @@ export interface DevcontainerTarget {
   rootPath: string;
   workspaceFolder: string;
   configPath: string;
+  /**
+   * Set by `ensureDevcontainer` on a laptop (see there): the config the dev container tool is given with `--override-config`, which holds the project's own settings and the workspace mount the worker wants. Every
+   * later `devcontainer` call for this target carries it, so the tool finds the same container and the same folders.
+   */
+  overrideConfigPath?: string;
 }
 
 export interface DevcontainerUpResult {
@@ -223,9 +230,17 @@ export function preparedDevcontainerTarget(
  * Creates the devcontainer, or starts the existing one (on a resumed instance its containers are
  * stopped), and runs its lifecycle commands. Idempotent.
  */
-export async function ensureDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget): Promise<DevcontainerUpResult> {
-  await assertDevcontainerConfigAllowed(target);
-  const lockfile = cli.checks === undefined ? undefined : await assertFullConfigurationAllowed(cli.checks, target);
+export async function ensureDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget, options: { environment?: NodeJS.ProcessEnv } = {}): Promise<DevcontainerUpResult> {
+  const environment = options.environment ?? process.env;
+  // On a laptop the worker reaches Docker only through the socket guard, which serves an image that is ready to run and no build (devcontainer-policy.ts localDevcontainerRefusal).
+  const local = environment["AGENTX_RUNTIME"] !== "ec2" && sandboxNetworkFromEnvironment(environment) !== undefined;
+  const config = await assertDevcontainerConfigAllowed(target, local);
+  // On a laptop the Docker socket guard allows a bind mount of the workspace folder itself and of nothing below it (a link inside the workspace could lead a deeper path anywhere on the computer), but the tool would also mount the
+  // repository folder at /workspaces/<name> on its own. So the tool is given the project's config with its workspace mount and folder set to the workspace and the repository at their own paths, which is where the worker, the
+  // agent's tools and every command already expect them (the config's own workspace settings are not used: they are the project's, and these are the worker's).
+  const lockfile = cli.checks === undefined ? undefined : await assertFullConfigurationAllowed(cli.checks, target, local);
+  // After the checks, which read the project's own config as the tool would without the override.
+  if (local && config !== undefined) target.overrideConfigPath = await writeLocalOverride(target, config);
   // `up` fetches remote features again. With a lockfile of the digests just checked, and --frozen-lockfile, it uses
   // exactly that content or fails before it builds anything.
   const start = (hidden: readonly string[]) => lockfile === undefined
@@ -253,14 +268,14 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
 }
 
 /** Refuses a devcontainer.json that asks Docker for part of the worker host (devcontainer-policy.ts). */
-async function assertDevcontainerConfigAllowed(target: DevcontainerTarget): Promise<void> {
+async function assertDevcontainerConfigAllowed(target: DevcontainerTarget, local = false): Promise<Record<string, unknown> | undefined> {
   const shown = relative(target.rootPath, target.configPath);
   let text: string;
   try {
     text = await readFile(target.configPath, "utf8");
   } catch (error) {
     // No config: `devcontainer up` says so.
-    if ((error as { code?: unknown }).code === "ENOENT") return;
+    if ((error as { code?: unknown }).code === "ENOENT") return undefined;
     throw agentXError("CONFIG_INVALID", `AgentX could not read the dev container config ${shown}: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512));
   }
   let config: unknown;
@@ -269,10 +284,28 @@ async function assertDevcontainerConfigAllowed(target: DevcontainerTarget): Prom
   } catch {
     throw agentXError("CONFIG_INVALID", `AgentX could not read the dev container config ${shown} as JSON with comments, so it did not start it`);
   }
+  const buildReason = local ? localDevcontainerRefusal(config) : undefined;
+  if (buildReason !== undefined) throw agentXError("CONFIG_INVALID", localBuildMessage(shown, buildReason));
   const reason = devcontainerConfigRefusal(config, policyContext(target));
   if (reason !== undefined) {
     throw agentXError("CONFIG_INVALID", `The dev container config ${shown} uses ${reason}, which AgentX does not allow: it would give code in the container the worker host. Remove it; see "Dev container" in docs/project-configuration.md for what is allowed.`.slice(0, 1_000));
   }
+  return config !== null && typeof config === "object" && !Array.isArray(config) ? config as Record<string, unknown> : undefined;
+}
+
+/** Writes the config the dev container tool is given on a laptop (see `ensureDevcontainer`), in the worker's own folder of the workspace (`.agentx`, which no container sees). */
+async function writeLocalOverride(target: DevcontainerTarget, config: Record<string, unknown>): Promise<string> {
+  const directory = join(target.rootPath, ".agentx");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, `devcontainer-override-${createHash("sha256").update(target.configPath).digest("hex").slice(0, 12)}.json`);
+  const override = { ...config, workspaceMount: `type=bind,source=${target.rootPath},target=${target.rootPath}`, workspaceFolder: target.workspaceFolder };
+  await writeFile(path, `${JSON.stringify(override)}\n`, { mode: 0o600 });
+  return path;
+}
+
+/** What the person is told when a dev container needs a build on a laptop: fixed words, naming only the setting. */
+function localBuildMessage(shown: string, setting: string): string {
+  return `The dev container config ${shown} uses ${setting}, which needs an image build. On this computer a dev container must name an image that is ready to run ("image": "..."), with no Dockerfile, build section or features, because Rovara's Docker guard does not allow a build. The same dev container works on a cloud worker.`.slice(0, 512);
 }
 
 function policyContext(target: DevcontainerTarget) {
@@ -288,7 +321,7 @@ function policyContext(target: DevcontainerTarget) {
  * Refuses, before any container starts, what the dev container's features or its image's `devcontainer.metadata` label
  * would add: the devcontainer CLI merges them into the configuration `up` uses, and reads that without starting anything.
  */
-async function assertFullConfigurationAllowed(checks: DevcontainerChecks, target: DevcontainerTarget): Promise<FeatureLockfile> {
+async function assertFullConfigurationAllowed(checks: DevcontainerChecks, target: DevcontainerTarget, local = false): Promise<FeatureLockfile> {
   let full: DevcontainerFullConfiguration;
   try {
     full = await checks.fullConfiguration(target);
@@ -296,6 +329,8 @@ async function assertFullConfigurationAllowed(checks: DevcontainerChecks, target
     throw new Error(`AgentX could not read the dev container's full configuration (with its features and image), so it did not start it: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512), { cause: error });
   }
   const context = policyContext(target);
+  const buildReason = local ? (localDevcontainerRefusal(full.configuration) ?? localDevcontainerRefusal(full.mergedConfiguration)) : undefined;
+  if (buildReason !== undefined) throw agentXError("CONFIG_INVALID", localBuildMessage(relative(target.rootPath, target.configPath), buildReason));
   const reason = devcontainerConfigRefusal(full.configuration, context)
     ?? devcontainerConfigRefusal(full.mergedConfiguration, context)
     ?? (full.workspaceMount === undefined ? undefined : devcontainerConfigRefusal({ workspaceMount: full.workspaceMount }, context));
@@ -456,7 +491,8 @@ async function startDevcontainer(cli: DevcontainerCli, target: DevcontainerTarge
     "up",
     ...targetArgs(target),
     ...(frozenLockfile ? ["--frozen-lockfile"] : []),
-    "--mount", `type=bind,source=${target.rootPath},target=${target.rootPath}`,
+    // With the override config the workspace is already mounted at its own path (workspaceMount); mounting it again would be a second mount of the same folder.
+    ...(target.overrideConfigPath === undefined ? ["--mount", `type=bind,source=${target.rootPath},target=${target.rootPath}`] : []),
     ...hidden.flatMap((path) => ["--mount", `type=volume,source=${maskVolume(path, token)},target=${path}`]),
     "--log-format", "json",
   ], { timeoutMs: UP_TIMEOUT_MS });
@@ -754,7 +790,8 @@ export function createDevcontainerCli(options: { dockerPath?: string } = {}): De
         return parsed[0] as ContainerInspection;
       },
       async remove(containerId) {
-        await execFile(docker, ["rm", "--force", containerId], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS });
+        // With its anonymous volumes (an image's own VOLUME lines): a container AgentX refuses must not leave one behind on every start. A named volume is never removed by this.
+        await execFile(docker, ["rm", "--force", "--volumes", containerId], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS });
       },
       async removeVolumes(names) {
         await execFile(docker, ["volume", "rm", ...names], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS });
@@ -785,7 +822,7 @@ function remoteEnvArgs(env: Readonly<Record<string, string>> | undefined): strin
 }
 
 function targetArgs(target: DevcontainerTarget): string[] {
-  return ["--workspace-folder", target.workspaceFolder, "--config", target.configPath];
+  return ["--workspace-folder", target.workspaceFolder, "--config", target.configPath, ...(target.overrideConfigPath === undefined ? [] : ["--override-config", target.overrideConfigPath])];
 }
 
 /**

@@ -38,6 +38,8 @@ import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import type { BrowserOpener } from "./open-browser.js";
 import { createLocalApp, type LocalApp } from "./app/app.js";
+import { localAllowedDomains } from "./isolation/allow-list.js";
+import { devcontainerRegistriesForInstall } from "./isolation/stack.js";
 import type { LocalComments } from "./app/comments.js";
 import { configurationAnswer } from "./app/routes.js";
 import { usableWorkerCredential } from "./app/push-credential.js";
@@ -413,6 +415,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
 
   // Worker machines. The callback listener's port is not known until the handler exists, so it is read when a machine starts.
   const callbackServer: { current?: CallbackServer } = {};
+  // The hosts the owner approved for a setup run: read at each machine start (the app is made after the machines, so it is read late).
+  const approvedHosts: { current?: (project: string | undefined) => Promise<string[]> } = {};
   const docker = new DockerWorkerMachines({
     image: options.workerImage,
     stateDirectory,
@@ -421,6 +425,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       return { tcpPort: callbackServer.current.tcpPort, socketDirectory: callbackServer.current.socketDirectory };
     },
     ...(options.allowedDomains === undefined ? {} : { allowedDomains: options.allowedDomains }),
+    extraAllowedDomains: async (project) => (await approvedHosts.current?.(project)) ?? [],
+    // The registries a project's dev container may pull from: the owner's `ROVARA_DEVCONTAINER_REGISTRIES` (`0` turns dev containers off); with none said, the default list on a Docker that runs in a virtual machine and none on a host where root in a container is root.
+    devcontainerRegistries: await devcontainerRegistriesForInstall(options.environment, options.docker ?? createDockerRunner(options.environment)),
     modelProxy: true,
     // Port lane P6 (item B1): what the registered build-system adapters supply (extra detectors, setup programs) goes to the worker's start-up environment; read late, because the config's adapters load after this.
     buildSystems: () => collectBuildSystemProfiles(registry),
@@ -531,7 +538,11 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // The flip-back settings of the session features (`0` turns one off; anything else leaves it on).
     liveSteer: options.environment["ROVARA_LIVE_STEER"] !== "0", stepNotes: options.environment["ROVARA_STEP_NOTES"] !== "0", ask: options.environment["ROVARA_ASK"] !== "0", lessonsEnabled: () => localLessonsEnabled(options.environment),
     diagnosis: options.environment["ROVARA_DIAGNOSIS"] !== "0",
+    // The setup agent (`ROVARA_SETUP_AGENT=0` turns it off): a run that sets a project up by running its commands in a sandbox.
+    setupAgent: options.environment["ROVARA_SETUP_AGENT"] !== "0",
+    installDomains: () => localAllowedDomains(options.allowedDomains),
   });
+  approvedHosts.current = (project) => app.setupAgent.approvedHosts(project);
 
   comments.current = app.comments;
   const workspaces = new InMemoryRegistry();
