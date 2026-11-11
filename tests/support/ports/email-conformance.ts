@@ -46,7 +46,7 @@ export function runEmailConformance(name: string, harness: EmailHarness): void {
     }));
 
     it("refuses a recipient that is not one plain address, never retried", () => withSender(async ({ sender, sent }) => {
-      for (const to of ["", "not-an-address", "a@example.test, b@example.test", "Dev <dev@example.test>", "a@example.test;b@example.test", "dev@example.test\r\nBcc: x@example.test"]) {
+      for (const to of ["", "not-an-address", "a@example.test, b@example.test", "Dev <dev@example.test>", "a@example.test;b@example.test", "dev@example.test\r\nBcc: x@example.test", "dev\u0001@example.test", "dev@example.test\u007f"]) {
         const failure = await sender.send(message({ to })).catch((error: unknown) => error);
         expect(failure, to).toBeInstanceOf(EmailError);
         expect((failure as EmailError).code).toBe("refused");

@@ -247,9 +247,20 @@ export function recordLinks(links: readonly string[]): string[] {
   }).slice(0, RECORD_LINKS_MAX);
 }
 
-/** The trust a stored row gets: the lowest of the draft's own, its actor's and its pieces'. */
-export function recordStoredTrust(draft: Pick<RecordDraft, "trust" | "actor" | "pieceTrusts">): TrustClass {
-  return minTrust(draft.trust, ...(draft.actor === undefined ? [] : [draft.actor.trust]), ...(draft.pieceTrusts ?? []));
+/** The lowest of the draft's own trust, its actor's and its pieces' (what a source must already have said). */
+const ownPartsTrust = (draft: Pick<RecordDraft, "trust" | "actor" | "pieceTrusts">): TrustClass =>
+  minTrust(draft.trust, ...(draft.actor === undefined ? [] : [draft.actor.trust]), ...(draft.pieceTrusts ?? []));
+
+/**
+ * The trust a stored row gets (the hosted record's rule): the lowest of the draft's own, its actor's, its pieces' and its quoted authors' (`quotedTrusts`), and at most
+ * `system` for text from an outside source with no actor (nobody vouches for it). Rovara's own rows (`source: "rovara"`) are not capped.
+ */
+export function recordStoredTrust(draft: Pick<RecordDraft, "trust" | "actor" | "pieceTrusts" | "quotedTrusts" | "source" | "text">): TrustClass {
+  return minTrust(
+    ownPartsTrust(draft),
+    ...(draft.quotedTrusts ?? []),
+    ...(draft.actor === undefined && draft.source !== "rovara" && draft.text !== undefined ? ["system" as const] : []),
+  );
 }
 
 /** Why a SINK must refuse a draft, in a fixed sentence, or `undefined`: it is not a `RecordDraftSchema` draft, or its text is over the byte limit. Everything else a sink repairs (trust, text under A or B, links). */
@@ -270,6 +281,6 @@ export function recordSourceDraftProblem(draft: unknown): string | undefined {
   const row = draft as RecordDraft;
   if (row.text !== undefined && row.retention === "A") return "retention A keeps no text";
   if (row.audience.kind === "restricted" && row.audience.acl.source !== row.source) return "the permission snapshot names another source";
-  if (recordStoredTrust(row) !== row.trust) return "the row's trust is higher than one of its parts";
+  if (ownPartsTrust(row) !== row.trust) return "the row's trust is higher than one of its parts";
   return undefined;
 }
