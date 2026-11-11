@@ -48,10 +48,11 @@ describe("tool budget at registration", () => {
     expect(approvedToolCount({ repositories: [] } as never)).toBe(0);
   });
 
-  it("warns above 20 visible tools and refuses above 40", () => {
+  it("never warns about many tools, because tools above 20 load on demand, and refuses only above the sanity limit of 200", () => {
     expect(toolBudget(20 - IN_HOUSE_TOOL_COUNT)).toEqual({ maximum: 20 });
-    expect(toolBudget(21 - IN_HOUSE_TOOL_COUNT)).toEqual({ maximum: 21, warning: "the model could see 21 tools; above 20, tool choice gets less reliable. Approve fewer connector tools." });
-    expect(toolBudget(41 - IN_HOUSE_TOOL_COUNT)).toMatchObject({ maximum: 41, refusal: "this project could expose 41 tools; at most 40 are allowed. Approve fewer connector tools." });
+    expect(toolBudget(60 - IN_HOUSE_TOOL_COUNT)).toEqual({ maximum: 60 });
+    expect(toolBudget(200 - IN_HOUSE_TOOL_COUNT)).toEqual({ maximum: 200 });
+    expect(toolBudget(201 - IN_HOUSE_TOOL_COUNT)).toEqual({ maximum: 201, refusal: "this project could expose 201 tools; at most 200 are allowed. Approve fewer connector tools." });
   });
 
   it("names every approval whose presented name exceeds 64 characters", () => {

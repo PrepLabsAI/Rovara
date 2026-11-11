@@ -140,7 +140,7 @@ describe("project registration without connectors", () => {
 describe("project registration errors", () => {
   it("surfaces the control plane's refusal so the administrator knows what to fix", async () => {
     const context = await administratorContext("agentx-cli-register-refused-");
-    const message = "this project could expose 41 tools; at most 40 are allowed. Approve fewer connector tools.";
+    const message = "this project could expose 201 tools; at most 200 are allowed. Approve fewer connector tools.";
     const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ error: { code: "CONFIG_INVALID", message } }, { status: 400 }));
     const { exitCode, stderr } = await runRegister(context, fetchImplementation);
     expect(exitCode).not.toBe(0);

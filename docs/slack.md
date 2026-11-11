@@ -114,10 +114,12 @@ by sending `preflight: true` in the registration body (the current administratio
 does). Preflight never blocks registration on that check failing: it reports which approved tools
 the vendor actually offers, which it could not present, and whether the connector is connected.
 It runs only when asked, so an older administration client, or an existing test, never makes a
-vendor call at registration. Separately, and regardless of preflight, a project that could expose
-more than 40 tools to the model (six built-in plus every connector approval) refuses registration;
-above 20 tools it registers with a warning, because the model's tool choice gets less reliable
-past that point.
+vendor call at registration. Separately, and regardless of preflight, a project with more than 200
+tools (six built-in plus every connector approval) refuses registration; this replaces the old limit of
+40 and the warning above 20. When a thread has more than 20 connector tools, the model is not shown
+them all: its first request lists only the built-in tools and `tool_search`, and the model loads the
+connector tools it needs by searching. A loaded tool is the same tool: it still runs through the
+control plane, and the action gate still decides every call. Search can only find tools this project approved.
 
 ## One-time administrator setup
 
