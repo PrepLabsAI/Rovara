@@ -8,6 +8,7 @@ import { hostAlreadyAllowed } from "../../packages/broker/src/core/setup-agent/h
 const EXACT_LIST = [
   "*.compute.internal", "*.ec2.internal", "*.42.10.in-addr.arpa",
   "github.com", "ghcr.io", "*.ghcr.io", "pkg-containers.githubusercontent.com",
+  "raw.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "codeload.github.com",
   "registry.npmjs.org", "registry.yarnpkg.com",
   "pypi.org", "files.pythonhosted.org",
   "crates.io", "*.crates.io",
@@ -34,16 +35,17 @@ describe("the default allow-list", () => {
     for (const entry of forbidden) expect(DEFAULT_AGENT_ALLOW_DOMAINS, entry).not.toContain(entry);
     for (const entry of DEFAULT_AGENT_ALLOW_DOMAINS) {
       expect(entry.endsWith("amazonaws.com") || entry.endsWith(".aws"), entry).toBe(false);
-      if (entry.endsWith("githubusercontent.com")) expect(entry).toBe("pkg-containers.githubusercontent.com");
-      if (entry.endsWith("github.com")) expect(entry).toBe("github.com");
+      // GitHub: only the git host, the image registry's blob host and the four read-only download hosts, each by exact name.
+      if (entry.endsWith("githubusercontent.com")) expect(["pkg-containers.githubusercontent.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]).toContain(entry);
+      if (entry.endsWith("github.com")) expect(["github.com", "codeload.github.com"]).toContain(entry);
     }
     for (const entry of DEFAULT_AGENT_ALLOW_DOMAINS.filter((name) => !name.endsWith(".internal") && !name.endsWith(".in-addr.arpa"))) expect(isAllowedDomain(entry), entry).toBe(true);
   });
 
-  it("does not let a bucket, an API, a gist or a raw-content host of anyone's through, by the way the firewall and the gateway read the list", () => {
+  it("does not let a bucket, an API, a gist or a user-content host of anyone's through, by the way the firewall and the gateway read the list", () => {
     const exits = [
       "attacker-bucket.s3.amazonaws.com", "attacker-bucket.s3.us-west-2.amazonaws.com", "s3.amazonaws.com", "abc123.execute-api.us-east-1.amazonaws.com", "x.lambda-url.us-east-1.on.aws", "x.api.aws",
-      "api.github.com", "gist.github.com", "uploads.github.com", "codeload.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "gist.githubusercontent.com", "user-images.githubusercontent.com",
+      "api.github.com", "gist.github.com", "uploads.github.com", "gist.githubusercontent.com", "user-images.githubusercontent.com", "avatars.githubusercontent.com", "x.codeload.github.com",
     ];
     for (const host of exits) {
       expect(hostIsAllowed(host, DEFAULT_AGENT_ALLOW_DOMAINS), host).toBe(false);
@@ -52,7 +54,7 @@ describe("the default allow-list", () => {
     }
   });
 
-  it("still lets the worker's git and the image pulls through", () => {
-    for (const host of ["github.com", "ghcr.io", "x.ghcr.io", "pkg-containers.githubusercontent.com"]) expect(hostAlreadyAllowed(host, []), host).toBe(true);
+  it("still lets the worker's git, the image pulls and the read-only download hosts through", () => {
+    for (const host of ["github.com", "ghcr.io", "x.ghcr.io", "pkg-containers.githubusercontent.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "codeload.github.com"]) expect(hostAlreadyAllowed(host, []), host).toBe(true);
   });
 });
