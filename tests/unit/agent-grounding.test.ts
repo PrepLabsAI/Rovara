@@ -190,6 +190,15 @@ describe("ToolCallRecorder", () => {
     expect(recorder.calls()[1]).toMatchObject({ connector: false });
   });
 
+  it("does not record a tool search or a branch choice: they are not reads of the world", () => {
+    const recorder = new ToolCallRecorder(new Set(["list_pull_requests"]));
+    recorder.observe(start("a", "tool_search", { query: "pull requests" }));
+    recorder.observe(end("a", "tool_search", "Loaded 1 tool:\n- list_pull_requests: List pull requests #4242"));
+    recorder.observe(start("b", "list_pull_requests", {}));
+    recorder.observe(end("b", "list_pull_requests", JSON.stringify({ status: "SUCCEEDED", text: "none" })));
+    expect(recorder.calls().map(({ tool }) => tool)).toEqual(["list_pull_requests"]);
+  });
+
   it("holds a connector call that waits for approval as neither failed nor a read", () => {
     const recorder = new ToolCallRecorder(new Set(["add_issue_comment"]));
     recorder.observe(start("a", "add_issue_comment", { body: "x" }));

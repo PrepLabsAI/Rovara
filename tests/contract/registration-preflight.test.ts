@@ -159,10 +159,13 @@ describe("registration preflight", () => {
     expect(db.get("PROJECT#payments", "REV#000000000001")).toBeDefined();
   });
 
-  it("warns when the model could see more than 20 tools", async () => {
+  it("does not warn about more than 20 tools: they load on demand, so a connector with 32 approved tools registers quietly", async () => {
     const { handler } = await createAdminBroker({});
-    const names = Array.from({ length: 15 }, (_, index) => `tool_${index}`);
-    expect((await register(handler, githubConnector(names))).body.warnings).toEqual(["the model could see 21 tools; above 20, tool choice gets less reliable. Approve fewer connector tools."]);
+    const names = Array.from({ length: 32 }, (_, index) => `tool_${index}`);
+    const registered = await register(handler, githubConnector(names));
+    expect(registered.status).toBe(201);
+    expect(registered.body.warnings).toBeUndefined();
+    expect(registered.body.tools).toEqual({ maximum: IN_HOUSE_TOOL_COUNT + 32, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT });
   });
 
   it("always includes the visible tool budget in the response, with or without preflight", async () => {

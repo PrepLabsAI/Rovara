@@ -23,8 +23,8 @@ const MAX_CITATIONS = 50;
 const MAX_REASONS = 10;
 const MAX_FAILURES = 10;
 const MESSAGE_CHARS = 300;
-/** The step's own tools: a choice of branch and a skill's text are not reads of the world, so their calls are not recorded (a skill's text is part of what the step was given). */
-const OWN_TOOLS: ReadonlySet<string> = new Set(["choose_branch", "read_skill"]);
+/** The step's own tools: a choice of branch, a skill's text and a search for tools are not reads of the world, so their calls are not recorded (a skill's text is part of what the step was given; a tool search only lists tool names and descriptions). */
+const OWN_TOOLS: ReadonlySet<string> = new Set(["choose_branch", "read_skill", "tool_search"]);
 
 /** How a call ended: it answered (`ok`), failed (a thrown error, or a connector answer that says FAILED or UNKNOWN), is held for a person's approval, or never ended. */
 export type RecordedCallOutcome = "ok" | "failed" | "held" | "pending";
