@@ -26,6 +26,10 @@ export function runEmailConformance(name: string, harness: EmailHarness): void {
   }
 
   describe(`email conformance: ${name}`, () => {
+    it("says it can send", () => withSender(async ({ sender }) => {
+      expect(sender.capabilities.available).toBe(true);
+    }));
+
     it("sends one message to one address with the subject and text as given", () => withSender(async ({ sender, sent }) => {
       await sender.send(message());
       const taken = await sent();
@@ -53,7 +57,7 @@ export function runEmailConformance(name: string, harness: EmailHarness): void {
 
     it("refuses a subject that is not one short line, an empty text and a link that is not plain https", () => withSender(async ({ sender, sent }) => {
       for (const extra of [
-        { subject: "Hello\r\nBcc: x@example.test" }, { subject: `a${String.fromCharCode(0x2028)}b` }, { subject: "" }, { subject: "x".repeat(EMAIL_SUBJECT_MAX + 1) },
+        { subject: "Hello\r\nBcc: x@example.test" }, { subject: "Hello\rBcc: x@example.test" }, { subject: "Hello\nBcc: x@example.test" }, { unsubscribeUrl: "https://rovara.example.test/stop\r\nBcc: x@example.test" }, { subject: `a${String.fromCharCode(0x2028)}b` }, { subject: "" }, { subject: "x".repeat(EMAIL_SUBJECT_MAX + 1) },
         { text: "" }, { unsubscribeUrl: "http://rovara.example.test/stop" }, { unsubscribeUrl: "https://user:pw@rovara.example.test/stop" }, { unsubscribeUrl: "javascript:alert(1)" },
         { purpose: "Not A Word" },
       ] as const) {

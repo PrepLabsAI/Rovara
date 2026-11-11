@@ -26,6 +26,7 @@ describe("the email point", () => {
     registerCodeDefaults(registry, { priceTable: { currency: "USD", models: {} } });
     expect(registry.names("email")).toEqual(["none"]);
     const none = createUnavailableEmailSender();
+    expect(none.capabilities.available).toBe(false);
     const message = { companyId: "org_00000000000000000000", purpose: "invite", to: "dev@example.test", subject: "You are invited", text: "Open the link." };
     await expect(none.send(message)).rejects.toMatchObject({ name: "EmailError", code: "unavailable" });
     await expect(none.send({ ...message, to: "two@example.test, three@example.test" })).rejects.toMatchObject({ code: "refused" });
@@ -48,5 +49,6 @@ describe("the email point", () => {
     for (const value of ["a@b", "a b@example.test", "<a@example.test>", "\"a\"@example.test", `${"x".repeat(250)}@example.test`]) expect(isPlainEmailAddress(value), value).toBe(false);
     expect(emailRefusal({ companyId: "c", purpose: "attention", to: "a@example.test", subject: "ok", text: "ok" })).toBeUndefined();
     expect(new EmailError("unavailable", "x").retryable).toBe(true);
+    expect(emailRefusal({ companyId: "c", purpose: "attention", to: "a@example.test\u0000", subject: "ok", text: "ok" })).toBe("the recipient is not one plain address");
   });
 });

@@ -1,7 +1,7 @@
 // The `team-record-source` point: an in-memory record sink that keeps the sink contract (for the conformance suite and for testing a source), a scripted source
 // for tests, Code's local sink (there is no team record on a Code install: every write is refused), and the list of known sources the audience rule reads.
 import {
-  RecordSourceIdSchema, recordDraftRefusal, recordIdempotencyKey, recordScopeCovers,
+  PluginRegistryError, RecordSourceIdSchema, recordDraftRefusal, recordDraftScope, recordIdempotencyKey, recordLinks, recordScopeCovers, recordStoredTrust,
   type AdapterRegistry, type Audience, type RecordDraft, type RecordExistence, type RecordIngestOutcome, type RecordPollOutcome, type RecordPollRequest,
   type RecordReceiveOutcome, type RecordSink, type RecordTombstoneCause, type RecordWriteCounts, type TeamRecordSource, type TeamRecordSourceCapabilities,
 } from "@agentx/contracts";
@@ -21,12 +21,14 @@ export interface MemoryRecordSink extends RecordSink {
   visible(workspaceId: string): RecordDraft[];
   /** The seeded member list of a place, if `ensureAccessSeed` seeded one. */
   accessSeed(workspaceId: string, scope: string): Audience | undefined;
+  /** The B drafts `distillTransient` accepted, oldest first (the text held in memory only, as a distiller would). */
+  transient(): RecordDraft[];
   /** Tests: every call throws while down (a record that cannot be reached). */
   setDown(down: boolean): void;
 }
 
 const at = (draft: RecordDraft): string => draft.sourceRef.versionAt ?? draft.occurredAt;
-const scopeOf = (draft: RecordDraft): string | undefined => draft.scope ?? (draft.audience.kind === "restricted" ? draft.audience.acl.scope : undefined);
+const scopeOf = (draft: RecordDraft): string | undefined => recordDraftScope(draft);
 const PRINCIPALS_MAX = 500;
 
 export function createMemoryRecordSink(): MemoryRecordSink {
@@ -34,25 +36,35 @@ export function createMemoryRecordSink(): MemoryRecordSink {
   const changes = new Map<string, MemoryRecordRow>();
   const seen = new Set<string>();
   const sticky = new Set<string>();
-  const excluded: Array<{ workspaceId: string; scope: string }> = [];
+  /** Places closed by a `source_deleted` or `excluded` scope tombstone: nothing new is stored in them or under them. */
+  const closed: Array<{ workspaceId: string; scope: string }> = [];
+  const distilled: RecordDraft[] = [];
   const seeds = new Map<string, Audience>();
   let down = false;
   const itemKey = (workspaceId: string, source: string, system: string, id: string): string => JSON.stringify([workspaceId, source, system, id]);
   const stickyKey = (workspaceId: string, system: string, id: string): string => JSON.stringify([workspaceId, system, id]);
   const check = (): void => { if (down) throw new Error("the record could not be reached"); };
   const allRows = (): MemoryRecordRow[] => [...heads.values(), ...changes.values()];
+  /** A deleted item or a closed place refuses the draft. */
+  const admission = (draft: RecordDraft): RecordIngestOutcome | undefined => {
+    if (sticky.has(stickyKey(draft.workspaceId, draft.sourceRef.system, draft.sourceRef.id))) return { status: "refused", reason: "the item was deleted at its source" };
+    const scope = scopeOf(draft);
+    if (scope !== undefined && closed.some((entry) => entry.workspaceId === draft.workspaceId && recordScopeCovers(entry.scope, scope))) return { status: "refused", reason: "the place is closed" };
+    return undefined;
+  };
 
   return {
     async put(input) {
       check();
       const refusal = recordDraftRefusal(input);
       if (refusal !== undefined) return { status: "refused", reason: refusal };
-      const draft = structuredClone(input);
+      const blocked = admission(input);
+      if (blocked !== undefined) return blocked;
+      // What the sink repairs rather than refuses: the trust is lowered to the lowest part, no text is kept under A or B, and links are trimmed.
+      const { text, ...rest } = structuredClone(input);
+      const draft: RecordDraft = { ...rest, trust: recordStoredTrust(input), links: recordLinks(input.links), ...(text === undefined || input.retention === "A" || input.retention === "B" ? {} : { text }) };
       const key = recordIdempotencyKey(draft);
       if (seen.has(key)) return { status: "duplicate" };
-      if (sticky.has(stickyKey(draft.workspaceId, draft.sourceRef.system, draft.sourceRef.id))) return { status: "refused", reason: "the item was deleted at its source" };
-      const scope = scopeOf(draft);
-      if (scope !== undefined && excluded.some((entry) => entry.workspaceId === draft.workspaceId && recordScopeCovers(entry.scope, scope))) return { status: "refused", reason: "the place is excluded" };
       if (draft.sourceRef.order !== undefined) {
         seen.add(key);
         changes.set(key, { draft, hidden: false });
@@ -67,6 +79,12 @@ export function createMemoryRecordSink(): MemoryRecordSink {
       seen.add(key);
       heads.set(item, { draft, hidden: false });
       return { status: "stored" };
+    },
+    async distillTransient(input) {
+      check();
+      if (input.retention !== "B" || recordDraftRefusal(input) !== undefined || admission(input) !== undefined) return { accepted: false };
+      distilled.push(structuredClone(input));
+      return { accepted: true };
     },
     async tombstone(input) {
       check();
@@ -83,7 +101,7 @@ export function createMemoryRecordSink(): MemoryRecordSink {
         sticky.add(stickyKey(draft.workspaceId, draft.sourceRef.system, draft.sourceRef.id));
         if (!row.hidden) { row.hidden = true; row.cause = input.cause; hidden += 1; }
       }
-      if (ids === undefined && input.scope !== undefined && input.cause === "excluded") excluded.push({ workspaceId: input.workspaceId, scope: input.scope });
+      if (input.scope !== undefined && (input.cause === "excluded" || input.cause === "source_deleted")) closed.push({ workspaceId: input.workspaceId, scope: input.scope });
       return { hidden };
     },
     async changePrincipals(input) {
@@ -121,6 +139,7 @@ export function createMemoryRecordSink(): MemoryRecordSink {
       const seed = seeds.get(JSON.stringify([workspaceId, scope]));
       return seed === undefined ? undefined : structuredClone(seed);
     },
+    transient: () => distilled.map((draft) => structuredClone(draft)),
     setDown(value) { down = value; },
   };
 }
@@ -161,6 +180,8 @@ export interface FakeRecordSourceOptions {
   draftsOf?: (payload: unknown) => readonly RecordDraft[];
   /** The items a poll reads, oldest first; the cursor is the index of the next one. */
   items?: readonly RecordDraft[];
+  /** Whether the source's own settings can be read (absent: yes). When they cannot, it records nothing (fail closed). */
+  settingsReadable?: () => Promise<boolean>;
   /** What `exists` answers by native id (absent: `unknown`). */
   existence?: Readonly<Record<string, RecordExistence>>;
 }
@@ -174,6 +195,7 @@ export function createFakeRecordSource(options: FakeRecordSourceOptions = {}): T
     source,
     capabilities: { delivery: ["push", "poll"], existence: true, acl: "place", retentions: ["A", "B", "C", "D"], ...options.capabilities },
     async receive(payload, sink): Promise<RecordReceiveOutcome> {
+      if (options.settingsReadable !== undefined && !(await options.settingsReadable().catch(() => false))) return { status: "ignored", reason: "settings_unreadable", ...zero() };
       const drafts = draftsOf(payload);
       if (drafts.length === 0) return { status: "ignored", reason: "nothing_to_record", ...zero() };
       return { status: "recorded", ...(await writeAll(sink, drafts)) };
@@ -192,13 +214,23 @@ export function createFakeRecordSource(options: FakeRecordSourceOptions = {}): T
   };
 }
 
-/** The `source` ids of the registered `team-record-source` adapters, plus the recorders built in: the sources `audienceForSource` believes. A malformed id is left out. */
+/** Source ids no adapter may claim: Rovara's own recorder. */
+export const RESERVED_RECORD_SOURCES: readonly string[] = ["rovara"];
+
+/**
+ * The `source` ids of the registered `team-record-source` adapters, plus the recorders built in (and the reserved ones): the sources `audienceForSource` believes. A malformed
+ * id is left out. Two adapters claiming one id, or an adapter claiming a built-in or reserved id, is refused (`PluginRegistryError` `already_registered`): its rows would be
+ * believed as another system's.
+ */
 export function knownRecordSources(registry: Pick<AdapterRegistry, "names" | "require">, builtIn: Iterable<string> = []): Set<string> {
-  const known = new Set<string>();
-  for (const id of builtIn) if (RecordSourceIdSchema.safeParse(id).success) known.add(id);
+  const builtIns = new Set<string>();
+  for (const id of [...RESERVED_RECORD_SOURCES, ...builtIn]) if (RecordSourceIdSchema.safeParse(id).success) builtIns.add(id);
+  const claimed = new Set<string>();
   for (const name of registry.names("team-record-source")) {
     const { source } = registry.require("team-record-source", name);
-    if (RecordSourceIdSchema.safeParse(source).success) known.add(source);
+    if (!RecordSourceIdSchema.safeParse(source).success) continue;
+    if (builtIns.has(source) || claimed.has(source)) throw new PluginRegistryError("already_registered", "two team record sources claim one source id, or a source claims a built-in one");
+    claimed.add(source);
   }
-  return known;
+  return new Set([...builtIns, ...claimed]);
 }

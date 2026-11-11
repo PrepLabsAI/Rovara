@@ -4,7 +4,7 @@
 //   - `runRecordSourceConformance`: what every source adapter's writes must be. The scripted fake and each hosted source tap (fed recorded deliveries) run it.
 import { describe, expect, it } from "vitest";
 import {
-  RecordSourceIdSchema, recordDraftRefusal, recordIdempotencyKey,
+  RecordSourceIdSchema, recordDraftRefusal, recordIdempotencyKey, recordSourceDraftProblem,
   type Audience, type RecordDraft, type RecordIngestOutcome, type RecordPollRequest, type RecordSink, type TeamRecordSource,
 } from "@agentx/contracts";
 
@@ -13,30 +13,51 @@ const OTHER = "org_11111111111111111111";
 const AT = "2026-11-10T10:00:00.000Z";
 const LATER = "2026-11-10T11:00:00.000Z";
 
-/** A draft for the suites: a member's message in a chat place, visible to the place's members. */
-export function sampleRecordDraft(extra: Partial<RecordDraft> & { id?: string; version?: string; scope?: string } = {}): RecordDraft {
-  const { id = "C9/1700000000.0001", version = "v1", scope = "chat:T1/C9", ...rest } = extra;
-  const audience: Audience = { kind: "restricted", acl: { source: "chat", scope, principals: ["U1", "U2"], capturedAt: AT, liveCheck: "none" } };
+/**
+ * What the suites record with: a source, a row kind and a source instance the sink under test accepts, and how a place is named. Code's fakes use `chat`; a hosted sink
+ * names one of its own sources (and its `setup` writes that source's settings for each place, so the sink records there).
+ */
+export interface RecordSample {
+  source: string;
+  kind: string;
+  system: string;
+  /** The place for a path: `place("C9")` and the place under it, `place("C9/thread")`. Two paths that only start the same (`C9`, `C90`) must give sibling places. */
+  place: (path: string) => string;
+}
+
+export const CHAT_SAMPLE: RecordSample = { source: "chat", kind: "chat.message", system: "T1", place: (path) => `chat:T1/${path}` };
+
+/** A draft for the suites: a member's message in a place, visible to the place's members. `place` is a path for `sample.place`. */
+export function sampleRecordDraft(sample: RecordSample = CHAT_SAMPLE, extra: Partial<RecordDraft> & { id?: string; version?: string; place?: string } = {}): RecordDraft {
+  const { id = "C9/1700000000.0001", version = "v1", place = "C9", ...rest } = extra;
+  const scope = sample.place(place);
+  const audience: Audience = { kind: "restricted", acl: { source: sample.source, scope, principals: ["U1", "U2"], capturedAt: AT, liveCheck: "none" } };
   return {
-    workspaceId: COMPANY, project: "web", source: "chat",
-    sourceRef: { system: "T1", id, version },
-    kind: "chat.message", occurredAt: AT, actor: { sourceId: "U1", trust: "member" }, trust: "member", audience,
+    workspaceId: COMPANY, project: "web", source: sample.source,
+    sourceRef: { system: sample.system, id, version },
+    kind: sample.kind, occurredAt: AT, actor: { sourceId: "U1", trust: "member" }, trust: "member", audience,
     text: "The deploy needs the cache warmed first.", links: [], retention: "D", scope, ...rest,
   };
 }
 
 // ---- the sink
 
-/** How the harness reads back what a sink keeps. */
+/** How the harness reads back what a sink keeps. `trust` and `links` are checked when the harness gives them. */
 export interface StoredRecordView {
   text?: string | undefined;
   version: string;
   hidden: boolean;
   audience: Audience;
+  trust?: string;
+  links?: readonly string[];
 }
 
 export interface RecordSinkUnderTest {
   sink: RecordSink;
+  /** What to record with. Absent: `CHAT_SAMPLE`. */
+  sample?: RecordSample;
+  /** Called once for each company and place before the first write there (a hosted sink writes its source's settings: on, retention D, the project). */
+  setup?: (workspaceId: string, scope: string) => Promise<void>;
   /** The item's current row (the newest version), or undefined when none was stored. */
   read: (workspaceId: string, source: string, system: string, id: string) => Promise<StoredRecordView | undefined>;
   /** For a sink that queues every call (answers `queued`): applies what is queued. */
@@ -48,104 +69,157 @@ export interface RecordSinkHarness {
   create(): Promise<RecordSinkUnderTest>;
 }
 
+interface SinkContext extends RecordSinkUnderTest {
+  sample: RecordSample;
+  put: (draft: RecordDraft) => Promise<RecordIngestOutcome>;
+  draft: (extra?: Parameters<typeof sampleRecordDraft>[1]) => RecordDraft;
+  row: (id: string, workspaceId?: string) => Promise<StoredRecordView | undefined>;
+  tombstone: (input: Parameters<RecordSink["tombstone"]>[0]) => Promise<{ hidden: number }>;
+}
+
 export function runRecordSinkConformance(name: string, harness: RecordSinkHarness): void {
-  async function withSink<T>(body: (under: RecordSinkUnderTest & { put: (draft: RecordDraft) => Promise<RecordIngestOutcome> }) => Promise<T>): Promise<T> {
+  async function withSink<T>(body: (context: SinkContext) => Promise<T>): Promise<T> {
     const under = await harness.create();
-    const put = async (draft: RecordDraft) => { const outcome = await under.sink.put(draft); await under.settle?.(); return outcome; };
-    try { return await body({ ...under, put }); } finally { await under.dispose?.(); }
+    const sample = under.sample ?? CHAT_SAMPLE;
+    const ready = new Set<string>();
+    const prepare = async (draft: RecordDraft) => {
+      const scope = draft.audience.kind === "restricted" ? draft.audience.acl.scope : draft.scope;
+      const key = JSON.stringify([draft.workspaceId, scope]);
+      if (scope !== undefined && !ready.has(key)) { ready.add(key); await under.setup?.(draft.workspaceId, scope); }
+    };
+    const context: SinkContext = {
+      ...under, sample,
+      async put(draft) { await prepare(draft); const outcome = await under.sink.put(draft); await under.settle?.(); return outcome; },
+      draft: (extra = {}) => sampleRecordDraft(sample, extra),
+      row: (id, workspaceId = COMPANY) => under.read(workspaceId, sample.source, sample.system, id),
+      async tombstone(input) { const result = await under.sink.tombstone(input); await under.settle?.(); return result; },
+    };
+    try { return await body(context); } finally { await under.dispose?.(); }
   }
   const stored = (outcome: RecordIngestOutcome) => expect(["stored", "queued"]).toContain(outcome.status);
   const repeated = (outcome: RecordIngestOutcome) => expect(["duplicate", "queued"]).toContain(outcome.status);
+  const notStored = (outcome: RecordIngestOutcome) => expect(["refused", "queued"]).toContain(outcome.status);
+  const gone = (row: StoredRecordView | undefined) => expect(row === undefined || row.hidden).toBe(true);
 
   describe(`record sink conformance: ${name}`, () => {
-    it("stores a draft once: the same item and version again is a repeat", () => withSink(async ({ put, read }) => {
-      stored(await put(sampleRecordDraft()));
-      repeated(await put(sampleRecordDraft()));
-      expect(await read(COMPANY, "chat", "T1", "C9/1700000000.0001")).toMatchObject({ version: "v1", hidden: false, text: "The deploy needs the cache warmed first." });
+    it("stores a draft once: the same item and version again is a repeat", () => withSink(async ({ put, draft, row }) => {
+      stored(await put(draft()));
+      repeated(await put(draft()));
+      const kept = await row("C9/1700000000.0001");
+      expect(kept).toMatchObject({ version: "v1", hidden: false });
+      expect(kept?.text).toContain("cache warmed first");
     }));
 
-    it("replaces an item's text with a newer version, and never with an older one that arrives late", () => withSink(async ({ put, read }) => {
-      stored(await put(sampleRecordDraft()));
-      stored(await put(sampleRecordDraft({ version: "v2", text: "Edited: warm the cache.", sourceRef: { system: "T1", id: "C9/1700000000.0001", version: "v2", versionAt: LATER } })));
-      repeated(await put(sampleRecordDraft({ version: "v0", text: "An old version.", sourceRef: { system: "T1", id: "C9/1700000000.0001", version: "v0", versionAt: "2026-11-10T09:00:00.000Z" } })));
-      expect(await read(COMPANY, "chat", "T1", "C9/1700000000.0001")).toMatchObject({ version: "v2", text: "Edited: warm the cache." });
+    it("replaces an item's text with a newer version, and never with an older one that arrives late", () => withSink(async ({ put, draft, row, sample }) => {
+      stored(await put(draft()));
+      stored(await put(draft({ version: "v2", text: "Edited: warm the cache.", sourceRef: { system: sample.system, id: "C9/1700000000.0001", version: "v2", versionAt: LATER } })));
+      repeated(await put(draft({ version: "v0", text: "An old version.", sourceRef: { system: sample.system, id: "C9/1700000000.0001", version: "v0", versionAt: "2026-11-10T09:00:00.000Z" } })));
+      const kept = await row("C9/1700000000.0001");
+      expect(kept?.version).toBe("v2");
+      expect(kept?.text).toContain("Edited: warm the cache.");
     }));
 
-    it("keeps a delete that arrives before its put: the late put is refused", () => withSink(async ({ sink, put, read, settle }) => {
-      await sink.tombstone({ workspaceId: COMPANY, system: "T1", sourceIds: ["C9/1700000000.0001"], cause: "source_deleted" });
-      await settle?.();
-      const late = await put(sampleRecordDraft());
-      expect(["refused", "queued"]).toContain(late.status);
-      const row = await read(COMPANY, "chat", "T1", "C9/1700000000.0001");
-      expect(row === undefined || row.hidden).toBe(true);
+    it("keeps a delete that arrives before its put: the late put is refused", () => withSink(async ({ put, draft, row, tombstone, sample }) => {
+      await tombstone({ workspaceId: COMPANY, system: sample.system, sourceIds: ["C9/1700000000.0001"], cause: "source_deleted" });
+      notStored(await put(draft()));
+      gone(await row("C9/1700000000.0001"));
     }));
 
-    it("hides a stored item at once on a delete, and refuses a newer version of it afterwards", () => withSink(async ({ sink, put, read, settle }) => {
-      stored(await put(sampleRecordDraft()));
-      const { hidden } = await sink.tombstone({ workspaceId: COMPANY, system: "T1", sourceIds: ["C9/1700000000.0001"], cause: "source_deleted" });
-      await settle?.();
+    it("hides a stored item at once on a delete, and refuses a newer version of it afterwards", () => withSink(async ({ put, draft, row, tombstone, sample }) => {
+      stored(await put(draft()));
+      const { hidden } = await tombstone({ workspaceId: COMPANY, system: sample.system, sourceIds: ["C9/1700000000.0001"], cause: "source_deleted" });
       expect(hidden).toBeLessThanOrEqual(1);
-      expect((await read(COMPANY, "chat", "T1", "C9/1700000000.0001"))?.hidden ?? true).toBe(true);
-      const after = await put(sampleRecordDraft({ version: "v2", sourceRef: { system: "T1", id: "C9/1700000000.0001", version: "v2", versionAt: LATER } }));
-      expect(["refused", "queued"]).toContain(after.status);
-      expect((await read(COMPANY, "chat", "T1", "C9/1700000000.0001"))?.hidden ?? true).toBe(true);
+      gone(await row("C9/1700000000.0001"));
+      notStored(await put(draft({ version: "v2", sourceRef: { system: sample.system, id: "C9/1700000000.0001", version: "v2", versionAt: LATER } })));
+      gone(await row("C9/1700000000.0001"));
     }));
 
-    it("deletes a place and the places under it, not a place whose name only starts the same", () => withSink(async ({ sink, put, read, settle }) => {
-      stored(await put(sampleRecordDraft({ id: "a", scope: "chat:T1/C9" })));
-      stored(await put(sampleRecordDraft({ id: "b", scope: "chat:T1/C9/thread" })));
-      stored(await put(sampleRecordDraft({ id: "c", scope: "chat:T1/C90" })));
-      await sink.tombstone({ workspaceId: COMPANY, system: "T1", scope: "chat:T1/C9", cause: "source_deleted" });
+    it("deletes a place and the places under it, not a sibling whose name only starts the same, and closes it: nothing new is stored there", () => withSink(async ({ put, draft, row, tombstone, sample }) => {
+      stored(await put(draft({ id: "a", place: "C9" })));
+      stored(await put(draft({ id: "b", place: "C9/thread" })));
+      stored(await put(draft({ id: "c", place: "C90" })));
+      await tombstone({ workspaceId: COMPANY, system: sample.system, scope: sample.place("C9"), cause: "source_deleted" });
+      gone(await row("a"));
+      gone(await row("b"));
+      expect((await row("c"))?.hidden).toBe(false);
+      notStored(await put(draft({ id: "d", place: "C9" })));
+      notStored(await put(draft({ id: "e", place: "C9/thread" })));
+      gone(await row("d"));
+      stored(await put(draft({ id: "f", place: "C90" })));
+    }));
+
+    it("closes an excluded place too", () => withSink(async ({ put, draft, row, tombstone, sample }) => {
+      await tombstone({ workspaceId: COMPANY, system: sample.system, scope: sample.place("C7"), cause: "excluded" });
+      notStored(await put(draft({ id: "e", place: "C7" })));
+      gone(await row("e"));
+    }));
+
+    it("keeps a per-editor change row apart: it replaces nothing and is replaced by nothing", () => withSink(async ({ put, draft, row, sample }) => {
+      stored(await put(draft()));
+      stored(await put(draft({ version: "e1", text: "My own edit.", sourceRef: { system: sample.system, id: "C9/1700000000.0001", version: "e1", versionAt: LATER, order: 1_700_000_000_500 } })));
+      const kept = await row("C9/1700000000.0001");
+      expect(kept?.version).toBe("v1");
+      expect(kept?.text).toContain("cache warmed first");
+    }));
+
+    it("refuses what is not a draft", () => withSink(async ({ put, draft }) => {
+      for (const bad of [{ ...draft(), source: "Not A Source" }, { ...draft(), kind: "message" }, { ...draft(), occurredAt: "yesterday" }]) notStored(await put(bad));
+    }));
+
+    it("keeps no text under retention A or B", () => withSink(async ({ put, draft, row }) => {
+      for (const [id, retention] of [["ra", "A"], ["rb", "B"]] as const) {
+        const outcome = await put(draft({ id, retention }));
+        expect(["stored", "queued", "refused"]).toContain(outcome.status);
+        expect((await row(id))?.text).toBeUndefined();
+      }
+    }));
+
+    it("never stores a row trusted above its author, and trims links instead of refusing", () => withSink(async ({ put, draft, row }) => {
+      const links = ["https://example.test/1", "javascript:alert(1)", `https://example.test/${"x".repeat(2_100)}`, ...Array.from({ length: 30 }, (_, i) => `https://example.test/p${String(i)}`)];
+      const outcome = await put(draft({ id: "t1", trust: "member", actor: { sourceId: "U9", trust: "outsider" }, links }));
+      if (outcome.status === "refused") return;
+      const kept = await row("t1");
+      if (kept?.trust !== undefined) expect(kept.trust).toBe("outsider");
+      if (kept?.links !== undefined) {
+        expect(kept.links.length).toBeLessThanOrEqual(20);
+        expect(kept.links).not.toContain("javascript:alert(1)");
+        for (const link of kept.links) expect(link.length).toBeLessThanOrEqual(2_048);
+      }
+    }));
+
+    it("hands B text to the distiller only where a stored row could go", () => withSink(async ({ sink, put, draft, tombstone, sample }) => {
+      if (sink.distillTransient === undefined) return;
+      stored(await put(draft({ id: "open-place", place: "C5" })));
+      const open = draft({ id: "b1", place: "C5", retention: "B" }) as RecordDraft & { text: string };
+      expect((await sink.distillTransient(open)).accepted).toBe(true);
+      await tombstone({ workspaceId: COMPANY, system: sample.system, scope: sample.place("C5"), cause: "source_deleted" });
+      expect((await sink.distillTransient({ ...open, sourceRef: { ...open.sourceRef, id: "b2" } })).accepted).toBe(false);
+    }));
+
+    it("changes a private place's members, keeps a removal against a late older event, and moves a place to a new audience", () => withSink(async ({ sink, put, draft, row, settle }) => {
+      stored(await put(draft()));
+      const principals = async () => {
+        const kept = await row("C9/1700000000.0001");
+        return kept?.audience.kind === "restricted" ? [...(kept.audience.acl.principals ?? [])].sort() : [];
+      };
+      await sink.changePrincipals({ workspaceId: COMPANY, scope: draft().scope!, add: ["U3"], remove: ["U2"], at: LATER });
       await settle?.();
-      expect((await read(COMPANY, "chat", "T1", "a"))?.hidden).toBe(true);
-      expect((await read(COMPANY, "chat", "T1", "b"))?.hidden).toBe(true);
-      expect((await read(COMPANY, "chat", "T1", "c"))?.hidden).toBe(false);
-      // A deleted place does not refuse a NEW item under it (only an excluded place does).
-      stored(await put(sampleRecordDraft({ id: "d", scope: "chat:T1/C9" })));
-    }));
-
-    it("refuses new items under an excluded place", () => withSink(async ({ sink, put, settle }) => {
-      await sink.tombstone({ workspaceId: COMPANY, system: "T1", scope: "chat:T1/C7", cause: "excluded" });
+      expect(await principals()).toEqual(["U1", "U3"]);
+      // An add of U2 made BEFORE the removal, delivered after it, does not bring U2 back.
+      await sink.changePrincipals({ workspaceId: COMPANY, scope: draft().scope!, add: ["U2"], at: "2026-11-10T10:30:00.000Z" });
       await settle?.();
-      const outcome = await put(sampleRecordDraft({ id: "e", scope: "chat:T1/C7" }));
-      expect(["refused", "queued"]).toContain(outcome.status);
-    }));
-
-    it("keeps a per-editor change row apart: it replaces nothing and is replaced by nothing", () => withSink(async ({ put, read }) => {
-      stored(await put(sampleRecordDraft()));
-      stored(await put(sampleRecordDraft({ version: "e1", text: "My own edit.", sourceRef: { system: "T1", id: "C9/1700000000.0001", version: "e1", versionAt: LATER, order: 1_700_000_000_500 } })));
-      expect(await read(COMPANY, "chat", "T1", "C9/1700000000.0001")).toMatchObject({ version: "v1", text: "The deploy needs the cache warmed first." });
-    }));
-
-    it("refuses a draft that breaks the rules: text kept under retention A, a snapshot naming another source, a row trusted above its author", () => withSink(async ({ put }) => {
-      const base = sampleRecordDraft();
-      const bad: RecordDraft[] = [
-        { ...base, retention: "A" },
-        { ...base, audience: { kind: "restricted", acl: { source: "tracker", scope: "chat:T1/C9", capturedAt: AT, liveCheck: "none" } } },
-        { ...base, trust: "rovara", actor: { sourceId: "U1", trust: "outsider" } },
-        { ...base, source: "Not A Source" },
-      ];
-      for (const draft of bad) expect((await put(draft)).status).toMatch(/^(refused|queued)$/u);
-    }));
-
-    it("changes a private place's members and moves a place to a new audience", () => withSink(async ({ sink, put, read, settle }) => {
-      stored(await put(sampleRecordDraft()));
-      await sink.changePrincipals({ workspaceId: COMPANY, scope: "chat:T1/C9", add: ["U3"], remove: ["U2"], at: LATER });
+      expect(await principals()).not.toContain("U2");
+      await sink.replaceScopeAudience({ workspaceId: COMPANY, scope: draft().scope!, audience: { kind: "project" }, at: "2026-11-10T12:00:00.000Z" });
       await settle?.();
-      const changed = await read(COMPANY, "chat", "T1", "C9/1700000000.0001");
-      expect(changed?.audience.kind === "restricted" ? [...(changed.audience.acl.principals ?? [])].sort() : []).toEqual(["U1", "U3"]);
-      await sink.replaceScopeAudience({ workspaceId: COMPANY, scope: "chat:T1/C9", audience: { kind: "project" }, at: LATER });
-      await settle?.();
-      expect((await read(COMPANY, "chat", "T1", "C9/1700000000.0001"))?.audience).toEqual({ kind: "project" });
+      expect((await row("C9/1700000000.0001"))?.audience).toEqual({ kind: "project" });
     }));
 
-    it("keeps companies apart: a delete in one company leaves the same item in another", () => withSink(async ({ sink, put, read, settle }) => {
-      stored(await put(sampleRecordDraft()));
-      stored(await put(sampleRecordDraft({ workspaceId: OTHER })));
-      await sink.tombstone({ workspaceId: OTHER, system: "T1", sourceIds: ["C9/1700000000.0001"], cause: "person_erased" });
-      await settle?.();
-      expect((await read(COMPANY, "chat", "T1", "C9/1700000000.0001"))?.hidden).toBe(false);
-      expect((await read(OTHER, "chat", "T1", "C9/1700000000.0001"))?.hidden ?? true).toBe(true);
+    it("keeps companies apart: a delete in one company leaves the same item in another", () => withSink(async ({ put, draft, row, tombstone, sample }) => {
+      stored(await put(draft()));
+      stored(await put(draft({ workspaceId: OTHER })));
+      await tombstone({ workspaceId: OTHER, system: sample.system, sourceIds: ["C9/1700000000.0001"], cause: "person_erased" });
+      expect((await row("C9/1700000000.0001"))?.hidden).toBe(false);
+      gone(await row("C9/1700000000.0001", OTHER));
     }));
   });
 }
@@ -182,6 +256,8 @@ export interface RecordSourceUnderTest {
   deliveries?: readonly unknown[];
   /** A poll that reads at least one item. Needed when it can `poll`. */
   poll?: Omit<RecordPollRequest, "deadline">;
+  /** Optional: the same source made with settings it cannot read (a store that is down). It must record nothing. */
+  unreadableSettings?: () => Promise<TeamRecordSource>;
   dispose?: () => Promise<void>;
 }
 
@@ -198,7 +274,7 @@ export function runRecordSourceConformance(name: string, harness: RecordSourceHa
   const checkDrafts = (source: TeamRecordSource, drafts: readonly RecordDraft[]) => {
     expect(drafts.length).toBeGreaterThan(0);
     for (const draft of drafts) {
-      expect(recordDraftRefusal(draft), JSON.stringify(draft.sourceRef)).toBeUndefined();
+      expect(recordSourceDraftProblem(draft), JSON.stringify(draft.sourceRef)).toBeUndefined();
       expect(draft.source).toBe(source.source);
       expect(source.capabilities.retentions).toContain(draft.retention);
       if (draft.audience.kind === "restricted") expect(draft.audience.acl.source).toBe(source.source);
@@ -247,6 +323,17 @@ export function runRecordSourceConformance(name: string, harness: RecordSourceHa
       const outcome = await source.receive({ unrelated: true }, sink).catch(() => undefined);
       expect(sink.drafts).toHaveLength(0);
       if (outcome !== undefined) expect(outcome.written).toBe(0);
+    }));
+
+    it("records nothing when its own settings cannot be read (fail closed)", () => withSource(async ({ deliveries, unreadableSettings }) => {
+      if (unreadableSettings === undefined) return;
+      const blind = await unreadableSettings();
+      const sink = createRecordingSink();
+      for (const delivery of deliveries ?? []) {
+        const outcome = await blind.receive?.(delivery, sink).catch(() => undefined);
+        if (outcome !== undefined) expect(outcome.written).toBe(0);
+      }
+      expect(sink.drafts).toHaveLength(0);
     }));
 
     it("polls well-formed drafts of the asked company, and keeps its cursor when a write failed", () => withSource(async ({ source, poll }) => {

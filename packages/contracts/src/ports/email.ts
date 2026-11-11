@@ -7,6 +7,7 @@
 //   - `send` sends ONE message to ONE address. It resolves when the transport took the message. It throws `EmailError`: `refused` for a message this adapter will not
 //     send (an address that is not one plain address, a subject with a line break, a body over the limit, a link that is not https), never retried; `unavailable` for
 //     a transport that is down or slow past the message's `deadline`, which the caller may retry later (it marks what was sent itself, so a retry sends once more at most).
+//   - `capabilities.available` says whether the adapter can send at all; the core decides before it offers email, and falls back to another channel when it cannot.
 //   - `html` is an optional second form of the same words; an adapter without `capabilities.html` sends the text alone. `unsubscribeUrl` becomes the mail client's own
 //     unsubscribe offer where the adapter can set it (`capabilities.unsubscribeHeader`); the text always carries the same link in words, so nothing depends on it.
 //
@@ -42,6 +43,8 @@ export interface EmailMessage {
 }
 
 export interface EmailCapabilities {
+  /** Whether this adapter can send at all. The core asks before it offers email or picks it for a notice (a person's choice falls back to another channel when false). */
+  available: boolean;
   /** The HTML form is sent beside the text. */
   html: boolean;
   /** The mail client's unsubscribe offer is set from `unsubscribeUrl`. */
@@ -71,6 +74,11 @@ export interface EmailSender {
   close?(): Promise<void> | void;
 }
 
+/** The unsubscribe link as an adapter sends it: the parsed link's normal form (`URL.href`), never the raw text. `undefined` when it is not a link. */
+export function emailUnsubscribeHref(value: string): string | undefined {
+  try { return new URL(value).href; } catch { return undefined; }
+}
+
 /** Whether a string is one plain address this port sends to. */
 export const isPlainEmailAddress = (value: string): boolean => value.length <= 254 && PLAIN_ADDRESS.test(value);
 
@@ -87,14 +95,14 @@ const hasLineOrControl = (value: string): boolean => [...value].some((char) => {
  */
 export function emailRefusal(message: EmailMessage): string | undefined {
   if (!PURPOSE.test(message.purpose)) return "the email's purpose is not one word";
-  if (!isPlainEmailAddress(message.to)) return "the recipient is not one plain address";
+  if (hasLineOrControl(message.to) || !isPlainEmailAddress(message.to)) return "the recipient is not one plain address";
   if (message.subject.length === 0 || message.subject.length > EMAIL_SUBJECT_MAX || hasLineOrControl(message.subject)) return "the subject is not one short line";
   if (message.text.length === 0 || bytes(message.text) > EMAIL_BODY_MAX_BYTES || message.text.includes("\u0000")) return "the text is empty or too long";
   if (message.html !== undefined && (bytes(message.html) > EMAIL_BODY_MAX_BYTES || message.html.includes("\u0000"))) return "the HTML is too long";
   if (message.unsubscribeUrl !== undefined) {
     let url: URL | undefined;
     try { url = new URL(message.unsubscribeUrl); } catch { url = undefined; }
-    if (url === undefined || url.protocol !== "https:" || url.username !== "" || url.password !== "" || message.unsubscribeUrl.length > 2_000 || /[\s<>]/u.test(message.unsubscribeUrl)) return "the unsubscribe link is not a plain https link";
+    if (hasLineOrControl(message.unsubscribeUrl) || url === undefined || url.protocol !== "https:" || url.username !== "" || url.password !== "" || message.unsubscribeUrl.length > 2_000 || /[\s<>]/u.test(message.unsubscribeUrl)) return "the unsubscribe link is not a plain https link";
   }
   return undefined;
 }
