@@ -444,6 +444,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
+    // Decision 70(c): the owner's own machine acts on its own as far as `prepare`, the same default merge tracking reads for a task (there is no recipe or company limit to read here).
+    autonomy: async () => ({ autonomy: "prepare" as const }),
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
   });

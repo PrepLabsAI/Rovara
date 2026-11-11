@@ -3,7 +3,7 @@
 // the candidate, so a recovered or repeated row is the first one's duplicate.
 import { createHash } from "node:crypto";
 import {
-  AgentXError, EVIDENCE_CAPTURE_FEATURE, abandonWorkflowFix, blockWorkflow, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
+  AgentXError, EVIDENCE_CAPTURE_FEATURE, WORKFLOW_BLOCK_REASONS, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
   WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
@@ -244,6 +244,25 @@ async function testPlanFor(deps: TaskFlowDeps, task: TaskRecord, mode: "IMPLEMEN
 
 // ---- reviews
 
+/**
+ * Whether the task is at the reviews of a merged base's automatic re-run (decision 70(c)): the newest decision is Rovara's re-run after a merge of the base, for the candidate now at REVIEW, which an open pull
+ * request holds. The reviews that follow are paid work of a round Rovara decided itself.
+ */
+export function isBaseMergedRecheckRound(workflow: WorkflowSnapshot): boolean {
+  const candidate = workflow.candidate;
+  const last = workflow.decisions.at(-1);
+  return workflow.stage === "REVIEW" && workflow.state === "WAITING" && workflow.fixSource === undefined && candidate !== undefined && last !== undefined && isBaseMergedRetry(last)
+    && last.auto?.candidateDigest === candidate.digest
+    && (workflow.pullRequests ?? []).some((pullRequest) => (pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN") && pullRequest.candidateDigest === candidate.digest);
+}
+
+/** Whether how far Rovara may act on its own was lowered to `suggest` (a setting that cannot be read reads as `suggest`). An install with no autonomy seam never stops the reviews. */
+async function autonomyLowered(deps: TaskFlowDeps, task: TaskRecord): Promise<boolean> {
+  if (deps.autonomy === undefined) return false;
+  const found = await deps.autonomy(task).catch(() => ({ autonomy: "suggest" as const }));
+  return found.autonomy === "suggest";
+}
+
 function reviewChecksOf(workflow: WorkflowSnapshot): WorkflowReviewChecks | undefined {
   const verification = workflow.verification;
   if (verification === undefined) return undefined;
@@ -269,6 +288,12 @@ export async function startReview(deps: TaskFlowDeps, row: RowRef, options: { re
   if (found === "waiting") return "WAITING";
   const { task, workspace } = found;
   const { workflow } = task;
+  // Decision 70(c): the reviews after Rovara's own re-run of a merged base's checks are paid work of a round Rovara decided itself: how far it may act is read again, and if it was lowered to `suggest` since, the
+  // round stops here, cleanly, before any review is paid for. The owner's Retry (retry: true) is their own go-ahead.
+  if (options.retry !== true && isBaseMergedRecheckRound(workflow) && await autonomyLowered(deps, task)) {
+    await commitWorkflow(deps, task, blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.recheckAutonomyLowered, iso(deps)), [resolveRowItem(deps, task.taskId, row.workflowRevision)]);
+    return "STALE";
+  }
   const candidate = workflow.candidate;
   const verification = workflow.verification;
   if (candidate === undefined || verification === undefined || verification.candidateDigest !== candidate.digest

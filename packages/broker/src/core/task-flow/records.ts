@@ -188,7 +188,7 @@ export interface DispatchRowRecord {
   /** A CRITIQUE row: who approved running the design review without a price (the cost hold's "run it anyway"). Only this lets a round start from the hold. */
   costApprovedBy?: string;
   /** An AUTOFIX row: how the block it looks at came about when no finished run wrote it (the run was lost, or its start was tried until the budget ran out). */
-  cause?: "run-lost" | "dispatch-exhausted";
+  cause?: "run-lost" | "dispatch-exhausted" | "base-merged";
 }
 
 /** A record as the store keeps it: plain JSON, with undefined fields dropped. */

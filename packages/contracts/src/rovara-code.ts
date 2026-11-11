@@ -526,6 +526,10 @@ export const MERGE_NOT_READY_MESSAGES = {
   changesRequested: "A reviewer asked for changes on this pull request.",
   staleApproval: "The approval was for earlier code. This pull request needs a new approval.",
   behind: (base: string): string => `The branch is behind ${base}, and GitHub needs it up to date. I'm bringing it up to date; press Merge again when that is done.`,
+  /** A branch that is behind a base GitHub needs it up to date with, on a task whose changes need browser or API checks: Rovara does not merge the base in for it (the merged code could not be checked again), so the person does. */
+  behindByHand: (base: string): string => `The branch is behind ${base}, and GitHub needs it up to date. This task's changes need browser or API checks, so I won't merge the base in myself: update the branch on GitHub, then press Merge again, or send the task back.`,
+  /** The base branch was merged into the pull request: the merged code is a new candidate that needs its checks and reviews again before the task waits for the merge. */
+  baseMerged: "The base branch was merged into this pull request, so the merged code needs its checks and reviews again before it can be merged.",
   taskClosed: "This task is closed.",
   presserLostRight: "You can no longer merge this task, so nothing was merged.",
   notTrackedYet: "I haven't finished reading this pull request from GitHub yet. Try again in a minute.",

@@ -83,6 +83,7 @@ const CODE_SENTENCES: Readonly<Record<AutoFixCode, string>> = Object.freeze({
   "dispatch-exhausted": "Rovara tried several times to start this step and could not.",
   "run-lost": "The runner lost the task partway through the run.",
   "owner-stopped": "You stopped this run.",
+  "base-merged": "The base branch was merged into this pull request, so the merged code needs its checks and reviews again.",
   "e2e-evidence-unknown": "Some checks ended without a result, and nothing says whether the code or the setup is at fault.",
   "check-result-unknown": "A check ended without a result.",
   "check-failed-cause-unknown": "A check failed and nothing says yet whether the code or the setup is at fault.",
@@ -107,6 +108,11 @@ export function autoFixAskReasonSentence(reason: AutoFixAskReason, capUsd?: numb
     case "original-code-also-fails": return failedOnOriginal ? "The same checks also fail on the original code, so new code may not fix it." : "The original code could not be checked, so I can't tell whether new code would fix it.";
     case "unclear-fault": return "I could not tell whether the code or the setup is at fault.";
     case "owner-stopped": return "You stopped this, so I did not retry it by myself.";
+    case "autonomy-suggest": return "Rovara is set to suggest, so it doesn't re-run the checks on the merged code by itself.";
+    case "autonomy-unreadable": return "Rovara couldn't read how far it may act on its own for this task, so it didn't re-run the checks on the merged code by itself.";
+    case "autonomy-no-company": return "This task has no company, so Rovara doesn't re-run the checks on the merged code by itself.";
+    case "head-moved": return "Someone pushed to this pull request after the base branch was merged into it, so I didn't re-run the checks on code it no longer holds.";
+    case "base-merged-limit": return "I already re-ran the checks after a base branch merge three times for this task today, which is my limit.";
     case "send-back-limit": return "I already sent this back to coding twice for this plan, which is my limit.";
     case "retry-limit": return "I already retried this once for this code, which is my limit.";
     case "total-limit": return "I reached my limit of 6 automatic actions on this task.";

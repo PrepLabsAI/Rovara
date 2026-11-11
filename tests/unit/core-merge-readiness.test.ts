@@ -1,6 +1,6 @@
 // Port lane L7a: the pure rules of the merge core (Cloud's, unchanged): what the checks say, whose approval counts, when the pull requests may be merged and in whose words.
 import { describe, expect, it } from "vitest";
-import { MERGE_NOT_READY_MESSAGES as M, type ChangeRequestStatus, type MergeTrackingItem } from "../../packages/contracts/src/index.js";
+import { MERGE_NOT_READY_MESSAGES as M, WORKFLOW_BLOCK_REASONS, type ChangeRequestStatus, type MergeTrackingItem } from "../../packages/contracts/src/index.js";
 import { humanApprovalOf, latestReviewers } from "../../packages/broker/src/core/merge/approval.js";
 import { mergeReadiness, mergeViewFromReadiness, riskOfTask, type MergePullRequestFacts, type ReadinessInput } from "../../packages/broker/src/core/merge/merge.js";
 import { NO_CI_GRACE_MS, PERMISSION_LOOKUPS_MAX, readBranch, readCi, readHeadByRovara, readReviews, tracksMerge } from "../../packages/broker/src/core/merge/merge-tracking.js";
@@ -133,6 +133,15 @@ describe("mergeReadiness", () => {
     expect(refused({ pullRequests: [fact({ branch: "behind", behindRequired: true })] })).toBe(M.behind("main"));
     expect(refused({ pullRequests: [fact({ branch: "behind", behindRequired: false })] })).toBe("ready");
     expect(refused({ pullRequests: [fact({ state: "merged" })] })).toBe(M.taskClosed);
+  });
+  it("tells a task that needs browser or API checks to update its branch itself (Rovara does not merge the base in), and a merged base that needs its checks again to Retry checks (decision 70(c))", () => {
+    const behind = { pullRequests: [fact({ branch: "behind", behindRequired: true })] };
+    expect(refused({ ...behind, workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING", e2e: { required: true } } })).toBe(M.behindByHand("main"));
+    expect(M.behindByHand("main")).not.toContain("I'm bringing it up to date");
+    expect(refused({ ...behind, workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING", e2e: { required: false } } })).toBe(M.behind("main"));
+    // The base was merged in: not "still changing", but the owner's Retry checks.
+    expect(refused({ workflow: { stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.baseMergedRecheck } })).toBe(M.baseMerged);
+    expect(refused({ workflow: { stage: "VERIFY", state: "BLOCKED", blockReason: "checks failed" } })).toBe(M.changing);
   });
   it("holds while the task is changing, blocked, closed, or a second review waits", () => {
     expect(refused({ workflow: { stage: "WAIT_FOR_MERGE", state: "RUNNING" } })).toBe(M.changing);

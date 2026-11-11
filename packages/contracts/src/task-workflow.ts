@@ -23,6 +23,17 @@ export const isStepNotRunReason = (reason: string | undefined): boolean => reaso
 
 export const WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE = "AgentX couldn't open the pull request automatically. Use Retry opening the pull request to try again.";
 
+/**
+ * Decision 70(c): the reason an automatic re-run of the checks after a merge of the base records. A decision with exactly this reason is a "base-merged" retry: it counts for its candidate (one per
+ * candidate) but not in the task's lifetime limit of automatic actions; it has its own allowance per task per day (`BASE_MERGED_RETRIES_PER_DAY`).
+ */
+export const BASE_MERGED_RETRY_REASON = "Rovara re-ran the checks by itself after the base branch was merged into the pull request.";
+/** How many automatic re-runs after a merge of the base one task gets in 24 hours. */
+export const BASE_MERGED_RETRIES_PER_DAY = 3;
+/** The milestone lines: Rovara is re-checking by itself (information), or the task waits for the owner to re-check (needs you). */
+export const BASE_MERGED_RECHECKING_MILESTONE = "The base branch was merged into the pull request. Rovara is re-checking the merged code.";
+export const BASE_MERGED_NEEDS_YOU_MILESTONE = "The base branch was merged into the pull request. The merged code needs its checks again: open the task and choose Retry checks.";
+
 export const WORKFLOW_BLOCK_REASONS = {
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
   checkRetryStale: "This check run no longer matches the task's current step. Use the latest update in the thread.",
@@ -63,6 +74,12 @@ export const WORKFLOW_BLOCK_REASONS = {
   /** An approved PR feedback fix left every repository's code as its open pull request holds it: nothing was pushed. */
   fixChangedNothing: "The approved fix didn't change any code, so nothing was pushed.",
   codeChangedAfterChecks: "The code changed after its checks ran. Run the checks again on the latest code.",
+  /** The base branch was merged into the pull request's branch: the merged code is a new candidate, so its checks and reviews run again before the task waits for the merge (a merge is not trusted on its parents alone). */
+  baseMergedRecheck: "The base branch was merged into this pull request, so the merged code needs its checks and reviews again before it is called ready.",
+  /** The company's limit on how far Rovara may act on its own was lowered while the merged code's checks re-ran: the reviews (paid) did not start. */
+  recheckAutonomyLowered: "Rovara is no longer set to act on its own here, so it stopped before the reviews of the merged code. Choose Retry reviews to run them.",
+  /** A rerun of the checks of code a pull request already holds ran on other code than the code the pull request shows. */
+  checkedOtherCode: "The checks ran on other code than the code on the pull request. Send the task back to coding, or close it.",
   startUnrecorded: "AgentX could not record where this change started. Close the task and start a new one.",
   startUnconfirmed: "AgentX could not confirm the task's starting commit on GitHub.",
   startChanged: "The code's starting point changed. Send the task back to coding or close it.",

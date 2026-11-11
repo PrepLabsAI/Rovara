@@ -138,7 +138,7 @@ const SHA = COMMIT_ID_PATTERN;
 /**
  * What a finished merge of the base is, from what GitHub shows (never from the worker's word alone):
  * - the merge is on the branch when the head is a new commit with exactly two parents, the head Rovara recorded first and the base commit it merged second, on the task's own branch, with the tree
- *   the worker reported (when it reported one); it is recorded even when the worker's result was lost;
+ *   the worker reported (when it reported one); it is recorded even when the worker's result was lost (as a new candidate that is checked and reviewed again);
  * - a conflict (nothing pushed) starts a conflict round, or stops when the rounds are used up;
  * - GitHub refusing the push of workflow files stops, and is not a conflict round;
  * - anything else (a failed check, a head that moved, a lost machine, a branch that already had the base) ends the merge with nothing recorded.
@@ -164,6 +164,8 @@ export function planBranchSyncOutcome(input: {
   const resultFits = result === undefined || (result.action === "sync" && result.number === binding.number);
   if (!resultFits) return unchanged();
 
+  // The merge the host shows with exactly the recorded head and the asked base commit as its parents is recorded as the NEW CANDIDATE whatever the run's status (decision 67b): its checks and reviews run again
+  // before the task waits for the merge, so the run's own status adds no safety, and leaving Rovara's own merge on the pull request unrecorded would read it as someone else's push for good.
   const landed = github !== undefined && github.state === "open" && github.headBranch === input.recordedBranch && github.headCommit !== binding.expectedHeadCommit
     && SHA.test(github.headCommit) && SHA.test(github.headTreeSha)
     && github.parents?.length === 2 && github.parents[0] === binding.expectedHeadCommit && github.parents[1] === binding.baseCommit
@@ -173,7 +175,7 @@ export function planBranchSyncOutcome(input: {
       const next = recordWorkflowBranchSync(workflow, {
         repositoryId: binding.repositoryId, number: binding.number, headSha: github.headCommit, headTreeSha: github.headTreeSha, baseCommitSha: binding.baseCommit,
         previousHeadSha: binding.expectedHeadCommit, now: input.now,
-        // Only a merge whose result came back has Rovara's checks behind it (the worker pushes only after they pass).
+        // Only a merge whose result came back has Rovara's own checks behind it (the worker pushes only after they pass): no earlier head is kept for an approval to carry from otherwise.
         unverified: input.terminalStatus !== "SUCCEEDED",
       });
       return { kind: "synced", workflow: next, headSha: github.headCommit, headTreeSha: github.headTreeSha, previousHeadSha: binding.expectedHeadCommit, baseCommitSha: binding.baseCommit };
@@ -287,6 +289,9 @@ export function conflictDecider(input: MergeActionInput): MergeActionRequest | u
 
 /** The sync slot: a merge of the base into a branch that is behind it, where a base that requires it and a counted approval make it needed. */
 export function syncDecider(input: MergeActionInput): MergeActionRequest | undefined {
+  // A task whose changes need browser or API checks is not brought up to date by Rovara: the merged code is a new candidate that must pass those checks again, and the merge worker exports no
+  // source for them. The branch stays behind; merge tracking says so and the person updates it on the code host (or sends the task back). A merge for a conflict still runs: its fix goes through coding, which exports its source.
+  if (input.workflow.e2e?.required === true) return undefined;
   const decision = decideBranchSync({ item: input.item, behindRequired: input.context?.behindRequired === true, now: input.now });
   return decision === "sync" && input.autonomy !== "suggest" ? begin(input, "behind") : undefined;
 }
