@@ -1,10 +1,12 @@
-// Work events (U3, requirements P-11 and E-62; owner Q1: "Cloud starts emitting the Code-defined work-event type now so Insights has history").
+// Work events (requirements P-11 and E-62): a durable, content-free history of the flow of work, kept so that flow reports and summaries have data from the first day.
 //
-// A work event is ONE fact about the flow of one task: it started, a plan was approved, a step began or ended, a decision was asked or answered, a pull request opened, merged or closed, the task failed, the
-// next actor changed, a cost settled. Insights and the attention and work summaries are computed from a company's events, and history cannot be rebuilt afterwards, so the events are written from the first day.
+// A work event is ONE fact about the flow of one task: it started, a plan was approved, a step began or ended, a decision was asked or answered, a pull request opened, merged or closed, a review was asked for or
+// given, the task failed or ended, the next actor changed, a cost settled. Flow reports and the attention and work summaries are computed from a company's events, and history cannot be rebuilt afterwards, so a
+// deployment that wants them writes events from the first day. Any deployment can write them; this file does not say where they are kept or who reads them.
 //
 // What an event holds, and does not:
-//  - Ids, never names: the company, the project (its name is its id), the task, and a PERSON'S Rovara id (an opaque id, never a name, an email or a chat handle).
+//  - Ids, never names of people: the company, the project (its name is its id, as chosen by the company, and so is a repository's `owner/name`: both are identifiers a company owns, not content), the task, and a PERSON'S
+//    Rovara id (an opaque id, never a name, an email or a chat handle). A person's id stays in the rows for the retention period; a deployment's erase rules decide whether it is rewritten earlier.
 //  - Closed words, never text: the kind comes from `WORK_EVENT_KINDS`; every other field is a number, a closed list of words, or a short lower-case code. There is no field that can hold a prompt, a plan, a comment, a
 //    title, a branch name, a file path, an error message or a secret, and every shape is strict, so an unknown field is refused rather than stored.
 //  - Time: `at` is the instant of the change itself (UTC, with milliseconds), taken from the source change, so a repeat of the same change is the same event.
@@ -30,7 +32,10 @@ export const WORK_EVENT_KINDS = [
   "pr_opened",
   "pr_merged",
   "pr_closed",
+  "review_requested",
+  "review_approved",
   "task_failed",
+  "task_closed",
   "waiting_changed",
   "cost_settled",
 ] as const;
@@ -77,14 +82,31 @@ const base = {
 
 export const WORK_EVENT_RISKS = ["low", "medium", "high"] as const;
 export const WORK_EVENT_DECISION_OUTCOMES = ["approved", "rejected", "changes_requested", "answered", "expired"] as const;
-export const WORK_EVENT_STEP_OUTCOMES = ["done", "failed", "stopped", "superseded"] as const;
+export const WORK_EVENT_STEP_OUTCOMES = ["done", "failed", "stopped"] as const;
+
+/**
+ * Why a step stopped before it finished: a closed list, chosen from the deployment's known stop reasons (never their words). A reader counts a failure rate from the FAILURE causes only; the rest are a person
+ * or Rovara stopping the work on purpose, a pause for budget or setup, or a pull request closed by someone.
+ */
+export const WORK_EVENT_FAILURE_CAUSES = ["checks_failed", "run_failed", "no_code_change", "plan_failed", "review_failed", "pr_update_failed", "ci_fix_gave_up", "branch_sync_failed", "other"] as const;
+export const WORK_EVENT_STOP_CAUSES = ["cancelled", "budget_exhausted", "budget_paused", "not_started", "waiting_setup", "pr_closed", "needs_owner"] as const;
+export const WORK_EVENT_BLOCK_CAUSES = [...WORK_EVENT_FAILURE_CAUSES, ...WORK_EVENT_STOP_CAUSES] as const;
+export const WorkEventFailureCauseSchema = z.enum(WORK_EVENT_FAILURE_CAUSES);
+export const WorkEventBlockCauseSchema = z.enum(WORK_EVENT_BLOCK_CAUSES);
+export type WorkEventBlockCause = z.infer<typeof WorkEventBlockCauseSchema>;
+/** Whether a cause is a failure (counted in a failure rate) rather than a stop. */
+export const workEventCauseIsFailure = (cause: WorkEventBlockCause): boolean => (WORK_EVENT_FAILURE_CAUSES as readonly string[]).includes(cause);
+
+/** How a task ended, in closed words. `closed_unmerged`: closed without its pull request merged; `plan_rejected`: the owner rejected the plan. */
+export const WORK_EVENT_TASK_OUTCOMES = ["merged", "closed_unmerged", "answered", "plan_rejected", "passed", "skipped", "changes_requested"] as const;
 
 export const WorkEventSchema = z.discriminatedUnion("kind", [
   z.object({ ...base, kind: z.literal("task_started"), path: z.enum(["QUICK", "FULL"]).optional(), origin: WorkEventCodeSchema.optional() }).strict(),
   z.object({ ...base, kind: z.literal("plan_approved"), risk: z.enum(WORK_EVENT_RISKS).optional() }).strict(),
   // A retry is a second `step_started` for the same step of the same task: a reader counts them, so no event carries an attempt number.
   z.object({ ...base, kind: z.literal("step_started"), step: WorkEventCodeSchema }).strict(),
-  z.object({ ...base, kind: z.literal("step_ended"), step: WorkEventCodeSchema, outcome: z.enum(WORK_EVENT_STEP_OUTCOMES) }).strict(),
+  z.object({ ...base, kind: z.literal("step_ended"), step: WorkEventCodeSchema, outcome: z.enum(WORK_EVENT_STEP_OUTCOMES), cause: WorkEventBlockCauseSchema.optional() }).strict()
+    .refine((event) => event.cause === undefined || event.outcome !== "done", "a step that is done has no cause"),
   z.object({ ...base, kind: z.literal("decision_asked"), decisionId: WorkEventRefSchema, decision: WorkEventCodeSchema, risk: z.enum(WORK_EVENT_RISKS).optional() }).strict(),
   z.object({
     ...base, kind: z.literal("decision_answered"), decisionId: WorkEventRefSchema, decision: WorkEventCodeSchema, outcome: z.enum(WORK_EVENT_DECISION_OUTCOMES), place: WorkEventCodeSchema.optional(),
@@ -92,7 +114,12 @@ export const WorkEventSchema = z.discriminatedUnion("kind", [
   z.object({ ...base, kind: z.literal("pr_opened"), repository: RepositorySchema, number: z.number().int().positive() }).strict(),
   z.object({ ...base, kind: z.literal("pr_merged"), repository: RepositorySchema, number: z.number().int().positive() }).strict(),
   z.object({ ...base, kind: z.literal("pr_closed"), repository: RepositorySchema, number: z.number().int().positive() }).strict(),
-  z.object({ ...base, kind: z.literal("task_failed"), reason: WorkEventCodeSchema }).strict(),
+  // A review asked for or given on a pull request by a person (P-11). The contract has them so that no later version is needed; a deployment emits them from where it learns of a review.
+  z.object({ ...base, kind: z.literal("review_requested"), repository: RepositorySchema, number: z.number().int().positive() }).strict(),
+  z.object({ ...base, kind: z.literal("review_approved"), repository: RepositorySchema, number: z.number().int().positive() }).strict(),
+  // Only a real failure: a stop on purpose (a cancel, a budget pause) is `step_ended` with outcome `stopped` and its cause, never this.
+  z.object({ ...base, kind: z.literal("task_failed"), cause: WorkEventFailureCauseSchema }).strict(),
+  z.object({ ...base, kind: z.literal("task_closed"), outcome: z.enum(WORK_EVENT_TASK_OUTCOMES) }).strict(),
   z.object({
     ...base, kind: z.literal("waiting_changed"), waitingOn: z.enum(WORK_EVENT_WAITING_ON), personIds: z.array(WorkEventPersonIdSchema).min(1).max(20).optional(), reason: WorkEventCodeSchema.optional(),
   }).strict().refine((event) => event.personIds === undefined || event.waitingOn === "person", "personIds are given only when the work waits on a person (and not always: the person may not be known)"),
@@ -101,17 +128,35 @@ export const WorkEventSchema = z.discriminatedUnion("kind", [
 export type WorkEvent = z.infer<typeof WorkEventSchema>;
 export type WorkEventInput = z.input<typeof WorkEventSchema>;
 
-/** The partition for one company's events of one month (`ORG#<org>#WORK_EVENTS#<yyyy-mm>`): a month is read with one query, and a company's events never share a partition with another's. */
-export function workEventPartition(orgId: OrgId, month: string): string {
-  if (!/^\d{4}-(?:0[1-9]|1[0-2])$/u.test(month)) throw new Error("a work event month is yyyy-mm");
-  // `ORG#<company>#WORK_EVENTS#<month>`: the company-scoped key scheme (decision 45.6; `companyScoped` in `ports/company-scope.ts`), written out here so this file imports nothing but `browser-ids` and `names`.
-  if (!/^org_[0-9a-z]{20}$/u.test(orgId)) throw new Error("a work event company id is org_ and 20 characters");
-  return `ORG#${orgId}#WORK_EVENTS#${month}`;
+/** How many partitions a company's events of one month are spread over, by task, so that no one partition key takes all the writes. */
+export const WORK_EVENT_SHARDS = 8;
+
+/** The shard of a task's events: from the task id's first hex digits, so every event of a task is in one shard and no hash library is needed. */
+export function workEventShard(taskId: string): number {
+  const value = Number.parseInt(taskId.replace(/-/gu, "").slice(0, 2), 16);
+  return Number.isNaN(value) ? 0 : value % WORK_EVENT_SHARDS;
 }
 
-/** The key of one event: its month's partition, and `<at>#<id>` (time order, then id). */
-export function workEventKey(event: Pick<WorkEvent, "orgId" | "at" | "id">): { pk: string; sk: string } {
-  return { pk: workEventPartition(event.orgId, event.at.slice(0, 7)), sk: `${event.at}#${event.id}` };
+/**
+ * One partition of a company's events of one month (`ORG#<org>#WORK_EVENTS#<yyyy-mm>#<shard>`): the company's own key scope, so one company's events never share a partition with another's. A month is read with one
+ * query per shard (`workEventPartitions`).
+ */
+export function workEventPartition(orgId: OrgId, month: string, shard: number): string {
+  if (!/^\d{4}-(?:0[1-9]|1[0-2])$/u.test(month)) throw new Error("a work event month is yyyy-mm");
+  if (!Number.isInteger(shard) || shard < 0 || shard >= WORK_EVENT_SHARDS) throw new Error("a work event shard is a whole number below WORK_EVENT_SHARDS");
+  // `ORG#<company>#...`: the company-scoped key scheme (`companyScoped` in `ports/company-scope.ts`), written out so this file imports nothing but `browser-ids` and `names`.
+  if (!/^org_[0-9a-z]{20}$/u.test(orgId)) throw new Error("a work event company id is org_ and 20 characters");
+  return `ORG#${orgId}#WORK_EVENTS#${month}#${String(shard)}`;
+}
+
+/** Every partition of a company's events of one month. */
+export function workEventPartitions(orgId: OrgId, month: string): string[] {
+  return Array.from({ length: WORK_EVENT_SHARDS }, (_, shard) => workEventPartition(orgId, month, shard));
+}
+
+/** The key of one event: its task's shard of its month, and `<at>#<id>` (time order, then id). */
+export function workEventKey(event: Pick<WorkEvent, "orgId" | "at" | "id" | "taskId">): { pk: string; sk: string } {
+  return { pk: workEventPartition(event.orgId, event.at.slice(0, 7), workEventShard(event.taskId)), sk: `${event.at}#${event.id}` };
 }
 
 /** The months from `from` to `to` (both instants, inclusive) as `yyyy-mm`, oldest first: the partitions a read of that range must ask. */
