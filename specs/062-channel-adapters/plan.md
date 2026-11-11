@@ -11,10 +11,11 @@ Each phase is one PR to `mainline` and leaves Slack working.
 | 3 | Adapter registry, channel API, signed events, account linking, step-up | FR-020–033 |
 | 4a | Adapter conversations run end to end: broker identity and charging, channel consumer, events, decisions, step-up | FR-035–038 |
 | 4b | Orchestrator and commands without Slack; Slack API calls behind one adapter module | FR-040–042 |
-| 5 | Slack adapter on the protocol; channel routes; `agentx channel add/bind` | FR-050–051 |
+| 5a | `agentx adapter` commands; the adapter author's and administrator's guide | FR-051 |
+| 5b | Slack as an in-process adapter around a neutral core; ChatGPT commands parsed in the core; the Slack boundary test | FR-041, FR-050, SC-004 |
 | 6 | WhatsApp adapter | FR-052 |
 
-## Phase 1: neutral model (this branch)
+## Phase 1: neutral model
 
 | Layer | Change |
 |---|---|
@@ -157,6 +158,26 @@ gives them back; close those workspaces first.
 ### Rollback
 
 No stored data or wire format changes; revert the PR.
+
+## Phase 5a: the CLI and the guide
+
+| Layer | Change |
+|---|---|
+| cli | `admin/channel-adapters.ts` calls the admin routes; `setup/adapter-commands.ts` adds `agentx adapter add|list|remove|bind|unbind|unlink`. `add` prints the signing secret once, or writes it to a mode-600 file with `--secret-file`. |
+| docs | `docs/channel-adapters.md`: turning adapters on, registering and binding, linking, and the protocol for adapter authors (IDs, requests, signing, answers, events, retries). |
+
+### Decisions
+
+- **`agentx adapter`, not `agentx channel`.** `channel add` already binds a Slack channel; renaming it would break
+  scripts and docs. Spec FR-051 is updated.
+- **`--projects a,b` and the global `--project`.** The CLI's root already owns `--project`, so `add` takes a list of
+  its own and `bind` reads the global one.
+- **Checked before any call.** Step-up kinds, project names, button and length bounds, and IDs are refused locally,
+  so a typo never reaches the control plane.
+
+### Rollback
+
+CLI and docs only; revert.
 
 ## Phase 5b: Slack as an in-process adapter
 

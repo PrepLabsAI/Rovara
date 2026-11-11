@@ -5,6 +5,7 @@ import type { Command } from "commander";
 import { readSlackBotToken } from "../init/slack-app.js";
 import { definedEntries, secretSource } from "../signin/cli.js";
 import { alertsTopicArn, sendTestAlarm } from "./alerts.js";
+import { registerAdapterCommands } from "./adapter-commands.js";
 import { addChannel } from "./channel-add.js";
 import type { SetupCommandContext } from "./command-context.js";
 import { addAsana } from "./connectors/asana.js";
@@ -109,6 +110,9 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
       }
       run.print({ ...bound, projectName }, `Bound #${bound.channelName} to ${projectName}\n`);
     });
+
+  // Spec 062 FR-051: channel adapters, beside the Slack channel binding above.
+  registerAdapterCommands(program, context);
 
   // agentx connector add linear|jira|asana, the words FR-036 uses, and mcp for any other server (spec 055).
   const connector = program.command("connector").description("connect a project to Linear, Jira, Asana or any MCP server");
