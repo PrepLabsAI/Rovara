@@ -20,6 +20,7 @@ import { createE2EApplicationCollectionOracleFromCompiledSuite } from "@agentx/v
 import type { ObservedApiOutcome } from "../support/e2e-application-evidence-fixture.js";
 import { NOW, binding, planFixture, snapshotOf, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { ORDERS_APPLICATION_ID, contractOf, ordersManifestWith, registryFor, sha256Hex, withOwnerB, withViewerRole } from "../support/e2e-account-registry-fixtures.js";
+import { TEST_ORG, testProjectPk } from "../support/orgs.js";
 
 // Task 3.1 (owner decision D5): synthetic account definitions are written automatically when a setup is approved, versioned per (application, profile), and expire
 // after 90 days. The recipe-derived stand-in of M1.2 (Ruling AT) is read only for M1.2 records; a new APPROVE never accepts it.
@@ -193,12 +194,12 @@ describe("what a registration writes", () => {
 
   it("names an unreadable row specifically and parses the others", () => {
     const [good] = entriesOf(fourWritten());
-    const goodRows = { latest: { ...e2eAccountLatestKey("payments", ORDERS_APPLICATION_ID, good!.definition.profileId), entityType: "E2E_ACCOUNT_LATEST", ...good!.latest },
-      definition: { ...e2eAccountDefinitionKey("payments", ORDERS_APPLICATION_ID, good!.definition.profileId, 1), entityType: "E2E_ACCOUNT", ...good!.definition } };
-    expect(parseAccountEntry("payments", ORDERS_APPLICATION_ID, good!.definition.profileId, goodRows.latest, goodRows.definition).definition).toEqual(good!.definition);
-    expect(() => parseAccountEntry("payments", ORDERS_APPLICATION_ID, good!.definition.profileId, { ...goodRows.latest, revision: "garbage" }, goodRows.definition))
+    const goodRows = { latest: { ...e2eAccountLatestKey(TEST_ORG, "payments", ORDERS_APPLICATION_ID, good!.definition.profileId), entityType: "E2E_ACCOUNT_LATEST", ...good!.latest },
+      definition: { ...e2eAccountDefinitionKey(TEST_ORG, "payments", ORDERS_APPLICATION_ID, good!.definition.profileId, 1), entityType: "E2E_ACCOUNT", ...good!.definition } };
+    expect(parseAccountEntry(TEST_ORG, "payments", ORDERS_APPLICATION_ID, good!.definition.profileId, goodRows.latest, goodRows.definition).definition).toEqual(good!.definition);
+    expect(() => parseAccountEntry(TEST_ORG, "payments", ORDERS_APPLICATION_ID, good!.definition.profileId, { ...goodRows.latest, revision: "garbage" }, goodRows.definition))
       .toThrow(new RegExp(`account profile ${good!.definition.profileId} of application .* cannot be read; an administrator must register the project's setup again`));
-    expect(() => parseAccountEntry("payments", ORDERS_APPLICATION_ID, good!.definition.profileId, goodRows.latest, undefined)).toThrow(/cannot be read/);
+    expect(() => parseAccountEntry(TEST_ORG, "payments", ORDERS_APPLICATION_ID, good!.definition.profileId, goodRows.latest, undefined)).toThrow(/cannot be read/);
   });
 
   it("keeps an older line of definitions for a contract the latest was not registered for", () => {
@@ -214,9 +215,9 @@ describe("what a registration writes", () => {
   });
 
   it("keys a definition and its latest pointer in the project's partition, as the plan lays them out", () => {
-    expect(e2eAccountDefinitionKey("payments", "orders-app", "orders-viewer", 3)).toEqual({ pk: "PROJECT#payments", sk: "E2E_ACCOUNT#orders-app#orders-viewer#REV#3" });
-    expect(e2eAccountLatestKey("payments", "orders-app", "orders-viewer")).toEqual({ pk: "PROJECT#payments", sk: "E2E_ACCOUNT_LATEST#orders-app#orders-viewer" });
-    expect(() => e2eAccountLatestKey("payments", "orders#app", "orders-viewer")).toThrow();
+    expect(e2eAccountDefinitionKey(TEST_ORG, "payments", "orders-app", "orders-viewer", 3)).toEqual({ pk: testProjectPk("payments"), sk: "E2E_ACCOUNT#orders-app#orders-viewer#REV#3" });
+    expect(e2eAccountLatestKey(TEST_ORG, "payments", "orders-app", "orders-viewer")).toEqual({ pk: testProjectPk("payments"), sk: "E2E_ACCOUNT_LATEST#orders-app#orders-viewer" });
+    expect(() => e2eAccountLatestKey(TEST_ORG, "payments", "orders#app", "orders-viewer")).toThrow();
   });
 });
 
@@ -440,11 +441,11 @@ describe("the broker's project registration writes the accounts (Task 3.1, owner
         body: { definition: { ...definition, revision: revision ?? Number((rows.at(-1)!.definition as { revision: number }).revision) + 1, e2e: proposal.policy }, runtimeBinding: rows.at(-1)!.runtimeBinding,
           setupApproval: { proposalRef: proposal.ref, proposalSha256: proposal.sha, decision: "approve" } } });
     };
-    const rows = () => harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT")).map((row) => String(row.sk)).sort();
-    const latest = (): Record<string, number> => Object.fromEntries(harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))
+    const rows = () => harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).startsWith("E2E_ACCOUNT")).map((row) => String(row.sk)).sort();
+    const latest = (): Record<string, number> => Object.fromEntries(harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))
       .map((row): [string, number] => [String(row.sk).split("#")[2]!, Number(row.revision)]));
-    const latestRow = (profile: string) => harness.db.get("PROJECT#payments", `E2E_ACCOUNT_LATEST#${ORDERS_APPLICATION_ID}#${profile}`);
-    const definitionRow = (profile: string, revision: number) => harness.db.get("PROJECT#payments", `E2E_ACCOUNT#${ORDERS_APPLICATION_ID}#${profile}#REV#${revision}`);
+    const latestRow = (profile: string) => harness.db.get(testProjectPk("payments"), `E2E_ACCOUNT_LATEST#${ORDERS_APPLICATION_ID}#${profile}`);
+    const definitionRow = (profile: string, revision: number) => harness.db.get(testProjectPk("payments"), `E2E_ACCOUNT#${ORDERS_APPLICATION_ID}#${profile}#REV#${revision}`);
     return { harness, source, propose, approve, register, rows, latest, latestRow, definitionRow, projectRows };
   }
   const fourSnapshot = (...edits: Array<(e2e: Parameters<typeof withOwnerB>[0]) => void>) =>
@@ -547,7 +548,7 @@ describe("the broker's project registration writes the accounts (Task 3.1, owner
     const stolen = await broker.register(proposal, otherAdmin);
     expect(stolen.status).toBeGreaterThanOrEqual(400);
     expect(broker.rows()).toEqual(rowsBefore);
-    expect(broker.harness.db.find((row) => row.pk === "PROJECT#billing")).toEqual([]);
+    expect(broker.harness.db.find((row) => row.pk === testProjectPk("billing"))).toEqual([]);
   });
 
   it("stays correct when two registrations race for the same accounts: one revision between them, whichever setup wins", async () => {
@@ -647,8 +648,8 @@ describe("the broker's project registration writes the accounts (Task 3.1, owner
     expect(JSON.stringify(loser.body)).toContain("administrator of project billing");
     expect(broker.harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string }).name === "billing")).toHaveLength(1);
     // Only the first administrator's setup wrote accounts, once.
-    expect(broker.harness.db.find((row) => row.pk === "PROJECT#billing" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))).toHaveLength(4);
-    expect(broker.harness.db.find((row) => row.pk === "PROJECT#billing" && String(row.sk).includes("#REV#2"))).toHaveLength(0);
+    expect(broker.harness.db.find((row) => row.pk === testProjectPk("billing") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))).toHaveLength(4);
+    expect(broker.harness.db.find((row) => row.pk === testProjectPk("billing") && String(row.sk).includes("#REV#2"))).toHaveLength(0);
   });
 
   describe("an account pointer that moves between planning and commit", () => {
@@ -771,7 +772,7 @@ describe("a whole round with two accounts of one application", () => {
     expect(pinned.map((ref) => ref.profileId).sort()).toEqual([...ACCOUNTS]);
     expect(new Set(pinned.map((ref) => ref.definitionDigest)).size).toBe(2);
     for (const profileId of ACCOUNTS) {
-      const latest = round.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).endsWith(`#${profileId}`) && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"));
+      const latest = round.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).endsWith(`#${profileId}`) && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"));
       expect(latest, profileId).toHaveLength(1);
       expect(pinned.find((ref) => ref.profileId === profileId)).toMatchObject({ revision: 1, definitionDigest: (latest[0] as unknown as { definitionDigest: string }).definitionDigest });
     }
@@ -792,7 +793,7 @@ describe("a whole round with two accounts of one application", () => {
     for (const expected of group.binding.expectedCases) {
       const facts = oracle.applicationIdsByCase.find((item) => item.caseId === expected.caseId)!;
       const own = pinned.find((ref) => ref.profileId === expected.accountProfileId)!;
-      const registered = round.harness.db.get("PROJECT#payments", `E2E_ACCOUNT_LATEST#${facts.accountRef.applicationId}#${expected.accountProfileId}`) as unknown as { definitionDigest: string };
+      const registered = round.harness.db.get(testProjectPk("payments"), `E2E_ACCOUNT_LATEST#${facts.accountRef.applicationId}#${expected.accountProfileId}`) as unknown as { definitionDigest: string };
       expect(facts.accountRef.profileId, expected.caseId).toBe(expected.accountProfileId);
       expect(canonicalJson(facts.accountRef), expected.caseId).toBe(canonicalJson(own));
       expect(facts.accountRef.definitionDigest, expected.caseId).toBe(registered.definitionDigest);
@@ -802,7 +803,7 @@ describe("a whole round with two accounts of one application", () => {
 
   it("a corrupt row refuses only the plans that run as that account, naming it and the repair, and hides no other account", async () => {
     const corrupt = (round: { harness: { db: Pick<RoundBrokerHarness["db"], "find" | "set"> } }) => {
-      const row = round.harness.db.find((item) => item.pk === "PROJECT#payments" && String(item.sk).startsWith("E2E_ACCOUNT_LATEST#") && String(item.sk).endsWith("#orders-viewer"))[0]!;
+      const row = round.harness.db.find((item) => item.pk === testProjectPk("payments") && String(item.sk).startsWith("E2E_ACCOUNT_LATEST#") && String(item.sk).endsWith("#orders-viewer"))[0]!;
       round.harness.db.set({ ...row, revision: "garbage" });
     };
     const both = await prepareApplicationRound({ accounts: ACCOUNTS });
@@ -813,7 +814,7 @@ describe("a whole round with two accounts of one application", () => {
     expect(JSON.stringify(refused.body)).toMatch(/account profile orders-viewer of application .* cannot be read; an administrator must register the project's setup again to repair it/);
     expect(both.workflowNow().e2e).toBeUndefined();
     // The reader keeps the readable accounts and lists the unreadable one, for the planner and for registration to act on.
-    const read = await readAccountRegistryEntries(both.harness.brokerInput as never, "payments", ACCOUNTS.map((profileId) => ({ applicationId: roundApplicationId, profileId })));
+    const read = await readAccountRegistryEntries(both.harness.brokerInput as never, TEST_ORG, "payments", ACCOUNTS.map((profileId) => ({ applicationId: roundApplicationId, profileId })));
     expect(read.entries.map((entry) => entry.definition.profileId)).toEqual(["orders-owner"]);
     expect(read.corrupt).toMatchObject([{ applicationId: roundApplicationId, profileId: "orders-viewer" }]);
     // A plan that runs only as the owner is approved all the same.
@@ -827,8 +828,8 @@ describe("a whole round with two accounts of one application", () => {
     const broker = await import("../../packages/broker/src/aws/broker.js");
     const valid: { reason?: string; runtimeChange?: "requalified" | "unusable" | "accounts" } = {};
     expect(await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, round.taskNow() as never, round.candidate, round.admission, valid), valid.reason).toBe(true);
-    const key = round.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).endsWith("#orders-owner") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))[0]!;
-    const current = round.harness.db.get("PROJECT#payments", String(key.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
+    const key = round.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).endsWith("#orders-owner") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))[0]!;
+    const current = round.harness.db.get(testProjectPk("payments"), String(key.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
     const { pk: _pk, sk: _sk, entityType: _entity, ...body } = current;
     void _pk; void _sk; void _entity;
     const next = E2EApplicationAccountDefinitionSchema.parse({ ...body, revision: 2, expiresAt: new Date(Date.now() + 100 * DAY).toISOString() });
@@ -844,8 +845,8 @@ describe("a whole round with two accounts of one application", () => {
   it("refuses to approve the plan when one of the two accounts moved to a new revision after the plan was written", async () => {
     const prepared = await prepareApplicationRound({ accounts: ACCOUNTS });
     const { harness } = prepared;
-    const key = harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).endsWith("#orders-viewer") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))[0]!;
-    const current = harness.db.get("PROJECT#payments", String(key.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
+    const key = harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).endsWith("#orders-viewer") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))[0]!;
+    const current = harness.db.get(testProjectPk("payments"), String(key.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
     const { pk: _pk, sk: _sk, entityType: _entity, ...body } = current;
     void _pk; void _sk; void _entity;
     const next = E2EApplicationAccountDefinitionSchema.parse({ ...body, revision: 2 });

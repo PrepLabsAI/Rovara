@@ -32,6 +32,7 @@ import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { NOW, PROFILE, anonymousScenario, anonymousTargetOf, apiSnapshot, approvedSetup, binding, contractSnapshot, csvScenario, inferredSnapshot, ordersContractManifest, planFixture, sha, shaCanonical, snapshotOf, webAndApiFixture, webApiRow,
   type PlanInput } from "../support/e2e-application-plan-fixtures.js";
 import { assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+import { TEST_ORG, testProjectPk } from "../support/orgs.js";
 
 // The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
 assumeDrivingTestsPassed();
@@ -702,7 +703,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     const { harness, workspaceId, planningId, snapshot } = started;
     const { policy } = started;
     const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_WEB],
-      accountRegistry: accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments")) });
+      accountRegistry: accountRegistryEntriesFromRows(TEST_ORG, "payments", harness.db.find((row) => row.pk === testProjectPk("payments"))) });
     if (context.status !== "available") throw new Error(context.reason);
     const target = context.targets.find((item) => item.targetId === "web-1")!;
     const forTarget = <T extends { applicationId: string }>(refs: readonly T[]) => refs.filter((ref) => ref.applicationId === target.applicationId);
@@ -961,7 +962,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     await createApplicationPlanNegotiationRecorder({ documentClient: input.documentClient, tableName: input.tableName })(outbox as never);
     expect(started.harness.db.get(operationKey.pk, operationKey.sk)).not.toHaveProperty("workflowE2EPlanVersion");
     const context = buildFeatureE2EPlanningContext(started.policy, started.snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_WEB],
-      accountRegistry: accountRegistryEntriesFromRows("payments", started.harness.db.find((row) => row.pk === "PROJECT#payments")) });
+      accountRegistry: accountRegistryEntriesFromRows(TEST_ORG, "payments", started.harness.db.find((row) => row.pk === testProjectPk("payments"))) });
     if (context.status !== "available") throw new Error(context.reason);
     const target = context.targets.find((item) => item.targetId === "web-1")!;
     const forTarget = <T extends { applicationId: string; profileId?: string; accountProfileId?: string }>(refs: readonly T[]) => refs.filter((ref) => ref.applicationId === target.applicationId);
@@ -1175,7 +1176,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
 
     it("blocks with model-route-budget-exhausted before anything starts when the project's day has no room", async () => {
       const { planned, dispatched } = await agentRound({ current: async () => anthropic });
-      planned.harness.db.set({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET#${new Date().toISOString().slice(0, 10)}`, inputTokens: 1_999_000, calls: 10 });
+      planned.harness.db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${new Date().toISOString().slice(0, 10)}`, inputTokens: 1_999_000, calls: 10 });
       await expectBlockedAtDispatch(dispatched, reason("model-route-budget-exhausted"));
     });
 
@@ -1568,8 +1569,8 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
         /** The next revision of the target's account, as an approval of the setup writes it when a definition changes or expires: same contract, a later expiry. */
         const registerNextRevision = (planned: Planned, edit: (definition: Record<string, unknown>) => Record<string, unknown> = (definition) => definition) => {
           const profileId = planned.target.accountProfileId;
-          const latest = planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#") && String(row.sk).endsWith(`#${profileId}`))[0]!;
-          const current = planned.harness.db.get("PROJECT#payments", String(latest.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
+          const latest = planned.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#") && String(row.sk).endsWith(`#${profileId}`))[0]!;
+          const current = planned.harness.db.get(testProjectPk("payments"), String(latest.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
           const { pk: _pk, sk: _sk, entityType: _entity, ...body } = current;
           void _pk; void _sk; void _entity;
           const next = edit({ ...body, revision: 2, expiresAt: new Date(Date.now() + 100 * 86_400_000).toISOString() });
@@ -1620,8 +1621,8 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           const planned = await plannedWithApplicationIntent();
           const dispatched = await atApplicationDispatch(planned);
           const profileId = planned.target.accountProfileId;
-          const latest = planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#") && String(row.sk).endsWith(`#${profileId}`))[0]!;
-          const definitionRow = planned.harness.db.get("PROJECT#payments", String(latest.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
+          const latest = planned.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#") && String(row.sk).endsWith(`#${profileId}`))[0]!;
+          const definitionRow = planned.harness.db.get(testProjectPk("payments"), String(latest.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
           const { pk: _pk, sk: _sk, entityType: _entity, ...body } = definitionRow;
           void _pk; void _sk; void _entity;
           const expired = E2EApplicationAccountDefinitionSchema.parse({ ...body, expiresAt: new Date(Date.now() - 1_000).toISOString() });
@@ -1667,7 +1668,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
               setupApproval: { proposalRef: String(proposal.body.proposalRef), proposalSha256: String(proposal.body.proposalSha256), decision: "approve" } } });
           expect(registered.status, JSON.stringify(registered.body)).toBe(201);
         };
-        const accountRevision = (planned: Planned) => (planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#")
+        const accountRevision = (planned: Planned) => (planned.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#")
           && String(row.sk).endsWith(`#${planned.target.accountProfileId}`))[0] as unknown as { revision: number }).revision;
 
         it("does not strand a task pinned to an older project revision: its own line of definitions still runs, and a retry re-approves within that line, recording which account moved", async () => {
@@ -1710,7 +1711,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           const planned = await plannedWithApplicationIntent();
           const dispatched = await atApplicationDispatch(planned);
           await registerNewerSetup(planned);
-          const first = planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).includes("#REV#1") && String(row.sk).endsWith(`${planned.target.accountProfileId}#REV#1`))[0]!;
+          const first = planned.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).includes("#REV#1") && String(row.sk).endsWith(`${planned.target.accountProfileId}#REV#1`))[0]!;
           planned.harness.db.set({ ...first, expiresAt: new Date(Date.now() - 1_000).toISOString() });
           await dispatched.runDispatch();
           expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
@@ -1726,8 +1727,8 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           const planned = await plannedWithApplicationIntent();
           const dispatched = await atApplicationDispatch(planned);
           const fence = (await import("../../packages/broker/src/aws/e2e-account-registry.js")).accountRegistryFences;
-          const entries = accountRegistryEntriesFromRows("payments", planned.harness.db.find((row) => row.pk === "PROJECT#payments"));
-          const items = fence({ tableName: "state", projectId: "payments", refs: selectionOf(planned).accountRefs, entries });
+          const entries = accountRegistryEntriesFromRows(TEST_ORG, "payments", planned.harness.db.find((row) => row.pk === testProjectPk("payments")));
+          const items = fence({ orgId: TEST_ORG, tableName: "state", projectId: "payments", refs: selectionOf(planned).accountRefs, entries });
           expect(items).toHaveLength(1);
           registerNextRevision(planned);
           const check = (items[0] as unknown as { ConditionCheck: { Key: { pk: string; sk: string }; ExpressionAttributeValues: Record<string, unknown> } }).ConditionCheck;

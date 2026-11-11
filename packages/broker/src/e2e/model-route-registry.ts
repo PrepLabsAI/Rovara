@@ -1,8 +1,6 @@
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
-  E2EModelRouteDefinitionSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_MODEL_DRIVING_TEST_MARKER, E2E_MODEL_ROUTE_NOT_TESTED, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE,
-  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, e2eAgentScopeSentence, indexExpiresAt, e2eModelRouteRevision, e2eModelRouteRevisionNumber,
-  isKeyedModelProvider, type E2EModelRouteDefinition, type ModelProvider,
+  E2EModelRouteDefinitionSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_MODEL_DRIVING_TEST_MARKER, E2E_MODEL_ROUTE_NOT_TESTED, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, e2eAgentScopeSentence, indexExpiresAt, e2eModelRouteRevision, isKeyedModelProvider, projectPk, type E2EModelRouteDefinition, type ModelProvider, type OrgId,
 } from "@agentx/contracts";
 import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest, type E2EAgentInstallation, type DerivedE2EAgentRoute } from "@agentx/model-runtime/e2e-route-derive";
 import type { E2EDayBudget, E2EDayLimits, E2EDayReservation } from "@agentx/model-runtime";
@@ -28,36 +26,15 @@ export { deriveE2EAgentRoute, type E2EAgentInstallation, type DerivedE2EAgentRou
  * - `E2E_MODEL_ROUTES / E2E_MODEL_CHECK_RUNNER#<profileId>`: the runner that serves model checks;
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_SHAPE#<routeId>#<modelId>`: `{ payloadShape: "standard" | "minimal", testedAt }`, the request shape the driving test found to work for that model
  *   (Task 4.10; written by the broker when it validates a passing test, read here so setup approval derives exactly the tested definition);
- * - `PROJECT#<project> / E2E_MODEL_BUDGET#<yyyy-mm-dd>`: `{ inputTokens, calls }` of the project's UTC day, moved only by conditional increments;
- * - `PROJECT#<project> / E2E_MODEL_BUDGET_RESERVATION#<reservationId>`: one call's reservation against that day (`open`, then `settled` or `released` once), kept by the worker's
+ * - `ORG#<org>#PROJECT#<project> / E2E_MODEL_BUDGET#<yyyy-mm-dd>` (`projectPk`, so two orgs' same-named projects have separate days): `{ inputTokens, calls }` of the project's UTC day, moved only by conditional increments;
+ * - `ORG#<org>#PROJECT#<project> / E2E_MODEL_BUDGET_RESERVATION#<reservationId>`: one call's reservation against that day (`open`, then `settled` or `released` once), kept by the worker's
  *   budget callback (`model-budget-endpoint.ts`, Task 4.3a), which is the budget the worker path uses.
  * None of these is a membership row or a project revision row, and nothing here writes to either.
  */
 
-export const E2E_MODEL_ROUTE_PARTITION = "E2E_MODEL_ROUTES" as const;
+import { E2E_MODEL_ROUTE_PARTITION, e2eModelRouteRevisionKey, isTransientAwsFault, readAdmittedE2EModelRoute } from "./model-route-read.js";
+export { E2E_MODEL_ROUTE_PARTITION, e2eModelRouteRevisionKey, isTransientAwsFault, readAdmittedE2EModelRoute };
 
-const TRANSIENT_FAULT_NAMES: ReadonlySet<string> = new Set([
-  "ProvisionedThroughputExceededException", "ThrottlingException", "ThrottledException", "RequestLimitExceeded", "TooManyRequestsException", "InternalServerError",
-  "InternalFailure", "ServiceUnavailable", "ServiceUnavailableException", "RequestTimeout", "RequestTimeoutException", "TimeoutError", "AbortError",
-]);
-const TRANSIENT_NETWORK_CODES: ReadonlySet<string> = new Set(["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EAI_AGAIN", "EPIPE", "ENETUNREACH", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"]);
-
-/**
- * Whether a failure to read DynamoDB or SSM is the kind that a later attempt can be expected to get past: throttling, a 5xx or InternalServerError, or a network, timeout or abort
- * error. Anything else (AccessDenied, ParameterNotFound, a malformed row, a validation error) is deterministic and will fail the same way again.
- */
-export function isTransientAwsFault(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const fault = error as { name?: unknown; code?: unknown; $metadata?: { httpStatusCode?: unknown }; $fault?: unknown; cause?: unknown };
-  if (typeof fault.name === "string" && TRANSIENT_FAULT_NAMES.has(fault.name)) return true;
-  if (typeof fault.code === "string" && TRANSIENT_NETWORK_CODES.has(fault.code)) return true;
-  const status = fault.$metadata?.httpStatusCode;
-  if (typeof status === "number" && (status >= 500 || status === 429)) return true;
-  if (fault.$fault === "server") return true;
-  return fault.cause !== undefined && fault.cause !== error ? isTransientAwsFault(fault.cause) : false;
-}
-
-export const e2eModelRouteRevisionKey = (routeId: string, revisionNumber: number) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE#${routeId}#REV#${revisionNumber}` });
 export const e2eModelRouteLatestKey = (routeId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_LATEST#${routeId}` });
 export const e2eModelRouteCanaryKey = (routeId: string, definitionDigest: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_CANARY#${routeId}#${definitionDigest}` });
 export const e2eModelRouteTestKey = (routeId: string, modelId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_TEST#${routeId}#${modelId}` });
@@ -66,31 +43,9 @@ export const e2eModelCheckKey = (checkId: string) => ({ pk: E2E_MODEL_ROUTE_PART
 export const e2eModelCheckLatestKey = () => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: "E2E_MODEL_CHECK_LATEST" });
 export const e2eModelCheckRunnerKey = (profileId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_CHECK_RUNNER#${profileId}` });
 export const e2eModelRouteShapeKey = (routeId: string, modelId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_SHAPE#${routeId}#${modelId}` });
-export const e2eModelBudgetKey = (projectName: string, day: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET#${day}` });
+export const e2eModelBudgetKey = (orgId: OrgId, projectName: string, day: string) => ({ pk: projectPk(orgId, projectName), sk: `E2E_MODEL_BUDGET#${day}` });
 /** One reservation of a call's tokens against the project's day (`model-budget-endpoint.ts`): written with the day's increment, settled or released once. */
-export const e2eModelBudgetReservationKey = (projectName: string, reservationId: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET_RESERVATION#${reservationId}` });
-
-/**
- * The definition the registry stores for the route revision an admission names (Task 4.4a, ruling DJ): one GetItem by key, held to the revision it was read for. A worker's account of
- * the route it served is never the definition the broker judges a round's receipts against; this is. Null when the revision is not in the registry, or its row is not exactly that
- * revision's (another route id or number, a definition that does not hash to the revision it is filed under). A fault the read can be expected to get past (throttling, a timeout) is
- * tried again up to three times; one that persists, or any other, is thrown, so the caller can tell "not there" from "could not be asked".
- */
-export async function readAdmittedE2EModelRoute(read: (key: { pk: string; sk: string }) => Promise<Record<string, unknown> | undefined>, route: { routeId: string; routeRevision: string },
-  options: { sleep?: (ms: number) => Promise<void> } = {}): Promise<E2EModelRouteDefinition | null> {
-  const revisionNumber = e2eModelRouteRevisionNumber(route.routeRevision);
-  if (revisionNumber === null) return null;
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  let row: Record<string, unknown> | undefined;
-  for (let attempt = 1; ; attempt += 1) {
-    try { row = await read(e2eModelRouteRevisionKey(route.routeId, revisionNumber)); break; }
-    catch (error) { if (attempt >= 3 || !isTransientAwsFault(error)) throw error; await sleep(100 * attempt); }
-  }
-  if (row === undefined || row["entityType"] !== "E2E_MODEL_ROUTE" || row["routeId"] !== route.routeId || row["revisionNumber"] !== revisionNumber || row["revision"] !== route.routeRevision) return null;
-  const parsed = E2EModelRouteDefinitionSchema.safeParse(row["definition"]);
-  if (!parsed.success || parsed.data.routeId !== route.routeId || parsed.data.revision !== revisionNumber || e2eModelRouteRevision(parsed.data) !== route.routeRevision) return null;
-  return parsed.data;
-}
+export const e2eModelBudgetReservationKey = (orgId: OrgId, projectName: string, reservationId: string) => ({ pk: projectPk(orgId, projectName), sk: `E2E_MODEL_BUDGET_RESERVATION#${reservationId}` });
 
 export interface E2EModelRouteStore {
   documentClient: DynamoDBDocumentClient;
@@ -333,6 +288,8 @@ export async function checkE2EAgentRouteCurrent(store: E2EModelRouteStore, insta
 const utcDay = (epochMs: number): string => new Date(epochMs).toISOString().slice(0, 10);
 
 export interface BrokerE2EDayBudgetOptions extends E2EModelRouteStore {
+  /** The org the project belongs to: the day is the org's own, never shared with another org's project of the same name. */
+  orgId: OrgId;
   projectName: string;
   /** Milliseconds since the epoch. Injected so tests control the UTC day. */
   now: () => number;
@@ -361,7 +318,7 @@ export function createBrokerE2EDayBudget(options: BrokerE2EDayBudgetOptions): E2
       // Without room for even this call on an empty day, nothing could ever be reserved.
       if (inputTokens > limits.maxInputTokens) return null;
       const day = utcDay(options.now());
-      const key = e2eModelBudgetKey(options.projectName, day);
+      const key = e2eModelBudgetKey(options.orgId, options.projectName, day);
       try {
         await options.documentClient.send(new UpdateCommand({
           TableName: options.tableName, Key: key,
@@ -412,11 +369,11 @@ export function createBrokerE2EDayBudget(options: BrokerE2EDayBudgetOptions): E2
  * per-call reservations above are what actually hold the caps. False gives UNKNOWN `model-route-budget-exhausted` before the run starts.
  */
 export async function e2eDayBudgetRoom(
-  options: E2EModelRouteStore & { projectName: string; now: number },
+  options: E2EModelRouteStore & { orgId: OrgId; projectName: string; now: number },
   need: { inputTokens: number; calls: number },
   limits: E2EDayLimits,
 ): Promise<boolean> {
-  const response = await options.documentClient.send(new GetCommand({ TableName: options.tableName, Key: e2eModelBudgetKey(options.projectName, utcDay(options.now)), ConsistentRead: true }));
+  const response = await options.documentClient.send(new GetCommand({ TableName: options.tableName, Key: e2eModelBudgetKey(options.orgId, options.projectName, utcDay(options.now)), ConsistentRead: true }));
   const item = response.Item as { inputTokens?: unknown; calls?: unknown } | undefined;
   const usedTokens = typeof item?.inputTokens === "number" ? item.inputTokens : 0;
   const usedCalls = typeof item?.calls === "number" ? item.calls : 0;

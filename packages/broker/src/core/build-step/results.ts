@@ -4,12 +4,14 @@
 //
 // The approved work breakdown (spec 059: parts built in order or side by side) is read here too (`../work-breakdown/results.ts`): an ordered run's result must be the run the owner approved.
 //
-// Left out on purpose (not part of Code's wave 1): the browser and API checks (E2E), a custom step sequence (a program), and the
+// The browser and API checks (E2E) join here when the install gives the flow its `e2e` seam: a candidate's checks pass only on a round the broker verified itself, and the rows that verdict
+// stands on are fenced into the same transaction. Left out on purpose (not part of Code's wave 1): a custom step sequence (a program), and the
 // design review. A workflow that carries any of them is not one this install starts. The second review by another company is here (`core/second-review`): the review step asks the service
 // at its start and at its end, and without one the review is exactly what it was.
 import {
   CheckReportSchema, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
-  WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, WorkflowSnapshotSchema, blockWorkflow, createCandidateManifest, endWorkflowCiFixUnrelated, noChangeFindingsFrom, recordWorkflowVerification,
+  WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, WorkflowSnapshotSchema, WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
+  WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, blockWorkflow, createCandidateManifest, endWorkflowCiFixUnrelated, noChangeFindingsFrom, recordWorkflowVerification,
   submitWorkflowReview, workflowIsReviewOnly, workflowPullRequestTrees, workflowReviewRoles, workflowSelectedChecks,
   blockingFindings, change, secondReviewBlockFinding, type CandidateRepository, type TransactItem, type UpdateOp, type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -24,6 +26,9 @@ import type { StoredSecondOpinion } from "../second-review/store.js";
 import { blockTaskWorkflow, commitWorkflow, runDispatchRow } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
 import { checkCommandCouldNotRun, regressedCheckLabels } from "./check-results.js";
+import { isNonCandidateRound, verifyWorkflowE2EEvidence } from "../e2e/verification.js";
+import type { E2EVerificationDiagnostic } from "../e2e/authority.js";
+import { SOURCE_TOO_LARGE_BLOCK_REASON, SOURCE_TOO_LARGE_CODE, readCandidateSourceExport, type CandidateSourceRef } from "../e2e/uploads.js";
 import { GRAPH_NOT_CARRIED, GRAPH_RESULT_UNUSABLE, graphCandidateProblem, judgeGraphResult, progressAfterStoppedRun } from "../work-breakdown/results.js";
 
 export interface Ended { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }
@@ -54,11 +59,11 @@ export function causeOfEnd(ended: Ended): "run-lost" | "dispatch-exhausted" | un
  * Commits the workflow `next` with the row of the step that follows it, then starts that step now (the row is also found by the sweep if this process dies first). A task that moved on while
  * the result was read changes nothing.
  */
-export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, now: string, cause?: "run-lost" | "dispatch-exhausted", taskOps: readonly UpdateOp[] = []): Promise<void> {
+export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, now: string, cause?: "run-lost" | "dispatch-exhausted", taskOps: readonly UpdateOp[] = [], fences: readonly TransactItem[] = []): Promise<void> {
   const following = next.stage === "REVIEW" && next.state === "WAITING" ? [dispatchRowItem(deps, task.taskId, next.revision, "REVIEW", now)]
     : next.stage === "PULL_REQUEST" && next.state === "READY" ? [dispatchRowItem(deps, task.taskId, next.revision, "PUBLISH", now)]
     : autofixRowFor(deps, task.taskId, next, now, cause);
-  const committed = await commitWorkflow(deps, task, next, following, taskOps);
+  const committed = await commitWorkflow(deps, task, next, [...fences, ...following], taskOps);
   const row = following[0];
   if (!committed || row === undefined || row.kind !== "put") return;
   const kind = row.item["kind"] as "REVIEW" | "PUBLISH" | "AUTOFIX";
@@ -129,6 +134,8 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
   let failure: string = WORKFLOW_BLOCK_REASONS.checksUnconfirmed;
   let detail: string | undefined;
   let regressedChecks: string[] | undefined;
+  let failedE2ERound: NonNullable<NonNullable<WorkflowSnapshot["e2e"]>["failedRound"]> | undefined;
+  let e2eFences: TransactItem[] = [];
   let next: WorkflowSnapshot;
   // Ordered work (spec 059): the run's result must be the approved run's, item by item, before any of its code is believed.
   const judged = mode === "IMPLEMENT" ? judgeGraphResult(operation, workflow, reported) : undefined;
@@ -162,6 +169,46 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
     const graphProblem = judged === undefined ? undefined : graphCandidateProblem(judged, candidate);
     if (graphProblem !== undefined) { failure = graphProblem; throw new Error(failure); }
     if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositories.join("\n")) { failure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete; throw new Error("candidate repositories are incomplete"); }
+    // The browser and API checks: the committed source of this code must be on file, and a candidate's round must be verified by the broker before the checks can pass.
+    let e2eQualification: ReturnType<typeof qualificationOf> | undefined;
+    if (workflow.e2e?.required === true && deps.e2e !== undefined) {
+      if (mode === "IMPLEMENT") {
+        const ref = (operation as OperationRecord & { candidateSourceRef?: CandidateSourceRef }).candidateSourceRef;
+        const exported = ref === undefined || ref.candidateDigest !== candidate.digest ? undefined : await readCandidateSourceExport({ objects: deps.e2e.objects }, ref);
+        if (exported === undefined) {
+          failure = (operation as OperationRecord & { candidateSourceRefused?: unknown }).candidateSourceRefused === SOURCE_TOO_LARGE_CODE ? SOURCE_TOO_LARGE_BLOCK_REASON : WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON;
+          throw new Error(failure);
+        }
+      } else {
+        const round = operation.workflowE2EAdmission;
+        if (isNonCandidateRound(round)) throw new Error("a baseline, replay or grounding round is never a candidate's checks");
+        if (workflow.e2e.currentGroupRunIds.length === 0 || workflow.e2e.currentRoundId === undefined || round === undefined || operation.workflowE2EEvidenceRef === undefined) {
+          failure = "the current candidate-bound E2E round or its private evidence is missing"; throw new Error(failure);
+        }
+        const diagnostic: E2EVerificationDiagnostic = {};
+        // The operation's stored record still says RUNNING: this is the one callback that ends it, and only a run that succeeded reaches verification.
+        const verdict = await verifyWorkflowE2EEvidence(deps.e2e, operation, task, candidate, undefined, diagnostic, { terminalStatus: "SUCCEEDED" });
+        e2eFences = diagnostic.authorityChecks ?? [];
+        if (e2eFences.length === 0) {
+          const why = diagnostic.application === true ? diagnostic.reason?.slice(0, 240) : undefined;
+          failure = diagnostic.application === true && diagnostic.authorityEvaluated !== true && why !== undefined ? `admitted E2E evidence is incomplete or unknown (${why})`
+            : diagnostic.runtimeChange === "requalified" && why !== undefined ? `${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${why}`
+            : diagnostic.runtimeChange === "unusable" && why !== undefined ? `${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}${why}`
+            : diagnostic.runtimeChange === "accounts" && why !== undefined ? `${WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX}${why}`
+            : `current E2E authority snapshot could not be fenced at terminal persistence${why === undefined ? "" : ` (${why})`}`;
+          throw new Error(failure);
+        }
+        if (verdict !== "PASS") {
+          if (verdict === "FAILED") {
+            failedE2ERound = { status: "FAILED", candidateDigest: candidate.digest, roundId: round.roundId, groupRunIds: [...round.groupRunIds],
+              admissionSha256: round.admissionRef.sha256, evidenceSha256: operation.workflowE2EEvidenceRef.sha256 };
+          }
+          failure = verdict === "FAILED" ? "one or more admitted E2E groups failed" : `admitted E2E evidence is incomplete or unknown${diagnostic.reason === undefined ? "" : ` (${diagnostic.reason})`}`;
+          throw new Error(failure);
+        }
+        e2eQualification = qualificationOf(workflow, candidate.digest, round, operation.workflowE2EEvidenceRef.sha256);
+      }
+    }
     // A rerun of the checks is of the code the task already has: other code under the same checks (the merge of the base the host shows is not the code the worker's workspace holds, say) is not it.
     if (mode === "CHECKS" && workflow.candidate !== undefined && candidate.digest !== workflow.candidate.digest) { failure = CHECKED_OTHER_CODE_REASON; throw new Error("the checks ran on other code than the candidate"); }
     // An approved fix to an open pull request that leaves every repository's code as the pull request holds it changed nothing: there is nothing to check again or push.
@@ -199,6 +246,7 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
       candidate,
       checks: { candidateDigest: candidate.digest, producer: "agentx-worker-checks", environmentId: task.workspaceId, recordedAt: now, results, ...(reviewOnly ? { reviewOnly: true } : {}) },
       now,
+      ...(e2eQualification === undefined ? {} : { e2eQualification }),
     });
     // Proof and evidence (lane L12): the verification is recorded, so the run's evidence is assembled for this code. Informational and bounded; a fault changes nothing.
     await deps.keepEvidence?.({ task, operation, workflow, candidateDigest: candidate.digest, checks: checks.data.checks }).catch((error: unknown) => log(deps, { event: "build_step.evidence_not_kept", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
@@ -209,10 +257,19 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
       next = endWorkflowCiFixUnrelated(workflow, now);
     } else {
       next = failure === WORKFLOW_BLOCK_REASONS.fixChangedNothing ? blockWorkflow(workflow, failure, now)
-        : blockWorkflow(verifying, failure, now, regressedChecks === undefined ? {} : { regressedChecks });
+        : blockWorkflow(verifying, failure, now, { ...(regressedChecks === undefined ? {} : { regressedChecks }), ...(failedE2ERound === undefined ? {} : { failedE2ERound }) });
     }
   }
-  await commitAndContinue(deps, task, next, now);
+  // The rows the E2E verdict stands on ride in the same transaction: if any of them moved after it was judged, the verdict is not recorded.
+  await commitAndContinue(deps, task, next, now, undefined, [], next.state === "BLOCKED" ? [] : e2eFences);
+}
+
+/** What a passing candidate round records on the workflow: the digests the approval fixed and the round's own references. */
+function qualificationOf(workflow: WorkflowSnapshot, candidateDigest: string, round: NonNullable<OperationRecord["workflowE2EAdmission"]>, evidenceSha256: string) {
+  const admitted = workflow.e2e;
+  if (admitted === undefined) throw new Error("trusted E2E aggregate references are unavailable");
+  return { candidateDigest, contractDigest: admitted.contractDigest, policyDigest: admitted.policyDigest, bundleDigest: admitted.bundleDigest, executionPlanDigest: admitted.executionPlanDigest,
+    roundId: round.roundId, groupRunIds: [...round.groupRunIds], admissionSha256: round.admissionRef.sha256, evidenceSha256 };
 }
 
 // ---- reviews

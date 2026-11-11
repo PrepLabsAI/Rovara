@@ -42,6 +42,7 @@ import { PROFILE, shaCanonical, webApiRow } from "../support/e2e-application-pla
 import { ACCOUNTS_APP_FILES, ACCOUNTS_FIXTURE_ROOT, webAccountScenarios } from "../support/e2e-accounts-fixture.js";
 import { planOwnerWebAndApi } from "../support/e2e-web-and-api-plan.js";
 import { INFERRED_APP_FILES, INFERRED_FIXTURE_ROOT, anonymousWebScenarios } from "../support/e2e-inferred-fixture.js";
+import { TEST_ORG, testProjectPk } from "../support/orgs.js";
 
 // M1.3 native journeys. Each case is a whole path of an application round on a real Docker host, gated like `m1-web-journey.test.ts`: it needs Docker and the executor image, so it runs
 // where the CI `linux-runtime` job provides them (ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE) and skips cleanly everywhere else. Locally, colima's Docker works too
@@ -223,7 +224,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const readyApi = { kind: "api" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedSteps,
       supportedAssertions: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedAssertions };
     const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: input.apiRuntime === true ? [readyWeb, readyApi] : [readyWeb],
-      accountRegistry: accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments")) });
+      accountRegistry: accountRegistryEntriesFromRows(TEST_ORG, "payments", harness.db.find((row) => row.pk === testProjectPk("payments"))) });
     if (context.status !== "available") throw new Error(context.reason);
     const planned = await input.plan(context);
     await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument({ title: planned.title, claims: planned.claims, e2e: planned.plannerIntent as never })));
@@ -773,7 +774,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
 
     // Each case's account ref is the registry's own for (applicationId, accountProfileId): three different accounts of one application.
     const contract = readE2EApplicationProjectContract(snapshot, plannedRefs[0]!.applicationId)!;
-    const entries = accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments"));
+    const entries = accountRegistryEntriesFromRows(TEST_ORG, "payments", harness.db.find((row) => row.pk === testProjectPk("payments")));
     expect(plannedRefs.map((ref) => ref.profileId).sort()).toEqual(["orders-owner", "orders-owner-b", "orders-viewer"]);
     expect(new Set(plannedRefs.map((ref) => ref.applicationId)).size).toBe(1);
     for (const ref of plannedRefs) {

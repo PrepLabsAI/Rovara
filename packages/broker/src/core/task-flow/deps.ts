@@ -30,6 +30,7 @@ import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
 import type { SecondReview } from "../second-review/service.js";
 import type { ProofContext } from "../proof/proof-section.js";
+import type { E2EVerificationDeps } from "../e2e/authority.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
@@ -225,6 +226,11 @@ export interface TaskFlowDeps {
   keepEvidence?: (input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<unknown>;
   /** The design review stage. Absent: no task enters it. */
   designReview?: DesignReviewSteps;
+  /**
+   * The browser and API checks (E2E): what a finished round is verified with (the stored admission and evidence, and the install's authority over the owner, the project, the source and the runtime).
+   * Absent: a task that needs the checks cannot have a round verified, so it stays at the checks and never passes them.
+   */
+  e2e?: E2EVerificationDeps;
   /** Lane L10: the steps after the plan is approved. `createTaskFlow` fills it with the build step when absent. */
   buildSteps?: BuildSteps;
   /**

@@ -336,7 +336,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { planQualityFinding } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, planQualityFinding } from "@agentx/contracts";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
 import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, untestedRouteSentence, type ModelCheckDependencies } from "../e2e/model-checks.js";
@@ -404,6 +404,8 @@ const MAX_SETUP_PROPOSAL_BYTES = 24 * 1024 * 1024;
 // This derived ceiling bounds only the chunked private carrier; each report,
 // frame, literal, record, and admitted group keeps its existing component limit.
 const MAX_SETUP_EVIDENCE_BYTES = e2ePrivateTransferMaxBytes(64, 4);
+/** This path keeps one project namespace; the E2E account and day-budget rows it shares with the ports-based core sit under Code's one company, as Cloud's do under an org. */
+const LEGACY_E2E_COMPANY = OrgIdSchema.parse(IMPLICIT_COMPANY_ID);
 const SETUP_ARTIFACT_CHUNK_BYTES = 64 * 1024;
 // 100,000 complete tree paths at the 1,024-byte path ceiling, plus the accepted 4 MiB source
 // materialization (base64 expansion and bounded JSON envelope). This is a private chunked object
@@ -2021,7 +2023,7 @@ async function registerProject(
   }
   const planAccounts = async () => {
     if (accountSetup === undefined) return { items: [] as TransactItems, written: 0, planKey: "" };
-    try { return await planSetupAccountWrites(dependencies, { projectId: definition.name, snapshot: accountSetup.snapshot, setup: accountSetup, now: Date.now() }); }
+    try { return await planSetupAccountWrites(dependencies, { orgId: LEGACY_E2E_COMPANY, projectId: definition.name, snapshot: accountSetup.snapshot, setup: accountSetup, now: Date.now() }); }
     catch (error) {
       if (error instanceof E2EAccountRegistryError) throw agentXError("PROJECT_REVISION_MISMATCH", error.message);
       throw error;
@@ -4538,7 +4540,7 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
   const projectId = project.definition.name;
   let accountEntries: E2EAccountRegistryEntry[];
   try {
-    const read = await readAccountRegistryEntries(dependencies, projectId, intent.applicationRuntimeRefs.map((ref) => ({ applicationId: ref.applicationId, profileId: ref.accountProfileId })),
+    const read = await readAccountRegistryEntries(dependencies, LEGACY_E2E_COMPANY, projectId, intent.applicationRuntimeRefs.map((ref) => ({ applicationId: ref.applicationId, profileId: ref.accountProfileId })),
       { earlierFor: accountDefinitionIsForOtherContract(setup.snapshot) });
     // An account whose rows cannot be read refuses only the plans that run as it, and says which account to repair (registering the project's setup again does).
     if (read.corrupt.length > 0) return { ok: false, kind: "refused", reason: unreadableAccountMessage(read.corrupt[0]!.applicationId, read.corrupt[0]!.profileId), scope: "accounts" };
@@ -4553,7 +4555,7 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
   if (!evaluation.ok) return { ok: false, kind: "refused", reason: evaluation.reason, ...(evaluation.scope === undefined ? {} : { scope: evaluation.scope }) };
   // The rows and account pointers this derivation was made from must still be exactly those when the transaction commits.
   const conditions: TransactItems = [...applicationRuntimeRowFences({ tableName: dependencies.tableName, rows, selected: evaluation.selection.runtimeRows }),
-    ...accountRegistryFences({ tableName: dependencies.tableName, projectId, refs: evaluation.accountRefs, entries: accountEntries })];
+    ...accountRegistryFences({ orgId: LEGACY_E2E_COMPANY, tableName: dependencies.tableName, projectId, refs: evaluation.accountRefs, entries: accountEntries })];
   return { ok: true, selection: evaluation.selection, conditions, inputs: { policy: policy.data,
     setup: { snapshot: setup.snapshot, setupProposal: setup.setupProposal, setupApproval: setup.setupApproval }, rows, runtimeCatalogId: catalogId, runtimeBinding: parseRuntimeBinding(project.runtimeBinding),
     accountEntries } };
@@ -4635,7 +4637,7 @@ async function codingPlanFeatureE2EContext(dependencies: AwsBrokerDependencies, 
   let accountRegistry: E2EAccountRegistryEntry[];
   try {
     // An account whose rows cannot be read is left out, so only its own targets are listed as unavailable.
-    accountRegistry = (await readAccountRegistryEntries(dependencies, project.definition.name,
+    accountRegistry = (await readAccountRegistryEntries(dependencies, LEGACY_E2E_COMPANY, project.definition.name,
       parsedPolicy.data.targets.map((target) => ({ applicationId: target.applicationId, profileId: target.accountProfileId })),
       { earlierFor: accountDefinitionIsForOtherContract(snapshot) })).entries;
   } catch { accountRegistry = []; }
@@ -6405,7 +6407,7 @@ async function handleCallback(
     return json(await handleWorkflowE2EEvidenceUpload(dependencies, operation, parseBody(request.body)), request.requestId);
   }
   if (action === "e2e-model-budget") {
-    return json(await handleE2EModelBudgetCallback({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now,
+    return json(await handleE2EModelBudgetCallback({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, orgOf: async () => LEGACY_E2E_COMPANY,
       log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
       ...(dependencies.e2eAgentInstallation === undefined ? {} : { e2eAgentInstallation: dependencies.e2eAgentInstallation }) }, operation, body), request.requestId);
   }
@@ -10954,7 +10956,7 @@ async function autofixDayBudgetHasRoom(dependencies: AwsBrokerDependencies, task
   try {
     const derived = deriveE2EAgentRoute(await dependencies.e2eAgentInstallation());
     const budgets = derived.status === "available" ? derived.definition.budgets : E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
-    return await e2eDayBudgetRoom({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, projectName: task.project, now: Date.now() }, autofixDayBudgetNeed(budgets),
+    return await e2eDayBudgetRoom({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, orgId: LEGACY_E2E_COMPANY, projectName: task.project, now: Date.now() }, autofixDayBudgetNeed(budgets),
       { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay });
   } catch { return undefined; }
 }
@@ -11177,7 +11179,7 @@ export async function requireAgentRouteStillCurrent(dependencies: AwsBrokerDepen
   const calls = Math.min(budgets.maxModelCallsPerGroup, agentSteps * (budgets.maxActionsPerStep + budgets.extraModelCallsPerStep));
   const need = { calls, inputTokens: Math.min(budgets.maxInputTokensPerGroup, calls * budgets.maxInputTokens) };
   let room: boolean;
-  try { room = await e2eDayBudgetRoom({ ...store, projectName, now: Date.now() }, need, { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay }); }
+  try { room = await e2eDayBudgetRoom({ ...store, orgId: LEGACY_E2E_COMPANY, projectName, now: Date.now() }, need, { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay }); }
   catch (error) { throw unreadable("The project's daily AI navigation budget", error); }
   if (!room) throw new ApplicationDispatchRefusal("model-route-budget-exhausted: This project's daily AI navigation budget is spent, so the checks did not start. They can run again tomorrow (UTC)");
   return true;

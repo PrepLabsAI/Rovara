@@ -8,6 +8,7 @@ import { recordPublished, startPublication } from "./publish.js";
 import { recordBuilt, recordReviewed } from "./results.js";
 import { startImplementation, startReview } from "./start.js";
 import { recordCritiqued, startCriticRevision, startPlanCritique } from "../plan/check.js";
+import { isNonCandidateRound, settleNonCandidateRound } from "../e2e/verification.js";
 
 export * from "./autofix.js";
 export * from "./check-results.js";
@@ -37,6 +38,8 @@ export function createBuildSteps(): BuildSteps {
       }
     },
     async onEnded(deps, task, operation, ended) {
+      // A baseline, replay or grounding round only settles its own record: it never moves the workflow.
+      if (deps.e2e !== undefined && operation.kind === "task" && isNonCandidateRound(operation.workflowE2EAdmission) && await settleNonCandidateRound(deps.e2e, operation, ended.status)) return;
       if (operation.kind === "publish") return recordPublished(deps, task, operation, ended);
       if (operation.kind === "maintain") return recordMaintained(deps, task, operation, ended);
       if (operation.workflowMode === "PLAN_CRITIQUE") return recordCritiqued(deps, task, operation, ended);

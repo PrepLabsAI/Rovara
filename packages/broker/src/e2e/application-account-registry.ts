@@ -1,12 +1,12 @@
 import {
   E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS, E2EApplicationAccountDefinitionSchema, E2EApplicationAccountLatestSchema, E2EApplicationProjectContractSchema,
   createE2ESyntheticAccountDefinition, deriveE2EApplicationRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, e2eSyntheticAccountContractDigest,
-  resolveE2ELatestAccountRef, validateE2EApplicationAccountBinding,
-  type E2EApplicationAccountDefinition, type E2EApplicationAccountLatest, type E2EApplicationProjectContract, type E2ERuntimeAccountRef,
+  projectPk, resolveE2ELatestAccountRef, validateE2EApplicationAccountBinding,
+  type E2EApplicationAccountDefinition, type E2EApplicationAccountLatest, type E2EApplicationProjectContract, type E2ERuntimeAccountRef, type OrgId,
 } from "@agentx/contracts";
 
 /**
- * The versioned registry of an application's test accounts (Task 3.1, owner decision D5), in the broker's one table under the project's partition:
+ * The versioned registry of an application's test accounts (Task 3.1, owner decision D5), in the broker's one table under the project's partition in its org (`projectPk(orgId, project)`, so two orgs' same-named projects keep separate accounts):
  *
  * - `sk = E2E_ACCOUNT#<applicationId>#<profileId>#REV#<n>` holds the `E2EApplicationAccountDefinition` of revision n, written once and never changed;
  * - `sk = E2E_ACCOUNT_LATEST#<applicationId>#<profileId>` holds `{ revision, definitionDigest }`, the account's newest revision, moved only from the previous revision.
@@ -43,23 +43,23 @@ const keyPart = (value: string, label: string): string => {
   return value;
 };
 const accountSuffix = (applicationId: string, profileId: string) => `${keyPart(applicationId, "application id")}#${keyPart(profileId, "account profile id")}`;
-export function e2eAccountDefinitionKey(projectId: string, applicationId: string, profileId: string, revision: number): { pk: string; sk: string } {
-  return { pk: `PROJECT#${projectId}`, sk: `E2E_ACCOUNT#${accountSuffix(applicationId, profileId)}#REV#${revision}` };
+export function e2eAccountDefinitionKey(orgId: OrgId, projectId: string, applicationId: string, profileId: string, revision: number): { pk: string; sk: string } {
+  return { pk: projectPk(orgId, projectId), sk: `E2E_ACCOUNT#${accountSuffix(applicationId, profileId)}#REV#${revision}` };
 }
-export function e2eAccountLatestKey(projectId: string, applicationId: string, profileId: string): { pk: string; sk: string } {
-  return { pk: `PROJECT#${projectId}`, sk: `E2E_ACCOUNT_LATEST#${accountSuffix(applicationId, profileId)}` };
+export function e2eAccountLatestKey(orgId: OrgId, projectId: string, applicationId: string, profileId: string): { pk: string; sk: string } {
+  return { pk: projectPk(orgId, projectId), sk: `E2E_ACCOUNT_LATEST#${accountSuffix(applicationId, profileId)}` };
 }
 /** The sort-key prefix shared by every revision of one account. */
-export function e2eAccountRevisionPrefix(projectId: string, applicationId: string, profileId: string): { pk: string; prefix: string } {
-  return { pk: `PROJECT#${projectId}`, prefix: `E2E_ACCOUNT#${accountSuffix(applicationId, profileId)}#REV#` };
+export function e2eAccountRevisionPrefix(orgId: OrgId, projectId: string, applicationId: string, profileId: string): { pk: string; prefix: string } {
+  return { pk: projectPk(orgId, projectId), prefix: `E2E_ACCOUNT#${accountSuffix(applicationId, profileId)}#REV#` };
 }
 
-export function accountDefinitionRow(projectId: string, definition: E2EApplicationAccountDefinition): Record<string, unknown> {
-  return { ...e2eAccountDefinitionKey(projectId, definition.applicationId, definition.profileId, definition.revision), entityType: "E2E_ACCOUNT", ...definition };
+export function accountDefinitionRow(orgId: OrgId, projectId: string, definition: E2EApplicationAccountDefinition): Record<string, unknown> {
+  return { ...e2eAccountDefinitionKey(orgId, projectId, definition.applicationId, definition.profileId, definition.revision), entityType: "E2E_ACCOUNT", ...definition };
 }
-export function accountLatestRow(projectId: string, applicationId: string, profileId: string, latest: E2EApplicationAccountLatest,
+export function accountLatestRow(orgId: OrgId, projectId: string, applicationId: string, profileId: string, latest: E2EApplicationAccountLatest,
   setup?: { approvedAt: string; proposalSha256: string }): Record<string, unknown> {
-  return { ...e2eAccountLatestKey(projectId, applicationId, profileId), entityType: "E2E_ACCOUNT_LATEST", ...latest,
+  return { ...e2eAccountLatestKey(orgId, projectId, applicationId, profileId), entityType: "E2E_ACCOUNT_LATEST", ...latest,
     ...(setup === undefined ? {} : { setupApprovedAt: setup.approvedAt, setupProposalSha256: setup.proposalSha256 }) };
 }
 
@@ -71,12 +71,12 @@ const unreadable = (applicationId: string, profileId: string) => new E2EAccountR
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
 /** One revision's definition row, parsed and held to its key; undefined when it is missing or is not that account's row. */
-export function parseAccountDefinitionRow(projectId: string, applicationId: string, profileId: string, revision: number, row: unknown): E2EApplicationAccountDefinition | undefined {
+export function parseAccountDefinitionRow(orgId: OrgId, projectId: string, applicationId: string, profileId: string, revision: number, row: unknown): E2EApplicationAccountDefinition | undefined {
   if (!isRecord(row)) return undefined;
   const { pk, sk, entityType, ...body } = row;
   const definition = E2EApplicationAccountDefinitionSchema.safeParse(body);
   if (!definition.success || entityType !== "E2E_ACCOUNT" || definition.data.applicationId !== applicationId || definition.data.profileId !== profileId || definition.data.revision !== revision) return undefined;
-  const expected = e2eAccountDefinitionKey(projectId, applicationId, profileId, revision);
+  const expected = e2eAccountDefinitionKey(orgId, projectId, applicationId, profileId, revision);
   return pk === expected.pk && sk === expected.sk ? definition.data : undefined;
 }
 
@@ -84,28 +84,28 @@ export function parseAccountDefinitionRow(projectId: string, applicationId: stri
  * An account's two rows, parsed and held to their keys: a row is only the account it is keyed as. `definitionRow` is the row at the revision the pointer names.
  * A row that cannot be read throws an `accounts-changed-reapprove` error that names the account.
  */
-export function parseAccountEntry(projectId: string, applicationId: string, profileId: string, latestRow: unknown, definitionRow: unknown): E2EAccountRegistryEntry {
+export function parseAccountEntry(orgId: OrgId, projectId: string, applicationId: string, profileId: string, latestRow: unknown, definitionRow: unknown): E2EAccountRegistryEntry {
   if (!isRecord(latestRow)) throw unreadable(applicationId, profileId);
   const { pk: latestPk, sk: latestSk, entityType: latestType, setupApprovedAt, setupProposalSha256, ...latestBody } = latestRow;
   const latest = E2EApplicationAccountLatestSchema.safeParse(latestBody);
-  const expectedLatest = e2eAccountLatestKey(projectId, applicationId, profileId);
+  const expectedLatest = e2eAccountLatestKey(orgId, projectId, applicationId, profileId);
   if (!latest.success || latestType !== "E2E_ACCOUNT_LATEST" || latestPk !== expectedLatest.pk || latestSk !== expectedLatest.sk
     || (setupApprovedAt !== undefined && (typeof setupApprovedAt !== "string" || Number.isNaN(Date.parse(setupApprovedAt))))
     || (setupProposalSha256 !== undefined && typeof setupProposalSha256 !== "string")) throw unreadable(applicationId, profileId);
-  const definition = parseAccountDefinitionRow(projectId, applicationId, profileId, latest.data.revision, definitionRow);
+  const definition = parseAccountDefinitionRow(orgId, projectId, applicationId, profileId, latest.data.revision, definitionRow);
   if (definition === undefined) throw unreadable(applicationId, profileId);
   return { definition, latest: latest.data, ...(typeof setupApprovedAt === "string" ? { setupApprovedAt } : {}) };
 }
 
 /** Every account of a project in the rows read from its partition (a test's view of the table; the broker reads the accounts a plan names, by key). */
-export function accountRegistryEntriesFromRows(projectId: string, rows: readonly Record<string, unknown>[]): E2EAccountRegistryEntry[] {
+export function accountRegistryEntriesFromRows(orgId: OrgId, projectId: string, rows: readonly Record<string, unknown>[]): E2EAccountRegistryEntry[] {
   const prefix = "E2E_ACCOUNT_LATEST#";
   return rows.flatMap((row) => {
-    if (row.pk !== `PROJECT#${projectId}` || typeof row.sk !== "string" || !row.sk.startsWith(prefix)) return [];
+    if (row.pk !== projectPk(orgId, projectId) || typeof row.sk !== "string" || !row.sk.startsWith(prefix)) return [];
     const [applicationId, profileId] = row.sk.slice(prefix.length).split("#");
     if (applicationId === undefined || profileId === undefined) return [];
-    const definition = rows.find((item) => item.pk === row.pk && item.sk === e2eAccountDefinitionKey(projectId, applicationId, profileId, Number(row.revision)).sk);
-    return [parseAccountEntry(projectId, applicationId, profileId, row, definition)];
+    const definition = rows.find((item) => item.pk === row.pk && item.sk === e2eAccountDefinitionKey(orgId, projectId, applicationId, profileId, Number(row.revision)).sk);
+    return [parseAccountEntry(orgId, projectId, applicationId, profileId, row, definition)];
   });
 }
 

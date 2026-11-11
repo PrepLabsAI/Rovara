@@ -319,17 +319,17 @@ const FRESH_DISCOVERY_MS = 7 * 24 * 60 * 60_000;
 const CHECK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Where checks go: the runner the installation's READY web runtime was qualified on (a row an operator tool records with the registration), bound to that registration. */
-async function runnerPrefix(deps: ModelCheckDependencies, profileId: string): Promise<string> {
+async function runnerQualification(deps: ModelCheckDependencies, profileId: string): Promise<{ prefix: string; correlationId: string }> {
   const row = await deps.readRuntimeRow();
   const now = deps.now();
-  if (row === undefined || row["state"] !== "READY" || typeof row["expiresAt"] !== "string" || Date.parse(row["expiresAt"]) <= now || typeof row["transportCorrelationId"] !== "string") {
+  if (row === undefined || row["state"] !== "READY" || typeof row["expiresAt"] !== "string" || !Number.isFinite(Date.parse(row["expiresAt"])) || Date.parse(row["expiresAt"]) <= now || typeof row["transportCorrelationId"] !== "string") {
     throw new ModelCheckError(409, "no-ready-runtime", "no browser and API runtime is READY, so there is no runner to check a model on; qualify the runtime first");
   }
   const pointer = (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: e2eModelCheckRunnerKey(profileId), ConsistentRead: true }))).Item as Record<string, unknown> | undefined;
   if (pointer === undefined || pointer["transportCorrelationId"] !== row["transportCorrelationId"] || typeof pointer["roleId"] !== "string" || typeof pointer["instanceId"] !== "string") {
     throw new ModelCheckError(409, "no-model-check-runner", "the READY runtime's runner is not recorded for model checks; requalify the runtime with the current tooling");
   }
-  try { return e2eQualificationPrefix(pointer["roleId"], pointer["instanceId"]); }
+  try { return { prefix: e2eQualificationPrefix(pointer["roleId"], pointer["instanceId"]), correlationId: row["transportCorrelationId"] }; }
   catch { throw new ModelCheckError(409, "no-model-check-runner", "the recorded model check runner is not valid; requalify the runtime"); }
 }
 
@@ -361,14 +361,19 @@ export async function startModelCheck(deps: ModelCheckDependencies, body: unknow
     request = { ...request, routeId: definition.routeId, definitionDigest: e2eAgentRouteDefinitionDigest(definition) };
     record = { ...record, modelId, routeId: definition.routeId, definitionDigest: e2eAgentRouteDefinitionDigest(definition) };
   }
-  const prefix = await runnerPrefix(deps, profileId);
+  const qualification = await runnerQualification(deps, profileId);
+  const { prefix } = qualification;
   const now = deps.now();
   // What the request asks for, apart from its id: a retried POST (a lost 202, a double click) has the same one.
   const fingerprint = createHash("sha256").update(JSON.stringify([input.kind, record["modelId"] ?? null, record["definitionDigest"] ?? null])).digest("hex");
   const expires = indexExpiresAt(new Date(now + CHECK_TTL_MS).toISOString());
   const latestItem = (id: string) => ({ ...e2eModelCheckLatestKey(), entityType: "E2E_MODEL_CHECK_LATEST", checkId: id, requestedAt: now, state: "pending", fingerprint, [INDEX_EXPIRY_ATTRIBUTE]: expires });
   const writeCheck = async (id: string) => {
+    // This is platform qualification work, not a customer spending admission.
+    // Refuse a runtime/runner change before making a request visible to it.
     await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...e2eModelCheckKey(id), entityType: "E2E_MODEL_CHECK", checkId: id, ...record, prefix, requestedAt: now, state: "pending", [INDEX_EXPIRY_ATTRIBUTE]: expires } }));
+    const currentQualification = await runnerQualification(deps, profileId);
+    if (currentQualification.prefix !== prefix || currentQualification.correlationId !== qualification.correlationId) throw new ModelCheckError(409, "no-model-check-runner", "the qualified model check runner changed; requalify and retry");
     await deps.putObject(`${prefix}${REQUEST_KEY}`, `${JSON.stringify({ ...request, checkId: id })}\n`);
   };
   // One check at a time per runner, held by ONE conditional write of the latest pointer: of two POSTs at once, one wins and the other is told which check is running. A pointer that

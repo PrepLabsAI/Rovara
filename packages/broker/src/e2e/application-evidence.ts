@@ -4,8 +4,10 @@ import { E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_RUNTIME_ENVIRONMENT_DRIFTED_CODE, E
 import { E2EAgentModelEvidenceSchema, E2E_AGENT_TRACE_BASE64_MAX, createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
   E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, e2eApplicationAggregateRunUsage, e2eApplicationGroupUsesModel, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, e2eApplicationSchemaReason, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
   reviewAgentTraceFile, verifiedAgentCaseLedger, type E2EAgentModelEvidence, type E2EAgentTraceCase, type E2EApplicationCaseFacts, type E2ECompiledApplicationSuite } from "@agentx/verifier";
-import { readAdmittedE2EModelRoute } from "./model-route-registry.js";
+import { readAdmittedE2EModelRoute } from "./model-route-read.js";
 import { buildScenarioRows, readCaptureScreenshots, type DisplayArtifact, type DisplayGroupInput } from "./application-display.js";
+import { readCaptureApiSamples, scenarioSamplesOf, type SampleFile, type ScenarioSamples } from "./api-evidence.js";
+import { readCaptureStrips, scenarioStripsOf, type ScenarioStrip, type StripFrame } from "./capture-strips.js";
 import { agentCaseDirectory, agentNavigationOf } from "./application-agent-display.js";
 import { modelSentenceContext } from "./owner-sentences.js";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
@@ -110,6 +112,13 @@ export type ApplicationEvidenceVerification = Readonly<{
    */
   display?: Readonly<{ scenarios: readonly E2EDisplayScenario[]; artifacts: readonly DisplayArtifact[] }>;
   /**
+   * The screenshot strips of the round's scenarios (proof and evidence B1), one frame at the end of each step, present only for a round the broker accepted whole and only when the admission asked
+   * for a strip. Display only, like `display`; `browserEvidenceOf` turns a candidate round's and a baseline round's strips into the evidence pack's browser rows.
+   */
+  strips?: readonly ScenarioStrip[];
+  /** The API samples of the round's scenarios (proof and evidence B2), on the same terms as `strips`; `apiEvidenceOf` turns a candidate's and a baseline's into the pack's api rows. */
+  apiSamples?: readonly ScenarioSamples[];
+  /**
    * The recordings of the round's AI navigation steps that the broker's own review kept, in a fixed order. Present only when the round's verdict is PASS (empty for a round with no
    * recording); a recording that fails review is left out and changes nothing else about the verdict.
    */
@@ -184,6 +193,8 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     const agentTraces: VerifiedAgentTrace[] = [];
     const results: E2EQualifiedResult[] = [];
     const displayGroups: Array<{ runId: string; group: Omit<DisplayGroupInput, "result"> }> = [];
+    const sampleGroups: Array<{ cases: ReadonlyArray<{ caseId: string; scenarioId: string }>; samples: ReadonlyMap<string, readonly SampleFile[]> }> = [];
+    const stripGroups: Array<{ cases: ReadonlyArray<{ caseId: string; scenarioId: string }>; strips: ReadonlyMap<string, readonly StripFrame[]> }> = [];
     for (const suite of validated.applicationSuites) {
       const groupAdmission = admission.groups.find((group) => group.outerBinding.groupId === suite.group.groupId);
       if (groupAdmission === undefined || groupAdmission.protocol !== "trusted-e2e-application/v1") refuse("an application group is not admitted");
@@ -206,6 +217,8 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: verified.verdict, reason: verified.reason, ...(verified.caseFacts === undefined ? {} : { caseFacts: verified.caseFacts }) });
       if (verified.result !== undefined) results.push(verified.result);
       if (verified.verdict === "PASS" && verified.agentTraces !== undefined) agentTraces.push(...verified.agentTraces);
+      sampleGroups.push({ cases: displayBase.cases, samples: readCaptureApiSamples(groupRun.operatorEvidence, new Set(binding.expectedCases.map((item) => item.caseId))) });
+      stripGroups.push({ cases: displayBase.cases, strips: readCaptureStrips(groupRun.operatorEvidence, new Set(binding.expectedCases.map((item) => item.caseId))) });
       displayGroups.push({ runId: binding.runId, group: { ...displayBase, verdict: verified.verdict, reason: verified.reason, observed: verified.observed ?? new Map(),
         screenshots: readCaptureScreenshots(groupRun.operatorEvidence, new Set(binding.expectedCases.map((item) => item.caseId))), agentNavigation: verified.agentNavigation } });
     }
@@ -219,7 +232,9 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     const reasonOf = (verdict: E2EVerdict) => groups.filter((group) => group.verdict === verdict).map((group) => `${group.groupId}: ${group.reason}`).join("; ");
     // The rows are held to the same rule as the verdict: shown only for a round the broker accepted whole, and never able to change what the verdict decided.
     // The label is the purpose the admission was signed with (checked against the caller's above), so a replay's rows are never labelled as the candidate's (Task FU2, REPLAYLABEL).
-    const display = displayOf({ plan, authoritative, purpose: signedPurpose, groups: displayGroups, shown });
+    const stripped = authoritative ? scenarioStripsOf(stripGroups) : [];
+    const sampled = authoritative ? scenarioSamplesOf(sampleGroups) : [];
+    const display = { ...displayOf({ plan, authoritative, purpose: signedPurpose, groups: displayGroups, shown }), ...(stripped.length === 0 ? {} : { strips: stripped }), ...(sampled.length === 0 ? {} : { apiSamples: sampled }) };
     if (aggregateRuns === undefined) {
       return { verdict: "UNKNOWN", reason: "the round's aggregate evidence has not been accepted, so no group result is authoritative", plan, round, groups, results: shown, ...display };
     }

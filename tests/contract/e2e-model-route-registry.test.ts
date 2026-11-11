@@ -11,6 +11,7 @@ import {
 import { E2E_MODEL_ROUTE } from "../../scripts/test-deploy-check.js";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { SECRET_ARN, channelRequest, drivingTestRow, tapAnswer } from "../support/e2e-model-fixtures.js";
+import { TEST_ORG, testProjectPk } from "../support/orgs.js";
 
 // The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
 assumeDrivingTestsPassed();
@@ -234,16 +235,16 @@ describe("dispatch re-derives the route and compares it with what was approved",
 });
 
 describe("the broker-backed day budget", () => {
-  const budget = (db: FakeDynamoDb, now = DAY) => createBrokerE2EDayBudget({ ...store(db), projectName: "payments", now: () => now });
+  const budget = (db: FakeDynamoDb, now = DAY) => createBrokerE2EDayBudget({ ...store(db), orgId: TEST_ORG, projectName: "payments", now: () => now });
   const LIMITS = { maxInputTokens: 10_000, maxCalls: 3 };
-  const row = (db: FakeDynamoDb, day = "2026-10-21") => db.get(`PROJECT#payments`, `E2E_MODEL_BUDGET#${day}`);
+  const row = (db: FakeDynamoDb, day = "2026-10-21") => db.get(testProjectPk("payments"), `E2E_MODEL_BUDGET#${day}`);
 
   it("keeps one row per project and UTC day with the tokens and calls reserved", async () => {
     const db = new FakeDynamoDb();
     const reservation = await budget(db).reserve(4_000, LIMITS);
     expect(reservation).not.toBeNull();
     expect(row(db)).toMatchObject({ inputTokens: 4_000, calls: 1 });
-    expect(e2eModelBudgetKey("payments", "2026-10-21")).toEqual({ pk: "PROJECT#payments", sk: "E2E_MODEL_BUDGET#2026-10-21" });
+    expect(e2eModelBudgetKey(TEST_ORG, "payments", "2026-10-21")).toEqual({ pk: testProjectPk("payments"), sk: "E2E_MODEL_BUDGET#2026-10-21" });
   });
 
   it("refuses a reserve that would pass the token cap or the call cap, and records nothing for it", async () => {
@@ -272,7 +273,7 @@ describe("the broker-backed day budget", () => {
     const db = new FakeDynamoDb();
     const sent: Array<Record<string, unknown>> = [];
     const spy = { send: async (command: { input: Record<string, unknown> }) => { sent.push(command.input); return db.send(command); } };
-    await createBrokerE2EDayBudget({ documentClient: spy as unknown as DynamoDBDocumentClient, tableName: TABLE, projectName: "payments", now: () => DAY }).reserve(100, LIMITS);
+    await createBrokerE2EDayBudget({ documentClient: spy as unknown as DynamoDBDocumentClient, tableName: TABLE, orgId: TEST_ORG, projectName: "payments", now: () => DAY }).reserve(100, LIMITS);
     expect(sent).toHaveLength(1);
     expect(String(sent[0]!.ConditionExpression)).toMatch(/attribute_not_exists/);
     expect(String(sent[0]!.UpdateExpression)).toMatch(/ADD/);
@@ -373,7 +374,7 @@ describe("the broker-backed day budget", () => {
   it("charges the day the reservation was made on, even if the settle crosses midnight", async () => {
     const db = new FakeDynamoDb();
     const reservation = (await budget(db, Date.parse("2026-10-21T23:59:59.000Z")).reserve(2_000, LIMITS))!;
-    const nextDay = createBrokerE2EDayBudget({ ...store(db), projectName: "payments", now: () => Date.parse("2026-10-22T00:00:05.000Z") });
+    const nextDay = createBrokerE2EDayBudget({ ...store(db), orgId: TEST_ORG, projectName: "payments", now: () => Date.parse("2026-10-22T00:00:05.000Z") });
     await nextDay.reserve(500, LIMITS);
     await reservation.settle(800);
     expect(row(db, "2026-10-21")).toMatchObject({ inputTokens: 800, calls: 1 });
@@ -383,17 +384,17 @@ describe("the broker-backed day budget", () => {
   it("keeps projects apart", async () => {
     const db = new FakeDynamoDb();
     await budget(db).reserve(9_000, LIMITS);
-    const other = createBrokerE2EDayBudget({ ...store(db), projectName: "billing", now: () => DAY });
+    const other = createBrokerE2EDayBudget({ ...store(db), orgId: TEST_ORG, projectName: "billing", now: () => DAY });
     expect(await other.reserve(9_000, LIMITS)).not.toBeNull();
   });
 
   it("answers the dispatch precheck from a keyed read, before a run starts", async () => {
     const db = new FakeDynamoDb();
-    expect(await e2eDayBudgetRoom({ ...store(db), projectName: "payments", now: DAY }, { inputTokens: 400_000, calls: 12 }, { maxInputTokens: 2_000_000, maxCalls: 400 })).toBe(true);
-    db.set({ pk: "PROJECT#payments", sk: "E2E_MODEL_BUDGET#2026-10-21", inputTokens: 1_700_000, calls: 100 });
-    expect(await e2eDayBudgetRoom({ ...store(db), projectName: "payments", now: DAY }, { inputTokens: 400_000, calls: 12 }, { maxInputTokens: 2_000_000, maxCalls: 400 })).toBe(false);
-    db.set({ pk: "PROJECT#payments", sk: "E2E_MODEL_BUDGET#2026-10-21", inputTokens: 1_000, calls: 395 });
-    expect(await e2eDayBudgetRoom({ ...store(db), projectName: "payments", now: DAY }, { inputTokens: 400_000, calls: 12 }, { maxInputTokens: 2_000_000, maxCalls: 400 })).toBe(false);
+    expect(await e2eDayBudgetRoom({ ...store(db), orgId: TEST_ORG, projectName: "payments", now: DAY }, { inputTokens: 400_000, calls: 12 }, { maxInputTokens: 2_000_000, maxCalls: 400 })).toBe(true);
+    db.set({ pk: testProjectPk("payments"), sk: "E2E_MODEL_BUDGET#2026-10-21", inputTokens: 1_700_000, calls: 100 });
+    expect(await e2eDayBudgetRoom({ ...store(db), orgId: TEST_ORG, projectName: "payments", now: DAY }, { inputTokens: 400_000, calls: 12 }, { maxInputTokens: 2_000_000, maxCalls: 400 })).toBe(false);
+    db.set({ pk: testProjectPk("payments"), sk: "E2E_MODEL_BUDGET#2026-10-21", inputTokens: 1_000, calls: 395 });
+    expect(await e2eDayBudgetRoom({ ...store(db), orgId: TEST_ORG, projectName: "payments", now: DAY }, { inputTokens: 400_000, calls: 12 }, { maxInputTokens: 2_000_000, maxCalls: 400 })).toBe(false);
     expect(db.commandNames().filter((name) => name === "ScanCommand")).toEqual([]);
   });
 });
@@ -402,9 +403,9 @@ describe("the governed route against the broker-backed budget", () => {
   const route = (db: FakeDynamoDb, invoke: Parameters<typeof createGovernedE2EModelRoute>[1]["invoke"], definition = available(bedrock)) => {
     let clock = DAY;
     return createGovernedE2EModelRoute(definition, { invoke, now: () => (clock += 5),
-      dayBudget: createBrokerE2EDayBudget({ ...store(db), projectName: "payments", now: () => DAY }) });
+      dayBudget: createBrokerE2EDayBudget({ ...store(db), orgId: TEST_ORG, projectName: "payments", now: () => DAY }) });
   };
-  const row = (db: FakeDynamoDb) => db.get("PROJECT#payments", "E2E_MODEL_BUDGET#2026-10-21");
+  const row = (db: FakeDynamoDb) => db.get(testProjectPk("payments"), "E2E_MODEL_BUDGET#2026-10-21");
 
   it("charges one call and the reported tokens for a call that is answered", async () => {
     const db = new FakeDynamoDb();
@@ -439,7 +440,7 @@ describe("the governed route against the broker-backed budget", () => {
 
   it("declines with model-route-budget-exhausted when the day is spent, without calling the provider", async () => {
     const db = new FakeDynamoDb();
-    db.set({ pk: "PROJECT#payments", sk: "E2E_MODEL_BUDGET#2026-10-21", inputTokens: 1_999_900, calls: 3 });
+    db.set({ pk: testProjectPk("payments"), sk: "E2E_MODEL_BUDGET#2026-10-21", inputTokens: 1_999_900, calls: 3 });
     const invoke = vi.fn(async () => tapAnswer());
     const { result, receipt } = await route(db, invoke).generate(channelRequest());
     expect(invoke).not.toHaveBeenCalled();
@@ -464,8 +465,8 @@ describe("the registry rows do not touch membership", () => {
     const planned = await planE2EAgentRoute(store(db), anthropic);
     if (planned.status !== "available") throw new Error("unavailable");
     await approveE2EAgentRoute(store(db), anthropic, planned.revision);
-    await createBrokerE2EDayBudget({ ...store(db), projectName: "payments", now: () => DAY }).reserve(100, { maxInputTokens: 1_000, maxCalls: 2 });
-    expect([...db.items.values()].map((item) => String(item.pk)).sort()).toEqual([E2E_MODEL_ROUTE_PARTITION, E2E_MODEL_ROUTE_PARTITION, "PROJECT#payments"]);
+    await createBrokerE2EDayBudget({ ...store(db), orgId: TEST_ORG, projectName: "payments", now: () => DAY }).reserve(100, { maxInputTokens: 1_000, maxCalls: 2 });
+    expect([...db.items.values()].map((item) => String(item.pk)).sort()).toEqual([E2E_MODEL_ROUTE_PARTITION, E2E_MODEL_ROUTE_PARTITION, testProjectPk("payments")]);
     expect([...db.items.values()].some((item) => String(item.pk).startsWith("MEMBER#"))).toBe(false);
   });
 

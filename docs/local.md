@@ -442,6 +442,20 @@ it is stored beside the workflow (`task.secondOpinion`), never in it, so a secon
 - **Lowering the mode** goes through the `Approvers` port's requirement for a `setting` request: with Code's default (the owner) it applies at once, audited; an approvers adapter that needs a different person turns it into a proposal that person approves with a proof the port verifies.
 - **Not done here:** the merge press itself (Code's merge card is not wired on `rovara up`, so `mergeWait` is offered to whoever builds the merge dependencies), the decision card for the notice (the card routes are not mounted on a laptop; `secondReviewNoticeItemsFor` is ready), and per-operation model records (every step runs on the install's one chosen model, so that is the model the second reviewer must differ from).
 
+## Browser and API checks (E2E)
+
+The committed source of a coding run (`candidate-export`, `candidate-build-source`, `baseline-source`) is kept on the object-storage point for a task whose approved plan needs these checks, so a round has the exact code to run from; any other task's uploads are answered and nothing is kept. A worker reads its round's admission and uploads its evidence through the same callbacks. When a candidate's
+checks end, the build step verifies the round from what was stored (`core/e2e/verification.ts`) and the checks pass only on a round the broker judged itself.
+
+What does not run on a laptop yet, and why:
+
+- **A round cannot start.** Starting one needs a qualified runtime: a Linux ARM64 host whose operating system and kernel are recorded in a registration that an administrator issued a challenge for, a pinned executor image, and the project's approved E2E setup (targets, accounts, mocks).
+  Cloud's registration is for an EC2 host (`deploymentMode: ec2-ebs`); a Docker worker on a Mac is a different kernel, and the worker compares its host with the admitted runtime before it builds anything. This install has no runtime registration and no project setup approval, so the
+  authority has no `currentSelection` and every round is refused as unverifiable. Nothing is skipped silently: a task whose plan needs the checks stays at the checks.
+- **The committed source of a larger code base** does not fit the default object storage of `rovara up` (objects kept as documents, about 290 KB each). A task that does not need the checks is not affected. A task that does stops at its checks with one fixed sentence, and the run's result is not lost. Kept sources stay until deleted. Name the folder object storage (`@agentx/local-adapters/object-storage`) for the `object-storage` point to hold up to the export bound.
+- **The plan with an E2E section** comes from the structured plan (a plan the planner wrote in the structured format); a Markdown plan has none.
+- **AI navigation steps** are charged through Cloud's spend ledger; Code has no dollar cap on them yet.
+
 ## Not wired yet
 
 - **Merge from `rovara up`.** A person merges a draft pull request on the code host (or with their proof); merge tracking never presses Merge (owner decision 1). The owner's own Merge button on the local page is not built;

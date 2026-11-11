@@ -1,6 +1,6 @@
 // Lane L9-wire: the callback endpoints a local worker posts to (`/v1/internal/workspaces/<w>/operations/<o>/<action>`), for the three every job has: its events, its artifacts and
 // its terminal result. The capability the flow issued at delivery (HMAC, one workspace, one operation, one fence, a list of actions) is checked first; the ids in the address must be the
-// capability's own. Every other callback the worker can make (a pull request, a candidate export, a model fallback, ...) answers "not available" until its lane is wired; the worker
+// capability's own. Every other callback the worker can make (a model fallback, the model budget of the browser checks, ...) answers "not available" until its lane is wired; the worker
 // then fails that job with a plain reason instead of waiting for ever.
 //
 // A plan the worker saves as `plan.md` is read by `core/plan` (a structured plan, the default) or kept as a Markdown plan (an install that asks for Markdown).
@@ -13,7 +13,9 @@ import { CallbackCapabilities, type CallbackAction } from "../../callbacks.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { currentDocumentType } from "../../core/decisions/workflow-subject.js";
 import { operationKey, taskPointerKey } from "../../core/task-flow/keys.js";
-import { acknowledgeUpload } from "./candidate-export.js";
+import { handleCodingRunUpload, isCodingRunUpload } from "./candidate-export.js";
+import { handleE2EEvidenceUpload, readE2EAdmissionChunk, type RoundRecordReaders } from "../../core/e2e/callbacks.js";
+import type { UploadStores } from "../../core/e2e/uploads-chunks.js";
 import { openPullRequest } from "../../core/build-step/publish.js";
 import { updatePullRequest } from "../../core/build-step/maintain.js";
 import { readTask } from "../../core/task-flow/reads.js";
@@ -56,6 +58,11 @@ export interface CallbackDeps {
   blobs: ObjectStorage;
   /** The repository grants this process issued; a worker exchanges one for a clone or push credential. */
   grants: Pick<RepositoryGrantService, "exchange">;
+  /**
+   * The records of the browser and API round kinds, which the admission read is held to. Absent on an install that does not run those checks: `e2e-admission` and `e2e-evidence` are then
+   * answered "not available" (no checks operation is ever started there, so no worker asks).
+   */
+  e2e?: { records: RoundRecordReaders };
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -74,7 +81,7 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "pull-request", "pull-request-update"]);
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "pull-request", "pull-request-update"]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -218,6 +225,8 @@ async function exchangeCredential(deps: CallbackDeps, request: BrokerRequest, wo
   return deps.grants.exchange(grant, { workspaceId, operationId, credentialRef, repositoryUrl, access });
 }
 
+const uploadStores = (deps: CallbackDeps): UploadStores => ({ store: deps.flow.store, objects: deps.blobs, ...(deps.flow.now === undefined ? {} : { now: deps.flow.now }), ...(deps.flow.newId === undefined ? {} : { newId: deps.flow.newId }) });
+
 export function createCallbackHandler(deps: CallbackDeps): (request: BrokerRequest) => Promise<BrokerResponse> {
   const capabilities = new CallbackCapabilities(Buffer.from(deps.flow.callbackSigningKey));
   return async (request) => {
@@ -242,7 +251,12 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
       if (action !== "result" && isTerminalStatus(operation.status)) throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
-      if (action === "candidate-export" || action === "candidate-build-source" || action === "baseline-source") return json(200, acknowledgeUpload(bodyOf(request), { allowUnavailable: action !== "candidate-export" }));
+      if (isCodingRunUpload(action)) return json(200, await handleCodingRunUpload(action, uploadStores(deps), operation, bodyOf(request)));
+      if (action === "e2e-admission" || action === "e2e-evidence") {
+        if (deps.e2e === undefined) throw agentXError("NOT_FOUND", "this callback is not available on this install");
+        return json(200, action === "e2e-admission" ? await readE2EAdmissionChunk(uploadStores(deps), deps.e2e.records, operation, bodyOf(request))
+          : await handleE2EEvidenceUpload(uploadStores(deps), operation, bodyOf(request)));
+      }
       if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));
       const body = bodyOf(request);

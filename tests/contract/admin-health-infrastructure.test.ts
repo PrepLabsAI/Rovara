@@ -154,6 +154,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/script-tokens/rate.ts", "packages/broker/src/core/script-tokens/store.ts",
       // Sessions: thread notes and the live-message counters (session retention), followers and presence rows, and Ask's records, locks, request marks and rate rows.
       "packages/broker/src/core/sessions/followers.ts", "packages/broker/src/core/sessions/notes.ts", "packages/broker/src/core/sessions/ask.ts", "packages/broker/src/core/sessions/steer.ts",
+      // The browser and API checks on the ports: the baseline, replay and grounding records expire 30 days after they were last written, as the hosted product's do.
+      "packages/broker/src/core/e2e/baseline.ts", "packages/broker/src/core/e2e/replay.ts", "packages/broker/src/core/e2e/grounding.ts",
       // Second review: the track record rows (one per answered second opinion, and a pointer per task) expire after their retention (400 days).
       "packages/broker/src/core/second-review/track.ts",
     ]);

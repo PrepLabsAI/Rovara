@@ -41,10 +41,16 @@ import { refreshSessionSummary, type SummaryDependencies } from "../../core/sess
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import { createTaskFlowFromRegistry, TASK_FLOW_INDEXES, type TaskFlow } from "../../core/task-flow/flow.js";
+import { createOwnerTaskAccess } from "../../core/task-flow/access.js";
+import { createLocalE2EAuthority } from "../../core/e2e/local-authority.js";
+import type { RoundRecordReaders } from "../../core/e2e/callbacks.js";
+import { readWorkflowE2EBaselineRecord } from "../../core/e2e/baseline.js";
+import { readWorkflowE2EReplayRecord } from "../../core/e2e/replay.js";
+import { readWorkflowE2EGroundingRecord } from "../../core/e2e/grounding.js";
 import { operationKey, taskPointerKey, workspaceKey } from "../../core/task-flow/keys.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
 import { readTask } from "../../core/task-flow/reads.js";
-import { fromDocument, type TaskPointerRecord } from "../../core/task-flow/records.js";
+import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
 import { isTerminalStatus } from "../../core/task-flow/results.js";
 import { planFeedbackKey } from "../../core/task-flow/stage-machine.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
@@ -229,9 +235,29 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
   const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs });
+  // The browser and API checks: a finished round is verified from what the broker stored, against the owner, the project, the source and the runtime as they are now. This install keeps no runtime
+  // registration for a round to stand on (see docs/local.md), so the authority has no `currentSelection` and no round passes; everything else about a round is checked as Cloud checks it.
+  const e2e = {
+    state: { store, ...(options.now === undefined ? {} : { now: () => options.now!() }) },
+    objects: blobs,
+    authority: createLocalE2EAuthority({ companyId, state: { store }, objects: blobs, projects: projectSource, access: createOwnerTaskAccess(),
+      operationsOf: async (task) => {
+        const operations: OperationRecord[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await store.query({ pk: `WORKSPACE#${task.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" }, ...(cursor === undefined ? {} : { cursor }) });
+          for (const item of page.items) if (item["entityType"] === "OPERATION") operations.push(item as unknown as OperationRecord);
+          cursor = page.cursor;
+        } while (cursor !== undefined);
+        return operations;
+      } }),
+    readTask: (taskId: string) => readTask({ store }, taskId),
+    log: (entry: Record<string, unknown>) => log({ component: "e2e", ...entry }),
+  };
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
     projects: projectSource,
+    e2e,
     repositoryGrants: grants,
     secondReview,
     callbackSigningKey: signingKey,
@@ -396,7 +422,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: () => clock().getTime() }),
   });
 
-  const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
+  // A worker's reads of its round's admission and its evidence uploads are held to the round's own record (baseline, replay or grounding) or, for a candidate, to the task's current round.
+  const roundRecords: RoundRecordReaders = {
+    task: (taskId) => readTask({ store }, taskId),
+    baseline: async (task) => { const full = await readTask({ store }, task.taskId); return full === undefined ? undefined : readWorkflowE2EBaselineRecord({ store }, full); },
+    replay: (taskId, key) => readWorkflowE2EReplayRecord({ store }, taskId, key),
+    grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
+  };
+  const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords } });
   const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, designReview, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({

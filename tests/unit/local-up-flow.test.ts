@@ -17,7 +17,14 @@ import { planDocument } from "../support/plan-documents.js";
 import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { Command } from "commander";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as e2eVerification from "../../packages/broker/src/core/e2e/verification.js";
+
+// The verdict of a round is the broker's own re-collection of evidence (tested in e2e-core-verification); here it is replaced so the tests can hand the build step each verdict and see what it commits.
+vi.mock("../../packages/broker/src/core/e2e/verification.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof e2eVerification>();
+  return { ...actual, verifyWorkflowE2EEvidence: vi.fn(actual.verifyWorkflowE2EEvidence) };
+});
 import { modelProxyWorkerUrl } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { OPENS_PER_MINUTE } from "../../packages/broker/src/local/app/routes.js";
 import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
@@ -1121,6 +1128,160 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
     h.model.branches.set(branch, commit);
     const opened = await h.callback(second, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
     expect(opened.status).toBe(200);
+  });
+
+  it("needs the committed source of the code for a task whose checks include the browser and API round, and never passes those checks without a verified round", async () => {
+    const h = await launch();
+    const { taskId, coding } = await toCoding(h);
+    const store = h.runtime.registry.require("storage");
+    const digest = (char: string) => char.repeat(64);
+    const withChecks = async (extra: Record<string, unknown> = {}) => {
+      const record = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!;
+      const workflow = { ...(record["workflow"] as Record<string, unknown>), e2e: { contractDigest: digest("1"), policyDigest: digest("2"), bundleDigest: digest("3"), executionPlanDigest: digest("4"), required: true, currentGroupRunIds: [], resultRefs: [], ...extra } };
+      await store.update({ key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [change.set("workflow", JSON.parse(JSON.stringify(workflow)) as JsonValue)] });
+    };
+    await withChecks();
+    // The coding run ends with no committed source on file for this code: the checks cannot be run on it, so the step stops and says so.
+    expect((await h.callback(coding, "result", builtResult("d".repeat(40)))).status).toBe(200);
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "the final candidate has no first-party committed source export" });
+  });
+
+  it("answers a coding run's source upload and keeps nothing for a task that does not need the browser and API checks, however big its code is (default storage)", async () => {
+    const h = await launch();
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const total = 400 * 1024;
+    const count = Math.ceil(total / (64 * 1024));
+    const digest = "e".repeat(64);
+    const init = await h.callback(coding, "candidate-export", { stage: "init", schemaVersion: "workflow-candidate-export-upload/v1", totalBytes: total, chunkCount: count, sha256: digest });
+    expect(init.status).toBe(200);
+    const uploadId = (init.body as { uploadId: string }).uploadId;
+    for (let index = 0; index < count; index += 1) {
+      expect((await h.callback(coding, "candidate-export", { stage: "chunk", schemaVersion: "workflow-candidate-export-chunk/v1", uploadId, index, bytesBase64: "AAAA", sha256: digest })).status).toBe(200);
+    }
+    expect((await h.callback(coding, "candidate-export", { stage: "finalize", schemaVersion: "workflow-candidate-export-finalize/v1", uploadId, sha256: digest })).status).toBe(200);
+    const store = h.runtime.registry.require("storage");
+    expect(await store.get({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${coding.operationId}` })).toBeUndefined();
+    // The run's result is not held up: the reviews start on the checked code.
+    expect((await h.callback(coding, "result", builtResult("d".repeat(40)))).status).toBe(200);
+    expect(await h.nextJob(workspaceId, seen)).toMatchObject({ payload: { workflowMode: "REVIEW" } });
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "REVIEW" });
+  });
+
+  it("does not lose the result of a task that needs the browser and API checks when its code is too big to keep: the checks block with a fixed sentence", async () => {
+    const h = await launch();
+    const { taskId, coding } = await toCoding(h);
+    const store = h.runtime.registry.require("storage");
+    const record = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!;
+    const workflow = { ...(record["workflow"] as Record<string, unknown>), e2e: { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64), executionPlanDigest: "4".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
+    await store.update({ key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [change.set("workflow", JSON.parse(JSON.stringify(workflow)) as JsonValue)] });
+    // An export this install cannot keep (over what one object of the default storage holds), valid in every other way: only a real tree can be valid, so the tree is the fixture's.
+    const { createRealCandidate, disposeRealCandidates } = await import("../support/e2e-application-candidate.js");
+    const files = Object.fromEntries(Array.from({ length: 30 }, (_, index) => [`src/file-${String(index).padStart(2, "0")}.txt`, `${String(index).padStart(2, "0")}${"x".repeat(8 * 1024 - 3)}\n`]));
+    const candidate = await createRealCandidate({ "package.json": "{\"name\":\"app\"}", ...files });
+    try {
+      const bytes = Buffer.from(JSON.stringify(candidate.source), "utf8");
+      const { createHash } = await import("node:crypto");
+      const sha = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
+      const count = Math.ceil(bytes.byteLength / (64 * 1024));
+      const init = await h.callback(coding, "candidate-export", { stage: "init", schemaVersion: "workflow-candidate-export-upload/v1", totalBytes: bytes.byteLength, chunkCount: count, sha256: sha(bytes) });
+      expect(init.status).toBe(200);
+      const uploadId = (init.body as { uploadId: string }).uploadId;
+      for (let index = 0; index < count; index += 1) {
+        const chunk = bytes.subarray(index * 64 * 1024, Math.min((index + 1) * 64 * 1024, bytes.byteLength));
+        expect((await h.callback(coding, "candidate-export", { stage: "chunk", schemaVersion: "workflow-candidate-export-chunk/v1", uploadId, index, bytesBase64: chunk.toString("base64"), sha256: sha(chunk) })).status).toBe(200);
+      }
+      const finalize = await h.callback(coding, "candidate-export", { stage: "finalize", schemaVersion: "workflow-candidate-export-finalize/v1", uploadId, sha256: sha(bytes) });
+      expect(finalize.status).toBe(200);
+      expect(finalize.body).toMatchObject({ accepted: false, reason: "too-large" });
+      // The build source that follows is answered, not refused for lack of a kept source: the run goes on to its result.
+      expect((await h.callback(coding, "candidate-build-source", { stage: "unavailable", schemaVersion: "workflow-candidate-build-source-unavailable/v1", reason: "none" })).status).toBe(200);
+      expect((await h.callback(coding, "result", builtResult("d".repeat(40)))).status).toBe(200);
+      expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "The code is too big to keep for the browser and API checks on this install's object storage. Name the folder object storage (see docs/local.md) and Retry." });
+    } finally { await disposeRealCandidates(); }
+  });
+
+  describe("a candidate's browser and API round, judged at the end of its checks (the verdict is handed to the build step)", () => {
+    /** A task in its checks (VERIFY, running) with a round admitted: the workflow and the CHECKS operation as the round's start would have left them. */
+    async function inChecks(h: Awaited<ReturnType<typeof launch>>) {
+      const { taskId, coding } = await toCoding(h);
+      const store = h.runtime.registry.require("storage");
+      const record = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!;
+      const workflow = record["workflow"] as Record<string, unknown>;
+      const tree = "d".repeat(40);
+      const candidate = createCandidateManifest(candidateOf(tree));
+      const roundId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const runId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      const running = { ...workflow, revision: Number(workflow["revision"]) + 1, stage: "VERIFY", state: "RUNNING", candidate,
+        e2e: { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64), executionPlanDigest: "4".repeat(64), required: true, currentRoundId: roundId, currentGroupRunIds: [runId], resultRefs: [] } };
+      await store.update({ key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [change.set("workflow", JSON.parse(JSON.stringify(running)) as JsonValue)] });
+      const operationRow = (await store.get({ pk: `WORKSPACE#${coding.workspaceId}`, sk: `OPERATION#${coding.operationId}` }))!;
+      const operation = { ...operationRow, workflowMode: "CHECKS", workflowRevision: running.revision,
+        workflowE2EAdmission: { schemaVersion: 1, taskId, workflowRevision: running.revision, candidateDigest: candidate.digest, roundId, groupRunIds: [runId],
+          admissionRef: { key: `workflow-e2e-admissions/sha256/${"5".repeat(64)}.json`, sha256: "5".repeat(64), byteLength: 10 } },
+        workflowE2EEvidenceRef: { key: `workflow-e2e-evidence/sha256/${"6".repeat(64)}.json`, sha256: "6".repeat(64), byteLength: 10 } };
+      const deps = h.runtime.app.flow.deps;
+      const end = async () => {
+        const task = (await import("../../packages/broker/src/core/task-flow/reads.js")).readTask;
+        await deps.buildSteps!.onEnded(deps, (await task(deps, taskId))!, operation as never, { status: "SUCCEEDED", outcome: { kind: "built", result: builtResult(tree).result } });
+        return (await taskRecord(h, taskId)).workflow as Record<string, unknown> & { stage: string; state: string; revision: number; blockReason?: string; e2e?: { qualifiedRound?: unknown; failedRound?: unknown } };
+      };
+      await store.put({ item: { pk: "E2E_PROBE", sk: "fence", marker: 1 } });
+      const verdict = (answer: "PASS" | "FAILED" | "UNKNOWN", fences: boolean) => vi.mocked(e2eVerification.verifyWorkflowE2EEvidence).mockImplementationOnce(async (_deps, _op, _task, _candidate, _projection, diagnostic) => {
+        if (diagnostic !== undefined && fences) diagnostic.authorityChecks = [{ kind: "check", key: { pk: "E2E_PROBE", sk: "fence" }, condition: when.eq("marker", 1) }];
+        return answer;
+      });
+      return { store, running, end, verdict };
+    }
+
+    it("passes the checks only on a PASS, records the round that qualified, and the task goes on to its reviews", async () => {
+      const h = await launch();
+      const round = await inChecks(h);
+      round.verdict("PASS", true);
+      const after = await round.end();
+      expect(after).toMatchObject({ stage: "REVIEW" });
+      expect(after.e2e?.qualifiedRound).toMatchObject({ roundId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", groupRunIds: ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"], admissionSha256: "5".repeat(64), evidenceSha256: "6".repeat(64) });
+    });
+
+    it("does not record the verdict when a row it stands on moved after it was judged: the fences commit with it", async () => {
+      const h = await launch();
+      const round = await inChecks(h);
+      round.verdict("PASS", true);
+      await round.store.update({ key: { pk: "E2E_PROBE", sk: "fence" }, ops: [change.set("marker", 2)] });
+      const after = await round.end();
+      expect(after).toMatchObject({ stage: "VERIFY", state: "RUNNING", revision: round.running.revision });
+      expect(after.e2e?.qualifiedRound).toBeUndefined();
+    });
+
+    it("does not pass a FAILED round: the checks block, the round is recorded as the failed one, and Rovara's own fixing sends the task back to coding", async () => {
+      const h = await launch();
+      const round = await inChecks(h);
+      round.verdict("FAILED", true);
+      const after = await round.end();
+      expect(after.stage).toBe("IMPLEMENT");
+      expect(after.e2e?.failedRound).toMatchObject({ status: "FAILED", roundId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", admissionSha256: "5".repeat(64), evidenceSha256: "6".repeat(64) });
+      expect(after.e2e?.qualifiedRound).toBeUndefined();
+    });
+
+    it("blocks on a round the broker could not judge (UNKNOWN), and records no failed round for it", async () => {
+      const h = await launch();
+      const round = await inChecks(h);
+      round.verdict("UNKNOWN", true);
+      const after = await round.end();
+      expect(after).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(after.blockReason).toContain("admitted E2E evidence is incomplete or unknown");
+      expect(after.e2e?.failedRound).toBeUndefined();
+      expect(after.e2e?.qualifiedRound).toBeUndefined();
+    });
+
+    it("blocks a PASS that comes with no rows to fence, because no authority could be shown for it", async () => {
+      const h = await launch();
+      const round = await inChecks(h);
+      round.verdict("PASS", false);
+      const after = await round.end();
+      expect(after).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(after.blockReason).toContain("current E2E authority snapshot could not be fenced");
+      expect(after.e2e?.qualifiedRound).toBeUndefined();
+    });
   });
 
   it("blocks a coding run that failed, with a reason, and does not try to fix it by itself", async () => {
