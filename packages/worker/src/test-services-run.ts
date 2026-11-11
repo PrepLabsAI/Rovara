@@ -422,6 +422,9 @@ function resolveDependencies(catalog: ServiceCatalog, dependencies: readonly Tas
       }
       continue;
     }
+    // Company-approved extra images (switch `pj`): this worker has no way to fetch or verify an image of a company's own (it starts only the digests baked into its image), so it refuses the plan BY NAME: a company image is
+    // told apart from a catalog plan with a wrong digest, and it is never started as one. The same "not available on this worker" sentence as a digest it does not pin.
+    if (plan.backing === "company") throw new TestServicesError("pull_failed", new Map([[plan.id, "pull_failed" as const]]));
     bases.push(plan.backing === "fake" ? resolveFake(catalog, plan, config) : resolveLocal(catalog, plan, config));
   }
   return bases;
