@@ -87,6 +87,7 @@ describe("the broker tags a screenshot, and only a screenshot, with that retenti
   it("names the tag nowhere else in the broker, so no other object can expire on it", () => {
     const found = execFileSync("grep", ["-rl", "E2E_ARTIFACT_RETENTION_TAG\\|Tagging:", "packages", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" })
       .trim().split("\n").filter((file) => file !== "");
-    expect(found.sort()).toEqual(["packages/broker/src/aws/workflow-e2e-artifacts.ts", "packages/contracts/src/e2e-view-node.ts"]);
+    // core/e2e/artifacts.ts is the ports version of the screenshot write: it puts the tag's value on a screenshot as its retention class, and on nothing else.
+    expect(found.sort()).toEqual(["packages/broker/src/aws/workflow-e2e-artifacts.ts", "packages/broker/src/core/e2e/artifacts.ts", "packages/contracts/src/e2e-view-node.ts"]);
   });
 });
