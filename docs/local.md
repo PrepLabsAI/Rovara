@@ -127,8 +127,10 @@ Task code is a repository's code, so a local worker is built as if it were hosti
   server name in the TLS hello and port 80 by each request's `Host`; the gateway resolves the name itself and connects only to a public
   address (no loopback, private, link-local, shared, metadata, multicast or reserved address; one bad answer refuses the name), so DNS
   rebinding and an address in a hello do nothing. Other ports (ssh, databases) do not leave. A wildcard entry covers subdomains at
-  any depth and not the bare domain. As in the cloud, an allowed name is allowed for everything behind it: `*.amazonaws.com` includes
-  anyone's bucket, `github.com` includes anyone's repository, and a CDN can host a different site on the same address as an allowed one.
+  any depth and not the bare domain. As in the cloud, an allowed name is allowed for everything behind it: `github.com` (which the worker's
+  `git clone`, `fetch` and `push` need, and which shares this list with the sandboxes) includes anyone's repository, and a CDN can host a
+  different site on the same address as an allowed one. The default list therefore has no `*.amazonaws.com` (anyone's bucket), no `*.github.com`
+  and no `*.githubusercontent.com`; add the exact name a project needs to `allowedDomains`.
 - **The socket guard** (`isolation/docker-socket-guard-source.ts`, one per machine) is the only container that holds the socket. It lets
   the worker create, start, stop, kill, restart, inspect, read the logs of, run commands in (as the sandbox user, never privileged) and
   remove its own sandboxes, and inspect its own image and sandbox network. It never forwards what the worker sent: it checks every

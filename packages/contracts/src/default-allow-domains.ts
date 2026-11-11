@@ -2,20 +2,28 @@
 // which re-exports it): the DNS firewall allows exactly these, and a project's own allowed domains are checked against it so that adding
 // one of these is answered "already allowed" instead of waiting for approval.
 /**
- * The websites the machines in a cloud install may resolve by default: AWS, GitHub, package
+ * The websites the machines in a cloud install may resolve by default: GitHub's git host and container registry, package
  * registries, OS package mirrors, Docker registries, the AI providers, and Slack and the connector
  * hosts. Everything else gets NXDOMAIN. A wildcard entry matches subdomains only, not the bare domain.
+ *
+ * Narrow on purpose (0.5.15, DEFAULT-ALLOW-LIST-EXFIL). The list governs a task sandbox as much as the worker beside it (one resolver, one list), so a name
+ * that lets anyone upload (a bucket of any account, a repository of any user) is an exit for an injected agent. Not on the list, and never to be added back as a wildcard:
+ *  - `*.amazonaws.com`, `*.aws`: every AWS customer's S3 bucket, API Gateway and so on. A cloud install adds the exact regional hosts its own machines call
+ *    (infra/lib/agent-dns-firewall.ts, `hostedAwsAllowDomains`); a laptop needs none (model calls go through the host's proxy).
+ *  - `*.github.com` (api., gist., uploads. and the rest) and `*.githubusercontent.com` (raw., objects., user-content hosts): nothing the worker's git needs,
+ *    and a project that needs one asks for it by name.
+ * What stays of GitHub: `github.com` itself, because the worker (not the sandbox, but they share the list) runs `git clone`, `fetch` and `push` against it; that is
+ * a known exit (a push to a repository of the attacker's with the attacker's own token) which only a per-task proxy closes. `ghcr.io`, `*.ghcr.io` and
+ * `pkg-containers.githubusercontent.com` (the one host the blobs of a ghcr.io image come from) stay for image pulls.
  */
 export const DEFAULT_AGENT_ALLOW_DOMAINS: readonly string[] = [
-  // AWS services
-  "*.amazonaws.com", "*.aws",
   // The VPC's own names: a machine's hostname (ip-10-42-....<region>.compute.internal, or ec2.internal in
   // us-east-1) and reverse lookups inside the VPC's 10.42.0.0/16 range. These are private zones, never
   // delegated to the internet, so allowing them opens no exfiltration path; build tools and test servers
   // that resolve their own hostname otherwise fail.
   "*.compute.internal", "*.ec2.internal", "*.42.10.in-addr.arpa",
-  // GitHub (the model proxy image comes from ghcr.io, whose blobs come from *.githubusercontent.com)
-  "github.com", "*.github.com", "*.githubusercontent.com", "ghcr.io", "*.ghcr.io",
+  // GitHub: the git host for the worker's clone, fetch and push; ghcr.io for images (the model proxy image, dev container features), whose blobs come from the one host below
+  "github.com", "ghcr.io", "*.ghcr.io", "pkg-containers.githubusercontent.com",
   // Package registries: npm and Yarn, Python, Rust, Go, Java, Ruby
   "registry.npmjs.org", "registry.yarnpkg.com",
   "pypi.org", "files.pythonhosted.org",

@@ -43,7 +43,8 @@ describe("the allow-list", () => {
   it("is the cloud's default list without the cloud network's own names", () => {
     expect(LOCAL_DEFAULT_ALLOW_DOMAINS.length).toBe(DEFAULT_AGENT_ALLOW_DOMAINS.length - 3);
     for (const vpc of ["*.compute.internal", "*.ec2.internal", "*.42.10.in-addr.arpa"]) expect(LOCAL_DEFAULT_ALLOW_DOMAINS).not.toContain(vpc);
-    for (const site of ["api.anthropic.com", "github.com", "*.github.com", "registry.npmjs.org", "pypi.org", "deb.debian.org"]) expect(LOCAL_DEFAULT_ALLOW_DOMAINS).toContain(site);
+    for (const site of ["api.anthropic.com", "github.com", "registry.npmjs.org", "pypi.org", "deb.debian.org"]) expect(LOCAL_DEFAULT_ALLOW_DOMAINS).toContain(site);
+    for (const site of ["*.github.com", "*.githubusercontent.com", "*.amazonaws.com", "*.aws"]) expect(LOCAL_DEFAULT_ALLOW_DOMAINS).not.toContain(site);
   });
 
   it("adds the owner's entries under the cloud's rules, and names the position of one it refuses, never the value", () => {
