@@ -31,6 +31,9 @@ import type { CompanyInstructionsSource } from "./company-instructions.js";
 import type { LearningAdapter } from "./learning.js";
 import type { QueueService } from "./queue.js";
 import type { Scheduler } from "./scheduler.js";
+import type { RealtimePublisher } from "./realtime.js";
+import type { EmailSender } from "./email.js";
+import type { TeamRecordSource } from "./record-source.js";
 import type { WorkerMachines } from "./worker-machines.js";
 
 /** Every place an adapter can plug in. A new point is an interface change (both owners). */
@@ -66,6 +69,10 @@ export const PLUGIN_POINTS = [
   "image-registry",
   /** When something is due (the nightly test run). The scheduler only says when; the core decides what starts. Code: a local timer; Cloud: its cloud scheduler. */
   "scheduler",
+  /** Lane K1: tells an open page that something it shows changed (a hint of ids and numbers, never the data). Code: the install's own pages, in the process; Cloud: its cloud events service. */
+  "realtime",
+  /** Lane K1: sends one plain notice to one address, from the sender the owner set. Code: none (notices go through the channel adapters); Cloud: its cloud email service. */
+  "email",
 ] as const;
 export const PluginPointSchema = z.enum(PLUGIN_POINTS);
 export type PluginPoint = z.infer<typeof PluginPointSchema>;
@@ -99,6 +106,8 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   secrets: "one",
   "image-registry": "one",
   scheduler: "one",
+  realtime: "one",
+  email: "one",
 };
 
 /**
@@ -142,8 +151,8 @@ export interface ChannelAdapter {
 }
 
 /**
- * The thing an adapter of a point that has no port yet must be (team-record-source). The lane
- * that defines the point's port narrows its line in `PluginPointTypes` to the real interface. Until then only the name is known.
+ * The thing an adapter of a point that has no port yet must be. Every point has a port now (lane K1 defined the last ones); a lane that adds a new point
+ * without its interface types it with this until the interface is agreed.
  */
 export interface UnspecifiedAdapter {
   readonly kind?: string;
@@ -160,7 +169,7 @@ export interface PluginPointTypes {
   queue: QueueService;
   monitoring: MonitoringAdapter;
   learning: LearningAdapter;
-  "team-record-source": UnspecifiedAdapter;
+  "team-record-source": TeamRecordSource;
   identity: IdentityProvider;
   "build-system": BuildSystem;
   admission: Admission;
@@ -175,6 +184,8 @@ export interface PluginPointTypes {
   secrets: SecretStore;
   "image-registry": ImageRegistry;
   scheduler: Scheduler;
+  realtime: RealtimePublisher;
+  email: EmailSender;
 }
 
 export type AdapterOf<P extends PluginPoint> = PluginPointTypes[P];

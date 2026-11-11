@@ -6,7 +6,7 @@
 // verifies a channel event verifies this one with the same code. The envelope has the same `version`, `id` (`evt_...`, stable across retries, so a receiver drops a repeat) and `createdAt`.
 //
 // What this file holds: the event shape, the signing helpers and the adapter interface. What it does not: a sender over HTTP (an adapter, with its own address and secret rules), a retry queue, a dead-letter queue, and
-// the rules for who may register one. Scheduler (timers), realtime push and email notices stay names only until a lane needs them (decision 61); they are not points.
+// the rules for who may register one. Timers, realtime push and email notices are their own points (`scheduler`, `realtime`, `email`), not outbound events.
 import { z } from "zod";
 import { ChannelOpaqueIdSchema } from "../conversation.js";
 import { signWebhook, verifyWebhook, webhookHeaders, channelEventId, type WebhookVerification } from "../channel-adapter.js";

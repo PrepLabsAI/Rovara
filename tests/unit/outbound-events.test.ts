@@ -36,8 +36,9 @@ describe("the outbound-events point", () => {
     expect(PLUGIN_POINT_CARDINALITY["outbound-events"]).toBe("many");
   });
 
-  it("does not make points of realtime push or email (names only until something needs them)", () => {
-    for (const name of ["realtime", "email"]) expect(PLUGIN_POINTS as readonly string[]).not.toContain(name);
+  it("keeps realtime push and email out of outbound events: lane K1 made them points of their own", () => {
+    for (const name of ["realtime", "email"]) expect(PLUGIN_POINTS as readonly string[]).toContain(name);
+    expect(PLUGIN_POINTS as readonly string[]).toContain("outbound-events");
   });
 });
 
