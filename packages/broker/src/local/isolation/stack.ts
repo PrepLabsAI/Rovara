@@ -158,6 +158,25 @@ export async function createGateway(run: Run, input: GatewayInput): Promise<void
   }
 }
 
+/**
+ * What the guard lets the worker do for test services (docker-socket-guard-services-source.ts says exactly what and what it still refuses). Set only when the owner turned test services on; unset, the guard is the plain
+ * one. `images` are the full digest references of the catalog images this install pulled (the only helpers that may start), `guardImage` the worker's own image as a pinned id (the only image the resolver guard runs),
+ * `runDirectory` the folder, outside every workspace, that holds the run's own read-only files.
+ */
+export interface GuardServices {
+  images: readonly string[];
+  guardImage: string;
+  runDirectory: string;
+  /** A folder only the guard writes, outside the run folder and never mounted into the worker: where the guard keeps the copies of the run files a service container mounts (see the guard's rule on binds). */
+  bindDirectory: string;
+  /** The group that owns the Docker socket: a service container never runs in it. */
+  socketGroup: number;
+  slots?: { first: number; last: number };
+  maxNetworks?: number;
+  maxContainers?: number;
+  maxMemoryMiB?: number;
+}
+
 export interface GuardInput extends HelperCommon {
   names: IsolationNames;
   socketPath: string;
@@ -168,6 +187,8 @@ export interface GuardInput extends HelperCommon {
   /** The gateway's address on the sandbox network: the name server every sandbox is given. */
   sandboxDns: string;
   maxSandboxes?: number;
+  /** Test services (see `GuardServices`). Absent: the guard refuses networks, other images and anything that is not a task sandbox, as it always did. */
+  services?: GuardServices | undefined;
   /** The registries a project's dev container may pull its image from (lower-case names). Absent or empty: no dev container (the guard refuses every image but the worker's own). */
   devcontainerRegistries?: readonly string[];
 }
@@ -226,6 +247,7 @@ export function guardPolicy(input: GuardInput): Record<string, unknown> {
     user: "1000:1000",
     port: SOCKET_GUARD_PORT,
     maxSandboxes: input.maxSandboxes ?? 16,
+    ...(input.services === undefined ? {} : { services: { images: [...input.services.images], guardImage: input.services.guardImage, runDirectory: input.services.runDirectory, bindDirectory: input.services.bindDirectory, socketGroup: input.services.socketGroup, ...(input.services.slots === undefined ? {} : { slots: input.services.slots }), ...(input.services.maxNetworks === undefined ? {} : { maxNetworks: input.services.maxNetworks }), ...(input.services.maxContainers === undefined ? {} : { maxContainers: input.services.maxContainers }), ...(input.services.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: input.services.maxMemoryMiB }) } }),
     ...(input.devcontainerRegistries === undefined || input.devcontainerRegistries.length === 0 ? {} : { devcontainer: { registries: [...input.devcontainerRegistries] } }),
   };
 }
@@ -240,6 +262,8 @@ export async function createGuard(run: Run, input: GuardInput): Promise<void> {
     "--user", "1000:1000", "--group-add", input.socketGroup,
     ...hardening.map((entry) => (entry === "512m" ? "256m" : entry === "512" ? "256" : entry)),
     "--volume", `${input.socketPath}:${input.socketPath}`,
+    // Test services: the run folder is read by the guard (read-only: it copies the files a service container mounts) and the guard's own folder for those copies is written by it alone.
+    ...(input.services === undefined ? [] : ["--volume", `${input.services.runDirectory}:${input.services.runDirectory}:ro`, "--volume", `${input.services.bindDirectory}:${input.services.bindDirectory}`]),
     "--env", `ROVARA_SOCK_POLICY=${JSON.stringify(guardPolicy(input))}`,
     "--entrypoint", NODE,
     input.image, "-e", DOCKER_SOCKET_GUARD_SOURCE,

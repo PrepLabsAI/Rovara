@@ -7,7 +7,7 @@ import { esc, externalLink, layout, untrusted } from "./html.js";
 import type { FormBinding } from "./guard.js";
 import { PART_STATE_WORDS } from "../work-breakdown/view.js";
 import type {
-  ApprovalOffer, ChatPageView, CommentView, DesignReviewView, LessonReposView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView,
+  ApprovalOffer, ChatPageView, CommentView, DesignReviewView, LessonReposView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView, TestEnvironmentPageView,
 } from "./views.js";
 import type { SecondReviewState } from "@agentx/contracts";
 
@@ -304,6 +304,35 @@ export function renderScriptTokens(context: PageContext, view: ScriptTokensPageV
     body: `<h1>Script tokens</h1><p>A script token lets your own scripts on this computer read your tasks and start tasks on the projects you choose, without your session. It can do nothing else: it cannot approve a plan, merge, or make another token. You can revoke it at any time.</p>`
       + `${created}<section class="panel" id="make"><h2>Make a token</h2>${form}</section>`
       + `${rows.length === 0 ? "<p class=\"muted\">You have no script tokens.</p>" : `<table><thead><tr><th>Token</th><th>Projects</th><th>May</th><th>State</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`}`,
+  });
+}
+
+// ---- Test environments
+
+const RISK_WORDS = { low: "low", medium: "medium", high: "high: only a strong proof (this page) can approve it" } as const;
+
+/** One project's test environment: what is approved, and the proposal that waits (what changes, how risky, whether a Prove run passed) with an Approve button only when the proposal was proved. */
+export function renderTestEnvironment(context: PageContext, view: TestEnvironmentPageView): string {
+  const approved = view.approved === undefined
+    ? "<p class=\"muted\">No test environment is approved for this project: its tasks run the project's own checks.</p>"
+    : `<p>Revision ${esc(view.approved.revision)}, approved ${esc(view.approved.approvedAt)}${view.approved.approvedBy === undefined ? "" : ` by ${untrusted(view.approved.approvedBy)}`}.</p><ul>${view.approved.lines.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul>`
+      + (view.approved.checks.length === 0 ? "" : `<h3>Checks</h3><ul>${view.approved.checks.map((check) => `<li>${untrusted(check.label)} <span class="muted">(${esc(check.kind)})</span></li>`).join("")}</ul>`);
+  let proposal = "<p class=\"muted\">Nothing is waiting for approval.</p>";
+  if (view.proposal !== undefined) {
+    const offer = view.approval;
+    const form = offer === undefined
+      ? `<p class="muted">${view.proposal.proved ? "This proposal is no longer the one that can be approved." : "It cannot be approved until a Prove run (boot, smoke test and a full run) passes for exactly this proposal."}</p>`
+      : `<form class="decide" method="post" action="${esc(context.base)}/test-environment/${esc(encodeURIComponent(view.project))}/decide">${approvalFields(context, "testenv.decide", view.project, offer)}<div class="row"><button class="primary" type="submit">Approve revision ${esc(offer.revision)}</button></div></form>`;
+    proposal = `<p>Proposed ${esc(view.proposal.proposedAt)}. Risk: <strong class="${view.proposal.risk === "high" ? "bad" : view.proposal.risk === "medium" ? "warn" : "ok"}">${esc(RISK_WORDS[view.proposal.risk])}</strong>. `
+      + `Prove run: <span class="${view.proposal.proved ? "ok" : "warn"}">${view.proposal.proved ? "passed" : "not passed"}</span>.${view.proposal.expiresAt === undefined ? "" : ` Approve it before ${esc(view.proposal.expiresAt)}.`}</p>`
+      + (view.proposal.lessSafe.length === 0 ? "" : `<p class="warn">Less safe than the approved revision: ${view.proposal.lessSafe.map((word) => esc(word.replace(/_/gu, " "))).join(", ")}.</p>`)
+      + `<h3>What changes</h3>${view.proposal.changes.length === 0 ? "<p class=\"muted\">Nothing differs from the approved revision.</p>" : `<ul>${view.proposal.changes.map((line) => `<li><code>${untrusted(line)}</code></li>`).join("")}</ul>`}${form}`;
+  }
+  const extra = view.extra === undefined || view.extra.length === 0 ? "" : `<section class="panel"><h2>More</h2><ul>${view.extra.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`;
+  return layout({
+    title: `Test environment: ${view.project}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
+    body: `<h1>Test environment: ${untrusted(view.project)}</h1><p>The environment tasks of this project run their checks in, and the nightly run uses. A change is approved here, by you, once it has been proved.</p>`
+      + `<section class="panel"><h2>Approved</h2>${approved}</section><section class="panel"><h2>Waiting for approval</h2>${proposal}</section>${extra}`,
   });
 }
 

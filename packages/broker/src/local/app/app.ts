@@ -76,6 +76,12 @@ import type { DocumentMilestones } from "../../core/milestones/milestones.js";
 import { createTaskFactsSource } from "./facts.js";
 import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
+import { createLocalTestEnvironment } from "./test-environment.js";
+import type { ServiceCatalogSource } from "../../core/test-env/dependency-plan.js";
+import { nightlyHooks, subscribeNightly } from "../../core/test-env/nightly-wiring.js";
+import { readApprovedTestEnvironment } from "../../core/test-env/environment.js";
+import { nightlyRunsOn } from "../../core/test-env/health-switch.js";
+import { savedEnvEnabled } from "../../core/test-env/saved-env-switch.js";
 import { createSessionRoutes } from "./session-routes.js";
 import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens.js";
 import { createLocalPlaybook } from "./playbook.js";
@@ -151,6 +157,8 @@ export interface LocalAppOptions {
   planFormat?: "structured" | "markdown";
   /** whether script tokens exist on this install (`ROVARA_SCRIPT_TOKENS=0` turns them off). The runtime gives it from its environment. Default: the process environment. */
   scriptTokensEnabled?: () => boolean;
+  /** The signed service catalog a dependency is pinned from (absent: no dependency can be pinned). */
+  serviceCatalog?: ServiceCatalogSource | undefined;
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
   timers?: boolean;
   now?: () => Date;
@@ -262,6 +270,26 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
   const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs });
+  // The project's approved test environment: tasks pin it when they start, a coding or verification run is told its plan, and the owner approves a change on a page (the gate decides it).
+  // `pages` and `gate` are made below; the module asks for them when it is used, never when it is built.
+  const pagesServer: { current?: LocalPagesServer } = {};
+  const testEnvironment = createLocalTestEnvironment({
+    store, companyId, now: () => clock().getTime(), audit: registry.require("audit-sink"), log,
+    gate: () => gate,
+    openPage: async (path) => { if (pagesServer.current === undefined) throw new Error("the pages are not up yet"); await (options.openBrowser ?? openInSystemBrowser)(pagesServer.current.onceLink(path, { label: "browser" })); },
+    // What this computer does not do yet, said on the page instead of left for the owner to find out.
+    extraLines: async () => [
+      ...(savedEnvEnabled(options.environment ?? process.env) ? ["Saved environments are on, but no image is built on this computer yet: the worker's Docker access does not allow it. Tasks set up fresh."] : []),
+      ...(nightlyRunsOn(options.environment ?? process.env) ? ["The nightly run is scheduled, but this install cannot start the model-free full run yet, so a fire is skipped."] : []),
+    ],
+    // The nightly schedule follows the approved environment (on and at its time when the nightly is on, gone otherwise); a failure here never undoes the approval.
+    onApproved: async (project) => {
+      const approved = await readApprovedTestEnvironment({ store, now: () => clock().getTime() }, companyId, project);
+      if (approved !== undefined) await nightlyHooks({ scheduling: { scheduler: registry.require("scheduler") } }, options.environment ?? process.env).onApproved(companyId, project, approved);
+    },
+    ...(options.environment === undefined ? {} : { env: options.environment }),
+    ...(options.serviceCatalog === undefined ? {} : { serviceCatalog: options.serviceCatalog }),
+  });
   // How we work is the repository's `.rovara/playbook.yaml`, read through the code host at the default branch's head (a host nobody registered reads as no file). The company's rules come from the
   // `company-instructions` point. Both are put in front of every step that reads them, at the dispatch (core/instructions).
   const playbook = createPlaybookService({
@@ -292,6 +320,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
+    testEnvironment: testEnvironment.taskEnvironment,
     projects: projectSource,
     standingInstructions,
     e2e,
@@ -379,7 +408,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // Decisions: the one gate, over the workflow document of the task. A change request starts planning again with the owner's words (L9-wire writes them where the planner's prompt reads them).
   const gate = createDecisionGate({
     store, approvers: registry.require("approvers"), audit: registry.require("audit-sink"),
-    subjects: [...setupDecisionSubjects(flow.deps), createWorkflowDocumentSubject({
+    subjects: [testEnvironment.subject, ...setupDecisionSubjects(flow.deps), createWorkflowDocumentSubject({
       store,
       // The tier of the plan waiting now, read from the plan itself (the files it names, the claims nothing proves): a plan nobody could grade is never graded low, but a plan that names its files
       // and its proof is not high just for being a plan.
@@ -453,13 +482,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       ...createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence, comments, secondReview, designReview, diagnosis, lessons }),
       howWeWork: howWeWork.page,
       listScriptTokens: async () => (scriptTokens.enabled() ? { tokens: await scriptTokens.list(), projects: await scriptTokens.projects() } : undefined),
+      ...testEnvironment.pageData,
       getChatPage: () => chat.view(),
       previewChatLink: (code) => chat.preview(code),
       ...(setupAgent.enabled ? { listSetupProjects: () => setupAgent.page.projects(), getSetupPage: (project: string) => setupAgent.page.view(project) } : {}),
     },
     actions: {
       ...chat.actions,
-      decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume,
+      decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       ...(setupAgent.enabled ? {
         setupStart: setupAgent.page.start, setupStop: setupAgent.page.stop, setupCommand: setupAgent.page.command, setupConfirm: setupAgent.page.confirm, setupDiscard: setupAgent.page.discard, setupForgetHost: setupAgent.page.forgetHost,
@@ -489,6 +519,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: () => clock().getTime() }),
   });
 
+  pagesServer.current = pages;
   // A worker's reads of its round's admission and its evidence uploads are held to the round's own record (baseline, replay or grounding) or, for a candidate, to the task's current round.
   const roundRecords: RoundRecordReaders = {
     task: (taskId) => readTask({ store }, taskId),
@@ -509,7 +540,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -560,6 +591,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     }
   }
   const timers: NodeJS.Timeout[] = [];
+  let nightly: { stop(): Promise<void> } | undefined;
   if (options.timers !== false) {
     const every = (ms: number, work: () => Promise<void>): void => {
       let running = false;
@@ -573,6 +605,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     };
     every(2_000, tickCore);
     every(5_000, tickTracking);
+    // The nightly test run hears of its fires here. Without a way to start a model-free run (this install has none yet), a fire is answered "unavailable" and nothing is charged or claimed.
+    nightly = subscribeNightly({ scheduler: registry.require("scheduler"), deps: testEnvironment.deps, ...(options.environment === undefined ? {} : { env: options.environment }), log: (entry) => log({ component: "nightly", ...entry }) });
     every(10_000, tickLessons);
   }
 
@@ -583,6 +617,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     tick,
     async stop() {
       for (const timer of timers) clearInterval(timer);
+      await nightly?.stop();
       for (const one of listening) await one.stop().catch(() => undefined);
       await tracking.idle();
       await projector?.stop();

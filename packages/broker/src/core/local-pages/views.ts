@@ -16,8 +16,8 @@ export interface ApprovalOffer {
   requestId: string;
   revision: number;
   artifactDigest: string;
-  /** `plan`, `design`, `setup` (a project's setup commands, or a website for a setup run): the W0 approval kind. */
-  kind: "plan" | "design" | "setup";
+  /** `plan`, `design`, `test-environment`, `setup` (a project's setup commands, or a website for a setup run): the W0 approval kind. */
+  kind: "plan" | "design" | "test-environment" | "setup";
   risk?: "low" | "medium" | "high";
 }
 
@@ -215,6 +215,17 @@ export interface ChatPageView {
 /** A token the page just made: the secret is shown on the answer to the form, once, and kept nowhere. */
 export type LocalCreateTokenResult = { ok: true; created: CreatedScriptToken } | { ok: false; reason: "refused" | "invalid" | "not_found"; message: string };
 
+/** What a project's test environment page shows (see `core/test-env/local-view.ts`). The page never reads the store itself. */
+export interface TestEnvironmentPageView {
+  project: string;
+  approved?: { revision: number; approvedAt: string; approvedBy?: string; lines: string[]; checks: Array<{ id: string; label: string; kind: string }> };
+  proposal?: { digest: string; proposedAt: string; risk: "low" | "medium" | "high"; lessSafe: string[]; changes: string[]; proved: boolean; expiresAt?: string };
+  /** Present while a proposal that was proved waits for the owner: the revision approving it would make, and the id of this decision. */
+  approval?: ApprovalOffer;
+  /** More facts a feature adds (the nightly run's last night, the saved image), one plain line each. */
+  extra?: string[];
+}
+
 /** How we work, as the page reads it: the effective view and where it came from (the file in the repository), for each registered project. */
 export type HowWeWorkPageState = HowWeWorkState;
 export interface HowWeWorkPageData {
@@ -287,6 +298,9 @@ export interface LocalPageData {
   getProofReport(taskId: string): Promise<ProofReportView | undefined>;
   /** the owner's script tokens. Absent, or undefined: script tokens are off here and the page is not found. */
   listScriptTokens?(): Promise<ScriptTokensPageView | undefined>;
+  /** The projects that have a test environment page. Absent, or undefined: the test environment is off here and the pages are not found. */
+  listTestEnvironments?(): Promise<string[] | undefined>;
+  getTestEnvironmentPage?(project: string): Promise<TestEnvironmentPageView | undefined>;
   /** How we work: the project's playbook file and what a draft of it would make. Absent: the page is not found. */
   howWeWork?: HowWeWorkPageData;
   /** The second review's settings page: the model list, the choice, the mode, the evidence and the notice. Absent: the page is not there. */
@@ -359,6 +373,8 @@ export interface LocalPageActions {
   createScriptToken?(input: { requestId: string; name: string; projects: string[]; permissions: string[]; days?: number }): Promise<LocalCreateTokenResult>;
   /** revokes a script token. */
   revokeScriptToken?(input: { tokenId: string }): Promise<LocalActionResult>;
+  /** Approves a proved test environment proposal as the project's next revision. Like a plan decision it is the owner's own act on a page: it carries a proof for exactly this request, revision and digest. */
+  decideTestEnvironment?(input: { project: string; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
   /** A change of the second review's settings. Refused (with its fixed words) when the owner may not or the setting moved. */
   secondReview?(input: SecondReviewPageAction, context: { fresh: boolean }): Promise<LocalActionResult>;
   /** Fix with agent: the owner asks for a diagnosis of the error the task page showed (`errorKey` names the error as shown; `requestId` is this press). Spends the owner's own model key, so it is the owner's act on a page. */

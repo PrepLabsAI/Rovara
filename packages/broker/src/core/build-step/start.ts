@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import {
   AgentXError, EVIDENCE_CAPTURE_FEATURE, abandonWorkflowFix, blockWorkflow, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
-  type JsonValue, type ProjectDefinition, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
+  type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
 import { conflictFixPrompt } from "../branch-sync/branch-sync.js";
@@ -12,6 +12,7 @@ import { withTestRule } from "../proof/verification-report.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { resolveRowItem } from "../task-flow/dispatch-rows.js";
 import { readTask } from "../task-flow/reads.js";
+import type { StepTestPlan } from "../test-env/seam.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
 import { acceptStep, acceptStepWithNotes, commitWorkflow, readWorkspace, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log, newId } from "../task-flow/support.js";
@@ -148,9 +149,16 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
       return settled(deps, row, "STALE");
     }
   }
+  // The approved test environment this task pinned: its dependencies are started for the coding run (the working sandbox gets them while the agent codes). A plan that cannot be built blocks the task with its sentence.
+  const testPlan = await testPlanFor(deps, task, "IMPLEMENT", undefined);
+  if (typeof testPlan === "string") {
+    await commitWorkflow(deps, task, blockWorkflow(workflow, testPlan, receivedAt));
+    return settled(deps, row, "STALE");
+  }
   const operationId = graph === undefined ? undefined : newId(deps);
   const payload = jsonOf({
     ...(readiness === undefined ? {} : { readiness }),
+    ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }),
     ...baseOf(task, workflow),
     ...(workflow.fixSource === undefined ? {} : { workflowFix: { source: workflow.fixSource, ...(startFrom === undefined ? {} : { startFrom }) } }),
     ...(graph === undefined ? {} : { workflowDependencies: graph.invocation }),
@@ -162,6 +170,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     requires: [
       "task.workflowMode", ...(readiness === undefined ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(workflow.fixSource === undefined ? [] : ["task.workflowFix"]),
       ...(graph === undefined ? [] : ["task.workflowDependencies"]),
+      ...(testPlan === undefined ? [] : testPlan.requires),
     ],
     extraActions: ["candidate-export", "candidate-build-source", "baseline-source"],
     ...(graph === undefined || operationId === undefined ? {} : { workflowDependencies: graph.invocation, operationId, ...(graph.note === undefined ? {} : { firstEvent: graph.note }) }),
@@ -202,13 +211,30 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
   const readiness = selected.map((check) => check.command);
   // Lane L12: a rerun of the checks also saves the raw parts of its evidence (test reports, coverage) for the pack, when this install keeps evidence.
   const capture = deps.keepEvidence !== undefined;
-  const payload = jsonOf({ ...(readiness.length === 0 ? {} : { readiness }), ...(capture ? { evidenceCapture: true } : {}), ...baseOf(task, workflow) });
+  // The task's pinned environment: a verification run whose first commands are the environment's checks is told its selection, budget and dependencies.
+  const testPlan = await testPlanFor(deps, task, "CHECKS", readiness);
+  if (typeof testPlan === "string") {
+    await commitWorkflow(deps, task, blockWorkflow(workflow, testPlan, receivedAt));
+    return settled(deps, row, "STALE");
+  }
+  const payload = jsonOf({ ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
-    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : [])],
+    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(testPlan === undefined ? [] : testPlan.requires)],
   });
   return settled(deps, row, accepted.result);
+}
+
+/** The test plan of a step, or the sentence that refuses it (a dependency that cannot be pinned, a dev container): never a plan with the dependencies left out, which would only fail the tests in a confusing way. */
+async function testPlanFor(deps: TaskFlowDeps, task: TaskRecord, mode: "IMPLEMENT" | "CHECKS", readiness: readonly ProjectCommand[] | undefined): Promise<StepTestPlan | string | undefined> {
+  if (deps.testEnvironment === undefined) return undefined;
+  try {
+    return await deps.testEnvironment.stepPlan({ project: task.project, taskId: task.taskId, mode, ...(readiness === undefined ? {} : { readiness }) });
+  } catch (error) {
+    if (error instanceof AgentXError) return error.message.replace(`${error.code}: `, "").slice(0, 500);
+    throw error;
+  }
 }
 
 // ---- reviews

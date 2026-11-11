@@ -2,6 +2,7 @@
 // conformance suite without Docker. The simulated worker checks every invocation with the REAL worker's invoke verification
 // (packages/worker/src/invoke-auth.ts), using the public key, workspace id and generation the adapter put in the container's
 // environment file, so a token the real worker would refuse fails here too.
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
 import type { DockerResult, DockerRunner } from "../../../packages/broker/src/local/docker-runner.js";
@@ -68,6 +69,11 @@ export class FakeDocker implements DockerRunner {
   #nextNetwork = 20;
   #nextHost = 2;
 
+  /** The id `network ls --quiet` and `ps --quiet` give a network or a container: 12 hex characters of its name's hash. */
+  static networkId(name: string): string {
+    return createHash("sha256").update(name).digest("hex").slice(0, 12);
+  }
+
   /** The host port a machine's worker is reached on: its gateway's. */
   portOf(workerName: string): number {
     const hash = workerName.slice("rovara-worker-".length);
@@ -93,7 +99,8 @@ export class FakeDocker implements DockerRunner {
       case "version":
         return ok("29.0.0\n");
       case "image":
-        return this.images.has(rest[rest.length - 1]!) ? ok("sha256:abc\n") : fail("Error: No such image");
+        // A real image id: 64 hex characters, which is what a pinned reference to the image is made of.
+        return this.images.has(rest[rest.length - 1]!) ? ok(`sha256:${createHash("sha256").update(rest[rest.length - 1]!).digest("hex")}\n`) : fail("Error: No such image");
       case "run":
         return ok("999\n"); // the socket-group probe
       case "network":
@@ -130,7 +137,7 @@ export class FakeDocker implements DockerRunner {
         if (this.failSandboxRemoval && names.some((name) => this.containers.get(name)?.kind === "other" || /^[0-9a-f]{12}$/.test(name))) return fail("removal of container is already in progress");
         let missing = false;
         for (const name of names) {
-          const found = [...this.containers.keys()].find((key) => key === name || key.startsWith(name));
+          const found = [...this.containers.keys()].find((key) => key === name || key.startsWith(name) || FakeDocker.networkId(key) === name);
           if (found === undefined) missing = true;
           else this.containers.delete(found);
         }
@@ -154,7 +161,7 @@ export class FakeDocker implements DockerRunner {
           const [key, value] = label.split("=");
           return value === undefined ? container.labels[key!] !== undefined : container.labels[key!] === value;
         }));
-        return ok(matching.map((container) => (rest.includes("--quiet") ? container.name.slice(0, 12) : container.name)).join("\n"));
+        return ok(matching.map((container) => (rest.includes("--quiet") ? FakeDocker.networkId(container.name) : container.name)).join("\n"));
       }
       default:
         return fail(`unexpected docker command ${String(command)}`);
@@ -174,13 +181,24 @@ export class FakeDocker implements DockerRunner {
       this.networks.set(name, { name, internal: rest.includes("--internal"), options, subnet: `172.${this.#nextNetwork++}.0.0/16`, labels });
       return { exitCode: 0, stdout: `${name}\n`, stderr: "" };
     }
+    if (verb === "ls") {
+      // `network ls --quiet --filter label=k=v --filter name=part`: the ids (12 hex characters of the name's hash) of the networks that match.
+      const labels = rest.filter((entry, index) => rest[index - 1] === "--filter" && entry.startsWith("label=")).map((entry) => entry.slice(6));
+      const names = rest.filter((entry, index) => rest[index - 1] === "--filter" && entry.startsWith("name=")).map((entry) => entry.slice(5));
+      const matching = [...this.networks.values()].filter((network) => names.every((part) => network.name.includes(part)) && labels.every((label) => {
+        const [key, value] = label.split("=");
+        return value === undefined ? network.labels[key!] !== undefined : network.labels[key!] === value;
+      }));
+      return { exitCode: 0, stdout: matching.map((network) => FakeDocker.networkId(network.name)).join("\n"), stderr: "" };
+    }
     if (verb === "inspect") {
       const network = this.networks.get(rest[rest.length - 1]!);
       if (network === undefined) return fail("Error response from daemon: network not found");
       return { exitCode: 0, stdout: `bridge|${network.internal}|${network.options["com.docker.network.bridge.inhibit_ipv4"] ?? ""}|false|${network.subnet} \n`, stderr: "" };
     }
     if (verb === "rm") {
-      const name = rest[rest.length - 1]!;
+      const given = rest[rest.length - 1]!;
+      const name = [...this.networks.keys()].find((candidate) => candidate === given || FakeDocker.networkId(candidate) === given) ?? given;
       if (!this.networks.has(name)) return fail("Error response from daemon: network not found");
       if ([...this.containers.values()].some((container) => container.networks.has(name))) return fail(`network ${name} has active endpoints`);
       this.networks.delete(name);

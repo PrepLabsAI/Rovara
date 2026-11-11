@@ -13,6 +13,8 @@ export * from "./learning.js";
 export * from "./model-keys.js";
 export * from "./model-provider.js";
 export * from "./secrets.js";
+export * from "./image-registry.js";
+export * from "./scheduler.js";
 export * from "./object-storage.js";
 export * from "./outbound-events.js";
 export * from "./plugin-adapters.js";

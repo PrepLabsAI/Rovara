@@ -22,7 +22,7 @@ runDocumentStoreConformance("sqlite", { async create() { /* a fresh empty store 
 
 One registry holds every adapter, by **plug-in point** and name (`createAdapterRegistry`). The points are `code-host`, `tracker`,
 `check-runner`, `channel`, `worker-machines`, `storage`, `queue`, `monitoring`, `learning`, `team-record-source`, `identity`,
-`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below). A point holds either many
+`build-system`, and the policy seams `admission`, `audit-sink`, `approvers`, `metering` and `model-keys`, `secrets` (below), `object-storage` (provisional, below), `model-provider` (below), `company-instructions` (read-only company rules, below) and `outbound-events` (signed events out, below), `image-registry` (a project's saved environment image, below) and `scheduler` (when something is due, below). A point holds either many
 adapters by name (every code host) or one (the store, the queue, each policy seam).
 
 It is the registry Pratik's channel adapters (spec 062 phase 3) use, with the `channel` point. An out-of-process adapter that an
@@ -504,7 +504,7 @@ A `build-system` adapter is a way of building code that the built-in detectors d
 | --- | --- | --- |
 | `detectorModule` | A package name the worker image installs, or an absolute `.js`/`.mjs` path inside the image. It exports `detectors: [{ name, run }]` (`run` is the worker's `Detector`). | The worker runs them after the built-in detectors, in the detector thread under its wall clock and memory limit. A name may not be a built-in's. A module that cannot be loaded adds a fixed-words note and nothing else. |
 | `setupPrograms` | Program names (never a shell such as `sh` or `bash`, or `env`, `xargs`, `sudo`) the setup governor groups into steps by subcommand (`examplebuild build //a:b` is its own step, as `npm ci` is). | `setup-agent-journal.ts`, set once at worker boot. |
-| `keyFileGlobs` | Files whose content decides what a saved environment holds. | **Not used yet, and refused when non-empty** (`BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED` is false): Code has no saved-environment job builder or environment key yet. When it does, `detectorGlobsWithBuildSystems` puts them in the job's `detectorGlobs` and in the broker's own key, so both sides hash the same files (register: DEFERRED-CHECKS, BUILD-SYSTEM-KEYFILE-GLOBS). |
+| `keyFileGlobs` | Files whose content decides what a saved environment holds. | The rebuild job builder (`savedEnvBuildInputsOf`, `core/test-env/saved-env-rebuild.ts`) merges them into the job's `detectorGlobs` AND into the broker's own key-file listing with `detectorGlobsWithBuildSystems`, so the worker and the broker hash the same files and a changed key file changes the environment key (`BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED` is true). More than 200 globs in all fails closed. |
 
 **It does not travel in a job.** A module path in a job would let every job name code for the worker to load. The profile is the operator's, like the worker image: the machine launcher (`DockerWorkerMachines`, option `buildSystems`,
 read from the registry with `collectBuildSystemProfiles`) puts the profiles into the worker's start-up environment as `ROVARA_BUILD_SYSTEMS`, a name a machine spec cannot set. The worker reads it once at boot and refuses to start on a value it cannot
@@ -657,8 +657,8 @@ Cloud's own files keep only what is Cloud's (its adapters, its policies, its dat
   instead of a list length, base64 text instead of bytes. That changes the stored format, so it needs a one-time data migration in Cloud. Owner decision 60 settles it (item S2; this replaces
   "a decision for both owners"): **the document store stays small.** Sets and list append are NOT added to the port or to SQLite. Cloud's budget, limit and session code moves to one row per item
   (a marker row per charged task, a counter row) with a one-time migration on the Cloud side. L6a's workspace limits already use that pattern.
-- **A scheduler, realtime push and email notices.** Each is a provider dependency of the core
-  today and has no port yet (object storage has a provisional one, and secrets have the `secrets` point above). The relay "from a timer" is the caller's timer.
+- **Realtime push and email notices.** Each is a provider dependency of the core today and has no port yet (object storage has a provisional one, secrets have the `secrets` point above, and
+  the `scheduler` and `image-registry` points are below). The relay "from a timer" is the caller's timer.
 - **Sign-in flows.** `IdentityProvider` answers who a credential is; begin/complete/sign-out, authentication freshness and member
   listing for single sign-on are interface additions for the lane that needs them.
 - A SQLite adapter must use UTF-8 text with BINARY collation for the code-point order and refuse lone surrogates in keys.
@@ -683,3 +683,46 @@ claim, and the single merge path that re-reads the code host and merges at the c
   `CodeMilestones` is filled by `core/milestones`: the items are Cloud's `CODE_MILESTONE#<kind>#<n>` rows (with the sweep's due-time attributes under `CODE_MILESTONE`) and a session line, committed with the change; `register` takes the handlers an adapter
   supplies, `deliver` tells them after the commit and `deliverDue` (the app's timer) tells again one that failed, at most 5 times (the per-handler `tries_`, `done_` and `lease_` attributes are Cloud's). It needs the dispatch rows' `workflow-dispatch-due` index.
 - **Keys are Cloud's** (`mergeTrackingKey`, `prHeadKey`, `mergeCommitIndexKey`, the task's own partition), so Cloud consumes the same layout with no migration.
+
+## Scheduler (a new interface: both owners approve)
+
+The `scheduler` point (one adapter) says WHEN. A `ScheduleEntry` names a company, a schedule id, a rule (a five-field cron in a named time zone, or "every N minutes"), an on/off switch and a target
+(`{ kind, ref }`, ids only: a schedule is stored by an outside system and listed in its console, so it never holds a secret or a person's text). `put` creates or replaces (idempotent on company and
+id), `remove` deletes (not an error when absent), `get` reads back, and `subscribe` registers the one handler that hears of each fire. A fire is a `DueSchedule`: the time the rule meant, a `slotId`
+that is the same for every delivery of one fire, and an `attempt` count. The handler resolves when it has HANDLED the fire, including by deciding to start nothing; if it throws, the scheduler may
+deliver the same fire again and finally gives it up.
+
+The core decides what a fire does from what is stored then. The nightly test run checks that the schedule is still on, that the fire is fresh, that something merged, that no run is in flight, and
+claims the slot with a conditional write before it starts anything, so a scheduler that fires twice, late or after a restart does no harm. `capabilities` says which rules an adapter honours; a rule
+it does not honour is refused at `put`, never run differently. Code's adapter is a timer inside `rovara up` (`createIntervalScheduler` in `@agentx/local-adapters`): UTC crons and intervals, its
+schedules kept in the state database, one late delivery for a fire missed while `rovara up` was not running (within an hour). Code's default, `none`, refuses `put` with `unavailable`. Cloud's adapter
+will be the cloud scheduler. `tests/support/ports/scheduler-conformance.ts` is the conformance suite (the fake, the local timer and Cloud's later adapter all run it).
+
+## Image registry (a new interface: both owners approve)
+
+The `image-registry` point (one adapter) is where a project's saved environment image lives. The broker never talks to a registry itself: it asks the port for a short-lived login for ONE repository
+(`login`, to push or to pull), whether the repository is the one Rovara makes (`inspect`: `matches`, `absent`, or `unusable` when somebody else created it first with other settings), the images it holds
+(`list`), and to delete images or the repository. What makes an image trustworthy stays in the core (`core/test-env/saved-env*.ts`): which approved environment it was built for, that a Prove run
+passed, that the job that pushes is the job that was queued, the 30-day ceiling, keeping the newest N. A repository name is built by `savedEnvRepositoryName` (a hash of the company and the project) and
+every call refuses a name of any other shape, so no wildcard or extra segment reaches a registry call. The worker never sees the registry's own credentials: a login is a `SavedEnvRegistryAuth`.
+`capabilities.workerPush` and `workerPull` say whether a worker can push and pull with its own container tooling; when they are false the core queues no build and names no image to a worker.
+
+**What changed in the login's shape:** `SavedEnvRegistryAuth.registry` accepts the cloud registry's host or a registry on this machine (`localhost` or `127.0.0.1` with a port, nothing else), and `username`
+is the hosted registry's fixed user name or `rovara-local`. A hosted install validates with `HostedSavedEnvRegistryAuthSchema` (the same schema made by `savedEnvRegistryAuthSchema({ allowLocal: false })`), which takes only the cloud registry's host and user name, so a hosted worker is never told to log in to a loopback address. Code's adapter runs one registry container on the owner's Docker, published on the loopback address only; that registry has no login check, so the adapter refuses worker access until one that checks it is built. Code's default, `none`, answers every call with `unavailable`.
+Cloud's adapter will be its cloud registry (a login scoped to one repository; the policy builders are in `saved-env-image.ts`). `tests/support/ports/image-registry-conformance.ts` is
+the conformance suite.
+
+## The test environment (`core/test-env/`)
+
+A project's test environment is a setting Rovara PROPOSES, a Prove run checks, and the owner approves once; each approved change is a new immutable revision, and a task keeps the revision it started
+with. The stored rows are Cloud's, key for key (`TESTENV#PROPOSAL#<digest>`, `#PROVE#<digest>`, `#REV#<revision>`, `#LATEST`, the task's `#PIN#<task>`, `#NIGHTLY#...`), under `projectPk(company, project)`, so
+Cloud can switch to this code with no data move.
+
+- **The approval is a subject of the approval gate** (`createTestEnvironmentSubject`, kind `test-environment`). Cloud's own checks (a maintainer role, a fresh sign-in, a second person for a less-safe
+  change, a confirmation card) are the Approvers seam's rules here. A less-safe change, a proposal a setup run or draft made, and any card the contract grades high are HIGH risk, so only the methods the
+  approvers plug-in names as strong may approve them, and `minApprovers` says whether a second person is needed. The environment still refuses, in fixed words: an unproved proposal, a seed file the
+  check did not load, a production target, recordings outside the sandbox and preview tiers, a kind of backing that is not available, an archived project, and a revision other than the one the person saw.
+- **The task flow takes it through one seam** (`TaskFlowDeps.testEnvironment`, `core/test-env/seam.ts`): a starting workflow task pins the newest usable revision in its own start transaction (an environment the flow cannot carry out is
+  recorded as not applied, with the reason); a coding or verification run is told the plan of the pinned revision and the worker features it needs (a worker that lacks one is refused the run, never sent it without).
+- **Switches** are environment variables read by leaf modules (`switch.ts`): `ROVARA_TEST_ENVIRONMENT` (on unless `0`), `ROVARA_TEST_SERVICES`, `ROVARA_TEST_ACCOUNTS`, `ROVARA_PROJECT_IMAGES`,
+  `ROVARA_SAVED_ENVIRONMENTS` and `ROVARA_NIGHTLY_HEALTH` (each on only when exactly `1`).

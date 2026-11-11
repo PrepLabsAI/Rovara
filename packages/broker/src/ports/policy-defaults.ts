@@ -1,6 +1,8 @@
 // Port lane W0: Code's defaults for the policy seams. Each does nothing or allows what a lone developer on their own machine
 // may do. Cloud registers its own adapters (budgets, an audit ledger, second approvers, members and single sign-on, proxy-key spend)
 // on the same points.
+import { createUnavailableImageRegistry } from "./fake-image-registry.js";
+import { createUnavailableScheduler } from "./fake-scheduler.js";
 import { checkCommentProof, type CommentRequestContext, type FetchedComment } from "../core/pr-commands/comment-checks.js";
 import {
   IMPLICIT_COMPANY_ID,
@@ -237,4 +239,7 @@ export function registerCodeDefaults(registry: AdapterRegistry, options: CodeDef
   registry.register("metering", "price-table", createPriceTableMetering(options.priceTable, options.onMeter), { isDefault: true });
   if (options.modelKeys !== undefined) registry.register("model-keys", "local", options.modelKeys, { isDefault: true });
   if (options.secrets !== undefined) registry.register("secrets", "local", options.secrets, { isDefault: true });
+  // Saved environments and the nightly test run need these two; until a real one is registered they say plainly that none is set up (they never pretend).
+  registry.register("image-registry", "none", createUnavailableImageRegistry(), { isDefault: true });
+  registry.register("scheduler", "none", createUnavailableScheduler(), { isDefault: true });
 }

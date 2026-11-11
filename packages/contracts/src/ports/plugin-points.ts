@@ -17,6 +17,7 @@ import type { DocumentStore } from "./document-store.js";
 import type { JsonObject } from "./json.js";
 import type { ModelKeyStore } from "./model-keys.js";
 import { MODEL_PROVIDER_ID_PATTERN, MODEL_REQUEST_FORMATS, type ModelProviderAdapter } from "./model-provider.js";
+import type { ImageRegistry } from "./image-registry.js";
 import type { ObjectStorage } from "./object-storage.js";
 import type { OutboundEventsAdapter } from "./outbound-events.js";
 import type { SecretStore } from "./secrets.js";
@@ -27,6 +28,7 @@ import type { BuildSystem } from "./build-system.js";
 import type { CompanyInstructionsSource } from "./company-instructions.js";
 import type { LearningAdapter } from "./learning.js";
 import type { QueueService } from "./queue.js";
+import type { Scheduler } from "./scheduler.js";
 import type { WorkerMachines } from "./worker-machines.js";
 
 /** Every place an adapter can plug in. A new point is an interface change (both owners). */
@@ -58,6 +60,10 @@ export const PLUGIN_POINTS = [
   "model-provider",
   /** Owner decision 60 (R2): where an adapter's secrets are read (`read(ref)` returns a `SecretValue`). */
   "secrets",
+  /** Where a project's saved environment image lives (login for one repository, list, delete). Code: a registry container on the owner's Docker; Cloud: its cloud registry. */
+  "image-registry",
+  /** When something is due (the nightly test run). The scheduler only says when; the core decides what starts. Code: a local timer; Cloud: its cloud scheduler. */
+  "scheduler",
 ] as const;
 export const PluginPointSchema = z.enum(PLUGIN_POINTS);
 export type PluginPoint = z.infer<typeof PluginPointSchema>;
@@ -89,6 +95,8 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   "outbound-events": "many",
   "model-provider": "many",
   secrets: "one",
+  "image-registry": "one",
+  scheduler: "one",
 };
 
 /**
@@ -163,6 +171,8 @@ export interface PluginPointTypes {
   "outbound-events": OutboundEventsAdapter;
   "model-provider": ModelProviderAdapter;
   secrets: SecretStore;
+  "image-registry": ImageRegistry;
+  scheduler: Scheduler;
 }
 
 export type AdapterOf<P extends PluginPoint> = PluginPointTypes[P];

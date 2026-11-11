@@ -1,0 +1,720 @@
+{
+  "schemaVersion": 1,
+  "revision": 3,
+  "pinned": true,
+  "entries": [
+    {
+      "id": "postgres@15",
+      "family": "postgres",
+      "backing": "local",
+      "version": "15.8",
+      "status": "available",
+      "image": {
+        "repository": "svc/postgres",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "999:999",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/var/lib/postgresql/data",
+            "sizeMiB": 256
+          },
+          {
+            "path": "/run/postgresql",
+            "sizeMiB": 8
+          },
+          {
+            "path": "/tmp",
+            "sizeMiB": 32
+          }
+        ],
+        "ports": [
+          5432
+        ],
+        "extraArgs": [
+          "postgres_fsync_off",
+          "postgres_synchronous_commit_off",
+          "postgres_full_page_writes_off"
+        ]
+      },
+      "health": {
+        "kind": "command",
+        "check": "pg_isready",
+        "startTimeoutS": 30
+      },
+      "resources": {
+        "memMiB": 512,
+        "cpus": 1,
+        "pids": 256
+      },
+      "connect": {
+        "templates": {
+          "DATABASE_URL": "postgres://{user}:{password}@{host}:{port}/{db}",
+          "PGHOST": "{host}",
+          "PGPORT": "{port}",
+          "PGUSER": "{user}",
+          "PGPASSWORD": "{password}",
+          "PGDATABASE": "{db}"
+        },
+        "defaultAliases": [
+          "postgres"
+        ]
+      },
+      "reset": {
+        "kind": "template_db"
+      },
+      "licence": "PostgreSQL",
+      "editions": [
+        "public",
+        "enterprise"
+      ]
+    },
+    {
+      "id": "postgres@16",
+      "family": "postgres",
+      "backing": "local",
+      "version": "16.4",
+      "status": "default",
+      "image": {
+        "repository": "svc/postgres",
+        "digest": "d57d57125e5b0d7caa8ab98817005a9460fc092e47d8f1155628b97e9756f106",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "999:999",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/var/lib/postgresql/data",
+            "sizeMiB": 256
+          },
+          {
+            "path": "/run/postgresql",
+            "sizeMiB": 8
+          },
+          {
+            "path": "/tmp",
+            "sizeMiB": 32
+          }
+        ],
+        "ports": [
+          5432
+        ],
+        "extraArgs": [
+          "postgres_fsync_off",
+          "postgres_synchronous_commit_off",
+          "postgres_full_page_writes_off"
+        ]
+      },
+      "health": {
+        "kind": "command",
+        "check": "pg_isready",
+        "startTimeoutS": 30
+      },
+      "resources": {
+        "memMiB": 512,
+        "cpus": 1,
+        "pids": 256
+      },
+      "connect": {
+        "templates": {
+          "DATABASE_URL": "postgres://{user}:{password}@{host}:{port}/{db}",
+          "PGHOST": "{host}",
+          "PGPORT": "{port}",
+          "PGUSER": "{user}",
+          "PGPASSWORD": "{password}",
+          "PGDATABASE": "{db}"
+        },
+        "defaultAliases": [
+          "postgres"
+        ]
+      },
+      "reset": {
+        "kind": "template_db"
+      },
+      "licence": "PostgreSQL",
+      "sbomRef": "0ea219eb2fef529314a0acf29934787323a619ce3e9da6adc40c3f31983c8ed3",
+      "scan": {
+        "scannedAt": "2026-11-04T14:31:38.000Z",
+        "criticalOpen": 0,
+        "highOpen": 12
+      },
+      "editions": [
+        "public",
+        "enterprise"
+      ]
+    },
+    {
+      "id": "postgres@17",
+      "family": "postgres",
+      "backing": "local",
+      "version": "17.0",
+      "status": "available",
+      "image": {
+        "repository": "svc/postgres",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "999:999",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/var/lib/postgresql/data",
+            "sizeMiB": 256
+          },
+          {
+            "path": "/run/postgresql",
+            "sizeMiB": 8
+          },
+          {
+            "path": "/tmp",
+            "sizeMiB": 32
+          }
+        ],
+        "ports": [
+          5432
+        ],
+        "extraArgs": [
+          "postgres_fsync_off",
+          "postgres_synchronous_commit_off",
+          "postgres_full_page_writes_off"
+        ]
+      },
+      "health": {
+        "kind": "command",
+        "check": "pg_isready",
+        "startTimeoutS": 30
+      },
+      "resources": {
+        "memMiB": 512,
+        "cpus": 1,
+        "pids": 256
+      },
+      "connect": {
+        "templates": {
+          "DATABASE_URL": "postgres://{user}:{password}@{host}:{port}/{db}",
+          "PGHOST": "{host}",
+          "PGPORT": "{port}",
+          "PGUSER": "{user}",
+          "PGPASSWORD": "{password}",
+          "PGDATABASE": "{db}"
+        },
+        "defaultAliases": [
+          "postgres"
+        ]
+      },
+      "reset": {
+        "kind": "template_db"
+      },
+      "licence": "PostgreSQL",
+      "editions": [
+        "public",
+        "enterprise"
+      ]
+    },
+    {
+      "id": "mysql@8",
+      "family": "mysql",
+      "backing": "local",
+      "version": "8.4",
+      "status": "default",
+      "image": {
+        "repository": "svc/mysql",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "999:999",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/var/lib/mysql",
+            "sizeMiB": 384
+          },
+          {
+            "path": "/run/mysqld",
+            "sizeMiB": 8
+          },
+          {
+            "path": "/tmp",
+            "sizeMiB": 32
+          }
+        ],
+        "ports": [
+          3306
+        ],
+        "extraArgs": [
+          "mysql_skip_log_bin",
+          "mysql_flush_log_lazily"
+        ]
+      },
+      "health": {
+        "kind": "command",
+        "check": "mysqladmin_ping",
+        "startTimeoutS": 90
+      },
+      "resources": {
+        "memMiB": 768,
+        "cpus": 1,
+        "pids": 256
+      },
+      "connect": {
+        "templates": {
+          "DATABASE_URL": "mysql://{user}:{password}@{host}:{port}/{db}",
+          "MYSQL_HOST": "{host}",
+          "MYSQL_TCP_PORT": "{port}"
+        },
+        "defaultAliases": [
+          "mysql"
+        ]
+      },
+      "reset": {
+        "kind": "restart"
+      },
+      "licence": "GPL-2.0-only",
+      "editions": [
+        "public",
+        "enterprise"
+      ]
+    },
+    {
+      "id": "valkey@8",
+      "family": "redis",
+      "backing": "local",
+      "version": "8.0",
+      "status": "default",
+      "image": {
+        "repository": "svc/valkey",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "999:999",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/data",
+            "sizeMiB": 32
+          },
+          {
+            "path": "/tmp",
+            "sizeMiB": 16
+          }
+        ],
+        "ports": [
+          6379
+        ],
+        "extraArgs": [
+          "redis_save_off",
+          "redis_appendonly_off"
+        ]
+      },
+      "health": {
+        "kind": "command",
+        "check": "redis_ping",
+        "startTimeoutS": 15
+      },
+      "resources": {
+        "memMiB": 128,
+        "cpus": 0.5,
+        "pids": 64
+      },
+      "connect": {
+        "templates": {
+          "REDIS_URL": "redis://:{password}@{host}:{port}"
+        },
+        "defaultAliases": [
+          "redis"
+        ]
+      },
+      "reset": {
+        "kind": "flush"
+      },
+      "licence": "BSD-3-Clause",
+      "editions": [
+        "public",
+        "enterprise"
+      ]
+    },
+    {
+      "id": "redis@7",
+      "family": "redis",
+      "backing": "local",
+      "version": "7.2",
+      "status": "available",
+      "image": {
+        "repository": "svc/redis",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "999:999",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/data",
+            "sizeMiB": 32
+          },
+          {
+            "path": "/tmp",
+            "sizeMiB": 16
+          }
+        ],
+        "ports": [
+          6379
+        ],
+        "extraArgs": [
+          "redis_save_off",
+          "redis_appendonly_off"
+        ]
+      },
+      "health": {
+        "kind": "command",
+        "check": "redis_ping",
+        "startTimeoutS": 15
+      },
+      "resources": {
+        "memMiB": 128,
+        "cpus": 0.5,
+        "pids": 64
+      },
+      "connect": {
+        "templates": {
+          "REDIS_URL": "redis://:{password}@{host}:{port}"
+        },
+        "defaultAliases": [
+          "redis"
+        ]
+      },
+      "reset": {
+        "kind": "flush"
+      },
+      "licence": "BSD-3-Clause",
+      "editions": [
+        "public",
+        "enterprise"
+      ]
+    },
+    {
+      "id": "rabbitmq@3",
+      "family": "rabbitmq",
+      "backing": "local",
+      "version": "3.13",
+      "status": "available",
+      "image": {
+        "repository": "svc/rabbitmq",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "999:999",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/var/lib/rabbitmq",
+            "sizeMiB": 128
+          },
+          {
+            "path": "/tmp",
+            "sizeMiB": 16
+          }
+        ],
+        "ports": [
+          5672
+        ],
+        "extraArgs": []
+      },
+      "health": {
+        "kind": "command",
+        "check": "rabbitmq_ping",
+        "startTimeoutS": 90
+      },
+      "resources": {
+        "memMiB": 256,
+        "cpus": 0.5,
+        "pids": 512
+      },
+      "connect": {
+        "templates": {
+          "AMQP_URL": "amqp://{user}:{password}@{host}:{port}"
+        },
+        "defaultAliases": [
+          "rabbitmq"
+        ]
+      },
+      "reset": {
+        "kind": "restart"
+      },
+      "licence": "MPL-2.0",
+      "editions": [
+        "public",
+        "enterprise"
+      ]
+    },
+    {
+      "id": "local-aws@r1",
+      "family": "local-aws",
+      "backing": "emulated",
+      "version": "r1",
+      "status": "default",
+      "image": {
+        "repository": "svc/local-aws",
+        "digest": "e1e95b4f89d16b8ebd29ed088afabc4c22cf5e7bb62a1508f61ea4bfa9a4a672",
+        "platforms": [
+          "linux/arm64"
+        ]
+      },
+      "run": {
+        "user": "10001:10001",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/tmp",
+            "sizeMiB": 64
+          }
+        ],
+        "ports": [
+          4566
+        ],
+        "extraArgs": []
+      },
+      "health": {
+        "kind": "http",
+        "port": 4566,
+        "path": "/_rovara/health",
+        "startTimeoutS": 30
+      },
+      "resources": {
+        "memMiB": 384,
+        "cpus": 1,
+        "pids": 512
+      },
+      "connect": {
+        "templates": {
+          "AWS_REGION": "{region}",
+          "AWS_DEFAULT_REGION": "{region}"
+        },
+        "defaultAliases": [
+          "aws"
+        ]
+      },
+      "reset": {
+        "kind": "http_reset"
+      },
+      "licence": "LicenseRef-Rovara AND MIT",
+      "sbomRef": "c4f4de986d462e3e110652afffcf4f8b37a4f92f86a50e8fe141fa32991fdba4",
+      "scan": {
+        "scannedAt": "2026-11-04T14:41:28.000Z",
+        "criticalOpen": 0,
+        "highOpen": 1
+      },
+      "editions": [
+        "public",
+        "enterprise"
+      ],
+      "emulator": {
+        "services": {
+          "supported": [
+            "s3",
+            "dynamodb",
+            "sqs",
+            "sns",
+            "sts",
+            "secretsmanager",
+            "ssm",
+            "kms",
+            "events"
+          ],
+          "functions": [
+            "lambda"
+          ],
+          "model_endpoint_front": [
+            "sagemaker-runtime"
+          ],
+          "available": [
+            "dynamodbstreams",
+            "kinesis",
+            "stepfunctions",
+            "apigateway",
+            "cognito-idp",
+            "logs"
+          ]
+        },
+        "iamEnforced": false,
+        "storage": "memory"
+      }
+    },
+    {
+      "id": "fake-server@r1",
+      "family": "fake-server",
+      "backing": "fake",
+      "version": "r1",
+      "status": "default",
+      "image": {
+        "repository": "svc/fake-server",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "1000:1000",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/tmp",
+            "sizeMiB": 16
+          }
+        ],
+        "ports": [
+          8080
+        ],
+        "extraArgs": []
+      },
+      "health": {
+        "kind": "tcp",
+        "port": 8080,
+        "startTimeoutS": 30
+      },
+      "resources": {
+        "memMiB": 512,
+        "cpus": 0.5,
+        "pids": 64
+      },
+      "connect": {
+        "templates": {},
+        "defaultAliases": []
+      },
+      "reset": {
+        "kind": "restart"
+      },
+      "licence": "MIT",
+      "editions": [
+        "public",
+        "enterprise"
+      ],
+      "workerImage": true
+    },
+    {
+      "id": "test-account-proxy@r1",
+      "family": "test-account-proxy",
+      "backing": "helper",
+      "version": "r1",
+      "status": "available",
+      "image": {
+        "repository": "svc/test-account-proxy",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "65532:65532",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/tmp",
+            "sizeMiB": 8
+          }
+        ],
+        "ports": [
+          3128
+        ],
+        "extraArgs": []
+      },
+      "health": {
+        "kind": "tcp",
+        "port": 3128,
+        "startTimeoutS": 15
+      },
+      "resources": {
+        "memMiB": 64,
+        "cpus": 0.25,
+        "pids": 32
+      },
+      "connect": {
+        "templates": {},
+        "defaultAliases": []
+      },
+      "reset": {
+        "kind": "restart"
+      },
+      "licence": "MIT",
+      "editions": [
+        "public",
+        "enterprise"
+      ],
+      "workerImage": true
+    },
+    {
+      "id": "dns-helper@r1",
+      "family": "dns-helper",
+      "backing": "helper",
+      "version": "r1",
+      "status": "available",
+      "image": {
+        "repository": "svc/dns-helper",
+        "platforms": [
+          "linux/arm64",
+          "linux/amd64"
+        ]
+      },
+      "run": {
+        "user": "1000:1000",
+        "readOnlyRoot": true,
+        "tmpfs": [
+          {
+            "path": "/tmp",
+            "sizeMiB": 8
+          }
+        ],
+        "ports": [
+          53
+        ],
+        "extraArgs": []
+      },
+      "health": {
+        "kind": "tcp",
+        "port": 53,
+        "startTimeoutS": 15
+      },
+      "resources": {
+        "memMiB": 128,
+        "cpus": 0.5,
+        "pids": 32
+      },
+      "connect": {
+        "templates": {},
+        "defaultAliases": []
+      },
+      "reset": {
+        "kind": "restart"
+      },
+      "licence": "MIT",
+      "editions": [
+        "public",
+        "enterprise"
+      ],
+      "workerImage": true
+    }
+  ]
+}

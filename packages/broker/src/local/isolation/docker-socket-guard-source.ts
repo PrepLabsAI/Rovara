@@ -1,3 +1,5 @@
+import { DOCKER_SOCKET_GUARD_SERVICES_SOURCE } from "./docker-socket-guard-services-source.js";
+
 // Port lane L4b: the Docker socket guard of one local worker.
 // This is the program that runs inside the helper container (`node -e`), kept as text so the broker needs no build step for it and
 // tests can run the very same text. It uses only Node built-ins. Edit it here; there is no other copy.
@@ -52,20 +54,28 @@ function ask(method, path, body) {
     request.end(body);
   });
 }
-// The container's id (and whether it is a dev container) when it is a sandbox or dev container of this worker, otherwise undefined.
-async function ownedInfo(reference) {
+// What this guard knows of a container of this worker, or undefined when it is not one. ONE lookup for every route, with the class from the labels the guard itself put on it (a worker cannot set a rovara. label):
+//   class "sandbox"  a task sandbox (label sandbox=1);
+//   class "dev"      a project's dev container (sandbox=1 and the dev container label): only where dev containers are on, but told apart ALWAYS, so a rule that fits a sandbox (the sandbox user) is never applied to it;
+//   class "service"  a test service container (only with test services on), with its profile and its own configured user.
+// Every route that takes a command, an attach or a network change asks for the class; none asks only for the id.
+async function ownedFound(reference) {
   if (!NAME.test(reference)) return undefined;
   const answer = await ask("GET", "/containers/" + encodeURIComponent(reference) + "/json");
   if (answer.status !== 200) return undefined;
   let parsed;
   try { parsed = JSON.parse(answer.body); } catch (error) { return undefined; }
   const labels = (parsed && parsed.Config && parsed.Config.Labels) || {};
-  if (!(labels[OWNER] === policy.owner && labels[SANDBOX] === "1" && typeof parsed.Id === "string")) return undefined;
-  return { id: parsed.Id, devcontainer: labels[DEVCONTAINER_LABEL] === "1" };
+  if (labels[OWNER] !== policy.owner || typeof parsed.Id !== "string") return undefined;
+  const name = String(parsed.Name || "").replace(/^\//, "");
+  if (labels[SANDBOX] === "1") return { id: parsed.Id, class: labels[DEVCONTAINER_LABEL] === "1" ? "dev" : "sandbox", execUser: undefined, profile: "", name: name };
+  if (SVC === null || labels[SANDBOX] !== SERVICE_CLASS) return undefined;
+  const user = parsed.Config && typeof parsed.Config.User === "string" ? parsed.Config.User : "";
+  return { id: parsed.Id, class: "service", execUser: user, profile: String(labels[PROFILE_LABEL] || ""), name: name };
 }
-async function ownedContainer(reference) {
-  const info = await ownedInfo(reference);
-  return info === undefined ? undefined : info.id;
+async function ownedId(reference) {
+  const found = await ownedFound(reference);
+  return found === undefined ? undefined : found.id;
 }
 
 // ---- the rules for a sandbox
@@ -135,14 +145,30 @@ const DEV_HOST_ZERO = HOST_ZERO.filter(function (name) { return name !== "Mounts
 const MOUNT_KEYS = ["Type", "Source", "Target", "ReadOnly", "Consistency"];
 const CONSISTENCY = ["", "default", "cached", "consistent", "delegated"];
 
-// The HostConfig a sandbox (or dev container) gets, built from the checked parts of what the worker sent.
-function buildHostConfig(host, dev) {
+// What a HostConfig is built for is one tagged value, never a flag that is tested for truthiness (a value that means one thing to one lane and another to the other would give a container the other's capabilities):
+//   { kind: "sandbox" }                    a task sandbox: every capability dropped, the sandbox network and name server, the workspace as the only mount;
+//   { kind: "check", variant: {...} }      the sealed check sandbox of a test run: the sandbox rules, on the run's own network, with the run's two read-only files (as the guard's copies) and no name server of its own choosing;
+//   { kind: "devcontainer" }               a project's dev container, with the differences listed above.
+// Anything else throws, so a caller that passes the wrong thing fails here and in its tests instead of loosening a rule.
+function hostConfigMode(mode) {
+  if (mode !== null && typeof mode === "object") {
+    if (mode.kind === "sandbox" || mode.kind === "devcontainer") return mode;
+    if (mode.kind === "check" && mode.variant !== null && typeof mode.variant === "object") return mode;
+  }
+  throw new Error("unknown host config mode");
+}
+
+// The HostConfig a sandbox, a check sandbox or a dev container gets, built from the checked parts of what the worker sent.
+function buildHostConfig(host, mode) {
+  hostConfigMode(mode);
+  const dev = mode.kind === "devcontainer";
+  const variant = mode.kind === "check" ? mode.variant : undefined;
   if (host === null || typeof host !== "object" || Array.isArray(host)) deny("host config is missing");
   knownKeys(host, dev ? DEV_HOST_USED : HOST_USED, dev ? DEV_HOST_ZERO : HOST_ZERO, "host setting");
   if (host.Privileged === true || (host.Privileged !== undefined && host.Privileged !== false && host.Privileged !== null)) deny("privileged mode is not allowed");
   if (dev) {
     if (host.NetworkMode !== undefined && host.NetworkMode !== null && host.NetworkMode !== "" && host.NetworkMode !== "default" && host.NetworkMode !== policy.network) deny("only the sandbox network is allowed");
-  } else if (host.NetworkMode !== policy.network) deny("only the sandbox network is allowed");
+  } else if (host.NetworkMode !== (variant ? variant.network : policy.network)) deny(variant ? "only the run's own network is allowed" : "only the sandbox network is allowed");
   let capDrop = ["ALL"];
   let capAdd = [];
   let securityOpt = ["no-new-privileges"];
@@ -167,7 +193,9 @@ function buildHostConfig(host, dev) {
   if (host.ReadonlyPaths !== null && host.ReadonlyPaths !== undefined) deny("read-only paths cannot be changed");
   const binds = host.Binds === null || host.Binds === undefined ? [] : host.Binds;
   const mount = policy.workspaceDir + ":" + policy.workspaceDir;
-  if (!stringList(binds, 4) || !binds.every(function (bind) { return bind === mount || bind === mount + ":rw"; })) deny("only the workspace folder may be mounted");
+  // The sealed check sandbox (a services variant) also gets two read-only files of the run's own folder at fixed targets; every other sandbox mounts the workspace and nothing else.
+  const extraBinds = variant ? variant.readOnlyBinds : [];
+  if (!stringList(binds, 4 + extraBinds.length) || !binds.every(function (bind) { return bind === mount || bind === mount + ":rw" || extraBinds.indexOf(bind) !== -1; })) deny("only the workspace folder may be mounted");
   const tmpfs = host.Tmpfs === null || host.Tmpfs === undefined ? {} : host.Tmpfs;
   if (typeof tmpfs !== "object" || Array.isArray(tmpfs)) deny("tmpfs is not valid");
   const masks = {};
@@ -224,10 +252,14 @@ function buildHostConfig(host, dev) {
     ulimits = host.Ulimits.map(function (entry) { return { Name: entry.Name, Soft: entry.Soft, Hard: entry.Hard }; });
   }
   const built = {
-    Binds: binds.slice(),
+    // The sealed check sandbox's two run files are mounted from the guard's COPIES of them (never from a path the worker could change); the workspace bind is as it was.
+    Binds: binds.map(function (bind) { const pair = variant ? variant.copies.find(function (entry) { return entry.original === bind; }) : undefined; return pair === undefined ? bind : pair.copy; }),
     Tmpfs: masks,
-    NetworkMode: policy.network,
-    Dns: policy.dns,
+    // The sealed check sandbox, like every service container, has no IPv6 (the run network has none to give it).
+    ...(variant ? { Sysctls: { "net.ipv6.conf.all.disable_ipv6": "1" } } : {}),
+    NetworkMode: variant ? variant.network : policy.network,
+    // The sealed check sandbox has no name server of its own choosing: the run network's embedded one only.
+    Dns: variant ? [] : policy.dns,
     // Forced, not only checked.
     CapDrop: capDrop,
     Privileged: false,
@@ -253,14 +285,15 @@ function buildHostConfig(host, dev) {
   return built;
 }
 
-function transformCreate(query, text) {
+function transformCreate(query, text, variant) {
   let body;
   try { body = JSON.parse(text); } catch (error) { deny("the body is not JSON"); }
   if (body === null || typeof body !== "object" || Array.isArray(body)) deny("the body is not an object");
   Array.from(query.keys()).forEach(function (key) { if (key !== "name") deny("create option " + key + " is not allowed"); });
   const name = query.get("name");
-  if (name === null || !/^agentx-task-[A-Za-z0-9_.-]{1,100}$/.test(name)) deny("a sandbox name starts with agentx-task-");
-  knownKeys(body, TOP_USED, TOP_ZERO, "setting");
+  if (variant ? name !== variant.name : (name === null || !/^agentx-task-[A-Za-z0-9_.-]{1,100}$/.test(name))) deny("a sandbox name starts with agentx-task-");
+  knownKeys(body, variant ? TOP_USED.concat(["Hostname"]) : TOP_USED, variant ? TOP_ZERO.filter(function (key) { return key !== "Hostname"; }) : TOP_ZERO, "setting");
+  if (variant && body.Hostname !== undefined && body.Hostname !== "" && body.Hostname !== variant.hostname) deny("the hostname is fixed");
   if (body.Image !== policy.image) deny("only the worker's image may be started");
   if (body.User !== policy.user) deny("the sandbox user is fixed");
   if (body.WorkingDir !== undefined && body.WorkingDir !== "" && !inside(body.WorkingDir)) deny("the working folder must be inside the workspace");
@@ -272,12 +305,15 @@ function transformCreate(query, text) {
   if (typeof labels["agentx.task"] !== "string" || labels["agentx.task"] === "") deny("a sandbox carries its task's label");
   const kept = {};
   Object.keys(labels).forEach(function (key) {
+    // The run's own four labels pass through only for a services variant, and only as the variant already checked them.
+    if (variant && variant.runLabels.hasOwnProperty(key)) { kept[key] = variant.runLabels[key]; return; }
     if (key.indexOf("rovara.") === 0) return;
     if (typeof labels[key] !== "string" || labels[key].length > 512) deny("labels are not valid");
     kept[key] = labels[key];
   });
   kept[OWNER] = policy.owner;
-  kept[SANDBOX] = "1";
+  kept[SANDBOX] = variant ? "service" : "1";
+  if (variant) kept[PROFILE_LABEL] = "check";
   ["Tty", "OpenStdin", "AttachStdin", "AttachStdout", "AttachStderr", "StdinOnce"].forEach(function (key) { if (body[key] !== undefined && body[key] !== null && typeof body[key] !== "boolean") deny(key + " is not valid"); });
   if (body.StopSignal !== undefined && body.StopSignal !== null && (typeof body.StopSignal !== "string" || !/^[A-Za-z0-9]{0,16}$/.test(body.StopSignal))) deny("StopSignal is not valid");
   if (body.StopTimeout !== undefined && body.StopTimeout !== null && !(typeof body.StopTimeout === "number" && body.StopTimeout >= 0 && body.StopTimeout <= 600)) deny("StopTimeout is not valid");
@@ -295,12 +331,14 @@ function transformCreate(query, text) {
     AttachStdout: body.AttachStdout === true,
     AttachStderr: body.AttachStderr === true,
     StdinOnce: body.StdinOnce === true,
-    HostConfig: buildHostConfig(body.HostConfig, false),
+    HostConfig: buildHostConfig(body.HostConfig, variant ? { kind: "check", variant: variant } : { kind: "sandbox" }),
     NetworkingConfig: { EndpointsConfig: {} },
   };
+  if (variant && body.Hostname) out.Hostname = body.Hostname;
   if (typeof body.StopSignal === "string" && body.StopSignal !== "") out.StopSignal = body.StopSignal;
   if (typeof body.StopTimeout === "number") out.StopTimeout = body.StopTimeout;
-  out.NetworkingConfig.EndpointsConfig[policy.network] = {};
+  if (variant) out.NetworkingConfig.EndpointsConfig[variant.network] = { IPAMConfig: { IPv4Address: variant.address } };
+  else out.NetworkingConfig.EndpointsConfig[policy.network] = {};
   return JSON.stringify(out);
 }
 
@@ -377,7 +415,7 @@ function transformDevcontainerCreate(query, text) {
     AttachStdout: body.AttachStdout === true,
     AttachStderr: body.AttachStderr === true,
     StdinOnce: body.StdinOnce === true,
-    HostConfig: buildHostConfig(body.HostConfig, true),
+    HostConfig: buildHostConfig(body.HostConfig, { kind: "devcontainer" }),
     NetworkingConfig: { EndpointsConfig: {} },
   };
   if (typeof body.StopSignal === "string" && body.StopSignal !== "") out.StopSignal = body.StopSignal;
@@ -388,12 +426,19 @@ function transformDevcontainerCreate(query, text) {
 
 // The body of a command, rebuilt: never privileged, and only the fields below. "who" says whose command it is, as a tagged
 // kind so that a new kind of container is a new branch here and never a boolean that quietly widens an old one:
-//   { kind: "sandbox" }       the worker's own sandbox: the sandbox's user whatever was asked;
-//   { kind: "devcontainer" }  a dev container: its own remote user, named plainly (root included, see the docs).
-// Any other value is refused, so a caller that is not updated with a new kind fails closed.
+//   { kind: "sandbox" }                         the worker's own sandbox: the sandbox's user whatever was asked;
+//   { kind: "service", user: "<uid>:<gid>" }    a test service container: ITS OWN configured user, forced, which must be the one allowed shape (a non-zero number for both, never the socket's group);
+//   { kind: "devcontainer" }                    a dev container: its own remote user, named plainly (root included, see the docs). Only this kind may name root.
+// Any other value, and no value, is refused, so a caller that is not updated with a new kind fails closed.
 function checkExecBody(text, who) {
-  const dev = who !== null && typeof who === "object" && who.kind === "devcontainer";
-  if (!dev && !(who !== null && typeof who === "object" && who.kind === "sandbox")) deny("the kind of container for this command is not known");
+  if (who === null || typeof who !== "object") deny("the kind of container for this command is not known");
+  const dev = who.kind === "devcontainer";
+  let fixedUser = policy.user;
+  if (who.kind === "service") {
+    const refusal = serviceUserRefusal(who.user);
+    if (refusal !== undefined) deny(refusal);
+    fixedUser = who.user;
+  } else if (!dev && who.kind !== "sandbox") deny("the kind of container for this command is not known");
   let body;
   try { body = JSON.parse(text); } catch (error) { deny("the body is not JSON"); }
   if (body === null || typeof body !== "object" || Array.isArray(body)) deny("the body is not an object");
@@ -403,15 +448,15 @@ function checkExecBody(text, who) {
   });
   if (body.Privileged !== undefined && body.Privileged !== false && body.Privileged !== null) deny("privileged exec is not allowed");
   if (body.ConsoleSize !== undefined && !emptyish(body.ConsoleSize)) deny("exec setting ConsoleSize is not allowed");
-  // A sandbox's command runs as the sandbox user. A dev container's runs as its own remote user (the image's), named plainly; never privileged.
+  // A sandbox's command runs as the sandbox user and a service container's as its own user. A dev container's runs as its own remote user (the image's), named plainly; never privileged.
   if (dev) { if (body.User !== undefined && body.User !== null && (typeof body.User !== "string" || !DEV_USER.test(body.User))) deny("the command user is not valid"); }
-  else if (body.User !== undefined && body.User !== "" && body.User !== policy.user && body.User !== policy.user.split(":")[0]) deny("a command runs as the sandbox user");
+  else if (body.User !== undefined && body.User !== "" && body.User !== fixedUser && body.User !== fixedUser.split(":")[0]) deny("a command runs as the sandbox user");
   if (!stringList(body.Cmd, 4096) || body.Cmd.length === 0) deny("Cmd is not valid");
   if (body.Env !== undefined && body.Env !== null && !stringList(body.Env, 500)) deny("Env is not valid");
   if (body.WorkingDir !== undefined && body.WorkingDir !== null && (typeof body.WorkingDir !== "string" || body.WorkingDir.length > 4096 || body.WorkingDir.indexOf("\0") !== -1)) deny("WorkingDir is not valid");
   if (body.DetachKeys !== undefined && body.DetachKeys !== null && (typeof body.DetachKeys !== "string" || !/^[A-Za-z0-9,@^\\[\]_-]{0,32}$/.test(body.DetachKeys))) deny("DetachKeys is not valid");
   ["AttachStdin", "AttachStdout", "AttachStderr", "Tty"].forEach(function (key) { if (body[key] !== undefined && body[key] !== null && typeof body[key] !== "boolean") deny(key + " is not valid"); });
-  const out = { AttachStdin: body.AttachStdin === true, AttachStdout: body.AttachStdout === true, AttachStderr: body.AttachStderr === true, Tty: body.Tty === true, Cmd: body.Cmd, User: dev ? (typeof body.User === "string" ? body.User : "") : policy.user, Privileged: false };
+  const out = { AttachStdin: body.AttachStdin === true, AttachStdout: body.AttachStdout === true, AttachStderr: body.AttachStderr === true, Tty: body.Tty === true, Cmd: body.Cmd, User: dev ? (typeof body.User === "string" ? body.User : "") : fixedUser, Privileged: false };
   if (Array.isArray(body.Env)) out.Env = body.Env;
   if (typeof body.WorkingDir === "string" && body.WorkingDir !== "") out.WorkingDir = body.WorkingDir;
   if (typeof body.DetachKeys === "string" && body.DetachKeys !== "") out.DetachKeys = body.DetachKeys;
@@ -522,10 +567,13 @@ async function route(request, response) {
     Object.keys(filters).forEach(function (key) { filters[key] = asMap(filters[key]); });
     filters.label = filters.label || {};
     filters.label[OWNER + "=" + policy.owner] = true;
-    filters.label[SANDBOX + "=1"] = true;
+    // With test services on, a listing that asks for the run's own family label sees the run's service containers (and only those); every other listing sees the sandboxes, as before.
+    filters.label[SANDBOX + "=" + (SVC !== null && asksForRunFamily(filters.label) ? SERVICE_CLASS : "1")] = true;
     query.set("filters", JSON.stringify(filters));
     return forward(request, response, rebuilt("/containers/json", query));
   }
+
+  if (SVC !== null && method === "POST" && path === "/containers/create" && SERVICE_CONTAINER_NAME.test(query.get("name") || "")) return serviceCreate(request, response, query);
 
   if (method === "POST" && path === "/containers/create") {
     const text = await readBody(request);
@@ -565,7 +613,7 @@ async function route(request, response) {
     if (method !== wants) deny("method not allowed");
     const allowedQuery = { json: ["size"], logs: ["follow", "stdout", "stderr", "since", "until", "timestamps", "tail"], start: ["detachKeys"], stop: ["t", "signal"], kill: ["signal"], restart: ["t", "signal"], wait: ["condition"] }[verb];
     onlyQuery(query, allowedQuery);
-    const id = await ownedContainer(decodeURIComponent(match[1]));
+    const id = await ownedId(decodeURIComponent(match[1]));
     if (id === undefined) return send(response, 404, "no such sandbox of this worker");
     return forward(request, response, rebuilt("/containers/" + id + "/" + verb, query));
   }
@@ -573,7 +621,7 @@ async function route(request, response) {
   match = /^\/containers\/([^/]+)$/.exec(path);
   if (match !== null && method === "DELETE") {
     onlyQuery(query, ["force", "v"]);
-    const id = await ownedContainer(decodeURIComponent(match[1]));
+    const id = await ownedId(decodeURIComponent(match[1]));
     if (id === undefined) return send(response, 404, "no such sandbox of this worker");
     return forward(request, response, rebuilt("/containers/" + id, query));
   }
@@ -581,11 +629,18 @@ async function route(request, response) {
   match = /^\/containers\/([^/]+)\/exec$/.exec(path);
   if (match !== null && method === "POST") {
     onlyQuery(query, []);
-    const info = await ownedInfo(decodeURIComponent(match[1]));
-    if (info === undefined) return send(response, 404, "no such sandbox of this worker");
-    const id = info.id;
+    const found = await ownedFound(decodeURIComponent(match[1]));
+    if (found === undefined) return send(response, 404, "no such sandbox of this worker");
+    const id = found.id;
+    // A sandbox takes a command as the sandbox user, a dev container as its own remote user, a service container as its own configured non-root user (the guard forces it); the resolver guard, the one root container, takes none at all.
+    let kind;
+    if (found.class === "sandbox") kind = { kind: "sandbox" };
+    // A dev container takes a command only where dev containers are on (as an attach does): a leftover one on an install that turned them off is not served.
+    else if (found.class === "dev" && DEV !== undefined) kind = { kind: "devcontainer" };
+    else if (found.class === "service" && found.profile !== "resolver") kind = { kind: "service", user: found.execUser };
+    else deny("this container takes no command");
     const text = await readBody(request);
-    return forward(request, response, "/containers/" + id + "/exec", checkExecBody(text, info.devcontainer ? { kind: "devcontainer" } : { kind: "sandbox" }), function (status, answer) {
+    return forward(request, response, "/containers/" + id + "/exec", checkExecBody(text, kind), function (status, answer) {
       if (status !== 201) return;
       const created = JSON.parse(answer);
       if (typeof created.Id === "string" && NAME.test(created.Id)) {
@@ -614,7 +669,7 @@ async function route(request, response) {
     onlyQuery(query, []);
     let name;
     try { name = decodeURIComponent(match[1]); } catch (error) { deny("image name is not valid"); }
-    if (name !== policy.image && imageRefusal(name) !== undefined) deny("only the worker's image, or a dev container's image from a listed registry, may be inspected");
+    if (name !== policy.image && !(SVC !== null && serviceImageMayBeInspected(name)) && imageRefusal(name) !== undefined) deny("only the worker's image, a test service's catalog image, or a dev container's image from a listed registry, may be inspected");
     return forward(request, response, "/images/" + encodeURIComponent(name) + "/json");
   }
 
@@ -657,10 +712,16 @@ async function route(request, response) {
 
   match = /^\/networks\/([^/]+)$/.exec(path);
   if (match !== null && method === "GET") {
+    if (SVC !== null && decodeURIComponent(match[1]) !== policy.network) return serviceNetworkInspect(request, response, query, decodeURIComponent(match[1]));
     onlyQuery(query, []);
     if (decodeURIComponent(match[1]) !== policy.network) deny("only the sandbox network may be inspected");
     return forward(request, response, "/networks/" + encodeURIComponent(policy.network));
   }
+  if (SVC !== null) {
+    if (await serviceNetworkRoute(request, response, method, path, query)) return;
+  }
+
+  if (SVC !== null && (await serviceContainerRoute(request, response, method, path, query))) return;
 
   deny("this request is not allowed");
 }
@@ -677,49 +738,61 @@ function onRequest(request, response) {
   });
 }
 
+// An attach upgrade: ONE dispatcher that looks the container up once and hands it to the rule of its own class. A service container gets the service rule (no stdin) and only where test services are on; a sandbox or a dev
+// container gets the dev container rule (the dev container tool attaches to the container it just made) and only where dev containers are on. A class is never handed to the other's rule, and with both on neither
+// shadows the other.
+function attachUpgrade(request, socket, head, target, reference, refuse) {
+  let decoded = "";
+  try { decoded = decodeURIComponent(reference); } catch (error) { decoded = ""; }
+  socket.on("error", function () {});
+  socket.pause();
+  ownedFound(decoded).then(function (found) {
+    if (found === undefined) return refuse("404 Not Found", "no such container of this worker");
+    if (found.class === "service" && SVC !== null) return serviceAttach(request, socket, head, target, found, refuse);
+    if ((found.class === "sandbox" || found.class === "dev") && DEV !== undefined) return devAttach(request, socket, head, target, found, refuse);
+    log("refused", { method: request.method, route: "attach", rule: "no attach for this kind of container" });
+    return refuse("403 Forbidden", "this attach is not allowed");
+  }).catch(function () { refuse("502 Bad Gateway", "the request could not be handled"); });
+}
+
 // A dev container's docker run attaches to the container it just made (its output is the start-up line). Only the attach of an owned container, with the options below and no body; the guard sends the daemon a request
 // of its own making and passes bytes on only after the daemon has answered 101.
-function onAttach(request, socket, head, target, reference, refuse) {
+function devAttach(request, socket, head, target, found, refuse) {
   const allowed = ["stream", "stdin", "stdout", "stderr", "logs", "detachKeys"];
-  let reference_;
-  try { reference_ = decodeURIComponent(reference); } catch (error) { reference_ = ""; }
   const bad = Array.from(target.searchParams.keys()).some(function (key) { return allowed.indexOf(key) === -1; });
   const length = request.headers["content-length"] === undefined ? 0 : Number(request.headers["content-length"]);
   if (request.method !== "POST" || bad || request.headers["transfer-encoding"] !== undefined || length !== 0 || (head && head.length > 0)) {
     log("refused", { method: request.method, route: "upgrade", rule: "not an attach of this worker" });
     return refuse("403 Forbidden", "this upgrade is not allowed");
   }
-  ownedContainer(reference_).then(function (id) {
-    if (id === undefined) return refuse("404 Not Found", "no such sandbox of this worker");
-    socket.on("error", function () {});
-    const upstream = net.connect({ path: policy.upstream });
-    let answer = Buffer.alloc(0);
-    upstream.on("error", function () { socket.destroy(); });
-    socket.on("close", function () { upstream.destroy(); });
-    upstream.on("close", function () { socket.destroy(); });
-    upstream.on("connect", function () {
-      const query = new URLSearchParams();
-      allowed.forEach(function (key) { if (target.searchParams.has(key)) query.set(key, target.searchParams.get(key)); });
-      const text = query.toString();
-      upstream.write("POST /containers/" + id + "/attach" + (text === "" ? "" : "?" + text) + " HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n");
-    });
-    upstream.on("data", function onAnswer(chunk) {
-      answer = Buffer.concat([answer, chunk]);
-      if (answer.length > 16384) return upstream.destroy();
-      if (answer.indexOf("\r\n\r\n") === -1) return;
-      upstream.removeListener("data", onAnswer);
-      upstream.pause();
-      if (!/^HTTP\/1\.1 101 /.test(answer.subarray(0, 16).toString("latin1"))) {
-        socket.end(answer);
-        upstream.destroy();
-        return;
-      }
-      socket.write(answer);
-      socket.pipe(upstream);
-      upstream.pipe(socket);
-      upstream.resume();
-    });
-  }).catch(function () { refuse("502 Bad Gateway", "the request could not be handled"); });
+  const upstream = net.connect({ path: policy.upstream });
+  let answer = Buffer.alloc(0);
+  upstream.on("error", function () { socket.destroy(); });
+  socket.on("close", function () { upstream.destroy(); });
+  upstream.on("close", function () { socket.destroy(); });
+  upstream.on("connect", function () {
+    const query = new URLSearchParams();
+    allowed.forEach(function (key) { if (target.searchParams.has(key)) query.set(key, target.searchParams.get(key)); });
+    const text = query.toString();
+    upstream.write("POST /containers/" + found.id + "/attach" + (text === "" ? "" : "?" + text) + " HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n");
+  });
+  upstream.on("data", function onAnswer(chunk) {
+    answer = Buffer.concat([answer, chunk]);
+    if (answer.length > 16384) return upstream.destroy();
+    if (answer.indexOf("\r\n\r\n") === -1) return;
+    upstream.removeListener("data", onAnswer);
+    upstream.pause();
+    if (!/^HTTP\/1\.1 101 /.test(answer.subarray(0, 16).toString("latin1"))) {
+      socket.end(answer);
+      upstream.destroy();
+      return;
+    }
+    socket.write(answer);
+    socket.pipe(upstream);
+    upstream.pipe(socket);
+    socket.resume();
+    upstream.resume();
+  });
 }
 
 // A command's input and output travel over an upgraded connection (docker exec). Nothing the client sends reaches the daemon unread:
@@ -733,7 +806,7 @@ function onUpgrade(request, socket, head) {
   const target = new URL(request.url || "/", "http://docker");
   const path = target.pathname.replace(/^\/v[0-9]+(\.[0-9]+)?(?=\/)/, "");
   const attach = /^\/containers\/([^/]+)\/attach$/.exec(path);
-  if (attach !== null && DEV !== undefined) return onAttach(request, socket, head, target, attach[1], refuse);
+  if (attach !== null && (SVC !== null || DEV !== undefined)) return attachUpgrade(request, socket, head, target, attach[1], refuse);
   const match = /^\/exec\/([^/]+)\/start$/.exec(path);
   let id = "";
   try { id = match === null ? "" : decodeURIComponent(match[1]); } catch (error) { id = ""; }
@@ -795,6 +868,7 @@ function onUpgrade(request, socket, head) {
   else socket.on("data", onData);
 }
 
+${DOCKER_SOCKET_GUARD_SERVICES_SOURCE}
 function createServer() {
   const server = http.createServer({ maxHeaderSize: 16384 }, onRequest);
   server.on("upgrade", onUpgrade);
@@ -811,7 +885,7 @@ function main() {
 }
 
 if (process.env.ROVARA_SOCK_LIBRARY === "1") {
-  module.exports = { transformCreate: transformCreate, transformDevcontainerCreate: transformDevcontainerCreate, imageRefusal: imageRefusal, checkExecBody: checkExecBody, createServer: createServer, Refusal: Refusal, policy: policy };
+  module.exports = { transformCreate: transformCreate, transformDevcontainerCreate: transformDevcontainerCreate, imageRefusal: imageRefusal, checkExecBody: checkExecBody, buildHostConfig: buildHostConfig, createServer: createServer, Refusal: Refusal, policy: policy, services: SVC === null ? null : servicesLibrary() };
 } else {
   main();
 }

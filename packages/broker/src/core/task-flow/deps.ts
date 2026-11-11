@@ -1,5 +1,6 @@
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
+import type { TaskTestEnvironment } from "../test-env/seam.js";
 import type {
   Admission,
   AgentXErrorCode,
@@ -263,6 +264,11 @@ export interface TaskFlowDeps {
   secondReview?: Pick<SecondReview, "prepare" | "opinionOf" | "prLines" | "mergeWait" | "operationEnded" | "releaseHold">;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
+  /**
+   * The project's approved test environment, as the flow uses it: a starting task pins the newest usable revision, and a coding or verification run is told the plan of the revision it pinned (its checks, selection,
+   * budget and dependencies). Absent: no task uses an environment and every payload is what it was.
+   */
+  testEnvironment?: TaskTestEnvironment;
   /** The company's rules and the project's How we work, put in front of every step that reads them. Absent: no block (the step is exactly what it was before). */
   standingInstructions?: StandingInstructionsSeam;
   /** Whether a message to a running step is handed to the worker as it is sent (the kill switch, default on). Off: a message is a note, read by the next step. */

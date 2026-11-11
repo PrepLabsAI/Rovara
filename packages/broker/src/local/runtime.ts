@@ -33,7 +33,7 @@ import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.j
 import { MemoryQueueService } from "../ports/memory-queue.js";
 import { createLocalLearningAdapter } from "../lessons/local-embedder.js";
 import { localLessonsEnabled } from "../lessons/switch.js";
-import { DocumentAuditSink, FileCompanyInstructions, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService, startAuditCopy, startAuditCopyFromPrimary } from "@agentx/local-adapters";
+import { DocumentAuditSink, FileCompanyInstructions, createIntervalScheduler, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService, startAuditCopy, startAuditCopyFromPrimary } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import type { BrowserOpener } from "./open-browser.js";
@@ -76,6 +76,10 @@ import {
   writeOwnerFile,
 } from "./state-directory.js";
 import { THIS_MACHINE_ADAPTER_NAME, ThisMachineWorkerMachines } from "./this-machine-worker-machines.js";
+import { prepareLocalTestServices } from "./test-services-install.js";
+import { createDockerImageRegistry } from "./docker-image-registry.js";
+import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
+import { releaseServiceCatalogSource } from "../core/test-env/shipped-catalog.js";
 
 /** The model providers whose keys `rovara up` looks for (the environment variable is `<PROVIDER>_API_KEY`). */
 export const LOCAL_MODEL_PROVIDERS = ["anthropic", "openai", "openrouter"] as const;
@@ -413,6 +417,17 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     }
   }
 
+  const runner = options.docker ?? createDockerRunner(options.environment);
+  // Saved environments (off unless `ROVARA_SAVED_ENVIRONMENTS=1`): the image registry is one labelled container on the owner's Docker, published on the loopback address only, started when first used. A configured
+  // `image-registry` plug-in replaces it. The worker's socket guard does not yet allow an image to be built, pushed or pulled, so the adapter says the worker cannot, and no image is queued or named to one.
+  if (savedEnvEnabled(options.environment) && !configured("image-registry")) {
+    const images = createDockerImageRegistry({ docker: runner, stateDirectory });
+    closers.push(async () => { await images.stop(); });
+    registry.unregister("image-registry", "none");
+    registry.register("image-registry", "docker", images, { isDefault: true });
+  }
+  // Test services (off unless `ROVARA_TEST_SERVICES=1`): the catalog's images are pulled on the host and the worker is told what it may start. Anything missing leaves the worker offering none.
+  const testServices = await prepareLocalTestServices({ environment: options.environment, stateDirectory, docker: runner, log: (entry) => console.log(JSON.stringify(entry)) });
   // Worker machines. The callback listener's port is not known until the handler exists, so it is read when a machine starts.
   const callbackServer: { current?: CallbackServer } = {};
   // The hosts the owner approved for a setup run: read at each machine start (the app is made after the machines, so it is read late).
@@ -432,7 +447,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // Port lane P6 (item B1): what the registered build-system adapters supply (extra detectors, setup programs) goes to the worker's start-up environment; read late, because the config's adapters load after this.
     buildSystems: () => collectBuildSystemProfiles(registry),
     signer: await loadInvokeSigner(stateDirectory),
-    docker: options.docker ?? createDockerRunner(options.environment),
+    docker: runner,
+    ...(testServices.services === undefined ? {} : { testServices: testServices.services }),
     ...(options.workerFetch === undefined ? {} : { fetch: options.workerFetch }),
   });
   registry.register("worker-machines", DOCKER_ADAPTER_NAME, docker);
@@ -455,6 +471,15 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
 
   options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, stateDirectory, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
+  // The scheduler (the nightly test run): a timer inside this process, its schedules kept in the same store so a restart keeps them. A configured `scheduler` plug-in replaces it. Made after the config's adapters are loaded, because it keeps its schedules in the storage adapter that may be one of them. Nothing fires until a
+  // handler subscribes, which the app does at start-up (and not at all with the timers off).
+  if (!configured("scheduler")) {
+    const scheduler = createIntervalScheduler({ store: registry.require("storage"), ...(options.now === undefined ? {} : { now: () => (options.now as () => Date)().getTime() }) });
+    closers.push(async () => { await scheduler.close?.(); });
+    registry.unregister("scheduler", "none");
+    registry.register("scheduler", "interval", scheduler, { isDefault: true });
+  }
+
   // Item K2: each provider is checked as a whole (an address that is not https, a header the proxy owns, a vertex variant on the wrong format), then its prices join the metering table.
   const providerRows = registry.names("model-provider").map((name) => registry.require("model-provider", name));
   for (const provider of providerRows) {
@@ -511,6 +536,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // The model proxy is made after the servers (it is served on the callback listener); the app asks it, late, to forget an operation that ended.
     operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
     scriptTokensEnabled: () => scriptTokensEnabled(options.environment),
+    ...(testServices.catalog === undefined ? {} : { serviceCatalog: releaseServiceCatalogSource(options.environment) }),
     modelCalls: (operationId) => modelProxyHolder.current?.tokens.calledAliases(operationId),
     slotKeys: () => modelProxyHolder.current?.slotKeys,
     // A diagnosis calls its model through the proxy over the listener's loopback port (both are made after the app).

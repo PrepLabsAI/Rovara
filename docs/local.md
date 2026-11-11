@@ -231,6 +231,33 @@ by path). The worker runs as user 1000, so the folder is mode `0777`; its parent
 On a Linux host whose user is not 1000 that is why the folder needs the open mode. On Docker Desktop and Colima only folders under
 your home are shared with the VM, which is where the state folder is.
 
+### Test services and saved environments on the Docker worker (both off by default)
+
+**Test services** (`ROVARA_TEST_SERVICES=1`). With a registry to take the service images from (`ROVARA_TEST_SERVICES_REGISTRY`, and `ROVARA_TEST_SERVICES_CATALOG_ENV`, default `local`) and a signed service catalog this release
+trusts (`ROVARA_SERVICE_CATALOG_DIR`, else `./service-catalog`: `catalog.json` and `catalog.sig.json`), `rovara up` pulls the catalog's images by digest on the host (only what the catalog pins; images you already had are
+never removed) and starts the worker with test services configured. The worker then makes an internal Docker network per run, starts the pinned images on it, and runs a sealed check sandbox on that network alone. It can do this because
+the Docker socket guard (`packages/broker/src/local/isolation`) gains narrow rules, only for installs that turned services on. The guard accepts only these shapes: networks named `rovara-svc-<hex>` on `172.30.<slot>.0/24`, internal, with the
+run's labels; catalog helpers from exactly the pulled references, as a fixed non-root user; worker-image programs from files shipped in the worker image; the sealed check sandbox; and the resolver guard. The resolver guard is the one root
+container with NET_ADMIN: it runs from the worker's pinned image with one of two fixed commands, in the namespace of the worker's own check sandbox. Run files (including per-run passwords, mode 0600, short-lived) live in
+`<state folder>/test-services/<worker>`, which sandboxes never mount. The guard never mounts a path the worker could have changed: a file that goes into a service container is opened without following links, must be a plain file of the run folder (4 MiB at most), and is copied by the guard into its own folder, and the container gets the copy. A service container runs only as a non-root user and group of the same number, never the Docker socket's group; a worker program's environment never carries node options, shell start files or preloads. The guard makes each run network itself without an address on the host's side (so a container on it has no route to a service of the host or the VM), and refuses a network that has one. The guard keeps its copies of run files for an hour after the last use and then removes them. IPv6 is off in service containers and in the sealed check sandbox. Service containers together may not ask for more than three quarters of the machine's memory. A project's dev container is never joined to a run network, and each kind of container (task sandbox, dev container, service container) is told apart by the guard's own labels and held to its own rules for a command and an attach: a service container takes a command only as its own non-root user and no input on an attach. `rovara up` refuses to start test services when the host already has an address in `172.30.0.0/16`, the range the run networks use. Builds, pulls, volumes, copies and project images are still refused. **This release ships no catalog signing key**, so until the project names one, test services fail closed
+with a clear sentence: nothing is pulled, the worker offers none, and a run that needs them is refused. Proved on Colima against real Docker (internal network, no route out, a non-listed image refused, the sealed sandbox reaches only its helpers);
+not run on native Linux or Docker Desktop.
+
+**Saved environments** (`ROVARA_SAVED_ENVIRONMENTS=1`). The image registry is one container of the registry image, named `rovara-image-registry-<hash of the state folder>` and labelled `rovara.local.registry=1`. It is published on
+127.0.0.1 only, on a port Docker picks, with its images under `<state folder>/registry`, and started when first used; `rovara up` never touches a container of that name that it did not label. The registry has no authentication, so it is dormant for workers: the adapter refuses to be made with worker access, and the hosted product accepts only the hosted registry's own logins (`HostedSavedEnvRegistryAuthSchema`). Until the worker's socket guard has a rule for image build, push and pull (the build uses a privileged builder container the guard cannot inspect),
+the adapter reports `workerPush` and `workerPull` as false: no image is built or pulled, and tasks set up fresh. The environment key also needs a recursive tree listing the code host port does not have yet, so no rebuild is queued.
+
+**The nightly run and the local scheduler.** `rovara up` registers a timer inside its own process as the `scheduler` adapter (`createIntervalScheduler`, in `@agentx/local-adapters`). It runs UTC five-field crons and "every N minutes",
+checks every 20 seconds, keeps its schedules in the state database so a restart keeps them, and delivers a fire missed while `rovara up` was not running once, late, if it is within an hour (older ones are dropped). It never runs a rule
+differently from what it said: another time zone, or a cron that sets both the day of the month and the day of the week, is refused when the environment is approved. A project's nightly run exists only when `ROVARA_NIGHTLY_HEALTH=1` is set
+and the test environment is not turned off (`ROVARA_TEST_ENVIRONMENT=0`). At each fire the core decides, from what is stored then, whether a model-free full run starts (the project has an approved environment with the nightly on, the default
+branch moved since the last recorded run, no run is in flight, and fewer than 20 hours have passed). This install cannot start that run yet, so a fire is answered "unavailable" and nothing is charged or claimed; the schedule is kept so
+nothing has to move when it can.
+
+**A project's test environment** is proposed with `rovara test-env propose <project> <file>`, read with `rovara test-env show <project>` and approved on its page (`rovara test-env open <project>`): the page shows every value that changes, the
+risk, and whether a Prove run passed, and offers Approve only for a proposal that was proved. Approving is your own act on the page, with a proof the page signs for exactly one request, revision and digest; the API token and the CLI cannot do
+it. A task that starts afterwards pins the approved revision.
+
 ### This machine (`this-machine`)
 
 A stub. Running the worker beside the broker with no container gives task commands your files and accounts, so it is refused unless

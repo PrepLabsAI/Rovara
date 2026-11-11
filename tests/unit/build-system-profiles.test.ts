@@ -54,14 +54,12 @@ describe("a build-system profile", () => {
     expect(BuildSystemProfileSchema.safeParse({ name: "b", setupPrograms: Array.from({ length: 65 }, (_, i) => `p${String(i)}`) }).success).toBe(false);
   });
 
-  it("refuses a non-empty keyFileGlobs for now, with a clear message (no caller uses it yet)", () => {
-    expect(BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED).toBe(false);
-    const refused = BuildSystemProfileSchema.safeParse({ name: "b", keyFileGlobs: ["WORKSPACE"] });
-    expect(refused.success).toBe(false);
-    expect(refused.success ? "" : refused.error.issues[0]?.message).toMatch(/not used yet.*Leave it empty/);
-    expect(() => serializeBuildSystemProfiles([{ name: "b", keyFileGlobs: ["WORKSPACE"] }])).toThrow();
-    expect(() => parseBuildSystemProfiles('[{"name":"b","keyFileGlobs":["WORKSPACE"]}]')).toThrow(/not used yet/);
+  it("accepts a profile's key files, and still refuses an unsafe glob", () => {
+    expect(BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED).toBe(true);
+    expect(BuildSystemProfileSchema.parse({ name: "b", keyFileGlobs: ["WORKSPACE"] }).keyFileGlobs).toEqual(["WORKSPACE"]);
+    expect(parseBuildSystemProfiles(serializeBuildSystemProfiles([{ name: "b", keyFileGlobs: ["WORKSPACE", "tools/**/*.bzl"] }]))[0]?.keyFileGlobs).toEqual(["WORKSPACE", "tools/**/*.bzl"]);
     expect(BuildSystemProfileSchema.safeParse({ name: "b", keyFileGlobs: [] }).success).toBe(true);
+    for (const glob of ["/etc/passwd", "../outside", "a/../b", "", "x\0y"]) expect(BuildSystemProfileSchema.safeParse({ name: "b", keyFileGlobs: [glob] }).success, glob).toBe(false);
   });
 
   it("refuses a shell, or a program that runs other programs, as a setup program (each command would become a step of its own)", () => {

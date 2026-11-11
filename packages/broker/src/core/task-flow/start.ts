@@ -148,6 +148,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
   const ownerKey = taskOwnerKey(developerId, taskId);
   const requestText = storedRequestText(request.instructions);
   const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt });
+  // The approved test environment the task starts with, pinned in the start's own transaction: a later approval changes the NEXT task, never this one.
+  const testEnvironment = asWorkflow ? await deps.testEnvironment?.forStart({ project: request.project, taskId }) : undefined;
 
   // The project's playbook is read now, at the head of the default branch, and the task keeps the commit: every step of this task reads the file at it, so one task runs under one playbook. A file that cannot be
   // used, or a host that does not answer, refuses the start with the reason: a task is never started under rules it cannot be given.
@@ -188,7 +190,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     ...(extras?.sessionId === undefined ? {} : { sessionId: extras.sessionId }),
     ...(run?.setupAgent === undefined ? {} : { purpose: "setup_agent" as const, setupAgentLimits: run.setupAgent.limits }),
     ...(asWorkflow ? { workflow: createWorkflowSnapshot({
-      taskId, ownerId: ownerKey, now: receivedAt, path: workflowPath, checkPolicy: taskWorkflowCheckPolicy(project.definition),
+      taskId, ownerId: ownerKey, now: receivedAt, path: workflowPath, checkPolicy: taskWorkflowCheckPolicy(project.definition, testEnvironment?.environment),
       // A 1.1.0 workflow alone may hold the Understand stage: it starts at UNDERSTAND/READY, and says whether the request or Understand chose the path.
       ...(understandFirst ? { definitionVersion: "1.1.0" as const, understand: true, pathFrom: request.workflowPath === undefined ? "understand" as const : "request" as const } : {}),
       // Rovara Code's own sequence (plan, plan check, coding, checks, reviews, pull request): the plan check reads each coding plan before a person sees it.
@@ -219,6 +221,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     // A task that understands first starts by understanding the request, as a dispatch row like every automatic step; it runs once the preparation has ended.
     ...(understandFirst ? [dispatchRowItem(deps, taskId, 1, "UNDERSTAND", receivedAt)] : []),
     ...(extras?.items ?? []),
+    ...(testEnvironment?.pin === undefined ? [] : [testEnvironment.pin]),
     ...(run?.setupAgent === undefined ? [] : [setupAgentPointerItem({ orgId: deps.companyId, project: request.project, taskId, requestId: request.requestId, requestedBy: developerIdOf(principal), basedOnRevision: revision, startedAt: receivedAt, limits: run.setupAgent.limits, seenTaskId: run.setupAgent.seenTaskId })]),
   ];
   const idempotencyIndex = (items: readonly TransactItem[]): number => items.findIndex((item) => item.kind === "put" && item.item.pk === idempotencyKey.pk && item.item.sk === idempotencyKey.sk);

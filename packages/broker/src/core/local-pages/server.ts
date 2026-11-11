@@ -11,7 +11,7 @@ import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import type { ApprovalProof } from "@agentx/contracts";
 import { FailureLimiter, FormTokens, LocalPageSessions, refuseRequest, type FormBinding } from "./guard.js";
 import { pagePolicy } from "./html.js";
-import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, type PageContext } from "./pages.js";
+import { renderDesignReview, renderIndex, renderLessons, renderPlanPage, renderProof, renderScriptTokens, renderSecondReview, renderChat, renderTestEnvironment, type PageContext } from "./pages.js";
 import { renderHowWeWork, renderHowWeWorkIndex } from "./how-we-work-page.js";
 import { renderSetupIndex, renderSetupPage } from "./setup-page.js";
 import type { ApprovalOffer, LocalActionResult, LocalPageActions, LocalPageData, SecondReviewPageAction } from "./views.js";
@@ -71,6 +71,7 @@ const NOTICES: Record<string, string> = {
   lessonrepo: "Saved. A switched-on repository gets its first pull request within a day.",
   lessonfresh: "Switching a repository's lessons file on needs a page you opened in the last few minutes. Run `rovara open lessons` to open one.",
   revoked: "That script token is revoked.",
+  envapproved: "Approved. Tasks that start from now on use it.",
   linked: "That chat account is linked to you.",
   unlinked: "That chat account is no longer linked.",
   bound: "That space is bound to the project.",
@@ -200,7 +201,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     return [...value].length > TEXT_MAX ? [...value].slice(0, TEXT_MAX).join("") : value;
   };
   const tokenPageIsFresh = (request: Req): boolean => now() - request.session.createdAt <= SCRIPT_TOKEN_FRESH_MS;
-  const offerOf = (request: Req, kind: "plan" | "design" | "setup"): ApprovalOffer | undefined => {
+  const offerOf = (request: Req, kind: "plan" | "design" | "test-environment" | "setup"): ApprovalOffer | undefined => {
     const revision = Number(request.form?.get("revision"));
     const requestId = request.form?.get("requestId") ?? "";
     const artifactDigest = request.form?.get("digest") ?? "";
@@ -360,6 +361,19 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "lesson.act", subject: `${lessonId}:${action}:${lesson.status}`, ...(offer === undefined ? {} : { requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest }) })) return redirect(`${request.base}/lessons?n=form`);
       const result = await options.actions.lessonAction({ lessonId, action, ...(offer === undefined ? {} : { offer, proof: proofFor(request, offer) }) });
       return redirect(`${request.base}/lessons?n=${outcomeCode(result, "lesson")}`);
+    } },
+    { method: "GET", pattern: /^\/test-environment\/([A-Za-z0-9._-]{1,100})$/, handle: async (request, match) => {
+      const view = await options.data.getTestEnvironmentPage?.(match[1] ?? "");
+      return view === undefined ? notFound() : page(request, (context) => renderTestEnvironment(context, view));
+    } },
+    { method: "POST", pattern: /^\/test-environment\/([A-Za-z0-9._-]{1,100})\/decide$/, handle: async (request, match) => {
+      const project = match[1] ?? "";
+      const back = `${request.base}/test-environment/${encodeURIComponent(project)}`;
+      const offer = offerOf(request, "test-environment");
+      if (offer === undefined || options.actions.decideTestEnvironment === undefined) return redirect(`${back}?n=invalid`);
+      if (!verified(request, { action: "testenv.decide", taskId: project, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })) return redirect(`${back}?n=form`);
+      const result = await options.actions.decideTestEnvironment({ project, approval: offer, proof: proofFor(request, offer) });
+      return redirect(`${back}?n=${outcomeCode(result, "envapproved")}`);
     } },
     { method: "GET", pattern: /^\/tokens$/, handle: async (request) => {
       const view = await options.data.listScriptTokens?.();

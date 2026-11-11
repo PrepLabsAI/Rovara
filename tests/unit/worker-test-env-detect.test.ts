@@ -1,4 +1,4 @@
-// Test environment (wire-testenv): the worker's draft of the project's test environment from the files of a setup draft's workspace (default branch only, links never followed, bounded).
+// Test environment: the worker's draft of the project's test environment from the files of a setup draft's workspace (default branch only, links never followed, bounded).
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

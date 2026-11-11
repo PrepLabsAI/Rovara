@@ -53,11 +53,10 @@ export const BuildSystemModuleSchema = z.string().min(1).max(256).regex(NO_CONTR
 }, "a package name, or an absolute path to a .js or .mjs file");
 
 /**
- * Whether a profile's `keyFileGlobs` are used. FALSE for now: Code's broker has no saved-environment job builder or environment key yet, so a listed key file would key nothing and a saved environment would go
- * stale after it changed. A non-empty list is refused with a clear message until the saved-environment lane is ported (register: DEFERRED-CHECKS, BUILD-SYSTEM-KEYFILE-GLOBS).
+ * Whether a profile's `keyFileGlobs` are used: TRUE. The saved-environment job builder and the broker's own key (`core/test-env/saved-env-rebuild.ts`, `saved-env-real.ts`) both read them through
+ * `detectorGlobsWithBuildSystems`, from the one function `savedEnvBuildInputsOf`, so the job's `detectorGlobs` and the broker's key hash the same files.
  */
-export const BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED = false as boolean;
-const KEY_FILE_GLOBS_NOT_WIRED = "keyFileGlobs is not used yet: Code has no saved-environment job builder, so a key file listed here would key nothing and a saved environment would go stale without a word. Leave it empty.";
+export const BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED = true as boolean;
 
 export const BuildSystemProfileSchema = z.object({
   /** The build system's name, the same as its adapter's name in the registry. */
@@ -65,9 +64,7 @@ export const BuildSystemProfileSchema = z.object({
   detectorModule: BuildSystemModuleSchema.optional(),
   setupPrograms: z.array(BuildSystemProgramSchema).max(BUILD_SYSTEM_MAX_PROGRAMS).default([]),
   keyFileGlobs: z.array(BuildSystemGlobSchema).max(BUILD_SYSTEM_MAX_KEY_GLOBS).default([]),
-}).strict().superRefine((profile, context) => {
-  if (!BUILD_SYSTEM_KEY_FILE_GLOBS_WIRED && profile.keyFileGlobs.length > 0) context.addIssue({ code: "custom", path: ["keyFileGlobs"], message: KEY_FILE_GLOBS_NOT_WIRED });
-});
+}).strict();
 export type BuildSystemProfile = z.infer<typeof BuildSystemProfileSchema>;
 export type BuildSystemProfileInput = z.input<typeof BuildSystemProfileSchema>;
 
