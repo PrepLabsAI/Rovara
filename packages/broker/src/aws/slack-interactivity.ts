@@ -41,6 +41,8 @@ import {
   type WorkflowCheckPolicy,
   type WorkflowOpenFinding,
   type WorkflowSnapshot,
+  slackModalOf,
+  type ChannelAction,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import {
@@ -69,8 +71,8 @@ import {
   CHATGPT_OPEN_ACTION, CHATGPT_PASTE_ACTION, CHATGPT_PASTE_SUBMISSION, chatGptPasteModal, chatGptSubmission, isHandedOffChatGptFinish, runHandedOffChatGptFinish,
   type HandedOffChatGptFinish,
 } from "./slack-chatgpt.js";
-import { confirmationAction, slackChannelForwarderFromEnvironment } from "./slack-adapter.js";
-import { channelActionOfPress } from "./slack-press-routing.js";
+import { confirmationAction, slackChannelActionClientFromEnvironment, slackChannelForwarderFromEnvironment } from "./slack-adapter.js";
+import { FORM_SLACK_PRESSES, channelActionOfAdminPress, channelActionOfPress, channelActionOfSubmission } from "./slack-press-routing.js";
 import { chatPostEphemeral, slackWebFetch } from "./slack-web.js";
 import { PROJECT_TASKS_DISABLED_TEXT, WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
@@ -144,13 +146,17 @@ export interface SlackInteractivityDependencies {
    * on. Absent, or false: the press is answered here.
    */
   routePress?: (action: SlackBlockAction) => Promise<boolean>;
+  /** Phase 7c3b: a submitted form the core answers; Slack's response to it, or undefined to answer it here. */
+  routeSubmission?: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;
+  /** Phase 7c3b: an admin change's Confirm or Cancel, handed to the core; true when it was. */
+  routeAdminChange?: (press: { changeId: string; click: "confirm" | "cancel"; slackUserId: string; teamId?: string }) => Promise<boolean>;
 }
 
 /** What an admin hears, privately, once a Confirm press is handed to the broker (spec 025 E14). */
 export const ADMIN_CHANGE_RECEIVED_TEXT = "Received. AgentX is applying the change; the message above will show how it went.";
 /** What an admin hears, privately, once a Cancel press is handed to the broker (spec 025 E14). */
 export const ADMIN_CHANGE_CANCEL_RECEIVED_TEXT = "Received. AgentX is dropping the change.";
-const ADMIN_CHANGE_PRESS_FAILED_TEXT = "I couldn't take that press. Press the button again.";
+export const ADMIN_CHANGE_PRESS_FAILED_TEXT = "I couldn't take that press. Press the button again.";
 const CHANGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** What a member hears, privately, for a button this release does not know. */
@@ -187,9 +193,9 @@ export { answeredWorkflowCard };
 /** Said when a Retry review press no longer matches the task's failed review. */
 const FEEDBACK_REVIEW_CHANGED = "This review changed. Use the latest AgentX message.";
 /** The modal that confirms Close task. */
-const WORKFLOW_CLOSE_SUBMISSION = "agentx_workflow_close_submission";
+export const WORKFLOW_CLOSE_SUBMISSION = "agentx_workflow_close_submission";
 /** The modal that answers each blocking review finding of a blocked review. */
-const WORKFLOW_FINDINGS_SUBMISSION = "agentx_workflow_resolve_findings_submission";
+export const WORKFLOW_FINDINGS_SUBMISSION = "agentx_workflow_resolve_findings_submission";
 /** Said privately when the owner confirms Close task; the thread's "closed" follows once the workspace is released. */
 const CLOSING_ACK = "Closing this task. Its workspace is being released; I'll post here when it's closed, usually within two minutes.";
 
@@ -378,6 +384,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 export function createSlackInteractivityHandler(dependencies: SlackInteractivityDependencies) {
   const now = dependencies.now ?? Date.now;
   const log: SlackIngressLog = dependencies.log ?? (() => undefined);
+  const submit = createSlackSubmissionHandler(dependencies);
   return async (event: HttpApiV2Event): Promise<HttpResponse> => {
     const requestStartedAt = now();
     const rawBody = event.body === undefined ? "" : event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body;
@@ -395,62 +402,17 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       return respond(400, { error: "interaction payload is not JSON" });
     }
     if (payload.type === "view_submission") {
-      const callbackId = asRecord(payload.view).callback_id;
-      if (callbackId === CHATGPT_PASTE_SUBMISSION) {
-        if (dependencies.chatgptSubmission === undefined) return respond(200, { response_action: "clear" });
-        return respond(200, await dependencies.chatgptSubmission(payload));
-      }
-      if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_workflow_checks_retry_submission" && callbackId !== "agentx_feedback_review_changes_submission"
-        && callbackId !== WORKFLOW_CLOSE_SUBMISSION && callbackId !== WORKFLOW_FINDINGS_SUBMISSION
-        && callbackId !== "agentx_task_people_submission" && callbackId !== "agentx_task_take_ownership") return respond(200, { response_action: "clear" });
-      // The close confirmation has no input to attach an error to, so a refusal replaces the modal with its reason.
-      if (callbackId === WORKFLOW_CLOSE_SUBMISSION) {
+      if (dependencies.routeSubmission !== undefined) {
         try {
-          if (dependencies.workflow === undefined) throw new WorkflowInteractionRefusal("Closing tasks from Slack is temporarily unavailable. Try again shortly.");
-          await dependencies.workflow.handleSubmission(payload);
-          return respond(200, { response_action: "clear" });
+          const routed = await dependencies.routeSubmission(payload);
+          if (routed !== undefined) return respond(200, routed);
         } catch (error) {
-          log("workflow.submission_failed", { errorName: errorName(error) });
-          return respond(200, { response_action: "update", view: closeRefusedView(error instanceof WorkflowInteractionRefusal ? error.message : "I couldn't close the task. Close this form and try again.") });
+          // The form stays open with the reason on it, so the person can submit again.
+          log("interaction.route_failed", { kind: "submission", errorName: errorName(error) });
+          return respond(200, { response_action: "errors", errors: { [firstInputBlock(asRecord(payload.view)) || "form"]: "I couldn't save this. Try again in a moment." } });
         }
       }
-      if (callbackId === "agentx_task_take_ownership") {
-        try {
-          if (dependencies.workflow === undefined) throw new WorkflowInteractionRefusal("Task People is unavailable.");
-          await dependencies.workflow.handleSubmission(payload);
-          return respond(200, { response_action: "clear" });
-        } catch (error) {
-          log("workflow.submission_failed", { errorName: errorName(error) });
-          const current = asRecord(payload.view);
-          const blocks: unknown[] = Array.isArray(current.blocks) ? current.blocks as unknown[] : [];
-          return respond(200, { response_action: "update", view: { ...current,
-            blocks: [{ type: "section", text: { type: "mrkdwn", text: error instanceof WorkflowInteractionRefusal ? error.message : "Task ownership changed. Close this form and try again." } }, ...blocks] } });
-        }
-      }
-      if (dependencies.workflow === undefined) {
-        log("workflow.submission_failed", { errorName: "WorkflowNotConfigured" });
-        return respond(200, { response_action: "errors", errors: { [callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note" : callbackId === "agentx_workflow_checks_retry_submission" ? "workflow_checks"
-          : callbackId === WORKFLOW_FINDINGS_SUBMISSION ? firstInputBlock(asRecord(payload.view)) : "workflow_feedback"]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
-      }
-      try {
-        await dependencies.workflow.handleSubmission(payload);
-        return respond(200, { response_action: "clear" });
-      } catch (error) {
-        log("workflow.submission_failed", { errorName: errorName(error) });
-        // Each problem with the owner's answers is shown on the input it is about.
-        if (error instanceof WorkflowFormErrors) return respond(200, { response_action: "errors", errors: error.errors });
-        const field = callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note"
-          : callbackId === WORKFLOW_FINDINGS_SUBMISSION ? firstInputBlock(asRecord(payload.view))
-          : callbackId === "agentx_task_people_submission" ? "task_person"
-          : callbackId === "agentx_workflow_checks_retry_submission" || error instanceof WorkflowCheckSelectionRequired ? checksErrorBlock(asRecord(payload.view)) : "workflow_feedback";
-        // A refusal the form can tell (not the owner, another workspace, a step that moved on) reads as itself.
-        const message = error instanceof WorkflowCheckSelectionRequired || error instanceof WorkflowInteractionRefusal
-          ? error.message
-          : callbackId === "agentx_task_people_submission"
-            ? "I couldn't save this role. If they are not in the task channel yet, invite them to the task channel in Slack, then return and choose their task role."
-            : "I couldn't save this decision. Close this form and try again.";
-        return respond(200, { response_action: "errors", errors: { [field]: message } });
-      }
+      return respond(200, await submit(payload));
     }
     if (payload.type !== "block_actions") {
       log("interaction.ignored", { reason: "not_block_actions" });
@@ -468,6 +430,15 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
           log("interaction.respond_failed", { errorName: errorName(error) });
         }
       };
+      if (dependencies.routeAdminChange !== undefined) {
+        try {
+          if (await dependencies.routeAdminChange({ changeId: press.changeId, click: press.click, slackUserId: press.slackUserId, ...(press.teamId === undefined ? {} : { teamId: press.teamId }) })) return respond(200, { ok: true });
+        } catch (error) {
+          log("admin_change.route_failed", { changeId: press.changeId, errorName: errorName(error) });
+          await answer(ADMIN_CHANGE_PRESS_FAILED_TEXT);
+          return respond(200, { ok: true });
+        }
+      }
       const traceId = await adminChange.traceOf?.(press.changeId).catch(() => undefined);
       log("admin_change.press_received", { changeId: press.changeId, ...(traceId === undefined ? {} : { traceId }), click: press.click });
       try {
@@ -552,6 +523,81 @@ export function createSlackPressDispatcher(dependencies: Pick<SlackInteractivity
       }
     }
   };
+}
+
+/**
+ * A submitted modal, answered as Slack's response to it: closed, errors on its inputs, or the modal replaced. Spec 062
+ * Phase 7c3b: the channel API runs this same handler for the forms the Slack adapter hands it.
+ */
+export function createSlackSubmissionHandler(dependencies: Pick<SlackInteractivityDependencies, "workflow" | "chatgptSubmission" | "log">): (payload: Record<string, unknown>) => Promise<Record<string, unknown>> {
+  const log: SlackIngressLog = dependencies.log ?? (() => undefined);
+  return async (payload) => {
+    const callbackId = asRecord(payload.view).callback_id;
+    if (callbackId === CHATGPT_PASTE_SUBMISSION) {
+      if (dependencies.chatgptSubmission === undefined) return { response_action: "clear" };
+      return await dependencies.chatgptSubmission(payload);
+    }
+    if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_workflow_checks_retry_submission" && callbackId !== "agentx_feedback_review_changes_submission"
+      && callbackId !== WORKFLOW_CLOSE_SUBMISSION && callbackId !== WORKFLOW_FINDINGS_SUBMISSION
+      && callbackId !== "agentx_task_people_submission" && callbackId !== "agentx_task_take_ownership") return { response_action: "clear" };
+    // The close confirmation has no input to attach an error to, so a refusal replaces the modal with its reason.
+    if (callbackId === WORKFLOW_CLOSE_SUBMISSION) {
+      try {
+        if (dependencies.workflow === undefined) throw new WorkflowInteractionRefusal("Closing tasks from Slack is temporarily unavailable. Try again shortly.");
+        await dependencies.workflow.handleSubmission(payload);
+        return { response_action: "clear" };
+      } catch (error) {
+        log("workflow.submission_failed", { errorName: errorName(error) });
+        return { response_action: "update", view: closeRefusedView(error instanceof WorkflowInteractionRefusal ? error.message : "I couldn't close the task. Close this form and try again.") };
+      }
+    }
+    if (callbackId === "agentx_task_take_ownership") {
+      try {
+        if (dependencies.workflow === undefined) throw new WorkflowInteractionRefusal("Task People is unavailable.");
+        await dependencies.workflow.handleSubmission(payload);
+        return { response_action: "clear" };
+      } catch (error) {
+        log("workflow.submission_failed", { errorName: errorName(error) });
+        const current = asRecord(payload.view);
+        const blocks: unknown[] = Array.isArray(current.blocks) ? current.blocks as unknown[] : [];
+        return ({ response_action: "update", view: { ...current,
+          blocks: [{ type: "section", text: { type: "mrkdwn", text: error instanceof WorkflowInteractionRefusal ? error.message : "Task ownership changed. Close this form and try again." } }, ...blocks] } });
+      }
+    }
+    if (dependencies.workflow === undefined) {
+      log("workflow.submission_failed", { errorName: "WorkflowNotConfigured" });
+      return ({ response_action: "errors", errors: { [callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note" : callbackId === "agentx_workflow_checks_retry_submission" ? "workflow_checks"
+        : callbackId === WORKFLOW_FINDINGS_SUBMISSION ? firstInputBlock(asRecord(payload.view)) : "workflow_feedback"]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
+    }
+    try {
+      await dependencies.workflow.handleSubmission(payload);
+      return { response_action: "clear" };
+    } catch (error) {
+      log("workflow.submission_failed", { errorName: errorName(error) });
+      // Each problem with the owner's answers is shown on the input it is about.
+      if (error instanceof WorkflowFormErrors) return { response_action: "errors", errors: error.errors };
+      const field = callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note"
+        : callbackId === WORKFLOW_FINDINGS_SUBMISSION ? firstInputBlock(asRecord(payload.view))
+        : callbackId === "agentx_task_people_submission" ? "task_person"
+        : callbackId === "agentx_workflow_checks_retry_submission" || error instanceof WorkflowCheckSelectionRequired ? checksErrorBlock(asRecord(payload.view)) : "workflow_feedback";
+      // A refusal the form can tell (not the owner, another workspace, a step that moved on) reads as itself.
+      const message = error instanceof WorkflowCheckSelectionRequired || error instanceof WorkflowInteractionRefusal
+        ? error.message
+        : callbackId === "agentx_task_people_submission"
+          ? "I couldn't save this role. If they are not in the task channel yet, invite them to the task channel in Slack, then return and choose their task role."
+          : "I couldn't save this decision. Close this form and try again.";
+      return { response_action: "errors", errors: { [field]: message } };
+    }
+
+  };
+}
+
+/**
+ * Where a form's acknowledgement may go: Slack's own response URL, or (spec 062 Phase 7c3) the channel's reply target
+ * the core put in the form's state when it opened the form through the channel API.
+ */
+function isReplyTarget(value: unknown): value is string {
+  return isSlackResponseUrl(value) || (typeof value === "string" && value.startsWith("channel-reply:"));
 }
 
 /** Only Slack's own response URLs are ever fetched. */
@@ -970,23 +1016,53 @@ export function createAwsSlackInteractivityHandler() {
     postEphemeral: async (input) => chatPostEphemeral((await secrets()).botToken, input),
     log,
   }, event);
-  // Spec 062 Phase 7c3: with SlackViaChannel on, a press the core takes is handed to an asynchronous invoke of this
-  // Lambda for the channel API, after Slack has its answer.
+  // Spec 062 Phase 7c3: with SlackViaChannel on, the core takes Slack's presses and forms. A press that opens no form
+  // is handed to an asynchronous invoke of this Lambda after Slack has its answer; a press that opens one, and a
+  // submitted form, wait for the core's answer within Slack's three seconds.
   const viaChannel = process.env.SLACK_VIA_CHANNEL === "enabled" && forward !== undefined;
-  const routePress = async (action: SlackBlockAction): Promise<boolean> => {
-    const channelAction = channelActionOfPress(action);
-    if (channelAction === undefined) return false;
+  const actionClient = viaChannel ? slackChannelActionClientFromEnvironment(secretsManager) : undefined;
+  const handOffAction = async (channelAction: ChannelAction) => {
     const functionName = requiredEnvironment("AWS_LAMBDA_FUNCTION_NAME");
     const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "Event",
       Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-adapter", kind: "forward", message: channelAction })) }));
     if (response.StatusCode !== 202) throw Object.assign(new Error("the press was not handed over"), { name: "HandOffRefused" });
-    log("interaction.handed_off", { actionId: action.actionId.slice(0, 64) });
+  };
+  const routePress = async (action: SlackBlockAction): Promise<boolean> => {
+    const channelAction = channelActionOfPress(action);
+    if (channelAction === undefined) return false;
+    if (!FORM_SLACK_PRESSES.has(action.actionId)) {
+      await handOffAction(channelAction);
+      log("interaction.handed_off", { actionId: action.actionId.slice(0, 64) });
+      return true;
+    }
+    if (actionClient === undefined) return false;
+    // Slack lets a form open for three seconds after the press; the core gets most of them.
+    const answered = await actionClient(channelAction, 2_400 - (Date.now() - action.requestStartedAt));
+    if (answered?.open !== undefined) {
+      await slackApi((await secrets()).botToken, "views.open", { trigger_id: action.triggerId, view: slackModalOf(answered.open) }, fetch, Math.max(300, 2_900 - (Date.now() - action.requestStartedAt)));
+    }
+    log("interaction.routed", { actionId: action.actionId.slice(0, 64), opened: answered?.open !== undefined });
+    return true;
+  };
+  const routeSubmission = async (payload: Record<string, unknown>): Promise<Record<string, unknown> | undefined> => {
+    const channelAction = channelActionOfSubmission(payload, Date.now());
+    if (channelAction === undefined || actionClient === undefined) return undefined;
+    const answered = await actionClient(channelAction, 2_600);
+    const form = answered?.form;
+    if (form === undefined || form.kind === "close") return { response_action: "clear" };
+    if (form.kind === "errors") return { response_action: "errors", errors: form.errors };
+    return { response_action: "update", view: slackModalOf(form.form) };
+  };
+  const routeAdminChange = async (press: { changeId: string; click: "confirm" | "cancel"; slackUserId: string; teamId?: string }): Promise<boolean> => {
+    const channelAction = channelActionOfAdminPress(press, Date.now());
+    if (channelAction === undefined) return false;
+    await handOffAction(channelAction);
     return true;
   };
   const interactivity = createSlackInteractivityHandler({
     secrets,
     log,
-    ...(viaChannel ? { routePress } : {}),
+    ...(viaChannel ? { routePress, routeSubmission, routeAdminChange } : {}),
     ...(brokerFunctionName === undefined ? {} : {
       chatgptSubmission: (payload: Record<string, unknown>) => chatGptSubmission({ handOff: (event) => handOffToSelf(lambda, event) }, payload),
     }),
@@ -1752,7 +1828,7 @@ export function workflowSlackHandlers(deps: {
         await deps.close({ taskId, userId: userId.data, thread: thread.data, requestId });
         // The thread hears "closed" only once the workspace is released, which takes a minute or two; until then the
         // owner is told privately that the close is under way. Best effort: the close is already handed off.
-        if (isSlackResponseUrl(metadata.responseUrl)) {
+        if (isReplyTarget(metadata.responseUrl)) {
           try {
             await deps.respondEphemeral?.(metadata.responseUrl, CLOSING_ACK);
           } catch (error) {
@@ -1796,7 +1872,7 @@ export function workflowSlackHandlers(deps: {
         if (deps.resolveFindings === undefined) throw new Error("resolving review findings is not configured");
         await deps.resolveFindings({ taskId: target.taskId, userId: userId.data, thread: thread.data, requestId, expectedRevision: workflow.revision, candidateDigest: target.candidateDigest, resolutions });
         // The form closes at once and the next card comes later: say privately what was saved. Best effort; the save stands.
-        if (isSlackResponseUrl(metadata.responseUrl)) {
+        if (isReplyTarget(metadata.responseUrl)) {
           const toFix = resolutions.filter((resolution) => resolution.action === "FIX").length;
           const findings = (count: number) => `${count} ${count === 1 ? "finding" : "findings"}`;
           try {
@@ -1930,7 +2006,7 @@ export function adminChangePressEvent(press: Parameters<NonNullable<SlackInterac
  * 3-second answer never waits on an apply (the broker records the outcome), and a by-key read of
  * the change's keys and trace ID only, for the log line.
  */
-function awsAdminChangePress(
+export function awsAdminChangePress(
   clientConfiguration: { region?: string }, documentClient: DynamoDBDocumentClient,
 ): NonNullable<SlackInteractivityDependencies["adminChange"]> {
   const lambda = new LambdaClient(clientConfiguration);
