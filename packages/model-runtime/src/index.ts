@@ -228,7 +228,9 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
         }
       }
       // ChatGPT requests are not retried here: a plan's limit does not lift in seconds, and the fallback is ready.
-      const upstream = upstreamStream(provider, model, context, { ...options, ...key, ...(plan === undefined ? {} : { maxRetries: 0 }), fetch: observedFetch }, routing);
+      // Pi 1.4+ hands each request an identity: a detailed User-Agent and, while install telemetry is on, attribution to Pi (OpenRouter's HTTP-Referer and X-OpenRouter-Title, and the like). Rovara's settings turn
+      // telemetry off, and the attribution is dropped here as well, so no request announces Pi whatever a caller's settings say.
+      const upstream = upstreamStream(provider, model, context, { ...options, ...key, ...(plan === undefined ? {} : { maxRetries: 0 }), identity: { ...options?.identity, attribution: null }, fetch: observedFetch }, routing);
       let started = false;
       for await (const event of upstream) {
         // Pi's first event comes only once OpenAI accepted the request, so an error first means nothing reached Pi yet.
@@ -246,7 +248,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
             returnedModel: returnedModel ?? null, returnedProvider: returnedProvider ?? null,
             tokens: { input: message.usage.input, output: message.usage.output, cacheRead: message.usage.cacheRead, cacheWrite: message.usage.cacheWrite },
             costUsd: priced ? message.usage.cost.total : null,
-            costSource: !priced ? "unknown" : provider === "openrouter" ? "estimated" : "list-price", outcome: message.stopReason,
+            costSource: !priced ? "unknown" : provider === "openrouter" ? (message.usage.cost.totalFromProvider === true ? "billed" : "estimated") : "list-price", outcome: message.stopReason,
           }); } catch { /* Telemetry must not turn a completed model response into a failed turn. */ }
         }
         output.push(event);
