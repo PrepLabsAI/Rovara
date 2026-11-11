@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  CreatedScriptTokenSchema, IMPLICIT_COMPANY_ID, SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE, SCRIPT_TOKENS_PER_PERSON_MAX, ScriptTokenListSchema, WORKER_INVOCATION_FEATURES, orgScriptTokensKey, scriptTokenKey,
+  CreateScriptTokenBodySchema, CreatedScriptTokenSchema, IMPLICIT_COMPANY_ID, SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE, SCRIPT_TOKEN_PERMISSIONS, SCRIPT_TOKENS_PER_PERSON_MAX, ScriptTokenListSchema, WORKER_INVOCATION_FEATURES, orgScriptTokensKey, scriptTokenKey,
   type AuditEvent, type AuditSink,
 } from "@agentx/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -193,6 +193,25 @@ describe("the stored tokens (document store port)", () => {
     await expect(createScriptToken(w.deps, owner, { ...body(1), permissions: ["admin"] }, anyProject)).rejects.toThrow(/permissions/);
   });
 
+  it("the lessons permission (decision 46b) is one of the three a token may have, and it is kept as asked: a token made without it has no lessons permission", async () => {
+    expect(SCRIPT_TOKEN_PERMISSIONS).toEqual(["read", "start", "lessons"]);
+    const asked = { requestId: REQUEST(1), name: "tool", projects: ["payments"] };
+    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons"] }).success).toBe(true);
+    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["read", "start", "lessons"] }).success).toBe(true);
+    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons", "lessons"] }).success).toBe(false);
+    expect(CreateScriptTokenBodySchema.safeParse({ ...asked, permissions: ["lessons", "read", "start", "lessons"] }).success).toBe(false);
+    const w = world();
+    const withLessons = CreatedScriptTokenSchema.parse(await createScriptToken(w.deps, owner, body(1, { permissions: ["lessons", "read"] }), anyProject));
+    expect(withLessons.token.permissions).toEqual(["read", "lessons"]);
+    expect((await readScriptToken(w.deps, IMPLICIT_COMPANY_ID, withLessons.token.tokenId))?.permissions).toEqual(["read", "lessons"]);
+    const lessonsOnly = CreatedScriptTokenSchema.parse(await createScriptToken(w.deps, owner, body(2, { permissions: ["lessons"] }), anyProject));
+    expect(lessonsOnly.token.permissions).toEqual(["lessons"]);
+    const without = CreatedScriptTokenSchema.parse(await createScriptToken(w.deps, owner, body(3, { permissions: ["read", "start"] }), anyProject));
+    expect(without.token.permissions).toEqual(["read", "start"]);
+    expect(w.events.map((event) => event.details?.["permissions"])).toEqual(["read,lessons", "lessons", "read,start"]);
+    expect((await listScriptTokens(w.deps, owner, async () => "Owner")).map((view) => view.permissions)).toEqual(expect.arrayContaining([["read", "lessons"], ["lessons"], ["read", "start"]]));
+  });
+
   it("keeps at most ten live tokens a person, and a token expires and is revoked at once", async () => {
     const w = world();
     const first = await createScriptToken(w.deps, owner, body(1, { days: 1 }), anyProject);
@@ -359,6 +378,20 @@ describe("rovara up: making a token on a page, and using it", () => {
     const rows = await h.store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SCRIPT_TOKEN_RATE` });
     expect(rows.items.length).toBeGreaterThan(0);
     expect(JSON.stringify(rows.items)).not.toContain(secret.slice(-43));
+  });
+
+  it("a token with only the lessons permission reaches nothing here (Rovara Code serves no lessons route for tools), and the page words say what it is for", async () => {
+    const h = await launch();
+    const made = await h.makeToken({ projects: ["payments"], permissions: ["lessons"] });
+    expect(made.html).toContain("read the team lessons of these projects");
+    const refused = { status: 403, body: { error: { code: "FORBIDDEN", message: SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE } } };
+    expect(await start(h, made.secret, 50)).toMatchObject(refused);
+    expect(await h.call(made.secret, "/v1/dev/tasks?project=payments")).toMatchObject(refused);
+    expect(await h.call(made.secret, "/v1/dev/projects/payments/lessons", { method: "POST", body: {} })).toMatchObject(refused);
+    expect(await h.call(made.secret, "/v1/app/projects/payments/lessons")).toMatchObject(refused);
+    // The create form offers all three permissions.
+    const drawn = await h.page(await h.browse("/tokens", true), "/tokens");
+    for (const permission of SCRIPT_TOKEN_PERMISSIONS) expect(drawn.body).toContain(`name="permission" value="${permission}"`);
   });
 
   it("keeps a token to its projects and permissions", async () => {
