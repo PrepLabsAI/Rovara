@@ -1,7 +1,7 @@
 // Convergence lane A1: the `storage` plug-in "dynamodb" for the registry. Opt-in: Code's default store stays SQLite, and nothing loads
 // this module unless the owner's config names it. Config entry:
 //   { "point": "storage", "name": "dynamodb", "module": "@rovara/aws-adapters/dynamodb",
-//     "settings": { "tableName": "...", "region": "us-west-2", "indexes": [ ... ], "ttlAttribute": "indexExpiresAt" } }
+//     "settings": { "tableName": "...", "region": "us-west-2", "indexes": [ ... ], "ttlAttribute": "<the table's time-to-live attribute>" } }
 // Credentials come from the AWS SDK's default chain (environment, profile, instance role); the config never holds one. The change feed
 // is not configured here: it belongs to the process that reads the table's stream, which builds `DynamoStreamChangeFeed` itself.
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";

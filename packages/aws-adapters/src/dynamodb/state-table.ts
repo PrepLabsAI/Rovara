@@ -1,7 +1,6 @@
 // Convergence lane A1: the hosted product's State table, as the DynamoDB document store sees it. Data, not infrastructure: the table
 // and its indexes are created by the hosted product's own deployment code, which stays private; nothing here creates or changes AWS.
 import {
-  INDEX_EXPIRY_ATTRIBUTE,
   OUTBOX_PENDING_INDEX,
   WORKFLOW_DISPATCH_DUE_INDEX,
   WORKSPACE_PROJECT_INDEX,
@@ -15,8 +14,7 @@ import {
  */
 export const STATE_TABLE_KEY = { partitionKey: "pk", sortKey: "sk", streamView: "NEW_AND_OLD_IMAGES" } as const;
 
-/** The table's time-to-live attribute, where one is set (named environments). */
-export const STATE_TABLE_TTL_ATTRIBUTE = INDEX_EXPIRY_ATTRIBUTE;
+// The table's time-to-live attribute is not named here: the hosted deployment owns it and passes it as the store's `ttlAttribute` setting.
 
 /** The global secondary indexes the State table has today, each projecting every attribute, all keyed on text. */
 export const STATE_TABLE_INDEXES: readonly IndexDefinition[] = Object.freeze([
