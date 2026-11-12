@@ -193,8 +193,10 @@ export function commandWithSelection(command: ProjectCommand, selectArgs: readon
 
 // ---- the import graph
 
-const PY_IMPORT = /^[ \t]*(?:from[ \t]+(\.*)([A-Za-z_][\w.]*)?[ \t]+import[ \t]+([^\n#]+)|import[ \t]+([A-Za-z_][\w.,\t ]*))/gmu;
-const JS_IMPORT = /(?:\bfrom[ \t]*|\bimport[ \t]*\(?[ \t]*|\brequire\([ \t]*)["'](\.{1,2}\/[^"'\n]*)["']/gu;
+// Linear in a line's length. `from` takes its blanks whole (`(?=([ \t]+))\1` cannot give any back), and `from  import x` (no module) still needs two of them, as before: the old
+// `from[ \t]+(\.*)(...)?[ \t]+import` tried every split of a run of blanks between its two `[ \t]+`, so a line of `from` and 64 KiB of spaces took seconds. The same for `import[ \t]*\(?[ \t]*`.
+const PY_IMPORT = /^[ \t]*(?:from(?=([ \t]+))\1(\.*)([A-Za-z_][\w.]*)?(?:[ \t]+|(?<=[ \t]{2}))import[ \t]+([^\n#]+)|import[ \t]+([A-Za-z_][\w.,\t ]*))/gmu;
+const JS_IMPORT = /(?:\bfrom[ \t]*|\bimport[ \t]*(?:\([ \t]*)?|\brequire\([ \t]*)["'](\.{1,2}\/[^"'\n]*)["']/gu;
 const JS_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"];
 
 /**
@@ -219,7 +221,7 @@ export function buildImportGraph(files: ReadonlyArray<{ path: string; text: stri
     const edges = new Set<string>();
     if (file.path.endsWith(".py")) {
       for (const match of file.text.matchAll(PY_IMPORT)) {
-        const [, dots, module, names, plain] = match;
+        const [, , dots, module, names, plain] = match;
         if (plain !== undefined) {
           for (const name of plain.split(",")) {
             const target = resolvePython(file.path, "", (name.trim().split(/\s+/u)[0] ?? ""));

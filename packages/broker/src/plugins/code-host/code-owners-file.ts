@@ -18,16 +18,71 @@ const RULES_MAX = 5_000;
 const OWNER = /^@[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\/[A-Za-z0-9_.-]{1,100})?$/u;
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/u;
 
-function escapeSegment(segment: string): string {
-  let out = "";
+// A pattern is matched by stepping a small automaton over the path once, not by a regular expression: the file is the repository's, and a pattern such as `*a*a*a*a*b` made
+// the old regex (`[^/]*a[^/]*a…`) backtrack for seconds to minutes on one path. The automaton reads what that regex read: `*` any run without `/`, `?` one character but `/`, `**`
+// inside a name any run at all, a `**` segment any directories (`(?:.*/)?`, or `.*` last), a pattern with no slash but at its end at any depth, and a name with no wildcard what
+// is inside it. "Any" stops at a line break, as `.` did; characters are code points, as with the `u` flag.
+const NOT_SLASH = (char: string): boolean => char !== "/";
+const NOT_LINE_BREAK = (char: string): boolean => char !== "\n" && char !== "\r" && char !== "\u2028" && char !== "\u2029";
+interface MatchState { next: number[]; on?: { test: (char: string) => boolean; to: number } }
+
+class Automaton {
+  readonly states: MatchState[] = [{ next: [] }];
+  private tail = 0;
+  private add(): number { this.states.push({ next: [] }); return this.states.length - 1; }
+  /** One character the test accepts. */
+  one(test: (char: string) => boolean): void { const to = this.add(); this.states[this.tail]!.on = { test, to }; this.tail = to; }
+  literal(char: string): void { this.one((other) => other === char); }
+  /** Any run of characters the test accepts, possibly none. */
+  run(test: (char: string) => boolean): void { const loop = this.add(); this.states[this.tail]!.next.push(loop); this.states[loop]!.on = { test, to: loop }; const out = this.add(); this.states[loop]!.next.push(out); this.tail = out; }
+  /** `(?:<build>)?` */
+  optional(build: () => void): void { const start = this.tail; build(); this.states[start]!.next.push(this.tail); }
+  private closures: number[][] | undefined;
+  /** Each state and every state its empty steps reach, computed once. */
+  private closureOf(state: number): number[] {
+    this.closures ??= this.states.map((_, from) => {
+      const seen = new Set<number>();
+      const stack = [from];
+      while (stack.length > 0) { const at = stack.pop()!; if (seen.has(at)) continue; seen.add(at); stack.push(...this.states[at]!.next); }
+      return [...seen];
+    });
+    return this.closures[state]!;
+  }
+  accepts(path: string): boolean {
+    const mark = new Int32Array(this.states.length);
+    let stamp = 1;
+    let current = this.closureOf(0);
+    for (const char of path) {
+      stamp += 1;
+      const next: number[] = [];
+      for (const state of current) {
+        const on = this.states[state]!.on;
+        if (on === undefined || !on.test(char)) continue;
+        for (const reached of this.closureOf(on.to)) if (mark[reached] !== stamp) { mark[reached] = stamp; next.push(reached); }
+      }
+      if (next.length === 0) return false;
+      current = next;
+    }
+    return current.includes(this.tail);
+  }
+}
+
+/** Adds a segment's steps; returns its runs of plain characters, which a matching path must contain. */
+function addSegment(automaton: Automaton, segment: string): string[] {
+  const plain = segment.split(/[*?]/u).filter((part) => part !== "");
   for (let index = 0; index < segment.length; index += 1) {
     const char = segment[index]!;
     if (char === "*") {
-      if (segment[index + 1] === "*") { out += ".*"; index += 1; } else out += "[^/]*";
-    } else if (char === "?") out += "[^/]";
-    else out += char.replace(/[.+^${}()|[\]\\]/gu, "\\$&");
+      if (segment[index + 1] === "*") { automaton.run(NOT_LINE_BREAK); index += 1; } else automaton.run(NOT_SLASH);
+    } else if (char === "?") automaton.one(NOT_SLASH);
+    else {
+      // A whole code point, so `?` next to an emoji and the literal itself are read as the `u` flag read them.
+      const point = String.fromCodePoint(segment.codePointAt(index)!);
+      automaton.literal(point);
+      index += point.length - 1;
+    }
   }
-  return out;
+  return plain;
 }
 
 /** A gitignore-style pattern as GitHub's CODEOWNERS reads it. */
@@ -37,17 +92,23 @@ function compile(pattern: string): (path: string) => boolean {
   // A pattern with a slash anywhere but the end is anchored to the root, as is one that starts with a slash.
   const anchored = pattern.startsWith("/") || trimmed.includes("/");
   const segments = trimmed.split("/");
-  let body = "";
+  const anyDirectories = (automaton: Automaton): void => automaton.optional(() => { automaton.run(NOT_LINE_BREAK); automaton.literal("/"); });
+  const automaton = new Automaton();
+  const plain: string[] = [];
+  if (!anchored) anyDirectories(automaton);
   for (const [index, segment] of segments.entries()) {
     const last = index === segments.length - 1;
-    if (segment === "**") body += last ? ".*" : "(?:.*/)?";
-    else body += escapeSegment(segment) + (last ? "" : "/");
+    if (segment === "**") { if (last) automaton.run(NOT_LINE_BREAK); else anyDirectories(automaton); } else {
+      plain.push(...addSegment(automaton, segment));
+      if (!last) automaton.literal("/");
+    }
   }
   const lastSegment = segments[segments.length - 1] ?? "";
   // A name with no wildcard (or a directory) owns what is inside it; a wildcard in the last segment (`*.js`, `docs/*`) matches that level only.
   const ownsInside = directory || !/[*?]/u.test(lastSegment);
-  const regex = new RegExp(`^${anchored ? "" : "(?:.*/)?"}${body}${ownsInside ? "(?:/.*)?" : ""}$`, "u");
-  return (path) => regex.test(path);
+  if (ownsInside) automaton.optional(() => { automaton.literal("/"); automaton.run(NOT_LINE_BREAK); });
+  // A quick refusal first (most rules name text the path does not have), then the automaton.
+  return (path) => plain.every((part) => path.includes(part)) && automaton.accepts(path);
 }
 
 /** The rules of a CODEOWNERS file, in order, and whether the file held anything Rovara cannot read. Comments and blank lines are skipped. An email is an owner (Rovara cannot match it to an approver). */

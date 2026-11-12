@@ -266,10 +266,28 @@ function runArgsRefusal(args: readonly string[], context: DevcontainerPolicyCont
   return undefined;
 }
 
+/**
+ * The source runs to the first colon outside a `${…}` variable (an unclosed `${` is plain text). A loop, not the pattern `^(?:\$\{[^}]*\}|[^:])*`: that one scanned to the end
+ * of the text from every unclosed `${`, so a repository's devcontainer.json with a long run of them took seconds (quadratic). Once no `}` is left, none is looked for again.
+ */
+function volumeSourceOf(spec: string): string {
+  let at = 0;
+  let closed = true;
+  while (at < spec.length) {
+    if (closed && spec.startsWith("${", at)) {
+      const close = spec.indexOf("}", at + 2);
+      if (close !== -1) { at = close + 1; continue; }
+      closed = false;
+    }
+    if (spec[at] === ":") break;
+    at += 1;
+  }
+  return spec.slice(0, at);
+}
+
 /** `-v SOURCE:TARGET[:OPTIONS]`: a source that is a path is a bind mount; anything else names a volume. */
 function volumeRefusal(spec: string, context: DevcontainerPolicyContext): string | undefined {
-  // The source runs to the first colon outside a `${…}` variable.
-  const source = /^(?:\$\{[^}]*\}|[^:])*/u.exec(spec)?.[0] ?? "";
+  const source = volumeSourceOf(spec);
   if (source.length === spec.length) return undefined;
   const named = substituteVolumeName(source, context);
   if (!/^[/.~]/u.test(named) && !named.includes("${")) return namedVolumeRefusal(source, context);
