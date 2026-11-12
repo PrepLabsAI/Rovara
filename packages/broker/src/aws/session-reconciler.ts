@@ -20,6 +20,7 @@ import { sweepStuckSetups } from "./stuck-setup.js";
 import { stuckCancelRetrier, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult, type StuckCancelWorker } from "./stuck-cancels.js";
 import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type SlackThreadPlace, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
+import { slackNoticeChannelFromEnvironment } from "./slack-notice-channel.js";
 import { isStaleWorkerAmi, readQualifiedWorkerAmi } from "./worker-ami.js";
 import { renewalAgeMetrics, readRenewalAgeDays } from "./reconciler-renewal-age.js";
 
@@ -504,7 +505,8 @@ function slackThreadPoster(): (thread: SlackThreadPlace, text: string) => Promis
   if (threadPoster !== undefined) return threadPoster;
   const secrets = new SecretsManagerClient(awsClientConfiguration);
   const slackSecretArn = requiredEnvironment("SLACK_SECRET_ARN");
-  const post = cachedSlackPoster(() => secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }))
+  // Spec 062 Phase 7c: through the Slack adapter when Slack goes through the channel API.
+  const post = slackNoticeChannelFromEnvironment(secrets)?.post ?? cachedSlackPoster(() => secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }))
     .then((secret) => slackBotTokenFrom(secret.SecretString)));
   threadPoster = async (thread, text) => { await post({ channel: thread.channelId, threadTs: thread.threadTs, text }); };
   return threadPoster;

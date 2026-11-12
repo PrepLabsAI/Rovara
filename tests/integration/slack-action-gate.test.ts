@@ -15,7 +15,7 @@ import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestra
 import { runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import { UNPOSTED_MARK } from "../../packages/slack-service/src/confirmations.js";
-import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields } from "../../packages/slack-service/src/runtime.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";

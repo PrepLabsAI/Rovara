@@ -7,7 +7,7 @@ import { slackThreadSubject } from "../../packages/contracts/src/index.js";
 import { finalizeBatch, withEvalBatches } from "../../packages/broker/src/aws/eval-batch.js";
 import { watchEvalBatchesOnce } from "../../packages/slack-service/src/eval-batch-watcher.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
-import { createEvalBatchWatchApi } from "../../packages/slack-service/src/thread-api.js";
+import { createEvalBatchWatchApi } from "../../packages/slack-service/src/slack-thread-api.js";
 import { brokerFetch } from "../support/broker-fetch.js";
 import { swebenchDeploymentForTests } from "../support/eval-batch-admin.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";

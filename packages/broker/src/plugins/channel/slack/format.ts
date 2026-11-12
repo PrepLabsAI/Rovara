@@ -39,7 +39,12 @@ export function renderEvent(event: ChannelEvent, maxLength: number): Rendered | 
     case "question": return { text: text(event.data.choices === undefined ? event.data.text : `${event.data.text}\n${event.data.choices.map((choice, index) => `${String(index + 1)}. ${choice}`).join("\n")}`) };
     case "check_report": return { text: text(`${{ passed: "Checks passed.", failed: "Checks failed.", unknown: "Checks have not finished." }[event.data.status]} ${event.data.text}`) };
     case "pr": return { text: text(`Pull request: ${event.data.title}\n${event.data.url}`) };
-    case "done": return { text: text(event.data.text) };
+    // The text of a reply or notice only: this adapter declares no `edits`, so a later message under the same key is a new post. Parts and actions are not shown here (a follow-up; the core fits them to what the adapter declares).
+    case "message": return { text: text(event.data.text), ...(event.data.audience?.kind === "ephemeral" ? { ephemeralTo: event.data.audience.actor.userId } : {}) };
+    // A closing line is optional: everything the request said came before it.
+    case "done": return event.data.text === undefined ? undefined : { text: text(event.data.text) };
+    // Needs `direct`, which this adapter does not declare.
+    case "direct": return undefined;
     case "error": return { text: text(event.data.text) };
     case "link_required": return { text: text(`Link your account to Rovara: ${event.data.linkUrl}`), ephemeralTo: event.data.actor.userId };
     case "approval_request": {

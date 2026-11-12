@@ -1,3 +1,5 @@
+import { createSlackWebClient } from "./slack-web.js";
+
 const NAME_TTL_MS = 60 * 60 * 1_000;
 const FAILURE_TTL_MS = 5 * 60 * 1_000;
 const LOOKUP_TIMEOUT_MS = 2_000;
@@ -11,7 +13,7 @@ export function createSlackUserNames(options: {
   fetch?: typeof fetch;
   now?: () => number;
 }): (userId: string) => Promise<string | undefined> {
-  const fetchFn = options.fetch ?? fetch;
+  const slack = createSlackWebClient({ token: options.token, ...(options.fetch === undefined ? {} : { fetch: options.fetch }) });
   const now = options.now ?? Date.now;
   const cache = new Map<string, { name: string | undefined; at: number }>();
   return async (userId) => {
@@ -19,12 +21,8 @@ export function createSlackUserNames(options: {
     if (cached && now() - cached.at < (cached.name === undefined ? FAILURE_TTL_MS : NAME_TTL_MS)) return cached.name;
     let name: string | undefined;
     try {
-      const response = await fetchFn(`https://slack.com/api/users.info?user=${encodeURIComponent(userId)}`, {
-        headers: { authorization: `Bearer ${await options.token()}` },
-        signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
-      });
-      const body = await response.json() as { ok?: boolean; user?: { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string } } };
-      if (body.ok) name = body.user?.profile?.display_name || body.user?.profile?.real_name || body.user?.real_name || body.user?.name || undefined;
+      const user = await slack.userInfo(userId, AbortSignal.timeout(LOOKUP_TIMEOUT_MS));
+      name = user?.profile?.display_name || user?.profile?.real_name || user?.real_name || user?.name || undefined;
     } catch { name = undefined; }
     cache.set(userId, { name, at: now() });
     return name;

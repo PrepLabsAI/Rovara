@@ -5,11 +5,15 @@ import {
   WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, workflowReadmitsApplicationRound, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { splitTextAtLines } from "@agentx/contracts";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
 import { isE2EPlanCorrectionBlockReason } from "./task-records.js";
 import { PLAN_UNREADABLE_SENTENCES, type PlanUnreadableCategory } from "./plan-check-summary.js";
 import { autoFixCardLines, type AutoFixAsk } from "./autofix-messages.js";
+
+/** Slack section blocks hold 3,000 characters; cards keep under that, as the shared Slack renderer does. */
+const SECTION_TEXT_LIMIT = 2_800;
 
 export interface WorkflowMessageContext {
   taskId: string;
@@ -67,7 +71,6 @@ export { WORKFLOW_ACTION_IDS };
 /** Escapes what Slack would read as markup: a mention, a link or a broadcast. */
 export const slackText = (value: string): string => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
-const SECTION_TEXT_LIMIT = 2_800;
 const SUMMARY_LINE_MAX = 160;
 const FINDING_TEXT_MAX = 180;
 const FINDINGS_SHOWN = 3;
@@ -883,34 +886,7 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
 
 /** Slack section blocks hold 3,000 characters; a long text is split at a line break where it can be. */
 export function slackSectionTexts(text: string): string[] {
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > SECTION_TEXT_LIMIT) {
-    // At a line break whenever one fits, so a line (a check's command, say) is never split; only a single line too long
-    // for one section is split, at a safe place.
-    const lineBreak = remaining.lastIndexOf("\n", SECTION_TEXT_LIMIT);
-    const splitAt = lineBreak > 0 ? lineBreak : safeSplit(remaining, SECTION_TEXT_LIMIT);
-    chunks.push(remaining.slice(0, splitAt));
-    remaining = remaining.slice(splitAt).replace(/^\n+/, "");
-  }
-  if (remaining.length > 0) chunks.push(remaining);
-  return chunks;
-}
-
-/**
- * Where to split one over-long line at or before `limit`: never inside an escaped character ("&lt;") and, when it can,
- * not inside a code span (before its opening backtick instead).
- */
-function safeSplit(line: string, limit: number): number {
-  let splitAt = limit;
-  const amp = line.lastIndexOf("&", splitAt - 1);
-  if (amp >= 0 && amp > splitAt - 10 && /^&[A-Za-z#0-9]{1,8};/.test(line.slice(amp)) && line.indexOf(";", amp) >= splitAt) splitAt = amp;
-  const ticks = (line.slice(0, splitAt).match(/`/g) ?? []).length;
-  if (ticks % 2 === 1) {
-    const opening = line.lastIndexOf("`", splitAt - 1);
-    if (opening > 0) splitAt = opening;
-  }
-  return splitAt > 0 ? splitAt : limit;
+  return splitTextAtLines(text, SECTION_TEXT_LIMIT);
 }
 
 /**

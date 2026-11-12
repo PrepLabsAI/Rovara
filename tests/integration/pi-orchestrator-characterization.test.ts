@@ -185,7 +185,7 @@ describe("orchestrator extensions, as pinned on Pi 0.85.1", () => {
       expect(await runOrchestratorTurn(runtime, "close TRK-9", recorder)).toBe("Asked.");
       expect(orchestration.callConnectorTool).not.toHaveBeenCalled();
       expect(toolResults(runtime)).toEqual([{ tool: "tracker__close_item", isError: true,
-        text: "Not run yet: AgentX has already posted a confirmation request for this action to the member in the Slack thread, with Approve and Cancel buttons. "
+        text: "Not run yet: AgentX has already posted a confirmation request for this action to the member in this conversation. "
           + "Do not call this tool again or try another way in this turn. Do not restate, summarise or mention this action, its details or the confirmation in your reply: "
           + "the member already sees the request. Report only anything else you did or found in this turn." }]);
       const hash = "910e95ae829c354e31d10a62731770797d07fe79a1cdd9fc0977ea5459ba9bbd";

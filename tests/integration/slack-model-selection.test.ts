@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { SLACK_FORMAT } from "../../packages/slack-service/src/slack-format.js";
 import type { ProjectModelOptions, SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import { ProjectModelOptionsSchema } from "../../packages/contracts/src/index.js";
 import { modelOptionsMessage } from "../../packages/slack-service/src/model-command.js";
-import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/slack-processor.js";
 
 const options: ProjectModelOptions = {
   projectName: "payments",
@@ -55,7 +56,7 @@ describe("Slack project model commands", () => {
       current: { provider: "openrouter", modelId: "z-ai/glm-5.3", label: "GLM 5.3", thinkingLevel: "medium" },
       source: "default",
     });
-    expect(modelOptionsMessage(parsed).split("\n").slice(1, 3)).toEqual([
+    expect(modelOptionsMessage(parsed, undefined, SLACK_FORMAT).split("\n").slice(1, 3)).toEqual([
       "• GLM 5.3 (thinking: medium) — `openrouter/z-ai/glm-5.3` _(current)_",
       "• Fast — `amazon-bedrock/fast-v1`",
     ]);

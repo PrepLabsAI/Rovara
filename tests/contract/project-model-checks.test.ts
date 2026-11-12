@@ -7,7 +7,7 @@ import type { ModelCheckResult } from "../../packages/model-runtime/src/model-ch
 import { registerRevision } from "../../packages/cli/src/setup/project-add.js";
 import { checkProjectModels, projectModelChecks, PROJECT_MODEL_CHECK_MAX_PAIRS, type ProjectModelChecker } from "../../packages/cli/src/setup/project-model-check.js";
 import { writeProjectFile } from "../../packages/cli/src/setup/project-add.js";
-import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/slack-processor.js";
 import { doctorContext, doctorServices } from "../support/doctor-fakes.js";
 import { passingChecks } from "../support/init-fakes.js";
 import { CONTROL_PLANE, fakeControlPlane } from "../support/setup-fakes.js";

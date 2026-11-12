@@ -6,8 +6,8 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { ANSWER_ONLY_INSTRUCTIONS, NO_TEXT_RESPONSE, runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
-import { processGroup, type QueueClient } from "../../packages/slack-service/src/consumer.js";
-import type { ThreadServiceApi, TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processGroup, type QueueClient } from "../../packages/slack-service/src/slack-consumer.js";
+import type { ThreadServiceApi, TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import {
   TASK_ANSWER_FAILED_TEXT, TASK_ANSWER_FOOTER, TASK_NOTE_SAVED_TEXT, handleTaskQuestion, runTaskAnswer, withoutChatPrefix, type TaskQuestionDependencies,

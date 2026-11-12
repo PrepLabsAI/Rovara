@@ -16,6 +16,7 @@ import {
   type TaskPeopleDisplayReadRequest,
   type TaskPeopleDisplayReadResponse,
 } from "@agentx/contracts";
+import { slackWebFetch } from "../aws/slack-web.js";
 
 export type SlackUserStatus = "active" | "gone" | "unavailable";
 export interface SlackDirectory {
@@ -101,6 +102,11 @@ export function slackDirectory(input: {
   /** Cold calls one channelInfo request may make. */
   maxInfoCallsPerRequest?: number;
   report?: (problem: SlackProblem) => void;
+  /**
+   * Spec 062 Phase 7c1b: makes one Web API read some other way (through the Slack adapter), answering Slack's status
+   * and body, or throwing when it got no answer. Without it, the read is made here with the bot token.
+   */
+  call?: (method: string, query: Record<string, string>, signal: AbortSignal) => Promise<{ status: number; body: unknown }>;
 }): SlackDirectory {
   const cacheMs = input.cacheMs ?? CHANNEL_MEMBERS_CACHE_MS;
   const maxPages = input.maxPages ?? 50;
@@ -117,11 +123,13 @@ export function slackDirectory(input: {
 
   /** Slack's reply, or undefined (already reported) when Slack could not answer. */
   const get = async (method: string, query: Record<string, string>, timeoutMs = TIMEOUT_MS, admission?: DisplayFetchAdmission): Promise<Reply | undefined> => {
-    let token: string;
-    try {
-      token = await withAbortSignal(input.botToken(), admission?.abortSignal);
-    } catch {
-      return problem(method, undefined, "bot_token_unavailable");
+    let token = "";
+    if (input.call === undefined) {
+      try {
+        token = await withAbortSignal(input.botToken(), admission?.abortSignal);
+      } catch {
+        return problem(method, undefined, "bot_token_unavailable");
+      }
     }
     if (admission !== undefined) {
       if (input.now() >= admission.deadlineAt) return problem(method, undefined, "deadline_reached");
@@ -129,28 +137,31 @@ export function slackDirectory(input: {
       admission.slackCallsUsed += 1;
       timeoutMs = Math.min(timeoutMs, admission.deadlineAt - input.now());
     }
-    let response: Response;
+    let status: number;
+    let body: unknown;
     try {
-      const url = new URL(`https://slack.com/api/${method}`);
-      for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
       const timeoutSignal = AbortSignal.timeout(Math.max(1, Math.min(TIMEOUT_MS, timeoutMs)));
       const signal = admission?.abortSignal === undefined ? timeoutSignal : AbortSignal.any([admission.abortSignal, timeoutSignal]);
-      response = await input.fetch(url, { headers: { authorization: `Bearer ${token}` }, signal });
+      if (input.call !== undefined) {
+        ({ status, body } = await input.call(method, query, signal));
+      } else {
+        const response = await slackWebFetch(method, token, { query, signal }, input.fetch);
+        status = response.status;
+        try {
+          body = await response.json();
+        } catch {
+          body = undefined;
+        }
+      }
     } catch {
       return problem(method, undefined, "unreachable");
     }
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      body = undefined;
-    }
-    if (admission !== undefined && input.now() >= admission.deadlineAt) return problem(method, response.status, "deadline_reached");
+    if (admission !== undefined && input.now() >= admission.deadlineAt) return problem(method, status, "deadline_reached");
     const record = typeof body === "object" && body !== null ? body as Record<string, unknown> : undefined;
-    if (response.status === 429 || response.status >= 500 || record === undefined) {
-      return problem(method, response.status, errorCode(record?.error) ?? `http_${response.status}`);
+    if (status === 429 || status >= 500 || record === undefined) {
+      return problem(method, status, errorCode(record?.error) ?? `http_${status}`);
     }
-    return { status: response.status, body: record };
+    return { status, body: record };
   };
   /** A reply Slack refused for a reason that says nothing about the person: report it, unavailable. */
   const refused = (method: string, reply: Reply): undefined => problem(method, reply.status, errorCode(reply.body.error) ?? "no_error_code");

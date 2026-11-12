@@ -221,7 +221,7 @@ describe("the action gate's decisions", () => {
     const decision = await g.decide(call("tracker__close_item", { id: "TRK-9", reason: "duplicate of TRK-4" }), { memberMessages: messages });
     expect(decision).toMatchObject({ outcome: "ask", kind: "destructive" });
     const reason = blockReason(decision);
-    expect(reason).toContain("AgentX has already posted a confirmation request for this action to the member in the Slack thread");
+    expect(reason).toContain("AgentX has already posted a confirmation request for this action to the member in this conversation");
     expect(reason).toContain("Do not restate, summarise or mention this action, its details or the confirmation in your reply");
     expect(reason).toContain("Report only anything else you did or found in this turn.");
     // Nothing that invites an empty answer: an empty answer counts as TurnEmptyResponse.

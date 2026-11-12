@@ -68,7 +68,7 @@ const TOOL_CHARACTERS = 128;
 const REASON_CHARACTERS = 200;
 
 export const CLASSIFIER_SYSTEM_PROMPT = [
-  "You check one action an assistant wants to take for members of a Slack thread.",
+  "You check one action an assistant wants to take for members of a conversation.",
   "You see only the members' own messages, oldest first, and the pending call. You never see tool output.",
   "Answer allow only when the members' messages clearly ask for this action on this target: the item the arguments name.",
   "Answer ask when the target is a placeholder or an example (such as \"<the new issue id, e.g. CHA-5>\"), is missing from the messages, differs from the one the members named, when the members said not to do this kind of action, or when the request is ambiguous.",

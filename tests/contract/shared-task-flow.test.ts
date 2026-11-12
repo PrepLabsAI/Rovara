@@ -7,7 +7,7 @@ import { CLOSED_SHARED_NOTICE, VIEW_ONLY_NOTICE, createWorkflowSnapshot, parseSl
 import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { STUCK_SETUP_MESSAGE, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
 import type { Notice, StreamRecord } from "../../packages/broker/src/developer/notifications.js";
-import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
 import { brokerFetch } from "../support/broker-fetch.js";

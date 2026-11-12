@@ -64,7 +64,9 @@ describe("turn record and alarm infrastructure", () => {
       .filter((policy) => policy.Properties.PolicyDocument.Statement.some(onTurnRecords))
       .flatMap((policy) => policy.Properties.Roles.map((role) => role.Ref ?? ""));
     // Spec 014 FR-024 admits exactly one more role: the ingress Lambda, for one record's Details fields (pinned below).
-    expect(roles.every((role) => role.startsWith("SlackOrchestratorTaskRole") || role.startsWith("BrokerServiceRole") || role.startsWith("SlackIngressServiceRole"))).toBe(true);
+    // Spec 062 Phase 7d: and the channel API, which shows the Details view for the built-in Slack adapter, the same way.
+    expect(roles.every((role) => role.startsWith("SlackOrchestratorTaskRole") || role.startsWith("BrokerServiceRole") || role.startsWith("SlackIngressServiceRole")
+      || role.startsWith("ChannelApiIngressServiceRole"))).toBe(true);
     expect(roles.length).toBeGreaterThanOrEqual(3);
   });
 
@@ -212,8 +214,8 @@ describe("Slack service turn records and metric filters", () => {
 describe("Details view access to turn records (spec 014 FR-024)", () => {
   const template = Template.fromStack(new ControlPlaneStack(new App(), "TurnDetailsControlPlane"));
 
-  it("lets the ingress Lambda get one turn record by key, with only the attributes the Details view shows", () => {
-    const statements = statementsForRole(template, "SlackIngressServiceRole").filter(onTurnRecords);
+  it.each(["SlackIngressServiceRole", "ChannelApiIngressServiceRole"])("lets %s get one turn record by key, with only the attributes the Details view shows", (role) => {
+    const statements = statementsForRole(template, role).filter(onTurnRecords);
     expect(statements).toHaveLength(1);
     expect([statements[0]!.Action].flat()).toEqual(["dynamodb:GetItem"]);
     expect(JSON.stringify(statements[0]!.Resource)).not.toContain("index");

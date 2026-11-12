@@ -49,7 +49,10 @@ export class SlackChannel implements ChannelAdapter {
   }
 
   async deliver(event: ChannelEvent): Promise<void> {
-    if (event.channel !== "slack" || event.conversation.channel !== "slack") throw new SlackApiError("wrong_channel");
+    if (event.channel !== "slack") throw new SlackApiError("wrong_channel");
+    // A message to one person outside any conversation needs the `direct` ability, which this adapter does not declare, so the core never sends one here.
+    if (event.type === "direct") throw new SlackApiError("direct_not_supported");
+    if (event.conversation.channel !== "slack") throw new SlackApiError("wrong_channel");
     // At least once: a repeat of an event id in this run is dropped, as an adapter must.
     if (this.seen.has(event.id)) return;
     const { teamId } = await this.who();

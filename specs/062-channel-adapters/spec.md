@@ -2,7 +2,7 @@
 
 **Feature Branch**: `claude/062-channel-adapters`
 **Created**: 2026-11-08
-**Status**: Phases 1–2 in PR #424; Phase 3 in progress
+**Status**: Phases 1–5b merged (#424–#427, #429); Phase 5a in #428
 **Issue**: #423
 **Input**: "We need a way to trigger Rovara through a third-party trigger, like Slack today. I should be able to
 do it through WhatsApp or anything, as long as it conforms to the protocol through a lightweight adapter."
@@ -101,9 +101,10 @@ phase. A thread started before the change resumes its workspace after it.
   answers? }`. Both require a Standard Webhooks signature (`webhook-id`, `webhook-timestamp`,
   `webhook-signature`) made with that adapter's secret, a timestamp within 5 minutes, and a path `channel`
   equal to the body's.
-- **FR-022:** Rovara sends typed events to `callbackUrl`, signed the same way: `ack`, `progress`, `question`,
-  `approval_request`, `check_report`, `pr`, `done`, `error`, `link_required`. Delivery is at least once with a
-  stable event ID, retried with backoff, then dead-lettered.
+- **FR-022:** Rovara sends typed events to `callbackUrl`, signed the same way: `ack`, `message`, `progress`,
+  `question`, `approval_request`, `check_report`, `pr`, `done`, `error`, `link_required`. Delivery is at least once
+  with a stable event ID, retried with backoff, then dead-lettered. Everything Rovara says in the conversation is a
+  `message`; `done` marks that a request finished and may carry no text.
 - **FR-023:** Capabilities are `threads`, `buttons` (max per message), `edits`, `maxTextLength` and
   `proactive`. The core never sends a part the adapter cannot show; without buttons, an approval names a reply
   such as "reply 1 to approve".
@@ -124,20 +125,113 @@ phase. A thread started before the change resumes its workspace after it.
   Phase 3 already sends no approve action for a stepped-up kind.
 - **FR-033:** Slack actors keep their current verified identity. Slack is never subject to FR-030 to FR-032.
 
-### Core without Slack (Phase 4)
+### Adapter conversations run (Phase 4a)
 
-- **FR-040:** The orchestrator's prompts and action gate name no surface; output is plain text and structured
-  parts, and each adapter formats it.
-- **FR-041:** `model`, `chatgpt connect`, `swebench` and eval-batch are core text commands.
-- **FR-042:** Slack Web API calls happen only inside the Slack adapter.
+- **FR-035:** The orchestrator runs each queued message and decision in order per conversation, through the same
+  processor as a Slack thread. Its replies leave as events; it acts on the service routes for the conversation and
+  actor, and the broker checks the adapter, binding, link and developer again on every call.
+- **FR-036:** An adapter conversation's workspace is charged to the linked developer: their Slack member's counter
+  when the developer is linked to Slack, otherwise their own, and the organization's. Close and a failed preparation
+  give it back.
+- **FR-037:** An adapter answers an action confirmation with a decision naming it and the digest of its calls, or with
+  a "yes" or "cancel" reply. A confirmation an administrator's policy requires is kind `admin`; an adapter that steps
+  `admin` up cannot approve it either way (FR-032).
+- **FR-038:** SWE-bench runs, eval batches, shared tasks and task-thread answers stay Slack-only; an adapter
+  conversation is told so or refused.
+
+### Core without Slack (Phase 4b)
+
+- **FR-040:** The orchestrator's prompts and action gate name no surface; the surface chooses the model's reply
+  style. The processor writes every text it posts through the conversation's format: Slack's keeps today's exact
+  texts, and an adapter's is plain text the adapter formats.
+- **FR-041:** `models` and `use <model>` are core text commands, worded for each surface. `swebench` and eval
+  batches stay Slack-only (FR-038). `connect chatgpt`, `chatgpt status` and `disconnect chatgpt` are parsed by the
+  core (`parseChatGptCommand`): Slack ingress answers them privately for the Slack member, and an adapter
+  conversation, which may be a group, is pointed to `agentx chatgpt` and told nothing about the connection.
+- **FR-042:** In each package, Slack Web API calls go through one module: `slack-web.ts` in the broker and in the
+  orchestrator service. (Sign-in's OpenID token exchange and the CLI's setup are not Web API messaging.)
 
 ### Slack and WhatsApp on the protocol (Phases 5–6)
 
-- **FR-050:** Slack's signature check and event parsing run in the Slack adapter, which reaches the core only
-  through the channel API.
-- **FR-051:** `agentx channel add` registers an adapter and `agentx channel bind` binds a space to a project.
+- **FR-050:** Slack is an in-process adapter (decided 2026-11-10): its signature check, event parsing and Slack-only
+  features stay in Slack's modules (`slack-*.ts`, and the orchestrator service's Slack modules), which reach the core
+  through the surface-neutral processor (`processConversationRequest`), its hooks and the neutral contract names.
+  Slack is not moved behind the HTTP channel API: the protocol would need private messages, edits, rich buttons,
+  task-workflow actions and canvases first.
+- **FR-051:** `agentx adapter add` registers or changes an adapter (and `--rotate` replaces its secret), `adapter bind`
+  and `adapter unbind` bind a space to a project, `adapter unlink` removes an actor's link, and `adapter list` and
+  `adapter remove` manage adapters. `agentx channel add` stays the Slack channel binding.
 - **FR-052:** A WhatsApp adapter maps a chat to a conversation, uses at most 3 reply buttons, and uses an
   approved template when it may not message first.
+
+### Slack through the channel API (Phase 7)
+
+Decided 2026-11-10, replacing Phase 5b's in-process adapter: Slack reaches the core only through the channel API, as
+any adapter does. The Slack adapter runs inside Rovara's stacks and is registered by the deploy, so installation is
+unchanged (the same Slack app, tokens and Add to Slack; the app's URLs point at the adapter). Slack sign-in stays an
+identity provider, not a channel.
+
+The protocol grows by three primitives, each behind a capability an adapter declares:
+
+- **FR-070 (rich messages):** a `message` event may carry `parts` (sections, fields, context lines, links, images by
+  URL) and `actions` (buttons with an `actionId` and `value`, link buttons, selects, and forms; see FR-071) besides its
+  plain `text`, which every adapter can show. A `key` names the message: a later event with the same key replaces it
+  where the adapter has `edits`, and is a new message elsewhere. An `audience` of one actor makes it private in the
+  conversation (`ephemeral`), and a `direct` audience sends it to the actor outside any conversation (`direct`).
+- **FR-071 (actions):** `POST /v1/channels/{channel}/actions` carries a person's press or form submission:
+  `{ eventId, conversation?, actor, actionId, value, form?, messageKey? }`, signed as messages are. A button may declare a
+  form (title, fields, submit label); the adapter opens it itself, since surfaces such as Slack require a form within
+  seconds of the press, and posts the submission as one action. Decisions (FR-021) stay as they are.
+- **FR-072 (commands):** the core asks the adapter and waits for its answer, signed both ways with the adapter's
+  secret: `start_conversation` (post the first message in a space; answers the new thread), `create_document`
+  (a titled Markdown document readable in a space; answers its link), `delete_document`, `space_members`, `user`
+  and `user_by_email` (directory reads for task access). An adapter answers only the commands its capabilities name;
+  the core never relies on one it lacks.
+- **FR-073 (the built-in Slack adapter):** the deploy registers channel `slack` with its own secret and capabilities
+  (`threads`, `buttons`, `edits`, `ephemeral`, `direct`, `forms`, `documents`, `directory`). Its actors keep Slack's
+  verified identity (FR-033): no linking, and no step-up refusal for decisions Slack can make today. Slack's subjects,
+  owner keys and bindings stay exactly as they are (SC-001).
+- **FR-074 (rollout):** `SlackViaChannel` (`enabled` | `disabled`, default `disabled`) routes Slack through the adapter;
+  disabled, today's Slack path runs unchanged. It is enabled in TEST first; the old path is removed only after.
+- **FR-075 (order):** a conversation's events reach its adapter in the order the core sent them. The event queue is
+  FIFO, one group per conversation (per person for a direct message); an event being retried holds the group's later
+  events behind it.
+- **FR-076 (posts the core must know about):** `post_message` (in a space, in a thread or starting one, or privately to
+  one person), `direct_message` and `update_message` commands, answered with the message's ID and thread. A message's
+  `parts`, when present, are its whole rich form (an `actions` part places buttons among them); `text` is its plain
+  form. The developer task notifier and the session reconciler post to Slack only through these commands and the
+  document commands once `SlackViaChannel` is on.
+- **FR-077 (directory):** `user` and `user_by_email` answer a directory person (their tenant and linked tenants,
+  names, email, whether a bot, deleted or external); `space` answers a space's name and privacy, `spaces` one page of
+  the tenant's public spaces, and `check` the tenant the adapter serves. Developer sign-in's Slack directory reads
+  (task access, channel names, the health check) go through these once `SlackViaChannel` is on, with its caches,
+  call budgets and eligibility rules unchanged.
+- **FR-078 (routing in the core):** with `SlackViaChannel` on, the Slack adapter decides nothing about a request: it
+  checks Slack's signature, drops Slack's own and malformed events, reads a plain reply only in a thread Rovara posted
+  in, and hands each message to the channel API after Slack has its answer. The channel API runs the routing (stops,
+  ChatGPT commands, task threads' notes, Quick or Full answers, new tasks, the per-thread limit, requests for the
+  orchestrator). An inbound message may say it is not `addressed` to Rovara, give its own `messageId`, and say it came
+  `viaApp` (the core confirms the poster is a person). A confirmation's Approve or Cancel is an action.
+- **FR-079 (presses in the core):** with `SlackViaChannel` on, a press that opens no form (workflow retries, send back,
+  keep the pull request, PR feedback decisions, Quick, Full and Just answer) is handed to the channel API as an action
+  carrying the pressed message's ID and text, after Slack has its answer, and runs there with the same request ID.
+  Its private notes and card edits go through the adapter's commands. Presses that open a form follow in Phase 7c3b.
+- **FR-080 (forms):** a press that opens a form is answered synchronously with the form (read-only parts and fields:
+  text, multiline, select, multiselect, checkboxes, radio, person), which the adapter opens within its surface's limit.
+  A submitted form comes back as an action with the form as shown, the core's `state`, each field's typed value, and
+  the surface's handle for the open form; the core answers by closing it, showing errors on its fields, or replacing
+  it, and may later replace a form still open (`update_form`). The built-in adapter's form submissions and its
+  direct-message presses (an admin change's Confirm and Cancel) carry no conversation; the core checks the person's
+  access itself. Every modal the core opens reads as a form that renders back to the same Slack modal.
+
+Phases: 7a the primitives (contracts, signing, the core's command client, capabilities); 7b Slack's conversation path
+through the adapter behind `SlackViaChannel`; 7c the task workflow, notices and directory through the adapter, in parts
+(7c1 the notifier's and reconciler's posts and Canvases; 7c1b directory reads; 7c2 mentions and replies routed by the
+core; 7c3 presses and forms as actions); 7d TEST, then the old path's removal.
+
+Constitution: Principle I requires an adapter's actors to be linked and refuses step-up decisions from adapters.
+FR-073 needs a MINOR amendment before 7b: the built-in Slack adapter is registered by the deploy, and its actors are
+verified by Slack, as today. Done: constitution 5.1.0 (2026-11-11).
 
 ## Security considerations
 
@@ -191,4 +285,7 @@ The amendment permits adapters; none exists until Phase 3, so no running behavio
 - **SC-001:** Every existing Slack owner key, subject and binding key is unchanged (Phase 1 and 2 tests).
 - **SC-002:** A WhatsApp message in a bound group starts a task and receives `done`, on a test install.
 - **SC-003:** An unlinked actor, an unbound space and a bad signature each run nothing (abuse tests).
-- **SC-004:** After Phase 4, no module outside the Slack adapter imports Slack schemas or calls the Slack API.
+- **SC-004:** After Phase 4b, no module outside `slack-web.ts` calls the Slack Web API, and the orchestrator package's
+  prompts and gate texts name no surface. After Phase 5b, the conversation core imports no Slack type or Slack module
+  (`tests/contract/slack-boundary.test.ts`), and Slack imports elsewhere, where Slack is a product feature, cannot
+  grow.

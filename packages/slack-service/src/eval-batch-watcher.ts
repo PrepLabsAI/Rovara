@@ -30,6 +30,7 @@ import type {
 } from "@agentx/contracts";
 import { batchStartMessage, modelLabel, usd } from "./eval-batch-command.js";
 import { escapeText } from "./slack-format.js";
+import { SlackApiError } from "./slack-web.js";
 
 export const EVAL_BATCH_WATCH_POLL_MS = 30_000;
 export const EVAL_BATCH_PROGRESS_INTERVAL_MS = 5 * 60_000;
@@ -50,11 +51,7 @@ export const PERMANENT_SLACK_ERRORS: readonly string[] = ["channel_not_found", "
  * A Slack Web API answer with `ok: false`, carrying Slack's error code. Its message and name are the
  * ones the service's posts always threw, so the processor's refusal check and logs are unchanged.
  */
-export class SlackApiError extends Error {
-  constructor(readonly method: string, readonly code: string) {
-    super(`Slack ${method} failed: ${code}`);
-  }
-}
+export { SlackApiError };
 
 export interface EvalBatchWatchList {
   batches: EvalBatchWatched[];

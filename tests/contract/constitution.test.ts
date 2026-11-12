@@ -3,10 +3,11 @@ import { describe, expect, it } from "vitest";
 
 const read = () => readFile(new URL("../../.specify/memory/constitution.md", import.meta.url), "utf8");
 
-describe("constitution 5.0.0 (channel adapters)", () => {
-  it("is version 5.0.0 with a sync impact note naming the changed principles", async () => {
+describe("constitution 5.1.0 (channel adapters)", () => {
+  it("is version 5.1.0 with sync impact notes naming the changed principles", async () => {
     const text = await read();
-    expect(text).toMatch(/\*\*Version\*\*: 5\.0\.0 \| \*\*Ratified\*\*: 2026-09-17 \| \*\*Last Amended\*\*: 2026-11-08/);
+    expect(text).toMatch(/\*\*Version\*\*: 5\.1\.0 \| \*\*Ratified\*\*: 2026-09-17 \| \*\*Last Amended\*\*: 2026-11-11/);
+    expect(text).toMatch(/Sync impact: 5\.0\.0 -> 5\.1\.0/);
     expect(text).toMatch(/Sync impact: 4\.1\.0 -> 5\.0\.0/);
     expect(text).toContain("specs/062-channel-adapters/");
   });
@@ -19,6 +20,12 @@ describe("constitution 5.0.0 (channel adapters)", () => {
     expect(text).toContain("MUST NOT receive credentials or run coding work");
     expect(text).toContain("on the task page and MUST be refused from the adapter");
     expect(text).not.toContain("accept only requests that Slack has signed");
+  });
+
+  it("lets Slack reach the core as the built-in adapter the deployment registers, with Slack's identity (Principle I)", async () => {
+    const text = await read();
+    expect(text).toContain("built-in Slack adapter, which the deployment registers itself rather than an administrator");
+    expect(text).toContain("relay only requests Slack has signed, from the Slack channel bound to the project");
   });
 
   it("keeps one orchestrator model and admits the developer task API", async () => {
