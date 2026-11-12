@@ -53,6 +53,21 @@ export function signInClientView(record: SignInClientRecord): SignInClientView {
 export const SIGN_IN_CLIENTS_PK = "SIGNIN_CLIENTS";
 export const signInClientKey = (clientId: string) => ({ pk: SIGN_IN_CLIENTS_PK, sk: `CLIENT#${SignInClientIdSchema.parse(clientId)}` });
 
+// ---- FR-004: the access check, POST /v1/dev/access ----
+
+/** With a confidential client's secret (HTTP Basic), the developer to ask about; with a person's token, nothing. */
+export const AccessCheckRequestSchema = z.object({ developerId: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
+export type AccessCheckRequest = z.infer<typeof AccessCheckRequestSchema>;
+
+/** Who the person is and what they can use now. `notices` names a check that could not run (`slack_unavailable`). */
+export interface AccessCheckResponse {
+  developerId: string;
+  displayName: string;
+  administrator: boolean;
+  projects: Array<{ name: string; access: "granted" | "channel" }>;
+  notices: string[];
+}
+
 // ---- The broker's requests to the sign-in Lambda, which owns the registry ----
 
 export const PutSignInClientRequestSchema = z.object({ kind: z.literal("put-sign-in-client"), client: SignInClientRecordSchema }).strict();

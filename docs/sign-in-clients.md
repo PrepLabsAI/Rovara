@@ -59,5 +59,22 @@ A session records whether the person is a Rovara administrator. Only a company s
 the same identity provider as the admin client and its ID token carries the administrator claim (`AdminClaim`,
 `AdminValues`). A Slack sign-in never counts.
 
-Status: phases 063a (the registry) and 063b (sign-in). The access check comes in 063c
-([spec](../specs/063-sign-in-clients/spec.md)).
+## Check what a person can do
+
+`POST <api>/v1/dev/access` answers who the person is, whether they are a Rovara administrator, and which projects
+they can use now:
+
+```json
+{ "developerId": "…", "displayName": "Ada", "administrator": false,
+  "projects": [{ "name": "payments-api", "access": "channel" }], "notices": [] }
+```
+
+- With the person's token: `Authorization: Bearer <their access token for the service>` and no body.
+- By developer ID, for a confidential service only: HTTP Basic with the client ID and secret, and the body
+  `{ "developerId": "…" }`. This form always answers `administrator: false`.
+
+Rovara reads the person's sign-in and grants on every call. An ended sign-in, a revoked developer or a removed client
+answers 401. If Slack can't be reached, `notices` contains `slack_unavailable` and projects that come only from a
+channel are left out.
+
+See the [spec](../specs/063-sign-in-clients/spec.md).

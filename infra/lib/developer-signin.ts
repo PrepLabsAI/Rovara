@@ -183,10 +183,11 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("MCP_CONFIRM_ELICITATION", p.mcpConfirmElicitation.valueAsString);
     fn.grantInvoke(broker);
     // Spec 025 25e: EMAIL# is the email index resolveDeveloper reads to name a developer by email.
+    // Spec 063: SIGNIN_CLIENTS holds the registered clients the access check authenticates.
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],
       resources: [table.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*"] } },
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } },
     }));
     // The workflow E2E terminal authority transaction also condition-checks the original creator
     // record. Keep that cross-table fence to developer identity rows only.
