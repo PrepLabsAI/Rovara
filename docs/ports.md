@@ -135,6 +135,106 @@ otherwise. A message that fails `maxAttempts` times is set aside as `DEAD` (repo
 `expiresAt`. Messages of one ordered group keep their order only if one relay runs at a time. `createTransactionalOutbox` is written
 once over the two ports; the store must keep `OUTBOX_PENDING_INDEX`.
 
+**SQS adapter (lane A2, `packages/aws-adapters/src/sqs`, `@rovara/aws-adapters/sqs`; public, opt-in, never Code's default).**
+`SqsQueueService` implements `Queue` on queues the deployment declares (settings `queues: { <name>: { url, deadLetterUrl? } }`, `region`,
+`endpoint`); it creates and changes no queue. At first use it reads the queue's attributes and takes its visibility timeout, redrive policy
+(`maxReceiveCount`, checked against `deadLetterUrl`) and size limit from SQS, and `queue(name, options)` throws for options that differ.
+It passes `runQueueConformance` in both modes, and the outbox suite over the DynamoDB store and either mode.
+- **Which mode, and why.** The mode is the queue's: a URL ending `.fifo` is FIFO. *Standard* is the default for task dispatch, because the
+  core already works with the weakest queue (at least once, no order, no duplicate suppression) and standard has no per-group throughput
+  cap; its consumers drop a repeat by `outboxId`. *FIFO* is for a use that needs order inside a group (`groupId`) or the 5 minute duplicate
+  window. Capabilities: standard `ordered false, dedupe false, maxDelaySeconds 900`; FIFO `ordered true, dedupe true, maxDelaySeconds 0`
+  (SQS refuses a per-message delay on FIFO). Both: `detectsStaleHandle false, deadLettersById false`.
+- **FIFO details.** A message with no `groupId` gets a group of its own (no order owed to any other message), hidden on receive. The
+  `dedupeId` is sent as its SHA-256 hex (SQS wants 128 characters of a narrow set); no `dedupeId` gets a fresh one. SQS does not say a send
+  was a duplicate, so `duplicate: true` is reported only for a repeat this process sent inside the window. An ordered queue is received one
+  message per request, because a FIFO request can return several messages of one group.
+- **Size.** SQS limits body plus attributes (names, type name, values) to 256 KiB, the port limits the body alone. The adapter refuses the
+  total before sending, and a queue with a smaller `MaximumMessageSize` is honoured. A message carries at most 9 attributes of its own
+  (SQS's 10, one kept for the dead-letter marker). U+FFFE and U+FFFF in a body are written as JSON escapes; other text SQS refuses
+  (control characters, an unpaired surrogate) in an attribute, group or reason is refused.
+- **Poison and dead letters.** SQS's redrive policy moves a message after `maxReceiveCount` receives and keeps its id. A body that is not
+  JSON is not delivered (reported to `onMalformed`) and ends in the dead letters the same way. `deadLetter(handle, reason)` sends the message
+  to the declared dead-letter queue with a marker attribute (reason, time, original id, count) and then deletes it, so a crash leaves it on both
+  queues, never neither; it needs the body, so only a delivery this process made (bounded memory) can be dead-lettered, and any other handle
+  answers false. `listDeadLetters` is a sample of one receive (at most 10, no cursor); `redrive` and `discardDeadLetter` by id scan up to
+  `deadLetterScanLimit` (100) messages, putting each other message straight back. For a large dead-letter queue use SQS's own redrive.
+- **Stale handles.** SQS answers true to an `ack` with the earlier handle of a message received again (and removes nothing); the core's
+  consumers are idempotent for this reason.
+- **Errors.** `SqsQueueError` names the call and SQS's error name, never SQS's text; `retryable` is false for refusals that will not change.
+
+**Outbox triggers on AWS (`sqs/outbox-relay.ts`; ports only).** `createOutboxRelayHook` is a change-feed consumer for the store's existing
+stream reader: an INSERT of a `PENDING` outbox row makes it call `relay({ companyId, ids })` for exactly the new rows, once per company in a batch.
+The relay's own updates (attempt counts, the move to `QUEUED`) are MODIFY records and start nothing. `createOutboxBackstop` is the scheduled
+run: one `relay({ companyId })` per company from a supplied list, sequentially, within an optional time budget (the rest is `deferred` to the
+next run), and one company's failure does not stop the others. The stream is never the only way a message reaches its queue: a missed record,
+a hook error or a failed hand-over is picked up by the backstop, and a row that keeps failing is set aside as `DEAD` by the outbox. Both are
+at least once; neither orders messages across calls, so nothing may rely on the outbox for order across overlapping relays.
+
+## Local adapters (SQLite)
+
+`packages/local-adapters` holds the adapters for the laptop path (decision 44): a SQLite `DocumentStore` with its change feed, and a
+SQLite `Queue`. They are plug-ins for the registry. `rovara up` registers them as the `storage` and `queue` defaults in `~/.rovara/state.db` with the task flow's indexes (lane L9-wire); a config entry like these replaces them, and then must keep `TASK_FLOW_INDEXES`:
+
+```json
+{ "point": "storage", "name": "sqlite", "module": "@agentx/local-adapters/storage", "settings": { "path": ".rovara/state.db", "indexes": [] } },
+{ "point": "queue", "name": "sqlite", "module": "@agentx/local-adapters/queue", "settings": { "path": ".rovara/state.db" } }
+```
+
+The store plug-in always keeps `OUTBOX_PENDING_INDEX`, and `ttlAttribute` is `expiresAt` unless set (`null` turns expiry off); `indexes`
+adds the core's other indexes. The queue may share the store's file (two connections) or use its own. Both plug-ins refuse a setting they do not know, and a
+`:memory:` path. `SqliteDocumentStore` and `SqliteQueueService` have `close()`, which the port does not: the process that loads them closes them.
+
+**The library is `node:sqlite`**, which is inside Node (the repository pins `>=22.19 <23`; SQLite 3.51 with WAL). Nothing is downloaded or
+compiled on macOS or Linux, arm64 or x64, and there is no dependency to review. The costs are that Node still calls it "active
+development" and prints one `ExperimentalWarning` at first use (run with `--disable-warning=ExperimentalWarning` to hide it), and that its
+API could change in a later Node line. `better-sqlite3` is the fallback; only `sqlite-database.ts` touches the library, so it is a one-file change.
+
+**How it reuses the rules.** A write reads the documents it touches inside its own `BEGIN IMMEDIATE` transaction, then calls the same functions
+as the in-memory fake (`evaluateCondition`, `applyUpdateOps`, the `assertValid...` checks, `indexPlacement`) and writes the result with the
+index tables, the time-to-live table and the change log in that one transaction. Text columns are UTF-8 with BINARY collation, so SQL order is the
+code point order the port promises. The suites in `tests/support/ports/` run unchanged against it (`tests/unit/local-adapters-*.test.ts`), and a
+crash test kills a child process with SIGKILL and reopens the file.
+
+**Change feed.** Changes are written to a log table in the writing transaction by every connection (also one opened with `changeFeed: false`, which only
+means it does not subscribe), only while some consumer name is registered in the file. A name that
+subscribes for the first time starts at the present; after that it resumes after its stored checkpoint, which is saved after the handler
+returns (a crash in between delivers the batch again). A handler that throws is retried with a doubling delay (10 tries by default), then
+`onPoison` is called, the checkpoint moves on and `droppedBatches` counts it. `sequence` is the log's row number, padded to 20 digits. The log
+is trimmed to the slowest registered consumer, so a consumer that is registered but never subscribes again holds the log forever: retire it
+with `removeConsumer(name)`.
+
+**Limits to know.**
+- **One process.** WAL lets several connections read while one writes, and the tests run two connections on one file (store and queue, two
+  stores). But the change feed, the expiry sweep and the queue's wake-up of a waiting `receive` are per process. Two processes that subscribe
+  to one consumer name both deliver every change (handlers are idempotent anyway) and race on the checkpoint. A waiting `receive` in another
+  process sees a new message at its next poll (`pollMs`, 250 ms), not at once.
+- **Writes are serialised.** A write waits for another connection's lock up to `busyTimeoutMs` (default 5000) and blocks this process's
+  event loop while it waits. Then the store throws `conflict` (retryable) and the queue throws `QueueStorageError`. A transaction never
+  spans an `await`, so two writes in one process never interleave.
+- **Durability.** `synchronous: "FULL"` (default) flushes every commit; a killed process loses nothing. A power cut can still lose recent
+  commits on macOS, because SQLite does not ask the disk to flush its cache there (`fullfsync` is off). `"NORMAL"` is faster and can lose the
+  last commits in a power cut, never corrupt the file.
+- **Local disk only.** WAL needs shared memory. A file system that cannot do it (some network shares, some container mounts) is refused at open.
+  To copy a live database use SQLite's backup (`sqlite3 state.db ".backup copy.db"`), not `cp`.
+- **Keys and text.** `pk`, `sk`, index key text and queue group, dedupe and reason text must not hold an unpaired surrogate or a NUL
+  (SQLite would turn one into U+FFFD and cut the other); they are `invalid_request`. A document body may hold both: it is stored as JSON text.
+  Numbers are JavaScript doubles; an index on a number sorts them as doubles.
+- **Paging.** A page is cut at `limit` before the filter, so a filtered page can be short with a cursor, as on DynamoDB. A cursor names the
+  last item, so a deleted item does not break it.
+- **Indexes.** The file remembers its index set and time-to-live attribute, because every connection must maintain the same tables.
+  Opening it with a different set is refused (`invalid_request`) unless the opener passes `migrate: true`; the storage plug-in always does, so a
+  changed config takes effect at the next start. A migration builds the new index tables from the documents (time grows with their number),
+  leaves out a document that does not fit a changed index (wrong sort type), and drops the tables of indexes no longer named. Connections still
+  open on the old layout then refuse to write or query an index (`unavailable`) until they are reopened.
+- **Expiry.** The sweep runs every 60 s (`sweepIntervalMs`; 0 for none), in pages of 100 documents, at most 50 ms at a time, and its removals
+  carry `cause: "expired"`. A document is readable until then.
+- **Queue.** Options (visibility, `maxReceiveCount`, `ordered`) belong to the process's declaration and are not stored; the messages, dead
+  letters and the 5 minute dedupe window are. `receive` is a poll (an idle poll reads only); `waitSeconds` polls until the time is up.
+- **Files.** A folder the store creates is `0700`; the file, and any `-wal` and `-shm` beside it, are set to `0600` at open. A folder that already
+  existed keeps its mode.
+- **Size.** The port's limits hold (400 KB a document, 4 MiB a transaction, 256 KB a message). Nothing is tuned for a database past a few GB.
+
 ## Worker machines
 
 `WorkerMachines`: `start` (idempotent on `machineKey`, wakes a stopped machine), `stop` (keeps the volume), `terminate`, `health`
