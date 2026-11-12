@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
+import type { AccessCheckContext, AccessCheckRule } from "../../packages/broker/src/developer/access-rules.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { localSigner } from "../support/developer-fakes.js";
@@ -18,6 +19,8 @@ const signer = localSigner();
 
 let db: FakeDynamoDb;
 let handler: AdminHandler;
+/** A host's stricter rules (owner decision 132); each test sets its own. */
+const rules: AccessCheckRule[] = [];
 let channelMembers: ReturnType<typeof vi.fn<(request: ChannelMembersRequest) => Promise<ChannelMembersResponse>>>;
 
 const clientClaims = (overrides: Record<string, unknown> = {}) => ({
@@ -45,9 +48,11 @@ afterEach(() => {
 beforeEach(async () => {
   vi.useFakeTimers({ now: T0, toFake: ["Date"] });
   channelMembers = vi.fn(async () => ({ ok: true as const, memberOf: ["C0PAY0001"] }));
+  rules.length = 0;
   const config: DeveloperApiConfiguration = {
     issuer: ISSUER, env: "staging", methods: { slack: true, oidc: true }, slackTeamId: "T0TEAM1", signInTableName: "signin", channelMembers,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
+    accessRules: rules,
   };
   ({ db, handler } = await createAdminBroker({ developer: config }));
   const at = new Date(T0 - 60_000).toISOString();
@@ -137,5 +142,49 @@ describe("a client's token on Rovara's own routes (FR-003)", () => {
     // A CLI-shaped token that names a client's session is refused too.
     const forged = await handler({ rawPath: "/v1/dev/projects", headers: { authorization: `Bearer ${await signed(clientClaims({ aud: "agentx-developer", azp: undefined }))}` }, requestContext: { requestId: "r", http: { method: "GET" } } });
     expect(forged.statusCode).toBe(401);
+  });
+});
+
+describe("a host's stricter rules on the access check (owner decision 132)", () => {
+  it("are told who asked, how, and the session when the person's own token asked", async () => {
+    const seen: AccessCheckContext[] = [];
+    rules.push((context) => { seen.push(context); return undefined; });
+    expect((await bearer()).status).toBe(200);
+    expect((await access(basic("scheduler", SECRET), { developerId })).status).toBe(200);
+    expect(seen[0]).toEqual({ clientId: "scheduler", via: "token", developerId, session: { sessionId: "s-client", amr: "oidc", startedAt: new Date(T0).toISOString(), administrator: true }, now: T0 });
+    expect(seen[1]).toEqual({ clientId: "scheduler", via: "client_secret", developerId, now: T0 });
+  });
+
+  it("can refuse with the access check's one 401, as a fresh-sign-in rule would", async () => {
+    const plain = await access("Bearer not-a-token");
+    rules.push((context) => (context.session !== undefined && context.now - Date.parse(context.session.startedAt) < 5 * 60_000 ? undefined : { refuse: true }));
+    expect((await bearer()).status).toBe(200);
+    vi.setSystemTime(T0 + 10 * 60_000);
+    const refused = await bearer();
+    expect(refused.status).toBe(401);
+    expect((refused.body as { error?: unknown }).error).toEqual((plain.body as { error?: unknown }).error);
+    expect((await access(basic("scheduler", SECRET), { developerId })).status).toBe(401);
+  });
+
+  it("refuses when a rule throws: a broken stricter rule never opens", async () => {
+    rules.push(() => { throw new Error("approval store down"); });
+    expect((await bearer()).status).toBe(401);
+  });
+
+  it("can take administrator away and keep only some projects, but never add a project or make an administrator", async () => {
+    rules.push(() => ({ administrator: false, projects: ["solo", "hidden"] }));
+    const narrowed = await bearer();
+    expect(narrowed.body).toMatchObject({ administrator: false, projects: [{ name: "solo", access: "granted" }] });
+    rules.length = 0;
+    rules.push(() => ({ administrator: true, projects: ["payments-api", "solo", "hidden"] }) as unknown as { projects: string[] });
+    const widened = await access(basic("scheduler", SECRET), { developerId });
+    expect(widened.body).toMatchObject({ administrator: false, projects: [{ name: "payments-api" }, { name: "solo" }] });
+  });
+
+  it("run in order, each on what the one before left", async () => {
+    const seenProjects: string[][] = [];
+    rules.push(() => ({ projects: ["solo"] }), (_context, answer) => { seenProjects.push(answer.projects.map((project) => project.name)); return undefined; });
+    expect((await bearer()).body.projects).toEqual([{ name: "solo", access: "granted" }]);
+    expect(seenProjects).toEqual([["solo"]]);
   });
 });

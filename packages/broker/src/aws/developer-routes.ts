@@ -65,6 +65,7 @@ import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPe
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { decodeJwt } from "jose";
+import { applyAccessRules, type AccessCheckContext, type AccessCheckRule } from "../developer/access-rules.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -113,6 +114,11 @@ export interface DeveloperApiConfiguration {
   channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
   verifyAccessToken(authorization: string | undefined, audience?: string): Promise<Record<string, unknown>>;
+  /**
+   * Owner decision 132: a host's stricter rules on the access check (spec 063 FR-004), such as a fresh sign-in or an approval it keeps. They can only refuse
+   * or narrow Rovara's own answer (`developer/access-rules.ts`); none means Rovara's answer as is.
+   */
+  accessRules?: readonly AccessCheckRule[];
   /** Spec 061 slice 2: the Slack service's request queue, set only with SLACK_REQUEST_QUEUE_URL; "Ask AgentX to reply to this comment" needs it. */
   slackRequestQueue?: SlackRequestQueue;
 }
@@ -643,10 +649,13 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   const nowSeconds = Math.floor(deps.now() / 1000);
   let developerId: string;
   let administrator = false;
+  let clientId: string;
+  let sessionFacts: AccessCheckContext["session"];
   if (basic !== undefined) {
     const client = await signInClientOf(deps, basic.clientId);
     if (client === undefined || !clientSecretMatches(basic.secret, client.secretHash) || parsed.data.developerId === undefined) throw refused();
     developerId = parsed.data.developerId;
+    clientId = client.clientId;
   } else {
     if (parsed.data.developerId !== undefined) throw refused();
     // The unverified azp only picks which client's audience the token must then verify against.
@@ -674,6 +683,8 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
       || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr])) throw refused();
     developerId = session.developerId;
     administrator = amr === "oidc" && session.administrator === true;
+    clientId = client.clientId;
+    sessionFacts = { sessionId: claims.sid, amr, startedAt: session.startedAt, administrator };
     const developer = await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${developerId}`);
     if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
   }
@@ -683,11 +694,15 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
     developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
   });
-  return {
+  const answer: AccessCheckResponse = {
     developerId, displayName: developer.displayName, administrator,
     projects: listed.projects.map((project) => ({ name: project.name, access: project.access })),
     notices: listed.notices,
   };
+  const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
+  const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
+  if (ruled === undefined) throw refused();
+  return ruled;
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {
