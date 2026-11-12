@@ -8,7 +8,9 @@
     "./e2e/discovery": "./dist/e2e/discovery.js",
     "./e2e/execution-plan": "./dist/e2e/execution-plan.js",
     "./local": "./dist/local/index.js",
-    "./plugins/channel-slack": "./dist/plugins/channel/slack/module.js"
+    "./plugins/channel-slack": "./dist/plugins/channel/slack/module.js",
+    "./plugins/object-storage-s3": "./dist/plugins/object-storage/s3/module.js",
+    "./plugins/secrets-aws": "./dist/plugins/secrets/aws-secrets-manager/module.js"
   },
   "types": "./dist/index.d.ts",
   "dependencies": {
@@ -36,6 +38,7 @@
     "@aws-sdk/lib-dynamodb": "3.1134.0",
     "@aws-sdk/util-dynamodb": "3.996.9",
     "@hpcc-js/wasm-graphviz": "1.29.0",
+    "@rovara/aws-adapters": "0.1.0",
     "jose": "6.2.12",
     "yaml": "2.9.1",
     "zod": "4.6.6"

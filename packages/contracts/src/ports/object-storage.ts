@@ -3,8 +3,8 @@
 // Where files live that are too big or too plain for the document store: proof evidence, plan documents, a worker's results. In
 // Cloud this is an S3 bucket (objects tagged with a retention class and expired by a lifecycle rule). The shape is the one lane L7b
 // wrote for evidence (`EvidenceBlobStore`), promoted to a registry point so every lane that stores a file asks the same port.
-// Code's adapters: a folder on this computer (`@agentx/local-adapters/object-storage`) and, as the default, the document store. An S3
-// adapter is Cloud's and is NOT here (a decision 51 item).
+// Code's adapters: a folder on this computer (`@agentx/local-adapters/object-storage`), as the default the document store, and an opt-in S3
+// bucket (`@agentx/broker/plugins/object-storage-s3`, convergence lane A3, owner decision 72 O2).
 //
 // Keys are the caller's, are case-sensitive and look like paths (`private/<owner>/<workspace>/evidence/<task>/<digest>`). A key is
 // checked by `isValidObjectKey` before any adapter uses it, so no adapter ever turns a key into a place outside its own store.

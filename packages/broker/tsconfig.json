@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": "dist" },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../contracts" }, { "path": "../gateway" }, { "path": "../local-adapters" }, { "path": "../model-runtime" }, { "path": "../verifier" }]
+  "references": [{ "path": "../aws-adapters" }, { "path": "../contracts" }, { "path": "../gateway" }, { "path": "../local-adapters" }, { "path": "../model-runtime" }, { "path": "../verifier" }]
 }

@@ -19,7 +19,8 @@ export type AwsCredentialProvider = () => Promise<AwsCredentialValue>;
 export interface AwsCredentialLoaders {
   profile(profile: string): Promise<AwsCredentialProvider>;
   ambient(): Promise<AwsCredentialProvider>;
-  role(roleArn: string, region: string): Promise<AwsCredentialProvider>;
+  /** `sessionName` names the AssumeRole session (CloudTrail shows it); absent: `rovara-bedrock`, the name Bedrock always used. */
+  role(roleArn: string, region: string, sessionName?: string): Promise<AwsCredentialProvider>;
 }
 
 export const AWS_MODULE_MISSING = "AWS credential module missing";
@@ -49,11 +50,11 @@ export function defaultAwsLoaders(): AwsCredentialLoaders {
       const { defaultProvider } = await load(() => import("@aws-sdk/credential-provider-node"));
       return defaultProvider();
     },
-    async role(roleArn, region) {
+    async role(roleArn, region, sessionName = "rovara-bedrock") {
       const { STSClient, AssumeRoleCommand } = await load(() => import("@aws-sdk/client-sts"));
       const client = new STSClient({ region });
       return async () => {
-        const out = await client.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: "rovara-bedrock", DurationSeconds: 900 }));
+        const out = await client.send(new AssumeRoleCommand({ RoleArn: roleArn, RoleSessionName: sessionName, DurationSeconds: 900 }));
         const got = out.Credentials;
         if (got?.AccessKeyId === undefined || got.SecretAccessKey === undefined) throw new Error("no credentials");
         return { accessKeyId: got.AccessKeyId, secretAccessKey: got.SecretAccessKey, sessionToken: got.SessionToken, expiration: got.Expiration };
@@ -80,7 +81,7 @@ export interface AwsCredentialSource {
 const REFRESH_BEFORE_MS = 60_000;
 const NO_EXPIRY_CACHE_MS = 30_000;
 
-export function createAwsCredentialSource(identity: AwsIdentity, region: string, options: { loaders?: AwsCredentialLoaders; now?: () => number } = {}): AwsCredentialSource {
+export function createAwsCredentialSource(identity: AwsIdentity, region: string, options: { loaders?: AwsCredentialLoaders; now?: () => number; sessionName?: string } = {}): AwsCredentialSource {
   const loaders = options.loaders ?? defaultAwsLoaders();
   const now = options.now ?? Date.now;
   let built: Promise<AwsCredentialProvider> | undefined;
@@ -89,7 +90,7 @@ export function createAwsCredentialSource(identity: AwsIdentity, region: string,
   let problem: string | undefined;
   const build = (): Promise<AwsCredentialProvider> => {
     if (identity.kind === "profile") return loaders.profile(identity.profile);
-    if (identity.kind === "role") return loaders.role(identity.roleArn, region);
+    if (identity.kind === "role") return options.sessionName === undefined ? loaders.role(identity.roleArn, region) : loaders.role(identity.roleArn, region, options.sessionName);
     return loaders.ambient();
   };
   return {

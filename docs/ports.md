@@ -363,6 +363,13 @@ and asks the point; it does not write its own reader.
   config-loaded plug-in. It sees every reference asked, and so can answer, and so choose, every model key and the GitHub token; it is trusted as much as the broker itself. Task input and project files cannot name a reference.
   Install a `secrets` plug-in only from a source you trust as you would trust the broker.
 - A conformance suite for every adapter is `tests/support/ports/secret-store-conformance.ts`.
+- **AWS Secrets Manager (convergence lane A3, owner decision 72 O2).** Opt-in: `{ "point": "secrets", "name": "aws-secrets-manager", "module": "@agentx/broker/plugins/secrets-aws", "settings": { "region",
+  one AWS identity, "namePrefix": "rovara/", "companyPaths"? } }` (`createSecretsManagerSecretStore` in `@rovara/aws-adapters/secrets-manager`; the module is `packages/broker/src/plugins/secrets/aws-secrets-manager/`, which shows the adapter's fixed sentences as `LocalSecretError`). Its reference kind is `{ "awsSecret": "<name under the prefix>" }`:
+  the secret read is `namePrefix` + the value (the hosted product's names, such as `agentx/<env>/org-connectors/<company>/<id>`, read as they are), and the value is checked first (plain parts, no `.` or `..`),
+  so no reference reaches outside the prefix. A value whose first part is one of `companyPaths` names a company's own secret and is read only when its second part is the call's company. `clientFor(companyId)`
+  lets a deployment sign each company's reads with a session that reaches only that company's secrets (IAM is the second fence). Missing, scheduled for deletion or empty is `undefined`; a refusal, a KMS
+  decryption failure, a binary secret or an outage is a fixed sentence that quotes neither the name nor the value. Read on every call. It knows no `{ env }` or `{ key }`, so with it
+  configured the model keys and the GitHub token must be named as `{ "awsSecret" }` sources where they are read. Suite: `tests/unit/aws-secrets-manager.test.ts`.
 
 ## Monitoring (the `monitoring` point)
 
@@ -409,8 +416,17 @@ object carries a content type, a few small text facts and a retention class (the
   adapters above run it in `tests/unit/ports-object-storage.test.ts`.
 - **Proof code.** `EvidenceBlobStore`, `EvidenceBlobMeta` and `EvidenceObjectTooBigError` stay as names over the port, so the proof code needs no change; the
   wiring lane takes the store from `registry.require("object-storage")`.
-- **Not here (decision 51).** The S3 adapter is Cloud's, with its lifecycle rule for retention; a signed download address (lane L8); a sweep of expired files in
-  the folder adapter (an expired object is reported absent and removed when it is next read).
+- **S3 (convergence lane A3, owner decision 72 O2: the generic AWS adapters are public).** Opt-in: `{ "point": "object-storage", "name": "s3", "module": "@agentx/broker/plugins/object-storage-s3",
+  "settings": { "bucket", "region", one of "profile" / "roleArn" / "allowAmbientAwsCredentials": true, "maxObjectMiB"?, "expectedBucketOwner"? } }` (`S3ObjectStorage` in the public AWS adapters package `@rovara/aws-adapters/s3`, `packages/aws-adapters`; the module that gives it an AWS identity is `packages/broker/src/plugins/object-storage/s3/`). It keeps the hosted
+  product's layout so no data moves: the key as given (no prefix), the metadata as S3 user metadata (`x-amz-meta-*`), and the retention class as the object tag `rovara-retention=<class>` on every
+  write. How long a class is kept is the BUCKET's lifecycle rules on that tag (the hosted bucket: `evidence-short` 14 days and `evidence-std` 30 days under `private/`, `e2e-screenshot` 30 days,
+  `nightly-maps/` 30 days by prefix); a class no rule names is kept until deleted, and the adapter never sets a lifetime itself. Write once is `If-None-Match: *`; an object whose lifecycle expiry
+  (`x-amz-expiration`) has passed reads as gone and is replaced only by its ETag (`If-Match`), so one writer wins there too. S3 lower-cases metadata names and keeps at most 2 KB, so this adapter
+  refuses upper-case names, non-ASCII values and more than 2 KB (`ObjectMetaError`) instead of storing something that reads back different. `presignGet(key, { contentType, disposition,
+  expiresInSeconds })` (not part of the port) signs a GET for one key with the content type and disposition forced, 60 seconds by default and 300 at most; the deployment passes the signer
+  (`getSignedUrl` of `@aws-sdk/s3-request-presigner`, which Code does not depend on). Errors never carry S3's words. It passes the suite over a faithful S3 stand-in (`tests/support/ports/aws-fakes.ts`)
+  in `tests/unit/aws-object-storage-s3.test.ts`.
+- **Not here (decision 51).** A sweep of expired files in the folder adapter (an expired object is reported absent and removed when it is next read).
 
 ## Local model proxy (lane L9a, PROVISIONAL: owner decision 58, until Pratik agrees)
 
@@ -747,7 +763,7 @@ Cloud's own files keep only what is Cloud's (its adapters, its policies, its dat
 
 ## What is not here
 
-- **Artifact (object) storage** now has a provisional port (`object-storage`, above). Cloud's S3 adapter is not in Code.
+- **Artifact (object) storage** now has a provisional port (`object-storage`, above), with an opt-in S3 adapter (lane A3).
 - **Snapshot reads** (`TransactGet`, 10 uses in Cloud). `getMany` is not a snapshot; use `transact` with `check` steps.
 - **Scan** (2 uses). Use `query` on a partition or an index. **Projections** (16 uses) are not offered; read the document.
 - **Sets with `contains`, list append with `size`, `attribute_type`, binary attributes.** Cloud's limit and budget code uses them
