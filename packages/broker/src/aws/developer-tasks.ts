@@ -4988,14 +4988,20 @@ function truncateText(text: string, max: number): string {
 export async function recordWorkflowThreadNote(
   deps: Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now">,
   input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string;
-    peopleAccess?: { peopleRevision?: number; isOwner: boolean } },
-): Promise<{ outcome: "captured" | "duplicate" | "refused" }> {
+    peopleAccess?: { peopleRevision?: number; isOwner: boolean };
+    /** Decision 134: the ingress read the reply as small talk ("thanks", "ok"). */
+    smallTalk?: boolean },
+): Promise<{ outcome: "captured" | "duplicate" | "refused" | "small_talk" }> {
   const thread = SlackThreadSchema.parse(input.thread);
   const task = await get<DeveloperTaskRecord>(deps, taskKey(input.taskId));
   if (task === undefined || task.closedAt !== undefined || task.workflow === undefined
     || task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
     return { outcome: "refused" };
   }
+  // Decision 134: small talk is not saved, unless the task waits on this person (a plan to approve, a question, a
+  // blocked step): then a short "ok" or "yes" is their answer, and it goes to the task like any reply.
+  const isOwner = input.peopleAccess?.isOwner ?? task.slackUserId === input.userId;
+  if (input.smallTalk === true && !(isOwner && (task.workflow.state === "WAITING" || task.workflow.state === "BLOCKED"))) return { outcome: "small_talk" };
   const trimmed = input.text.trim();
   const text = truncateText(trimmed, WORKFLOW_THREAD_NOTE_MAX_CHARS).trim();
   const slackUserId = SlackUserIdSchema.parse(input.userId);
@@ -5004,7 +5010,7 @@ export async function recordWorkflowThreadNote(
   let receivedAt = iso(deps);
   for (let attempt = 1; ; attempt += 1) {
     const note: SlackNote = SlackNoteSchema.parse({
-      schemaVersion: 1, taskId: task.taskId, slackUserId, isOwner: input.peopleAccess?.isOwner ?? task.slackUserId === input.userId,
+      schemaVersion: 1, taskId: task.taskId, slackUserId, isOwner,
       teamId: thread.teamId, channelId: thread.channelId, threadTs: thread.threadTs, messageTs,
       eventId: input.eventId, text, truncated: text.length < trimmed.length, receivedAt, workflowRevision,
     });

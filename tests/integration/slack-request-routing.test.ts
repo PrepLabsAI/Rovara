@@ -385,12 +385,50 @@ describe("decision 134: a clear small change starts Quick on its own, with a Sto
     expect(e2e.slack.responses.at(-1)?.text).toBe("Only the task owner can stop this task.");
     // Stop with nothing running: the task closes at once, and no code was written or published.
     await e2e.click(WORKFLOW_STOP_ACTION);
-    expect(e2e.slack.responses.at(-1)?.text).toBe("Stopping this task. Nothing it planned or wrote will be kept, and no pull request will open.");
+    expect(e2e.slack.responses.at(-1)?.text).toBe("Stopping this task. Nothing it planned or wrote will be kept.");
     await e2e.settle();
     expect(tasks(e2e)[0]!.closedAt).toEqual(expect.any(String));
     expect(e2e.workflow().candidate).toBeUndefined();
     expect(e2e.github.pullRequests).toEqual([]);
     expect(e2e.db.find((item) => item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")).toEqual([]);
+  }, 120_000);
+
+  it("finishes a remembered Stop on the next press when the close after the result did not happen, and the thread hears it closed", async () => {
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "small_change", outcome: "ok" }), autoStartQuick: true, model: { plan: PLAN, edits: [] } });
+    expect(await e2e.mention("fix the typo in README")).toBe(200);
+    await e2e.settle();
+    // As if a Stop was remembered and the close after its result failed once: the mark is there, the task still open.
+    const meta = tasks(e2e)[0]!;
+    const firstPress = "33333333-3333-4333-8333-333333333333";
+    e2e.db.set({ ...meta, stopRequest: { userId: MAYA.slackUserId, requestId: firstPress, at: new Date().toISOString() } });
+    await e2e.click(WORKFLOW_STOP_ACTION);
+    await e2e.settle();
+    expect(tasks(e2e)[0]!.closedAt).toEqual(expect.any(String));
+    expect(e2e.slack.posts.map((post) => post.text)).toContain("The task is closed, and its workspace is released. This thread no longer drives it.");
+  }, 120_000);
+
+  it("refuses Stop with honest words once the pull request is being opened, at Slack's handler and at the broker alone; and the broker alone refuses a teammate", async () => {
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "small_change", outcome: "ok" }), autoStartQuick: true, model: { plan: PLAN, edits: [] } });
+    expect(await e2e.mention("fix the typo in README")).toBe(200);
+    await e2e.settle();
+    const meta = tasks(e2e)[0]!;
+    const taskId = String(meta.taskId);
+    const share = meta.share as { teamId: string; channelId: string; threadTs: string };
+    const thread = { teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs };
+    const stop = (userId: string, requestId: string) => e2e.handler({ source: "agentx.slack-ingress", action: "workflow-close", taskId, userId, thread, requestId, stop: true });
+    // The broker alone (no Slack handler in front of it) refuses a teammate's Stop: no mark, still open.
+    const teammate = await stop("U0TEAMMATE1", "44444444-4444-4444-8444-444444444444");
+    expect(JSON.parse(teammate.body)).toMatchObject({ refused: true });
+    expect(tasks(e2e)[0]!.stopRequest).toBeUndefined();
+    expect(tasks(e2e)[0]!.closedAt).toBeUndefined();
+    // The pull request is being opened.
+    e2e.db.set({ ...tasks(e2e)[0]!, workflow: { ...(meta.workflow as Record<string, unknown>), stage: "PULL_REQUEST", state: "RUNNING" } });
+    await e2e.click(WORKFLOW_STOP_ACTION);
+    expect(e2e.slack.responses.at(-1)?.text).toBe("The pull request is already being opened, so it can't be stopped now. You can close it on GitHub.");
+    const owner = await stop(String(MAYA.slackUserId), "55555555-5555-4555-8555-555555555555");
+    expect(JSON.parse(owner.body)).toMatchObject({ refused: true, message: "The pull request is already being opened, so it can't be stopped now. You can close it on GitHub." });
+    expect(tasks(e2e)[0]!.stopRequest).toBeUndefined();
+    expect(tasks(e2e)[0]!.closedAt).toBeUndefined();
   }, 120_000);
 
   it("remembers a Stop pressed during setup: one press is enough, a second changes nothing, a teammate's is refused, and setup ends in a close with nothing planned", async () => {
@@ -484,5 +522,70 @@ describe("decision 134: small talk in a task's thread", () => {
     // Anything more than small talk is the task's, as before.
     expect(await e2e.mention("thanks, but also fix the second typo in CONTRIBUTING")).toBe(200);
     expect(e2e.taskQuestions.map((message) => message.text)).toEqual(["thanks, but also fix the second typo in CONTRIBUTING"]);
+  }, 120_000);
+});
+
+describe("decision 134: a quick start takes its text and requester from the broker's own record", () => {
+  let log: MockInstance<typeof console.log>;
+  beforeEach(() => { log = vi.spyOn(console, "log").mockImplementation(() => undefined); });
+  afterEach(() => { log.mockRestore(); });
+
+  it("refuses a body with text, another person, another thread or company, and a used or expired record", async () => {
+    // The classifier cannot tell, so nothing auto-starts; the ingress still recorded the message.
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "unclear", outcome: "ok" }), autoStartQuick: true, model: { plan: PLAN, edits: [] } });
+    const ts = "1696000000.000001";
+    expect(await e2e.mention("fix the typo in README", { ts, threadTs: ts })).toBe(200);
+    const card = e2e.slack.lastPostWithAction(WORKFLOW_PATH_QUICK_ACTION);
+    const thread = { teamId: "T0BSHLLUGBD", channelId: card.channel, threadTs: ts };
+    const choiceId = (JSON.parse((card.blocks as Array<{ type: string; elements?: Array<{ value: string }> }>).find((block) => block.type === "actions")!.elements![0]!.value) as { choiceId: string }).choiceId;
+    const record = e2e.db.get(`SLACK_INTAKE#${choiceId}`, "META");
+    expect(record).toMatchObject({ userId: MAYA.slackUserId, text: "fix the typo in README", threadTs: ts });
+    const ask = async (target: typeof thread, userId: string, body: Record<string, unknown>) => {
+      const response = await e2e.serviceFetch(target, userId)("https://agentx.internal/v1/workflows/quick-start", { method: "POST", body: JSON.stringify(body) });
+      return { status: response.status, body: await response.json() as Record<string, unknown> };
+    };
+    // Text in the body is refused outright: the broker never takes it from the Slack service.
+    expect((await ask(thread, String(MAYA.slackUserId), { requestId: choiceId, instructions: "rename getUsr" })).status).toBe(400);
+    // Another person, another thread, another company's workspace: refused.
+    expect((await ask(thread, "U0TEAMMATE1", { requestId: choiceId })).status).toBe(403);
+    expect((await ask({ ...thread, threadTs: "1696000000.000099" }, String(MAYA.slackUserId), { requestId: choiceId })).status).toBe(403);
+    expect((await ask({ ...thread, teamId: "T0OTHERCO01" }, String(MAYA.slackUserId), { requestId: choiceId })).status).toBeGreaterThanOrEqual(400);
+    expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#") && item.sk === "META")).toEqual([]);
+    // The right person in the right thread starts it once, with the recorded text; the record is then used.
+    expect((await ask(thread, String(MAYA.slackUserId), { requestId: choiceId })).body).toMatchObject({ started: true });
+    const started = e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#") && item.sk === "META");
+    expect(started).toHaveLength(1);
+    expect(started[0]!.requestText ?? started[0]!.title).toContain("fix the typo in README");
+    expect((await ask(thread, String(MAYA.slackUserId), { requestId: choiceId })).body).toMatchObject({ started: false, reason: "not_recorded" });
+    // An expired record starts nothing.
+    const ts2 = "1696000000.000002";
+    expect(await e2e.mention("fix the typo in CONTRIBUTING", { ts: ts2, threadTs: ts2 })).toBe(200);
+    const second = (JSON.parse((e2e.slack.lastPostWithAction(WORKFLOW_PATH_QUICK_ACTION).blocks as Array<{ type: string; elements?: Array<{ value: string }> }>).find((block) => block.type === "actions")!.elements![0]!.value) as { choiceId: string }).choiceId;
+    e2e.db.set({ ...e2e.db.get(`SLACK_INTAKE#${second}`, "META")!, expiresAt: Math.floor(Date.now() / 1_000) - 1 });
+    expect((await ask({ ...thread, threadTs: ts2 }, String(MAYA.slackUserId), { requestId: second })).body).toMatchObject({ started: false, reason: "not_recorded" });
+  }, 120_000);
+});
+
+describe("decision 134: a short reply to a task waiting on its owner is their answer", () => {
+  let log: MockInstance<typeof console.log>;
+  beforeEach(() => { log = vi.spyOn(console, "log").mockImplementation(() => undefined); });
+  afterEach(() => { log.mockRestore(); });
+
+  it("saves \"ok\" for the task while its plan waits for the owner, and answers it as small talk while nothing waits", async () => {
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "small_change", outcome: "ok" }), autoStartQuick: true, model: { plan: PLAN, edits: [] } });
+    expect(await e2e.mention("fix the typo in README")).toBe(200);
+    const notes = () => e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#") && String(item.sk).startsWith("NOTE#"));
+    // Planning not yet done: nothing waits on the owner, so "ok" is small talk.
+    const before = e2e.slack.posts.length;
+    expect(await e2e.mention("ok")).toBe(200);
+    expect(notes()).toEqual([]);
+    expect(e2e.slack.posts.slice(before).map((post) => post.text)).toEqual([expect.stringMatching(/^Got it! I didn't add that to the task\./)]);
+    // The plan waits for the owner's approval: "sounds good" is their answer and goes to the task.
+    await e2e.settle();
+    expect(e2e.workflow().state).toBe("WAITING");
+    const posted = e2e.slack.posts.length;
+    expect(await e2e.mention("sounds good")).toBe(200);
+    expect(notes()).toHaveLength(1);
+    expect(e2e.slack.posts.slice(posted).some((post) => post.text.includes("I didn't add that to the task"))).toBe(false);
   }, 120_000);
 });

@@ -30,32 +30,42 @@ prefer `question` when in doubt, because an answer changes nothing.
 ## Starting a clear small change on its own (decision 134)
 
 Only a usable `small_change` answer is tried. The Slack service asks the broker (`POST /v1/service/workflows/quick-start`,
-the Slack service's existing signed route family, acting for the thread and requester), and the broker decides:
+the Slack service's existing signed route family) naming only the request's choice ID, and the broker decides:
 
+- The text and the requester come from the broker's own record of the message (`SLACK_INTAKE#<choiceId>`), written by
+  the Slack ingress from the verified Slack event when it queued the request. The record must match the asking thread
+  and person, is kept 10 minutes and is used once. A body carrying text is refused.
 - Only a new request's own thread (no task there yet).
-- Its own deterministic check of the text (`packages/broker/src/core/intake/quick-auto-start.ts`): at most 280
-  characters and 3 lines; no markup or text that talks to the assistant ("ignore", "rules", "system prompt", braces,
-  tags); nothing the path rules call high risk, by word (auth, login, payments, migrations, infra, CI, secrets, delete,
-  deploy, ...) or by a path named in the text (`isSensitivePath`). So text that steers the classifier still cannot
-  start a task.
+- Its own deterministic check of the text (`packages/broker/src/core/intake/quick-auto-start.ts`), on the text
+  normalised with NFKC and with invisible format characters removed: at most 280 characters and 3 lines (split on
+  \r, \n, U+2028, U+2029); no markup (tags, braces, Slack-escaped `&lt;` `&gt;` `&amp;`) or text that talks to the
+  assistant; no word written in two scripts; nothing the path rules call high risk, by word (auth, login, payments,
+  migrations, infra, CI, secrets, delete, remove, deploy, env, install scripts, dependencies, curl, rate limits, ...) or
+  by a path named in the text (`isSensitivePath`). So text that steers the classifier still cannot start a task.
 - The start itself is the requester's Start press: same member checks, project, limits, admission and spend, and
   Quick's plan step comes first with its approval per risk level. Nothing downstream changes.
 
 Anything else (`unusual_text`, `high_risk`, `too_long`, `thread_busy`, `start_refused`, or the call failing) posts the
 card with Start, as before. Unclear, large, and every classifier failure never auto-start.
 
-**Stop.** The started message has a Stop button (requester only; a teammate's press is refused). One press is enough
-and a second changes nothing. The press is remembered on the task (`stopRequest`), then:
+**Stop.** The started message has a Stop button (the task's owners only; a teammate's press is refused, by Slack's handler
+and by the broker alone). One press is enough. The first press is remembered on the task (`stopRequest`); every press
+then decides again from the task as it is, with the first press's request ID, so a press after a failed close still
+finishes it:
 
 - setup still running: the first instructions are taken back (as a cancel before they run does), so finished setup
   queues no planning step; when setup finishes the task closes and the thread hears "Stopped as you asked";
 - a step running (planning, say): it is cancelled first, and the task closes once it has stopped;
 - nothing running (a plan waiting for approval): the task closes at once.
 
-The close discards whatever the task planned or wrote; no pull request opens.
+The close discards whatever the task planned or wrote. Once the pull request is being opened (publication cannot be
+cancelled) or is open, Stop is refused with "The pull request is already being opened, so it can't be stopped now. You
+can close it on GitHub."
 
 **Small talk in a task's thread.** "thanks", "great", "ok" (and other bare acknowledgements) in a Slack-started task's
-thread get the fixed reply ("I didn't add that to the task"), with no model call, and are not saved as task notes. A
+thread get the fixed reply ("I didn't add that to the task"), with no model call, and are not saved as task notes,
+unless the task is waiting on that person (a plan to approve, a question, a blocked step): then a short reply is their
+answer and goes to the task. The broker decides, from the task. A
 mention is answered in the thread; a plain reply only privately. "thanks, but also fix X" is not small talk and is
 saved for the task as before.
 

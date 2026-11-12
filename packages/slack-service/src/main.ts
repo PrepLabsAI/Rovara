@@ -414,7 +414,7 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
     autoStart: async ({ message: request, requestId }) => {
       const api = threadApi(request);
       if (api.startQuickFromIntake === undefined) return { started: false, reason: "start_refused" };
-      return api.startQuickFromIntake({ requestId, instructions: request.text });
+      return api.startQuickFromIntake({ requestId });
     },
     answer: (question) => processRequest(question, context), finish: (subject) => threads.finish(subject), log })
   : processRequest(message, context), {

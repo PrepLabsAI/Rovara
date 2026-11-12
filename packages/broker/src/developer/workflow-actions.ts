@@ -19,6 +19,11 @@ export const WORKFLOW_ACTION_IDS: ReadonlySet<string> = new Set([
   WORKFLOW_STOP_ACTION,
 ]);
 
+/** Decision 134: Stop pressed once the task's pull request is being opened (publication cannot be cancelled), or is open. */
+export const STOP_WHILE_PUBLISHING_REFUSAL = "the pull request is already being opened, so this task can't be stopped now";
+/** What the presser hears for it. */
+export const STOP_WHILE_PUBLISHING_TEXT = "The pull request is already being opened, so it can't be stopped now. You can close it on GitHub.";
+
 /** What a member hears when the project their task belongs to has AgentX tasks switched off. */
 export const PROJECT_TASKS_DISABLED_TEXT = "AgentX tasks aren't turned on for this project. Ask an AgentX admin to turn them on.";
 
