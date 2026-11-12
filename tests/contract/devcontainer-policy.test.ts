@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEVCONTAINER_NETWORK_UNWALLED,
+  DEVCONTAINER_NET_RAW,
   DOCKER_DATA_VISIBLE,
   WORKER_STATE_VISIBLE,
   containerProblems,
   devcontainerConfigRefusal,
+  dropsNetRaw,
+  walledNetworkProblem,
   hostPathResolver,
   parseJsonc,
   type ContainerInspection,
@@ -397,5 +401,79 @@ describe("the started dev container, checked as Docker ran it (docker containmen
     expect(containerProblems(maskedState, hidden)).toEqual([]);
     // A workspace without a Docker data folder (a developer machine) has nothing to hide.
     expect(containerProblems({ ...ordinary, Mounts: [ordinary.Mounts![0]!] }, { rootPath: "/mnt/workspace" })).toEqual([]);
+  });
+});
+
+describe("dev containers on a walled worker network", () => {
+  const walled = { ...context, walledNetwork: "agentx-task" };
+  const withArgs = (runArgs: string[], settings: typeof walled | typeof context = walled) => devcontainerConfigRefusal({ image: "node:22", runArgs }, settings);
+  const withBuildOptions = (options: string[], settings: typeof walled | typeof context = walled) => devcontainerConfigRefusal({ build: { dockerfile: "Dockerfile", options } }, settings);
+
+  it.each([["--network=bridge"], ["--network=agentx-task"], ["--net=team-cache"], ["--network=host"]])("refuses %s in runArgs, because it would attach a second network", (arg) => {
+    expect(withArgs([arg])).toMatch(/^runArgs --net(work)? \(dev containers on this worker join the agentx-task network\)$/u);
+  });
+
+  it.each([[["--network", "bridge"]], [["--net", "default"]], [["--init", "--network", "host"]]])("refuses the split spelling %j in runArgs", (args) => {
+    expect(withArgs(args)).toMatch(/^runArgs --net(work)? \(dev containers on this worker join the agentx-task network\)$/u);
+  });
+
+  it.each([[["--network=bridge"]], [["--network", "agentx-task"]], [["--net=team-cache"]], [["--net", "none"]], [["--build-arg", "A=1", "--network", "none"]]])("refuses %j in build.options, where the build's containers are put on the walled network", (options) => {
+    expect(withBuildOptions(options)).toMatch(/^build\.options --net(work)? \(the containers of a dev container build on this worker join the agentx-task network\)$/u);
+  });
+
+  it("allows what is not a network: other runArgs and build options on a walled worker (positive control)", () => {
+    expect(withArgs(["--init", "--cpus=2", "--cap-add=SYS_PTRACE", "--env", "CI=1"])).toBeUndefined();
+    expect(withBuildOptions(["--build-arg", "A=1", "--target", "dev"])).toBeUndefined();
+    expect(devcontainerConfigRefusal({ image: "node:22" }, walled)).toBeUndefined();
+  });
+
+  it("changes nothing where nothing is walled (a laptop): a runArgs or build network that stays off the host is allowed, and the host network is still refused", () => {
+    expect(withArgs(["--network=team-cache"], context)).toBeUndefined();
+    expect(withArgs(["--net", "team-cache"], context)).toBeUndefined();
+    expect(withBuildOptions(["--network=team-cache"], context)).toBeUndefined();
+    expect(withArgs(["--network=host"], context)).toBe("runArgs --network=host");
+    expect(withBuildOptions(["--network=host"], context)).toBe("build.options --network=host");
+    expect(withBuildOptions(["--network=container:other"], context)).toBe("build.options --network=container:");
+  });
+});
+
+describe("a started dev container on a walled worker network", () => {
+  const checks = { rootPath: "/mnt/workspace", walledNetwork: "agentx-task" };
+  const container = (shape: { mode?: string; networks?: string[] | null; capDrop?: string[] | null } = {}): ContainerInspection => ({
+    HostConfig: { NetworkMode: shape.mode ?? "agentx-task", CapDrop: shape.capDrop === undefined ? ["NET_RAW"] : shape.capDrop },
+    NetworkSettings: { Networks: shape.networks === null ? {} : Object.fromEntries((shape.networks ?? ["agentx-task"]).map((name) => [name, {}])) },
+    Mounts: [{ Type: "bind", Source: "/mnt/workspace/repo/sample", Destination: "/workspaces/sample" }],
+  });
+
+  it("is accepted when it is on the walled network alone and dropped NET_RAW (positive control)", () => {
+    expect(containerProblems(container(), checks)).toEqual([]);
+    expect(walledNetworkProblem(container(), "agentx-task")).toBe(false);
+    expect(dropsNetRaw(container())).toBe(true);
+  });
+
+  it.each([["NET_RAW"], ["CAP_NET_RAW"], ["net_raw"], ["ALL"], ["CAP_ALL"]])("counts %s as dropping NET_RAW", (capability) => {
+    expect(dropsNetRaw(container({ capDrop: ["CHOWN", capability] }))).toBe(true);
+  });
+
+  it("reports a container on the default bridge, in another mode, attached to a second network, or attached to none", () => {
+    for (const shape of [{ mode: "bridge", networks: ["bridge"] }, { mode: "default", networks: ["bridge"] }, { networks: ["agentx-task", "bridge"] }, { networks: ["other"] }, { networks: null }, { mode: "bridge" }]) {
+      expect(containerProblems(container(shape), checks), JSON.stringify(shape)).toEqual([DEVCONTAINER_NETWORK_UNWALLED]);
+    }
+  });
+
+  it("reports a container that kept NET_RAW (no drops, an empty list, other drops only, or an inspection without the field)", () => {
+    for (const capDrop of [null, [], ["CHOWN", "SETUID"]]) {
+      expect(dropsNetRaw(container({ capDrop })), JSON.stringify(capDrop)).toBe(false);
+      expect(containerProblems(container({ capDrop }), checks), JSON.stringify(capDrop)).toEqual([DEVCONTAINER_NET_RAW]);
+    }
+    expect(containerProblems({ NetworkSettings: { Networks: { "agentx-task": {} } }, HostConfig: { NetworkMode: "agentx-task" } }, checks)).toEqual([DEVCONTAINER_NET_RAW]);
+  });
+
+  it("reports both faults of a container of an earlier release (the default bridge, with NET_RAW)", () => {
+    expect(containerProblems(container({ mode: "bridge", networks: ["bridge"], capDrop: null }), checks)).toEqual([DEVCONTAINER_NETWORK_UNWALLED, DEVCONTAINER_NET_RAW]);
+  });
+
+  it("is not checked for a network or NET_RAW where nothing is walled (a laptop)", () => {
+    expect(containerProblems(container({ mode: "bridge", networks: ["bridge", "other"], capDrop: null }), { rootPath: "/mnt/workspace" })).toEqual([]);
   });
 });
