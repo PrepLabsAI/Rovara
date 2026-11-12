@@ -15,7 +15,8 @@ export function checkCommandCouldNotRun(command: { executable: string; args: rea
   const error = /^(SyntaxError|IndentationError):/mu.exec(output);
   if (error === null) return false;
   // The file the traceback names last before the error is the one that does not parse.
-  const files = [...output.slice(0, error.index).matchAll(/^\s*File "([^"\n]*)", line \d+/gmu)];
+  // Leading blanks of ONE line (`\s*` after a multiline `^` ran across every blank line from each line start: quadratic on output the customer's tests shape).
+  const files = [...output.slice(0, error.index).matchAll(/^[^\S\n\r\u2028\u2029]*File "([^"\n]*)", line \d+/gmu)];
   const file = files.at(-1)?.[1];
   const own = pythonCheckOwnCode(command.args);
   return file !== undefined && own !== undefined && (own === "<string>" ? file === "<string>" : pythonFileIsScript(file, own, command.cwd));
