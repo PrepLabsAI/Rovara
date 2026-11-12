@@ -1,11 +1,13 @@
 // Task 21: a plain top-level @AgentX request, which the Slack ingress queued with the routing mark once Slack had its
-// answer. The classifier model sorts it: a question is answered by the chat agent, like any chat request; anything
+// answer. Small talk gets a fixed reply first (smart intake, no model). Otherwise the classifier model sorts it: a question is answered by the chat agent, like any chat request; anything
 // else gets a card suggesting Quick or Full (or, unclear, offering all three), and nothing starts until its requester
 // presses a button there, which the Slack ingress Lambda answers.
 import { DeleteCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   routedChoiceId,
   slackThreadSubject,
+  smallTalkOf,
+  smallTalkReply,
   suggestionCardMessage,
   workflowChoiceKey,
   workflowChoicePut,
@@ -33,7 +35,7 @@ export interface RequestRoutingDependencies {
   route?: RequestRouter;
   /** Saves the request for its requester's choice and posts its card. */
   offer(input: ChoiceOffer): Promise<void>;
-  /** Posts a plain line in the thread: the card-failed notice when the card could not be saved or posted. */
+  /** Posts a plain line in the thread: the small-talk reply, or the card-failed notice when the card could not be saved or posted. */
   notify(thread: SlackThread, text: string): Promise<void>;
   /** Answers the request as the chat agent does any chat request. */
   answer(message: SlackRequestMessage): Promise<void>;
@@ -50,6 +52,16 @@ export interface RequestRoutingDependencies {
 export async function routeSlackRequest(message: SlackRequestMessage, deps: RequestRoutingDependencies): Promise<void> {
   const now = deps.now ?? Date.now;
   const startedAt = now();
+  // Smart intake: small talk ("hello", "thanks", "what can you do?") gets its fixed reply at once: no model call, no
+  // spend, no card. It works when the classifier is down too.
+  const smallTalk = smallTalkOf(message.text);
+  if (smallTalk !== undefined) {
+    deps.log("route.small_talk", { eventId: message.eventId, kind: smallTalk });
+    await deps.notify(message.thread, smallTalkReply(smallTalk))
+      .catch((error: unknown) => deps.log("route.small_talk_reply_failed", { eventId: message.eventId, errorName: errorName(error) }));
+    await finishQuietly(message, deps);
+    return;
+  }
   let route: RequestRoute;
   if (deps.route === undefined) {
     route = { kind: "unclear", outcome: "unavailable" };
@@ -75,10 +87,14 @@ export async function routeSlackRequest(message: SlackRequestMessage, deps: Requ
     await deps.notify(message.thread, ROUTE_CARD_FAILED_TEXT)
       .catch((postError: unknown) => deps.log("route.card_failed_notice_failed", { eventId: message.eventId, errorName: errorName(postError) }));
   }
+  await finishQuietly(message, deps);
+}
+
+async function finishQuietly(message: SlackRequestMessage, deps: RequestRoutingDependencies): Promise<void> {
   try {
     await deps.finish(slackThreadSubject(message.thread));
   } catch (error) {
-    // The card is posted; a count left one high only says "queued behind" once too often.
+    // The reply or card is posted; a count left one high only says "queued behind" once too often.
     deps.log("route.finish_failed", { eventId: message.eventId, errorName: errorName(error) });
   }
 }
