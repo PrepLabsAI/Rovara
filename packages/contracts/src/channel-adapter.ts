@@ -263,6 +263,17 @@ const richMessage = {
   actions: z.array(MessageActionSchema).max(25).optional(),
 };
 
+/**
+ * Issue #438: the Rovara task (operation) an event is about, so an adapter can tell two tasks in one conversation apart.
+ * Optional everywhere, so an adapter registered before these fields reads every event as before.
+ */
+const EventTaskId = z.string().min(1).max(100);
+const CommitSha = z.string().regex(/^[a-f0-9]{40,64}$/);
+/** owner/name on GitHub. */
+const RepositoryFullName = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/);
+export const ChannelCheckStatusSchema = z.enum(["passed", "failed", "timed_out", "unknown", "not_run"]);
+const ErrorCode = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
+
 const eventData = {
   ack: z.object({ inReplyTo: ChannelOpaqueIdSchema }).strict(),
   /**
@@ -283,11 +294,35 @@ const eventData = {
     /** Absent when the adapter steps this kind up (FR-032): the person approves on `taskUrl`. */
     actions: z.array(ApprovalAction).min(1).max(4).optional(),
   }).strict(),
-  check_report: z.object({ text: Text, status: z.enum(["passed", "failed", "unknown"]) }).strict(),
-  pr: z.object({ url: HttpsUrl, title: z.string().min(1).max(300) }).strict(),
-  /** The request finished; everything it said came before as `message` events. `text` is an optional closing line. */
-  done: z.object({ inReplyTo: ChannelOpaqueIdSchema.optional(), text: Text.optional() }).strict(),
-  error: z.object({ code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/), text: Text }).strict(),
+  /** #438: `commits` names what the checks ran on (one per repository) and `checks` each check's result. */
+  check_report: z.object({
+    text: Text, status: z.enum(["passed", "failed", "unknown"]),
+    taskId: EventTaskId.optional(),
+    commits: z.array(z.object({ repository: RepositoryFullName, sha: CommitSha }).strict()).max(20).optional(),
+    checks: z.array(z.object({ name: z.string().min(1).max(200), status: ChannelCheckStatusSchema }).strict()).max(64).optional(),
+  }).strict(),
+  /** #438: the typed facts of a pull request a task opened or changed; `headSha` is the commit now at its head. */
+  pr: z.object({
+    url: HttpsUrl, title: z.string().min(1).max(300),
+    taskId: EventTaskId.optional(),
+    repository: RepositoryFullName.optional(),
+    number: z.number().int().positive().optional(),
+    headSha: CommitSha.optional(),
+    baseBranch: z.string().min(1).max(255).optional(),
+    draft: z.boolean().optional(),
+    action: z.enum(["opened", "updated", "replaced", "closed", "reopened"]).optional(),
+  }).strict(),
+  /**
+   * The request finished; everything it said came before as `message` events. `text` is an optional closing line.
+   * #438: `outcome` says how it ended, `taskId` names the last task it ran, and `code` says why it failed.
+   */
+  done: z.object({
+    inReplyTo: ChannelOpaqueIdSchema.optional(), text: Text.optional(),
+    outcome: z.enum(["succeeded", "failed", "cancelled", "no_change"]).optional(),
+    taskId: EventTaskId.optional(),
+    code: ErrorCode.optional(),
+  }).strict(),
+  error: z.object({ code: ErrorCode, text: Text, taskId: EventTaskId.optional() }).strict(),
   link_required: z.object({ linkUrl: HttpsUrl, expiresAt: z.string().datetime(), actor: ActorRefSchema }).strict(),
 } as const;
 export type ChannelEventType = keyof typeof eventData | "direct";

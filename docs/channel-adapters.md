@@ -171,11 +171,30 @@ Rovara posts each event to your callback URL, signed as above, with the event's 
 | `ack` | `inReplyTo` | Optional: a reaction or "typing" on that message |
 | `message` | `text`, optional `key`, `parts`, `actions`, `audience` | A message in the conversation (see below) |
 | `approval_request` | `text`, `kind`, `requestId`, `expectedRevision`, `artifactDigest`, optional `taskUrl` and `actions` | A message with buttons for `actions`; with no `actions`, the text already says how to answer |
-| `done` | optional `inReplyTo`, `text` | The request finished; stop any typing indicator |
+| `done` | optional `inReplyTo`, `text`, `outcome`, `taskId`, `code` | The request finished; stop any typing indicator |
 | `link_required` | `linkUrl`, `expiresAt`, `actor` | A private message to that actor with the link |
-| `progress`, `question`, `check_report`, `pr`, `error` | `text` and type-specific fields | A message |
+| `pr` | `url`, `title`, optional `taskId`, `repository`, `number`, `headSha`, `baseBranch`, `draft`, `action` | A link to the pull request |
+| `check_report` | `text`, `status`, optional `taskId`, `commits`, `checks` | A message |
+| `progress`, `question`, `error` | `text` and type-specific fields (`error` has `code` and optional `taskId`) | A message |
 
 Text is plain, cut to your `--max-text`. Rovara sends no more buttons than `--buttons` allows.
+
+#### Acting on tasks and pull requests
+
+A service that acts on events, rather than showing them, can read typed fields instead of the text. Every field
+below is optional, so read it only when it is there:
+
+- `taskId` names the Rovara task (operation) an event is about, so you can tell two tasks in one conversation apart.
+- `pr` events come after the reply text, one for each pull request the request opened or changed. `repository` is
+  `owner/name` on GitHub. `headSha` is the commit now at the pull request's head. `action` is `opened`, `updated`,
+  `replaced`, `closed` or `reopened`.
+- `check_report` events come after the `pr` events. There is one for each task's checks, and one for each
+  publication that ran the project's checks. A publication's report has `commits` (`[{ repository, sha }]`): the
+  commit it checked, which is the `headSha` of the `pr` event with the same `taskId`. `checks` lists each check as
+  `{ name, status }`, where `status` is `passed`, `failed`, `timed_out`, `unknown` or `not_run`.
+- `done` says how the request ended. `outcome` is `succeeded`, `failed`, `cancelled`, or `no_change` (it answered
+  without running a task). `taskId` is the last task it ran. On a failure, `code` says why, for example
+  `request_failed` or `workspace_limit`.
 
 A `message` may be richer, by what you declared:
 
