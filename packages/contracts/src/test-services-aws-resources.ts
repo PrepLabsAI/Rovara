@@ -1,7 +1,7 @@
 // Test services (design test-services.md 3.2 D7 and 5.4): the AWS resources a project's infrastructure code declares, in the form the worker seeds into Rovara local AWS when a run starts: DynamoDB tables with
 // their key schema, S3 buckets, SQS queues, SNS topics (and the queues they deliver to), Secrets Manager secrets, SSM parameters, KMS keys and EventBridge buses and rules. They are NAMES and plain settings only, read from
 // infrastructure code by the D7 detector, so every field has a plain form (the rules of each service, tightened: a name that looks like a secret is refused, as the detector already does). A secret's VALUE is never in
-// here: the worker generates a placeholder when it seeds, and a SecureString parameter carries none either. Every other service of the generated table starts empty and the tests create what they need.
+// here: the worker generates a placeholder when it seeds. Only a plain `String` SSM parameter is a resource (a SecureString or a StringList is not seeded). Every other service of the generated table starts empty and the tests create what they need.
 // Nothing here imports a Node module.
 import { z } from "zod";
 import { normaliseAwsServiceKey } from "./aws-emulator-service-keys.js";
@@ -50,12 +50,10 @@ export const TaskAwsResourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("topic"), name: TopicNameSchema, /** The queues (by name) the project declares as subscribers: the worker subscribes each by its ARN. */ queues: z.array(QueueNameSchema).max(TASK_AWS_TOPIC_QUEUES_MAX).optional() }).strict(),
   z.object({ kind: z.literal("secret"), name: SecretNameSchema }).strict(),
   z.object({
-    kind: z.literal("parameter"), name: ParameterNameSchema, type: z.enum(["String", "StringList", "SecureString"]),
-    /** The template's literal default of a String or StringList parameter. Never present for a SecureString. */
+    kind: z.literal("parameter"), name: ParameterNameSchema,
+    /** The template's literal default of a `String` parameter; absent when the template builds the value (the worker then makes a placeholder). */
     value: ParameterValueSchema.optional(),
-  }).strict().superRefine((parameter, context) => {
-    if (parameter.type === "SecureString" && parameter.value !== undefined) context.addIssue({ code: "custom", path: ["value"], message: "a SecureString carries no value" });
-  }),
+  }).strict(),
   z.object({ kind: z.literal("key"), name: KeyLabelSchema, alias: KeyAliasSchema.optional() }).strict(),
   z.object({ kind: z.literal("bus"), name: BusNameSchema }).strict(),
   z.object({ kind: z.literal("rule"), name: RuleNameSchema, bus: BusNameSchema.optional(), pattern: RulePatternSchema.optional(), schedule: RuleScheduleSchema.optional() }).strict().superRefine((rule, context) => {

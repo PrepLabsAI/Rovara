@@ -1,5 +1,5 @@
 // Wide AWS plans: what Rovara creates from a project's declarations beyond buckets, queues and tables. SNS topics (subscribed to the declared queues), Secrets Manager secrets (a placeholder value, never one from the
-// repository), SSM parameters (a String's literal default only), KMS keys with their alias, EventBridge buses and rules. The documents are the ones the front's seed accepts (its `seed.go`); every other service of the
+// repository), SSM parameters (a plain String's literal default only; a SecureString or a StringList is not seeded), KMS keys with their alias, EventBridge buses and rules. The documents are the ones the front's seed accepts (its `seed.go`); every other service of the
 // table starts empty and is a candidate only.
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,8 +29,8 @@ describe("buildAwsSeedDocument: the new kinds", () => {
     { kind: "topic", name: "alerts", queues: ["jobs"] },
     { kind: "topic", name: "plain" },
     { kind: "secret", name: "app/db-password" },
-    { kind: "parameter", name: "/app/region", type: "String", value: "us-east-1" },
-    { kind: "parameter", name: "/app/token", type: "SecureString" },
+    { kind: "parameter", name: "/app/region", value: "us-east-1" },
+    { kind: "parameter", name: "/app/built" },
     { kind: "key", name: "MainKey", alias: "alias/main" },
     { kind: "key", name: "OtherKey" },
     { kind: "bus", name: "orders-bus" },
@@ -44,7 +44,7 @@ describe("buildAwsSeedDocument: the new kinds", () => {
       sqs: { queues: [{ name: "jobs" }] },
       sns: { topics: [{ name: "alerts", subscriptions: [{ protocol: "sqs", endpoint: "arn:aws:sqs:us-west-2:000000000000:jobs" }] }, { name: "plain" }] },
       secretsmanager: { secrets: [{ name: "app/db-password", value: "placeholder-value" }] },
-      ssm: { parameters: [{ name: "/app/region", value: "us-east-1", type: "String" }, { name: "/app/token", value: "placeholder-value", type: "SecureString" }] },
+      ssm: { parameters: [{ name: "/app/region", value: "us-east-1", type: "String" }, { name: "/app/built", value: "placeholder-value", type: "String" }] },
       kms: { keys: [{ alias: "alias/main", description: "MainKey" }, { description: "OtherKey" }] },
       events: { buses: ["orders-bus"], rules: [{ name: "nightly", schedule: "rate(1 day)" }, { name: "on-order", bus: "orders-bus", pattern: '{"source":["orders"]}' }] },
     });
@@ -53,30 +53,31 @@ describe("buildAwsSeedDocument: the new kinds", () => {
     const first = placeholderSecretValue();
     expect(first).toMatch(/^rovara-placeholder-[A-Za-z0-9]{12}$/u);
     expect(placeholderSecretValue()).not.toBe(first);
-    const document = buildAwsSeedDocument("us-east-1", [{ kind: "secret", name: "a-secret" }, { kind: "parameter", name: "/p/q", type: "SecureString" }]);
+    const document = buildAwsSeedDocument("us-east-1", [{ kind: "secret", name: "a-secret" }, { kind: "parameter", name: "/p/q" }]);
     expect(document.secretsmanager!.secrets[0]!.value).toMatch(/^rovara-placeholder-/u);
     expect(document.ssm!.parameters[0]!.value).toMatch(/^rovara-placeholder-/u);
   });
-  it("refuses a subscription to a queue the document does not create, a SecureString that carries a value, and a rule with no pattern or schedule", () => {
+  it("refuses a subscription to a queue the document does not create, a parameter of another type, and a rule with no pattern or schedule", () => {
     const refused = (list: unknown) => { try { buildAwsSeedDocument("us-east-1", list as TaskAwsResource[], placeholder); return undefined; } catch (error) { return error; } };
     expect(refused([{ kind: "topic", name: "alerts", queues: ["missing"] }])).toBeInstanceOf(EmulatorSeedError);
     expect(refused([{ kind: "parameter", name: "/p/q", type: "SecureString", value: "x" }])).toBeInstanceOf(EmulatorSeedError);
+    expect(refused([{ kind: "parameter", name: "/p/q", type: "StringList" }])).toBeInstanceOf(EmulatorSeedError);
     expect(refused([{ kind: "rule", name: "r" }])).toBeInstanceOf(EmulatorSeedError);
     expect(refused([{ kind: "bus", name: "default" }])).toBeInstanceOf(EmulatorSeedError);
     expect(refused([{ kind: "key", name: "K", alias: "alias/aws/s3" }])).toBeInstanceOf(EmulatorSeedError);
-    expect(refused([{ kind: "parameter", name: "/aws/reserved", type: "String", value: "x" }])).toBeInstanceOf(EmulatorSeedError);
+    expect(refused([{ kind: "parameter", name: "/aws/reserved", value: "x" }])).toBeInstanceOf(EmulatorSeedError);
     expect(refused([{ kind: "secret", name: "s", extra: 1 }])).toBeInstanceOf(EmulatorSeedError);
     expect(refused([{ kind: "parameter", name: "/p/q", type: "String", value: REAL_LOOKING.padEnd(60, "x") + ["AK", "IA", "ABCDEFGHIJKLMNOP"].join("") }])).toBeInstanceOf(EmulatorSeedError);
   });
   it("is unique by kind and name", () => {
     expect(TaskAwsResourcesSchema.safeParse([{ kind: "secret", name: "s" }, { kind: "secret", name: "s" }]).success).toBe(false);
-    expect(TaskAwsResourcesSchema.safeParse([{ kind: "secret", name: "s" }, { kind: "parameter", name: "s", type: "String" }]).success).toBe(true);
+    expect(TaskAwsResourcesSchema.safeParse([{ kind: "secret", name: "s" }, { kind: "parameter", name: "s" }]).success).toBe(true);
   });
 });
 
 describe("seedReportCovers: the front's step of each kind", () => {
   const resources: TaskAwsResource[] = [
-    { kind: "topic", name: "alerts" }, { kind: "secret", name: "app/s" }, { kind: "parameter", name: "/p", type: "String" }, { kind: "key", name: "K", alias: "alias/k" }, { kind: "key", name: "Plain" },
+    { kind: "topic", name: "alerts" }, { kind: "secret", name: "app/s" }, { kind: "parameter", name: "/p" }, { kind: "key", name: "K", alias: "alias/k" }, { kind: "key", name: "Plain" },
     { kind: "bus", name: "b" }, { kind: "rule", name: "r", schedule: "rate(1 day)" },
   ];
   const step = (service: string, action: string, name: string) => ({ service, action, name, ok: true });
@@ -107,6 +108,7 @@ describe("what the detector reads from infrastructure code", () => {
     "  Fanout:", "    Type: AWS::SNS::Subscription", "    Properties:", "      Protocol: sqs", "      TopicArn: !Ref Alerts", "      Endpoint: !GetAtt Jobs.Arn",
     "  DbPassword:", "    Type: AWS::SecretsManager::Secret", "    Properties:", "      Name: app/db-password", `      SecretString: ${REAL_LOOKING}`,
     "  Region:", "    Type: AWS::SSM::Parameter", "    Properties: { Name: /app/region, Type: String, Value: us-east-1 }",
+    "  Secure:", "    Type: AWS::SSM::Parameter", "    Properties: { Name: /app/secure, Type: SecureString, Value: whatever }",
     "  Linked:", "    Type: AWS::SSM::Parameter", "    Properties: { Name: /app/bucket, Type: String, Value: !Ref Jobs }",
     "  Main:", "    Type: AWS::KMS::Key",
     "  MainAlias:", "    Type: AWS::KMS::Alias", "    Properties: { AliasName: alias/main, TargetKeyId: !Ref Main }",
@@ -122,8 +124,8 @@ describe("what the detector reads from infrastructure code", () => {
     expect(resourcesOf(detection, "aws:sns")).toEqual([{ kind: "topic", name: "alerts", queues: ["jobs"] }]);
     expect(resourcesOf(detection, "aws:secrets-manager")).toEqual([{ kind: "secret", name: "app/db-password" }]);
     expect(JSON.stringify(detection)).not.toContain(REAL_LOOKING);
-    // A `!Ref` is a reference, not a value: the parameter is listed without one.
-    expect(resourcesOf(detection, "aws:ssm")).toEqual([{ kind: "parameter", name: "/app/region", parameterType: "String", value: "us-east-1" }, { kind: "parameter", name: "/app/bucket", parameterType: "String" }]);
+    // A `!Ref` is a reference, not a value: the parameter is listed without one. A SecureString or StringList parameter is not a resource.
+    expect(resourcesOf(detection, "aws:ssm")).toEqual([{ kind: "parameter", name: "/app/region", value: "us-east-1" }, { kind: "parameter", name: "/app/bucket" }]);
     expect(resourcesOf(detection, "aws:kms")).toEqual([{ kind: "key", name: "Main", alias: "alias/main" }]);
     expect(resourcesOf(detection, "aws:eventbridge")).toEqual([
       { kind: "bus", name: "orders-bus" }, { kind: "rule", name: "nightly", schedule: "rate(1 day)" }, { kind: "rule", name: "on-order", bus: "orders-bus", pattern: '{"source":["orders"]}' },
@@ -139,7 +141,7 @@ describe("what the detector reads from infrastructure code", () => {
     } }, null, 2);
     const detection = await detect({ "cdk.out/Stack.template.json": json });
     expect(resourcesOf(detection, "aws:sns")).toEqual([{ kind: "topic", name: "Alerts", queues: ["Jobs"] }]);
-    expect(resourcesOf(detection, "aws:ssm")).toEqual([{ kind: "parameter", name: "/a/b", parameterType: "String", value: "plain" }]);
+    expect(resourcesOf(detection, "aws:ssm")).toEqual([{ kind: "parameter", name: "/a/b", value: "plain" }]);
     expect(JSON.stringify(detection)).not.toContain(REAL_LOOKING);
   });
 
@@ -158,11 +160,11 @@ describe("what the detector reads from infrastructure code", () => {
     'resource "aws_cloudwatch_event_rule" "on_order" {', '  name = "on-order"', "  event_pattern = <<EOF", '{"source": ["orders"]}', "EOF", "}",
     "",
   ].join("\n");
-  it("Terraform: the same kinds, subscriptions and aliases by reference; a secret version and a SecureString value are never read", async () => {
+  it("Terraform: the same kinds, subscriptions and aliases by reference; a secret version is never read and a SecureString parameter is not seeded", async () => {
     const detection = await detect({ "main.tf": terraform });
     expect(resourcesOf(detection, "aws:sns")).toEqual([{ kind: "topic", name: "alerts", queues: ["jobs"] }]);
     expect(resourcesOf(detection, "aws:secrets-manager")).toEqual([{ kind: "secret", name: "app/db" }]);
-    expect(resourcesOf(detection, "aws:ssm")).toEqual([{ kind: "parameter", name: "/app/region", parameterType: "String", value: "us-east-1" }, { kind: "parameter", name: "/app/secure", parameterType: "SecureString" }]);
+    expect(resourcesOf(detection, "aws:ssm")).toEqual([{ kind: "parameter", name: "/app/region", value: "us-east-1" }]);
     expect(resourcesOf(detection, "aws:kms")).toEqual([{ kind: "key", name: "main", alias: "alias/main" }]);
     expect(resourcesOf(detection, "aws:eventbridge")).toEqual([
       { kind: "bus", name: "orders-bus" }, { kind: "rule", name: "nightly", schedule: "rate(1 day)", bus: "orders-bus" }, { kind: "rule", name: "on-order", pattern: '{"source":["orders"]}' },
@@ -187,7 +189,7 @@ describe("what the detector reads from infrastructure code", () => {
     const detection = await detect({ "lib/stack.ts": cdkTs });
     expect(resourcesOf(detection, "aws:sns")).toEqual([{ kind: "topic", name: "alerts", queues: ["jobs"] }]);
     expect(resourcesOf(detection, "aws:secrets-manager")).toEqual([{ kind: "secret", name: "app/db" }]);
-    expect(resourcesOf(detection, "aws:ssm")).toEqual([{ kind: "parameter", name: "/app/region", parameterType: "String", value: "us-east-1" }]);
+    expect(resourcesOf(detection, "aws:ssm")).toEqual([{ kind: "parameter", name: "/app/region", value: "us-east-1" }]);
     expect(resourcesOf(detection, "aws:kms")).toEqual([{ kind: "key", name: "Main", alias: "alias/main" }]);
     expect(resourcesOf(detection, "aws:eventbridge")).toEqual([{ kind: "bus", name: "orders-bus" }]);
     // A `Key` or `Secret` of a file that does not import the module is something else.

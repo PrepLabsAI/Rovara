@@ -46,7 +46,14 @@ const body = (dependencies: unknown[]) => TestEnvironmentBodySchema.parse({
   roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, nightly: { enabled: false, cronUtc: "0 6 * * *", branch: "main" }, services: [],
   data: { seeds: [], generator: "faker_seeded", seed: 1 }, accounts: [], prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] }, capture: { screenshots: "failed", video: false, traces: false }, dependencies,
 });
+/** The catalog as shipped today: the emulator entry names no engine release (its image is the old fork's, which serves about eighteen services). */
 const catalog: ServiceCatalog = pinnedCatalog();
+/** The catalog once the table's engine is the shipped image: the entry names its release. */
+const engineCatalog = (engineVersion: string | undefined): ServiceCatalog => {
+  const copy: ServiceCatalog = structuredClone(catalog);
+  for (const entry of copy.entries) if (entry.id === "local-aws@r1" && entry.emulator !== undefined) { if (engineVersion === undefined) delete entry.emulator.engineVersion; else entry.emulator.engineVersion = engineVersion; }
+  return copy;
+};
 const planOf = (dependencies: unknown[]): TaskDependencyPlan[] => {
   const result = taskDependencyPlansOf({ body: body(dependencies), catalog: verifiedCatalog(catalog), edition: "public" });
   if (!result.ok) throw new Error(result.reason);
@@ -78,9 +85,10 @@ describe("the broker pins a wide plan, and only a worker that lists the feature 
 
 // ---- the worker's side: it starts the wide plan
 
-function stubSealed(): SealedRoundPorts {
+function stubSealed(setups: Array<ReadonlyArray<readonly [string, string]>> = []): SealedRoundPorts {
   return {
     withSealedCheckRound(setup, round) {
+      setups.push(setup.environment.entries);
       return withDetachedWorking(setup.docker, setup.plan, async (start) => {
         await start();
         const runners: CheckRunners = {
@@ -100,14 +108,15 @@ function stubSealed(): SealedRoundPorts {
   };
 }
 
-async function harness() {
+const setups: Array<ReadonlyArray<readonly [string, string]>> = [];
+async function harness(from: ServiceCatalog = catalog) {
   const fake = fakeServicesDocker();
   const root = await temp("rsv-workspace-");
   await mkdir(join(root, "app"));
   const runParent = await temp("rsv-runs-");
   const config: TestServicesConfig = {
     docker: fake.docker, registry: REGISTRY, catalogEnv: "staging", edition: "public", probeImage: IMAGE, guardImage: IMAGE, maxMemMiB: 3072, runDirectoryParent: runParent,
-    catalog: () => Promise.resolve(catalog), sealedRound: stubSealed(), sleep: () => Promise.resolve(), log: () => undefined,
+    catalog: () => Promise.resolve(from), sealedRound: stubSealed(setups), sleep: () => Promise.resolve(), log: () => undefined,
   };
   const sandbox = new TaskSandbox({ rootPath: root, taskId: OPERATION, docker: fake.docker, image: IMAGE, log: () => undefined });
   await sandbox.start();
@@ -116,8 +125,8 @@ async function harness() {
 }
 
 describe("the worker starts a wide plan", () => {
-  it("accepts services beyond the three (no `mismatch`), and the sandbox's variables name the planned services and the ones the repository's settings set", async () => {
-    const h = await harness();
+  it("accepts services beyond the three (no `mismatch`) when the entry names the table's engine, and the sandbox's variables name the planned services and the ones the repository's settings set", async () => {
+    const h = await harness(engineCatalog("1.0.322"));
     await writeFile(join(h.root, "app", ".env"), "AWS_ENDPOINT_URL_STEPFUNCTIONS=http://localhost:4566\nAWS_ENDPOINT_URL_SFN=http://localhost:4566\n");
     const plans = withSeed(planOf([aws("sns", { connect: { env: [], hostAliases: ["aws"] } }), aws("secrets-manager"), aws("kinesis")]));
     const run = await h.start(plans);
@@ -148,21 +157,43 @@ describe("the worker starts a wide plan", () => {
     expect(error!.reason).toBe("mismatch");
   });
   it("refuses an emulator entry that names another engine release than the table's", async () => {
-    const other: ServiceCatalog = structuredClone(catalog);
-    for (const entry of other.entries) if (entry.id === "local-aws@r1" && entry.emulator !== undefined) entry.emulator.engineVersion = "1.0.321";
-    const h = await harness();
-    h.config.catalog = () => Promise.resolve(other);
+    const h = await harness(engineCatalog("1.0.321"));
     const error = await h.start(planOf([aws("sns", { connect: { env: [], hostAliases: ["aws"] } })])).then(() => undefined, (caught: unknown) => caught as TestServicesError);
     expect(error).toBeInstanceOf(TestServicesError);
     expect(error!.reason).toBe("mismatch");
   });
-  it("starts one that names the table's engine release, and one that names none (a catalog made before the field)", async () => {
-    for (const engineVersion of ["1.0.322", undefined]) {
-      const copy: ServiceCatalog = structuredClone(catalog);
-      for (const entry of copy.entries) if (entry.id === "local-aws@r1" && entry.emulator !== undefined) { if (engineVersion === undefined) delete entry.emulator.engineVersion; else entry.emulator.engineVersion = engineVersion; }
-      const h = await harness();
-      h.config.catalog = () => Promise.resolve(copy);
-      const run = await h.start(planOf([aws("sns", { connect: { env: [], hostAliases: ["aws"] } })]));
+  it("on the image shipped today (an entry that names no engine) runs the services of the old fork only: a plan outside them is refused", async () => {
+    // The fork serves sns and secrets-manager (and about sixteen others), not kinesis' sibling services such as ec2.
+    for (const [services, ok] of [[["sns", "secrets-manager"], true], [["ec2"], false], [["sns", "ec2"], false], [["bedrock-runtime"], false]] as const) {
+      const h = await harness(engineCatalog(undefined));
+      const plans = planOf(services.map((service, index) => aws(service, index === 0 ? { connect: { env: [], hostAliases: ["aws"] } } : {})));
+      const outcome = await h.start(plans).then(async (run) => { await run.dispose(); return "started"; }, (caught: unknown) => (caught instanceof TestServicesError ? caught.reason : "other"));
+      expect(outcome, services.join(",")).toBe(ok ? "started" : "mismatch");
+    }
+  });
+  it("on the table's engine runs any service of the table", async () => {
+    for (const services of [["ec2"], ["sns", "bedrock-runtime"], ["kinesis", "sfn", "cognito-identity-provider"]]) {
+      const h = await harness(engineCatalog("1.0.322"));
+      const run = await h.start(planOf(services.map((service, index) => aws(service, index === 0 ? { connect: { env: [], hostAliases: ["aws"] } } : {}))));
+      await run.dispose();
+    }
+  });
+  it("reads the repository's endpoint names again for each sealed round: a `.env` edited between rounds is seen by the next one", async () => {
+    setups.length = 0;
+    const h = await harness(engineCatalog("1.0.322"));
+    await writeFile(join(h.root, "app", ".env"), "AWS_ENDPOINT_URL_KMS=http://localhost:4566\n");
+    const run = await h.start(planOf([aws("sns", { connect: { env: [], hostAliases: ["aws"] } })]));
+    try {
+      const runners = run.checkRunners({ runProjectCommand: () => Promise.reject(new Error("no")), runAgentCommand: () => Promise.reject(new Error("no")) });
+      await runners.freshServices?.(new AbortController().signal);
+      const first = setups.at(-1)!;
+      await writeFile(join(h.root, "app", ".env"), "AWS_ENDPOINT_URL_KMS=http://localhost:4566\nAWS_ENDPOINT_URL_SSM=http://localhost:4566\n");
+      await runners.freshServices?.(new AbortController().signal);
+      const second = setups.at(-1)!;
+      const names = (entries: ReadonlyArray<readonly [string, string]>) => entries.map(([name]) => name).filter((name) => name.startsWith("AWS_ENDPOINT_URL_")).sort();
+      expect(names(first)).toEqual(["AWS_ENDPOINT_URL_KMS", "AWS_ENDPOINT_URL_SNS"]);
+      expect(names(second)).toEqual(["AWS_ENDPOINT_URL_KMS", "AWS_ENDPOINT_URL_SNS", "AWS_ENDPOINT_URL_SSM"]);
+    } finally {
       await run.dispose();
     }
   });

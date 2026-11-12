@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { AWS_EMULATOR_SERVICES, awsServiceKeyFromCfnType, awsServiceKeyFromSdkName } from "@agentx/contracts";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { awsServiceOfTerraformType } from "../../packages/worker/src/env-detect/iac-resources.js";
-import { normalizeAwsService } from "../../packages/worker/src/env-detect/dependency-candidates.js";
+import { awsServicesFromList, normalizeAwsService } from "../../packages/worker/src/env-detect/dependency-candidates.js";
 
 type Files = Record<string, string>;
 async function detect(files: Files) {
@@ -160,6 +160,25 @@ describe("infrastructure code: one fixture per kind", () => {
     });
     expect(families(detection)).toEqual(["aws:cognito-identity-provider", "aws:kinesis", "aws:sfn", "aws:sns"]);
     expect(family(detection, "aws:kinesis")).toMatchObject({ strength: "mentioned" });
+  });
+});
+
+describe("the CDK alias import and LocalStack's SERVICES list", () => {
+  it("reads `import { aws_s3 as s3, aws_sns } from \"aws-cdk-lib\"` (on several lines, and through require) as the modules it names", async () => {
+    const detection = await detect({
+      "lib/a-stack.ts": 'import { Stack, aws_kinesis as kinesis, aws_sns } from "aws-cdk-lib";\nnew kinesis.Stream(this, "S");\n',
+      "lib/b-stack.ts": 'import {\n  aws_cognito as cognito,\n  aws_stepfunctions,\n} from "aws-cdk-lib";\n',
+      "lib/c-stack.js": 'const { aws_ec2 } = require("aws-cdk-lib");\n',
+    });
+    expect(families(detection)).toEqual(["aws:cognito-identity-provider", "aws:ec2", "aws:kinesis", "aws:sfn", "aws:sns"]);
+    expect(family(detection, "aws:kinesis")).toMatchObject({ strength: "mentioned", evidence: [{ path: "lib/a-stack.ts", line: 1 }] });
+  });
+  it("reads LocalStack's SERVICES by the table: cognito-idp and cognito-identity are the two Cognito services, and no service is read as a neighbour", () => {
+    expect(awsServicesFromList("cognito-idp,cognito-identity,secretsmanager,events,ddb,stepfunctions,apigatewayv2,apigateway")).toEqual([
+      "cognito-identity-provider", "cognito-identity", "secrets-manager", "eventbridge", "dynamodb", "sfn", "apigatewayv2", "api-gateway",
+    ]);
+    // LocalStack's bare `cognito` is neither: it is kept as the word it is, not turned into user pools.
+    expect(awsServicesFromList("cognito")).toEqual(["cognito"]);
   });
 });
 

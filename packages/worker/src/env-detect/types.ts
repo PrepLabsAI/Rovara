@@ -51,8 +51,7 @@ export interface DependencyResource {
   keySchema?: { partitionKey: DependencyKeyAttribute; sortKey?: DependencyKeyAttribute };
   /** A topic: the names of the declared queues that subscribe to it. */
   queues?: string[];
-  /** A parameter: its type, and for a String or StringList the template's literal default (a SecureString never has one; a secret's value is never read at all). */
-  parameterType?: "String" | "StringList" | "SecureString";
+  /** A `String` parameter: the template's literal default when it writes one (a secret's value is never read at all). */
   value?: string;
   /** A key: its alias (`alias/name`). */
   alias?: string;

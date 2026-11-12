@@ -6,11 +6,10 @@
 import { listRepositoryFiles, readRepositoryFile } from "./test-env-detect.js";
 import { boundedReader } from "./env-detect/index.js";
 import { runDetectorsGuarded, type GuardOptions } from "./env-detect/guarded.js";
+import { REPO_ENDPOINT_NAMES_MAX } from "./service-env.js";
 
 /** The longest the settings of one repository are read for. */
 export const REPO_ENDPOINT_NAMES_LIMIT_MS = 10_000;
-/** The most names kept (a plan's services are at most 64; a repository that sets more than this many endpoint variables is not asking for a service each). */
-export const REPO_ENDPOINT_NAMES_MAX = 128;
 const ENDPOINT_VARIABLE = /^AWS_ENDPOINT_URL_[A-Z0-9_]{2,60}$/u;
 
 /** The endpoint variable names the repositories' settings set, sorted and unique. Never throws. */
