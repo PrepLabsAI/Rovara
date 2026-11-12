@@ -126,7 +126,7 @@ async function harness(from: ServiceCatalog = catalog) {
 
 describe("the worker starts a wide plan", () => {
   it("accepts services beyond the three (no `mismatch`) when the entry names the table's engine, and the sandbox's variables name the planned services and the ones the repository's settings set", async () => {
-    const h = await harness(engineCatalog("1.0.322"));
+    const h = await harness(engineCatalog("1.0.337"));
     await writeFile(join(h.root, "app", ".env"), "AWS_ENDPOINT_URL_STEPFUNCTIONS=http://localhost:4566\nAWS_ENDPOINT_URL_SFN=http://localhost:4566\n");
     const plans = withSeed(planOf([aws("sns", { connect: { env: [], hostAliases: ["aws"] } }), aws("secrets-manager"), aws("kinesis")]));
     const run = await h.start(plans);
@@ -173,14 +173,14 @@ describe("the worker starts a wide plan", () => {
   });
   it("on the table's engine runs any service of the table", async () => {
     for (const services of [["ec2"], ["sns", "bedrock-runtime"], ["kinesis", "sfn", "cognito-identity-provider"]]) {
-      const h = await harness(engineCatalog("1.0.322"));
+      const h = await harness(engineCatalog("1.0.337"));
       const run = await h.start(planOf(services.map((service, index) => aws(service, index === 0 ? { connect: { env: [], hostAliases: ["aws"] } } : {}))));
       await run.dispose();
     }
   });
   it("reads the repository's endpoint names again for each sealed round: a `.env` edited between rounds is seen by the next one", async () => {
     setups.length = 0;
-    const h = await harness(engineCatalog("1.0.322"));
+    const h = await harness(engineCatalog("1.0.337"));
     await writeFile(join(h.root, "app", ".env"), "AWS_ENDPOINT_URL_KMS=http://localhost:4566\n");
     const run = await h.start(planOf([aws("sns", { connect: { env: [], hostAliases: ["aws"] } })]));
     try {
