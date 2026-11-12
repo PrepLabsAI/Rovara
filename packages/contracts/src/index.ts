@@ -43,6 +43,7 @@ export * from "./channel-binding.js";
 export * from "./channel-adapter.js";
 export * from "./channel-command-client.js";
 export * from "./channel-forms.js";
+export * from "./sign-in-clients.js";
 export * from "./thread-service.js";
 export * from "./slack-details.js";
 export * from "./slack-confirmation.js";

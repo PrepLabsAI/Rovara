@@ -2,6 +2,7 @@
 // (R3): the legacy deployment must not change.
 import { ArnFormat, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, aws_apigatewayv2 as apigwv2, aws_dynamodb as dynamodb, aws_iam as iam, aws_kms as kms, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager } from "aws-cdk-lib";
 import { Construct } from "constructs";
+import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { packagedFunction } from "./control-plane.js";
 
@@ -116,6 +117,12 @@ export class DeveloperSignIn extends Construct {
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
       resources: [table.tableArn],
+    }));
+    // Spec 063: listing and removing sign-in clients, only in their own partition.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:Query", "dynamodb:DeleteItem"],
+      resources: [table.tableArn],
+      conditions: { "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [SIGN_IN_CLIENTS_PK] }, Null: { "dynamodb:LeadingKeys": "false" } },
     }));
     tokenKey.grant(fn, "kms:Sign", "kms:GetPublicKey");
     tokenKey.addToResourcePolicy(new iam.PolicyStatement({

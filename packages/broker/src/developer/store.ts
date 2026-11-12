@@ -2,12 +2,16 @@
 // The DeveloperSignIn table (spec 025 FR-005, FR-008). Codes and refresh tokens are stored only as
 // SHA-256 hashes. Every expiry is checked here; the table's TTL only cleans up afterwards.
 import { randomUUID } from "node:crypto";
-import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   DEVELOPER_AUTH_REQUEST_SECONDS,
   DEVELOPER_CODE_SECONDS,
   DEVELOPER_SESSION_SECONDS,
+  SIGN_IN_CLIENTS_PK,
+  SignInClientRecordSchema,
+  signInClientKey,
   type DeveloperSignInMethod,
+  type SignInClientRecord,
 } from "@agentx/contracts";
 import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
@@ -81,6 +85,42 @@ export class DeveloperSignInStore {
 
   private async put(item: Record<string, unknown>, condition?: string): Promise<void> {
     await this.input.documentClient.send(new PutCommand({ TableName: this.input.tableName, Item: item, ...(condition === undefined ? {} : { ConditionExpression: condition }) }));
+  }
+
+  // ---- Spec 063: the sign-in clients an administrator registered ----
+
+  /** Registers a client or replaces it; its first registration's time is kept. */
+  async putClient(client: SignInClientRecord): Promise<void> {
+    const record = SignInClientRecordSchema.parse(client);
+    const current = await this.getClient(record.clientId);
+    await this.input.documentClient.send(new PutCommand({ TableName: this.input.tableName,
+      Item: { ...signInClientKey(record.clientId), entityType: "SIGN_IN_CLIENT", ...record, createdAt: current?.createdAt ?? record.createdAt } }));
+  }
+
+  async removeClient(clientId: string): Promise<boolean> {
+    const response = await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: signInClientKey(clientId), ReturnValues: "ALL_OLD" })) as { Attributes?: unknown };
+    return response.Attributes !== undefined;
+  }
+
+  /** A registered client, or undefined for one never registered or since removed (an unreadable row reads as none). */
+  async getClient(clientId: string): Promise<SignInClientRecord | undefined> {
+    const response = await this.input.documentClient.send(new GetCommand({ TableName: this.input.tableName, Key: signInClientKey(clientId), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+    return response.Item === undefined ? undefined : clientOf(response.Item);
+  }
+
+  async listClients(): Promise<SignInClientRecord[]> {
+    const clients: SignInClientRecord[] = [];
+    let start: Record<string, unknown> | undefined;
+    do {
+      const response = await this.input.documentClient.send(new QueryCommand({ TableName: this.input.tableName, KeyConditionExpression: "pk = :pk",
+        ExpressionAttributeValues: { ":pk": SIGN_IN_CLIENTS_PK }, ConsistentRead: true, ...(start === undefined ? {} : { ExclusiveStartKey: start }) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+      for (const item of response.Items ?? []) {
+        const client = clientOf(item);
+        if (client !== undefined) clients.push(client);
+      }
+      start = response.LastEvaluatedKey;
+    } while (start !== undefined);
+    return clients.sort((a, b) => a.clientId.localeCompare(b.clientId));
   }
 
   async createAuthRequest(input: Omit<AuthRequestRecord, "id" | "expiresAt" | "method" | "consumedAt">): Promise<AuthRequestRecord> {
@@ -372,4 +412,12 @@ function strip<T extends { pk: string; sk: string }>(item: T): Omit<T, "pk" | "s
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the keys
   const { pk: _pk, sk: _sk, entityType: _type, ...rest } = item as T & { entityType?: string };
   return rest;
+}
+
+/** A stored client row as its record, without the table's own fields; undefined for a row that does not read. */
+function clientOf(item: Record<string, unknown>): SignInClientRecord | undefined {
+  const rest: Record<string, unknown> = { ...item };
+  for (const key of ["pk", "sk", "entityType"]) delete rest[key];
+  const parsed = SignInClientRecordSchema.safeParse(rest);
+  return parsed.success ? parsed.data : undefined;
 }

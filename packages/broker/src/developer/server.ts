@@ -16,6 +16,10 @@ import {
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
   EndDeveloperSessionsRequestSchema,
+  ListSignInClientsRequestSchema,
+  PutSignInClientRequestSchema,
+  RemoveSignInClientRequestSchema,
+  signInClientView,
   SlackAuthCheckRequestSchema,
   SlackUserByEmailRequestSchema,
   isLoopbackRedirectUri,
@@ -34,6 +38,10 @@ import {
   type TaskPeopleDisplayReadResponse,
   type DeveloperSignInMethod,
   type EndDeveloperSessionsRequest,
+  type ListSignInClientsRequest,
+  type PutSignInClientRequest,
+  type RemoveSignInClientRequest,
+  type SignInClientsResponse,
   type EndDeveloperSessionsResponse,
   type SlackAuthCheckRequest,
   type SlackAuthCheckResponse,
@@ -483,9 +491,29 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/");
 
   return async (
-    event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
-  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse> => {
+    event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
+      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest,
+  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse> => {
     if ("kind" in event) {
+      // Spec 063 (FR-001): the registry of sign-in clients, changed only by the broker's applied admin changes.
+      if (event.kind === "put-sign-in-client") {
+        const parsed = PutSignInClientRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        await store.putClient(parsed.data.client);
+        deps.log({ event: "signin.client_registered", clientId: parsed.data.client.clientId });
+        return { ok: true };
+      }
+      if (event.kind === "remove-sign-in-client") {
+        const parsed = RemoveSignInClientRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        const removed = await store.removeClient(parsed.data.clientId);
+        deps.log({ event: "signin.client_removed", clientId: parsed.data.clientId, removed });
+        return { ok: true, removed };
+      }
+      if (event.kind === "list-sign-in-clients") {
+        if (!ListSignInClientsRequestSchema.safeParse(event).success) return { ok: false, error: "invalid_request" };
+        return { ok: true, clients: (await store.listClients()).map(signInClientView) };
+      }
       if (event.kind === "end-developer-sessions") {
         const parsed = EndDeveloperSessionsRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
