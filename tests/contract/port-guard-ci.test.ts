@@ -39,6 +39,9 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     expect(run).not.toMatch(/boundary-allowlist\.json[^\n]*\|\|/);
     expect(run).not.toMatch(/cp scripts\/boundary-allowlist/);
     expect(run).not.toMatch(/cp scripts\/port-guard/);
+    // the accepted findings travel from code/next the same way, never from the pull request's checkout
+    expect(run).toContain('git show origin/code/next:scripts/port-guard-accepted.json > "$RUNNER_TEMP/port-guard-accepted.json"');
+    expect(run).not.toMatch(/--accepted/);
     expect(run).not.toMatch(/port-guard\.ts"? *\|\|/);
     const checkout = job.steps.find((step) => step.uses?.startsWith("actions/checkout"));
     expect(checkout?.with?.["fetch-depth"]).toBe(0);
