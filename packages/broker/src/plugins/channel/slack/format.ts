@@ -47,6 +47,8 @@ export interface Rendered {
   ephemeralTo?: string;
 }
 
+const OPEN_WORDS = "Open the task on the computer where Rovara runs: `rovara open`.";
+
 const section = (text: string): unknown => ({ type: "section", text: { type: "mrkdwn", text: cut(escapeText(text), SECTION_MAX) } });
 
 /** The message for an event, or undefined when the event says nothing to a person in this chat. */
@@ -67,13 +69,16 @@ export function renderEvent(event: ChannelEvent, maxLength: number): Rendered | 
     case "error": return { text: text(event.data.text) };
     case "link_required": return { text: text(`Link your account to Rovara: ${event.data.linkUrl}`), ephemeralTo: event.data.actor.userId };
     case "approval_request": {
-      const open = { type: "button", text: { type: "plain_text", text: "Open the task" }, url: event.data.taskUrl, action_id: "rovara_open_task" };
+      // The "Open the task" button only when there is an address to open: with none, the words say where the task is opened.
+      const open = event.data.taskUrl === undefined ? [] : [{ type: "button", text: { type: "plain_text", text: "Open the task" }, url: event.data.taskUrl, action_id: "rovara_open_task" }];
       const buttons = (event.data.actions ?? []).map((action) => ({
         type: "button", text: { type: "plain_text", text: cut(action.label, 70) }, action_id: `${ACTION_PREFIX}${action.decision}`,
         ...(LABEL_STYLE[action.decision] === undefined ? {} : { style: LABEL_STYLE[action.decision] }),
         value: JSON.stringify({ r: event.data.requestId, v: event.data.expectedRevision, d: event.data.artifactDigest, o: action.decision } satisfies ButtonValue),
       }));
-      return { text: text(event.data.text), blocks: [section(event.data.text), { type: "actions", elements: [...buttons, open] }] };
+      const elements = [...buttons, ...open];
+      const where = event.data.taskUrl === undefined && !event.data.text.includes("rovara open") ? [{ type: "context", elements: [{ type: "mrkdwn", text: OPEN_WORDS }] }] : [];
+      return { text: text(event.data.text), blocks: [section(event.data.text), ...(elements.length === 0 ? [] : [{ type: "actions", elements }]), ...where] };
     }
   }
 }

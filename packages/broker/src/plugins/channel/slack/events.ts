@@ -82,8 +82,28 @@ export function decisionOf(payload: unknown, now: () => Date, log: (entry: Recor
   return parsed.success ? parsed.data : undefined;
 }
 
-/** A press of the Request changes button: what is needed to open the box that asks "What should change?" for exactly that request, by the person who pressed. */
-export interface ChangesPress { triggerId: string; context: ChangesContext }
+/**
+ * A press of the Request changes button: what is needed to open the box that asks "What should change?" for exactly that request, by the person who pressed. `taskUrl` is the card's own "Open the task" address when it has one
+ * (a plain https address), for the note that says the button expired.
+ */
+export interface ChangesPress { triggerId: string; context: ChangesContext; taskUrl?: string }
+
+/** The card's own "Open the task" address, read from the message the button is on: a plain https address, or nothing. */
+function taskUrlOf(message: Record<string, unknown>): string | undefined {
+  const blocks = Array.isArray(message["blocks"]) ? message["blocks"] as unknown[] : [];
+  for (const block of blocks) {
+    const elements = typeof block === "object" && block !== null && Array.isArray((block as { elements?: unknown }).elements) ? (block as { elements: unknown[] }).elements : [];
+    for (const element of elements) {
+      const entry = element as { action_id?: unknown; url?: unknown };
+      if (entry.action_id !== "rovara_open_task" || typeof entry.url !== "string") continue;
+      try {
+        const url = new URL(entry.url);
+        if (url.protocol === "https:" && url.username === "" && url.password === "") return url.toString();
+      } catch { /* not an address */ }
+    }
+  }
+  return undefined;
+}
 
 export function changesPressOf(payload: unknown, log: (entry: Record<string, unknown>) => void = () => undefined): ChangesPress | undefined {
   const pressed = ActionPayloadSchema.safeParse(payload);
@@ -98,8 +118,10 @@ export function changesPressOf(payload: unknown, log: (entry: Record<string, unk
   }
   if (value.o !== "REQUEST_CHANGES") return undefined;
   if (pressed.data.user.team_id === undefined) { log({ event: "slack.speaker_workspace_unknown" }); return undefined; }
+  const taskUrl = taskUrlOf(pressed.data.message);
   return {
     triggerId: pressed.data.trigger_id,
+    ...(taskUrl === undefined ? {} : { taskUrl }),
     context: { r: value.r, v: value.v, d: value.d, t: pressed.data.team.id, s: pressed.data.channel.id, h: pressed.data.message.thread_ts ?? NO_THREAD, u: pressed.data.user.id, w: pressed.data.user.team_id },
   };
 }
@@ -120,7 +142,21 @@ const SubmissionSchema = z.object({
  * What came back from the box: not Rovara's (`undefined`); the person's words as a decision for the request the box was opened for (`ok`); nothing typed (`empty`: the box shows an error and stays open); or from a person other
  * than the one who opened it, or a box whose own record does not read (`refused`: it is closed and nothing is decided).
  */
-export type ChangesSubmission = { status: "ok"; decision: ChannelDecision } | { status: "empty" } | { status: "refused" };
+export type ChangesSubmission =
+  | { status: "ok"; decision: ChannelDecision }
+  | { status: "empty" }
+  /** `notify` says where to tell the person why nothing was sent, when the box's record still names a place (an unreadable record may not). */
+  | { status: "refused"; why: "other_person" | "unreadable"; notify?: { channel: string; thread: string; user: string } };
+
+/** Where a refused box's person can be told: the card's channel and thread, read leniently from a record that did not read as a whole. */
+function placeOf(metadata: string, user: string): { channel: string; thread: string; user: string } | undefined {
+  try {
+    const found = z.object({ s: Id, h: Ts }).passthrough().safeParse(JSON.parse(metadata));
+    return found.success ? { channel: found.data.s, thread: found.data.h, user } : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function changesSubmissionOf(payload: unknown, bot: { userId: string }, now: () => Date, log: (entry: Record<string, unknown>) => void = () => undefined): ChangesSubmission | undefined {
   const submitted = SubmissionSchema.safeParse(payload);
@@ -130,12 +166,13 @@ export function changesSubmissionOf(payload: unknown, bot: { userId: string }, n
     context = ContextSchema.parse(JSON.parse(submitted.data.view.private_metadata));
   } catch {
     log({ event: "slack.changes_box_unreadable" });
-    return { status: "refused" };
+    const place = placeOf(submitted.data.view.private_metadata, submitted.data.user.id);
+    return { status: "refused", why: "unreadable", ...(place === undefined ? {} : { notify: place }) };
   }
   // Only the person who pressed the button may send what is in its box, from the workspace they pressed it in.
   if (submitted.data.user.id !== context.u || submitted.data.user.team_id !== context.w) {
     log({ event: "slack.changes_box_other_person" });
-    return { status: "refused" };
+    return { status: "refused", why: "other_person", notify: { channel: context.s, thread: context.h, user: submitted.data.user.id } };
   }
   const reason = cleanChatText(submitted.data.view.state.values[CHANGES_INPUT]?.[CHANGES_FIELD]?.value ?? "", bot.userId, CHANGE_REASON_MAX);
   if (reason === "") return { status: "empty" };
@@ -145,5 +182,5 @@ export function changesSubmissionOf(payload: unknown, bot: { userId: string }, n
     actor: { channel: "slack", tenant: context.w, userId: context.u },
     requestId: context.r, expectedRevision: context.v, artifactDigest: context.d, decision: "REQUEST_CHANGES", reason, receivedAt: now().toISOString(),
   });
-  return parsed.success ? { status: "ok", decision: parsed.data } : { status: "refused" };
+  return parsed.success ? { status: "ok", decision: parsed.data } : { status: "refused", why: "unreadable", notify: { channel: context.s, thread: context.h, user: context.u } };
 }
