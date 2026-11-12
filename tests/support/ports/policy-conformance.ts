@@ -32,6 +32,20 @@ export interface AdmissionHarness {
   refused?: AdmissionRequest;
   /** What the adapter must declare as `enforcesCost`. Required: an adapter states it, the suite never infers it. `true` only for an adapter that refuses a request whose `estimate.cost` is over its allowance (so `refused` must be set, and carry such an estimate). */
   enforcesCost: boolean;
+  /**
+   * For an adapter that holds an allowance (a budget): a request whose `estimate.cost` a fresh adapter admits exactly `fits` times, each under its own key, before
+   * it is full. With it the suite checks the money rules every holding adapter must keep: racing requests never take more than the allowance, a repeated key
+   * holds once, a reservation given back frees its room once, a settled one never frees it again, and a request whose cost is unknown is never admitted as free
+   * once the allowance is used. Absent: an adapter that holds nothing (Code's allow-all).
+   */
+  capacity?: { request: AdmissionRequest; fits: number };
+}
+
+/** How many of `count` requests, each under its own key and all sent at once, the adapter admits; and the reservations it gave. */
+export async function raceAdmissions(admission: Admission, request: AdmissionRequest, count: number, prefix = "race"): Promise<{ allowed: number; reservations: string[] }> {
+  const decisions = await Promise.all(Array.from({ length: count }, (_, index) => admission.admit({ ...request, idempotencyKey: `${prefix}-${index}` })));
+  const allowed = decisions.filter((decision) => decision.allowed);
+  return { allowed: allowed.length, reservations: allowed.flatMap((decision) => (decision.allowed && decision.reservationId !== undefined ? [decision.reservationId] : [])) };
 }
 
 export function runAdmissionConformance(name: string, harness: AdmissionHarness): void {
@@ -81,6 +95,49 @@ export function runAdmissionConformance(name: string, harness: AdmissionHarness)
         expect(refused.decision.allowed).toBe(false);
         expect(refused.items).toEqual([]);
       }
+    });
+
+    it("never admits racing requests past the allowance (money; needs `capacity`)", async () => {
+      if (harness.capacity === undefined) return;
+      const { request, fits } = harness.capacity;
+      const raced = await raceAdmissions(await harness.create(), request, fits * 2 + 3);
+      expect(raced.allowed).toBe(fits);
+    });
+
+    it("holds a repeated key once, even when the repeats race (money; needs `capacity`)", async () => {
+      if (harness.capacity === undefined) return;
+      const { request, fits } = harness.capacity;
+      const admission = await harness.create();
+      const repeats = await Promise.all(Array.from({ length: 5 }, () => admission.admit({ ...request, idempotencyKey: "repeated" })));
+      expect(repeats.every((decision) => decision.allowed)).toBe(true);
+      expect(new Set(repeats.map((decision) => (decision.allowed ? decision.reservationId : undefined))).size).toBe(1);
+      expect((await raceAdmissions(admission, request, fits + 2, "after-repeat")).allowed).toBe(fits - 1);
+    });
+
+    it("frees a released reservation's room once, and a settled one's never (money; needs `capacity`)", async () => {
+      if (harness.capacity === undefined) return;
+      const { request, fits } = harness.capacity;
+      const admission = await harness.create();
+      const full = await raceAdmissions(admission, request, fits, "fill");
+      expect(full.allowed).toBe(fits);
+      const [released, settled] = full.reservations;
+      if (released === undefined) return;
+      await admission.release(released);
+      await admission.release(released);
+      expect((await raceAdmissions(admission, request, 3, "after-release")).allowed).toBe(1);
+      if (settled === undefined || request.estimate?.cost === undefined) return;
+      await admission.settle(settled, { cost: request.estimate.cost });
+      await admission.release(settled);
+      expect((await raceAdmissions(admission, request, 2, "after-settle")).allowed).toBe(0);
+    });
+
+    it("never admits a request of unknown cost as free once the allowance is used (decision 79; needs `capacity`)", async () => {
+      if (harness.capacity === undefined) return;
+      const { request, fits } = harness.capacity;
+      const admission = await harness.create();
+      expect((await raceAdmissions(admission, request, fits, "fill")).allowed).toBe(fits);
+      const { estimate: _known, ...unknown } = request;
+      expect((await admission.admit({ ...unknown, idempotencyKey: "unknown-cost" })).allowed).toBe(false);
     });
 
     it("settles and releases a reservation once, and treats a repeat or an unknown id as a no-op", async () => {
@@ -361,6 +418,13 @@ export function runMeteringConformance(name: string, harness: MeteringHarness): 
       const first = await metering.record(entry);
       const again = await metering.record(entry);
       expect(again).toEqual(first);
+    });
+
+    it("counts an entry once when the repeats race, and answers each the same (money)", async () => {
+      const metering = await harness.create();
+      const entry = harness.entry(harness.known);
+      const results = await Promise.all(Array.from({ length: 6 }, () => metering.record(entry)));
+      expect(results.every((result) => JSON.stringify(result) === JSON.stringify(results[0]))).toBe(true);
     });
 
     it("answers a model it cannot price with no cost and the source unknown, and does not throw", async () => {

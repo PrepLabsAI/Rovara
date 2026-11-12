@@ -110,6 +110,16 @@ describe("the workspace limit under a race", () => {
   });
 });
 
+describe("the charge marker", () => {
+  it("names the member counter it holds a slot on, so a host whose member counters share a partition can tell its members' markers apart", async () => {
+    const h = createHarness();
+    await h.registerProject();
+    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "one" });
+    const charge = developerCharge({ companyId: COMPANY, developerId: "local-owner" });
+    expect(await h.store.get(chargeMarkerKey(charge, started.task.taskId))).toMatchObject({ entityType: "DEVELOPER_LIMIT_TASK", taskId: started.task.taskId, memberSk: charge.member.sk });
+  });
+});
+
 describe("results", () => {
   async function understandRunning() {
     const h = createHarness({ understandFirst: true, machines: { startingChecks: 0 } });
