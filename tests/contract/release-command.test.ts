@@ -276,9 +276,14 @@ describe("release pipeline trigger", () => {
   });
 
   it("starts the pipeline for every worker and Slack orchestrator image input and control-plane source", () => {
-    const samples = [...WORKER_IMAGE_INPUTS, ...SLACK_ORCHESTRATOR_IMAGE_INPUTS].map((input) =>
+    // The aws-adapters manifest is copied only so npm ci sees every workspace; the trigger list stays as the legacy template has it, and a
+    // dependency change of that package always changes package-lock.json, which starts the pipeline.
+    const notTriggered = new Set(["packages/aws-adapters/package.json"]);
+    const samples = [...WORKER_IMAGE_INPUTS, ...SLACK_ORCHESTRATOR_IMAGE_INPUTS].filter((input) => !notTriggered.has(input)).map((input) =>
       statSync(input).isDirectory() ? `${input}/src/index.ts` : input);
     expect(samples.filter((sample) => !triggered(sample))).toEqual([]);
+    expect(triggered("package-lock.json")).toBe(true);
+    expect(triggered("packages/aws-adapters/src/index.ts")).toBe(false);
     expect(triggered("packages/broker/src/aws/dispatcher.ts")).toBe(true);
     expect(triggered("infra/lib/control-plane.ts")).toBe(true);
     expect(triggered("packages/orchestrator/src/orchestrator.ts")).toBe(true);

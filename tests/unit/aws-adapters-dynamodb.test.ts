@@ -25,7 +25,6 @@ import {
   STATE_TABLE_INDEXES,
   STATE_TABLE_KEY,
   STATE_TABLE_PLANNED_INDEXES,
-  STATE_TABLE_TTL_ATTRIBUTE,
   UnrepresentableValueError,
   changeOfRecord,
   createDynamoStoreFromSettings,
@@ -74,7 +73,6 @@ describe("the DynamoDB store keeps the hosted State table's stored form (no data
 
   it("describes the State table as the hosted deployment defines it", () => {
     expect(STATE_TABLE_KEY).toEqual({ partitionKey: "pk", sortKey: "sk", streamView: "NEW_AND_OLD_IMAGES" });
-    expect(STATE_TABLE_TTL_ATTRIBUTE).toBe("indexExpiresAt");
     expect(STATE_TABLE_INDEXES.map((index) => [index.name, index.partitionAttribute, index.sortAttribute, index.sortType])).toEqual([
       ["bySessionState", "sessionState", "workspaceId", "string"],
       ["byWorkspaceProject", "workspaceProject", "workspaceCreatedAt", "string"],
@@ -349,10 +347,10 @@ describe("the dynamodb storage plug-in", () => {
   it("is an allowed module name and loads from a config entry, only when named (no AWS call at load)", async () => {
     expect(isAllowedModuleSpecifier("@rovara/aws-adapters/dynamodb")).toBe(true);
     const registry = createAdapterRegistry();
-    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "storage", name: "dynamodb", module: "@rovara/aws-adapters/dynamodb", settings: { tableName: "State", region: "us-west-2", endpoint: "http://127.0.0.1:1", ttlAttribute: "indexExpiresAt" } }] }), { registry, importModule: importer });
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "storage", name: "dynamodb", module: "@rovara/aws-adapters/dynamodb", settings: { tableName: "State", region: "us-west-2", endpoint: "http://127.0.0.1:1", ttlAttribute: "expiresAt" } }] }), { registry, importModule: importer });
     const store = registry.require("storage");
     expect(store).toBeInstanceOf(DynamoDocumentStore);
-    expect(store.ttlAttribute).toBe("indexExpiresAt");
+    expect(store.ttlAttribute).toBe("expiresAt");
     expect(store.indexes.map((index) => index.name)).toEqual(["outbox-pending"]);
     expect(store.changes).toBeUndefined();
   });
