@@ -7,6 +7,7 @@
 //   - the broker adds its own findings (`withOwnFindings`), after dropping a reviewer finding that has the fingerprint of one of them (N6);
 //   - each `ReviewerRun` is built from the verified facts and the proxy-MEASURED spend (`recordedReviewerCost`): a slot that was asked again, or whose spend could not be measured, is charged its key's budget, so the cap is
 //     never under-counted;
+//   - what the round's keys were measured to spend settles the Admission port's reservation for the round (`settleRoundAdmission`), on every end, so a hosted install's budget is charged what was spent and no more;
 // - every slot key is blocked and finalized FIRST, then the spend is measured ; `submitDesignReview` moves the workflow; the stored packets are removed by Delete items in the caller's commit, so a result that is computed
 //     again finds them and records the same round.
 //
@@ -15,7 +16,7 @@ import {
   DesignReviewBindingSchema, DesignReviewWorkerResultSchema, PacketDeliverySchema, ReviewerRunSchema, WorkflowTransitionError, closeDesignReview, itemOf, promptDigest, submitDesignReview,
   type CitablePacketItem, type DesignReviewBinding, type DesignReviewWorkerResult, type OrgId, type ReviewerPacketItem, type ReviewerRole, type ReviewerRun, type WorkflowSnapshot,
 } from "@agentx/contracts";
-import type { DocumentStore, TransactItem } from "@agentx/contracts";
+import type { Admission, DocumentStore, TransactItem } from "@agentx/contracts";
 import type { OperationRecord } from "../task-flow/records.js";
 import { recordedReviewerCost } from "./estimate.js";
 import { bindingMergeProblem } from "./merge-binding.js";
@@ -25,7 +26,7 @@ import { packetDeleteItems, readSlotPacket, removeSlotPackets } from "./packet-s
 import { reviewerPromptFor, promptRecord } from "./prompts/index.js";
 import { assembleRoundFindings, type RoundReviewerState } from "./round-findings.js";
 import { requirementIdsOf } from "./round-inputs.js";
-import { designReviewKeyIds, type DesignReviewKeyIds } from "./slot-keys.js";
+import { designReviewKeyIds, readSlotAllocationReservation, type DesignReviewKeyIds } from "./slot-keys.js";
 import { verifyRound, type UsageCheck, type VerifyResult } from "./verify.js";
 
 export interface RoundRecordPorts {
@@ -38,6 +39,21 @@ export interface RoundRecordPorts {
   readResult(operation: OperationRecord): Promise<string | undefined>;
   /** The proxy's first-call reader . Absent: every reviewer is `digest_only`, and the card says so. */
   usage?: UsageCheck | undefined;
+  /** The install's Admission port: the round's reservation (kept on its allocation) is settled with what the keys spent. Absent: nothing is settled here and a held reservation expires by itself. */
+  admission?: Pick<Admission, "settle"> | undefined;
+}
+
+/**
+ * Settles the Admission port's reservation for a round with what its keys were measured (or charged) to spend. A reservation settles once (the port's rule), so a round recorded again settles nothing more. Never throws: an
+ * allowance that cannot be settled here expires by itself.
+ */
+export async function settleRoundAdmission(ports: Pick<RoundRecordPorts, "table" | "admission">, scope: { orgId: OrgId; operationId: string }, spentUsd: number): Promise<void> {
+  if (ports.admission === undefined) return;
+  try {
+    const reservationId = await readSlotAllocationReservation(ports.table, scope);
+    if (reservationId === undefined) return;
+    await ports.admission.settle(reservationId, { cost: { micros: Math.max(0, Math.ceil(spentUsd * 1_000_000)), currency: "USD" } });
+  } catch { console.log(JSON.stringify({ component: "broker", event: "design_review.admission_not_settled", operationId: scope.operationId })); }
 }
 
 export interface RoundRecordInput {
@@ -105,7 +121,7 @@ function parsedResult(text: string | undefined, binding: DesignReviewBinding): D
  * A design-review operation ended with no result to read (it failed, was stopped, or was lost): what its keys cost so far, the packets removed and the keys blocked and finalized. The cost is the proxy's measured spend for each slot's key;
  * a slot whose spend cannot be read is charged its key's whole budget (never under-counted). Never throws.
  */
-export async function releaseDesignReviewRound(ports: Pick<RoundRecordPorts, "table" | "keySpend" | "closeKeys">, operation: Pick<OperationRecord, "id" | "orgId" | "designReview">): Promise<{ spentUsd: number }> {
+export async function releaseDesignReviewRound(ports: Pick<RoundRecordPorts, "table" | "keySpend" | "closeKeys" | "admission">, operation: Pick<OperationRecord, "id" | "orgId" | "designReview">): Promise<{ spentUsd: number }> {
   const orgId = operation.orgId;
   if (orgId === undefined) return { spentUsd: 0 };
   let spentUsd = 0;
@@ -117,6 +133,7 @@ export async function releaseDesignReviewRound(ports: Pick<RoundRecordPorts, "ta
     const costs = await slotCosts(ports, keys);
     for (const cost of costs.values()) spentUsd += cost.costUsd;
   } catch { console.log(JSON.stringify({ component: "broker", event: "design_review.spend_not_read", operationId: operation.id })); }
+  await settleRoundAdmission(ports, { orgId, operationId: operation.id }, spentUsd);
   try { await removeSlotPackets(ports.table, orgId, operation.id); } catch { console.log(JSON.stringify({ component: "broker", event: "design_review.packets_not_removed", operationId: operation.id })); }
   return { spentUsd: Math.round(spentUsd * 1e6) / 1e6 };
 }
@@ -140,6 +157,8 @@ export async function recordDesignReviewRound(ports: RoundRecordPorts, input: Ro
   const sourceId = operation.modelSourceId ?? "local";
   const costOf = (slot: string): number => costs.get(slot)?.costUsd ?? 0;
   const totalSpend = (): number => binding.reviewers.reduce((sum, entry) => sum + costOf(entry.keySlot), binding.merge === undefined ? 0 : costOf(binding.merge.keySlot));
+  // Every key's spend is known from here on, whatever the result says: the round's reservation is settled with it now.
+  await settleRoundAdmission(ports, { orgId, operationId: operation.id }, totalSpend());
 
   const finish = async (next: () => WorkflowSnapshot): Promise<WorkflowSnapshot> => {
     // the packets are NOT removed here. Their delete steps go to the caller's transaction (`input.release`), so they go with the commit and not before it; the keys were closed above.

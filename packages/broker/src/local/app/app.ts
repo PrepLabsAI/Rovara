@@ -456,6 +456,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // The design review stage (a Full task's design is read by fresh reviewers before anyone approves it). It fills `flow.deps.designReview`; with the switch off no task enters it.
   const designReview = createLocalDesignReview({
     flow: flow.deps, blobs, registry, companyId, environment: options.environment ?? {}, chosen, routeOf, provider: (id) => providers.get(id), slotKeys: () => options.slotKeys?.(), timeline,
+    contextSources: connections.runtime,
   });
 
   // Lane L12: merge tracking by polling. The publish step enrols a task's tracking row; a timer reads the due rows and calls the core's pass for each (pull request status, CI fix, branch sync, ready for review).

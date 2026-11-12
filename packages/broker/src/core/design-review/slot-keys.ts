@@ -62,6 +62,11 @@ export interface SlotBudgetAllocationInput {
   /** What is left of the task's run limit for model spend (`taskRunRoomUsd`): the least of the stop-at limit and the test cap, less what the task's keys have spent in this window. */
   taskRoomUsd: number;
   nowMs: number;
+  /**
+   * The allowance the install's Admission port held for this round (`AdmissionDecision.reservationId`), kept on the allocation so the round's end can settle it with what the keys were measured to spend
+   * (`settleRoundAdmission`). Absent: the port held nothing back (Code's allow-all).
+   */
+  reservationId?: string | undefined;
 }
 
 export interface SlotBudgetAllocation {
@@ -76,6 +81,20 @@ export interface SlotBudgetAllocation {
  * not dispatch: `not_run`) when either room is used up: BUDGET_EXCEEDED. A slot's key request reads this row and is given no key without it.
  */
 export async function allocateSlotBudgets(deps: Pick<DocumentStore, "get" | "put" | "update" | "query">, input: SlotBudgetAllocationInput): Promise<SlotBudgetAllocation> {
+  const { ceilings, totalUsd } = planSlotBudgets(input);
+  const written = await deps.put({
+    item: { ...allocationItem(input.orgId, input.operationId), entityType: ALLOCATION_ENTITY, orgId: input.orgId, operationId: input.operationId, round: input.binding.round, ceilings, totalUsd, createdAt: input.nowMs,
+      ...(input.reservationId === undefined ? {} : { reservationId: input.reservationId }), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.nowMs / 1000) + SLOT_PACKET_TTL_SECONDS },
+    condition: when.absent(),
+  });
+  if (!written.applied) throw agentXError("CONFIG_INVALID", "this design-review operation already has its budgets allocated");
+  return { ceilings, totalUsd };
+}
+
+/**
+ * The round's per-slot ceilings, worked out and NOT written: what `allocateSlotBudgets` writes, so the round can ask the Admission port for exactly their sum before anything is stored. BUDGET_EXCEEDED when either room is used up.
+ */
+export function planSlotBudgets(input: Pick<SlotBudgetAllocationInput, "binding" | "reviewRoomUsd" | "taskRoomUsd">): SlotBudgetAllocation {
   const slots = bindingSlots(input.binding);
   if (slots.length < 1 || new Set(slots.map((slot) => slot.keySlot)).size !== slots.length || slots.some((slot) => !SLOT_PATTERN.test(slot.keySlot))) throw agentXError("CONFIG_INVALID", "a design review needs valid, distinct key slots");
   const room = Math.min(input.reviewRoomUsd, input.taskRoomUsd);
@@ -86,13 +105,14 @@ export async function allocateSlotBudgets(deps: Pick<DocumentStore, "get" | "put
   for (const slot of slots) ceilings[slot.keySlot] = slot.purpose === "merge" ? share.mergeUsd : share.reviewerUsd;
   const totalUsd = Object.values(ceilings).reduce((sum, usd) => sum + usd, 0);
   if (!(share.reviewerUsd > 0) || totalUsd > room + 1e-9) throw agentXError("BUDGET_EXCEEDED", "The design review has no budget left for this round.");
-  const written = await deps.put({
-    item: { ...allocationItem(input.orgId, input.operationId), entityType: ALLOCATION_ENTITY, orgId: input.orgId, operationId: input.operationId, round: input.binding.round, ceilings, totalUsd, createdAt: input.nowMs,
-      [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.nowMs / 1000) + SLOT_PACKET_TTL_SECONDS },
-    condition: when.absent(),
-  });
-  if (!written.applied) throw agentXError("CONFIG_INVALID", "this design-review operation already has its budgets allocated");
   return { ceilings, totalUsd };
+}
+
+/** The Admission port's reservation kept on an operation's allocation, or undefined when there is none (no allocation, or the port held nothing back). */
+export async function readSlotAllocationReservation(deps: Pick<DocumentStore, "get">, scope: { orgId: OrgId; operationId: string }): Promise<string | undefined> {
+  const item = await deps.get(allocationItem(scope.orgId, scope.operationId));
+  if (item === undefined || item.entityType !== ALLOCATION_ENTITY || item.orgId !== scope.orgId || item.operationId !== scope.operationId) return undefined;
+  return typeof item.reservationId === "string" && item.reservationId !== "" ? item.reservationId : undefined;
 }
 
 /** The ceiling allocated to a slot, or undefined when the operation has no allocation (or one that does not name the slot): no key is minted then. */
