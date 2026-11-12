@@ -53,11 +53,15 @@ export const TEST_SERVICES_FILE_SEED_FEATURE = "task.testServices.fileSeed.v1";
 /** SEED-RISK-1: a worker that checks a seed command's `lock` (re-hashes the repository's seed script from its checkout, refuses on a difference). A plan with a locked seed goes only to such a worker. */
 export const TEST_SERVICES_SEED_LOCK_FEATURE = "task.testServices.seedLock.v1";
 /**
- * A worker that lists this reads a plan whose `aws.services` names any service of the generated table (`AWS_EMULATOR_SERVICES`), not only the three it could seed. An older worker's strict parse allows only
- * `SEEDED_AWS_SERVICES`, so the broker sends a plan with any other service to a worker that lists this, and refuses the run to one that does not (`awsPlanNeedsAllServices`, `ec2-delivery.ts`). In `WORKER_INVOCATION_FEATURES`.
+ * A worker that lists this reads a plan whose `aws.services` names any service of the generated table (`AWS_EMULATOR_SERVICES`). A worker without it only accepts the three services of `SEEDED_AWS_SERVICES`, so the
+ * broker adds this feature to a plan with any other service (`featuresForTestPlan`, which the delivery guard reads) and the run goes only to a worker that lists it. It is in `WORKER_INVOCATION_FEATURES`; a worker
+ * advertises it with the other test-services features (`testServicesAdvertisedFeatures`), when it can run an emulated plan at all.
  */
 export const TEST_SERVICES_AWS_ALL_SERVICES_FEATURE = "task.testServices.aws.allServices.v1";
-/** The AWS services Rovara can seed from a project's declared resources today (a bucket, a queue, a table). Any other service of the table starts empty. */
+/**
+ * The three AWS services a worker WITHOUT `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE` accepts in a plan (what could be seeded before that feature). This is the old worker's list, kept for the feature check; the services Rovara
+ * now seeds are `AWS_SEEDED_KINDS`, and any other service of the table starts empty.
+ */
 export const SEEDED_AWS_SERVICES = ["s3", "sqs", "dynamodb"] as const;
 /** Whether a plan's services need `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE`: any of them is not one a worker without the feature accepts. Legacy spellings are read as their keys. */
 export function awsPlanNeedsAllServices(services: readonly string[]): boolean {
@@ -88,7 +92,7 @@ export const TEST_ENV_SEED_COMMANDS_MAX = 8;
 const CandidateKeyAttribute = z.object({ name: line(255), type: z.enum(["S", "N", "B"]) }).strict();
 const CandidateResource = z
   .object({
-    kind: z.enum(["table", "bucket", "queue", "topic"]),
+    kind: z.enum(["table", "bucket", "queue", "topic", "secret", "parameter", "key", "bus", "rule"]),
     name: line(300),
     keySchema: z.object({ partitionKey: CandidateKeyAttribute, sortKey: CandidateKeyAttribute.optional() }).strict().optional(),
   })
@@ -121,6 +125,8 @@ export const TestEnvDependencyCandidateSchema = z
         /** The settings that name it, parsed down to the scheme and the host FAMILY; never the host. */
         url: z.object({ scheme: line(32), hostFamily: z.enum(["local", "private", "cloud", "unknown"]) }).strict().optional(),
         resources: z.array(CandidateResource).max(TEST_ENV_DEPENDENCY_LIMITS.awsServices).optional(),
+        /** An AWS service no seed handler creates resources for: its emulator starts empty and the tests create their resources. */
+        startsEmpty: z.boolean().optional(),
         seenBy: z.array(line(40)).max(8).optional(),
       })
       .strict(),

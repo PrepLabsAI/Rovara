@@ -45,10 +45,21 @@ export type DependencyRefusedField = (typeof DEPENDENCY_REFUSED_FIELDS)[number];
 
 export interface DependencyKeyAttribute { name: string; type: "S" | "N" | "B" }
 export interface DependencyResource {
-  kind: "table" | "bucket" | "queue" | "topic";
+  kind: "table" | "bucket" | "queue" | "topic" | "secret" | "parameter" | "key" | "bus" | "rule";
   /** The physical name when the code writes one as a plain identifier, else the template's own id for it. */
   name: string;
   keySchema?: { partitionKey: DependencyKeyAttribute; sortKey?: DependencyKeyAttribute };
+  /** A topic: the names of the declared queues that subscribe to it. */
+  queues?: string[];
+  /** A parameter: its type, and for a String or StringList the template's literal default (a SecureString never has one; a secret's value is never read at all). */
+  parameterType?: "String" | "StringList" | "SecureString";
+  value?: string;
+  /** A key: its alias (`alias/name`). */
+  alias?: string;
+  /** A rule: its bus (absent: the default bus), and its event pattern (JSON text) or schedule. */
+  bus?: string;
+  pattern?: string;
+  schedule?: string;
 }
 
 /**
@@ -78,6 +89,8 @@ export interface DependencyHints {
   url?: { scheme: string; hostFamily: "local" | "private" | "cloud" | "unknown" };
   /** Resources infrastructure code declares (tables with their key schema, buckets, queues, topics), at most 24: what Rovara local AWS creates when it starts. */
   resources?: DependencyResource[];
+  /** An AWS service of the emulator's table that no seed handler creates resources for: it starts empty and the tests create their resources. */
+  startsEmpty?: boolean;
   /** Which detector families saw it (`compose`, `ci`, `env`, `driver`, `sdk`, `test`, `iac`). */
   seenBy?: string[];
 }

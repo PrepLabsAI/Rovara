@@ -9,7 +9,7 @@
 //   - a name must be an upper-case variable name and must not be shaped like a key (the contracts' secret-shape rule), or it is dropped;
 //   - http(s) URLs are not read here: outside API hosts are the services detector's (D8).
 // Nothing is run; a file is read only if the reader was given its path.
-import { candidate, DEPENDENCY_SKIP_DIRS, FAMILY_KINDS, kindOfFamily, mergeCandidates, safeEnvName, slug } from "./dependency-candidates.js";
+import { candidate, DEPENDENCY_SKIP_DIRS, FAMILY_KINDS, kindOfFamily, mergeCandidates, normalizeAwsService, safeEnvName, slug } from "./dependency-candidates.js";
 import { blocksBetween, lineOf, type DependencyCandidate, type DependencyHints, type Detector } from "./types.js";
 
 const DOTENV = /(?:^|\/)\.env(?:\.[A-Za-z0-9_-]{1,32})?$/u;
@@ -42,11 +42,10 @@ const NAME_RULES: ReadonlyArray<{ pattern: RegExp; family: string | ((match: Reg
   { pattern: /^KINESIS_/u, family: "aws:kinesis" },
   { pattern: /^SAGEMAKER_(?:RUNTIME_)?ENDPOINT/u, family: "aws:sagemaker-runtime" },
 ];
-const AWS_SERVICE_ALIASES: Record<string, string> = { dynamodb_streams: "dynamodbstreams", cognito_identity_provider: "cognito-idp", sagemaker_runtime: "sagemaker-runtime" };
+/** The service `AWS_ENDPOINT_URL_<suffix>` is for: the table's variable suffix (`SECRETS_MANAGER`), else any other spelling the table knows, else the suffix as an id. */
 function awsService(suffix: string): string | undefined {
-  const lower = suffix.toLowerCase();
-  const id = AWS_SERVICE_ALIASES[lower] ?? lower.replace(/_/gu, "-");
-  return /^[a-z][a-z0-9-]{1,39}$/u.test(id) ? `aws:${id}` : undefined;
+  const id = normalizeAwsService(suffix, "endpointVariable");
+  return id === undefined ? undefined : `aws:${id}`;
 }
 
 /** Prefixes that say nothing about WHICH outside service a key belongs to. */

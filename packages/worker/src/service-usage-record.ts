@@ -30,7 +30,7 @@
 //
 // The record is the broker contract's `TestServicesUsageRecord` (contracts/src/test-services-usage.ts, s1-broker T1); the tests parse every record this module builds with `TestServicesUsageRecordSchema`.
 import {
-  AwsOperationNameSchema, AwsServiceKeySchema, TEST_SERVICES_AWS_USAGE_LIMITS, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_SCHEMA_VERSION, TestServicesAwsUsageSchema, hostProblem, looksLikeSecretValue, registrableDomain,
+  AwsOperationNameSchema, AwsServiceKeySchema, TEST_SERVICES_AWS_USAGE_LIMITS, normaliseAwsLedgerName, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_SCHEMA_VERSION, TestServicesAwsUsageSchema, hostProblem, looksLikeSecretValue, registrableDomain,
   type TestServicesAwsUsage, type TestServicesDependencyUsage, type TestServicesFakeUsage, type TestServicesStartFailure, type TestServicesUsageRecord,
 } from "@agentx/contracts";
 import { readSealedDnsRecord, type SealedDnsRecord } from "./check-sandbox.js";
@@ -77,6 +77,11 @@ export interface ServiceUsageRecordInput {
   emulator?: EmulatorLedgerPort;
   /** The longest the ledger port may take. Default USAGE_LEDGER_LIMIT_MS. */
   ledgerLimitMs?: number;
+  /**
+   * The plan used the all-services feature (a service outside s3, sqs and dynamodb): only then may the `aws` facts list more than 24 services and carry `outOfPlan`. A broker from before that feature reads a usage record
+   * strictly (at most 24 services, no `outOfPlan`), and only the plans it could not read the record of go to a worker that lists the feature. Default false: the narrow record, as before.
+   */
+  awsWide?: boolean;
   /**
    * Slice 3, the ONE port for the round's fake servers: reads each fake's ledger summary, bound to the round's own fakes while they still run. Present only when the run started a fake. A summary that is missing (undefined), or a
    * port that throws or never answers within the ledger limit, gives `ledger: "unreadable"` for that fake; absent, the record has no `fakes` field at all (the earlier slices' record, byte for byte).
@@ -156,7 +161,7 @@ export async function buildServiceUsageRecord(input: ServiceUsageRecordInput): P
   }
   const dns = input.dns === undefined ? undefined : "unknown" in input.dns ? input.dns : await readSealedDnsRecord(input.dns.docker, input.dns.dnsHelperName).catch(() => undefined);
   const unknownCalls = dns === undefined ? { domains: [], otherCount: 0 } : reduceUnknownNames(dns, input.redactor);
-  const aws = input.emulator === undefined ? undefined : await readAwsUsage(input.emulator, input.redactor, input.ledgerLimitMs ?? USAGE_LEDGER_LIMIT_MS);
+  const aws = input.emulator === undefined ? undefined : await readAwsUsage(input.emulator, input.redactor, input.ledgerLimitMs ?? USAGE_LEDGER_LIMIT_MS, input.awsWide === true);
   const fakes = input.fakes === undefined ? undefined : await readFakeUsage(input.fakes, input.planned, input.ledgerLimitMs ?? USAGE_LEDGER_LIMIT_MS);
   return { schemaVersion: TEST_SERVICES_USAGE_SCHEMA_VERSION, dependencies, unknownCalls, ...(aws === undefined ? {} : { aws }), ...(fakes === undefined ? {} : { fakes }) };
 }
@@ -225,13 +230,13 @@ const byBucketThenName = <T extends { bucket: number; name: string }>(a: T, b: T
  * Reads the ledger through the port with at most `limitMs` to answer, and reduces it. Never throws: a failure, a ledger that does not reduce to a valid record, or silence is `UNREADABLE_AWS_USAGE`; a ledger past its
  * limits (the code flooded it with different calls) is `FLOODED_AWS_USAGE`. The port is handed an AbortSignal that aborts when the time is up, so the control call's container is stopped and removed with it.
  */
-async function readAwsUsage(port: EmulatorLedgerPort, redactor: ServiceRedactor, limitMs: number): Promise<TestServicesAwsUsage> {
+async function readAwsUsage(port: EmulatorLedgerPort, redactor: ServiceRedactor, limitMs: number, wide: boolean): Promise<TestServicesAwsUsage> {
   const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   const silence = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(new RangeError("silence")); }, Math.max(1, limitMs)); });
   try {
     const ledger = await Promise.race([port(controller.signal), silence]);
-    const parsed = TestServicesAwsUsageSchema.safeParse(reduceAwsUsage(ledger, redactor));
+    const parsed = TestServicesAwsUsageSchema.safeParse(reduceAwsUsage(ledger, redactor, { wide }));
     return parsed.success ? parsed.data : UNREADABLE_AWS_USAGE;
   } catch (error) {
     controller.abort();
@@ -245,26 +250,31 @@ async function readAwsUsage(port: EmulatorLedgerPort, redactor: ServiceRedactor,
  * Reduces the emulator's ledger to the record's `aws` facts (see the top of the file). A service key shown must be a service key by shape and survive `isShowable`; an operation name is shown only for an UNSUPPORTED operation (the
  * operations that worked are in the service's call count and named nowhere), only with the operation-name shape and `isShowable`. Everything not shown is counted in `otherCalls` / `otherUnsupported`.
  */
-export function reduceAwsUsage(ledger: EmulatorLedger, redactor: ServiceRedactor): TestServicesAwsUsage {
+export function reduceAwsUsage(ledger: EmulatorLedger, redactor: ServiceRedactor, options: { wide?: boolean } = {}): TestServicesAwsUsage {
   const max = USAGE_LIMITS.count;
+  const wide = options.wide === true;
+  const servicesMax = wide ? TEST_SERVICES_AWS_USAGE_LIMITS.services : TEST_SERVICES_AWS_USAGE_LIMITS.narrowServices;
   let otherCalls = 0;
   let otherUnsupported = 0;
   const candidates: Array<{ bucket: number; name: string; ledger: EmulatorLedger["services"][number] }> = [];
   const merged = new Map<string, EmulatorLedger["services"][number]>();
-  for (const service of ledger.services) {
-    if (clamp(service.calls, max) === 0 && clamp(service.unsupported, max) === 0) continue;
+  for (const entry of ledger.services) {
+    if (clamp(entry.calls, max) === 0 && clamp(entry.unsupported, max) === 0) continue;
+    // One service under every name the emulator may call it: a key of the table, an older spelling (`secretsmanager`), or its signing name (`monitoring`).
+    const service = { ...entry, service: normaliseAwsLedgerName(entry.service) };
     if (!AwsServiceKeySchema.safeParse(service.service).success || !isShowable(service.service, redactor)) {
       otherCalls += clamp(service.calls, max);
       otherUnsupported += clamp(service.unsupported, max);
       continue;
     }
     const before = merged.get(service.service);
-    merged.set(service.service, before === undefined ? service : { ...service, calls: before.calls + service.calls, unsupported: before.unsupported + service.unsupported, operations: [...before.operations, ...service.operations] });
+    const outOfPlan = before?.outOfPlan === undefined && service.outOfPlan === undefined ? undefined : (before?.outOfPlan ?? 0) + (service.outOfPlan ?? 0);
+    merged.set(service.service, before === undefined ? service : { ...service, calls: before.calls + service.calls, unsupported: before.unsupported + service.unsupported, operations: [...before.operations, ...service.operations], ...(outOfPlan === undefined ? {} : { outOfPlan }) });
   }
   for (const service of merged.values()) candidates.push({ bucket: bucketCount(clamp(service.calls, max)), name: service.service, ledger: service });
   candidates.sort(byBucketThenName);
-  const shown = candidates.slice(0, TEST_SERVICES_AWS_USAGE_LIMITS.services);
-  for (const { ledger: service } of candidates.slice(TEST_SERVICES_AWS_USAGE_LIMITS.services)) {
+  const shown = candidates.slice(0, servicesMax);
+  for (const { ledger: service } of candidates.slice(servicesMax)) {
     otherCalls += clamp(service.calls, max);
     otherUnsupported += clamp(service.unsupported, max);
   }
@@ -287,24 +297,30 @@ export function reduceAwsUsage(ledger: EmulatorLedger, redactor: ServiceRedactor
   for (const { row } of rankedOps.slice(TEST_SERVICES_AWS_USAGE_LIMITS.unsupportedOperations)) otherUnsupported += row.count;
   return {
     ledger: "read",
-    services: shown.map(({ ledger: service }) => ({ service: service.service, calls: bucketCount(clamp(service.calls, max)), unsupported: bucketCount(clamp(service.unsupported, max)) })).filter((row) => row.calls >= 1),
+    // `outOfPlan` only in a wide record (see `awsWide`), and only when the emulator counted some: never more than the calls, which the same bucketing keeps in order.
+    services: shown.map(({ ledger: service }) => {
+      const calls = clamp(service.calls, max);
+      const outOfPlan = wide ? Math.min(clamp(service.outOfPlan, max), calls) : 0;
+      return { service: service.service, calls: bucketCount(calls), unsupported: bucketCount(clamp(service.unsupported, max)), ...(outOfPlan > 0 ? { outOfPlan: bucketCount(outOfPlan) } : {}) };
+    }).filter((row) => row.calls >= 1),
     unsupportedOperations: rankedOps.slice(0, TEST_SERVICES_AWS_USAGE_LIMITS.unsupportedOperations).map(({ bucket, row }) => ({ service: row.service, operation: row.operation, count: bucket })),
     otherCalls: bucketCount(Math.min(otherCalls, max)),
     otherUnsupported: bucketCount(Math.min(otherUnsupported, max)),
   };
 }
 
-/** Adds two `aws` facts of one run (the rounds' records): services and operations sum (counts are lower bounds, so their sums are too), the lists are cut again, and a ledger unreadable in either is unreadable. */
-export function mergeAwsUsage(earlier: TestServicesAwsUsage | undefined, later: TestServicesAwsUsage | undefined): TestServicesAwsUsage | undefined {
+/** Adds two `aws` facts of one run (the rounds' records): services and operations sum (counts are lower bounds, so their sums are too), the lists are cut again, and a ledger unreadable in either is unreadable. `wide` as in `reduceAwsUsage`. */
+export function mergeAwsUsage(earlier: TestServicesAwsUsage | undefined, later: TestServicesAwsUsage | undefined, wide = false): TestServicesAwsUsage | undefined {
   if (earlier === undefined) return later;
   if (later === undefined) return earlier;
   if (earlier.ledger === "flooded" || later.ledger === "flooded") return FLOODED_AWS_USAGE;
   if (earlier.ledger === "unreadable" || later.ledger === "unreadable") return UNREADABLE_AWS_USAGE;
   const max = USAGE_LIMITS.count;
-  const services = new Map<string, { calls: number; unsupported: number }>();
+  const servicesMax = wide ? TEST_SERVICES_AWS_USAGE_LIMITS.services : TEST_SERVICES_AWS_USAGE_LIMITS.narrowServices;
+  const services = new Map<string, { calls: number; unsupported: number; outOfPlan: number }>();
   for (const row of [...earlier.services, ...later.services]) {
     const before = services.get(row.service);
-    services.set(row.service, { calls: Math.min(max, (before?.calls ?? 0) + row.calls), unsupported: Math.min(max, (before?.unsupported ?? 0) + row.unsupported) });
+    services.set(row.service, { calls: Math.min(max, (before?.calls ?? 0) + row.calls), unsupported: Math.min(max, (before?.unsupported ?? 0) + row.unsupported), outOfPlan: Math.min(max, (before?.outOfPlan ?? 0) + (row.outOfPlan ?? 0)) });
   }
   const operations = new Map<string, { service: string; operation: string; count: number }>();
   for (const row of [...earlier.unsupportedOperations, ...later.unsupportedOperations]) {
@@ -313,11 +329,11 @@ export function mergeAwsUsage(earlier: TestServicesAwsUsage | undefined, later: 
   }
   const rankedServices = [...services].sort((a, b) => b[1].calls - a[1].calls || (a[0] < b[0] ? -1 : 1));
   const rankedOps = [...operations.values()].sort((a, b) => b.count - a.count || (a.service + a.operation < b.service + b.operation ? -1 : 1));
-  const overflowCalls = rankedServices.slice(TEST_SERVICES_AWS_USAGE_LIMITS.services).reduce((sum, [, row]) => sum + row.calls, 0);
-  const overflowUnsupported = rankedServices.slice(TEST_SERVICES_AWS_USAGE_LIMITS.services).reduce((sum, [, row]) => sum + row.unsupported, 0) + rankedOps.slice(TEST_SERVICES_AWS_USAGE_LIMITS.unsupportedOperations).reduce((sum, row) => sum + row.count, 0);
+  const overflowCalls = rankedServices.slice(servicesMax).reduce((sum, [, row]) => sum + row.calls, 0);
+  const overflowUnsupported = rankedServices.slice(servicesMax).reduce((sum, [, row]) => sum + row.unsupported, 0) + rankedOps.slice(TEST_SERVICES_AWS_USAGE_LIMITS.unsupportedOperations).reduce((sum, row) => sum + row.count, 0);
   return {
     ledger: "read",
-    services: rankedServices.slice(0, TEST_SERVICES_AWS_USAGE_LIMITS.services).map(([service, row]) => ({ service, calls: row.calls, unsupported: row.unsupported })),
+    services: rankedServices.slice(0, servicesMax).map(([service, row]) => ({ service, calls: row.calls, unsupported: row.unsupported, ...(wide && row.outOfPlan > 0 ? { outOfPlan: Math.min(row.outOfPlan, row.calls) } : {}) })),
     unsupportedOperations: rankedOps.slice(0, TEST_SERVICES_AWS_USAGE_LIMITS.unsupportedOperations),
     otherCalls: Math.min(max, earlier.otherCalls + later.otherCalls + overflowCalls),
     otherUnsupported: Math.min(max, earlier.otherUnsupported + later.otherUnsupported + overflowUnsupported),

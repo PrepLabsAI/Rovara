@@ -3,7 +3,6 @@
   "aliases": {
     "apigateway": "api-gateway",
     "cloudwatchlogs": "cloudwatch-logs",
-    "cognito": "cognito-identity-provider",
     "cognito-idp": "cognito-identity-provider",
     "dynamodbstreams": "dynamodb-streams",
     "es": "elasticsearch-service",

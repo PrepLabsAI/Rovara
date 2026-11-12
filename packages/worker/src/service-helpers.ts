@@ -24,7 +24,7 @@
 // fixed sentence; Docker's own words are never repeated. Everything started is removed.
 import { createHash, randomBytes } from "node:crypto";
 import {
-  CATALOG_FIXED_ARGS, CatalogEntrySchema, FIXTURE_SET_MAX_BYTES, TEST_ENV_RESERVED_ALIASES, TestEnvDependencyIdSchema, agentXError, catalogFixedArgv, catalogIdName,
+  AWS_PLAN_SERVICES_MAX, CATALOG_FIXED_ARGS, CatalogEntrySchema, FIXTURE_SET_MAX_BYTES, TEST_ENV_RESERVED_ALIASES, TestEnvDependencyIdSchema, agentXError, catalogFixedArgv, catalogIdName, normaliseAwsServiceKey,
   type CatalogEntry,
 } from "@agentx/contracts";
 import { DOCKER_CALL_TIMEOUT_MS } from "./setup-network.js";
@@ -133,8 +133,10 @@ export interface HelperRequest {
   /** The AWS region of the emulator. Default us-east-1. */
   region?: string;
   /**
-   * Rovara local AWS only: the AWS services the run asked for (`s3`, `sqs`, `dynamodb`). Every OTHER service the emulator can serve is switched off in its env file (`ROVARA_AWS_SERVICES_<NAME>_ENABLED=false`, the fork's
-   * per-service switch, enforced by its `ServiceEnabledFilter`), so a call outside the plan is refused by the emulator itself and shows in the ledger. That only happens if the code's call REACHES the emulator: the worker points every non-plan `AWS_ENDPOINT_URL_<SERVICE>` and the global `AWS_ENDPOINT_URL` at it (service-env.ts), not at a sinkhole. The fork's ledger filter must run before the disable filter (fork: LedgerFilter priority). Absent: every service stays on (the development default).
+   * Rovara local AWS only: the AWS services the run asked for (keys of the emulator's table: `s3`, `sns`, `secrets-manager`, ...). They go to the emulator as `ROVARA_AWS_PLANNED_SERVICES=<csv of keys>`: the front serves every
+   * service but records a call to one outside the list as out of the plan in its ledger, which is how the broker flags it. THE OLD IMAGE (the fork, shipped until the front replaces it): the fork has no such variable and switches
+   * its own services off one by one, so for ONE MORE RELEASE the env file also holds `ROVARA_AWS_SERVICES_<NAME>_ENABLED=false` for every fork key the plan does not need (`LOCAL_AWS_FORK_KEYS_OF`), exactly as before. Remove
+   * that list when the front is the shipped image. Absent: every service stays on (the development default).
    */
   awsServices?: readonly string[];
   files?: readonly HelperFile[];
@@ -224,8 +226,37 @@ function need(value: string | undefined, pattern: RegExp): string {
   return value;
 }
 
-/** The services the fork can switch on or off (`rovara-aws.services.<key>.enabled`, from its application.yml), by key. */
+/** The services the fork can switch on or off (`rovara-aws.services.<key>.enabled`, from its application.yml), by key. Only the OLD image reads them (see `HelperRequest.awsServices`). */
 export const LOCAL_AWS_SERVICE_KEYS: readonly string[] = ["ssm", "sqs", "s3", "dynamodb", "sns", "lambda", "apigateway", "apigatewayv2", "iam", "eventbridge", "eventbridgev2", "cloudwatchlogs", "secretsmanager", "kinesis", "kms", "cognito", "stepfunctions", "sagemaker"];
+
+/** The fork's switches that a service of the table needs on, by key of the table. A service the fork does not serve needs none (the old image refuses a plan for it anyway). */
+export const LOCAL_AWS_FORK_KEYS_OF: Readonly<Record<string, readonly string[]>> = {
+  s3: ["s3"], sqs: ["sqs"], dynamodb: ["dynamodb"], "dynamodb-streams": ["dynamodb"], sns: ["sns"], sts: ["iam"], iam: ["iam"], ssm: ["ssm"], kms: ["kms"], "secrets-manager": ["secretsmanager"], eventbridge: ["eventbridge", "eventbridgev2"],
+  lambda: ["lambda"], "api-gateway": ["apigateway"], apigatewayv2: ["apigatewayv2"], "cloudwatch-logs": ["cloudwatchlogs"], kinesis: ["kinesis"], "cognito-identity-provider": ["cognito"], sfn: ["stepfunctions"],
+  "sagemaker-runtime": ["sagemaker"], sagemaker: ["sagemaker"],
+};
+
+/** The env file lines of Rovara local AWS (the run contract above, then the planned services and, for the old image, its switches). Pure. */
+export function localAwsEnvLines(input: { credentials: HelperCredentials; address: string; region: string; aliases: readonly string[]; port: number; awsServices?: readonly string[] | undefined }): string[] {
+  const { credentials, address, region, aliases, port, awsServices } = input;
+    const presign = need(credentials.password, EMULATOR_SECRET);
+    const control = need(credentials.controlToken, EMULATOR_SECRET);
+    const receipt = need(credentials.sqsReceiptSecret, EMULATOR_SECRET);
+    if (new Set([presign, control, receipt]).size !== 3) throw new RangeError("control token");
+    const alias = aliases[0] ?? "aws";
+    // Every service is a key of the table (a legacy spelling is read as its key), listed once, at most as many as a plan may name.
+    const planned = awsServices?.map((service) => normaliseAwsServiceKey(service));
+    if (planned !== undefined && (planned.length === 0 || planned.length > AWS_PLAN_SERVICES_MAX || new Set(planned).size !== planned.length || planned.some((service) => service === undefined))) throw new RangeError("aws services");
+    const plannedKeys = planned as string[] | undefined;
+    // The old image's switches (see `HelperRequest.awsServices`): off for every fork key no planned service needs. The same lines as before for a plan of s3, sqs and dynamodb.
+    const forkKeysNeeded = plannedKeys === undefined ? undefined : new Set(plannedKeys.flatMap((service) => (Object.hasOwn(LOCAL_AWS_FORK_KEYS_OF, service) ? LOCAL_AWS_FORK_KEYS_OF[service]! : [])));
+    const switchedOff = forkKeysNeeded === undefined ? [] : LOCAL_AWS_SERVICE_KEYS.filter((key) => !forkKeysNeeded.has(key)).map((key) => `ROVARA_AWS_SERVICES_${key.toUpperCase()}_ENABLED=false`);
+    const plannedLine = plannedKeys === undefined ? [] : [`ROVARA_AWS_PLANNED_SERVICES=${plannedKeys.join(",")}`];
+  return [
+      `QUARKUS_HTTP_HOST=${address}`, `ROVARA_AWS_BASE_URL=http://${alias}:${String(port)}`, `ROVARA_AWS_AUTH_PRESIGN_SECRET=${presign}`, `ROVARA_AWS_SERVICES_SQS_RECEIPT_HANDLE_SECRET=${receipt}`,
+      `ROVARA_AWS_CONTROL_TOKEN=${control}`, `ROVARA_AWS_DEFAULT_REGION=${region}`, `ROVARA_AWS_HOSTNAME=${alias}`, ...plannedLine, ...switchedOff,
+  ];
+}
 
 /** The families a helper may be, and the one way each takes its per-run credentials. A family not listed here is refused: whatever its image does with no setup is not decided by this launcher. */
 const FAMILY_RULES: Record<string, FamilyRule> = {
@@ -238,19 +269,7 @@ const FAMILY_RULES: Record<string, FamilyRule> = {
   // Rovara local AWS (the fork's run contract, rovara-local-aws README "Run contract"): with a control token the emulator refuses to start unless it is given its run address, the URL the code reaches it at and two signing secrets.
   // QUARKUS_HTTP_HOST is the run address (never a wildcard); ROVARA_AWS_BASE_URL is `http://<first alias>:<port>`, so presigned URLs and queue URLs name something the other containers resolve; the presign secret is `password`.
   // Three secrets, three jobs, all different: a control token that equalled a signing secret would let anyone holding a presigned URL or a receipt handle drive the control API. All three go only into the 0600 env file.
-  "local-aws": { prepare: ({ credentials, address, region, aliases, port, awsServices }) => {
-    const presign = need(credentials.password, EMULATOR_SECRET);
-    const control = need(credentials.controlToken, EMULATOR_SECRET);
-    const receipt = need(credentials.sqsReceiptSecret, EMULATOR_SECRET);
-    if (new Set([presign, control, receipt]).size !== 3) throw new RangeError("control token");
-    const alias = aliases[0] ?? "aws";
-    if (awsServices !== undefined && (awsServices.length === 0 || new Set(awsServices).size !== awsServices.length || awsServices.some((service) => !LOCAL_AWS_SERVICE_KEYS.includes(service)))) throw new RangeError("aws services");
-    const switchedOff = awsServices === undefined ? [] : LOCAL_AWS_SERVICE_KEYS.filter((key) => !awsServices.includes(key)).map((key) => `ROVARA_AWS_SERVICES_${key.toUpperCase()}_ENABLED=false`);
-    return { env: [
-      `QUARKUS_HTTP_HOST=${address}`, `ROVARA_AWS_BASE_URL=http://${alias}:${String(port)}`, `ROVARA_AWS_AUTH_PRESIGN_SECRET=${presign}`, `ROVARA_AWS_SERVICES_SQS_RECEIPT_HANDLE_SECRET=${receipt}`,
-      `ROVARA_AWS_CONTROL_TOKEN=${control}`, `ROVARA_AWS_DEFAULT_REGION=${region}`, `ROVARA_AWS_HOSTNAME=${alias}`, ...switchedOff,
-    ] };
-  } },
+  "local-aws": { prepare: (input) => ({ env: localAwsEnvLines(input) }) },
   "fake-server": { prepare: () => ({ env: [] }) },
   // The official image with no authentication (owner-image-list.ts says why): the run's network is sealed and nothing from the project is let in to it.
   mongodb: { prepare: () => ({ env: [] }) },

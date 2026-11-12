@@ -158,11 +158,11 @@ describe("limits that need their own test", () => {
 
 describe("infrastructure resource names are carried, but never a key-shaped one", () => {
   const keyName = ["AK", "IA", "ABCDEFGHIJKLMNOP"].join("");
-  it("falls back from a key-shaped physical name to the template's id, and drops a resource with neither", async () => {
+  it("falls back from a key-shaped physical name to the template's id, and drops a resource with neither (its service stays a candidate with no resource)", async () => {
     const template = `Resources:\n  Orders:\n    Type: AWS::SQS::Queue\n    Properties:\n      QueueName: ${keyName}\n  ${keyName}:\n    Type: AWS::SNS::Topic\n    Properties:\n      TopicName: ${keyName}\n`;
     const detection = await detect({ "template.yaml": template });
     expect(family(detection, "aws:sqs")!.hints.resources).toEqual([{ kind: "queue", name: "Orders" }]);
-    expect(family(detection, "aws:sns")).toBeUndefined();
+    expect(family(detection, "aws:sns")!.hints.resources).toBeUndefined();
     expect(JSON.stringify(detection)).not.toContain(keyName);
   });
   it("applies the same rule to Terraform and CDK names", async () => {

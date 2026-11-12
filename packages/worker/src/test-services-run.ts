@@ -34,7 +34,7 @@ import { constants as fsConstants, readFileSync } from "node:fs";
 import { open, readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import {
-  CATALOG_REGISTRY_ROOT, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, agentXError, catalogEntryById, catalogRepositoryName,
+  CATALOG_REGISTRY_ROOT, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, agentXError, awsPlanNeedsAllServices, catalogEntryById, catalogRepositoryName, checkEmulatorEngine, normaliseAwsServiceKey,
   type CatalogEdition, type CatalogEntry, type ServiceCatalog, type TaskAwsResource, type TaskDependencyPlan, type TestEnvTaskPlan, type TestServicesStartFailure, type TestServicesUsageRecord,
 } from "@agentx/contracts";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, type TaskSandbox } from "./task-sandbox.js";
@@ -53,12 +53,13 @@ import {
   type HelperFiles, type HelperRequest,
 } from "./service-helpers.js";
 import {
-  buildServiceEnvironment, createRunDirectoryFiles, createServiceRedactor, helperSecretValues, removeRunDirectory, unbackedAwsServices, withServiceEnvFile,
+  buildServiceEnvironment, createRunDirectoryFiles, createServiceRedactor, helperSecretValues, removeRunDirectory, withServiceEnvFile,
   type ServiceEnvDependency, type ServiceEnvironment, type ServiceRedactor,
 } from "./service-env.js";
 import { EmulatorControlError, type EmulatorControlTarget } from "./emulator-control.js";
 import { emulatorLedgerPort, type EmulatorLedgerPort } from "./emulator-ledger.js";
-import { EmulatorSeedError, SEEDED_AWS_SERVICES, readAwsResourcesFromIac, seedEmulator } from "./service-seed-aws.js";
+import { EmulatorSeedError, readAwsResourcesFromIac, seedEmulator } from "./service-seed-aws.js";
+import { repoAwsEndpointNames } from "./repo-aws-endpoints.js";
 import { SeedError, createResetHooks, resetForNextCheck, seedRun, type ResetDependency, type SeedPorts } from "./service-reset.js";
 import { SeedFileError, loadSeedFile, readSeedFile, seedFileDigest } from "./service-seed-file.js";
 import { seedLockHoldsInCheckout } from "./service-seed-lock.js";
@@ -159,6 +160,8 @@ export interface UsageRecordSetup {
   emulator?: EmulatorLedgerPort;
   /** Slice 3: the round's fake servers' ledger summaries, read now (while they still run). */
   fakes?: FakeUsagePort;
+  /** The plan used the all-services feature: the record may list more than 24 AWS services and carry `outOfPlan`. Absent or false: the record is the narrow one an older broker reads (`reduceAwsUsage`). */
+  awsWide?: boolean;
 }
 
 /**
@@ -333,6 +336,8 @@ interface EmulatorBase {
   services: string[];
   region: string;
   refs: Array<{ path: string }>;
+  /** Some service of the plan is one only a worker with `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE` accepts: the usage record may then use the wide shape (more services, `outOfPlan`). */
+  wide: boolean;
 }
 
 /** A dependency with one phase's own helper request and credentials (the working phase's, or one sealed round's). The emulator's has no `env`: its variables come from the `aws` block of the environment. */
@@ -485,15 +490,19 @@ function resolveEmulator(catalog: ServiceCatalog, emulated: readonly TaskDepende
   if (entry === undefined) return notAvailable();
   if (entry.backing !== "emulated" || entry.family !== "local-aws" || entry.status === "retired" || !entry.editions.includes(config.edition) || entry.image.repository !== first.repository) throw new TestServicesError("mismatch");
   if (entry.image.digest !== first.digest) return notAvailable();
+  // The catalog may say which engine release the entry runs (optional for now): a different one is refused, one that says nothing is let through.
+  if (!checkEmulatorEngine(entry, { pinned: "optional" }).ok) throw new TestServicesError("mismatch");
   const services = new Set<string>();
   const refs = new Map<string, { path: string }>();
   const seeds: TaskDependencyPlan["seeds"] = [];
   for (const plan of emulated) {
     if (plan.catalogId !== first.catalogId || plan.repository !== first.repository || plan.digest !== first.digest || plan.aws === undefined || plan.aws.region !== first.aws?.region) throw new TestServicesError("mismatch");
     if (!EMULATOR_REGION.test(plan.aws.region) || !AWS_REGION_SHAPE.test(plan.aws.region) || plan.connect.length > 0 || (plan.config.initFiles?.length ?? 0) > 0) throw new TestServicesError("mismatch");
+    // Any service of the generated table (the plan's parse already turned a legacy spelling into its key); the services Rovara creates resources for are `AWS_SEEDED_KINDS`, every other one starts empty.
     for (const service of plan.aws.services) {
-      if (!Object.hasOwn(SEEDED_AWS_SERVICES, service)) throw new TestServicesError("mismatch");
-      services.add(service);
+      const key = normaliseAwsServiceKey(service);
+      if (key === undefined) throw new TestServicesError("mismatch");
+      services.add(key);
     }
     if (plan.aws.resources !== undefined) refs.set(plan.aws.resources.path, { path: plan.aws.resources.path });
     seeds.push(...plan.seeds);
@@ -506,7 +515,7 @@ function resolveEmulator(catalog: ServiceCatalog, emulated: readonly TaskDepende
   return {
     plan: first, entry, aliases, host, port, user: DEFAULT_USER, database: DEFAULT_DATABASE, files: [],
     resetDependency: { id: first.id, seeds, reset: emulated.some((plan) => plan.reset === "between_checks") ? "between_checks" : "fresh_per_round" },
-    emulator: { ids: allIds, services: [...services], region: first.aws!.region, refs: [...refs.values()] },
+    emulator: { ids: allIds, services: [...services], region: first.aws!.region, refs: [...refs.values()], wide: awsPlanNeedsAllServices([...services]) },
   };
 }
 
@@ -568,16 +577,16 @@ export function neverValuesFor(resolved: ReadonlyArray<Pick<Resolved, "request" 
 }
 
 /**
- * The variables of one sandbox for a phase's helpers: the connection variables of the real-software dependencies, and, when the plan has an emulator, the `aws` block: `AWS_ENDPOINT_URL_S3` / `_SQS` / `_DYNAMODB` at the
- * emulator's first alias, every other AWS service the table knows (and, in both sandboxes, the global endpoint) at the EMULATOR too (it has them switched off: it refuses the call and records it in its ledger, so the broker flags it; the sinkhole is used only where no emulator runs), `AWS_REGION` and `AWS_DEFAULT_REGION` from the plan's region (only a label inside the emulator:
+ * The variables of one sandbox for a phase's helpers: the connection variables of the real-software dependencies, and, when the plan has an emulator, the `aws` block: `AWS_ENDPOINT_URL_<SERVICE>` of each service the plan
+ * names and of each `AWS_ENDPOINT_URL_*` name the repository's own settings set (`repoEndpointNames`), and the global endpoint, all at the emulator's first alias (a call to a service outside the plan reaches it through the global endpoint and its ledger counts it as out of the plan, so the broker flags it; the sinkhole is used only where no emulator runs), `AWS_REGION` and `AWS_DEFAULT_REGION` from the plan's region (only a label inside the emulator:
  * every endpoint is overridden, so no SDK call goes to the region's real AWS), fake credentials. The emulator's control token and secrets are `neverValues`: a variable holding one is refused.
  */
-function environmentFor(sandbox: "working" | "check", resolved: readonly Resolved[]): ServiceEnvironment {
+function environmentFor(sandbox: "working" | "check", resolved: readonly Resolved[], repoEndpointNames: readonly string[] = []): ServiceEnvironment {
   const emulator = resolved.find((item) => item.emulator !== undefined);
   return buildServiceEnvironment({
     sandbox, sinkholeUrl: SINKHOLE_URL, dependencies: resolved.flatMap((item) => (item.env === undefined ? [] : [item.env])), neverValues: neverValuesFor(resolved),
     ...(emulator?.emulator === undefined ? {} : {
-      aws: { alias: emulator.host, port: emulator.port, region: emulator.emulator.region, emulatedServices: emulator.emulator.services, unbackedServices: unbackedAwsServices(emulator.emulator.services) },
+      aws: { alias: emulator.host, port: emulator.port, region: emulator.emulator.region, emulatedServices: emulator.emulator.services, repoEndpointNames },
     }),
   });
 }
@@ -682,7 +691,7 @@ function failureOf(error: unknown): TestServicesError {
 }
 
 /** Adds two usage records of one run: the later record's health and failures, the resets of both, and the unknown names of both (counts are lower bounds, so their sums are too). */
-function mergeUsageRecords(earlier: TestServicesUsageRecord | undefined, later: TestServicesUsageRecord): TestServicesUsageRecord {
+function mergeUsageRecords(earlier: TestServicesUsageRecord | undefined, later: TestServicesUsageRecord, wide = false): TestServicesUsageRecord {
   if (earlier === undefined) return later;
   const limits = TEST_SERVICES_USAGE_LIMITS;
   const before = new Map(earlier.dependencies.map((entry) => [entry.id, entry]));
@@ -690,7 +699,7 @@ function mergeUsageRecords(earlier: TestServicesUsageRecord | undefined, later: 
   for (const row of [...earlier.unknownCalls.domains, ...later.unknownCalls.domains]) domains.set(row.domain, Math.min(limits.count, (domains.get(row.domain) ?? 0) + row.count));
   const ranked = [...domains].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1));
   const overflow = ranked.slice(limits.unknownDomains).reduce((sum, [, count]) => sum + count, 0);
-  const aws = mergeAwsUsage(earlier.aws, later.aws);
+  const aws = mergeAwsUsage(earlier.aws, later.aws, wide);
   const fakes = mergeFakeUsage(earlier.fakes, later.fakes);
   return {
     schemaVersion: 1,
@@ -759,6 +768,8 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
   const failures = new Map<string, TestServicesStartFailure>();
   const ids = input.dependencies.map((dependency) => dependency.id);
   const emulatorBase = bases.find((base) => base.emulator !== undefined);
+  // The endpoint variables the repositories' own settings set: pointed at the emulator too, so no value of the repository sends a service elsewhere (service-env.ts). Only a run with an emulator needs them.
+  const repoEndpointNames = emulatorBase === undefined ? [] : await repoAwsEndpointNames({ repositoryPaths: input.repositoryPaths });
   const secrets: string[] = [];
   const pendingStarts = new Set<Promise<ServiceSession>>();
   let workSession: ServiceSession | undefined;
@@ -855,6 +866,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
       const built = await ports.buildServiceUsageRecord({
         planned: ids, session: view.session, startMs: open.startMs, resetCounts: view.resets, failures, redactor: open.redactor, dns: { docker, dnsHelperName: open.plan.dnsHelperName },
         ...(open.ledger === undefined ? {} : { emulator: open.ledger }),
+        ...(emulatorBase?.emulator?.wide === true ? { awsWide: true } : {}),
         ...(open.fakes === undefined ? {} : { fakes: open.fakes }),
       });
       const parsed = TestServicesUsageRecordSchema.safeParse(built);
@@ -876,7 +888,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
       const record = await recordOf(open);
       // A round whose record could not be built or parsed makes the WHOLE run's record unreadable (never dropped, never a run that looks clean on its other rounds): it stays so for the rest of the run.
       if (record === undefined) { recordLost = true; cumulative = lostRecord(); }
-      else if (!recordLost) cumulative = mergeUsageRecords(cumulative, record);
+      else if (!recordLost) cumulative = mergeUsageRecords(cumulative, record, emulatorBase?.emulator?.wide === true);
       if (cumulative !== undefined && input.artifactSink !== undefined) await input.artifactSink({ name: TEST_SERVICES_USAGE_ARTIFACT, mediaType: "application/json", content: JSON.stringify(cumulative) }).catch(() => log({ event: "test-services.usage.save.failed" }));
     }
     await cleanupRound(open);
@@ -920,7 +932,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
       input.sandbox.attachServices({ wrapExec: (inner) => inner, teardown });
     } else {
       const working = materializeAll(bases, "working", await fetchFixtures(bases, input.fixtureDelivery, input.signal));
-      const workingEnv = environmentFor("working", working);
+      const workingEnv = environmentFor("working", working, repoEndpointNames);
       secrets.push(...helperSecretValues(working.map((item) => item.request)), ...workingEnv.secretValues);
       redactor = createServiceRedactor(secrets);
       // The sandbox runs every command with the run's variables from here on, and tears the run down when it is disposed, even if the start below fails.
@@ -978,7 +990,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
       throw error;
     }
     const resolved = materializeAll(current, "check", fixtures);
-    const environment = environmentFor("check", resolved);
+    const environment = environmentFor("check", resolved, repoEndpointNames);
     secrets.push(...helperSecretValues(resolved.map((item) => item.request)), ...environment.secretValues);
     redactor = createServiceRedactor(secrets);
     const roundRedactor = redactor;
@@ -1091,7 +1103,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
     if (round !== undefined) {
       if (recordLost) return cumulative;
       const live = await recordOf(round);
-      return live === undefined ? lostRecord() : mergeUsageRecords(cumulative, live);
+      return live === undefined ? lostRecord() : mergeUsageRecords(cumulative, live, emulatorBase?.emulator?.wide === true);
     }
     if (cumulative !== undefined) return cumulative;
     // No round has run: the working phase's own answer, with whatever failed since. A run with no working phase whose first round could not start says what failed (a record of facts, not a guess).
@@ -1261,13 +1273,14 @@ export async function startTaskTestServices(input: StartTaskTestServicesInput): 
 }
 
 /** The features this worker adds to /ping for test services: the plan feature only when the worker has a test-services configuration (a worker without one would only refuse such a plan). */
-export function testServicesAdvertisedFeatures(environment: NodeJS.ProcessEnv = process.env, shipped: ShippedCatalogFiles = SHIPPED_CATALOG_FILES): Array<typeof TEST_SERVICES_PLAN_FEATURE | typeof TEST_SERVICES_AWS_PLAN_FEATURE | typeof TEST_SERVICES_FAKE_PLAN_FEATURE | typeof TEST_SERVICES_FILE_SEED_FEATURE | typeof TEST_SERVICES_SEED_LOCK_FEATURE> {
+export function testServicesAdvertisedFeatures(environment: NodeJS.ProcessEnv = process.env, shipped: ShippedCatalogFiles = SHIPPED_CATALOG_FILES): Array<typeof TEST_SERVICES_PLAN_FEATURE | typeof TEST_SERVICES_AWS_PLAN_FEATURE | typeof TEST_SERVICES_AWS_ALL_SERVICES_FEATURE | typeof TEST_SERVICES_FAKE_PLAN_FEATURE | typeof TEST_SERVICES_FILE_SEED_FEATURE | typeof TEST_SERVICES_SEED_LOCK_FEATURE> {
   if (testServicesConfigFromEnvironment(environment, undefined, undefined) === undefined) return [];
   if (notPulledRepositories(environment) === "all") return [];
   // Slice 3: a worker whose image carries the catalog's fake server (a helper that runs from the worker's own image) can run a plan with a fake; it needs no image pulled.
   // TS-UX-1 item 9: every worker with test services loads a seed file (service-seed-file.ts). SEED-RISK-1: and checks a locked seed command's script before it runs it (service-seed-lock.ts).
-  const features: Array<typeof TEST_SERVICES_PLAN_FEATURE | typeof TEST_SERVICES_AWS_PLAN_FEATURE | typeof TEST_SERVICES_FAKE_PLAN_FEATURE | typeof TEST_SERVICES_FILE_SEED_FEATURE | typeof TEST_SERVICES_SEED_LOCK_FEATURE> = [TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE];
-  if (emulatorImagePrepulled(shipped, environment)) features.push(TEST_SERVICES_AWS_PLAN_FEATURE);
+  const features: Array<typeof TEST_SERVICES_PLAN_FEATURE | typeof TEST_SERVICES_AWS_PLAN_FEATURE | typeof TEST_SERVICES_AWS_ALL_SERVICES_FEATURE | typeof TEST_SERVICES_FAKE_PLAN_FEATURE | typeof TEST_SERVICES_FILE_SEED_FEATURE | typeof TEST_SERVICES_SEED_LOCK_FEATURE> = [TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE];
+  // A worker that can run an emulated plan at all reads a plan naming any service of the table (`resolveEmulator`), so the two go together; the broker adds the second to a plan that needs it (`featuresForTestPlan`).
+  if (emulatorImagePrepulled(shipped, environment)) features.push(TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
   if (fakeServerBaked(shipped)) features.push(TEST_SERVICES_FAKE_PLAN_FEATURE);
   return features;
 }

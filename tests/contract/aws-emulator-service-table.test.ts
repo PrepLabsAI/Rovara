@@ -2,7 +2,9 @@
 // engine pin. The generator itself is in tests/unit/aws-emulator-gen-service-table.test.ts.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { AWS_PLAN_SERVICES_MAX, AwsPlanServiceSchema, checkEmulatorEngine, awsEmulatorServiceRow, awsServicesForSigningName, normaliseAwsServiceKey } from "../../packages/contracts/src/aws-emulator-service-keys.js";
+import {
+  AWS_PLAN_SERVICES_MAX, AwsPlanServiceSchema, awsEmulatorEvidenceLine, awsEmulatorEvidenceLines, awsEmulatorServiceRow, awsFidelityPercent, awsServiceKeyFromEndpointVariable, awsServicesForSigningName, checkEmulatorEngine, normaliseAwsLedgerName, normaliseAwsServiceKey,
+} from "../../packages/contracts/src/aws-emulator-service-keys.js";
 import {
   AWS_EMULATOR_ENGINE, AWS_EMULATOR_ENGINE_COMMIT, AWS_EMULATOR_ENGINE_VERSION, AWS_EMULATOR_SCORES_SHA256, AWS_EMULATOR_SERVICES, AWS_EMULATOR_SHARED_SIGNING_NAMES,
 } from "../../packages/contracts/src/generated/aws-emulator-services.js";
@@ -99,7 +101,7 @@ describe("the generated table", () => {
 
 describe("service keys and legacy ids", () => {
   const LEGACY: Record<string, string> = {
-    events: "eventbridge", stepfunctions: "sfn", states: "sfn", "cognito-idp": "cognito-identity-provider", cognito: "cognito-identity-provider", logs: "cloudwatch-logs", cloudwatchlogs: "cloudwatch-logs",
+    events: "eventbridge", stepfunctions: "sfn", states: "sfn", "cognito-idp": "cognito-identity-provider", logs: "cloudwatch-logs", cloudwatchlogs: "cloudwatch-logs",
     secretsmanager: "secrets-manager", dynamodbstreams: "dynamodb-streams", apigateway: "api-gateway", es: "elasticsearch-service", "opensearch-serverless": "opensearchserverless",
   };
   // Ids older code uses that are keys already.
@@ -245,6 +247,61 @@ describe("the engine pin", () => {
     expect(parse("1.0.322")).toBe(true);
     expect(parse("aws-emulator@1.0.322")).toBe(false);
     expect(parse("latest")).toBe(false);
+  });
+});
+
+describe("an older-shaped catalog and the optional engine pin", () => {
+  const entry = (engineVersion?: string) => ({ backing: "emulated", emulator: engineVersion === undefined ? {} : { engineVersion } });
+  it("an emulator block made before the engine field still parses (strict, with no `engineVersion`), and the field stays optional", () => {
+    const old = { services: { supported: ["s3", "sqs", "dynamodb"], functions: ["lambda"], model_endpoint_front: [], available: [] }, iamEnforced: false, storage: "memory" };
+    expect(EmulatorSchema.safeParse(old).success).toBe(true);
+    expect(EmulatorSchema.safeParse({ ...old, engineVersion: "1.0.322" }).success).toBe(true);
+    expect(EmulatorSchema.safeParse({ ...old, engineVersion: "1.0.322", other: 1 }).success).toBe(false);
+  });
+  it("the optional check passes an entry with no version, passes the table's, and refuses a different one (the strict check still refuses no version)", () => {
+    expect(checkEmulatorEngine(entry(), { pinned: "optional" })).toEqual({ ok: true });
+    expect(checkEmulatorEngine(entry(AWS_EMULATOR_ENGINE_VERSION), { pinned: "optional" })).toEqual({ ok: true });
+    expect(checkEmulatorEngine(entry("1.0.321"), { pinned: "optional" })).toMatchObject({ ok: false, reason: "engine_mismatch" });
+    expect(checkEmulatorEngine(entry(), { pinned: "required" })).toMatchObject({ ok: false, reason: "engine_not_pinned" });
+  });
+});
+
+describe("names the ledger and the SDKs use", () => {
+  it("reads a ledger name as a key: a key, a legacy id, a signing name one service owns; anything else as it came", () => {
+    expect(normaliseAwsLedgerName("s3")).toBe("s3");
+    expect(normaliseAwsLedgerName("secretsmanager")).toBe("secrets-manager");
+    expect(normaliseAwsLedgerName("monitoring")).toBe("cloudwatch");
+    expect(normaliseAwsLedgerName("unknown")).toBe("unknown");
+    // A signing name two services share names neither of them.
+    expect(AWS_EMULATOR_SHARED_SIGNING_NAMES["appconfig"]).toBeDefined();
+    expect(normaliseAwsLedgerName("appconfigdata")).toBe(normaliseAwsServiceKey("appconfigdata") ?? "appconfigdata");
+  });
+  it("looks a signing name up without the prototype chain", () => {
+    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) expect(awsServicesForSigningName(name)).toEqual([]);
+    expect(awsServicesForSigningName("apigateway")).toEqual(["api-gateway", "apigatewayv2"]);
+    expect(awsServiceKeyFromEndpointVariable("constructor")).toBeUndefined();
+  });
+  it("`cognito` is no legacy spelling of a service: user pools and identity pools are two services", () => {
+    expect(normaliseAwsServiceKey("cognito")).toBeUndefined();
+    expect(normaliseAwsServiceKey("cognito-idp")).toBe("cognito-identity-provider");
+  });
+});
+
+describe("the evidence lines of an emulated run", () => {
+  it("says what emulated each planned service and how far that matches AWS (the table's own score), or that it was not scored", () => {
+    expect(awsFidelityPercent("s3")).toBe(Math.round(byKey("s3").behavioralOwnScore! * 100));
+    expect(awsEmulatorEvidenceLine("sqs")).toBe(`sqs: Emulated by AWS Emulator ${AWS_EMULATOR_ENGINE_VERSION}, AWS fidelity score ${String(Math.round(byKey("sqs").behavioralOwnScore! * 100))}%`);
+    const unscored = rows.find((row) => row.behavioralOwnScore === null)!;
+    expect(awsEmulatorEvidenceLine(unscored.key)).toBe(`${unscored.key}: Emulated by AWS Emulator ${AWS_EMULATOR_ENGINE_VERSION}, AWS fidelity score: not scored`);
+    expect(awsEmulatorEvidenceLine("nosuchservice")).toBeUndefined();
+    expect(awsEmulatorEvidenceLine("secretsmanager")).toContain("secrets-manager: Emulated");
+  });
+  it("one line per planned service (once, a legacy spelling as its key), then the operations the run called that the emulator does not support", () => {
+    const lines = awsEmulatorEvidenceLines(["s3", "secretsmanager", "secrets-manager", "nosuchservice"], [{ service: "s3", operation: "PutBucketReplication", count: 2 }, { service: "secretsmanager", operation: "RotateSecret", count: 1 }]);
+    expect(lines).toHaveLength(4);
+    expect(lines[2]).toBe("s3: operations AWS Emulator does not support, called by the tests: PutBucketReplication (2)");
+    expect(lines[3]).toBe("secrets-manager: operations AWS Emulator does not support, called by the tests: RotateSecret (1)");
+    expect(awsEmulatorEvidenceLines([])).toEqual([]);
   });
 });
 

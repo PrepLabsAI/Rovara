@@ -14,6 +14,7 @@
 // Every word in the answer is fixed here. Nothing a repository or a person wrote (a dependency's name, an account's label) is echoed: the answer holds ids that passed their contract's pattern, and fixed sentences.
 import {
   emulatorChoosable,
+  emulatorServiceTier,
   isTestAccountUsableAt,
   testAccountProdProblems,
   type CatalogEntry,
@@ -245,7 +246,8 @@ function emulatedStep(input: BackingChoiceInput): Step<ChosenBacking> {
   if ("skip" in found) return found;
   // The best entry that covers the service; one that does not is passed over for one that does.
   const emulators = input.catalog.entries.filter((entry) => entry.backing === "emulated" && entry.emulator !== undefined && entry.editions.includes(input.edition) && entry.status !== "retired" && entry.image.digest !== undefined);
-  const covering = emulators.filter((entry) => entry.emulator !== undefined && emulatorChoosable(entry.emulator, service));
+  // A maintainer who chose the emulator for a service names it on purpose, so a service the entry only has as `available` counts; by default only the chooser tiers do.
+  const covering = emulators.filter((entry) => entry.emulator !== undefined && (input.dependency.maintainerChoice === "emulated" ? emulatorServiceTier(entry.emulator, service) !== undefined : emulatorChoosable(entry.emulator, service)));
   const best = bestEntry(covering);
   return best === undefined ? { skip: "emulator_does_not_cover" } : { pick: { kind: "emulated", catalogId: best.id, awsService: service } };
 }

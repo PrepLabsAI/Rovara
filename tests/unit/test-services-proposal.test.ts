@@ -82,11 +82,11 @@ describe("a draft's dependency candidates", () => {
 
   it("leaves out, with one fixed note, whatever is not real catalog software", () => {
     const draft = sanitizeTestEnvDraft(draftOf([
-      candidate("postgres"), candidate("aws:sns"), candidate("http:api.example-pay.com", { kind: "http_api" }), candidate("redis", { hints: { fakedByTests: true } }),
+      candidate("postgres"), candidate("aws:kinesis"), candidate("http:api.example-pay.com", { kind: "http_api" }), candidate("redis", { hints: { fakedByTests: true } }),
     ]), options())!;
     expect(draft.environment.dependencies!.map((entry) => entry.id)).toEqual(["postgres"]);
     expect(draft.notes.filter((note) => note === DEPENDENCIES_NOT_PROPOSED_NOTE)).toHaveLength(1);
-    expect(draft.notes.join(" ")).not.toMatch(/example-pay|sns/iu);
+    expect(draft.notes.join(" ")).not.toMatch(/example-pay|kinesis/iu);
     // The candidates themselves are still in the draft for a person to see.
     expect(draft.dependencies).toHaveLength(4);
   });

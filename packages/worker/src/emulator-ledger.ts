@@ -21,8 +21,10 @@ export class EmulatorLedgerError extends Error {
 /** Counters of one operation or one service, as the emulator keeps them. */
 export interface LedgerCounts { calls: number; unsupported: number; errors: number }
 export interface LedgerService extends LedgerCounts {
-  /** The emulator's service key (`s3`, `sqs`, `dynamodb`, or `unknown`). */
+  /** The emulator's name for the service as the ledger wrote it (a key of the table, an older spelling, a signing name, or `unknown`): `reduceAwsUsage` turns it into a key. */
   service: string;
+  /** Calls the emulator counted as outside the run's planned services (`ROVARA_AWS_PLANNED_SERVICES`). Absent when the emulator does not say (the older image): the plan itself is then compared. */
+  outOfPlan?: number;
   /** The program's own operation words, UNCHECKED: only `reduceAwsUsage` may decide what of them is shown. */
   operations: Array<LedgerCounts & { operation: string }>;
 }
@@ -59,8 +61,9 @@ export function parseLedgerSummary(text: string): EmulatorLedger {
     if (typeof operations !== "object" || operations === null || Array.isArray(operations)) throw new EmulatorLedgerError();
     const rows = Object.entries(operations as Record<string, unknown>);
     if (rows.length > LEDGER_LIMITS.operationsPerService) throw new EmulatorLedgerError("too_many");
+    const outOfPlan = (value as Record<string, unknown>)["outOfPlan"];
     services.push({
-      service, ...counts,
+      service, ...counts, ...(outOfPlan === undefined ? {} : { outOfPlan: countOf(outOfPlan) }),
       operations: rows.map(([operation, row]) => {
         if (operation.length < 1 || operation.length > LEDGER_LIMITS.operationChars) throw new EmulatorLedgerError();
         return { operation, ...countsOf(row) };
