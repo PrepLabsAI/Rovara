@@ -284,6 +284,7 @@ export * from "./e2e-model-spend.js";
 export * from "./lessons.js";
 export * from "./app-lessons.js";
 export * from "./app-lessons-repo-file.js";
+export * from "./lessons-local-tools.js";
 export * from "./lesson-keys.js";
 export * from "./spec-target.js";
 

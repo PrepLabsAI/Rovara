@@ -1,6 +1,6 @@
 // Lane L8: fakes for the local pages' data and actions, and a raw HTTP client that can set any Host header (fetch cannot).
 import { request as httpRequest } from "node:http";
-import { type ApprovalOffer, type DesignReviewView, type LessonReposView, type LessonView, type LocalActionResult, type LocalPageActions, type LocalPageData, type PlanPageView, type ProofReportView } from "../../packages/broker/src/core/local-pages/index.js";
+import { type ApprovalOffer, type DesignReviewView, type LessonLocalToolsView, type LessonReposView, type LessonView, type LocalActionResult, type LocalPageActions, type LocalPageData, type PlanPageView, type ProofReportView } from "../../packages/broker/src/core/local-pages/index.js";
 import { planDocument } from "./plan-documents.js";
 
 export const TASK = "0b4f2b1e-3c6a-4d2e-9a77-5f1d8c0a1e11";
@@ -35,7 +35,7 @@ export function designView(overrides: Partial<DesignReviewView> = {}): DesignRev
 export const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 export interface FakeWorld {
-  data: LocalPageData & { plan: PlanPageView | undefined; design: DesignReviewView | undefined; lessons: LessonView[]; lessonRepos: LessonReposView[]; proof: ProofReportView | undefined; mockupReads: string[] };
+  data: LocalPageData & { plan: PlanPageView | undefined; design: DesignReviewView | undefined; lessons: LessonView[]; lessonRepos: LessonReposView[]; lessonLocalTools: LessonLocalToolsView | undefined; proof: ProofReportView | undefined; mockupReads: string[] };
   actions: LocalPageActions & { calls: Array<{ name: string; input: unknown }>; next: LocalActionResult };
 }
 
@@ -49,6 +49,7 @@ export function fakeWorld(): FakeWorld {
       { claim: "Timeouts are retried", check: "retry.test.ts", status: "passed" }, { claim: "Never charged twice", check: "idempotency.test.ts", status: "failed", detail: "1 failing" },
     ], pullRequests: [{ url: "https://github.com/example/repo/pull/7", number: 7, state: "open" }] },
     lessonRepos: [{ project: "payments", canEnable: true, repos: [{ repo: "api", enabled: false, fileDeleted: false, pointer: "not_yet", notices: [] }], available: [] }],
+    lessonLocalTools: undefined,
     mockupReads: [],
     async listPending() { return [{ kind: "plan", taskId: TASK, title: "Retry failed payments", since: "10:00" }, { kind: "design", taskId: OTHER_TASK, title: "<b>Settings</b>", since: "09:00" }]; },
     async getPlanPage(taskId) { return taskId === TASK ? data.plan : undefined; },
@@ -59,6 +60,7 @@ export function fakeWorld(): FakeWorld {
     },
     async listLessons() { return data.lessons; },
     async listLessonRepos() { return data.lessonRepos; },
+    async listLessonLocalTools() { return data.lessonLocalTools; },
     async getProofReport(taskId) { return taskId === TASK ? data.proof : undefined; },
   };
   const calls: FakeWorld["actions"]["calls"] = [];
@@ -69,6 +71,7 @@ export function fakeWorld(): FakeWorld {
     async addComment(input) { calls.push({ name: "addComment", input }); return actions.next; },
     async lessonAction(input) { calls.push({ name: "lessonAction", input }); return actions.next; },
     async lessonRepoAction(input) { calls.push({ name: "lessonRepoAction", input }); return actions.next; },
+    async lessonLocalToolsAction(input) { calls.push({ name: "lessonLocalToolsAction", input }); return actions.next; },
   };
   return { data, actions };
 }

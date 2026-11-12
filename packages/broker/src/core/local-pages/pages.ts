@@ -7,7 +7,7 @@ import { esc, externalLink, layout, untrusted } from "./html.js";
 import type { FormBinding } from "./guard.js";
 import { PART_STATE_WORDS } from "../work-breakdown/view.js";
 import type {
-  ApprovalOffer, AutomationPageView, ChatPageView, CommentView, DesignReviewView, LessonReposView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView, TestEnvironmentPageView,
+  ApprovalOffer, AutomationPageView, ChatPageView, CommentView, DesignReviewView, LessonLocalToolsView, LessonReposView, LessonView, PendingItemView, PlanPageView, PlanVersionView, ProofReportView, ScriptTokensPageView, TestEnvironmentPageView,
 } from "./views.js";
 import type { SecondReviewState } from "@agentx/contracts";
 
@@ -243,7 +243,13 @@ export function renderDesignReview(context: PageContext, view: DesignReviewView)
 
 // ---- lessons
 
-export function renderLessons(context: PageContext, lessons: readonly LessonView[], repos: readonly LessonReposView[] = []): string {
+const LOCAL_TOOLS_WHY: Readonly<Record<string, string>> = {
+  company_stays: "lessons stay in Rovara",
+  regulated: "the project is on the Regulated preset",
+  project_setting: "switched off for this project",
+};
+
+export function renderLessons(context: PageContext, lessons: readonly LessonView[], repos: readonly LessonReposView[] = [], localTools?: LessonLocalToolsView): string {
   const form = (lesson: LessonView, action: "approve" | "retire" | "wrong", label: string, cls = "") =>
     `<form method="post" action="${esc(context.base)}/lessons/act" class="row">${hidden("lessonId", lesson.id)}${hidden("action", action)}${hidden("ft", context.formToken({ action: "lesson.act", subject: `${lesson.id}:${action}:${lesson.status}`, ...(action === "approve" && lesson.offer !== undefined ? { requestId: lesson.offer.requestId, revision: lesson.offer.revision, artifactDigest: lesson.offer.artifactDigest } : {}) }))}<button type="submit" class="${cls}">${esc(label)}</button></form>`;
   const repoForm = (project: string, repo: string, action: "on" | "off" | "resume" | "pointer_add" | "pointer_decline" | "retire_confirm" | "retire_keep", label: string, cls = "", held?: string) =>
@@ -258,12 +264,23 @@ export function renderLessons(context: PageContext, lessons: readonly LessonView
     return `<h3>${untrusted(view.project)}</h3><table><thead><tr><th>Repository</th><th>Lessons file</th><th></th><th></th></tr></thead><tbody>${[...lines, ...more].join("")}</tbody></table>`;
   });
   const repoSection = repoBlocks.length === 0 ? "" : `<h2>Lessons in the repository</h2><p class="muted">Rovara can keep a <code>.rovara/lessons.md</code> file in a repository and open one pull request a week to update it. Switching it on needs a page opened in the last few minutes: run <code>rovara open lessons</code> to open one.</p>${repoBlocks.join("")}`;
+  // Decision 46b: whether a local coding tool (with your API token, or a script token with the lessons permission) may fetch the lessons the whole project may read. Each switch is your form on this page.
+  const localForm = (subject: string, fields: string, label: string, cls = "") =>
+    `<form method="post" action="${esc(context.base)}/lessons/local-tools" class="row">${fields}${hidden("ft", context.formToken({ action: "lesson.local_tools", subject }))}<button type="submit" class="${cls}">${esc(label)}</button></form>`;
+  const localSection = localTools === undefined ? "" : (() => {
+    const company = localTools.companyStays
+      ? `<p><strong>Lessons stay in Rovara:</strong> local coding tools get no lessons for any project.</p>${localForm("company:open", hidden("scope", "company") + hidden("stays", "false"), "Let local coding tools fetch lessons", "primary")}`
+      : `<p>Local coding tools may fetch the lessons the whole project may read, stable or approved by you, never one on trial.</p>${localForm("company:stay", hidden("scope", "company") + hidden("stays", "true"), "Keep lessons in Rovara")}`;
+    const rowsOf = localTools.projects.map((row) => `<tr><td>${untrusted(row.project)}</td><td>${row.enabled ? "on" : `off <span class="muted">(${esc(LOCAL_TOOLS_WHY[row.reason ?? ""] ?? "off")})</span>`}</td><td>`
+      + `${row.own === false ? localForm(`project:${row.project}:on`, hidden("scope", "project") + hidden("project", row.project) + hidden("enabled", "true"), "Switch on", "primary") : localForm(`project:${row.project}:off`, hidden("scope", "project") + hidden("project", row.project) + hidden("enabled", "false"), "Switch off")}</td></tr>`);
+    return `<h2>Lessons for local coding tools</h2>${company}${rowsOf.length === 0 ? "" : `<table><thead><tr><th>Project</th><th>Local coding tools</th><th></th></tr></thead><tbody>${rowsOf.join("")}</tbody></table>`}`;
+  })();
   const rows = lessons.map((lesson) => `<tr><td>${untrusted(lesson.text)}<br><span class="muted">${untrusted(lesson.scope)}</span>${lesson.retireRequest === undefined ? "" : `<br><strong>${untrusted(lesson.retireRequest.by)} asked, in a comment on pull request ${String(lesson.retireRequest.pullRequest)}, for this lesson to be retired. Press Retire to confirm.</strong>`}</td><td>${esc(lesson.status)}</td>`
     + `<td>${lesson.usedIn.length === 0 ? "<span class=\"muted\">not used yet</span>" : lesson.usedIn.slice(0, 5).map((use) => `<a href="${esc(context.base)}/proof/${esc(use.taskId)}">${untrusted(use.title)}</a>`).join("<br>")}</td>`
     + `<td>${lesson.status === "proposed" ? form(lesson, "approve", "Approve", "primary") : ""}${lesson.status !== "retired" ? form(lesson, "wrong", "Wrong", "danger") + form(lesson, "retire", "Retire") : ""}</td></tr>`);
   return layout({
     title: "Lessons", nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
-    body: `<h1>Lessons</h1>${rows.length === 0 ? "<p class=\"muted\">Rovara has not learned a lesson here yet.</p>" : `<table><thead><tr><th>Lesson</th><th>Status</th><th>Used in</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`}${repoSection}`,
+    body: `<h1>Lessons</h1>${rows.length === 0 ? "<p class=\"muted\">Rovara has not learned a lesson here yet.</p>" : `<table><thead><tr><th>Lesson</th><th>Status</th><th>Used in</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`}${repoSection}${localSection}`,
   });
 }
 

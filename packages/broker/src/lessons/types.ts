@@ -269,7 +269,7 @@ export const LESSON_AUDIT_ACTIONS = [
   "lesson.tier0_setting_proposed", "lesson.tier0_setting_changed", "lesson.tier0_setting_cancelled", "lesson.tier0_setting_refused_retryable",
   "lesson.sole_owner_switch_proposed", "lesson.sole_owner_switch_changed", "lesson.model_set",
   "lesson.trial_started", "lesson.trial_retired", "lesson.trial_stable", "lesson.harm_reversed", "lesson.proposal_withdrawn", "lesson.preset_changed", "lesson.preset_proposed",
-  "lesson.repo_file_pr_opened", "lesson.repo_file_pr_closed", "lesson.repo_file_switched", "lesson.repo_file_retire_decided",
+  "lesson.repo_file_pr_opened", "lesson.repo_file_pr_closed", "lesson.repo_file_switched", "lesson.local_tools_switched", "lesson.repo_file_retire_decided",
   "lesson.replay_started", "lesson.replay_read", "lesson.snapshot_created",
 ] as const;
 export type LessonAuditAction = (typeof LESSON_AUDIT_ACTIONS)[number];

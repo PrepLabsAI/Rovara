@@ -579,3 +579,52 @@ describe("what a finished task tells lessons", () => {
     expect(await source.projectOf?.({ workspaceId: COMPANY, taskId: w.taskId })).toBe("payments");
   });
 });
+
+describe("lessons for local coding tools on a laptop (decision 46b)", () => {
+  const ask = async (w: World, body: unknown, caller = w.h.owner) => {
+    const routes = createLessonRoutes({ lessons: w.lessons, flow: w.h.deps });
+    const answer = await routes({ method: "POST", path: "/v1/dev/projects/payments/lessons", headers: {}, body: JSON.stringify(body) }, caller);
+    return { status: answer?.statusCode, body: answer === undefined ? undefined : JSON.parse(answer.body) as Record<string, unknown> };
+  };
+  const repoOnly = (over: Parameters<typeof lessonRecord>[0] = {}) => active({
+    id: "les_repoonly1", title: "Run the formatter first", description: "The checks fail on unformatted files.",
+    provenance: { ...draft().provenance, supportTasks: [], audience: { kind: "restricted", acl: { source: "github", scope: "github:repo/77", capturedAt: "2026-11-01T00:00:00.000Z", liveCheck: "on_read" } }, sourceScopes: ["github:repo/77"] }, ...over,
+  });
+
+  it("proves the tool's repository against the project's registered address, by any spelling of it, with the place the host gives", async () => {
+    const w = await world();
+    const scopes = w.lessons.repositories.scopes();
+    for (const spelling of ["https://github.com/example/demo.git", "git@github.com:example/demo.git", "ssh://git@github.com/Example/Demo"]) {
+      expect(await scopes.byRemote!(COMPANY, "payments", (await import("../../packages/broker/src/lessons/repo-remote.js")).normalizeRemote(spelling)!), spelling).toEqual({ name: "demo", place: "github:repo/77" });
+    }
+    expect(await scopes.byRemote!(COMPANY, "payments", "github.com/example/other")).toBeUndefined();
+    await expect(scopes.byRemote!(COMPANY, "nope", "github.com/example/demo")).rejects.toThrow();
+    // A host that cannot say the repository's id: the repository is the project's, but has no place, so a lesson restricted to it never goes out.
+    const noHost = await world({ codeHost: false });
+    expect(await noHost.lessons.repositories.scopes().byRemote!(COMPANY, "payments", "github.com/example/demo")).toEqual({ name: "demo" });
+  });
+
+  it("gives the approved lessons the whole project may read, a repository-only one only in its repository, never a pending one; the owner's switches turn it off and are audited", async () => {
+    const w = await world();
+    await put(w, active(), repoOnly(), pending());
+    const inRepo = await ask(w, { repo: REPOSITORY, task: "add a retry", stage: "plan" });
+    expect(inRepo.status).toBe(200);
+    expect((inRepo.body!["lessons"] as Array<{ id: string }>).map((lesson) => lesson.id).sort()).toEqual(["les_aaaa1111", "les_repoonly1"]);
+    expect(inRepo.body!["markdown"]).toContain("Team lessons");
+    const noRepo = await ask(w, { task: "add a retry", stage: "plan" });
+    expect((noRepo.body!["lessons"] as Array<{ id: string }>).map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
+    expect((await ask(w, { repo: "https://github.com/example/other.git" })).status).toBe(404);
+
+    expect(await w.lessons.localToolsSwitches()).toEqual({ companyStays: false, projects: [{ project: "payments", enabled: true }] });
+    expect(await w.lessons.localToolsSwitch({ scope: "project", project: "nope", enabled: false })).toMatchObject({ ok: false, reason: "not_found" });
+    expect(await w.lessons.localToolsSwitch({ scope: "project", project: "payments", enabled: false })).toMatchObject({ ok: true });
+    expect(await ask(w, { repo: REPOSITORY })).toMatchObject({ status: 200, body: { status: "off", reason: "project_setting", lessons: [] } });
+    expect(await w.lessons.localToolsSwitch({ scope: "company", stays: true })).toMatchObject({ ok: true });
+    expect(await w.lessons.localToolsSwitches()).toEqual({ companyStays: true, projects: [{ project: "payments", enabled: false, own: false, reason: "company_stays" }] });
+    const audited = w.h.audit.filter((event) => event.action === "lesson.local_tools_switched");
+    expect(audited).toHaveLength(2);
+    // With lessons switched off for the install, a tool is told so, in one sentence.
+    w.setEnabled(false);
+    expect(await ask(w, {})).toMatchObject({ status: 200, body: { status: "off", reason: "install_switch" } });
+  });
+});

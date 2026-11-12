@@ -3,6 +3,7 @@
 //   company: pk of the company, sk `LESSONSET#COMPANY`        (`tier0`: the company floor, companyApproval.tier0)
 //   proposals (preset and sole-owner switch only): the same pk, sk `LESSONSET#TIER0CHG#PRESET#<id>` and `LESSONSET#TIER0CHG#SOLE#<id>`
 //   company sole-owner switch: the company pk, sk `LESSONSET#COMPANYSOLE` (`enabled`: whether the sole-owner exception may approve a loosening; absent means ON). It holds no person.
+//   local coding tools (decision 46b): the project pk, sk `LESSONSET#LOCALTOOLS` (`enabled`: absent means ON), and the company pk, sk `LESSONSET#COMPANYSTAY` (`stays`: "lessons stay in Rovara"; absent means off). Neither holds a person.
 // Every sort key starts with `LESSONSET`, which a project erase and a company erase wipe.
 import {
   LEARNED_CONTEXT_MAX_BYTES, LEARNED_CONTEXT_MAX_LESSONS, learningModeKey, learningModeLockKey, queryAll, teamRecordPk, when, change,
@@ -10,6 +11,7 @@ import {
 } from "@agentx/contracts";
 import { LOAD_BUDGET_MIN, TIER0_APPROVAL_DEFAULT, type LearningPreset, type LearningSettings, type LearningSettingsReader, type LoadBudgetSetting } from "./policy.js";
 import type { PresetChange, PresetChangeStore, PresetScope, PresetStore } from "./preset-setting.js";
+import type { LocalToolsSettings, LocalToolsSettingsStore } from "./local-tools.js";
 import type { SoleOwnerSwitchChange, SoleOwnerSwitchStore, Tier0Fence, Tier0Level, Tier0Scope, Tier0SettingsStore } from "./sole-owner-switch.js";
 
 type Item = StoredDocument;
@@ -185,4 +187,32 @@ export function documentLearningSettings(store: DocumentStore, settings: Tier0Se
 /** Writes the project's learning mode (`Off`, `Collect`, `Suggest`, `On`) on the `MODE` item the reader above reads. The owner's own choice; the audit event is the caller's. */
 export async function writeLearningMode(store: DocumentStore, scope: { workspaceId: string; project: string }, mode: Mode, at: number): Promise<void> {
   await store.put({ item: { ...learningModeKey(scope.workspaceId, scope.project), entityType: "LESSON_MODE", mode: mode.toLowerCase(), updatedAt: at } });
+}
+
+const LOCAL_TOOLS_PROJECT_SK = "LESSONSET#LOCALTOOLS";
+const LOCAL_TOOLS_COMPANY_SK = "LESSONSET#COMPANYSTAY";
+/**
+ * Lessons for local coding tools (decision 46b), read now on every call and never cached: the project's own "local coding tools can fetch lessons" choice and the company's "lessons stay in Rovara" switch, on the items a hosted
+ * install keeps them on. A stored value that is not a boolean is not "unset": the read throws and the caller refuses.
+ */
+export class DocumentLocalToolsSettings implements LocalToolsSettingsStore {
+  constructor(private readonly store: DocumentStore) {}
+  private company(workspaceId: string): Promise<Item | undefined> { return this.store.get({ pk: teamRecordPk(workspaceId, undefined), sk: LOCAL_TOOLS_COMPANY_SK }); }
+  private static stays(company: Item | undefined): boolean {
+    if (company !== undefined && typeof company["stays"] !== "boolean") throw new Error("the stored lessons-stay-in-Rovara setting is not valid");
+    return company === undefined ? false : company["stays"] as boolean;
+  }
+  async read(workspaceId: string, project: string): Promise<LocalToolsSettings> {
+    const [own, company] = await Promise.all([this.store.get({ pk: teamRecordPk(workspaceId, project), sk: LOCAL_TOOLS_PROJECT_SK }), this.company(workspaceId)]);
+    if (own !== undefined && typeof own["enabled"] !== "boolean") throw new Error("the stored local-tools setting is not valid");
+    return { ...(own === undefined ? {} : { projectOn: own["enabled"] as boolean }), companyStays: DocumentLocalToolsSettings.stays(company) };
+  }
+  async readCompany(workspaceId: string): Promise<boolean> { return DocumentLocalToolsSettings.stays(await this.company(workspaceId)); }
+  // The items name no person (the audit sink has the actor); the project erase and the company erase already wipe the `LESSONSET` prefix.
+  async setProject(workspaceId: string, project: string, enabled: boolean, at: number): Promise<void> {
+    await this.store.put({ item: { pk: teamRecordPk(workspaceId, project), sk: LOCAL_TOOLS_PROJECT_SK, entityType: "LESSON_SETTINGS", enabled, updatedAt: at } });
+  }
+  async setCompany(workspaceId: string, stays: boolean, at: number): Promise<void> {
+    await this.store.put({ item: { pk: teamRecordPk(workspaceId, undefined), sk: LOCAL_TOOLS_COMPANY_SK, entityType: "LESSON_SETTINGS", stays, updatedAt: at } });
+  }
 }

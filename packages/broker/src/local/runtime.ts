@@ -35,7 +35,7 @@ import { catalogPriceOf } from "../core/cost/price-table.js";
 import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
 import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
-import { createLocalLearningAdapter } from "../lessons/local-embedder.js";
+import { learningAdapterFromEnvironment } from "../lessons/local-embedder.js";
 import { localLessonsEnabled } from "../lessons/switch.js";
 import { DocumentAuditSink, FileCompanyInstructions, createIntervalScheduler, SqliteAuditLog, SqliteDocumentStore, SqliteQueueService, startAuditCopy, startAuditCopyFromPrimary } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
@@ -413,8 +413,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     priceTable: { currency: "USD", models: {} },
     prices: modelPrices,
   });
-  // The learning point: how lessons are compared. Code's own compares on keywords and cited paths; `ROVARA_LESSONS_EMBEDDER=local` adds the small embedder that runs in this process. A configured `learning` plug-in is used instead.
-  registry.register("learning", "local", createLocalLearningAdapter({ embedder: options.environment["ROVARA_LESSONS_EMBEDDER"] === "local" }), { isDefault: true });
+  // The learning point: how lessons are compared. Code's own compares on keywords and cited paths; `ROVARA_LESSONS_EMBEDDER=local` adds the small embedder that runs in this process, and a loopback address
+  // (`http://127.0.0.1:<port>/v1` with `ROVARA_LESSONS_EMBEDDER_MODEL`) a small open model served on this machine (decision 23). A configured `learning` plug-in is used instead.
+  registry.register("learning", "local", learningAdapterFromEnvironment(options.environment), { isDefault: true });
   // Item K2: the model providers. The three Code has always known are rows; a configured `model-provider` plug-in of the same name replaces one.
   registerBuiltinModelProviders(registry);
 

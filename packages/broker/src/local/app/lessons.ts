@@ -19,7 +19,7 @@ import type { ModelProviderBook } from "../model-proxy/types.js";
 import type { LocalModelChoice } from "../model-choice.js";
 import type { ProviderEndpoints } from "../model-proxy/providers.js";
 import type { DocumentMilestones } from "../../core/milestones/milestones.js";
-import type { LessonReposView, LocalActionResult, LessonView as PageLessonView } from "../../core/local-pages/views.js";
+import type { LessonLocalToolsView, LessonReposView, LocalActionResult, LessonView as PageLessonView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { taskPointerKey } from "../../core/task-flow/keys.js";
 import { readTask } from "../../core/task-flow/reads.js";
@@ -39,6 +39,7 @@ import { retryDelayFor, runReflectMessage, type ReflectWorkerDeps } from "../../
 import { learnFromEndedTaskTyped, learningTaskEndHandler, type TaskEndOutcome, type TaskLearningDeps } from "../../lessons/task-end.js";
 import { buildLessonsView } from "../../lessons/view.js";
 import { repoFileAction, repoFileStatus } from "../../lessons/repo-file-routes.js";
+import { readLocalToolsState, setCompanyLocalTools, setProjectLocalTools, type LocalToolsSetResult } from "../../lessons/local-tools-setting.js";
 import { lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, type RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
 import { documentRepoFileStore } from "../../lessons/document-repo-file.js";
@@ -97,6 +98,8 @@ export interface LocalLessonView extends PageLessonView {
 
 export interface LocalLessons {
   readonly runtime: LessonsRuntime;
+  /** The install's person: the one approver, and a name no lesson that leaves Rovara may hold. */
+  readonly owner: { id: string; name: string };
   readonly repositories: LessonRepositories;
   enabled(): boolean;
   /** The lessons of every project, newest first, for the owner's page. */
@@ -107,6 +110,10 @@ export interface LocalLessons {
   repoSwitches(): Promise<LessonReposView[]>;
   /** One switch from the lessons page. Switching on needs `fresh`: a page session opened in the last few minutes. */
   repoSwitch(input: { project: string; repo: string; action: "on" | "off" | "resume" | "pointer_add" | "pointer_decline" | "retire_confirm" | "retire_keep"; held?: string | undefined; fresh: boolean }): Promise<LocalActionResult>;
+  /** The local coding tools switches (decision 46b) for the lessons page. Undefined when the company's switch cannot be read. */
+  localToolsSwitches(): Promise<LessonLocalToolsView | undefined>;
+  /** One local coding tools switch from the lessons page: the project's own, or the company's "lessons stay in Rovara". Audited before it is made. */
+  localToolsSwitch(input: { scope: "project"; project: string; enabled: boolean } | { scope: "company"; stays: boolean }): Promise<LocalActionResult>;
   /** What the dispatch of a step asks: the lessons to give it (ids are the library's; the worker gets text). `features` are the worker's. */
   learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }): Promise<{ learnedContext?: LearnedContext }>;
   /** What the callbacks tell after a batch of a worker's events: the load report of a step, applied to the manifest its dispatch recorded. Never throws. */
@@ -361,6 +368,33 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
 
   // ---- loading, at the dispatch of a step
 
+  async function localToolsSwitches(): Promise<LessonLocalToolsView | undefined> {
+    let companyStays: boolean;
+    try { companyStays = await runtime.localTools.readCompany(companyId); } catch { return undefined; }
+    const projects: LessonLocalToolsView["projects"] = [];
+    for (const project of await projectNames()) {
+      try {
+        const state = await readLocalToolsState({ localTools: runtime.localTools, settings: runtime.settings }, companyId, project);
+        projects.push({ project, enabled: state.enabled, ...(state.own === undefined ? {} : { own: state.own }), ...(state.reason === undefined ? {} : { reason: state.reason }) });
+      } catch { /* a project whose setting cannot be read shows no switch */ }
+    }
+    return { companyStays, projects };
+  }
+
+  const LOCAL_TOOLS_REFUSED: Record<Extract<LocalToolsSetResult, { ok: false }>["code"], string> = {
+    audit_unavailable: "Not saved: the change could not be recorded. Try again.",
+    unreadable: "Not saved: the setting could not be read. Try again.",
+  };
+  async function localToolsSwitch(input: Parameters<LocalLessons["localToolsSwitch"]>[0]): Promise<LocalActionResult> {
+    const deps = { localTools: runtime.localTools, audit: runtime.audit, now };
+    if (input.scope === "project" && !(await projectNames()).includes(input.project)) return refuse("No such project.", "not_found");
+    const result = input.scope === "company"
+      ? await setCompanyLocalTools(deps, { workspaceId: companyId, stays: input.stays, by: ownerId })
+      : await setProjectLocalTools(deps, { workspaceId: companyId, project: input.project, enabled: input.enabled, by: ownerId });
+    if (!result.ok) return { ok: false, reason: "refused", message: LOCAL_TOOLS_REFUSED[result.code] };
+    return { ok: true, message: "Saved." };
+  }
+
   async function learnedFor(input: Parameters<LocalLessons["learnedFor"]>[0]): Promise<{ learnedContext?: LearnedContext }> {
     const stage = input.workflowMode === undefined || !Object.hasOwn(STAGES, input.workflowMode) ? undefined : STAGES[input.workflowMode];
     if (stage === undefined || !enabled() || !input.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
@@ -534,5 +568,5 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     try { await (await sender()).send({ orgId: companyId, taskId, outcome: "reverted", requestId: randomUUID() }); } catch { log("revert_not_queued"); }
   }
 
-  return { runtime, repositories, enabled, list, act, repoSwitches, repoSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted };
+  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted };
 }
