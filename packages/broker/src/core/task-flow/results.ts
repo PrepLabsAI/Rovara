@@ -3,6 +3,7 @@
 import { agentXError, change, when, type TransactItem } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
 import { operationKey, taskIndexKey, workspaceKey } from "./keys.js";
+import { runWatchKey } from "./run-watch-rows.js";
 import type { OperationResult, StepOutcome } from "./outcome.js";
 import { readTask, taskViewOf } from "./reads.js";
 import { fromDocument, toDocument, type OperationRecord, type TaskPointerRecord } from "./records.js";
@@ -50,6 +51,8 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
       ],
       condition: when.and(when.eq("fence", operation.fence), when.not(when.or(when.eq("status", "SUCCEEDED"), when.eq("status", "FAILED"), when.eq("status", "CANCELLED"), when.eq("status", "INTERRUPTED")))),
     }];
+    // The operation is no longer watched for a lost machine (`sweepLostRuns`); an end that does not pass here (a close) leaves the row for the sweep to drop.
+    items.push({ kind: "delete", key: runWatchKey(deps.companyId, operation.workspaceId, operation.id) });
     if (holds) {
       const prepared = operation.kind === "prepare";
       items.push({

@@ -264,7 +264,7 @@ with `removeConsumer(name)`.
 `WorkerMachines`: `start` (idempotent on `machineKey`, wakes a stopped machine), `stop` (keeps the volume), `terminate`, `health`
 (never throws for an unknown machine) and `deliver` (a `WorkerInvocation`, idempotent on `operationId`; `MachineError` codes
 `not_ready`, `not_found`, `unauthorized`, `rejected`, `unavailable`). `capabilities` says whether it isolates, keeps a volume, can
-stop, and how many machines it allows. The job's answer comes back through the broker's callback API, not through this port. One lane
+stop, and how many machines it allows. The job's answer comes back through the broker's callback API, not through this port. A machine that is lost after the delivery (`terminated`, `stopped`, `stopping` or `unhealthy` for longer than `runLostGraceSeconds`, 120 s by default) ends the operation on it INTERRUPTED (`sweepLostRuns`, run by the local app's tick; a watch row written with the hand-over names the operation, its fence and its machine), and the task then follows the path of any interrupted step. One lane
 each: EC2, local Docker, this machine.
 
 ## Policy seams
