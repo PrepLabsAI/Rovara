@@ -17,6 +17,8 @@ import {
   SlackWorkspaceCloseStartResultSchema,
   ProjectModelOptionsSchema,
   ProjectModelSelectionRequestSchema,
+  QuickAutoStartRequestSchema,
+  QuickAutoStartResultSchema,
   SwebenchRunSchema,
   SwebenchStartRequestSchema,
   SwebenchStartResultSchema,
@@ -67,6 +69,10 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
     async markCommentAnswered(input) {
       const body = SlackCommentAnsweredRequestSchema.parse(input);
       await servicePost("/v1/tasks/comments/answered", body, "writing the comment answer failed");
+    },
+    async startQuickFromIntake(input) {
+      const body = QuickAutoStartRequestSchema.parse(input);
+      return QuickAutoStartResultSchema.parse(await servicePost("/v1/workflows/quick-start", body, "starting the quick change failed"));
     },
     async markThreadNoteAnswered(input) {
       const body = SlackThreadNoteAnsweredRequestSchema.parse(input);
