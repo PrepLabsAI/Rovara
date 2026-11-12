@@ -72,7 +72,7 @@ export interface ControlDependencies {
 /** Who is acting: a principal the surface already authenticated through the Identity seam, or the raw credential, which this module authenticates itself (it never trusts an id it was handed). */
 export type ControlActor = Principal | { credential: PresentedCredential };
 
-export type ControlRefusal = "not_found" | "forbidden" | "ended" | "unavailable" | "nothing_to_retry" | "invalid" | "request_id_reused";
+export type ControlRefusal = "not_found" | "forbidden" | "task_access_denied" | "ended" | "unavailable" | "nothing_to_retry" | "invalid" | "request_id_reused";
 
 export type ControlResult<T = unknown> =
   | ({ status: "done"; session: AgentSessionRecord; repeated: boolean } & T)
@@ -136,8 +136,9 @@ export function createSessionControl(deps: ControlDependencies) {
       return { session, access: judged };
     } catch (error) {
       const code = (error as { code?: unknown } | null)?.code;
-      // No level at all reads as a missing session; a level short of the action says what is needed (the hosted product's SESSION_LEVEL_REQUIRED), and so does a task whose owner cannot be read.
-      if (code === "SESSION_LEVEL_REQUIRED" || code === "TASK_ACCESS_DENIED") return refuse("forbidden", messageOf(error));
+      // No level at all reads as a missing session; a level short of the action says what is needed (the hosted product's SESSION_LEVEL_REQUIRED); a task whose owner cannot be read is TASK_ACCESS_DENIED.
+      if (code === "SESSION_LEVEL_REQUIRED") return refuse("forbidden", messageOf(error));
+      if (code === "TASK_ACCESS_DENIED") return refuse("task_access_denied", messageOf(error));
       if (code === "NOT_FOUND") return refuse("not_found", "There is no such session.");
       throw error;
     }
