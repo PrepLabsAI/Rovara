@@ -19,6 +19,7 @@ import {
   isContextSourceStage,
   recordIntentAssessment,
   startWorkflowPlanAfterUnderstand,
+  startWorkflowPlanWithoutUnderstand,
   startWorkflowUnderstand,
   submitWorkflowArtifact,
   when,
@@ -302,7 +303,9 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
     await deps.store.transact([resolve()]);
     return "STALE";
   };
-  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.definitionVersion !== "1.1.0" || workflow.revision !== row.workflowRevision) return stale();
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== row.workflowRevision) return stale();
+  // Only the Understand step needs a 1.1.0 workflow: with Understand off (1.0.0) the owner's request for changes still plans again, from the request and their words (below).
+  if (workflow.definitionVersion !== "1.1.0" && !(workflow.definitionVersion === "1.0.0" && (row.kind === "PLAN" || row.kind === "REPLAN"))) return stale();
   const workspace = await readWorkspace(deps, task.workspaceId);
   if (workspace === undefined || workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return stale();
   const prompts = deps.prompts ?? DEFAULT_PROMPTS;
@@ -322,7 +325,8 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
     } else if (row.kind === "REPLAN") {
       // The planner's automatic second run: planning is RUNNING with no live run, one revision on; the row carries what the planner is told (the plan's problems, or what could not be read).
       const planPrompt = (row as Partial<DispatchRowRecord>).planPrompt ?? fromDocument<DispatchRowRecord>(await deps.store.get(dispatchRowKey(deps.companyId, row.taskId, row.workflowRevision)))?.planPrompt;
-      if (planPrompt === undefined || workflow.stage !== "PLAN" || workflow.state !== "RUNNING" || workflow.intent?.assessment?.kind !== "ready") return stale();
+      // With Understand off there is no assessment to wait for: the run is told the request and the owner's words.
+      if (planPrompt === undefined || workflow.stage !== "PLAN" || workflow.state !== "RUNNING" || (workflow.definitionVersion === "1.1.0" && workflow.intent?.assessment?.kind !== "ready")) return stale();
       const structured = await structuredPlanContextOf(deps, task, workflow);
       // The second run is told the owner's change notes again: the plan it revises was written after them, and the run may be a new conversation.
       const feedback = await planFeedbackOf(deps, task.taskId);
@@ -337,13 +341,16 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
       requestId = workflowRequestId("agentx-auto-plan-revision", task.taskId, workflow.revision, createHash("sha256").update(planPrompt, "utf8").digest("hex"));
     } else {
       const assessment = workflow.intent?.assessment;
-      if (workflow.stage !== "PLAN" || workflow.state !== "READY" || assessment?.kind !== "ready") return stale();
-      next = startWorkflowPlanAfterUnderstand(workflow, iso(deps));
+      if (workflow.stage !== "PLAN" || workflow.state !== "READY") return stale();
+      // Understand on: planning reads its assessment. Understand off (a 1.0.0 task, where the owner asked for changes to a plan): there is none, so the planner gets the request and what the owner asked to change.
+      const understood = assessment?.kind === "ready" ? assessment : undefined;
+      if (understood === undefined && workflow.definitionVersion !== "1.0.0") return stale();
+      next = understood === undefined ? startWorkflowPlanWithoutUnderstand(workflow, iso(deps)) : startWorkflowPlanAfterUnderstand(workflow, iso(deps));
       const feedback = await planFeedbackOf(deps, task.taskId);
       const context = await planContextOf(deps, workflow);
       const structured = await structuredPlanContextOf(deps, task, workflow);
       prompt = prompts.plan({
-        requestText: task.requestText ?? "", path: workflow.path, phase: workflow.reviewPhase, restatement: assessment.restatement, assumptions: assessment.assumptions, intent: workflow.intent,
+        requestText: task.requestText ?? "", path: workflow.path, phase: workflow.reviewPhase, ...(understood === undefined ? {} : { restatement: understood.restatement, assumptions: understood.assumptions }), intent: workflow.intent,
         ...(feedback.length === 0 ? {} : { feedback }), ...(context.earlier.length === 0 ? {} : { earlier: context.earlier }), ...(context.previous === undefined ? {} : { previous: context.previous }),
         ...(structured === undefined ? {} : { structured }),
         // Retry planning after an answer Rovara could not read: the planner is told what was wrong with it.
@@ -353,7 +360,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
       const designInstructions = deps.designReview?.planInstructions(workflow);
       if (designInstructions !== undefined) prompt = `${prompt}\n\n${designInstructions}`;
       mode = "PLAN";
-      requestId = workflowRequestId("agentx-plan-after-understand", task.taskId, workflow.revision);
+      requestId = workflowRequestId(understood === undefined ? "agentx-plan-after-changes" : "agentx-plan-after-understand", task.taskId, workflow.revision);
     }
   } catch (error) {
     if (error instanceof WorkflowTransitionError) return stale();
