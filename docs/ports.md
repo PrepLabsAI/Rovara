@@ -366,7 +366,7 @@ and asks the point; it does not write its own reader.
 - **AWS Secrets Manager (convergence lane A3, owner decision 72 O2).** Opt-in: `{ "point": "secrets", "name": "aws-secrets-manager", "module": "@agentx/broker/plugins/secrets-aws", "settings": { "region",
   one AWS identity, "namePrefix": "rovara/", "companyPaths"? } }` (`createSecretsManagerSecretStore` in `@rovara/aws-adapters/secrets-manager`; the module is `packages/broker/src/plugins/secrets/aws-secrets-manager/`, which shows the adapter's fixed sentences as `LocalSecretError`). Its reference kind is `{ "awsSecret": "<name under the prefix>" }`:
   the secret read is `namePrefix` + the value (the hosted product's names, such as `agentx/<env>/org-connectors/<company>/<id>`, read as they are), and the value is checked first (plain parts, no `.` or `..`),
-  so no reference reaches outside the prefix. A value whose first part is one of `companyPaths` names a company's own secret and is read only when its second part is the call's company. `clientFor(companyId)`
+  so no reference reaches outside the prefix. A value whose first part is one of `companyPaths` names a company's own secret and is read only when its second part is the call's company. A hosted (many-company) setup MUST set `namePrefix` to its environment's path and `companyPaths` (`org-connectors`, `org-hooks`); without `companyPaths` any name under the prefix is read for any company. `clientFor(companyId)`
   lets a deployment sign each company's reads with a session that reaches only that company's secrets (IAM is the second fence). Missing, scheduled for deletion or empty is `undefined`; a refusal, a KMS
   decryption failure, a binary secret or an outage is a fixed sentence that quotes neither the name nor the value. Read on every call. It knows no `{ env }` or `{ key }`, so with it
   configured the model keys and the GitHub token must be named as `{ "awsSecret" }` sources where they are read. Suite: `tests/unit/aws-secrets-manager.test.ts`.
@@ -403,7 +403,7 @@ The `object-storage` point (one adapter) is where files live that are too big or
 worker's results. It is lane L7b's `EvidenceBlobStore` promoted to the registry: `ObjectStorage` in `packages/contracts/src/ports/object-storage.ts`
 has `put`, `get` (with a size cap; an object over it is `undefined`, never cut), `stat`, `delete` and `deletePrefix`. Keys are paths of letters, digits and
 `. _ = : @ + , ~ -` (`isValidObjectKey`), at most 1024 characters and at most 128 per part (the evidence erase's plain-id rule), no `.` or `..` part, so no adapter can turn a key into a place outside its store. An
-object carries a content type, a few small text facts and a retention class (the caller's word, such as `evidence-std`; the adapter maps it to days).
+object carries a content type, a few small text facts (at most 32 and 2 KB in all, `OBJECT_METADATA_LIMITS`: S3's own limit) and a retention class (the caller's word, such as `evidence-std`; the adapter maps it to days).
 - **Immutable by default (L9-wire review).** A `put` on a key that holds an object refuses with `ObjectConflictError` and changes nothing; of two writers racing for a key exactly one wins (a
   conditional write in the document adapter, a hard link in the folder adapter). `put(..., { overwrite: true })` replaces on purpose. The proof evidence callers that rewrite a key
   pass it: `storeEvidenceArtifacts` (the key is the content's SHA-256, so a retried capture rewrites the same bytes) and `keepEvidence` (one pack per task and candidate digest, rewritten by a re-check).
@@ -423,7 +423,7 @@ object carries a content type, a few small text facts and a retention class (the
   `nightly-maps/` 30 days by prefix); a class no rule names is kept until deleted, and the adapter never sets a lifetime itself. Write once is `If-None-Match: *`; an object whose lifecycle expiry
   (`x-amz-expiration`) has passed reads as gone and is replaced only by its ETag (`If-Match`), so one writer wins there too. S3 lower-cases metadata names and keeps at most 2 KB, so this adapter
   refuses upper-case names, non-ASCII values and more than 2 KB (`ObjectMetaError`) instead of storing something that reads back different. `presignGet(key, { contentType, disposition,
-  expiresInSeconds })` (not part of the port) signs a GET for one key with the content type and disposition forced, 60 seconds by default and 300 at most; the deployment passes the signer
+  expiresInSeconds })` (not part of the port) signs a GET for one key with the content type forced and the disposition `inline` only for a picture or video type (`S3_INLINE_CONTENT_TYPES`), else always `attachment`, 60 seconds by default and 300 at most; the deployment passes the signer
   (`getSignedUrl` of `@aws-sdk/s3-request-presigner`, which Code does not depend on). Errors never carry S3's words. It passes the suite over a faithful S3 stand-in (`tests/support/ports/aws-fakes.ts`)
   in `tests/unit/aws-object-storage-s3.test.ts`.
 - **Not here (decision 51).** A sweep of expired files in the folder adapter (an expired object is reported absent and removed when it is next read).

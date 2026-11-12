@@ -155,6 +155,14 @@ export function runObjectStorageConformance(name: string, harness: ObjectStorage
       expect(await store.get("k", 10)).toBeUndefined();
     }));
 
+    it("keeps metadata of exactly 2 KB (names and values) and refuses one byte more, the limit every adapter shares (S3's own)", () => withStore(async ({ store }) => {
+      const fits = { m: "x".repeat(2_047) };
+      await store.put("fits", bytes("x"), { ...META, metadata: fits });
+      expect((await store.stat("fits"))?.metadata).toEqual(fits);
+      await expect(store.put("over", bytes("x"), { ...META, metadata: { m: "x".repeat(2_048) } })).rejects.toBeInstanceOf(ObjectMetaError);
+      expect(await store.get("over", 10)).toBeUndefined();
+    }));
+
     it("keeps a part of 128 characters, the longest id the evidence erase accepts", () => withStore(async ({ store }) => {
       const key = `private/${"a1".repeat(64)}/${"b".repeat(128)}/evidence/t/${"0".repeat(64)}`;
       await store.put(key, bytes("long"), META);
