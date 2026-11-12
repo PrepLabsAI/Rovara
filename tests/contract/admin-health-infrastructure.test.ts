@@ -148,6 +148,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/channel/links.ts", "packages/broker/src/core/channel/sink.ts", "packages/broker/src/core/channel/cards.ts", "packages/broker/src/core/channel/threads.ts",
       // Lessons: the rows that record a lesson's source events expire after a named retention (SOURCE_EVENT_TTL_DAYS), none a durable record.
       "packages/broker/src/lessons/document-store.ts",
+      // Lessons for local coding tools (decision 46b): the day counter of a person's reads of one project (LESSON_LOCAL_DAY, numbers only) is a per-day row that must expire after the index retention, never a durable record.
+      "packages/broker/src/local/app/lessons-routes.ts",
       // Parallel parts: the first progress line of a coding run (event rows, kept as long as the other event rows) and the milestone rows (their retention).
       "packages/broker/src/core/task-flow/accept.ts", "packages/broker/src/core/milestones/milestones.ts",
       // Design review: the reviewers' stored packets and a slot's key record and budget, which expire after the stage's retention (SLOT_PACKET_TTL_SECONDS).
