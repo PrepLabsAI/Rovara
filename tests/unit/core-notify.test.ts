@@ -313,6 +313,36 @@ describe("followers, the conversation a task was started from, and the footer", 
     expect(quiet3.delivered).toEqual([]);
   });
 
+  it("leaves the finished-task notice out of the start thread while the channel milestones tell it, and still tells the places the person chose and the other notices", async () => {
+    const started: ConversationRef = { channel: "otherchat", tenant: "team1", space: "room1", thread: "main" };
+    const thread = async (_org: OrgId, sessionId: string) => (sessionId === SESSION ? { conversation: started, personId: OWNER_ID } : undefined);
+    const finished = async () => {
+      const w = await world();
+      const quiet = new FakeChannelAdapter();
+      w.registry.register("channel", "otherchat", quiet);
+      await w.move({});
+      await w.move({ workflow: { stage: "MERGED", state: "COMPLETE" }, step: "Merged" });
+      await w.prefs([target()]);
+      return { w, quiet };
+    };
+    const milestones = await finished();
+    await milestones.w.deliver({ thread, doneToldInThread: () => true });
+    expect(milestones.quiet.delivered).toEqual([]);
+    expect(milestones.w.adapter.delivered).toHaveLength(1);
+    expect(await milestones.w.pending()).toHaveLength(0);
+    // Without them (the default), the thread is told as before.
+    const before = await finished();
+    await before.w.deliver({ thread });
+    expect(before.quiet.delivered).toHaveLength(1);
+    expect(before.quiet.delivered[0]).toMatchObject({ type: "done" });
+    // A needs-you notice still goes to the thread.
+    const waiting = await needsYou();
+    const quiet = new FakeChannelAdapter();
+    waiting.registry.register("channel", "otherchat", quiet);
+    await waiting.deliver({ thread, doneToldInThread: () => true });
+    expect(quiet.delivered).toHaveLength(1);
+  });
+
   it("adds the footer after the list and keeps it whole when the text is cut", async () => {
     const w = await needsYou();
     await w.prefs([target()]);

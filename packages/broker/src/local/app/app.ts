@@ -194,6 +194,11 @@ export interface LocalAppOptions {
    * route, a token or a page. Off, nothing of it is mounted, shown or run.
    */
   automation?: boolean | AutomationSwitch;
+  /**
+   * The milestone lines told to the chat thread a task was started from (the plan is ready, a pull request is ready, the task is done): on or off, or a switch the host reads on each use. Default on. Needs-you notices and the plan's
+   * approval card are not milestones and do not depend on it. A host with no chat adapter has no thread to tell, so nothing changes there.
+   */
+  channelMilestones?: boolean | (() => boolean);
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
   timers?: boolean;
   now?: () => Date;
@@ -518,6 +523,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const canNotify = (): boolean => registry.names("channel").length > 0 || registry.names("email").some((name) => registry.get("email", name)?.capabilities.available === true);
   // A task started from a chat thread gets the `plan_ready` and `closed` milestones the thread is told (`core/channel/thread-notices.ts`); with no chat adapter there is no thread and no read is made.
   const threadMoments = ticketMomentsOnChange({ store, milestones, now: () => clock().getTime(), log: (event, fields) => log({ component: "channel_thread", event, ...fields }), follows: threadFollows({ store }) });
+  const channelMilestonesOn = (): boolean => (typeof options.channelMilestones === "function" ? options.channelMilestones() : options.channelMilestones !== false);
   const summaryDeps: SummaryDependencies = {
     store,
     facts: createTaskFactsSource(flow.deps),
@@ -575,10 +581,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const decisionActions = createDecisionActions({ gate, companyId });
   // Chat (owner decision 58): the owner's own acts on the chat page, and what an adapter may hand the core. Nothing here approves: see chat.ts.
   const chat = createLocalChat({ registry, flow, store, companyId, owner, now: () => clock().getTime(), gate, log });
-  // What a task tells the thread it was started from: the plan's approval card (low and medium risk are decided there, high on the page). Registered before the first milestone is written.
+  // What a task tells the thread it was started from: the plan's approval card (low and medium risk are decided there, high on the page) and three milestone lines. Registered before the first milestone is written.
   if (registry.names("channel").length > 0) {
     milestones.register(channelThreadHandler({
-      store, registry, now: () => clock().getTime(), plan: { gate }, footer: ATTENTION_FOOTER,
+      store, registry, now: () => clock().getTime(), plan: { gate }, footer: ATTENTION_FOOTER, milestones: channelMilestonesOn,
       log: (event, fields) => log({ component: "channel_thread", event, ...fields }),
     }));
   }
@@ -704,7 +710,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
     // What needs the owner reaches them in their chat, batched (one message at most every few minutes). The sweep of the sessions above is what queues it.
     if (canNotify()) {
-      await deliverAttention({ store, registry, now: () => clock().getTime(), thread: (org, sessionId) => readTaskThread(store, org, sessionId), footer: ATTENTION_FOOTER, log }, { deadlineMs: clock().getTime() + 4_000 }).catch(logFailure("local_app.attention_failed"));
+      await deliverAttention({ store, registry, now: () => clock().getTime(), thread: (org, sessionId) => readTaskThread(store, org, sessionId), footer: ATTENTION_FOOTER, doneToldInThread: () => registry.names("channel").length > 0 && channelMilestonesOn(), log }, { deadlineMs: clock().getTime() + 4_000 }).catch(logFailure("local_app.attention_failed"));
     }
   };
   // Reading pull requests asks the code host over the network and may take seconds, so the timer runs it apart from the dispatch (a slow host never holds a step back); a test's `tick()` runs both in order.

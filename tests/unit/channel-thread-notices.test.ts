@@ -1,4 +1,4 @@
-// What a task tells the chat thread it was started from: the plan's approval card, by risk. The decision gate, the approvers, the chat work seam and the sink are the real ones over the memory
+// What a task tells the chat thread it was started from: the plan's approval card (by risk) and three milestone lines. The decision gate, the approvers, the chat work seam and the sink are the real ones over the memory
 // store; the chat adapter is a fake and no chat tool is named. A decision pressed in the chat goes through the same gate as the web app's.
 import { describe, expect, it } from "vitest";
 import {
@@ -48,6 +48,8 @@ interface WorldOptions {
   chatApprovers?: boolean;
   companyOf?: ChannelCompanyOf;
   isMember?: ChannelMemberRule;
+  milestones?: boolean;
+  withGate?: boolean;
   taskUrl?: boolean;
   /** The task's company on its record (default the install's). */
   taskOrg?: OrgId;
@@ -82,7 +84,8 @@ async function world(options: WorldOptions = {}) {
   await recordTaskThread(deps, { sessionId: SESSION, conversation: CONVERSATION, personId: OWNER_ID, actor: ACTOR });
   const handler = channelThreadHandler({
     store, registry, now, ...(options.companyOf === undefined ? {} : { companyOf: options.companyOf }), ...(options.isMember === undefined ? {} : { isMember: options.isMember }),
-    ...(options.taskUrl === false ? {} : { taskUrl: () => PAGE }), footer: "Open it with `rovara open`.", plan: { gate },
+    ...(options.milestones === undefined ? {} : { milestones: options.milestones }), ...(options.taskUrl === false ? {} : { taskUrl: () => PAGE }), footer: "Open it with `rovara open`.",
+    ...(options.withGate === false ? {} : { plan: { gate } }),
   });
   return { store, adapter, deliveries, risk, gate, sink, handler, deps };
 }
@@ -261,6 +264,109 @@ describe("the plan card, by risk", () => {
     const own = await world();
     await own.handler.on(milestone("merged", {}, OTHER));
     expect(own.deliveries).toEqual([]);
+  });
+});
+
+describe("the milestone lines", () => {
+  const PR = { repository: "acme/web", number: 7, url: "https://git.example.test/acme/web/pull/7" };
+
+  it("tells plan ready (with the link), pull request opened (with its link) and done, each once, and nothing else", async () => {
+    const w = await world({ withGate: false });
+    await w.handler.on(milestone("plan_ready"));
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    await w.handler.on(milestone("merged"));
+    expect(w.deliveries.map((event) => event.type)).toEqual(["progress", "pr", "done"]);
+    expect((w.deliveries[0] as { data: { text: string } }).data.text).toBe(`The plan for "Add a retry" is ready for review. ${PAGE}`);
+    expect(w.deliveries[1]).toMatchObject({ data: { url: PR.url, title: "Add a retry", action: "opened" } });
+    expect(w.deliveries[2]).toMatchObject({ data: { text: "\"Add a retry\" is merged.", outcome: "succeeded" } });
+    // Milestones that are not these say nothing.
+    for (const kind of ["questions", "answered", "review_nudge", "fixing", "stuck", "approved", "started"] as const) await w.handler.on(milestone(kind));
+    expect(w.deliveries).toHaveLength(3);
+  });
+
+  it("a closed task is one line too, and the same task is done once whichever ending comes", async () => {
+    const w = await world({ withGate: false });
+    await w.handler.on(milestone("closed"));
+    await w.handler.on(milestone("merged"));
+    expect(ofType(w.deliveries, "done")).toHaveLength(1);
+    expect(ofType(w.deliveries, "done")[0]).toMatchObject({ data: { text: "\"Add a retry\" was closed without a merge.", outcome: "cancelled" } });
+  });
+
+  it("a redelivery sends nothing: the adapter is not even asked", async () => {
+    const w = await world({ withGate: false });
+    for (let round = 0; round < 3; round += 1) {
+      await w.handler.on(milestone("plan_ready"));
+      await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+      await w.handler.on(milestone("merged"));
+    }
+    expect(w.deliveries).toHaveLength(3);
+  });
+
+  it("tells a new plan revision again, and another pull request, but never the same one twice", async () => {
+    const w = await world({ withGate: false });
+    await w.handler.on(milestone("plan_ready"));
+    const before = await workflowOf(w);
+    await w.store.update({ key: workflowTaskKey(TASK), ops: [change.set("workflow", JSON.parse(JSON.stringify({ ...before, revision: before.revision + 1 })) as JsonValue)] });
+    await w.handler.on(milestone("plan_ready"));
+    await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    await w.handler.on(milestone("pr_ready", { pullRequests: [{ ...PR, number: 8, url: "https://git.example.test/acme/web/pull/8" }] }));
+    expect(w.deliveries.map((event) => event.type)).toEqual(["progress", "progress", "pr", "pr"]);
+  });
+
+  it("sends none of the three when the host turns milestones off, but the plan card is not a milestone and still goes", async () => {
+    const off = await world({ milestones: false, withGate: false });
+    await off.handler.on(milestone("plan_ready"));
+    await off.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    await off.handler.on(milestone("merged"));
+    await off.handler.on(milestone("closed"));
+    expect(off.deliveries).toEqual([]);
+    const card = await world({ milestones: false, risk: "low" });
+    await card.handler.on(milestone("plan_ready"));
+    await card.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+    await card.handler.on(milestone("merged"));
+    expect(card.deliveries.map((event) => event.type)).toEqual(["approval_request"]);
+  });
+
+  it("can be switched by a function read at each use", async () => {
+    const state = { on: false };
+    const w = await world({ withGate: false, milestones: false });
+    void state;
+    const handler = channelThreadHandler({ store: w.store, registry: { get: () => w.adapter } as never, now, milestones: () => state.on });
+    await handler.on(milestone("merged"));
+    expect(w.deliveries).toEqual([]);
+    state.on = true;
+    await handler.on(milestone("merged"));
+    expect(ofType(w.deliveries, "done")).toHaveLength(1);
+  });
+
+  it("goes only to the task's own thread: a task started elsewhere, or with no thread, tells nobody", async () => {
+    const w = await world({ withGate: false });
+    await w.store.put({ item: { ...workflowTaskKey("11111111-1111-4111-8111-111111111111"), orgId: ORG, title: "Another", workflow: JSON.parse(JSON.stringify(waitingWorkflow())) as JsonValue } });
+    await w.handler.on({ ...milestone("merged"), taskId: "11111111-1111-4111-8111-111111111111" });
+    expect(w.deliveries).toEqual([]);
+    expect(await threadFollows({ store: w.store })(ORG, SESSION)).toBe(true);
+    expect(await threadFollows({ store: w.store })(ORG, taskSessionId("11111111-1111-4111-8111-111111111111"))).toBe(false);
+    expect(await threadFollows({ store: w.store })(OTHER, SESSION)).toBe(false);
+  });
+
+  it("nothing crosses companies: another company's thread, a failing company rule and a member who is not served get nothing", async () => {
+    for (const options of [{ companyOf: () => OTHER }, { companyOf: () => undefined }, { companyOf: (): never => { throw new Error("down"); } }, { companyOf: () => ORG, isMember: () => false }, { companyOf: () => ORG, isMember: (): never => { throw new Error("down"); } }] as WorldOptions[]) {
+      const w = await world({ ...options, withGate: false });
+      await w.handler.on(milestone("plan_ready"));
+      await w.handler.on(milestone("pr_ready", { pullRequests: [PR] }));
+      await w.handler.on(milestone("merged"));
+      expect(w.deliveries).toEqual([]);
+    }
+    const served = await world({ withGate: false, companyOf: () => ORG, isMember: () => true });
+    await served.handler.on(milestone("merged"));
+    expect(served.deliveries).toHaveLength(1);
+  });
+
+  it("a pull request with no plain https address is told without a link instead of failing", async () => {
+    const w = await world({ withGate: false });
+    await w.handler.on(milestone("pr_ready", { pullRequests: [{ ...PR, url: "http://user:pw@git.example.test/x" }] }));
+    expect(w.deliveries).toHaveLength(1);
+    expect(JSON.stringify(w.deliveries[0])).not.toContain("user:pw");
   });
 });
 
