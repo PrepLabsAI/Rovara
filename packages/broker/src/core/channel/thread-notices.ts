@@ -37,7 +37,9 @@ export const CHANNEL_THREAD_HANDLER = "channel_thread";
 type Moment = "plan_ready" | "pr_opened" | "done";
 const MOMENT_OF: Partial<Record<CodeMilestoneKind, Moment>> = { plan_ready: "plan_ready", pr_ready: "pr_opened", merged: "done", closed: "done" };
 
+/** How long a claim on a notice holds, and how often a send in progress renews it: a send that takes longer than the lease (a slow chat tool) keeps its claim, so a second one cannot take over and post a second card. */
 const CLAIM_LEASE_MS = 60_000;
+const CLAIM_RENEW_MS = CLAIM_LEASE_MS / 3;
 const PULL_REQUESTS_MAX = 3;
 
 export interface ThreadNoticeDeps {
@@ -89,9 +91,9 @@ const planCardKey = (revision: number, artifactDigest: string): string => `plan#
 
 /**
  * Whether the plan this task waits on now already got its approval card in the thread: the answer the needs-you reminder asks (`deliverAttention`'s `planCarded`), so the thread is not told twice. True only for a task whose plan
- * waits for review right now and whose card for exactly that revision and content was sent; a task waiting for anything else, or a plan revised since its card, is not carded.
+ * waits for review right now and whose card for exactly that revision and content was sent and can still be answered; a task waiting for anything else, or a plan revised since its card, is not carded.
  */
-export function planCardPosted(deps: { store: Pick<DocumentStore, "get"> }): (session: AgentSessionRecord) => Promise<boolean> {
+export function planCardPosted(deps: { store: Pick<DocumentStore, "get">; now: () => number }): (session: AgentSessionRecord) => Promise<boolean> {
   return async (session) => {
     if (session.subject.kind !== "task") return false;
     const task = await deps.store.get(taskKey(session.subject.taskId));
@@ -100,7 +102,9 @@ export function planCardPosted(deps: { store: Pick<DocumentStore, "get"> }): (se
     const digest = waitingDocumentDigest(workflow as WorkflowSnapshot);
     if (digest === undefined) return false;
     const sessionId = typeof task["sessionId"] === "string" ? task["sessionId"] : session.sessionId;
-    return (await deps.store.get(claimKey(session.orgId, sessionId, planCardKey(workflow.revision, digest))))?.["state"] === "done";
+    const claimed = await deps.store.get(claimKey(session.orgId, sessionId, planCardKey(workflow.revision, digest)));
+    // A card nobody can answer any more (it stops being answerable after CARD_TTL_SECONDS) is no card: the reminder is then sent.
+    return claimed?.["state"] === "done" && typeof claimed["cardUntil"] === "number" && claimed["cardUntil"] * 1000 > deps.now();
   };
 }
 
@@ -130,17 +134,25 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
     return adapter === undefined ? undefined : adapter;
   }
 
-  async function send(orgId: OrgId, sessionId: string, key: string, deliver: () => Promise<void>): Promise<void> {
+  /** `deliver` may answer when a card it sent stops being answerable (seconds): kept on the claim, so the reminder's check knows an expired card is no card. */
+  async function send(orgId: OrgId, sessionId: string, key: string, deliver: () => Promise<void | { cardUntil: number }>): Promise<void> {
     const claimed = await claim(deps.store, orgId, sessionId, key, deps.now());
     if (claimed === "done") return;
     if (claimed === "busy") throw new Error("thread notice in flight");
+    const at = claimKey(orgId, sessionId, key);
+    // The claim is renewed while the send runs, however long it takes.
+    const renew = setInterval(() => { void deps.store.update({ key: at, ops: [change.set("leaseUntil", deps.now() + CLAIM_LEASE_MS)], condition: when.eq("state", "sending") }).catch(() => undefined); }, CLAIM_RENEW_MS);
+    renew.unref();
+    let sent: void | { cardUntil: number };
     try {
-      await deliver();
+      sent = await deliver();
     } catch (error) {
-      await deps.store.delete({ key: claimKey(orgId, sessionId, key), condition: when.eq("state", "sending") }).catch(() => undefined);
+      await deps.store.delete({ key: at, condition: when.eq("state", "sending") }).catch(() => undefined);
       throw error;
+    } finally {
+      clearInterval(renew);
     }
-    await deps.store.update({ key: claimKey(orgId, sessionId, key), ops: [change.set("state", "done"), change.remove("leaseUntil")] }).catch(() => undefined);
+    await deps.store.update({ key: at, ops: [change.set("state", "done"), change.remove("leaseUntil"), ...(sent === undefined ? [] : [change.set("cardUntil", sent.cardUntil)])] }).catch(() => undefined);
   }
 
   return {
@@ -188,12 +200,13 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
           ? (asks ? (taskUrl === undefined ? undefined : `Details: ${taskUrl}`) : `To ask for changes, open the task page.${taskUrl !== undefined ? ` ${taskUrl}` : deps.footer !== undefined ? `\n${deps.footer}` : ""}`)
           : (taskUrl === undefined ? deps.footer : undefined);
         await send(orgId, sessionId, key, async () => {
-          await postApprovalCard({ store: deps.store, orgId, now: deps.now, companyOf: deps.companyOf }, {
+          const posted = await postApprovalCard({ store: deps.store, orgId, now: deps.now, companyOf: deps.companyOf }, {
             channel: conversation.channel, adapter, conversation, kind: "plan_approval", subject: { type: WORKFLOW_DOCUMENT_KIND, id: taskId }, revision: found.revision, artifactDigest: found.artifactDigest, risk, signInOnly: !chatTakes,
             text: extra === undefined ? words : `${words}\n${extra}`,
             ...(taskUrl === undefined ? {} : { taskUrl }),
             actions: chatTakes ? [{ decision: "APPROVE", label: "Approve" }, ...(asks ? [{ decision: "REQUEST_CHANGES" as const, label: "Request changes" }] : [])] : [],
           });
+          return { cardUntil: posted.expiresAt };
         });
         return;
       }

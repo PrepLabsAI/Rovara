@@ -3,15 +3,16 @@
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, type ActorRef, type ConversationRef, type InboundMessage, type OrgId } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, change, createWorkflowSnapshot, submitWorkflowArtifact, type ActorRef, type ChannelDecision, type ConversationRef, type InboundMessage, type JsonValue, type OrgId } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { readTaskThread, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/index.js";
+import { issueChannelLinkCode, postApprovalCard, readTaskThread, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/index.js";
 import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { readNotifyPrefs } from "../../packages/broker/src/core/notify/index.js";
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
+import { workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
@@ -141,6 +142,66 @@ describe("chat on rovara up", () => {
     await redeemChannelLinkCode({ store: h.store, orgId: ORG, now: () => Date.now() }, "c".repeat(64), code);
     await hear(h.adapter, "m2", "do something as the owner");
     expect(((await h.api("/v1/dev/tasks")).body["tasks"] as unknown[])).toHaveLength(0);
+  });
+
+  /** A started task whose plan waits for review, a card for it in the chat, and the owner's account linked: what a press needs. */
+  async function planWaiting() {
+    const h = await launch();
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const where = await h.browse("/chat", true);
+    await h.submit(where, "/chat/bind", { channel: "examplechat", tenant: "team1", space: "room1", project: "web" });
+    const ownerId = developerIdOf(localOwnerPrincipal());
+    await hear(h.adapter, "m1");
+    const code = /paste this code: ([A-Za-z0-9_-]{32})\./u.exec((h.adapter.delivered[0] as { data: { text: string } }).data.text)![1]!;
+    await redeemChannelLinkCode({ store: h.store, orgId: ORG, now: () => Date.now() }, ownerId, code);
+    await hear(h.adapter, "m2", "add a retry to the payment call");
+    const taskId = ((await h.api("/v1/dev/tasks")).body["tasks"] as Array<{ taskId: string }>)[0]!.taskId;
+    const digest = "b".repeat(64);
+    const initial = createWorkflowSnapshot({ taskId, ownerId, now: "2026-11-12T09:59:00.000Z" });
+    const waiting = submitWorkflowArtifact(initial, {
+      expectedRevision: initial.revision, now: "2026-11-12T10:00:00.000Z",
+      artifact: { id: "plan-v1", type: "plan", version: 1, sha256: digest, producer: "agentx-planner", objectKey: `tasks/${taskId}/plan-v1.json`, createdAt: "2026-11-12T10:00:00.000Z", format: "markdown" },
+    });
+    await h.store.update({ key: workflowTaskKey(taskId), ops: [change.set("workflow", JSON.parse(JSON.stringify(waiting)) as JsonValue)] });
+    const sent = await postApprovalCard({ store: h.store, orgId: ORG, now: () => Date.now() }, {
+      channel: "examplechat", adapter: h.adapter, conversation: CONVERSATION, kind: "plan_approval", subject: { type: "workflow-document", id: taskId }, revision: waiting.revision, artifactDigest: digest, risk: "medium",
+      text: "Plan waits.", actions: [{ decision: "APPROVE", label: "Approve" }],
+    });
+    const press = (eventId: string, actor: ActorRef = ACTOR): Promise<void> => h.adapter.sink!.decision({
+      version: 1, channel: "examplechat", eventId, conversation: CONVERSATION, actor, requestId: sent.requestId, expectedRevision: waiting.revision, artifactDigest: digest, decision: "APPROVE", reason: "Pressed in chat.", receivedAt: new Date().toISOString(),
+    } satisfies ChannelDecision);
+    const decisions = async () => ((await h.store.get(workflowTaskKey(taskId)))!["workflow"] as { decisions: Array<{ decision: string }> }).decisions;
+    return { h, taskId, digest, waiting, press, decisions, ownerId };
+  }
+
+  it("approves a plan from a button pressed by the owner's linked account, through the app's gate and the runtime's approvers", async () => {
+    const w = await planWaiting();
+    expect(await w.decisions()).toEqual([]);
+    await w.press("p1");
+    expect((await w.decisions()).map((entry) => entry.decision)).toEqual(["APPROVE"]);
+  });
+
+  it("refuses a button pressed by an account that is not the owner's: an unlinked one, and one linked to someone else", async () => {
+    const w = await planWaiting();
+    const stranger: ActorRef = { ...ACTOR, userId: "user2" };
+    await w.press("p-unlinked", stranger);
+    expect(await w.decisions()).toEqual([]);
+    const code = (await issueChannelLinkCode({ store: w.h.store, orgId: ORG, now: () => Date.now() }, stranger)).code;
+    await redeemChannelLinkCode({ store: w.h.store, orgId: ORG, now: () => Date.now() }, "c".repeat(64), code);
+    await w.press("p-other", stranger);
+    expect(await w.decisions()).toEqual([]);
+  });
+
+  it("the runtime's approvers take a chat proof only for an account the owner linked, and never for a high risk request", async () => {
+    const w = await planWaiting();
+    const approvers = w.h.runtime.registry.require("approvers");
+    const request = { companyId: ORG, requestId: "req-12345678.x", kind: "plan", subject: { type: "task", id: w.taskId }, revision: w.waiting.revision, artifactDigest: w.digest, risk: "medium" as const, outcome: "approve" as const };
+    const proof = (userId: string, risk = request) => ({ proofId: `p-${userId}`, method: "chat-examplechat", requestId: risk.requestId, revision: risk.revision, artifactDigest: risk.artifactDigest, token: `t-${userId}`, claimedAccount: { provider: "examplechat", tenant: "team1", accountId: userId } });
+    expect((await approvers.verify(request, proof("user1"))).approved).toBe(true);
+    expect((await approvers.verify(request, proof("user2"))).approved).toBe(false);
+    expect((await approvers.verify(request, proof("nobody"))).approved).toBe(false);
+    expect((await approvers.verify({ ...request, risk: "high" }, proof("user1"))).approved).toBe(false);
+    expect((await approvers.requirement(request)).methods).toContain("chat-examplechat");
   });
 
   it("gives a fresh page session to /tokens and /chat only", async () => {

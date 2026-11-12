@@ -1,16 +1,17 @@
 // What a task tells the chat thread it was started from: the plan's approval card (by risk) and three milestone lines. The decision gate, the approvers, the chat work seam and the sink are the real ones over the memory
 // store; the chat adapter is a fake and no chat tool is named. A decision pressed in the chat goes through the same gate as the web app's.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   IMPLICIT_COMPANY_ID, change, createWorkflowSnapshot, submitWorkflowArtifact, type ActorRef, type ChannelDecision, type ChannelEvent, type CodeMilestone, type ConversationRef, type DecisionRisk, type JsonValue, type OrgId, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { strictMethodsFor } from "../../packages/broker/src/core/decisions/strong-methods.js";
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import {
-  bindChannelSpace, channelThreadHandler, createChannelSink, decisionRefusalWords, planCardPosted, issueChannelLinkCode, linkedPerson, readApprovalCard, recordTaskThread, redeemChannelLinkCode, threadFollows, cardKey,
+  bindChannelSpace, channelThreadHandler, createChannelSink, decisionRefusalWords, planCardPosted, postApprovalCard, CARD_TTL_SECONDS, issueChannelLinkCode, linkedPerson, readApprovalCard, recordTaskThread, redeemChannelLinkCode, threadFollows, cardKey,
   type ChannelCompanyOf, type ChannelMemberRule,
 } from "../../packages/broker/src/core/channel/index.js";
 import { createDocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
@@ -486,7 +487,7 @@ describe("the reminder after a plan's card", () => {
 
   it("says a plan is carded only once its card for this revision was sent, and not for a revised plan, another company or a task that waits for something else", async () => {
     const w = await world({ risk: "low" });
-    const carded = planCardPosted({ store: w.store });
+    const carded = planCardPosted({ store: w.store, now });
     expect(await carded(sessionOf())).toBe(false);
     await w.handler.on(milestone("plan_ready"));
     expect(await carded(sessionOf())).toBe(true);
@@ -507,6 +508,101 @@ describe("the reminder after a plan's card", () => {
     const w = await world({ risk: "low" });
     w.adapter.deliver = async () => { throw new Error("down"); };
     await expect(w.handler.on(milestone("plan_ready"))).rejects.toThrow("down");
-    expect(await planCardPosted({ store: w.store })(sessionOf())).toBe(false);
+    expect(await planCardPosted({ store: w.store, now })(sessionOf())).toBe(false);
+  });
+});
+
+describe("a high risk card never has a button, whatever the adapter lists", () => {
+  const post = async (options: { risk?: "low" | "medium" | "high"; signInOnly?: boolean; stepUp?: readonly never[] }) => {
+    const store = new MemoryDocumentStore();
+    const adapter = new FakeChannelAdapter();
+    if (options.stepUp !== undefined) Object.assign(adapter, { stepUp: options.stepUp });
+    const sent = await postApprovalCard({ store, orgId: ORG, now }, {
+      channel: "examplechat", adapter, conversation: CONVERSATION, kind: "plan_approval", subject: { type: "workflow-document", id: TASK }, revision: 2, artifactDigest: DIGEST,
+      ...(options.risk === undefined ? {} : { risk: options.risk }), ...(options.signInOnly === undefined ? {} : { signInOnly: options.signInOnly }),
+      text: "Plan waits.", actions: [{ decision: "APPROVE", label: "Approve" }],
+    });
+    const event = adapter.delivered[0] as { data: { actions?: unknown[] } };
+    return { event, card: await readApprovalCard({ store, orgId: ORG, now }, sent.requestId), sent };
+  };
+
+  it("sends no button for a high risk plan, even when the adapter's own step-up list is empty", async () => {
+    for (const stepUp of [undefined, []] as const) {
+      const high = await post({ risk: "high", ...(stepUp === undefined ? {} : { stepUp }) });
+      expect(high.event.data.actions).toBeUndefined();
+      expect(high.card).toMatchObject({ risk: "high", offered: [] });
+    }
+  });
+
+  it("sends the button for a low or medium risk plan, and none when the host says sign-in only", async () => {
+    for (const risk of ["low", "medium"] as const) expect((await post({ risk, stepUp: [] })).card?.offered).toEqual(["APPROVE"]);
+    expect((await post({ risk: "low", signInOnly: true })).card?.offered).toEqual([]);
+    expect((await post({ risk: "low", signInOnly: true })).event.data.actions).toBeUndefined();
+  });
+});
+
+describe("a chat press that asks for changes on a high risk plan", () => {
+  it("is refused by the gate's own method rules, with a comment or the local session still allowed", () => {
+    const requirement = { changesMethods: ["local-session", "code-host-comment", "chat-examplechat"] };
+    expect(strictMethodsFor("request_changes", "high", requirement)).toEqual(["local-session", "code-host-comment"]);
+    expect(strictMethodsFor("request_changes", "medium", requirement)).toEqual(["local-session", "code-host-comment", "chat-examplechat"]);
+    expect(strictMethodsFor("request_changes", "low", requirement)).toContain("chat-examplechat");
+  });
+
+  it("is refused at the gate even for approvers that would accept it (no other layer is needed)", async () => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: { ...workflowTaskKey(TASK), orgId: ORG, project: "web", title: "Add a retry", sessionId: SESSION, workflow: JSON.parse(JSON.stringify(waitingWorkflow())) as JsonValue } });
+    const trusting = {
+      requirement: async () => ({ methods: ["chat-examplechat", "local-session"], minApprovers: 1, selfApprovalAllowed: true, changesMethods: ["chat-examplechat", "local-session"] }),
+      verify: async (_request: unknown, given: { method: string; proofId: string }) => ({ approved: true as const, approver: owner, method: given.method, proofId: given.proofId }),
+    };
+    const gateFor = (risk: DecisionRisk) => createDecisionGate({ store, approvers: trusting, audit: createNoopAuditSink(), now: () => new Date(clock.ms), subjects: [createWorkflowDocumentSubject({ store, riskOf: () => risk })] });
+    const attempt = (requestId: string) => ({
+      companyId: ORG, kind: "workflow-document", subjectId: TASK, requestId, outcome: "request_changes" as const, seen: { revision: waitingWorkflow().revision, artifactDigest: DIGEST },
+      credentials: [{ method: "chat-examplechat", token: requestId }], reason: "Use the retry helper.",
+    });
+    expect(await gateFor("high").decide(attempt("11111111-1111-4111-8111-111111111111"))).toMatchObject({ status: "refused", reason: "method_not_allowed" });
+    expect((await store.get(workflowTaskKey(TASK)))!["workflow"]).toMatchObject({ decisions: [] });
+    expect(await gateFor("medium").decide(attempt("22222222-2222-4222-8222-222222222222"))).toMatchObject({ status: "decided" });
+  });
+});
+
+describe("an expired card does not hide the reminder", () => {
+  it("is carded until the card stops being answerable, then the reminder is sent again", async () => {
+    const w = await world({ risk: "low" });
+    const carded = planCardPosted({ store: w.store, now });
+    const session = { orgId: ORG, sessionId: SESSION, subject: { kind: "task", taskId: TASK } } as never;
+    await w.handler.on(milestone("plan_ready"));
+    expect(await carded(session)).toBe(true);
+    clock.ms += (CARD_TTL_SECONDS - 60) * 1000;
+    expect(await carded(session)).toBe(true);
+    clock.ms += 120 * 1000;
+    expect(await carded(session)).toBe(false);
+    clock.ms -= (CARD_TTL_SECONDS + 60) * 1000;
+  });
+});
+
+describe("a slow send keeps its claim", () => {
+  it("renews the claim while the chat tool is slow, so a second delivery cannot post a second card", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = await world({ risk: "low" });
+      let release: () => void = () => undefined;
+      const slow = new Promise<void>((resolve) => { release = resolve; });
+      const real = w.adapter.deliver.bind(w.adapter);
+      w.adapter.deliver = async (event) => { await slow; await real(event); };
+      const first = w.handler.on(milestone("plan_ready"));
+      await vi.advanceTimersByTimeAsync(1);
+      // Three minutes pass in steps (the claim's lease is one minute): the send is still running and keeps renewing it.
+      for (let step = 0; step < 9; step += 1) { clock.ms += 20_000; await vi.advanceTimersByTimeAsync(20_000); }
+      await expect(w.handler.on(milestone("plan_ready"))).rejects.toThrow("in flight");
+      release();
+      await first;
+      await w.handler.on(milestone("plan_ready"));
+      expect(ofType(w.adapter.delivered, "approval_request")).toHaveLength(1);
+      clock.ms -= 180_000;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

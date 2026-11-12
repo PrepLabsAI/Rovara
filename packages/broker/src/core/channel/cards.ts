@@ -77,7 +77,7 @@ export interface PostApprovalCardInput {
 }
 
 /** Writes the card's record, then sends the message. When the send fails the record is removed and the failure is thrown, so no answer can arrive for a card nobody saw. */
-export async function postApprovalCard(deps: { store: DocumentStore; orgId: OrgId; now: () => number; companyOf?: ChannelCompanyOf | undefined }, input: PostApprovalCardInput): Promise<{ requestId: string; eventId: string }> {
+export async function postApprovalCard(deps: { store: DocumentStore; orgId: OrgId; now: () => number; companyOf?: ChannelCompanyOf | undefined }, input: PostApprovalCardInput): Promise<{ requestId: string; eventId: string; expiresAt: number }> {
   if (input.conversation.channel !== input.channel) throw agentXError("CONFIG_INVALID", "the conversation is on another channel");
   // Owner decision 131: a card goes only to a conversation in the company's own chat; nothing is written for another company's.
   if (!(await tenantIsCompanys(deps.companyOf, deps.orgId, input.channel, input.conversation.tenant))) throw agentXError("FORBIDDEN", "that is not a conversation of this company's chat");
@@ -105,5 +105,5 @@ export async function postApprovalCard(deps: { store: DocumentStore; orgId: OrgI
     await deps.store.delete({ key: cardKey(deps.orgId, requestId) }).catch(() => undefined);
     throw error;
   }
-  return { requestId, eventId };
+  return { requestId, eventId, expiresAt: card.expiresAt };
 }

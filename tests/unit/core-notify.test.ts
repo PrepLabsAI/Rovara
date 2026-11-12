@@ -382,6 +382,29 @@ describe("followers, the conversation a task was started from, and the footer", 
     expect(failed.quiet.delivered).toHaveLength(1);
   });
 
+  it("applies the reminder skip to needs-you only: a paused, ready, failed or done notice still goes to the thread even when the plan is carded", async () => {
+    const started: ConversationRef = { channel: "otherchat", tenant: "team1", space: "room1", thread: "main" };
+    const thread = async (_org: OrgId, sessionId: string) => (sessionId === SESSION ? { conversation: started, personId: OWNER_ID } : undefined);
+    const moves: Record<string, Partial<SessionTaskFacts>> = {
+      paused: { workflow: undefined, display: { state: "paused_budget", reason: "it reached its spending limit" } },
+      ready: { workflow: undefined, display: { state: "ready_to_merge" } },
+      failed: { workflow: undefined, runStatus: "FAILED", failureCategory: "timed_out" },
+      done: { workflow: { stage: "MERGED", state: "COMPLETE" }, step: "Merged" },
+    };
+    for (const [name, move] of Object.entries(moves)) {
+      const w = await world();
+      const quiet = new FakeChannelAdapter();
+      w.registry.register("channel", "otherchat", quiet);
+      await w.move({});
+      await w.move(move);
+      expect((await w.pending()).map((row) => row["kind"]), name).toEqual([name === "done" ? "done" : name]);
+      let asked = 0;
+      await w.deliver({ thread, planCarded: async () => { asked += 1; return true; } });
+      expect(quiet.delivered, name).toHaveLength(1);
+      expect(asked, name).toBe(0);
+    }
+  });
+
   it("adds the footer after the list and keeps it whole when the text is cut", async () => {
     const w = await needsYou();
     await w.prefs([target()]);
