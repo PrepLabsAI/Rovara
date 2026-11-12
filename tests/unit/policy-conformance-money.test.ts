@@ -73,7 +73,8 @@ describe("the money cases catch a broken budget adapter", () => {
   it("an adapter that holds nothing for an unknown cost admits it once the allowance is used", async () => {
     const free = budgetAdmission({ limitMicros: 5_000_000, fenced: true, unknownMicros: 0 });
     expect((await raceAdmissions(free, dollar(1), 5)).allowed).toBe(5);
-    const { estimate: _known, ...unknown } = dollar(1);
+    const unknown: AdmissionRequest = { ...dollar(1) };
+    delete unknown.estimate;
     expect((await free.admit({ ...unknown, idempotencyKey: "unknown" })).allowed).toBe(true);
   });
 });
