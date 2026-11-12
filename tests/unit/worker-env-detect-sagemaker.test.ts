@@ -156,3 +156,35 @@ describe("what the detector carries", () => {
     expect(await candidateOf({ "node_modules/x/a.py": "import boto3\nboto3.client('sagemaker-runtime')\n" })).toBeUndefined();
   });
 });
+
+// Fail, never hang: a backtracking pattern blocks the thread, so no test timeout can stop it (a cubic Dockerfile pattern hung CI shard 3/4 on
+// PR #485 inside the hostile-input suite's 1 h timeout). So this grows each hostile file in steps and stops at the first step over its bar: a
+// slow pattern fails at a small size, in seconds. Linear work at 64 KiB takes a few ms; the quadratic `^\s*` shapes took seconds there.
+describe("the detector stays fast on hostile files, and a slow pattern fails rather than hangs", () => {
+  const ON_CI = process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false";
+  const BAR_MS = ON_CI ? 1_000 : 250;
+  const SIZES = [1_024, 4_096, 16_384, 65_536];
+  const CALLER = { "app/score.py": "import boto3\nimport sagemaker\nruntime = boto3.client('sagemaker-runtime')\nruntime.invoke_endpoint(EndpointName='m')\n" };
+  const PATHS = ["Dockerfile", "inference.py", "app/main.py", "src/a.ts", "Main.java", "main.go", "tests/test_a.py", "config/app.yml", ".env", "settings.json", "main.tf", "template.yaml", "lib/stack.ts"];
+  // what lets each reader get past its early exits, then a filler that makes a backtracking pattern work hard
+  const LEADS = ["", "sagemaker aws-cdk CfnEndpoint( AWS::SageMaker::Endpoint\nresource \"aws_sagemaker_endpoint\" \"x\" {\n", "FROM ", "EXPOSE 8080\nCMD ", "endpoint_name", "SAGEMAKER_ENDPOINT="];
+  const FILLERS: Record<string, string> = { newlines: "\n", "space-newline": " \n", spaces: " ", "tab-newline": "\t\n", word: "a", dash: "-", quote: "\"", "from-line": "FROM a\n", "def-line": "def \n", "name-line": "name = \n" };
+  for (const path of PATHS) {
+    it(path, async () => {
+      // the first slow case ends the test: one is enough to fail, and each further one would cost seconds more
+      let slow: string | undefined;
+      search: for (const lead of LEADS) {
+        for (const [label, unit] of Object.entries(FILLERS)) {
+          for (const size of SIZES) {
+            const body = lead + unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+            const started = performance.now();
+            await detect({ ...CALLER, [path]: body });
+            const took = performance.now() - started;
+            if (took > BAR_MS) { slow = `${JSON.stringify(lead.slice(0, 20))}+${label} at ${String(size)} bytes: ${String(Math.round(took))} ms`; break search; }
+          }
+        }
+      }
+      expect(slow).toBeUndefined();
+    }, 120_000);
+  }
+});

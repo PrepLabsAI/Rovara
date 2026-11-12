@@ -77,7 +77,8 @@ const languageOf = (path: string): Language | undefined => (Object.keys(LANGUAGE
 // ---- the SageMaker Python SDK
 
 const PYTHON_SDK = {
-  imported: /^\s*(?:from\s+sagemaker\b|import\s+sagemaker\b)/mu,
+  // `[ \t]*`, never `\s*`, after a multiline `^`: `\s*` would run across every following blank line from each line start (quadratic on a file of newlines).
+  imported: /^[ \t]*(?:from|import)[ \t]+sagemaker\b/mu,
   predictor: /\bPredictor\s*\(/u,
   modelBuilder: /\bModelBuilder\s*\(/u,
   localSession: /\bLocalSession\b|\binstance_type\s*=\s*["']local(?:_gpu)?["']/u,
@@ -101,22 +102,42 @@ const DOUBLES = new RegExp(
 
 const CONFIG_FILE = /(?:^|\/)(?:\.env(?:\.[A-Za-z0-9_-]+)?|[^/]+\.(?:ya?ml|toml|ini|cfg|json|properties|env))$/u;
 /** `SAGEMAKER_ENDPOINT_NAME=fraud-scorer`, `sagemaker_endpoint: fraud-scorer`, `"fraudEndpointName": "fraud-scorer"`. The key is group 1 and the literal group 2; a value with a `${}`, a space or a slash is not a name. */
-const SETTING_LINE = new RegExp(String.raw`^\s*${QUOTE}?([A-Za-z0-9_.-]{0,60}?(?:endpoint[_.-]?name|sagemaker[_.-]?endpoint)[A-Za-z0-9_.-]{0,20})${QUOTE}?\s*[:=]\s*${QUOTE}?${NAME}${QUOTE}?\s*,?\s*(?:[#;].*)?$`, "gimu");
+// One line only: every gap is `[ \t]*`, so no match can start at one line and scan the blank lines after it.
+const SETTING_LINE = new RegExp(String.raw`^[ \t]*${QUOTE}?([A-Za-z0-9_.-]{0,60}?(?:endpoint[_.-]?name|sagemaker[_.-]?endpoint)[A-Za-z0-9_.-]{0,20})${QUOTE}?[ \t]*[:=][ \t]*${QUOTE}?${NAME}${QUOTE}?[ \t]*,?[ \t]*(?:[#;][^\n]*)?$`, "gimu");
 
 // ---- infrastructure code
 
 const TERRAFORM_ENDPOINT = /resource\s+"aws_sagemaker_endpoint"\s+"[A-Za-z0-9_-]{1,64}"\s*\{/gu;
-const TERRAFORM_NAME = new RegExp(String.raw`(?:^|\n)\s*name\s*=\s*"${NAME}"`, "u");
+const TERRAFORM_NAME = new RegExp(String.raw`^[ \t]*name[ \t]*=[ \t]*"${NAME}"`, "mu");
 const CDK_ENDPOINT = /\b(?:Cfn)?Endpoint\s*\(/gu;
 const CDK_NAMES = [new RegExp(String.raw`\bendpointName\s*:\s*[${"\"'`"}]${NAME}[${"\"'`"}]`, "u"), new RegExp(String.raw`\bendpoint_name\s*=\s*${QUOTE}${NAME}${QUOTE}`, "u"), new RegExp(String.raw`\.endpointName\(\s*"${NAME}"\s*\)`, "u")];
 const IAC_FILE = /\.(?:ya?ml|json|template|tf)$/u;
 
 // ---- model signs
 
-const INFERENCE_SCRIPT = /^\s*def\s+(?:model_fn|predict_fn|input_fn|output_fn)\s*\(/mu;
+const INFERENCE_SCRIPT = /^[ \t]*def[ \t]+(?:model_fn|predict_fn|input_fn|output_fn)[ \t]*\(/mu;
 const DOCKERFILE = /(?:^|\/)(?:Dockerfile(?:\.[A-Za-z0-9_-]+)?|[A-Za-z0-9_.-]+\.dockerfile)$/u;
 /** An inference image: a base image named for inference or SageMaker, the `/opt/ml` layout, or a container that exposes 8080 and starts `serve` (SageMaker's own contract). */
-const INFERENCE_IMAGE = /^\s*FROM\s+\S*(?:-inference|sagemaker)\S*|\/opt\/ml\b|(?=[\s\S]*^\s*EXPOSE\s+8080\b)(?=[\s\S]*^\s*(?:ENTRYPOINT|CMD)\b[^\n]*\bserve\b)/imu;
+// Three line-bounded patterns joined in code. The single pattern this replaces put `(?=[\s\S]*^\s*EXPOSE...)` lookaheads in an alternation tried at
+// every position: cubic on a Dockerfile of blank lines (12 s at 4 KB), so the hostile-input suite never finished.
+const INFERENCE_FROM = /^[ \t]*FROM[ \t]+([^\s]{1,300})/gimu;
+const OPT_ML = /\/opt\/ml\b/u;
+const EXPOSE_8080 = /^[ \t]*EXPOSE[ \t]+8080\b/imu;
+const SERVE_START = /^[ \t]*(?:ENTRYPOINT|CMD)\b[^\n]*\bserve\b/imu;
+/** Where a Dockerfile shows an inference image, or undefined: a base image named for inference or SageMaker, the `/opt/ml` layout, or both `EXPOSE 8080` and a start command that runs `serve` (then the file's start, as before). */
+function inferenceImageAt(text: string): number | undefined {
+  // the old pattern's lookahead branch matched at the file's start, before any later line, so it still wins
+  if (EXPOSE_8080.test(text) && SERVE_START.test(text)) return 0;
+  INFERENCE_FROM.lastIndex = 0;
+  let at: number | undefined;
+  for (const match of text.matchAll(INFERENCE_FROM)) {
+    const image = (match[1] ?? "").toLowerCase();
+    if (image.includes("-inference") || image.includes("sagemaker")) { at = match.index; break; }
+  }
+  const optMl = OPT_ML.exec(text);
+  if (optMl !== null && (at === undefined || optMl.index < at)) at = optMl.index;
+  return at;
+}
 
 /** The endpoint names a text writes as literals, each with its index. A name that is not SageMaker's own, or is shaped like a key, is not one. */
 function literalNames(text: string, patterns: readonly RegExp[]): Array<{ name: string; index: number }> {
@@ -246,7 +267,7 @@ function readModelSigns(path: string, text: string | undefined, found: Findings)
   if (/(?:^|\/)model\.tar\.gz$/u.test(path)) signal(found, "model_archive", path, 1);
   if (text === undefined) return;
   if (/(?:^|\/)inference\.py$/u.test(path)) { const match = INFERENCE_SCRIPT.exec(text); if (match !== null) signal(found, "inference_script", path, lineOf(text, match.index)); }
-  else if (DOCKERFILE.test(path)) { const match = INFERENCE_IMAGE.exec(text); if (match !== null) signal(found, "inference_image", path, lineOf(text, match.index)); }
+  else if (DOCKERFILE.test(path)) { const at = inferenceImageAt(text); if (at !== undefined) signal(found, "inference_image", path, lineOf(text, at)); }
 }
 
 const ENDPOINT_SIGNALS: readonly SageMakerDetectionSignal[] = ["runtime_client", "invoke_call", "predictor", "model_builder", "local_session", "endpoint_in_iac", "endpoint_name_setting"];
