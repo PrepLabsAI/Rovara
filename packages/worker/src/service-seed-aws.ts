@@ -6,7 +6,7 @@
 // The seed document is the front's (the fork's `SeedService`): `{ region, s3: { buckets: [{ name }] }, dynamodb: { tables: [{ request: <CreateTable> }] }, sqs: { queues: [{ name, attributes }] },
 // sns: { topics: [{ name, subscriptions: [{ protocol, endpoint }] }] }, secretsmanager: { secrets: [{ name, value }] }, ssm: { parameters: [{ name, value, type }] }, kms: { keys: [{ alias, description }] },
 // events: { buses: [name], rules: [{ name, bus, pattern | schedule }] } }` (its sections keep the fork's service names, not the table's keys). Every request is built here from fixed words and from names that passed the
-// contract's strict forms again; nothing else of the repository is sent. A secret's value is NEVER read from the repository: the value is a placeholder made here for each seed (as is a SecureString parameter's).
+// contract's strict forms again; nothing else of the repository is sent. A secret's value is NEVER read from the repository: the value is a placeholder made here for each seed (as is a String parameter's when the template builds it).
 //
 // Rules this module keeps, each with a test (tests/unit/worker-service-seed-aws.test.ts):
 //   - FAIL CLOSED. A resource that does not have its strict form, a duplicate, a region that is not one, a table without its key, an emulator that answers anything but a complete success: the seed fails with ONE fixed sentence
@@ -67,7 +67,7 @@ export interface AwsSeedDocument {
   sqs?: { queues: Array<{ name: string; attributes?: { FifoQueue: "true" } }> };
   sns?: { topics: Array<{ name: string; subscriptions?: Array<{ protocol: "sqs"; endpoint: string }> }> };
   secretsmanager?: { secrets: Array<{ name: string; value: string }> };
-  ssm?: { parameters: Array<{ name: string; value: string; type: "String" | "StringList" | "SecureString" }> };
+  ssm?: { parameters: Array<{ name: string; value: string; type: "String" }> };
   kms?: { keys: Array<{ alias?: string; description?: string }> };
   events?: { buses?: string[]; rules?: Array<{ name: string; bus?: string; pattern?: string; schedule?: string }> };
 }
@@ -75,7 +75,7 @@ export interface AwsSeedDocument {
 /** The account the emulator names in the ARNs it makes (a queue's URL is `.../000000000000/<name>`), which a subscription's endpoint must use. */
 const EMULATOR_ACCOUNT_ID = "000000000000";
 
-/** A made-up value for a secret or a SecureString parameter: plain letters and digits, fresh for each seed, and nothing the repository wrote. */
+/** A made-up value for a secret or a parameter whose value the template does not write: plain letters and digits, fresh for each seed, and nothing the repository wrote. */
 export function placeholderSecretValue(): string {
   return `rovara-placeholder-${randomBytes(9).toString("base64url").replace(/[^A-Za-z0-9]/gu, "a")}`;
 }
@@ -108,7 +108,7 @@ export function buildAwsSeedDocument(region: string, resources: readonly TaskAws
     return [{ name: resource.name, ...(subscriptions.length === 0 ? {} : { subscriptions }) }];
   });
   const secrets = parsed.data.flatMap((resource) => (resource.kind === "secret" ? [{ name: resource.name, value: placeholder() }] : []));
-  const parameters = parsed.data.flatMap((resource) => (resource.kind === "parameter" ? [{ name: resource.name, value: resource.value ?? placeholder(), type: resource.type }] : []));
+  const parameters = parsed.data.flatMap((resource) => (resource.kind === "parameter" ? [{ name: resource.name, value: resource.value ?? placeholder(), type: "String" as const }] : []));
   const keys = parsed.data.flatMap((resource) => (resource.kind === "key" ? [resource.alias === undefined ? { description: resource.name } : { alias: resource.alias, description: resource.name }] : []));
   const buses = parsed.data.flatMap((resource) => (resource.kind === "bus" ? [resource.name] : []));
   const rules = parsed.data.flatMap((resource) => (resource.kind === "rule" ? [{ name: resource.name, ...(resource.bus === undefined ? {} : { bus: resource.bus }), ...(resource.pattern === undefined ? {} : { pattern: resource.pattern }), ...(resource.schedule === undefined ? {} : { schedule: resource.schedule }) }] : []));
@@ -190,13 +190,13 @@ export const IAC_FILE_MAX_BYTES = ENV_DETECT_MAX_FILE_BYTES;
 /** The longest the detector may run over the one file (it runs in a thread that is ended at the limit). */
 export const IAC_DETECT_LIMIT_MS = 10_000;
 
-/** A detected resource in the form the contract accepts: the kind's own fields only (a parameter's `parameterType` is its `type`). */
+/** A detected resource in the form the contract accepts: the kind's own fields only (a parameter is always a `String`). */
 function seedResourceOf(resource: DependencyResource): Record<string, unknown> {
   const { kind, name } = resource;
   switch (kind) {
     case "table": return { kind, name, keySchema: resource.keySchema };
     case "topic": return { kind, name, ...(resource.queues === undefined ? {} : { queues: resource.queues }) };
-    case "parameter": return { kind, name, type: resource.parameterType ?? "String", ...(resource.value === undefined ? {} : { value: resource.value }) };
+    case "parameter": return { kind, name, ...(resource.value === undefined ? {} : { value: resource.value }) };
     case "key": return { kind, name, ...(resource.alias === undefined ? {} : { alias: resource.alias }) };
     case "rule": return { kind, name, ...(resource.bus === undefined ? {} : { bus: resource.bus }), ...(resource.pattern === undefined ? {} : { pattern: resource.pattern }), ...(resource.schedule === undefined ? {} : { schedule: resource.schedule }) };
     default: return { kind, name };
