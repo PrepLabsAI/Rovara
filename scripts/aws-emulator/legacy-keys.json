@@ -1,0 +1,17 @@
+{
+  "_comment": "Ids that older Rovara plans, settings and detectors spell differently from the SDK-derived key of the table. Read on input, never written. Each value must be a key of the generated table.",
+  "aliases": {
+    "apigateway": "api-gateway",
+    "cloudwatchlogs": "cloudwatch-logs",
+    "cognito": "cognito-identity-provider",
+    "cognito-idp": "cognito-identity-provider",
+    "dynamodbstreams": "dynamodb-streams",
+    "es": "elasticsearch-service",
+    "events": "eventbridge",
+    "logs": "cloudwatch-logs",
+    "opensearch-serverless": "opensearchserverless",
+    "secretsmanager": "secrets-manager",
+    "states": "sfn",
+    "stepfunctions": "sfn"
+  }
+}

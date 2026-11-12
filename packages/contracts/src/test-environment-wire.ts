@@ -16,6 +16,7 @@ import {
   IacSeedRefSchema, TestEnvDependencyIdSchema, TestEnvDependencyKindSchema, TestEnvRegionSchema, catalogIdName, testEnvStartedCount,
 } from "./test-env-dependency.js";
 import { reservedDependencyEnvName } from "./test-services-shared.js";
+import { AWS_PLAN_SERVICES_MAX, AwsPlanServiceSchema, normaliseAwsServiceKey } from "./aws-emulator-service-keys.js";
 import { TEST_ENV_ROUND_BUDGET_MIN, TEST_ENV_SELECTION_METHODS, TEST_ENV_SELECT_PLACEHOLDER, TestEnvValueSourceSchema, TestEnvironmentBodySchema, type TestEnvironmentBody } from "./test-environment.js";
 
 export const TEST_ENV_DETECT_FEATURE = "task.testEnvDetect.v1";
@@ -51,8 +52,17 @@ export const TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE = "task.testServices.compa
 export const TEST_SERVICES_FILE_SEED_FEATURE = "task.testServices.fileSeed.v1";
 /** SEED-RISK-1: a worker that checks a seed command's `lock` (re-hashes the repository's seed script from its checkout, refuses on a difference). A plan with a locked seed goes only to such a worker. */
 export const TEST_SERVICES_SEED_LOCK_FEATURE = "task.testServices.seedLock.v1";
-/** The AWS services a plan may ask Rovara local AWS for in slice 2. The broker's rule and the worker's contract are this one list. */
-export const TEST_SERVICES_AWS_PLAN_SERVICES = ["s3", "sqs", "dynamodb"] as const;
+/**
+ * A worker that lists this reads a plan whose `aws.services` names any service of the generated table (`AWS_EMULATOR_SERVICES`), not only the three it could seed. An older worker's strict parse allows only
+ * `SEEDED_AWS_SERVICES`, so the broker sends a plan with any other service to a worker that lists this, and refuses the run to one that does not (`awsPlanNeedsAllServices`, `ec2-delivery.ts`). In `WORKER_INVOCATION_FEATURES`.
+ */
+export const TEST_SERVICES_AWS_ALL_SERVICES_FEATURE = "task.testServices.aws.allServices.v1";
+/** The AWS services Rovara can seed from a project's declared resources today (a bucket, a queue, a table). Any other service of the table starts empty. */
+export const SEEDED_AWS_SERVICES = ["s3", "sqs", "dynamodb"] as const;
+/** Whether a plan's services need `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE`: any of them is not one a worker without the feature accepts. Legacy spellings are read as their keys. */
+export function awsPlanNeedsAllServices(services: readonly string[]): boolean {
+  return services.some((service) => !(SEEDED_AWS_SERVICES as readonly string[]).includes(normaliseAwsServiceKey(service) ?? service));
+}
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
 const line = (max: number) => z.string().min(1).max(max).regex(NO_HIDDEN, "one plain line");
@@ -207,7 +217,7 @@ export const TaskDependencyPlanSchema = z
     seeds: z.array(z.union([z.object({ command: ProjectCommandSchema, lock: SeedScriptLockSchema.optional() }).strict(), z.object({ fixturePath: RelativeWorkspacePathSchema, sha256: Sha256.optional() }).strict()])).max(TEST_ENV_DEPENDENCY_LIMITS.seeds),
     reset: z.enum(TEST_ENV_DEPENDENCY_RESETS),
     /** Only on an `emulated` entry: the AWS services this dependency needs from Rovara local AWS, the region the code is told, and where the project declares its resources (a file, never read by the broker). */
-    aws: z.object({ services: z.array(z.enum(TEST_SERVICES_AWS_PLAN_SERVICES)).min(1).max(TEST_SERVICES_AWS_PLAN_SERVICES.length), region: TestEnvRegionSchema, resources: IacSeedRefSchema.optional() }).strict().optional(),
+    aws: z.object({ services: z.array(AwsPlanServiceSchema).min(1).max(AWS_PLAN_SERVICES_MAX), region: TestEnvRegionSchema, resources: IacSeedRefSchema.optional() }).strict().optional(),
   })
   .strict()
   .superRefine((plan, context) => {
@@ -235,7 +245,7 @@ export const TaskDependencyPlanSchema = z
       if (plan.aws === undefined) problem(["aws"], "an emulated dependency names its AWS services");
       else {
         if (new Set(plan.aws.services).size !== plan.aws.services.length) problem(["aws", "services"], "a service is listed once");
-        if (plan.family.startsWith("aws:") && !(plan.aws.services as readonly string[]).includes(plan.family.slice(4))) problem(["aws", "services"], "the services include the family's own service");
+        if (plan.family.startsWith("aws:") && !(plan.aws.services as readonly string[]).includes(normaliseAwsServiceKey(plan.family.slice(4)) ?? plan.family.slice(4))) problem(["aws", "services"], "the services include the family's own service");
       }
     }
     if (new Set(plan.aliases).size !== plan.aliases.length) problem(["aliases"], "an alias is listed once");

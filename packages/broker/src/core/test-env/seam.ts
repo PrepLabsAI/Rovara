@@ -4,7 +4,7 @@
 //   - `prepareTestServices`: the dependencies a preparation (a candidate check) starts.
 // Nothing here is a second rule: the pin, the usable check and the plan are `usable.ts` and `task-plan.ts`. The seam only exists so `core/task-flow` and `core/build-step` do not import the environment's modules.
 import {
-  TEST_ENV_COVERAGE_PATH_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE,
+  TEST_ENV_COVERAGE_PATH_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, awsPlanNeedsAllServices, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE,
   type OrgId, type ProjectCommand, type TaskDependencyPlan, type TestEnvTaskPlan, type TestEnvironmentBody, type TransactItem,
 } from "@agentx/contracts";
 import type { TestEnvDeps } from "./deps.js";
@@ -20,6 +20,7 @@ export function featuresForTestPlan(dependencies: readonly TaskDependencyPlan[] 
   const planned = dependencies ?? plan?.dependencies ?? [];
   if (planned.length > 0) features.add(TEST_SERVICES_PLAN_FEATURE);
   if (planned.some((dependency) => dependency.backing === "emulated")) features.add(TEST_SERVICES_AWS_PLAN_FEATURE);
+  if (planned.some((dependency) => dependency.aws !== undefined && awsPlanNeedsAllServices(dependency.aws.services))) features.add(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
   if (planned.some((dependency) => dependency.backing === "fake")) features.add(TEST_SERVICES_FAKE_PLAN_FEATURE);
   if (planned.some((dependency) => dependency.seeds.some((seed) => "fixturePath" in seed))) features.add(TEST_SERVICES_FILE_SEED_FEATURE);
   if (planned.some((dependency) => dependency.seeds.some((seed) => "command" in seed && seed.lock !== undefined))) features.add(TEST_SERVICES_SEED_LOCK_FEATURE);
