@@ -125,6 +125,21 @@ export class Runner {
     return execution.stdout ?? "";
   }
 
+  /** {@link run}, as another account: the given uid and gid, with `env` over the release's own environment. */
+  runAs(account: { uid: number; gid: number; env: Record<string, string> }, command: string, args: readonly string[]): void {
+    process.stdout.write(`\n+ (uid ${String(account.uid)}) ${formatCommand(command, args)}\n`);
+    const execution = spawnSync(command, [...args], {
+      cwd: process.cwd(),
+      env: { ...process.env, ...account.env },
+      uid: account.uid,
+      gid: account.gid,
+      encoding: "utf8",
+      stdio: ["inherit", "inherit", "inherit"],
+    } satisfies SpawnSyncOptionsWithStringEncoding);
+    if (execution.error) throw execution.error;
+    if ((execution.status ?? 1) !== 0) throw new Error(`${command} exited with status ${execution.status ?? "unknown"}`);
+  }
+
   capture(command: string, args: readonly string[], allowFailure = false): CommandResult {
     const execution = spawnSync(command, [...args], {
       cwd: process.cwd(),
@@ -313,6 +328,33 @@ export async function buildAndPushImage(
   const pushed = `${image.repositoryUri}@${digest}`;
   assertDigestImage(pushed, image.repositoryUri);
   return pushed;
+}
+
+/** The unprivileged account (nobody) a release run as root, as CodeBuild's is, runs the test suite as. */
+export const RELEASE_TEST_ACCOUNT = { uid: 65534, gid: 65534, home: "/tmp/rovara-release-tests" } as const;
+
+/**
+ * Runs the test suite, as {@link RELEASE_TEST_ACCOUNT} when the release itself runs as root, as it does in CodeBuild.
+ * Root can write to any file, so the tests that prove a read-only git directory is refused as writable (the trusted
+ * base reads) cannot pass as root; CI runs them as an ordinary user. Node drops the privileges itself, so the image
+ * needs no user tools. The checkout is handed to that account for the run and back to root afterwards, pass or fail,
+ * because later steps run git as root and git refuses a repository another user owns.
+ */
+export function runTests(runner: Runner, uid: number | undefined = typeof process.getuid === "function" ? process.getuid() : undefined): void {
+  if (uid !== 0) {
+    runner.run("npm", ["test"]);
+    return;
+  }
+  const { uid: testUid, gid, home } = RELEASE_TEST_ACCOUNT;
+  const owner = `${String(testUid)}:${String(gid)}`;
+  const directory = process.cwd();
+  runner.run("mkdir", ["-p", home]);
+  runner.run("chown", ["-R", owner, directory, home]);
+  try {
+    runner.runAs({ uid: testUid, gid, env: { HOME: home } }, "npm", ["test"]);
+  } finally {
+    runner.run("chown", ["-R", "0:0", directory]);
+  }
 }
 
 // Loaded on use, not at the top: it reads the built @agentx/contracts, and the production release loads this file before it builds.
