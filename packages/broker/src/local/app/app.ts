@@ -93,6 +93,8 @@ import { createScheduleRouter } from "../../core/automation/schedule-router.js";
 import { createChannelSink } from "../../core/channel/sink.js";
 import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createCallbackService, createDecisionService, createNoticeService, createSessionService } from "../../services/index.js";
+import { channelThreadHandler, planCardPosted, threadFollows } from "../../core/channel/thread-notices.js";
+import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
 
 export { TASK_FLOW_INDEXES };
 
@@ -176,6 +178,11 @@ export interface LocalAppOptions {
    * route, a token or a page. Off, nothing of it is mounted, shown or run.
    */
   automation?: boolean | AutomationSwitch;
+  /**
+   * The milestone lines told to the chat thread a task was started from (the plan is ready, a pull request is ready, the task is done): on or off, or a switch the host reads on each use. Default on. Needs-you notices and the plan's
+   * approval card are not milestones and do not depend on it. A host with no chat adapter has no thread to tell, so nothing changes there.
+   */
+  channelMilestones?: boolean | (() => boolean);
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
   timers?: boolean;
   now?: () => Date;
@@ -497,8 +504,16 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }), oneShot);
 
   // Sessions: facts over the task records, the cost ledger over the metering seam.
+  // A task started from a chat thread gets the `plan_ready` and `closed` milestones the thread is told (`core/channel/thread-notices.ts`); with no chat adapter there is no thread and no read is made.
+  const threadMoments = ticketMomentsOnChange({ store, milestones, now: () => clock().getTime(), log: (event, fields) => log({ component: "channel_thread", event, ...fields }), follows: threadFollows({ store }) });
+  const channelMilestonesOn = (): boolean => (typeof options.channelMilestones === "function" ? options.channelMilestones() : options.channelMilestones !== false);
   // What needs the owner reaches them in their chat, batched (one message at most every few minutes), through the notice service. Its footer is the laptop's words: the task is opened on the page of the machine Rovara runs on.
-  const notices = createNoticeService({ store, registry, now: clock, footer: ATTENTION_FOOTER, log });
+  // A task started from a chat thread hears its plan card and its end in the thread, so the batch leaves those out.
+  const notices = createNoticeService({
+    store, registry, now: clock, footer: ATTENTION_FOOTER, log,
+    doneToldInThread: () => registry.names("channel").length > 0 && channelMilestonesOn(),
+    planCarded: planCardPosted({ store, now: () => clock().getTime() }),
+  });
   const sessionService = createSessionService({
     store,
     facts: createTaskFactsSource(flow.deps),
@@ -506,9 +521,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
     // A person is told what needs them through the chat adapters the registry holds, or an email plug-in that can send (`core/notify`; Code's default sends no email); with neither, nothing is queued. The row is only a
-    // queue entry: it is checked again before anything is sent. The install's own pages hear that it changed (ids only). The tickets that asked for the work hear of it after.
+    // queue entry: it is checked again before anything is sent. The install's own pages hear that it changed (ids only). The tickets that asked for the work hear of it after, and a chat thread hears its milestones.
     notices,
-    onChange: [(change) => intake.onSessionChange(change)],
+    onChange: [(change) => intake.onSessionChange(change), async (change) => { if (registry.names("channel").length > 0) await threadMoments(change); }],
   });
 
   // Decisions: the one gate, over the workflow document of the task. A change request starts planning again with the owner's words (L9-wire writes them where the planner's prompt reads them). The laptop's rule
@@ -523,6 +538,13 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const decisionActions = decisions.actions;
   // Chat (owner decision 58): the owner's own acts on the chat page, and what an adapter may hand the core. Nothing here approves: see chat.ts.
   const chat = createLocalChat({ registry, flow, store, companyId, owner, now: () => clock().getTime(), gate, log });
+  // What a task tells the thread it was started from: the plan's approval card (low and medium risk are decided there, high on the page) and three milestone lines. Registered before the first milestone is written.
+  if (registry.names("channel").length > 0) {
+    milestones.register(channelThreadHandler({
+      store, registry, now: () => clock().getTime(), plan: { gate }, footer: ATTENTION_FOOTER, milestones: channelMilestonesOn,
+      log: (event, fields) => log({ component: "channel_thread", event, ...fields }),
+    }));
+  }
   // Lessons: what Rovara learned from finished tasks, loaded into later steps and decided on the owner's page. On unless `ROVARA_LESSONS=0`, in Suggest mode (every lesson waits for the owner); the pages still show what exists.
   const lessonNames = registry.names("learning");
   const lessons = createLocalLessons({

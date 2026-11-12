@@ -1,6 +1,8 @@
 // Lane P3 (items A3, review M2 and L1, L2): which methods may give which answer. ONE function, used by the decision gate and by the merge press, so the two cannot disagree.
 import type { ApprovalRequirement } from "@agentx/contracts";
-import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
+import { CHAT_METHOD_PREFIX, CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
+
+export { CHAT_METHOD_PREFIX };
 
 export type DecisionOutcomeName = "approve" | "reject" | "request_changes";
 
@@ -10,9 +12,6 @@ export interface MethodPolicy {
   rejectMethods?: readonly string[] | undefined;
   changesMethods?: readonly string[] | undefined;
 }
-
-/** The prefix of a chat adapter's decision method (`chat-<channel>`): a press or a reply in a chat, which proves one act and no sign-in. */
-export const CHAT_METHOD_PREFIX = "chat-";
 
 /**
  * Whether a method proves ONE act and no sign-in, so it can never be a strong method: `code-host-comment`, any `code-host-*` method, any `chat-*` method (a press or a reply in a chat), and every method the plug-in lists in
@@ -36,6 +35,7 @@ export function strictMethodsFor(
   const narrowed = (named: readonly string[] | undefined, limit: readonly string[] | undefined, fallback: readonly string[]): readonly string[] =>
     (named ?? fallback).filter((method) => limit === undefined || limit.includes(method));
   if (outcome === "reject") return noComment(narrowed(requirement.rejectMethods, policy.rejectMethods, [LOCAL_SESSION_METHOD]));
-  if (outcome === "request_changes") return narrowed(requirement.changesMethods, policy.changesMethods, [LOCAL_SESSION_METHOD, CODE_HOST_COMMENT_METHOD]);
+  // A request for changes may be a comment or a chat press, but not a chat press on a high-risk request: the high-risk path is the task page's (sign-in), so a chat press is refused here as well as in the sink and the approvers.
+  if (outcome === "request_changes") return narrowed(requirement.changesMethods, policy.changesMethods, [LOCAL_SESSION_METHOD, CODE_HOST_COMMENT_METHOD]).filter((method) => risk !== "high" || !method.startsWith(CHAT_METHOD_PREFIX));
   return risk === "high" ? noComment(narrowed(requirement.strongMethods, policy.highRiskMethods, [LOCAL_SESSION_METHOD])) : undefined;
 }

@@ -19,6 +19,25 @@ const cut = (text: string, max: number): string => {
 export interface ButtonValue { r: string; v: number; d: string; o: ChannelDecision["decision"] }
 export const ACTION_PREFIX = "rovara_decide_";
 
+/** The box that asks "What should change?" when Request changes is pressed: its callback name, and the names of its one input. */
+export const CHANGES_CALLBACK = "rovara_changes";
+export const CHANGES_INPUT = "rovara_changes_reason";
+export const CHANGES_FIELD = "text";
+/** What the box carries for itself (the tool keeps it to 3,000 characters): the request it is for, where the card is, and who opened it. */
+export interface ChangesContext { r: string; v: number; d: string; t: string; s: string; h: string; u: string; w: string }
+
+/** The box (a modal view) that asks what should change. The words typed in it come back as the reason of the request for changes. */
+export function changesModal(context: ChangesContext): unknown {
+  return {
+    type: "modal", callback_id: CHANGES_CALLBACK, private_metadata: JSON.stringify(context),
+    title: { type: "plain_text", text: "Request changes" }, submit: { type: "plain_text", text: "Send" }, close: { type: "plain_text", text: "Cancel" },
+    blocks: [{
+      type: "input", block_id: CHANGES_INPUT, label: { type: "plain_text", text: "What should change?" },
+      element: { type: "plain_text_input", action_id: CHANGES_FIELD, multiline: true, max_length: 500 },
+    }],
+  };
+}
+
 const LABEL_STYLE: Partial<Record<ChannelDecision["decision"], "primary" | "danger">> = { APPROVE: "primary", REJECT: "danger" };
 
 export interface Rendered {
@@ -27,6 +46,8 @@ export interface Rendered {
   /** Only the named person sees it. */
   ephemeralTo?: string;
 }
+
+const OPEN_WORDS = "Open the task on the computer where Rovara runs: `rovara open`.";
 
 const section = (text: string): unknown => ({ type: "section", text: { type: "mrkdwn", text: cut(escapeText(text), SECTION_MAX) } });
 
@@ -48,13 +69,16 @@ export function renderEvent(event: ChannelEvent, maxLength: number): Rendered | 
     case "error": return { text: text(event.data.text) };
     case "link_required": return { text: text(`Link your account to Rovara: ${event.data.linkUrl}`), ephemeralTo: event.data.actor.userId };
     case "approval_request": {
-      const open = { type: "button", text: { type: "plain_text", text: "Open the task" }, url: event.data.taskUrl, action_id: "rovara_open_task" };
+      // The "Open the task" button only when there is an address to open: with none, the words say where the task is opened.
+      const open = event.data.taskUrl === undefined ? [] : [{ type: "button", text: { type: "plain_text", text: "Open the task" }, url: event.data.taskUrl, action_id: "rovara_open_task" }];
       const buttons = (event.data.actions ?? []).map((action) => ({
         type: "button", text: { type: "plain_text", text: cut(action.label, 70) }, action_id: `${ACTION_PREFIX}${action.decision}`,
         ...(LABEL_STYLE[action.decision] === undefined ? {} : { style: LABEL_STYLE[action.decision] }),
         value: JSON.stringify({ r: event.data.requestId, v: event.data.expectedRevision, d: event.data.artifactDigest, o: action.decision } satisfies ButtonValue),
       }));
-      return { text: text(event.data.text), blocks: [section(event.data.text), { type: "actions", elements: [...buttons, open] }] };
+      const elements = [...buttons, ...open];
+      const where = event.data.taskUrl === undefined && !event.data.text.includes("rovara open") ? [{ type: "context", elements: [{ type: "mrkdwn", text: OPEN_WORDS }] }] : [];
+      return { text: text(event.data.text), blocks: [section(event.data.text), ...(elements.length === 0 ? [] : [{ type: "actions", elements }]), ...where] };
     }
   }
 }

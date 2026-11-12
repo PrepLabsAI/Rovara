@@ -15,13 +15,19 @@ export interface MomentTable {
   milestones: Pick<CodeMilestones, "items" | "deliver">;
   now: () => number;
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
+  /**
+   * Another reason to write these moments for a session besides a ticket: a chat thread the task was started from, which is told the plan, the pull request and the end (`core/channel/thread-notices.ts`). Absent: only a ticket
+   * counts. A failure is a failure of the best-effort write, which is logged and never thrown.
+   */
+  follows?: ((orgId: OrgId, sessionId: string) => Promise<boolean>) | undefined;
 }
 
 const errorName = (error: unknown): string => (error instanceof Error ? error.name : "unknown");
 const log = (table: MomentTable, event: string, fields: Record<string, unknown>): void => table.log?.(event, fields);
 
 async function followsTicket(table: MomentTable, orgId: OrgId, sessionId: string | undefined): Promise<boolean> {
-  return (await sessionBindingsOf(table.store, orgId, sessionId)).some((binding) => binding.kind === "tracker_item");
+  if ((await sessionBindingsOf(table.store, orgId, sessionId)).some((binding) => binding.kind === "tracker_item")) return true;
+  return sessionId !== undefined && table.follows !== undefined && (await table.follows(orgId, sessionId)) === true;
 }
 
 async function writeMoment(table: MomentTable, input: { kind: "started" | "plan_ready" | "closed"; orgId: OrgId; taskId: string; n: number; text: string; definitionVersion?: string }): Promise<void> {

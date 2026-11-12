@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type ChannelDecision, type ChannelEvent, type InboundMessage } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters } from "../../packages/broker/src/ports/adapter-registry.js";
 import {
-  NO_THREAD, SLACK_CAPABILITIES, SlackApiError, SlackChannel, decisionOf, escapeText, messageOf, renderEvent, slackChannelPlugin, slackWeb, startSocket, textOf, SOCKET_QUEUE_MAX, type SocketLike,
+  NO_THREAD, SLACK_CAPABILITIES, SlackApiError, SlackChannel, changesModal, changesPressOf, changesSubmissionOf, cleanChatText, decisionOf, escapeText, messageOf, renderEvent, slackChannelPlugin, slackWeb, startSocket, textOf, SOCKET_QUEUE_MAX, type SocketLike,
 } from "../../packages/broker/src/plugins/channel/slack/index.js";
 
 const BOT_TOKEN = ["xoxb", "1111111111", "2222222222", "abcdefghijklmnop"].join("-");
@@ -400,3 +400,157 @@ describe("the plug-in", () => {
     expect(error).not.toContain(BOT_TOKEN);
   });
 });
+
+describe("Request changes asks what should change", () => {
+  const REQUEST = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+  const VALUE = { r: REQUEST, v: 3, d: "d".repeat(64), o: "REQUEST_CHANGES" };
+  const press = (overrides: Record<string, unknown> = {}) => ({
+    type: "block_actions", trigger_id: "1337.42.abcdef", user: { id: PERSON, team_id: TEAM }, team: { id: TEAM }, channel: { id: CHANNEL }, message: { ts: "1700000000.000300", thread_ts: "1700000000.000001" },
+    actions: [{ action_id: "rovara_decide_REQUEST_CHANGES", value: JSON.stringify(VALUE) }], ...overrides,
+  });
+  const context = changesPressOf(press())!.context;
+  const submission = (text: string | null | undefined, overrides: Record<string, unknown> = {}, meta: unknown = context) => ({
+    type: "view_submission", user: { id: PERSON, team_id: TEAM }, team: { id: TEAM },
+    view: { id: "V0VIEW001", callback_id: "rovara_changes", private_metadata: JSON.stringify(meta), state: { values: { rovara_changes_reason: { text: { type: "plain_text_input", value: text } } } } }, ...overrides,
+  });
+
+  it("declares forms, and a press of the button is not a decision: it is a request to open the box for exactly that request, by that person", () => {
+    expect(SLACK_CAPABILITIES.forms).toBe(true);
+    expect(decisionOf(press(), CLOCK)).toBeUndefined();
+    expect(changesPressOf(press())).toEqual({ triggerId: "1337.42.abcdef", context: { r: REQUEST, v: 3, d: "d".repeat(64), t: TEAM, s: CHANNEL, h: "1700000000.000001", u: PERSON, w: TEAM } });
+    // Another button, a value that disagrees with its button, and a presser with no workspace open no box.
+    expect(changesPressOf(press({ actions: [{ action_id: "rovara_decide_APPROVE", value: JSON.stringify({ ...VALUE, o: "APPROVE" }) }] }))).toBeUndefined();
+    expect(changesPressOf(press({ actions: [{ action_id: "rovara_decide_REQUEST_CHANGES", value: JSON.stringify({ ...VALUE, o: "REJECT" }) }] }))).toBeUndefined();
+    expect(changesPressOf(press({ user: { id: PERSON } }))).toBeUndefined();
+    const modal = changesModal(context) as { type: string; callback_id: string; private_metadata: string; blocks: Array<{ label: { text: string }; element: { max_length: number } }> };
+    expect(modal).toMatchObject({ type: "modal", callback_id: "rovara_changes" });
+    expect(modal.blocks[0]!.label.text).toBe("What should change?");
+    expect(modal.blocks[0]!.element.max_length).toBe(500);
+    expect(JSON.parse(modal.private_metadata)).toEqual(context);
+  });
+
+  it("reads the words typed in the box as the reason of a request for changes for the request the box was opened for", () => {
+    const heard = changesSubmissionOf(submission("Use the retry helper."), { userId: BOT }, CLOCK);
+    expect(heard).toMatchObject({ status: "ok", decision: { decision: "REQUEST_CHANGES", reason: "Use the retry helper.", requestId: REQUEST, expectedRevision: 3, eventId: "V0VIEW001", conversation: { tenant: TEAM, space: CHANNEL, thread: "1700000000.000001" }, actor: { userId: PERSON, tenant: TEAM } } });
+  });
+
+  it("makes the words safe the way other chat text is, and cuts them to the limit", () => {
+    expect(cleanChatText(`<@${BOT}> hi <@U0OTHER99> &lt;b&gt;\u0000 a\u200b   b`, BOT, 500)).toBe("hi @member <b> a b");
+    const heard = changesSubmissionOf(submission(`ask <@U0OTHER99>${"y".repeat(900)}`), { userId: BOT }, CLOCK);
+    expect(heard?.status === "ok" && heard.decision.reason.startsWith("ask @member")).toBe(true);
+    expect(heard?.status === "ok" && [...heard.decision.reason].length).toBe(500);
+  });
+
+  it("refuses nothing typed, only spaces, or only invisible characters, and the box stays open with a fixed error", () => {
+    for (const text of ["", "   \n ", "\u200b\u0007", null, undefined]) expect(changesSubmissionOf(submission(text), { userId: BOT }, CLOCK)).toEqual({ status: "empty" });
+    expect(changesSubmissionOf({ ...submission("x"), view: { id: "V1", callback_id: "rovara_changes", private_metadata: JSON.stringify(context), state: { values: {} } } }, { userId: BOT }, CLOCK)).toEqual({ status: "empty" });
+  });
+
+  it("refuses a box sent by a person other than the one who opened it, from another workspace, or whose record does not read, and ignores a box that is not Rovara's", () => {
+    const logs: Array<Record<string, unknown>> = [];
+    expect(changesSubmissionOf(submission("x", { user: { id: "U0SOMEONE", team_id: TEAM } }), { userId: BOT }, CLOCK, (entry) => logs.push(entry))).toMatchObject({ status: "refused" });
+    expect(changesSubmissionOf(submission("x", { user: { id: PERSON, team_id: "T0GUESTTT" } }), { userId: BOT }, CLOCK)).toMatchObject({ status: "refused" });
+    expect(changesSubmissionOf(submission("x", { user: { id: PERSON } }), { userId: BOT }, CLOCK)).toMatchObject({ status: "refused" });
+    expect(changesSubmissionOf(submission("x", {}, { ...context, d: "short" }), { userId: BOT }, CLOCK)).toMatchObject({ status: "refused" });
+    expect(changesSubmissionOf(submission("x", {}, "{not json"), { userId: BOT }, CLOCK)).toMatchObject({ status: "refused" });
+    expect(logs).toEqual([{ event: "slack.changes_box_other_person" }]);
+    const other = submission("x");
+    other.view.callback_id = "someone_elses";
+    expect(changesSubmissionOf(other, { userId: BOT }, CLOCK)).toBeUndefined();
+    expect(changesSubmissionOf({ type: "block_actions" }, { userId: BOT }, CLOCK)).toBeUndefined();
+  });
+
+  const listen = async () => {
+    const sockets: FakeSocket[] = [];
+    const decisions: ChannelDecision[] = [];
+    const slack = fakeSlack();
+    const adapter = new SlackChannel({ projects: ["web"], botToken: reader(BOT_TOKEN), appToken: reader(APP_TOKEN), fetch: slack.fetch, now: CLOCK, socket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, sleep: async () => { await new Promise((resolve) => setTimeout(resolve, 1)); } });
+    const listening = await adapter.start({ message: async () => undefined, decision: async (decision) => { decisions.push(decision); } });
+    await until(() => sockets.length === 1);
+    return { sockets, decisions, slack, listening };
+  };
+
+  it("opens the box with the press's own trigger, decides nothing yet, then sends the typed words as the decision", async () => {
+    const { sockets, decisions, slack, listening } = await listen();
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e1", payload: press() });
+    await until(() => slack.calls.some((call) => call.method === "views.open"));
+    const opened = JSON.parse(slack.calls.find((call) => call.method === "views.open")!.body) as { trigger_id: string; view: { callback_id: string; private_metadata: string } };
+    expect(opened.trigger_id).toBe("1337.42.abcdef");
+    expect(opened.view.callback_id).toBe("rovara_changes");
+    expect(JSON.parse(opened.view.private_metadata)).toEqual(context);
+    expect(decisions).toEqual([]);
+    expect(sockets[0]!.sent).toEqual([JSON.stringify({ envelope_id: "e1" })]);
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e2", payload: submission("Use the retry helper.") });
+    await until(() => decisions.length === 1);
+    expect(decisions[0]).toMatchObject({ decision: "REQUEST_CHANGES", reason: "Use the retry helper." });
+    expect(sockets[0]!.sent[1]).toBe(JSON.stringify({ envelope_id: "e2" }));
+    await listening.stop();
+  });
+
+  it("answers an empty box with an error on its field and sends no decision, and closes a box from another person with no decision", async () => {
+    const { sockets, decisions, slack, listening } = await listen();
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e1", payload: submission("   ") });
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e2", payload: submission("x", { user: { id: "U0SOMEONE", team_id: TEAM } }) });
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e3", payload: submission("Fine.") });
+    await until(() => decisions.length === 1);
+    expect(JSON.parse(sockets[0]!.sent[0]!)).toEqual({ envelope_id: "e1", payload: { response_action: "errors", errors: { rovara_changes_reason: "Say what should change." } } });
+    expect(JSON.parse(sockets[0]!.sent[1]!)).toEqual({ envelope_id: "e2", payload: { response_action: "clear" } });
+    expect(JSON.parse(sockets[0]!.sent[2]!)).toEqual({ envelope_id: "e3" });
+    // The person who sent a closed box is told why, privately, in the card's thread.
+    await until(() => slack.calls.some((call) => call.method === "chat.postEphemeral"));
+    const note = JSON.parse(slack.calls.find((call) => call.method === "chat.postEphemeral")!.body) as { channel: string; user: string; thread_ts: string; text: string };
+    expect(note).toMatchObject({ channel: CHANNEL, user: "U0SOMEONE", thread_ts: "1700000000.000001" });
+    expect(note.text).toContain("opened by someone else");
+    expect(decisions.map((decision) => decision.reason)).toEqual(["Fine."]);
+    await listening.stop();
+  });
+
+  it("tells the person privately when the box cannot open (an expired trigger), with the card's own link or the words to open the task", async () => {
+    const sockets: FakeSocket[] = [];
+    const slack = fakeSlack({ "views.open": () => ({ ok: false, error: "expired_trigger_id" }) });
+    const logs: Array<Record<string, unknown>> = [];
+    const adapter = new SlackChannel({ projects: ["web"], botToken: reader(BOT_TOKEN), appToken: reader(APP_TOKEN), fetch: slack.fetch, now: CLOCK, log: (entry) => logs.push(entry), socket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, sleep: async () => { await new Promise((resolve) => setTimeout(resolve, 1)); } });
+    const listening = await adapter.start({ message: async () => undefined, decision: async () => undefined });
+    await until(() => sockets.length === 1);
+    const withLink = press({ message: { ts: "1700000000.000300", thread_ts: "1700000000.000001", blocks: [{ type: "actions", elements: [{ type: "button", action_id: "rovara_open_task", url: "https://example.test/tasks/1" }] }] } });
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e1", payload: withLink });
+    await until(() => slack.calls.filter((call) => call.method === "chat.postEphemeral").length === 1);
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e2", payload: press() });
+    await until(() => slack.calls.filter((call) => call.method === "chat.postEphemeral").length === 2);
+    const notes = slack.calls.filter((call) => call.method === "chat.postEphemeral").map((call) => JSON.parse(call.body) as { channel: string; user: string; thread_ts: string; text: string });
+    expect(notes[0]).toMatchObject({ channel: CHANNEL, user: PERSON, thread_ts: "1700000000.000001", text: "That button expired. Open the task page to ask for changes: https://example.test/tasks/1" });
+    expect(notes[1]!.text).toBe("That button expired. Open the task page to ask for changes (`rovara open`).");
+    expect(logs).toContainEqual({ event: "slack.changes_box_failed", code: "expired_trigger_id" });
+    // An address that is not plain https is not put in the note.
+    expect(changesPressOf(press({ message: { ts: "1700000000.000300", blocks: [{ type: "actions", elements: [{ action_id: "rovara_open_task", url: "javascript:alert(1)" }] }] } }))?.taskUrl).toBeUndefined();
+    await listening.stop();
+  });
+
+  it("tells the person why a box that could not be read was closed, where the record still names the card's place", () => {
+    const place = changesSubmissionOf(submission("x", {}, { ...context, d: "short" }), { userId: BOT }, CLOCK);
+    expect(place).toEqual({ status: "refused", why: "unreadable", notify: { channel: CHANNEL, thread: "1700000000.000001", user: PERSON } });
+    expect(changesSubmissionOf(submission("x", {}, "{not json"), { userId: BOT }, CLOCK)).toEqual({ status: "refused", why: "unreadable" });
+  });
+});
+
+describe("a card with no address to open", () => {
+  const data = { text: "Plan waits.", kind: "plan_approval" as const, requestId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301", expectedRevision: 3, artifactDigest: "d".repeat(64) };
+  const base = { version: 1 as const, id: "evt_aaaaaaaaaaaaaaaaaaaa", channel: "slack", createdAt: "2026-11-10T10:00:00.000Z", conversation: { channel: "slack", tenant: TEAM, space: CHANNEL, thread: "1700000000.000001" } };
+
+  it("renders no Open the task button, and says where to open the task instead", () => {
+    const withButtons = renderEvent({ ...base, type: "approval_request", data: { ...data, actions: [{ decision: "APPROVE", label: "Approve" }] } }, 3_000)!;
+    const elementsOf = (rendered: { blocks?: unknown[] }) => (rendered.blocks as Array<{ type: string; elements?: Array<{ action_id?: string; url?: string; text?: unknown }> }>).filter((block) => block.type === "actions").flatMap((block) => block.elements ?? []);
+    expect(elementsOf(withButtons).map((element) => element.action_id)).toEqual(["rovara_decide_APPROVE"]);
+    expect(JSON.stringify(withButtons.blocks)).toContain("rovara open");
+    // No buttons and no address: no empty actions block either.
+    const bare = renderEvent({ ...base, type: "approval_request", data }, 3_000)!;
+    expect((bare.blocks as Array<{ type: string }>).map((block) => block.type)).toEqual(["section", "context"]);
+    // The words are not said twice when the card's own text already says it.
+    const said = renderEvent({ ...base, type: "approval_request", data: { ...data, text: "Plan waits.\nOpen it with `rovara open`." } }, 3_000)!;
+    expect((said.blocks as Array<{ type: string }>).map((block) => block.type)).toEqual(["section"]);
+    // With an address, the button is there with its url.
+    const linked = renderEvent({ ...base, type: "approval_request", data: { ...data, taskUrl: "https://example.test/t" } }, 3_000)!;
+    expect(elementsOf(linked)).toEqual([expect.objectContaining({ action_id: "rovara_open_task", url: "https://example.test/t" })]);
+  });
+});
+

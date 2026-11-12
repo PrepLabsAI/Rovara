@@ -313,6 +313,98 @@ describe("followers, the conversation a task was started from, and the footer", 
     expect(quiet3.delivered).toEqual([]);
   });
 
+  it("leaves the finished-task notice out of the start thread while the channel milestones tell it, and still tells the places the person chose and the other notices", async () => {
+    const started: ConversationRef = { channel: "otherchat", tenant: "team1", space: "room1", thread: "main" };
+    const thread = async (_org: OrgId, sessionId: string) => (sessionId === SESSION ? { conversation: started, personId: OWNER_ID } : undefined);
+    const finished = async () => {
+      const w = await world();
+      const quiet = new FakeChannelAdapter();
+      w.registry.register("channel", "otherchat", quiet);
+      await w.move({});
+      await w.move({ workflow: { stage: "MERGED", state: "COMPLETE" }, step: "Merged" });
+      await w.prefs([target()]);
+      return { w, quiet };
+    };
+    const milestones = await finished();
+    await milestones.w.deliver({ thread, doneToldInThread: () => true });
+    expect(milestones.quiet.delivered).toEqual([]);
+    expect(milestones.w.adapter.delivered).toHaveLength(1);
+    expect(await milestones.w.pending()).toHaveLength(0);
+    // Without them (the default), the thread is told as before.
+    const before = await finished();
+    await before.w.deliver({ thread });
+    expect(before.quiet.delivered).toHaveLength(1);
+    expect(before.quiet.delivered[0]).toMatchObject({ type: "done" });
+    // A needs-you notice still goes to the thread.
+    const waiting = await needsYou();
+    const quiet = new FakeChannelAdapter();
+    waiting.registry.register("channel", "otherchat", quiet);
+    await waiting.deliver({ thread, doneToldInThread: () => true });
+    expect(quiet.delivered).toHaveLength(1);
+  });
+
+  it("skips the thread's reminder for a plan that already got its card, and only for that: the places the person chose and every other notice still get theirs", async () => {
+    const started: ConversationRef = { channel: "otherchat", tenant: "team1", space: "room1", thread: "main" };
+    const thread = async (_org: OrgId, sessionId: string) => (sessionId === SESSION ? { conversation: started, personId: OWNER_ID } : undefined);
+    const setup = async (move: typeof needsYou) => {
+      const w = await move();
+      const quiet = new FakeChannelAdapter();
+      w.registry.register("channel", "otherchat", quiet);
+      return { w, quiet };
+    };
+    // A carded plan: the thread is not told again; the chosen place is.
+    const carded = await setup(needsYou);
+    await carded.w.prefs([target()]);
+    const asked: string[] = [];
+    await carded.w.deliver({ thread, planCarded: async (session: { sessionId: string }) => { asked.push(session.sessionId); return true; } });
+    expect(asked).toEqual([SESSION]);
+    expect(carded.quiet.delivered).toEqual([]);
+    expect(carded.w.adapter.delivered).toHaveLength(1);
+    expect(await carded.w.pending()).toHaveLength(0);
+    // A plan with no card, and a check that fails: the thread is told.
+    for (const planCarded of [async () => false, async () => { throw new Error("store down"); }]) {
+      const open = await setup(needsYou);
+      await open.w.prefs([target()]);
+      await open.w.deliver({ thread, planCarded });
+      expect(open.quiet.delivered).toHaveLength(1);
+      expect(open.w.adapter.delivered).toHaveLength(1);
+    }
+    // Not asked, and not skipped, for a notice that is not a wait: failed and done still go to the thread.
+    const failed = await setup(async () => {
+      const w = await world();
+      await w.move({});
+      await w.move({ workflow: undefined, runStatus: "FAILED", failureCategory: "timed_out" });
+      return w;
+    });
+    let questions = 0;
+    await failed.w.deliver({ thread, planCarded: async () => { questions += 1; return true; } });
+    expect(questions).toBe(0);
+    expect(failed.quiet.delivered).toHaveLength(1);
+  });
+
+  it("applies the reminder skip to needs-you only: a paused, ready, failed or done notice still goes to the thread even when the plan is carded", async () => {
+    const started: ConversationRef = { channel: "otherchat", tenant: "team1", space: "room1", thread: "main" };
+    const thread = async (_org: OrgId, sessionId: string) => (sessionId === SESSION ? { conversation: started, personId: OWNER_ID } : undefined);
+    const moves: Record<string, Partial<SessionTaskFacts>> = {
+      paused: { workflow: undefined, display: { state: "paused_budget", reason: "it reached its spending limit" } },
+      ready: { workflow: undefined, display: { state: "ready_to_merge" } },
+      failed: { workflow: undefined, runStatus: "FAILED", failureCategory: "timed_out" },
+      done: { workflow: { stage: "MERGED", state: "COMPLETE" }, step: "Merged" },
+    };
+    for (const [name, move] of Object.entries(moves)) {
+      const w = await world();
+      const quiet = new FakeChannelAdapter();
+      w.registry.register("channel", "otherchat", quiet);
+      await w.move({});
+      await w.move(move);
+      expect((await w.pending()).map((row) => row["kind"]), name).toEqual([name === "done" ? "done" : name]);
+      let asked = 0;
+      await w.deliver({ thread, planCarded: async () => { asked += 1; return true; } });
+      expect(quiet.delivered, name).toHaveLength(1);
+      expect(asked, name).toBe(0);
+    }
+  });
+
   it("adds the footer after the list and keeps it whole when the text is cut", async () => {
     const w = await needsYou();
     await w.prefs([target()]);

@@ -20,11 +20,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 
 export const ENGINE_NAME = "aws-emulator";
-export const ENGINE_VERSION = "1.0.322";
-export const ENGINE_COMMIT = "7753983c6e495ec3612695b1336bf4936fc7b7fd";
+export const ENGINE_VERSION = "1.0.337";
+export const ENGINE_COMMIT = "7394251eefd071b8c239bc91125495753c22c75a";
 /** sha256 of the scores file as released (gzip) and of the same file unzipped. */
-export const SCORES_SHA256_GZ = "eca6d69bfa6e801d224f88dd47907ef1573002161e57d1b092de655db77e08cd";
-export const SCORES_SHA256_JSON = "9aaa34569c5701fa33c706784354eff0d418e616058df99e0e1fc0b749def290";
+export const SCORES_SHA256_GZ = "f893b4eda831a79dd453a255e21acdb5498e1e462e2f42fac589d1ffdd038084";
+export const SCORES_SHA256_JSON = "dec0869018a5a88030f37934a76fdf54ffe2134bb040bceb7faff55fb756adbb";
 export const SCORES_SCHEMA_VERSION = 1;
 
 const SERVICE_KEY = /^[a-z][a-z0-9-]{1,39}$/u;

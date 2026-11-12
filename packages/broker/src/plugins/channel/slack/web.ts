@@ -30,6 +30,8 @@ export interface SlackWeb {
   authTest(): Promise<{ teamId: string; botUserId: string }>;
   postMessage(post: SlackPost): Promise<{ ts: string }>;
   postEphemeral(post: SlackPost & { user: string }): Promise<void>;
+  /** Opens a box (a modal view) for the person who pressed a button, with the press's own trigger (good for a few seconds). */
+  openView(input: { triggerId: string; view: unknown }): Promise<void>;
   /** The address of a socket connection for the app-level token. */
   openConnection(): Promise<string>;
 }
@@ -91,6 +93,9 @@ export function slackWeb(options: SlackWebOptions): SlackWeb {
     },
     async postEphemeral(post) {
       await call("chat.postEphemeral", await bot(), { ...postBody(post), user: post.user });
+    },
+    async openView(input) {
+      await call("views.open", await bot(), { trigger_id: input.triggerId, view: input.view });
     },
     async openConnection() {
       if (options.appToken === undefined) throw new SlackApiError("no_app_token");
