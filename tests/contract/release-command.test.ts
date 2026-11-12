@@ -6,9 +6,11 @@ import {
 } from "../../infra/lib/release-pipeline.js";
 import { AGENTX_SLACK_ORCHESTRATOR_REPOSITORY } from "../../infra/lib/slack-orchestrator.js";
 import {
+  RELEASE_TEST_ACCOUNT,
   assertDigestImage,
   parseReleaseArgs,
   releaseTag,
+  runTests,
   type Runner,
 } from "../../scripts/release-common.js";
 import {
@@ -299,5 +301,46 @@ describe("release pipeline trigger", () => {
       "docs/package.json",
     ];
     expect(ignored.filter(triggered)).toEqual([]);
+  });
+});
+
+describe("the release's test suite as root (CodeBuild)", () => {
+  function recorder(options: { testsFail?: boolean } = {}) {
+    const calls: unknown[][] = [];
+    const runner = {
+      run(command: string, args: readonly string[]) {
+        calls.push([command, ...args]);
+        return "";
+      },
+      runAs(account: { uid: number; gid: number; env: Record<string, string> }, command: string, args: readonly string[]) {
+        calls.push(["as", account, command, ...args]);
+        if (options.testsFail === true) throw new Error("npm exited with status 1");
+      },
+    };
+    return { runner: runner as unknown as Runner, calls };
+  }
+  const { uid, gid, home } = RELEASE_TEST_ACCOUNT;
+
+  it("runs the tests directly when the release is not root", () => {
+    const { runner, calls } = recorder();
+    runTests(runner, 501);
+    expect(calls).toEqual([["npm", "test"]]);
+  });
+
+  it("runs them as nobody when it is root, and gives the checkout back to root", () => {
+    const { runner, calls } = recorder();
+    runTests(runner, 0);
+    expect(calls).toEqual([
+      ["mkdir", "-p", home],
+      ["chown", "-R", `${String(uid)}:${String(gid)}`, process.cwd(), home],
+      ["as", { uid, gid, env: { HOME: home } }, "npm", "test"],
+      ["chown", "-R", "0:0", process.cwd()],
+    ]);
+  });
+
+  it("still gives the checkout back to root when the tests fail", () => {
+    const { runner, calls } = recorder({ testsFail: true });
+    expect(() => runTests(runner, 0)).toThrow("npm exited with status 1");
+    expect(calls.at(-1)).toEqual(["chown", "-R", "0:0", process.cwd()]);
   });
 });

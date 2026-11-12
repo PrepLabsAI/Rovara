@@ -13,6 +13,7 @@ import {
   optionalControlPlaneParameters,
   parseReleaseArgs,
   profileArgs,
+  runTests,
   stackExists,
   stackOutput,
   stackParameter,
@@ -215,7 +216,7 @@ export async function releaseProduction(
   if (!options.skipChecks) {
     runner.run("npm", ["run", "typecheck"]);
     runner.run("npm", ["run", "lint"]);
-    runner.run("npm", ["test"]);
+    runTests(runner);
   }
 
   const identity = JSON.parse(
