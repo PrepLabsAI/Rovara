@@ -48,6 +48,8 @@ import { createChoiceOffer, routeSlackRequest } from "../../packages/slack-servi
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { handleTaskQuestion, runTaskAnswer } from "../../packages/slack-service/src/task-question.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
+import { createContinuationRecorder } from "../../packages/slack-service/src/thread-continuation.js";
+import { isThreadContinuation } from "../../packages/contracts/src/index.js";
 import { runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import type { RequestRoute } from "../../packages/orchestrator/src/request-router.js";
@@ -305,6 +307,8 @@ export async function createWorkflowE2E(options: {
   route?: (text: string) => RequestRoute | Promise<RequestRoute>;
   /** Decision 134: the Slack service asks the broker to start a clear small change on Quick (through the `/v1/service` route). */
   autoStartQuick?: true;
+  /** Messages posted by apps are read too (the ingress's appPosted switch), with this member check. */
+  appPosted?: { accept: boolean; checkMember: (userId: string) => Promise<{ outcome: "person" } | { outcome: "not_person" } | { outcome: "failed"; error: string }> };
   /**
    * A task started before plans became structured: the first planning step's stored document is this Markdown, with no
    * format and no evidence, as the table, the storage and the notifier's stream all see it.
@@ -1029,6 +1033,7 @@ export async function createWorkflowE2E(options: {
   const offerChoice = createChoiceOffer({ documentClient: db, tableName: "slack-threads",
     post: async (thread, text, blocks) => slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }).ts,
     log: (event, fields) => { routeLogs.push({ event, fields }); } });
+  const rememberAnswered = createContinuationRecorder({ documentClient: db, tableName: "slack-threads", log: (event, fields) => { routeLogs.push({ event, fields }); } });
   const runRoutedRequests = async () => {
     for (const message of routedQueue.splice(0, routedQueue.length)) {
       const route = options.route;
@@ -1036,6 +1041,8 @@ export async function createWorkflowE2E(options: {
         ...(route === undefined ? {} : { route: async (text: string) => { routeCalls.push(text); return route(text); } }),
         offer: offerChoice, answer: async (question) => { chatQueue.push(question); }, finish: async () => undefined,
         notify: async (thread, text, blocks) => { slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }); },
+        // Decision 147: the production recorder of whom AgentX answered, on the fake Slack threads table.
+        answered: (request: SlackRequestMessage) => rememberAnswered(request.thread, request.userId),
         ...(options.autoStartQuick === true ? { autoStart: async ({ message: request, requestId }: { message: SlackRequestMessage; requestId: string }) =>
           createThreadApi({ controlPlaneUrl: CONTROL_PLANE_URL, signedFetch: serviceFetch(request.thread, request.userId) }).startQuickFromIntake!({ requestId }) } : {}),
         log: (event, fields) => { routeLogs.push({ event, fields }); },
@@ -1074,6 +1081,9 @@ export async function createWorkflowE2E(options: {
     recordThreadNote: (input) => recordThreadNoteThroughBroker(invokeBroker(handler), input),
     // Decision 134: the broker's own record of each routed request, through the production adapter.
     recordIntake: (input) => recordIntakeThroughBroker(invokeBroker(handler), input),
+    ...(options.appPosted === undefined ? {} : { appPosted: options.appPosted }),
+    // Decision 147: the production check of a plain reply against the Slack service's record.
+    threadContinuation: (thread, userId, nowSeconds) => isThreadContinuation(async (key) => db.get(key.pk, key.sk), thread, userId, nowSeconds),
     postEphemeral: async (input) => { slack.postEphemeral(input); },
     // A shared thread that is not a Slack-started task's own thread keeps the PR feedback note path.
     captureFeedbackNote: (input) => captureFeedbackNoteThroughBroker(invokeBroker(handler), input),

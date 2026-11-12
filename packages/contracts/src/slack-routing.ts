@@ -255,7 +255,7 @@ export const QuickAutoStartRequestSchema = z.object({
 export type QuickAutoStartRequest = z.infer<typeof QuickAutoStartRequestSchema>;
 
 /** Why a clear small change was not started on its own: it then gets the card with Start, as before. */
-export const QUICK_AUTO_START_SKIPS = ["unusual_text", "high_risk", "too_long", "thread_busy", "start_refused", "not_recorded"] as const;
+export const QUICK_AUTO_START_SKIPS = ["unusual_text", "high_risk", "too_long", "thread_busy", "start_refused", "not_recorded", "design_review"] as const;
 export type QuickAutoStartSkip = (typeof QUICK_AUTO_START_SKIPS)[number];
 
 export const QuickAutoStartResultSchema = z.discriminatedUnion("started", [
@@ -280,3 +280,45 @@ export function quickAutoStartedMessage(input: { requesterId: string; taskId: st
 
 /** How long the broker keeps a routed message's record for a quick start: the Slack service asks within seconds. */
 export const SLACK_INTAKE_RECORD_SECONDS = 10 * 60;
+
+/**
+ * Decision 147: in a Slack thread where AgentX answered someone, that same person's later replies count as addressed to
+ * AgentX without an @mention, for 24 hours after AgentX's last message in the thread; anyone else still needs a mention.
+ * Kept on the Slack threads table, keyed by the thread with its Slack workspace (so another company's thread never
+ * matches): one item for the thread (when AgentX last answered there) and one per person it answered, each with a TTL.
+ */
+export const THREAD_CONTINUATION_SECONDS = 24 * 60 * 60;
+/** How long a person's item is kept; the window itself is read from the thread's item. */
+export const THREAD_CONTINUATION_KEEP_SECONDS = 7 * 24 * 60 * 60;
+
+export interface ContinuationThread { teamId: string; channelId: string; threadTs: string }
+
+export function threadContinuationKey(thread: ContinuationThread, userId?: string): { pk: string; sk: string } {
+  return { pk: `CONTINUE#${thread.teamId}#${thread.channelId}#${thread.threadTs}`, sk: userId === undefined ? "META" : `USER#${userId}` };
+}
+
+/** The two items (without the table) that say AgentX answered `userId` in `thread` at `nowMs`. */
+export function threadContinuationItems(thread: ContinuationThread, userId: string, nowMs: number): Array<Record<string, unknown>> {
+  const nowSeconds = Math.floor(nowMs / 1_000);
+  return [
+    { ...threadContinuationKey(thread), entityType: "THREAD_CONTINUATION", lastAnsweredAt: nowSeconds, expiresAt: nowSeconds + THREAD_CONTINUATION_SECONDS },
+    { ...threadContinuationKey(thread, userId), entityType: "THREAD_CONTINUATION_PERSON", answeredAt: nowSeconds, expiresAt: nowSeconds + THREAD_CONTINUATION_KEEP_SECONDS },
+  ];
+}
+
+/**
+ * Whether `userId`'s reply in `thread` is addressed to AgentX without a mention: AgentX answered this person in this
+ * thread, and its last answer there is under 24 hours old. `read` gets one item by its key (undefined when absent).
+ */
+export async function isThreadContinuation(
+  read: (key: { pk: string; sk: string }) => Promise<Record<string, unknown> | undefined>,
+  thread: ContinuationThread,
+  userId: string,
+  nowSeconds: number,
+): Promise<boolean> {
+  const meta = await read(threadContinuationKey(thread));
+  const last = meta?.lastAnsweredAt;
+  if (typeof last !== "number" || nowSeconds - last > THREAD_CONTINUATION_SECONDS || nowSeconds < last - 300) return false;
+  const person = await read(threadContinuationKey(thread, userId));
+  return person !== undefined && typeof person.answeredAt === "number";
+}
