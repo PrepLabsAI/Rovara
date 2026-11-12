@@ -1,5 +1,6 @@
 // Worlds for the fakes: each builds a fresh model and the adapter over it. The contract suites run on these, and so do the mutants.
 import { FakeCheckRunner, FakeCodeHost, FakeHostModel, FakeTracker, fakeSignedDelivery, fakeTrackerDelivery } from "@agentx/broker/fakes";
+import { fakeCheckRunnerCompanies, fakeCodeHostCompanies, fakeTrackerCompanies } from "../isolation/fake-worlds.js";
 import type { CheckRunnerWorld } from "./check-runner-conformance.js";
 import type { CodeHostWorld } from "./code-host-conformance.js";
 import type { TrackerWorld } from "./tracker-conformance.js";
@@ -23,7 +24,7 @@ export function codeHostWorldFor(host: FakeCodeHost): CodeHostWorld {
   };
 }
 
-export const fakeCodeHostWorld = (): CodeHostWorld => codeHostWorldFor(new FakeCodeHost(newModel()));
+export const fakeCodeHostWorld = (): CodeHostWorld => ({ ...codeHostWorldFor(new FakeCodeHost(newModel())), isolation: fakeCodeHostCompanies().isolation });
 
 export function checkRunnerWorldFor(runner: FakeCheckRunner): CheckRunnerWorld {
   const host = new FakeCodeHost(runner.model);
@@ -39,7 +40,7 @@ export function checkRunnerWorldFor(runner: FakeCheckRunner): CheckRunnerWorld {
   };
 }
 
-export const fakeCheckRunnerWorld = (): CheckRunnerWorld => checkRunnerWorldFor(new FakeCheckRunner(newModel()));
+export const fakeCheckRunnerWorld = (): CheckRunnerWorld => ({ ...checkRunnerWorldFor(new FakeCheckRunner(newModel())), isolation: fakeCheckRunnerCompanies().isolation });
 
 export function trackerWorldFor(tracker: FakeTracker): TrackerWorld {
   return {
@@ -52,4 +53,4 @@ export function trackerWorldFor(tracker: FakeTracker): TrackerWorld {
   };
 }
 
-export const fakeTrackerWorld = (): TrackerWorld => trackerWorldFor(new FakeTracker({ allowedStatuses: ["open", "in_progress", "in_review"] }));
+export const fakeTrackerWorld = (): TrackerWorld => ({ ...trackerWorldFor(new FakeTracker({ allowedStatuses: ["open", "in_progress", "in_review"] })), isolation: fakeTrackerCompanies().isolation });

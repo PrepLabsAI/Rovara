@@ -5,9 +5,12 @@ import {
   TrackerCapabilitiesSchema, TrackerEventSchema, TrackerItemSchema,
   type ChangeRequestRef, type HostScope, type NeutralStatus, type RawDelivery, type Tracker,
 } from "@agentx/contracts";
+import { twoCompanyChecks, type TwoCompanyIsolation } from "../isolation/two-company.js";
 import { rejection, type ContractCheck } from "./plugin-contract-kit.js";
 
 export interface TrackerWorld {
+  /** Two companies that share raw ids on this adapter, for the isolation kit. Absent: the adapter serves one company, and the isolation checks show as skipped. */
+  readonly isolation?: TwoCompanyIsolation;
   readonly tracker: Tracker;
   readonly scope: HostScope;
   /** Makes an item exist at the tracker. */
@@ -23,7 +26,7 @@ export interface TrackerWorld {
 
 const changeRequest: ChangeRequestRef = { repository: { url: "https://git.example.test/acme/app" }, id: "7", url: "https://git.example.test/acme/app/pull/7" };
 
-export const trackerChecks: readonly ContractCheck<TrackerWorld>[] = [
+const ownChecks: readonly ContractCheck<TrackerWorld>[] = [
   {
     name: "advertises capabilities that fit the schema",
     async run({ tracker }) {
@@ -111,3 +114,5 @@ export const trackerChecks: readonly ContractCheck<TrackerWorld>[] = [
     },
   },
 ];
+
+export const trackerChecks: readonly ContractCheck<TrackerWorld>[] = [...ownChecks, ...twoCompanyChecks<TrackerWorld>()];
