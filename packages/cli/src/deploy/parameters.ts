@@ -72,7 +72,9 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
   // The AI navigation model the customer chose (agentx config set models.e2eAgent): a stack parameter and not a model role, so it is not in the settings the upgrade's answers read.
   // MODEL3: the fallback model the customer chose (agentx config set models.fallback), also a parameter of the Slack stack.
   runtime: ["E2eAgentModelId", "ModelFallback"],
-  "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "McpConfirmElicitation", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "TaskPersonProofEnabled", "WorkflowDependenciesEnabled"],
+  "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "McpConfirmElicitation", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "TaskPersonProofEnabled", "WorkflowDependenciesEnabled",
+    // Spec 062: channel adapters and Slack through the channel API, as the operator set them (agentx config set).
+    "ChannelAdapters", "SlackViaChannel"],
   slack: ["SlowTurnMinutes", "ModelFallback"],
 };
 
