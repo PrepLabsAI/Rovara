@@ -645,3 +645,38 @@ export function maskChannelUserId(userId: string): string {
   if (userId.length <= 6) return "•••";
   return `${userId.slice(0, 3)} ••• ${userId.slice(-4)}`;
 }
+
+// ---- Issue #437: a conversation's current state, for an adapter that drives conversations on its own ----
+
+/** `POST /v1/channels/{channel}/conversation-state`, signed as the other routes: the conversation to read. */
+export const ConversationStateRequestSchema = z.object({ conversation: ConversationRefSchema }).strict();
+export type ConversationStateRequest = z.infer<typeof ConversationStateRequestSchema>;
+
+export type ConversationWorkspaceState = "preparing" | "ready" | "closing" | "closed" | "failed";
+export type ConversationTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+/**
+ * What Rovara knows now about one conversation, read from its own records rather than from events, so it is true
+ * whatever was dead-lettered. `null` (or an empty list) is "none yet".
+ */
+export interface ConversationState {
+  conversation: ConversationRef;
+  workspace: { state: ConversationWorkspaceState } | null;
+  /** The current or last task (operation), with when it started and, once over, when it ended. */
+  task: { taskId: string; kind: string; status: ConversationTaskStatus; startedAt: string; endedAt?: string } | null;
+  /** A decision waiting on a person, as its `approval_request` named it. */
+  pendingDecision: { requestId: string; kind: "admin" | "other"; expectedRevision: number; artifactDigest: string; expiresAt: string } | null;
+  /** The latest task's check report status. */
+  checks: { taskId: string; status: "passed" | "failed" | "unknown" } | null;
+  pullRequests: Array<{ repository: string; number: number; url: string; state: "open" | "closed" | "merged"; headSha: string; baseBranch: string; taskId?: string }>;
+  /** The newest event Rovara sent for this conversation, delivered or not: compare it with the last one you received. */
+  lastEvent: { id: string; type: string; createdAt: string } | null;
+}
+
+/** The only fields the state read may take from a conversation's thread record (IAM holds the channel API to these). */
+export const CONVERSATION_STATE_THREAD_ATTRIBUTES = ["pk", "sk", "workspaceId", "closedAt"] as const;
+/** The only fields it may take from the workspace's record, operations and pull requests. */
+export const CONVERSATION_STATE_WORKSPACE_ATTRIBUTES = [
+  "pk", "sk", "entityType", "status", "id", "kind", "createdAt", "updatedAt", "result",
+  "url", "state", "expectedHeadCommit", "baseBranch", "number", "createdByOperationId",
+] as const;

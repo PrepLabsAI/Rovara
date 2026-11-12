@@ -1,10 +1,11 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
-import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { ChannelEventSchema, publicHttpsUrlProblem, steppedUpNote, usableWebhookSecret, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent, type MessagePart } from "@agentx/contracts";
 import { checkEndpointAddresses, EndpointRefused } from "@agentx/gateway";
 import { adapterForChannel, builtInAdapterFromEnvironment } from "./channel-adapters.js";
+import { lastEventItem } from "./channel-conversation-state.js";
 
 /**
  * Spec 062 FR-022, FR-023: delivers queued events to each adapter's callback URL, signed with its secret. At least
@@ -28,6 +29,8 @@ export interface ChannelEventSenderDependencies {
   checkAddresses(url: URL): Promise<void>;
   /** Delays a retried message's next attempt. */
   delay?(receiptHandle: string, seconds: number): Promise<void>;
+  /** Issue #437: keeps the newest event handled for its conversation, for the conversation state read. Best effort. */
+  recordLastEvent?(event: Extract<ChannelEvent, { conversation: unknown }>): Promise<void>;
   now(): number;
   log?(entry: Record<string, unknown>): void;
 }
@@ -106,6 +109,14 @@ export function createChannelEventSender(deps: ChannelEventSenderDependencies) {
     }
     const adapter = await deps.getAdapter(event.channel);
     if (adapter === undefined) { log({ event: "dropped", reason: "adapter_removed", channel: event.channel, eventId: event.id }); return "dropped"; }
+    // Recorded whether it is then delivered, retried or dropped: a read shows what Rovara sent, so a gap is visible.
+    if (event.type !== "direct" && adapter.builtIn !== true && deps.recordLastEvent !== undefined) {
+      try {
+        await deps.recordLastEvent(event);
+      } catch (error) {
+        log({ event: "last_event_failed", channel: event.channel, eventId: event.id, errorName: error instanceof Error ? error.name : "UnknownError" });
+      }
+    }
     const problem = publicHttpsUrlProblem(adapter.callbackUrl, "callbackUrl");
     if (problem !== undefined) { log({ event: "dropped", reason: "callback_refused", channel: event.channel, eventId: event.id }); return "dropped"; }
     const url = new URL(adapter.callbackUrl);
@@ -194,6 +205,20 @@ function createAwsChannelEventSender() {
     checkAddresses: (url) => checkEndpointAddresses(url),
     async delay(receiptHandle, seconds) {
       await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl, ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
+    },
+    async recordLastEvent(channelEvent) {
+      const channelTableName = process.env.CHANNEL_STATE_TABLE_NAME;
+      if (channelTableName === undefined || channelTableName === "") return;
+      try {
+        await documentClient.send(new PutCommand({
+          TableName: channelTableName, Item: lastEventItem(channelEvent),
+          // A retried older event never replaces a newer one.
+          ConditionExpression: "attribute_not_exists(pk) OR createdAt <= :createdAt",
+          ExpressionAttributeValues: { ":createdAt": channelEvent.createdAt },
+        }));
+      } catch (error) {
+        if (!(error instanceof Error && error.name === "ConditionalCheckFailedException")) throw error;
+      }
     },
     now: Date.now,
   });

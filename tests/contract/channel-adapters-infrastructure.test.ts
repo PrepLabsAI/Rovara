@@ -2,6 +2,7 @@
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
+import { CONVERSATION_STATE_WORKSPACE_ATTRIBUTES } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -58,25 +59,39 @@ describe("channel adapters infrastructure", () => {
     expect(mapping).toMatchObject({ ScalingConfig: { MaximumConcurrency: 2 } });
   });
 
-  it("routes only the three signed POSTs to the channel API, with no API Gateway authorizer", () => {
+  it("routes only the signed POSTs to the channel API, with no API Gateway authorizer", () => {
     const routes = ofType(named, "AWS::ApiGatewayV2::Route").map(([, route]) => route.Properties).filter((route) => String(route.RouteKey).includes("/v1/channels/"));
-    expect(routes.map((route) => route.RouteKey).sort()).toEqual(["POST /v1/channels/{channel}/actions", "POST /v1/channels/{channel}/decisions", "POST /v1/channels/{channel}/messages"]);
+    expect(routes.map((route) => route.RouteKey).sort()).toEqual([
+      "POST /v1/channels/{channel}/actions", "POST /v1/channels/{channel}/conversation-state", "POST /v1/channels/{channel}/decisions", "POST /v1/channels/{channel}/messages",
+    ]);
     for (const route of routes) expect(route.AuthorizationType).toBe("NONE");
   });
 
-  it("lets the channel API read only adapters, bindings (Slack's too, for the built-in adapter), links and shared task threads from the state table, by key", () => {
+  it("lets the channel API read only adapters, bindings (Slack's too, for the built-in adapter), links and shared task threads by key, and a conversation's state by its fields", () => {
     const statements = statementsOf(named, roleOf(named, "ChannelApiIngress"));
     const onState = statements.filter((statement) => JSON.stringify(statement.Resource).includes("State") && !JSON.stringify(statement.Resource).includes("ChannelApiState"));
     expect(onState.map((statement) => [actions(statement), statement.Condition?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]])).toEqual([
       [["dynamodb:GetItem"], ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*", "SHARED_TASK#*"]],
       [["dynamodb:PutItem"], ["CHANNEL_LINK_CODE#*"]],
+      // Issue #437: the conversation state read.
+      [["dynamodb:GetItem"], ["SLACK_THREAD#*"]],
+      [["dynamodb:GetItem", "dynamodb:Query"], ["WORKSPACE#*"]],
       // Phase 7c3: Slack's plan buttons read a task's owner, share and workflow, by key and those fields only.
       [["dynamodb:GetItem"], ["DEVTASK#*"]],
     ]);
     const taskRead = onState.find((statement) => JSON.stringify(statement.Condition).includes("DEVTASK#*"))!;
     expect(taskRead.Condition).toMatchObject({ "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "slackUserId", "share", "workflow"] }, Null: { "dynamodb:Attributes": "false" } });
-    // No query, no scan, no other write to the state table. (Slack's threads table is the Slack router's own, Phase 7c2.)
-    for (const statement of statements.filter((entry) => JSON.stringify(entry.Resource).includes("State"))) {
+    // Issue #437: the state read takes only the fields it shows, never a whole thread or operation record.
+    const threadRead = onState.find((statement) => JSON.stringify(statement.Condition).includes("SLACK_THREAD#*"))!;
+    expect(threadRead.Condition).toMatchObject({ "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "workspaceId", "closedAt"] }, Null: { "dynamodb:Attributes": "false" } });
+    const workspaceRead = onState.find((statement) => JSON.stringify(statement.Condition).includes("WORKSPACE#*"))!;
+    expect(workspaceRead.Condition).toMatchObject({
+      "ForAllValues:StringEquals": { "dynamodb:Attributes": [...CONVERSATION_STATE_WORKSPACE_ATTRIBUTES] },
+      StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }, Null: { "dynamodb:Attributes": "false" },
+    });
+    expect(CONVERSATION_STATE_WORKSPACE_ATTRIBUTES).not.toContain("prompt");
+    // Its one query is that read; no scan, no other write to the state table. (Slack's threads table is the Slack router's own, Phase 7c2.)
+    for (const statement of statements.filter((entry) => JSON.stringify(entry.Resource).includes("State") && entry !== workspaceRead)) {
       for (const action of actions(statement)) expect(["dynamodb:Query", "dynamodb:Scan"]).not.toContain(action);
     }
   });

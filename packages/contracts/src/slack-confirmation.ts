@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ChannelOpaqueIdSchema } from "./conversation.js";
 
@@ -59,6 +60,17 @@ export const PendingConfirmationSchema = z.object({
 export type ConfirmationCall = z.infer<typeof ConfirmationCallSchema>;
 export type PendingConfirmation = z.infer<typeof PendingConfirmationSchema>;
 export type ConfirmationClick = "approve" | "cancel";
+
+/** The digest an approval request carries: the confirmation and each call it lists, so a decision binds to exactly those. */
+export function confirmationDigest(confirmation: Pick<PendingConfirmation, "confirmationId" | "calls">): string {
+  const calls = confirmation.calls.map((call) => [call.tool, call.argumentsHash]);
+  return createHash("sha256").update(JSON.stringify([confirmation.confirmationId, calls])).digest("hex");
+}
+
+/** FR-032: a confirmation an administrator's policy asked for is step-up kind `admin`; any other is `other`. */
+export function confirmationApprovalKind(confirmation: Pick<PendingConfirmation, "calls">): "admin" | "other" {
+  return confirmation.calls.some((call) => call.kind === "admin") ? "admin" : "other";
+}
 
 /** The Slack threads table item that holds a thread's confirmation. */
 export function confirmationKey(subject: string): { pk: string; sk: string } {
