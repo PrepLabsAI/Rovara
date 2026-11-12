@@ -90,6 +90,7 @@ export * from "./channel-adapter.js";
 export * from "./slack-details.js";
 export * from "./slack-confirmation.js";
 export * from "./slack-routing.js";
+export * from "./request-intake.js";
 export * from "./templates.js";
 export * from "./turns.js";
 export * from "./usage.js";

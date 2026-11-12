@@ -92,20 +92,22 @@ describe("the routed request's card", () => {
 
   it("suggests Quick for a small change: Start (Quick), Use Full instead, Just answer", () => {
     const { card, elements } = buttons("small_change");
-    expect(card.text.startsWith("Looks like a small change. I'll use Quick.")).toBe(true);
+    expect(card.text.startsWith("This looks like a small, clear change, so I'll do it as a quick change: plan → code → checks → draft PR.")).toBe(true);
+    expect(card.text).toContain("reply `full` if you want requirements and design first");
     expect(elements).toEqual([["Start", WORKFLOW_PATH_QUICK_ACTION, "primary"], ["Use Full instead", WORKFLOW_PATH_FULL_ACTION, ""], ["Just answer", WORKFLOW_PATH_ANSWER_ACTION, ""]]);
   });
 
   it("suggests Full for a bigger change: Start (Full), Use Quick instead, Just answer", () => {
     const { card, elements } = buttons("large_change");
-    expect(card.text.startsWith("Looks like a bigger change. I'll use Full: requirements, design, then a coding plan.")).toBe(true);
+    expect(card.text.startsWith("This looks like a bigger change (a feature, several parts, or decisions to make first), so I suggest Full: requirements → design → coding plan.")).toBe(true);
     expect(elements).toEqual([["Start", WORKFLOW_PATH_FULL_ACTION, "primary"], ["Use Quick instead", WORKFLOW_PATH_QUICK_ACTION, ""], ["Just answer", WORKFLOW_PATH_ANSWER_ACTION, ""]]);
   });
 
-  it("offers Just answer, Quick and Full, each explained in one line, when it cannot tell", () => {
+  it("offers Just answer, Quick and Full, each explained in one line, recommending Just answer with its reason, when it cannot tell", () => {
     const { card, elements } = buttons("unclear");
     expect(card.text).toMatch(/Just answer\*: I reply here and change no code\.\n• \*Quick\*: [^\n]+\n• \*Full\*: [^\n]+/);
-    expect(elements).toEqual([["Just answer", WORKFLOW_PATH_ANSWER_ACTION, ""], ["Quick", WORKFLOW_PATH_QUICK_ACTION, ""], ["Full", WORKFLOW_PATH_FULL_ACTION, ""]]);
+    expect(card.text).toContain("I suggest *Just answer*: it changes no code, and you can ask for a change after.");
+    expect(elements).toEqual([["Just answer", WORKFLOW_PATH_ANSWER_ACTION, "primary"], ["Quick", WORKFLOW_PATH_QUICK_ACTION, ""], ["Full", WORKFLOW_PATH_FULL_ACTION, ""]]);
   });
 
   it("binds every button to the one saved request, says who can choose, and passes Slack's limits and the copy rules", () => {
