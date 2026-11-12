@@ -150,23 +150,26 @@ so a consumer is idempotent.**
 `DocumentStore.transact`, so the message exists if and only if the state change commits. `relay({ companyId })` hands that company's
 pending messages to their queues, oldest first, then marks them. The pending index partition is per company, so a relay reads only its
 own rows. The outbox id travels as the attribute `outboxId` and, scoped by company, as the queue's `dedupeId`: a crash between the
-hand-over and the mark means a second hand-over, which a queue with `dedupe` drops inside its window and a consumer drops by `outboxId`
-otherwise. A message that fails `maxAttempts` times is set aside as `DEAD` (reported, off the index); handed-over rows carry an
+hand-over and the mark means a second hand-over, which a queue with `dedupe` drops inside its window; otherwise the consumer must be idempotent on its operation (the dispatch consumer claims it with a
+conditional write and drops an ended or running one), and `outboxId` identifies the copies. A message that fails `maxAttempts` times is set aside as `DEAD` (reported, off the index); handed-over rows carry an
 `expiresAt`. Messages of one ordered group keep their order only if one relay runs at a time. `createTransactionalOutbox` is written
 once over the two ports; the store must keep `OUTBOX_PENDING_INDEX`.
 
 **SQS adapter (lane A2, `packages/aws-adapters/src/sqs`, `@rovara/aws-adapters/sqs`; public, opt-in, never Code's default).**
 `SqsQueueService` implements `Queue` on queues the deployment declares (settings `queues: { <name>: { url, deadLetterUrl? } }`, `region`,
 `endpoint`); it creates and changes no queue. At first use it reads the queue's attributes and takes its visibility timeout, redrive policy
-(`maxReceiveCount`, checked against `deadLetterUrl`) and size limit from SQS, and `queue(name, options)` throws for options that differ.
+(`maxReceiveCount`; `deadLetterUrl`, read back, must be a queue of the same kind and the one a redrive policy names) and size limit from SQS, and `queue(name, options)` throws for options that differ.
 It passes `runQueueConformance` in both modes, and the outbox suite over the DynamoDB store and either mode.
 - **Which mode, and why.** The mode is the queue's: a URL ending `.fifo` is FIFO. *Standard* is the default for task dispatch, because the
   core already works with the weakest queue (at least once, no order, no duplicate suppression) and standard has no per-group throughput
-  cap; its consumers drop a repeat by `outboxId`. *FIFO* is for a use that needs order inside a group (`groupId`) or the 5 minute duplicate
+  cap; its consumers are idempotent on the operation. *FIFO* is for a use that needs order inside a group (`groupId`) or the 5 minute duplicate
   window. Capabilities: standard `ordered false, dedupe false, maxDelaySeconds 900`; FIFO `ordered true, dedupe true, maxDelaySeconds 0`
   (SQS refuses a per-message delay on FIFO). Both: `detectsStaleHandle false, deadLettersById false`.
-- **FIFO details.** A message with no `groupId` gets a group of its own (no order owed to any other message), hidden on receive. The
-  `dedupeId` is sent as its SHA-256 hex (SQS wants 128 characters of a narrow set); no `dedupeId` gets a fresh one. SQS does not say a send
+- **FIFO details.** A message with no `groupId` gets a solo group, hidden on receive: named after the SHA-256 of its `dedupeId` when it has one
+  (so two sends of one id share a group and SQS drops the second even when the queue's `DeduplicationScope` is `messageGroup`), otherwise a group of
+  its own (no order owed to any other message). A queue with that scope reports `dedupe: false` (SQS keeps a repeat sent in another explicit
+  group); its solo-group messages are still suppressed. The `dedupeId` is sent as its SHA-256 hex (SQS wants 128 characters of a narrow set); no
+  `dedupeId` gets a fresh one. SQS does not say a send
   was a duplicate, so `duplicate: true` is reported only for a repeat this process sent inside the window. An ordered queue is received one
   message per request, because a FIFO request can return several messages of one group.
 - **Size.** SQS limits body plus attributes (names, type name, values) to 256 KiB, the port limits the body alone. The adapter refuses the
@@ -178,7 +181,8 @@ It passes `runQueueConformance` in both modes, and the outbox suite over the Dyn
   to the declared dead-letter queue with a marker attribute (reason, time, original id, count) and then deletes it, so a crash leaves it on both
   queues, never neither; it needs the body, so only a delivery this process made (bounded memory) can be dead-lettered, and any other handle
   answers false. `listDeadLetters` is a sample of one receive (at most 10, no cursor); `redrive` and `discardDeadLetter` by id scan up to
-  `deadLetterScanLimit` (100) messages, putting each other message straight back. For a large dead-letter queue use SQS's own redrive.
+  `deadLetterScanLimit` (100) messages, keeping the others hidden until the scan ends and then putting them back; `redrive` extends the found message's
+  hide first and sends nothing if SQS no longer knows its handle. For a large dead-letter queue use SQS's own redrive.
 - **Stale handles.** SQS answers true to an `ack` with the earlier handle of a message received again (and removes nothing); the core's
   consumers are idempotent for this reason.
 - **Errors.** `SqsQueueError` names the call and SQS's error name, never SQS's text; `retryable` is false for refusals that will not change.
