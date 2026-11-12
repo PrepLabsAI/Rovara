@@ -43,6 +43,21 @@ export interface ExternalAccountRef {
 
 // ---- Admission ----
 
+/**
+ * What a `task.start` request is about to start, for an adapter that sets its allowance by the kind of task (a different minimum room for a Quick task than for a Full one). Optional on the
+ * request, so an adapter and a caller that do not know it keep working; Code's own admission ignores it.
+ */
+export interface AdmissionTaskStart {
+  /** The task runs Rovara's workflow (plan, coding, checks, reviews, pull request) and not one plain run. */
+  workflow: boolean;
+  /** The path the request named: `QUICK` or `FULL`. Absent when the workflow is not used, or when Understand chooses it after the start (`pathFrom` is then `understand`). */
+  path?: "QUICK" | "FULL";
+  /** Who chooses the path: the request itself, or the Understand step that reads it. Absent when the workflow is not used. */
+  pathFrom?: "request" | "understand";
+  /** The request opens with a design review before any plan (`designFirst`). */
+  designFirst?: boolean;
+}
+
 export interface AdmissionRequest {
   companyId: string;
   /** Names this request: asking twice with one key gives the same decision and holds the allowance once. */
@@ -54,6 +69,8 @@ export interface AdmissionRequest {
   subject?: PolicySubject;
   /** What the caller expects it to use. */
   estimate?: { tokens?: number; cost?: Cost };
+  /** Set on `task.start` only: the path and the flow options of the task about to start. Optional and additive; an adapter that does not read it behaves as before. */
+  taskStart?: AdmissionTaskStart;
 }
 
 export type AdmissionDecision =
