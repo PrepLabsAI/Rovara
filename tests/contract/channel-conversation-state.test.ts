@@ -78,7 +78,8 @@ describe("a conversation's state (#437)", () => {
   it("asks the state table only for the fields it shows", async () => {
     const { deps, asked } = seeded();
     await readConversationState(deps, conversation);
-    expect(asked).toEqual([[...CONVERSATION_STATE_THREAD_ATTRIBUTES], ...Array(3).fill([...CONVERSATION_STATE_WORKSPACE_ATTRIBUTES])]);
+    const workspaceFields = [...CONVERSATION_STATE_WORKSPACE_ATTRIBUTES];
+    expect(asked).toEqual([[...CONVERSATION_STATE_THREAD_ATTRIBUTES], workspaceFields, workspaceFields, workspaceFields]);
     for (const attributes of asked) expect(attributes).not.toContain("prompt");
   });
 
