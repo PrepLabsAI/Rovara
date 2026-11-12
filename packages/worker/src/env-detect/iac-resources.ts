@@ -391,7 +391,7 @@ function cdkModules(text: string): Array<{ module: string; line: number }> {
   for (const line of text.matchAll(/^[ \t]*from[ \t]+aws_cdk[ \t]+import[ \t]+([^\n]{1,300})$/gmu)) {
     for (const word of line[1]!.matchAll(/\baws_([a-z0-9_]{2,40})\b/gu)) found.push({ module: word[1]!.replace(/_/gu, "-"), line: lineOf(text, line.index) });
   }
-  // TypeScript and JavaScript: `import { aws_s3 as s3, aws_sns } from "aws-cdk-lib"` (possibly over several lines), and `const { aws_s3 } = require("aws-cdk-lib")`.
+  // TypeScript and JavaScript: the names an alias import of the CDK library lists (`aws_s3 as s3, aws_sns`, possibly over several lines), and the same names taken from a require of it.
   for (const block of text.matchAll(/(?:\bimport\s{0,10}\{([^}]{1,600})\}\s{0,10}from|\bconst\s{1,10}\{([^}]{1,600})\}\s{0,10}=\s{0,10}require\()\s{0,10}["'](?:aws-cdk-lib|@aws-cdk\/core)["']/gu)) {
     for (const word of (block[1] ?? block[2] ?? "").matchAll(/\baws_([a-z0-9_]{2,40})\b/gu)) found.push({ module: word[1]!.replace(/_/gu, "-"), line: lineOf(text, block.index) });
   }

@@ -274,7 +274,7 @@ describe("the run's directory (L4: mode 0700 or 0710, whatever the umask)", () =
 describe("the worker's own environment is never touched", () => {
   it("building and writing the environment leaves process.env exactly as it was", async () => {
     const before = JSON.stringify(Object.entries(process.env).sort());
-    const env = buildServiceEnvironment(input({ sandbox: "check", aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3"], unbackedServices: [] } }));
+    const env = buildServiceEnvironment(input({ sandbox: "check", aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3"] } }));
     await withServiceEnvFile({ write: () => Promise.resolve("/run/x/y.env"), remove: () => Promise.resolve() }, "run-a.check", env, (a) => Promise.resolve(a));
     expect(JSON.stringify(Object.entries(process.env).sort())).toBe(before);
     expect(process.env["AWS_ACCESS_KEY_ID"]).toBeUndefined();
@@ -348,7 +348,7 @@ describe("H1: the emulator's secrets are registered with the redactor and never 
   });
   it("neither secret is among the variables the channel builds for an AWS run", () => {
     const secrets = helperSecretValues([{ credentials: { password: presign, controlToken: control } }]);
-    const env = buildServiceEnvironment(input({ neverValues: secrets, aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3", "sqs"], unbackedServices: [] } }));
+    const env = buildServiceEnvironment(input({ neverValues: secrets, aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3", "sqs"] } }));
     const text = JSON.stringify(env);
     expect(text).not.toContain(presign);
     expect(text).not.toContain(control);

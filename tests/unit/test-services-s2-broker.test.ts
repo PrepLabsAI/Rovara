@@ -132,7 +132,12 @@ describe("the plan of Rovara local AWS", () => {
     expect(reason(plansOf([aws("s3", { connect: AWS_CONNECT, backing: { kind: "emulated", catalogId: "local-aws@r9", awsServices: ["s3"], region: "us-east-1" } })]))).toBe("not_available_yet");
     // An emulator that says it runs another engine release than the table's is refused; one that says nothing (a catalog made before the field) and one that names the table's release are not.
     const withEngine = (engineVersion: string | undefined) => catalog((entries) => {
-      for (const entry of entries) if (entry["id"] === "local-aws@r1") (entry["emulator"] as { engineVersion?: string }).engineVersion = engineVersion;
+      for (const entry of entries) {
+        if (entry["id"] !== "local-aws@r1") continue;
+        const emulator = entry["emulator"] as { engineVersion?: string };
+        if (engineVersion === undefined) delete emulator.engineVersion;
+        else emulator.engineVersion = engineVersion;
+      }
     });
     expect(reason(plansOf(threeAws(), withEngine("1.0.321")))).toBe("not_available_yet");
     expect(reason(plansOf(threeAws(), withEngine(AWS_EMULATOR_ENGINE_VERSION)))).toBe("ok");
