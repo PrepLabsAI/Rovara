@@ -7,7 +7,7 @@
 import { z } from "zod";
 import { TestEnvDependencyIdSchema } from "./test-env-dependency.js";
 import { RelativeWorkspacePathSchema } from "./project.js";
-import { TestServiceHostSchema, looksLikeSecretValue } from "./test-services-shared.js";
+import { AWS_KEY_ID, TestServiceHostSchema, looksLikeSecretValue } from "./test-services-shared.js";
 import { awsServiceKeyOrSelf } from "./aws-emulator-service-keys.js";
 
 export const TEST_SERVICES_USAGE_SCHEMA_VERSION = 1;
@@ -57,7 +57,30 @@ export const AwsOperationNameSchema = z.string().regex(/^[A-Z][A-Za-z0-9]{2,63}$
  * `services` is the most a record lists. `narrowServices` and no `outOfPlan` are what a record keeps when its plan did NOT use `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE` (the worker's `reduceAwsUsage`): a broker from before
  * that feature parses a usage record strictly (at most 24 services, no `outOfPlan`), and such a plan only ever goes to workers its broker could read the record of.
  */
-export const TEST_SERVICES_AWS_USAGE_LIMITS = { services: 64, narrowServices: 24, unsupportedOperations: 30 } as const;
+export const TEST_SERVICES_AWS_USAGE_LIMITS = { services: 64, narrowServices: 24, unsupportedOperations: 30, heavyFunctions: 16 } as const;
+
+/**
+ * Why a Lambda function is not run by Rovara local AWS itself, in fixed words (never the repository's own text): `image` (a container image), `runtime` (a runtime the emulator does not run), `native-code` (compiled
+ * code the emulator cannot load), `x86-native` (x86-only native code on an Arm host), `unchecked` (the function could not be looked at), `timeout-over-28s` (it is allowed to run longer than the emulator waits).
+ */
+export const TEST_SERVICES_HEAVY_FUNCTION_REASONS = ["image", "runtime", "native-code", "x86-native", "unchecked", "timeout-over-28s"] as const;
+export type TestServicesHeavyFunctionReason = (typeof TEST_SERVICES_HEAVY_FUNCTION_REASONS)[number];
+/** The words each reason reads as in a sentence (a person reads these on the Prove report, the pull request and the Evidence tab). */
+export const TEST_SERVICES_HEAVY_FUNCTION_REASON_WORDS: Readonly<Record<TestServicesHeavyFunctionReason, string>> = {
+  image: "it is a container image",
+  runtime: "its runtime is not one Rovara local AWS runs",
+  "native-code": "it uses native code",
+  "x86-native": "it uses x86-only native code",
+  unchecked: "it could not be checked",
+  "timeout-over-28s": "its timeout is over 28 seconds",
+};
+/**
+ * A Lambda function name as AWS allows it: letters, digits, hyphens and underscores, at most 64. Not one that reads as a secret: an access key id in either case, or one unbroken run of 32 or more letters and digits (a
+ * token). The general long-run rule of `looksLikeSecretValue` is not used as it is, because it counts `-` and `_` as part of the run and would refuse an ordinary long name such as `payments-prod-process-order-handler`.
+ */
+export const AwsFunctionNameSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u).refine((name) => !AWS_KEY_ID.test(name) && !AWS_KEY_ID.test(name.toUpperCase()) && !(/^[A-Za-z0-9]+$/u.test(name) && looksLikeSecretValue(name)), { message: "a function name, not a secret" });
+export const AwsHeavyFunctionSchema = z.object({ name: AwsFunctionNameSchema, reason: z.enum(TEST_SERVICES_HEAVY_FUNCTION_REASONS) }).strict();
+export type AwsHeavyFunction = z.infer<typeof AwsHeavyFunctionSchema>;
 
 /**
  * One service of the ledger. `outOfPlan` is how many of its `calls` were to a service the plan did not name (the emulator serves every service, so the code can call one the plan left out): all of them or none.
@@ -88,9 +111,16 @@ export const TestServicesAwsUsageSchema = z
     otherCalls: Count,
     /** Unsupported calls whose service or operation is not shown. */
     otherUnsupported: Count,
+    /**
+     * The Lambda functions of the plan's own resources that Rovara local AWS does not run itself, each with a fixed reason. Only a worker that lists `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE` writes it (the worker's
+     * `reduceAwsUsage`): a broker from before the field parses a record strictly, and such a plan only goes to workers whose records it can read. Absent on every older record, which still parse.
+     */
+    heavyFunctions: z.array(AwsHeavyFunctionSchema).max(TEST_SERVICES_AWS_USAGE_LIMITS.heavyFunctions).optional(),
   })
   .strict()
   .superRefine((usage, context) => {
+    if (usage.heavyFunctions !== undefined && new Set(usage.heavyFunctions.map((entry) => entry.name)).size !== usage.heavyFunctions.length) context.addIssue({ code: "custom", path: ["heavyFunctions"], message: "a function is listed once" });
+    if (usage.ledger !== "read" && usage.heavyFunctions !== undefined && usage.heavyFunctions.length > 0) context.addIssue({ code: "custom", path: ["ledger"], message: "a ledger that was not read says nothing" });
     if (usage.ledger !== "read" && (usage.services.length > 0 || usage.unsupportedOperations.length > 0 || usage.otherCalls > 0 || usage.otherUnsupported > 0)) context.addIssue({ code: "custom", path: ["ledger"], message: "a ledger that was not read says nothing" });
     if (new Set(usage.services.map((entry) => entry.service)).size !== usage.services.length) context.addIssue({ code: "custom", path: ["services"], message: "a service is listed once" });
     if (new Set(usage.unsupportedOperations.map((entry) => `${entry.service}\0${entry.operation}`)).size !== usage.unsupportedOperations.length) context.addIssue({ code: "custom", path: ["unsupportedOperations"], message: "an operation is listed once" });
@@ -190,6 +220,23 @@ export function testServicesAwsUsageVerdict(usage: TestServicesUsageRecord | und
   if (outside.length > 0 || aws.otherCalls > 0) return { ok: false, problem: "out_of_plan", services: outside };
   if (aws.services.some((entry) => entry.unsupported > 0) || aws.unsupportedOperations.length > 0 || aws.otherUnsupported > 0) return { ok: false, problem: "unsupported", services: [] };
   return { ok: true };
+}
+
+/**
+ * The evidence sentence of one heavy function, in fixed words and the function's own name (which passed `AwsFunctionNameSchema`). While there is no function runner (`runnerAvailable` false):
+ * "Lambda function <name> was not run locally (<reason>); the function runner is not available yet". Once there is one: "Lambda function <name> ran in the Rovara function runner (<reason>)".
+ */
+export function awsHeavyFunctionEvidenceLine(entry: AwsHeavyFunction, options: { runnerAvailable?: boolean } = {}): string {
+  const words = TEST_SERVICES_HEAVY_FUNCTION_REASON_WORDS[entry.reason];
+  return options.runnerAvailable === true
+    ? `Lambda function ${entry.name} ran in the Rovara function runner (${words})`
+    : `Lambda function ${entry.name} was not run locally (${words}); the function runner is not available yet`;
+}
+
+/** The sentences for a record's heavy functions (none when the record has none, its ledger was not read, or it is an older record). */
+export function awsHeavyFunctionEvidenceLines(usage: TestServicesAwsUsage | undefined, options: { runnerAvailable?: boolean } = {}): string[] {
+  if (usage === undefined || usage.ledger !== "read") return [];
+  return (usage.heavyFunctions ?? []).map((entry) => awsHeavyFunctionEvidenceLine(entry, options));
 }
 
 // ---- what a fake's usage means for a result (the broker's rule, in one place)

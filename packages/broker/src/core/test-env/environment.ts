@@ -18,6 +18,7 @@
 import { createHash } from "node:crypto";
 import {
   SetupValueSourceSchema,
+  TEST_ENV_EDIT_STALE_MESSAGE,
   TestEnvProveReportSchema,
   TestEnvironmentBodySchema,
   TestEnvironmentSchema,
@@ -27,6 +28,7 @@ import {
   mediaTierAllowed,
   projectMetaKey,
   projectPk,
+  queryAll,
   testEnvApprovalRisk,
   testEnvDigest,
   testEnvIsProved,
@@ -273,6 +275,30 @@ export async function readEditedProposal(deps: TestEnvDeps, orgId: OrgId, projec
   if (expired(item, deps.now())) return undefined;
   return { digest: item["digest"], editedBy: item["editedBy"] };
 }
+
+/**
+ * The digest of the proposal an edit builds on: the owner's edited proposal when there is one, else the newest stored proposal that has not expired and still reads back. Undefined when there is none.
+ */
+export async function currentProposalDigest(deps: TestEnvDeps, orgId: OrgId, project: string): Promise<string | undefined> {
+  const edited = await readEditedProposal(deps, orgId, project);
+  if (edited !== undefined && (await readProposal(deps, orgId, project, edited.digest).catch(() => undefined)) !== undefined) return edited.digest;
+  const rows = await queryAll(deps.store, { pk: projectPk(orgId, project), sk: { op: "beginsWith", prefix: "TESTENV#PROPOSAL#" } });
+  const newest = rows
+    .flatMap((row) => (typeof row["digest"] === "string" && DIGEST.test(row["digest"]) && typeof row["proposedAt"] === "string" ? [{ digest: row["digest"], proposedAt: row["proposedAt"] }] : []))
+    .sort((left, right) => right.proposedAt.localeCompare(left.proposedAt));
+  for (const row of newest) if ((await readProposal(deps, orgId, project, row.digest).catch(() => undefined)) !== undefined) return row.digest;
+  return undefined;
+}
+
+/**
+ * The digest fence of an edit (`TestEnvEditBody.digest`): with a digest given, the edit goes on only when it is the proposal the project holds now. Otherwise CHANGE_STALE (409) with a fixed sentence, naming nothing, so the
+ * person's edit never replaces a newer proposal unseen. With no digest it does nothing (a client from before the field). Call it before `proposeTestEnvironment` / `setEditedProposal` of an edit.
+ */
+export async function refuseStaleEdit(deps: TestEnvDeps, input: { orgId: OrgId; project: string; digest: string | undefined }): Promise<void> {
+  if (input.digest === undefined) return;
+  if ((await currentProposalDigest(deps, input.orgId, input.project)) !== input.digest) throw stale(TEST_ENV_EDIT_STALE_MESSAGE);
+}
+
 export async function clearEditedProposal(deps: TestEnvDeps, orgId: OrgId, project: string): Promise<void> {
   await deps.store.delete({ key: editedKey(orgId, project) });
 }
