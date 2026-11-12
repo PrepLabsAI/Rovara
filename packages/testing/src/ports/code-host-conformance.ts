@@ -8,9 +8,12 @@ import {
 } from "@agentx/contracts";
 import type { FakeHostModel } from "@agentx/broker/fakes";
 import { workerGitCredentialUsable } from "@agentx/contracts";
+import { twoCompanyChecks, type TwoCompanyIsolation } from "../isolation/two-company.js";
 import { rejection, SHA40, type ContractCheck } from "./plugin-contract-kit.js";
 
 export interface CodeHostWorld {
+  /** Two companies that share raw ids on this adapter, for the isolation kit. Absent: the adapter serves one company, and the isolation checks show as skipped. */
+  readonly isolation?: TwoCompanyIsolation;
   readonly host: CodeHost;
   /** The state of the host. The fake reads it directly; a real adapter's fixtures are served from it. The suite only sets state up through it. */
   readonly model: FakeHostModel;
@@ -47,7 +50,7 @@ async function openChangeRequest(world: CodeHostWorld, options: { draft?: boolea
   return { ref, head, branch };
 }
 
-export const codeHostChecks: readonly ContractCheck<CodeHostWorld>[] = [
+const ownChecks: readonly ContractCheck<CodeHostWorld>[] = [
   {
     name: "advertises capabilities that fit the schema and a kind",
     async run({ host }) {
@@ -529,3 +532,5 @@ export const codeHostChecks: readonly ContractCheck<CodeHostWorld>[] = [
     },
   },
 ];
+
+export const codeHostChecks: readonly ContractCheck<CodeHostWorld>[] = [...ownChecks, ...twoCompanyChecks<CodeHostWorld>()];

@@ -6,9 +6,12 @@ import {
   type Check, type CheckRunner, type CheckTarget, type HostScope, type RepositoryRef,
 } from "@agentx/contracts";
 import type { FakeHostModel } from "@agentx/broker/fakes";
+import { twoCompanyChecks, type TwoCompanyIsolation } from "../isolation/two-company.js";
 import { rejection, type ContractCheck } from "./plugin-contract-kit.js";
 
 export interface CheckRunnerWorld {
+  /** Two companies that share raw ids on this adapter, for the isolation kit. Absent: the adapter serves one company, and the isolation checks show as skipped. */
+  readonly isolation?: TwoCompanyIsolation;
   readonly runner: CheckRunner;
   readonly model: FakeHostModel;
   readonly repository: RepositoryRef;
@@ -36,7 +39,7 @@ function listTarget(world: CheckRunnerWorld, registered: boolean): CheckTarget {
   return { kind: "run", repository, revision: "a".repeat(40), run: { runner: world.runner.kind, id: "build-1" }, gate: "unit", project: world.project };
 }
 
-export const checkRunnerChecks: readonly ContractCheck<CheckRunnerWorld>[] = [
+const ownChecks: readonly ContractCheck<CheckRunnerWorld>[] = [
   {
     name: "advertises capabilities that fit the schema",
     async run({ runner }) {
@@ -147,3 +150,5 @@ export const checkRunnerChecks: readonly ContractCheck<CheckRunnerWorld>[] = [
     },
   },
 ];
+
+export const checkRunnerChecks: readonly ContractCheck<CheckRunnerWorld>[] = [...ownChecks, ...twoCompanyChecks<CheckRunnerWorld>()];
