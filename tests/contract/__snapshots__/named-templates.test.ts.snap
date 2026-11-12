@@ -3205,6 +3205,33 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               ],
             },
             {
+              "Action": [
+                "secretsmanager:CreateSecret",
+                "secretsmanager:PutSecretValue",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/staging/channel-adapter/*",
+                  ],
+                ],
+              },
+            },
+            {
               "Action": "lambda:InvokeFunction",
               "Effect": "Allow",
               "Resource": [
@@ -3340,33 +3367,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                       "Ref": "AWS::AccountId",
                     },
                     ":alarm:agentx-staging-*",
-                  ],
-                ],
-              },
-            },
-            {
-              "Action": [
-                "secretsmanager:CreateSecret",
-                "secretsmanager:PutSecretValue",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":secretsmanager:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":secret:agentx/staging/channel-adapter/*",
                   ],
                 ],
               },
@@ -3842,6 +3842,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "FunctionResponseTypes": [
           "ReportBatchItemFailures",
         ],
+        "ScalingConfig": {
+          "MaximumConcurrency": 2,
+        },
         "Tags": [
           {
             "Key": "agentx:env",
@@ -4330,38 +4333,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   "dynamodb:Attributes": [
                     "pk",
                     "sk",
-                    "slackUserId",
-                    "share",
-                    "workflow",
-                  ],
-                },
-                "ForAllValues:StringLike": {
-                  "dynamodb:LeadingKeys": [
-                    "DEVTASK#*",
-                  ],
-                },
-                "Null": {
-                  "dynamodb:Attributes": "false",
-                },
-                "StringEqualsIfExists": {
-                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
-                },
-              },
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "State1C20CC9A",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": "dynamodb:GetItem",
-              "Condition": {
-                "ForAllValues:StringEquals": {
-                  "dynamodb:Attributes": [
-                    "pk",
-                    "sk",
                     "exportPk",
                     "exportSk",
                     "eventId",
@@ -4399,6 +4370,38 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Resource": {
                 "Fn::GetAtt": [
                   "TurnRecords69ECFCD9",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "slackUserId",
+                    "share",
+                    "workflow",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVTASK#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
                   "Arn",
                 ],
               },
@@ -4597,7 +4600,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::SQS::QueuePolicy",
     },
-    "ChannelApiSelfInvoke127C4E1A": {
+    "ChannelApiSelfInvoke808681B8": {
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -4614,7 +4617,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
           ],
           "Version": "2012-10-17",
         },
-        "PolicyName": "ChannelApiSelfInvoke127C4E1A",
+        "PolicyName": "ChannelApiSelfInvoke808681B8",
         "Roles": [
           {
             "Ref": "ChannelApiIngressServiceRole2BBC113A",
@@ -4642,6 +4645,32 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::SecretsManager::Secret",
       "UpdateReplacePolicy": "Delete",
+    },
+    "ChannelApiSlackAdapterSelfInvokeCEFFE71C": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackIngress5C88FFA0",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ChannelApiSlackAdapterSelfInvokeCEFFE71C",
+        "Roles": [
+          {
+            "Ref": "SlackIngressServiceRole8DA92EC7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "ChannelApiSlackCommandsRoute2A3464BE": {
       "Properties": {

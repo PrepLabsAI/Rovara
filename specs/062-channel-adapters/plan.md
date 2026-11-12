@@ -403,3 +403,22 @@ can miss it, and the person is told to press again.
 ### Rollback
 
 Set `SlackViaChannel` to `disabled`.
+
+## Phase 7d, part 1: the built-in Slack adapter in the legacy deployment
+
+The production (legacy) stacks get the channel API with the built-in Slack adapter, off until `SlackViaChannel` is
+`enabled`. They have no developer sign-in, so they get no adapter registry, no `ChannelAdapters` parameter and nothing
+on the broker (its IAM policy is unchanged, byte for byte).
+
+| Layer | Change |
+|---|---|
+| infra | `ChannelAdapters` takes `registry`, `sharedTasks` and the turn records table, and is made in every deployment (legacy secrets under `agentx/production/`). The Details read and both self-invoke policies (the channel API's, Slack ingress's) move into it. The event sender runs at most two at once. The orchestrator stack always takes the channel queue and Slack adapter parameters. |
+| release | `release:prod` passes the channel queue and Slack adapter outputs to the orchestrator once the control plane has them. |
+| broker | The router and press handlers post as the message's own Slack team when the deployment names none. |
+
+In production nothing is removed or replaced. Slack ingress, its role, the orchestrator's role and task definition change;
+37 resources are added. With `SlackViaChannel` disabled, Slack takes its own path as before. The legacy deployment has no
+task workflow, so the switch moves conversations, confirmations, Details, ChatGPT and the routing.
+
+A hand-off that fails all its retries in the legacy deployment is logged, not queued: Slack ingress's hand-off failure
+queue is named-only.

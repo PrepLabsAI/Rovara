@@ -25,13 +25,23 @@ export interface ChannelAdaptersProps {
     appPostedMessages: string;
     threadTurnsPerMinute: string;
   };
+  /**
+   * Phase 7d: whether administrators may register third-party adapters (named environments, where developer sign-in
+   * links their actors). The legacy deployment has no sign-in: it gets the built-in Slack adapter only, no registry,
+   * no `ChannelAdapters` parameter and nothing on the broker.
+   */
+  registry: boolean;
+  /** Whether Slack-started tasks share their threads (named environments), as Slack's ingress is told. */
+  sharedTasks: boolean;
+  /** Phase 7c3b: the turn records the Details view reads, field-limited, as Slack's interactivity does. */
+  turnRecords: { table: dynamodb.Table; detailsAttributes: readonly string[] };
 }
 
 /**
  * Spec 062 Phase 3: the channel API (signed adapter requests in), the event sender (signed events out), the short-lived
- * channel state and the two queues. Named environments only, where developer sign-in exists to link actors to. Off
- * unless the `ChannelAdapters` parameter is `enabled`: until then the broker serves no adapter routes and the channel
- * API answers 404 to everything, so no adapter can be registered or reached.
+ * channel state and the two queues. Third-party adapters are registered in named environments only, where developer
+ * sign-in exists to link actors to, and only while `ChannelAdapters` is `enabled`. Phase 7d: every deployment has the
+ * built-in Slack adapter, off until `SlackViaChannel` is `enabled`; until either is on the channel API answers 404.
  */
 export class ChannelAdapters extends Construct {
   readonly eventDeadLetters: sqs.Queue;
@@ -46,12 +56,12 @@ export class ChannelAdapters extends Construct {
   constructor(scope: Construct, id: string, props: ChannelAdaptersProps) {
     super(scope, id);
     const stack = Stack.of(this);
-    const enabled = new CfnParameter(stack, "ChannelAdapters", {
+    const enabled = props.registry ? new CfnParameter(stack, "ChannelAdapters", {
       type: "String",
       default: "disabled",
       allowedValues: ["enabled", "disabled"],
       description: "enabled: administrators can register channel adapters (spec 062) and the channel API accepts their signed requests",
-    }).valueAsString;
+    }).valueAsString : "disabled";
     // Adapter signing secrets, apart from connector secrets, which the broker can also read.
     const secretPrefix = `agentx/${props.env}/`;
     const adapterSecrets = stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${secretPrefix}channel-adapter/*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
@@ -128,7 +138,9 @@ export class ChannelAdapters extends Construct {
       ...builtInAdapter,
       SLACK_THREADS_TABLE_NAME: props.slack.threads.tableName,
       BROKER_FUNCTION_NAME: props.broker.functionName,
-      SHARED_TASKS: "enabled",
+      SHARED_TASKS: props.sharedTasks ? "enabled" : "disabled",
+      // Phase 7c3b: the Details view, as Slack's interactivity reads it.
+      TURN_RECORDS_TABLE_NAME: props.turnRecords.table.tableName,
       SLACK_APP_POSTED_MESSAGES: props.slack.appPostedMessages,
       SLACK_THREAD_TURNS_PER_MINUTE: props.slack.threadTurnsPerMinute,
     }, Duration.seconds(30));
@@ -138,7 +150,7 @@ export class ChannelAdapters extends Construct {
       resources: [props.state.tableArn],
       // SLACK_BINDING: the built-in Slack adapter's spaces are Slack channels, bound as they always were; SHARED_TASK: its
       // router reads whether a thread is a shared task's, as Slack's ingress does.
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*", "SHARED_TASK#*"] } },
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*", ...(props.sharedTasks ? ["SHARED_TASK#*"] : [])] } },
     }));
     ingress.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:PutItem"],
@@ -185,7 +197,9 @@ export class ChannelAdapters extends Construct {
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANNEL_ADAPTERS"] } },
     }));
     sender.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [adapterSecrets] }));
-    sender.addEventSource(new eventSources.SqsEventSource(events, { batchSize: 10, reportBatchItemFailures: true }));
+    // Phase 7d: at most two senders at once, so delivering replies never takes the account's few concurrent Lambdas
+    // from Slack's ingress or the broker.
+    sender.addEventSource(new eventSources.SqsEventSource(events, { batchSize: 10, reportBatchItemFailures: true, maxConcurrency: 2 }));
 
     // The built-in Slack adapter: Slack's ingress signs with the adapter's secret, hands requests to the channel API and
     // takes the core's events for Slack on its own route. The route answers 404 while SlackViaChannel is off.
@@ -209,14 +223,38 @@ export class ChannelAdapters extends Construct {
       principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
       sourceArn: `arn:${stack.partition}:execute-api:${stack.region}:${stack.account}:${props.api.ref}/*/*/v1/slack/channel-commands`,
     });
-    // A Canvas takes three Slack calls of up to 10 seconds each; the legacy ingress keeps its 10 seconds.
+    // A Canvas takes three Slack calls of up to 10 seconds each.
     (props.slack.ingress.node.defaultChild as lambda.CfnFunction).timeout = 30;
+
+    // Phase 7c3b: the Details view reads the one turn record a button names, those fields only (spec 014 FR-024), and a
+    // ChatGPT connection finishes in an asynchronous invoke of the channel API itself. Phase 7c2: Slack's ingress hands
+    // each message to an asynchronous invoke of itself. Policies of their own, so a function never waits on its own.
+    ingress.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:GetItem"],
+      resources: [props.turnRecords.table.tableArn],
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": [...props.turnRecords.detailsAttributes] },
+        StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        Null: { "dynamodb:Attributes": "false" },
+      },
+    }));
+    new iam.Policy(this, "SelfInvoke", {
+      roles: [ingress.role!],
+      statements: [new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: [ingress.functionArn] })],
+    });
+    new iam.Policy(this, "SlackAdapterSelfInvoke", {
+      roles: [props.slack.ingress.role!],
+      statements: [new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: [props.slack.ingress.functionArn] })],
+    });
 
     // The broker registers adapters and writes their secrets. Links and link codes are in the state table, which it
     // already reads and writes; one statement only, since the broker role's policy is near IAM's size limit.
-    props.broker.addEnvironment("CHANNEL_ADAPTERS", enabled);
-    props.broker.addEnvironment("CHANNEL_ADAPTER_SECRET_PREFIX", secretPrefix);
-    props.broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue"], resources: [adapterSecrets] }));
+    if (props.registry) {
+      props.broker.addEnvironment("CHANNEL_ADAPTERS", enabled);
+      props.broker.addEnvironment("CHANNEL_ADAPTER_SECRET_PREFIX", secretPrefix);
+      props.broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue"], resources: [adapterSecrets] }));
+    }
 
     new cloudwatch.Alarm(this, "RequestDeadLettersAlarm", {
       alarmName: props.naming.alarmName("ChannelRequestDeadLetters"),

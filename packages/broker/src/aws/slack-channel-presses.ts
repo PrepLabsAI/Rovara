@@ -35,7 +35,7 @@ import {
   ADMIN_CHANGE_CANCEL_RECEIVED_TEXT, ADMIN_CHANGE_PRESS_FAILED_TEXT, ADMIN_CHANGE_RECEIVED_TEXT, awsAdminChangePress, awsWorkflowSlackHandlers, chatGptActionHandler, createSlackPressDispatcher,
   createSlackSubmissionHandler, type SlackBlockAction, type SlackPressTransport,
 } from "./slack-interactivity.js";
-import { slackNoticeChannelFromEnvironment, type SlackNoticeChannel } from "./slack-notice-channel.js";
+import { slackNoticeChannelForCurrentTeam, slackNoticeChannelFromEnvironment, type SlackNoticeChannel } from "./slack-notice-channel.js";
 import { ADMIN_CHANGE_PRESSES, FORM_SLACK_PRESSES, ROUTED_SLACK_PRESSES, SLACK_FORM_SUBMISSIONS } from "./slack-press-routing.js";
 import type { HandedOffWorkflowStart } from "./slack-workflow-choice.js";
 
@@ -146,8 +146,9 @@ const answer = (body: ChannelActionAnswer) => ({ statusCode: 200, body: JSON.str
 
 export function createAwsSlackChannelPresses(): ChannelActionSurface {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
-  const notices = slackNoticeChannelFromEnvironment(new SecretsManagerClient(clientConfiguration));
-  if (notices === undefined) throw new Error("the Slack adapter is not configured for presses");
+  // Phase 7d: as the presser's own team, so a deployment that names none (the legacy one) still answers.
+  const team = new AsyncLocalStorage<string>();
+  const notices = slackNoticeChannelForCurrentTeam(new SecretsManagerClient(clientConfiguration), () => team.getStore());
   const sqs = new SQSClient(clientConfiguration);
   const lambda = new LambdaClient(clientConfiguration);
   const requestQueueUrl = requiredEnvironment("CHANNEL_REQUEST_QUEUE_URL");
@@ -197,7 +198,8 @@ export function createAwsSlackChannelPresses(): ChannelActionSurface {
     }, payload),
   });
   const adminChange = process.env.ADMIN_CHANGES === "enabled" ? awsAdminChangePress(clientConfiguration, documentClient) : undefined;
-  return async (action, context) => {
+  return (action, context) => team.run(action.actor.tenant, () => press(action, context));
+  async function press(action: ChannelAction, context: { projectName?: string }): Promise<{ statusCode: number; body: string } | undefined> {
     const pressed = () => slackPressOfChannelAction(action, Date.now());
     const inProject = <T>(work: () => Promise<T>) => (context.projectName === undefined ? work() : project.run(context.projectName, work));
     if (ROUTED_SLACK_PRESSES.has(action.actionId)) {
@@ -226,16 +228,15 @@ export function createAwsSlackChannelPresses(): ChannelActionSurface {
       return answer({ status: "handled" });
     }
     return undefined;
-  };
+  }
 }
 
 /** Phase 7c3b: a ChatGPT connection finished in an asynchronous invoke of the channel API, its form updated through the adapter. */
 export function createAwsSlackChatGptFinish(): (event: HandedOffChatGptFinish) => Promise<"connected" | "refused"> {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const secretsManager = new SecretsManagerClient(clientConfiguration);
-  const notices = slackNoticeChannelFromEnvironment(secretsManager);
   const adapter = builtInAdapterFromEnvironment(process.env);
-  if (notices === undefined || adapter === undefined) throw new Error("the Slack adapter is not configured");
+  if (adapter === undefined) throw new Error("the Slack adapter is not configured");
   const secret = slackAdapterSecretReader(secretsManager, adapter.secretName);
   const commandDeps = { getSecret: () => secret(), fetch, checkAddresses: (url: URL) => checkEndpointAddresses(url), now: Date.now };
   const lambda = new LambdaClient(clientConfiguration);
@@ -252,7 +253,12 @@ export function createAwsSlackChatGptFinish(): (event: HandedOffChatGptFinish) =
       if (form === undefined) throw new Error("the form cannot be shown through the channel API");
       await sendChannelCommand(commandDeps, adapter, "update_form", { handle: viewId, form });
     },
-    postEphemeral: (input) => notices.postEphemeral(input),
+    // As the connecting person's own team (Phase 7d: the legacy deployment names none).
+    async postEphemeral(input) {
+      const notices = slackNoticeChannelFromEnvironment(secretsManager, event.teamId);
+      if (notices === undefined) throw new Error("the Slack adapter is not configured");
+      await notices.postEphemeral(input);
+    },
     log: (name, fields) => console.log(JSON.stringify({ component: "slack-channel-presses", event: name, ...fields })),
   }, event);
 }
