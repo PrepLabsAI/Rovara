@@ -66,9 +66,22 @@ export const DECISION_REFUSAL_WORDS: Readonly<Record<string, string>> = {
   not_approved: "A reply here is not enough to decide this. Open the task page and decide there.",
   not_waiting: "That is no longer waiting for an answer.",
   expired: "That request has expired. Look at the task page.",
+  empty_reason: "Say what should change: press Request changes again and type it in the box.",
 };
 const GENERIC_REFUSAL = "That could not be applied from here. Open the task page and decide there.";
 export const decisionRefusalWords = (reason: string): string => DECISION_REFUSAL_WORDS[reason] ?? GENERIC_REFUSAL;
+
+/** The most a person's words for a request for changes may hold (the decision's own limit). */
+export const CHANGE_REASON_MAX = 500;
+
+/**
+ * What a person typed as the reason for a request for changes, made safe to keep and to hand to the planner: control and format characters become spaces, whitespace is one space, and the text is cut to
+ * `CHANGE_REASON_MAX` characters. Whatever is left may be empty, and then it is refused.
+ */
+export function cleanChangeReason(raw: string): string {
+  const flat = raw.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/gu, " ").trim();
+  return [...flat].slice(0, CHANGE_REASON_MAX).join("").trim();
+}
 
 const sameConversation = (a: ConversationRef, b: ConversationRef): boolean => a.channel === b.channel && a.tenant === b.tenant && a.space === b.space && a.thread === b.thread;
 
@@ -184,7 +197,14 @@ export function createChannelSink(deps: ChannelSinkDeps): ChannelInboundSink {
           await say(decision.conversation, "error", decisionRefusalWords("step_up"));
           return;
         }
-        const answer = await deps.work.decide({ card, decision, ...who });
+        // A request for changes carries what the person wants changed, in their own words: made safe, and never empty.
+        const given = decision.decision === "REQUEST_CHANGES" ? cleanChangeReason(decision.reason) : decision.reason;
+        if (given === "") {
+          log({ event: "channel.refused", reason: "empty_reason" });
+          await say(decision.conversation, "error", decisionRefusalWords("empty_reason"));
+          return;
+        }
+        const answer = await deps.work.decide({ card, decision: { ...decision, reason: given }, ...who });
         if (answer.status === "decided") await say(decision.conversation, "progress", "Recorded.");
         else {
           log({ event: "channel.refused", reason: answer.reason });

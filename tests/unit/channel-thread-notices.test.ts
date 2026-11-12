@@ -5,7 +5,7 @@ import {
   IMPLICIT_COMPANY_ID, change, createWorkflowSnapshot, submitWorkflowArtifact, type ActorRef, type ChannelDecision, type ChannelEvent, type CodeMilestone, type ConversationRef, type DecisionRisk, type JsonValue, type OrgId, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
+import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
@@ -51,13 +51,15 @@ interface WorldOptions {
   milestones?: boolean;
   withGate?: boolean;
   taskUrl?: boolean;
+  /** The chat opens a box that asks what should change (default yes); without it the card sends the person to the task page for that. */
+  forms?: boolean;
   /** The task's company on its record (default the install's). */
   taskOrg?: OrgId;
 }
 
 async function world(options: WorldOptions = {}) {
   const store = new MemoryDocumentStore();
-  const adapter = new FakeChannelAdapter();
+  const adapter = new FakeChannelAdapter({ ...FAKE_CHANNEL_CAPABILITIES, ...(options.forms === false ? {} : { forms: true }) });
   const deliveries: ChannelEvent[] = [];
   const realDeliver = adapter.deliver.bind(adapter);
   adapter.deliver = async (event) => { deliveries.push(event); await realDeliver(event); };
@@ -124,8 +126,56 @@ describe("the plan card, by risk", () => {
   it("Request changes in the thread sends the plan back through the gate", async () => {
     const w = await world({ risk: "medium" });
     const event = (await card(w))!;
-    await w.sink.decision(decisionFor(event.data.requestId, { expectedRevision: event.data.expectedRevision, decision: "REQUEST_CHANGES" }));
-    expect((await workflowOf(w)).decisions.at(-1)).toMatchObject({ decision: "REQUEST_CHANGES" });
+    await w.sink.decision(decisionFor(event.data.requestId, { expectedRevision: event.data.expectedRevision, decision: "REQUEST_CHANGES", reason: "Use the retry helper, not a loop." }));
+    expect((await workflowOf(w)).decisions.at(-1)).toMatchObject({ decision: "REQUEST_CHANGES", reason: "Use the retry helper, not a loop." });
+  });
+
+  it("Request changes carries the person's own words: they are made safe and cut, an empty one is refused, and nothing is decided without them", async () => {
+    const w = await world({ risk: "low" });
+    const event = (await card(w))!;
+    const ask = (eventId: string, reason: string) => w.sink.decision(decisionFor(event.data.requestId, { eventId, expectedRevision: event.data.expectedRevision, decision: "REQUEST_CHANGES", reason }));
+    // Only control and format characters: nothing is left once they are cleaned, so it is refused in fixed words.
+    await ask("c1", "\u200b\u0007 \u200d");
+    expect((await workflowOf(w)).decisions).toHaveLength(0);
+    expect((ofType(w.deliveries, "error").at(-1) as { data: { text: string } }).data.text).toBe(decisionRefusalWords("empty_reason"));
+    // Safe: controls become spaces and runs of space one space, so what the planner reads is one plain line.
+    await ask("c2", `  Add\u0000 a   retry\n\nto the call ${"x".repeat(450)}`);
+    const sent = (await workflowOf(w)).decisions.at(-1);
+    expect(sent).toMatchObject({ decision: "REQUEST_CHANGES" });
+    expect(sent?.reason?.startsWith("Add a retry to the call xxx")).toBe(true);
+    expect(sent?.reason?.includes("\u0000") || sent?.reason?.includes("\n")).toBe(false);
+  });
+
+  it("the words are capped at 500 characters: one more never reaches the gate, and 500 do", async () => {
+    const over = await world({ risk: "low" });
+    const overCard = (await card(over))!;
+    await over.sink.decision(decisionFor(overCard.data.requestId, { expectedRevision: overCard.data.expectedRevision, decision: "REQUEST_CHANGES", reason: "y".repeat(501) }));
+    expect((await workflowOf(over)).decisions).toHaveLength(0);
+    const exact = await world({ risk: "low" });
+    const exactCard = (await card(exact))!;
+    await exact.sink.decision(decisionFor(exactCard.data.requestId, { expectedRevision: exactCard.data.expectedRevision, decision: "REQUEST_CHANGES", reason: "y".repeat(500) }));
+    expect([...((await workflowOf(exact)).decisions.at(-1)?.reason ?? "")]).toHaveLength(500);
+  });
+
+  it("a chat with no box sends the person to the task page for changes: the card offers Approve alone, and a press of Request changes is refused", async () => {
+    const w = await world({ risk: "low", forms: false });
+    const event = (await card(w))!;
+    expect(event.data.actions?.map((action) => action.decision)).toEqual(["APPROVE"]);
+    expect(event.data.text).toContain("To ask for changes, open the task page.");
+    expect(event.data.text).toContain(PAGE);
+    expect(event.data.taskUrl).toBe(PAGE);
+    expect(await readApprovalCard({ store: w.store, orgId: ORG, now }, event.data.requestId)).toMatchObject({ offered: ["APPROVE"] });
+    await w.sink.decision(decisionFor(event.data.requestId, { eventId: "rc", expectedRevision: event.data.expectedRevision, decision: "REQUEST_CHANGES", reason: "Change it." }));
+    expect((await workflowOf(w)).decisions).toHaveLength(0);
+    expect((ofType(w.deliveries, "error").at(-1) as { data: { text: string } }).data.text).toBe(decisionRefusalWords("step_up"));
+    // Approve still works there.
+    await w.sink.decision(decisionFor(event.data.requestId, { expectedRevision: event.data.expectedRevision }));
+    expect(await approvals(w)).toBe(1);
+    // And with no address to link, the words say where to open it.
+    const bare = await world({ risk: "low", forms: false, taskUrl: false });
+    const plain = (await card(bare))!;
+    expect(plain.data.text).toContain("To ask for changes, open the task page.");
+    expect(plain.data.text).toContain("rovara open");
   });
 
   it("a high risk plan: no button, a link to the task page, and a forged button press is refused at the sink and again at the gate", async () => {

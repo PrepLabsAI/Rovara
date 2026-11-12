@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type ChannelDecision, type ChannelEvent, type InboundMessage } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters } from "../../packages/broker/src/ports/adapter-registry.js";
 import {
-  NO_THREAD, SLACK_CAPABILITIES, SlackApiError, SlackChannel, decisionOf, escapeText, messageOf, renderEvent, slackChannelPlugin, slackWeb, startSocket, textOf, SOCKET_QUEUE_MAX, type SocketLike,
+  NO_THREAD, SLACK_CAPABILITIES, SlackApiError, SlackChannel, changesModal, changesPressOf, changesSubmissionOf, cleanChatText, decisionOf, escapeText, messageOf, renderEvent, slackChannelPlugin, slackWeb, startSocket, textOf, SOCKET_QUEUE_MAX, type SocketLike,
 } from "../../packages/broker/src/plugins/channel/slack/index.js";
 
 const BOT_TOKEN = ["xoxb", "1111111111", "2222222222", "abcdefghijklmnop"].join("-");
@@ -398,5 +398,105 @@ describe("the plug-in", () => {
     await expect(load({ botToken: { env: "X" }, projects: ["web"], extra: true })).rejects.toThrow();
     const error = await load({ botToken: BOT_TOKEN, projects: ["web"] }).catch((caught: Error) => caught.message);
     expect(error).not.toContain(BOT_TOKEN);
+  });
+});
+
+describe("Request changes asks what should change", () => {
+  const REQUEST = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+  const VALUE = { r: REQUEST, v: 3, d: "d".repeat(64), o: "REQUEST_CHANGES" };
+  const press = (overrides: Record<string, unknown> = {}) => ({
+    type: "block_actions", trigger_id: "1337.42.abcdef", user: { id: PERSON, team_id: TEAM }, team: { id: TEAM }, channel: { id: CHANNEL }, message: { ts: "1700000000.000300", thread_ts: "1700000000.000001" },
+    actions: [{ action_id: "rovara_decide_REQUEST_CHANGES", value: JSON.stringify(VALUE) }], ...overrides,
+  });
+  const context = changesPressOf(press())!.context;
+  const submission = (text: string | null | undefined, overrides: Record<string, unknown> = {}, meta: unknown = context) => ({
+    type: "view_submission", user: { id: PERSON, team_id: TEAM }, team: { id: TEAM },
+    view: { id: "V0VIEW001", callback_id: "rovara_changes", private_metadata: JSON.stringify(meta), state: { values: { rovara_changes_reason: { text: { type: "plain_text_input", value: text } } } } }, ...overrides,
+  });
+
+  it("declares forms, and a press of the button is not a decision: it is a request to open the box for exactly that request, by that person", () => {
+    expect(SLACK_CAPABILITIES.forms).toBe(true);
+    expect(decisionOf(press(), CLOCK)).toBeUndefined();
+    expect(changesPressOf(press())).toEqual({ triggerId: "1337.42.abcdef", context: { r: REQUEST, v: 3, d: "d".repeat(64), t: TEAM, s: CHANNEL, h: "1700000000.000001", u: PERSON, w: TEAM } });
+    // Another button, a value that disagrees with its button, and a presser with no workspace open no box.
+    expect(changesPressOf(press({ actions: [{ action_id: "rovara_decide_APPROVE", value: JSON.stringify({ ...VALUE, o: "APPROVE" }) }] }))).toBeUndefined();
+    expect(changesPressOf(press({ actions: [{ action_id: "rovara_decide_REQUEST_CHANGES", value: JSON.stringify({ ...VALUE, o: "REJECT" }) }] }))).toBeUndefined();
+    expect(changesPressOf(press({ user: { id: PERSON } }))).toBeUndefined();
+    const modal = changesModal(context) as { type: string; callback_id: string; private_metadata: string; blocks: Array<{ label: { text: string }; element: { max_length: number } }> };
+    expect(modal).toMatchObject({ type: "modal", callback_id: "rovara_changes" });
+    expect(modal.blocks[0]!.label.text).toBe("What should change?");
+    expect(modal.blocks[0]!.element.max_length).toBe(500);
+    expect(JSON.parse(modal.private_metadata)).toEqual(context);
+  });
+
+  it("reads the words typed in the box as the reason of a request for changes for the request the box was opened for", () => {
+    const heard = changesSubmissionOf(submission("Use the retry helper."), { userId: BOT }, CLOCK);
+    expect(heard).toMatchObject({ status: "ok", decision: { decision: "REQUEST_CHANGES", reason: "Use the retry helper.", requestId: REQUEST, expectedRevision: 3, eventId: "V0VIEW001", conversation: { tenant: TEAM, space: CHANNEL, thread: "1700000000.000001" }, actor: { userId: PERSON, tenant: TEAM } } });
+  });
+
+  it("makes the words safe the way other chat text is, and cuts them to the limit", () => {
+    expect(cleanChatText(`<@${BOT}> hi <@U0OTHER99> &lt;b&gt;\u0000 a\u200b   b`, BOT, 500)).toBe("hi @member <b> a b");
+    const heard = changesSubmissionOf(submission(`ask <@U0OTHER99>${"y".repeat(900)}`), { userId: BOT }, CLOCK);
+    expect(heard?.status === "ok" && heard.decision.reason.startsWith("ask @member")).toBe(true);
+    expect(heard?.status === "ok" && [...heard.decision.reason].length).toBe(500);
+  });
+
+  it("refuses nothing typed, only spaces, or only invisible characters, and the box stays open with a fixed error", () => {
+    for (const text of ["", "   \n ", "\u200b\u0007", null, undefined]) expect(changesSubmissionOf(submission(text), { userId: BOT }, CLOCK)).toEqual({ status: "empty" });
+    expect(changesSubmissionOf({ ...submission("x"), view: { id: "V1", callback_id: "rovara_changes", private_metadata: JSON.stringify(context), state: { values: {} } } }, { userId: BOT }, CLOCK)).toEqual({ status: "empty" });
+  });
+
+  it("refuses a box sent by a person other than the one who opened it, from another workspace, or whose record does not read, and ignores a box that is not Rovara's", () => {
+    const logs: Array<Record<string, unknown>> = [];
+    expect(changesSubmissionOf(submission("x", { user: { id: "U0SOMEONE", team_id: TEAM } }), { userId: BOT }, CLOCK, (entry) => logs.push(entry))).toEqual({ status: "refused" });
+    expect(changesSubmissionOf(submission("x", { user: { id: PERSON, team_id: "T0GUESTTT" } }), { userId: BOT }, CLOCK)).toEqual({ status: "refused" });
+    expect(changesSubmissionOf(submission("x", { user: { id: PERSON } }), { userId: BOT }, CLOCK)).toEqual({ status: "refused" });
+    expect(changesSubmissionOf(submission("x", {}, { ...context, d: "short" }), { userId: BOT }, CLOCK)).toEqual({ status: "refused" });
+    expect(changesSubmissionOf(submission("x", {}, "{not json"), { userId: BOT }, CLOCK)).toEqual({ status: "refused" });
+    expect(logs).toEqual([{ event: "slack.changes_box_other_person" }]);
+    const other = submission("x");
+    other.view.callback_id = "someone_elses";
+    expect(changesSubmissionOf(other, { userId: BOT }, CLOCK)).toBeUndefined();
+    expect(changesSubmissionOf({ type: "block_actions" }, { userId: BOT }, CLOCK)).toBeUndefined();
+  });
+
+  const listen = async () => {
+    const sockets: FakeSocket[] = [];
+    const decisions: ChannelDecision[] = [];
+    const slack = fakeSlack();
+    const adapter = new SlackChannel({ projects: ["web"], botToken: reader(BOT_TOKEN), appToken: reader(APP_TOKEN), fetch: slack.fetch, now: CLOCK, socket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; }, sleep: async () => { await new Promise((resolve) => setTimeout(resolve, 1)); } });
+    const listening = await adapter.start({ message: async () => undefined, decision: async (decision) => { decisions.push(decision); } });
+    await until(() => sockets.length === 1);
+    return { sockets, decisions, slack, listening };
+  };
+
+  it("opens the box with the press's own trigger, decides nothing yet, then sends the typed words as the decision", async () => {
+    const { sockets, decisions, slack, listening } = await listen();
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e1", payload: press() });
+    await until(() => slack.calls.some((call) => call.method === "views.open"));
+    const opened = JSON.parse(slack.calls.find((call) => call.method === "views.open")!.body) as { trigger_id: string; view: { callback_id: string; private_metadata: string } };
+    expect(opened.trigger_id).toBe("1337.42.abcdef");
+    expect(opened.view.callback_id).toBe("rovara_changes");
+    expect(JSON.parse(opened.view.private_metadata)).toEqual(context);
+    expect(decisions).toEqual([]);
+    expect(sockets[0]!.sent).toEqual([JSON.stringify({ envelope_id: "e1" })]);
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e2", payload: submission("Use the retry helper.") });
+    await until(() => decisions.length === 1);
+    expect(decisions[0]).toMatchObject({ decision: "REQUEST_CHANGES", reason: "Use the retry helper." });
+    expect(sockets[0]!.sent[1]).toBe(JSON.stringify({ envelope_id: "e2" }));
+    await listening.stop();
+  });
+
+  it("answers an empty box with an error on its field and sends no decision, and closes a box from another person with no decision", async () => {
+    const { sockets, decisions, listening } = await listen();
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e1", payload: submission("   ") });
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e2", payload: submission("x", { user: { id: "U0SOMEONE", team_id: TEAM } }) });
+    sockets[0]!.hear({ type: "interactive", envelope_id: "e3", payload: submission("Fine.") });
+    await until(() => decisions.length === 1);
+    expect(JSON.parse(sockets[0]!.sent[0]!)).toEqual({ envelope_id: "e1", payload: { response_action: "errors", errors: { rovara_changes_reason: "Say what should change." } } });
+    expect(JSON.parse(sockets[0]!.sent[1]!)).toEqual({ envelope_id: "e2", payload: { response_action: "clear" } });
+    expect(JSON.parse(sockets[0]!.sent[2]!)).toEqual({ envelope_id: "e3" });
+    expect(decisions.map((decision) => decision.reason)).toEqual(["Fine."]);
+    await listening.stop();
   });
 });
