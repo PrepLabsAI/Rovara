@@ -18,13 +18,21 @@
 //   guard-files     an edit to the guard itself, its tests, or the CI workflow that runs it (the controller reviews those by hand;
 //                   the guard's own lane passes --allow-guard-edits)
 //   secret          anything gitleaks finds in the range
+//   accepted-stale  an entry of the accepted-findings list whose file the range itself changes or removes (the list must not rot where the range works)
+//
+// Accepted findings (scripts/port-guard-accepted.json, read from beside this script like the boundary data, never from the checkout): a finding of
+// rule cloud-aws or secret is skipped only when its path and rule match an entry AND the file's blob at the range tip is the entry's exact blob. No
+// wildcard and no directory: any edit to the file brings every finding about it back, and a new file is never covered. No other rule can be accepted
+// (a private name never), and the list itself is a guard file. An entry is judged against the range: its file absent at the tip and untouched by the range,
+// it is inactive (a note); present with other content but untouched by the range, a warning; changed or removed by the range itself, an accepted-stale
+// finding, and the file is judged on its own merits as if it had no entry.
 //
 // It checks the range's net diff (merge base to tip) and also every non-merge commit in the range, so a commit that adds a file
 // and a later commit that removes it still fails: the history is pushed too. It prints file:line, the rule and a label for the
 // pattern, never the text it matched. Exit status: 0 clean, 1 findings, 2 the guard could not run (bad range, git or gitleaks missing).
 //
 // Node runs this file directly, so only erasable syntax and only Node's own modules. Usage, from inside the lane's worktree:
-//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits]      (default range: origin/code/next..HEAD)
+//   node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--boundary <file>] [--accepted <file>]      (default range: origin/code/next..HEAD)
 // The controller's extended name list (one regular expression per line) is read from the file named by PORT_GUARD_PRIVATE_NAMES, if set.
 //
 // No name is written in this file or in its tests: the protected words are salted hashes (see NameSource), and the tests use invented names.
@@ -965,6 +973,7 @@ const INLINE_ALLOW = new RegExp(join("gitleaks", ":", "allow"), "i");
 const GUARD_FILES = [
   /^scripts\/port-guard\.ts$/i,
   /^scripts\/boundary-allowlist\.json$/i,
+  /^scripts\/port-guard-accepted\.json$/i,
   /^tests\/[^/]+\/port-guard[^/]*$/i,
   /^\.github\/workflows\/ci\.yml$/i,
   /(^|\/)\.gitleaks[^/]*$/i,
@@ -1151,9 +1160,94 @@ export interface GuardOptions {
   names?: NameSource;
   /** The gitleaks executable; tests point it at a name that does not exist to prove the failure is loud. */
   gitleaksBin?: string;
+  /** The accepted findings; the command line reads them with `loadAccepted`. Absent: none. */
+  accepted?: readonly AcceptedFinding[];
 }
 
-export interface GuardResult { findings: Finding[]; commits: number; range: Range }
+export interface GuardResult { findings: Finding[]; commits: number; range: Range; notes?: string[]; warnings?: string[] }
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Accepted findings.
+
+/** The only rules a finding may be accepted under. Never private-name, guard-files, scan-bypass or any other. */
+export const ACCEPTABLE_RULES: readonly string[] = ["cloud-aws", "secret"];
+
+export interface AcceptedFinding {
+  /** One exact repository path: no wildcard, no directory. */
+  path: string;
+  rule: "cloud-aws" | "secret";
+  /** The git blob id (40 hex) of the file's accepted content. */
+  blob: string;
+  reason: string;
+}
+
+/** Reads and checks the accepted-findings data; anything off is a GuardError (the guard does not run on a list it cannot trust). */
+export function parseAccepted(text: string, source: string): AcceptedFinding[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new GuardError(`${source} is not JSON`);
+  }
+  const record = data as { version?: unknown; accepted?: unknown };
+  if (record === null || typeof record !== "object" || record.version !== 1 || !Array.isArray(record.accepted)) throw new GuardError(`${source} must be { "version": 1, "accepted": [...] }`);
+  const seen = new Set<string>();
+  return record.accepted.map((raw: unknown, index: number) => {
+    const entry = raw as Record<string, unknown>;
+    const where = `${source} entry ${index + 1}`;
+    if (entry === null || typeof entry !== "object" || Object.keys(entry).sort().join(",") !== "blob,path,reason,rule") throw new GuardError(`${where} must have exactly path, rule, blob and reason`);
+    const { path, rule, blob, reason } = entry;
+    if (typeof path !== "string" || path === "" || /[*?[\]{}!\\]/.test(path) || path.endsWith("/") || path.startsWith("/") || path.split("/").some((part) => part === "" || part === "." || part === "..")) {
+      throw new GuardError(`${where}: the path must be one exact file path (no wildcard, no directory)`);
+    }
+    if (typeof rule !== "string" || !ACCEPTABLE_RULES.includes(rule)) throw new GuardError(`${where}: only ${ACCEPTABLE_RULES.join(" and ")} findings can be accepted`);
+    if (typeof blob !== "string" || !/^[0-9a-f]{40}$/.test(blob)) throw new GuardError(`${where}: blob must be a 40-character git blob id`);
+    if (typeof reason !== "string" || reason.trim().length < 10) throw new GuardError(`${where}: give the reason`);
+    const key = `${rule}|${path}`;
+    if (seen.has(key)) throw new GuardError(`${where}: ${path} is listed twice for ${rule}`);
+    seen.add(key);
+    return { path, rule: rule as AcceptedFinding["rule"], blob, reason };
+  });
+}
+
+let acceptedFile: string | undefined;
+/** Point the guard at an accepted-findings file (--accepted); the default is the file beside this script. */
+export function useAcceptedFile(file: string | undefined): void {
+  acceptedFile = file;
+}
+
+/** The accepted findings: the file named by --accepted, else the one beside this script (none when there is no such file). Never the checkout's copy. */
+export function loadAccepted(): AcceptedFinding[] {
+  const file = acceptedFile ?? joinPath(dirname(fileURLToPath(import.meta.url)), "port-guard-accepted.json");
+  if (acceptedFile === undefined && !existsSync(file)) return [];
+  return parseAccepted(readFileSync(file, "utf8"), file);
+}
+
+/** What the accepted list did to a run: the findings left, and the notes (inactive entries) and warnings (changed outside the range) to print. */
+export interface AcceptedOutcome { findings: Finding[]; notes: string[]; warnings: string[] }
+
+/**
+ * The findings left after the accepted ones. An entry skips findings only when the file at the tip is its exact blob. Otherwise: absent at the tip and
+ * untouched by the range, it is inactive (a note); present but different and untouched, a warning; changed or removed by the range, an accepted-stale finding.
+ */
+export function applyAccepted(cwd: string, tip: string, findings: readonly Finding[], accepted: readonly AcceptedFinding[], touched: ReadonlySet<string>): AcceptedOutcome {
+  const fresh = new Set<string>();
+  const stale: Finding[] = [];
+  const notes: string[] = [];
+  const warnings: string[] = [];
+  for (const entry of accepted) {
+    const current = git(cwd, ["rev-parse", "--verify", "--quiet", `${tip}:${entry.path}`], true).trim();
+    if (current === entry.blob) { fresh.add(`${entry.rule}|${entry.path}`); continue; }
+    if (touched.has(entry.path)) {
+      stale.push({ rule: "accepted-stale", file: entry.path, line: null, detail: current === "" ? `the range removes a file with an accepted ${entry.rule} finding; remove the entry` : `the range changes a file with an accepted ${entry.rule} finding, so it is judged as if it had none; review it and remove or update the entry` });
+    } else if (current === "") {
+      notes.push(`${entry.path}: accepted ${entry.rule} entry inactive (the file is not at the tip)`);
+    } else {
+      warnings.push(`${entry.path}: accepted ${entry.rule} entry no longer matches the file (changed before this range); remove or update the entry`);
+    }
+  }
+  return { findings: [...findings.filter((finding) => !(ACCEPTABLE_RULES.includes(finding.rule) && fresh.has(`${finding.rule}|${finding.file}`))), ...stale], notes, warnings };
+}
 
 interface LeakReport { RuleID?: string; File?: string; StartLine?: number; Commit?: string }
 
@@ -1263,7 +1357,13 @@ export function runGuard(options: GuardOptions): GuardResult {
     scanChange(collector, { cwd: options.cwd, commit: commit!, merge: parents.length > 1, tip: range.tip, allowGuardEdits });
   }
   if (options.gitleaks !== "off") runGitleaks(options, range, collector);
-  return { findings: collector.findings, commits: commits.length, range };
+  // Every path the range changes: in its net diff or in any of its commits (a file changed and changed back was still touched).
+  const touched = new Set([
+    ...git(options.cwd, ["diff", "--name-only", "--no-renames", mergeBase, range.tip]).split("\n"),
+    ...git(options.cwd, ["log", "--name-only", "--no-renames", "--format=", "-m", `${range.base}..${range.tip}`]).split("\n"),
+  ].filter((path) => path !== ""));
+  const outcome = applyAccepted(options.cwd, range.tip, collector.findings, options.accepted ?? [], touched);
+  return { findings: outcome.findings, commits: commits.length, range, notes: outcome.notes, warnings: outcome.warnings };
 }
 
 export function formatFinding(finding: Finding): string {
@@ -1301,8 +1401,17 @@ export function main(argv: readonly string[]): number {
       useBoundaryFile(value);
       i += 1;
     }
+    else if (arg === "--accepted") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        console.error("port-guard: --accepted needs the accepted-findings file");
+        return 2;
+      }
+      useAcceptedFile(value);
+      i += 1;
+    }
     else if (arg === "--help" || arg === "-h") {
-      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--boundary <file>]\n(default range: " + DEFAULT_RANGE + ")");
+      console.log("usage: node scripts/port-guard.ts [--range <base>..<tip>] [--allow-guard-edits] [--boundary <file>] [--accepted <file>]\n(default range: " + DEFAULT_RANGE + ")");
       return 0;
     } else {
       console.error(`port-guard: unknown argument ${arg}`);
@@ -1320,7 +1429,9 @@ export function main(argv: readonly string[]): number {
     } else {
       names = { ...DEFAULT_NAMES, patterns: loadPrivatePatterns(privateList) };
     }
-    const result = runGuard({ cwd: root.stdout.trim(), range, allowGuardEdits, names });
+    const result = runGuard({ cwd: root.stdout.trim(), range, allowGuardEdits, names, accepted: loadAccepted() });
+    for (const note of result.notes ?? []) console.log(`port-guard: note: ${note}`);
+    for (const warning of result.warnings ?? []) console.log(`port-guard: warning: ${warning}`);
     if (result.findings.length === 0) {
       console.log(`port-guard: clean. ${result.commits} commit${result.commits === 1 ? "" : "s"} in ${range}; no Cloud-only path or import, no private name, no secret.`);
       return 0;
