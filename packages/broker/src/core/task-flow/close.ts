@@ -12,6 +12,7 @@ import { isTerminalStatus, readOperation, syncTaskIndex } from "./results.js";
 import type { OperationRecord, TaskRecord, WorkspaceRecord } from "./records.js";
 import { readWorkspace } from "./stage-machine.js";
 import { iso, log } from "./support.js";
+import { announceTaskEnd } from "./task-end.js";
 import { DocumentStoreError } from "@agentx/contracts";
 
 const CLOSE_ATTEMPTS = 3;
@@ -66,7 +67,8 @@ export async function finishClose(deps: TaskFlowDeps, task: TaskRecord, parts: P
   // The workspace is read again once it is closed: a dispatch may have recorded a machine after the first read, and nothing records one on a closed workspace.
   const closed = await readWorkspace(deps, task.workspaceId);
   await stopMachines(deps, [workspace?.machine?.machineId, closed?.machine?.machineId], [workspace?.machineReservationId, closed?.machineReservationId, task.admissionReservationId]);
-  await deps.taskEnded?.({ orgId: deps.companyId, taskId: task.taskId }).catch((error: unknown) => log(deps, { event: "task_flow.task_ended_failed", error: error instanceof Error ? error.name : "unknown" }));
+  // The host is told once: a task a merge already ended is not announced again by its close (`task-end.ts`).
+  await announceTaskEnd(deps, task.taskId, "closed");
   // What the run cost goes to the estimates of the next runs. Best effort: a cost that cannot be read now is simply not counted, and the close stands.
   try { await deps.onTaskClosed?.(task, now); } catch (error) { log(deps, { event: "task_flow.run_cost_not_recorded", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }); }
 }

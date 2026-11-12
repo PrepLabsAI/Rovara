@@ -35,6 +35,7 @@ import { sessionEventItem } from "../core/sessions/store.js";
 import { verifyPublishedChanges } from "../core/build-step/changed-files.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { readTask } from "../core/task-flow/reads.js";
+import { announceTaskEnd, completedByMerge } from "../core/task-flow/task-end.js";
 import { recordedHeadOf } from "../core/build-step/head-check.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 
@@ -219,6 +220,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       ];
       const written = await store.transact(items);
       if (written.applied) await milestones.deliver(taskId).catch(() => undefined);
+      // The merge completed the task: the host is told it ended, right after the merge's own commit and once (a later close does not tell it again, and a merge seen twice commits once).
+      if (written.applied && completedByMerge(workflow, next)) await announceTaskEnd(flow, taskId, "merged");
       // Every pull request merged: the task is over and its row goes. Otherwise the next pull request is seen on the next pass, from the workflow as it now is.
       return written.applied && next.stage === "MERGED" ? { kind: "TERMINAL", release: "confirmed" } : { kind: "OBSERVED" };
     }

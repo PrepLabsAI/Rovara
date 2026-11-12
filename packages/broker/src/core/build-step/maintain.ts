@@ -25,6 +25,7 @@ import { dispatchRowItem, resolveRowItem } from "../task-flow/dispatch-rows.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
 import { acceptStep, commitWorkflow, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
+import { announceTaskEnd, completedByMerge } from "../task-flow/task-end.js";
 import { jsonOf, locate, settled, type Located, type RowRef } from "./start.js";
 import { pullRequestRecordKey, pullRequestRecordOf, taskOfOperation } from "./records.js";
 import type { Ended } from "./results.js";
@@ -320,6 +321,8 @@ async function recordAppended(deps: TaskFlowDeps, task: TaskRecord, workflow: Wo
     ...(next.stage === "PULL_REQUEST" && next.state === "READY" ? [dispatchRowItem(deps, task.taskId, next.revision, "PUBLISH", now)] : []),
   ];
   if (!(await commitWorkflow(deps, task, next, items))) return;
+  // The pushed fix was found merged and that completes the task: the host is told it ended, once (a later close does not tell it again).
+  if (completedByMerge(workflow, next)) await announceTaskEnd(deps, task.taskId, "merged");
   if (next.stage === "PULL_REQUEST" && next.state === "READY") await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "PUBLISH" }).catch((error: unknown) => log(deps, { event: "build_step.start_failed", taskId: task.taskId, kind: "PUBLISH", error: error instanceof Error ? error.name : "unknown" }));
 }
 
