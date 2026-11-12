@@ -68,3 +68,26 @@ describe("readCodeOwnersFile", () => {
     expect(readCodeOwnersFile("* @a\n!/x/ @b").unsupported).toBe(true);
   });
 });
+
+// The file is the repository's: no pattern may make one path slow. The bar is far above linear work (a few ms) and far below what the old regex
+// (`*a*a…b`: 19 s on a 256-character path) or a per-state reach list (`*` x 4000: 5.9 s) took. Sizes grow, and the first one over the bar fails.
+describe("a hostile pattern cannot make matching slow", () => {
+  const BAR_MS = process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false" ? 2_000 : 500;
+  const cases: Array<[string, (n: number) => string, (n: number) => string]> = [
+    ["a run of stars", (n) => "*".repeat(n), (n) => "a".repeat(n / 4)],
+    ["stars between letters", (n) => "*a".repeat(n / 2) + "*b", (n) => "a".repeat(n / 4)],
+    ["a long name between stars", (n) => "a" + "*".repeat(n) + "b", (n) => "a" + "c".repeat(n / 4) + "b"],
+    ["many any-directory segments", (n) => "a/" + "**/".repeat(n / 3) + "b", (n) => "a/" + "c/".repeat(n / 8) + "b"],
+  ];
+  for (const [label, pattern, path] of cases) {
+    it(label, () => {
+      for (const size of [256, 1_024, 4_096]) {
+        const [rule] = rules(`${pattern(size)} @o`);
+        const started = performance.now();
+        rule!.matches(path(size));
+        const took = performance.now() - started;
+        expect(took, `${label} at ${String(size)}`).toBeLessThan(BAR_MS);
+      }
+    }, 60_000);
+  }
+});
