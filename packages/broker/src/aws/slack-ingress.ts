@@ -14,6 +14,7 @@ import {
   CLOSED_SHARED_NOTICE,
   routeAttributes,
   routedChoiceId,
+  isThreadContinuation,
   SharedTaskRecordSchema,
   SlackChannelIdSchema,
   SlackMessageTimestampSchema,
@@ -130,6 +131,11 @@ export interface SlackIngressDependencies {
    * service. Best effort: without it, a clear small change gets the card with Start.
    */
   recordIntake?: (input: SlackIntakeRecordInput) => Promise<void>;
+  /**
+   * Decision 147: whether a plain thread reply is addressed to AgentX without a mention: AgentX answered this person in
+   * this thread, and its last answer there is under 24 hours old. Absent: plain replies outside task threads are ignored.
+   */
+  threadContinuation?: (thread: SlackThread, userId: string, nowSeconds: number) => Promise<boolean>;
   /** Task 21: the requester's typed `answer` to a waiting choice: its request goes to the chat agent instead. Absent: `answer` is not read. */
   answerWorkflowChoice?: (input: { thread: SlackThread; userId: string }) => Promise<WorkflowChoiceOutcome>;
   /**
@@ -416,7 +422,8 @@ export function slackMentionOfInbound(message: InboundMessage): SlackMention {
 export function createSlackMentionRouter(dependencies: SlackRouterDependencies): (mention: SlackMention) => Promise<HttpResponse> {
   const now = dependencies.now ?? Date.now;
   const log: SlackIngressLog = dependencies.log ?? (() => undefined);
-  return async (mention) => {
+  return async (incoming) => {
+    let mention: SlackMention = incoming;
     if (mention.appPosted && !dependencies.appPosted) return ignore(log, "bot_or_edited_message");
     if (mention.appPosted && !dependencies.appPosted?.accept) return ignore(log, "app_posted_disabled");
     const { thread } = mention;
@@ -437,17 +444,37 @@ export function createSlackMentionRouter(dependencies: SlackRouterDependencies):
         return respond(500, { error: "thread could not be checked" });
       }
     }
+    // Decision 147: a plain reply from the person AgentX answered in this thread (in the last 24 hours) is handled as a mention.
+    let continued = false;
     if (mention.kind === "message" && !choiceAnswer) {
-      if (dependencies.sharedTask === undefined || dependencies.recordThreadNote === undefined) return ignore(log, "not_task_thread");
-      try {
-        shared = await dependencies.sharedTask.lookup(thread);
-      } catch (error) {
-        // Nothing was claimed yet: Slack's retry is handled as new.
-        log("shared_task.lookup_failed", { eventId: mention.eventId, errorName: errorName(error) });
-        return respond(500, { error: "shared thread could not be checked" });
+      if (dependencies.sharedTask !== undefined) {
+        try {
+          shared = await dependencies.sharedTask.lookup(thread);
+        } catch (error) {
+          // Nothing was claimed yet: Slack's retry is handled as new.
+          log("shared_task.lookup_failed", { eventId: mention.eventId, errorName: errorName(error) });
+          return respond(500, { error: "shared thread could not be checked" });
+        }
+        sharedLooked = true;
       }
-      if (shared?.workflowThread !== true || shared.closed) return ignore(log, "not_task_thread");
-      sharedLooked = true;
+      const taskThread = shared?.workflowThread === true && !shared.closed && dependencies.recordThreadNote !== undefined;
+      if (!taskThread) {
+        // Only a person's own plain reply in a thread, never an app's post, and never the plain copy of an @mention (its app_mention copy is the one handled).
+        const mentionCopy = mention.botUserId !== undefined && mention.text.includes(`<@${mention.botUserId}>`);
+        if (!mention.isThreadReply || mention.appPosted || mentionCopy || dependencies.threadContinuation === undefined) return ignore(log, "not_task_thread");
+        let addressed: boolean;
+        try {
+          addressed = await dependencies.threadContinuation(thread, mention.userId, Math.floor(now() / 1_000));
+        } catch (error) {
+          // Nothing was claimed yet: Slack's retry is handled as new.
+          log("thread_continuation.lookup_failed", { eventId: mention.eventId, errorName: errorName(error) });
+          return respond(500, { error: "thread could not be checked" });
+        }
+        if (!addressed) return ignore(log, "not_task_thread");
+        continued = true;
+        mention = { ...mention, kind: "mention" };
+        log("thread.continued", { eventId: mention.eventId });
+      }
     }
     let memberCheckError: string | undefined;
     if (mention.appPosted && dependencies.appPosted) {
@@ -606,13 +633,14 @@ export function createSlackMentionRouter(dependencies: SlackRouterDependencies):
       // A plain request in a thread stays with the chat agent (an existing chat thread); only a prefixed one starts a
       // task there. A prefix always changes the text, so unchanged instructions mean no prefix. A stop that found
       // nothing running is the chat agent's too.
-      const plainThreadRequest = mention.isThreadReply && request.kind === "start" && request.instructions === text.trim();
+      // Decision 147: a continued reply is handled as a new request, routed like a top-level one.
+      const plainThreadRequest = mention.isThreadReply && !continued && request.kind === "start" && request.instructions === text.trim();
       if (request.kind === "chat") {
         chatText = request.text;
       } else if (!plainThreadRequest && !isStopCommand(text)) {
         // Task 21: a plain top-level request (no prefix: the instructions are the whole text) is routed by the Slack
         // service, after Slack has its answer; `workflow:` still asks Quick or Full here.
-        const routed = dependencies.routeRequest !== undefined && !mention.isThreadReply && request.path === undefined && request.instructions === text.trim();
+        const routed = dependencies.routeRequest !== undefined && (!mention.isThreadReply || continued) && request.path === undefined && request.instructions === text.trim();
         return startFromMention(dependencies, log, mention, request,
           routed ? () => queueRequest(dependencies, log, mention, request.instructions, countedWindowStart, now, true) : undefined);
       }
@@ -1302,6 +1330,12 @@ export function awsSlackRouterDependencies(transport: SlackRouterTransport): Sla
       // The broker holds the state table and callback key; this Lambda gets neither (#126).
       async stopTask(thread: SlackThread, userId: string) {
         return stopTaskThroughBroker(invokeBroker, thread, userId);
+      },
+      // Decision 147: the Slack service's record of whom AgentX answered in each thread, on the Slack threads table. Outside the
+      // task-only hooks: a chat thread continues the same way where Slack tasks are off (the legacy deployment).
+      async threadContinuation(thread: SlackThread, userId: string, nowSeconds: number) {
+        return isThreadContinuation(async (key) => ((await documentClient.send(new GetCommand({ TableName: threadsTableName, Key: key }))) as { Item?: Record<string, unknown> }).Item,
+          thread, userId, nowSeconds);
       },
       ...(!slackTasks ? {} : {
         async captureFeedbackNote(input: { taskId: string; thread: SlackThread; userId: string; eventId: string; messageTs: string; text: string }) {

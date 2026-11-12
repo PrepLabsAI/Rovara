@@ -45,6 +45,8 @@ export interface RequestRoutingDependencies {
    * card with Start is posted instead. Absent: every change gets the card.
    */
   autoStart?(input: { message: SlackRequestMessage; requestId: string }): Promise<QuickAutoStartResult>;
+  /** Decision 147: records that AgentX answered this request's sender in its thread (small talk, a card, a start, or a chat answer); never throws. */
+  answered?(message: SlackRequestMessage): Promise<void>;
   /** Answers the request as the chat agent does any chat request. */
   answer(message: SlackRequestMessage): Promise<void>;
   /** Tells the thread's queued-request count that this request is done (the chat agent's path does so itself). */
@@ -58,6 +60,11 @@ export interface RequestRoutingDependencies {
  * reason), keyed by the choice ID its card would carry, so the requester's later choice can be joined to it.
  */
 export async function routeSlackRequest(message: SlackRequestMessage, deps: RequestRoutingDependencies): Promise<void> {
+  await routeOnce(message, deps);
+  await deps.answered?.(message);
+}
+
+async function routeOnce(message: SlackRequestMessage, deps: RequestRoutingDependencies): Promise<void> {
   const now = deps.now ?? Date.now;
   const startedAt = now();
   // Smart intake: small talk ("hello", "thanks", "what can you do?") gets its fixed reply at once: no model call, no

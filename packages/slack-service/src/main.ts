@@ -37,6 +37,7 @@ import { createSlackWebClient } from "./slack-web.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { createChoiceOffer, routeSlackRequest } from "./request-routing.js";
+import { createContinuationRecorder } from "./thread-continuation.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
 import { handlePageComment } from "./page-comment.js";
 import { handleTaskQuestion, runTaskAnswer } from "./task-question.js";
@@ -489,6 +490,7 @@ log("service.started", {
   classifierProvider: classifierModel.provider, classifierModel: classifierModel.modelId, classifierAvailable, requestRouting: requestRouter !== undefined,
 });
 const offerChoice = createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => postToSlack(thread.channelId, thread.threadTs, text, blocks), log });
+const rememberAnswered = createContinuationRecorder({ documentClient, tableName: threadsTableName, log });
 await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQuestion !== undefined
   ? handleTaskQuestion(message, taskQuestion, {
     ...(requestRouter === undefined ? {} : { route: requestRouter }),
@@ -503,7 +505,9 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
     finish: (subject) => threads.finish(subject),
     log })
   : route === "suggest"
-  ? routeSlackRequest(message, { ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice,
+  ? routeSlackRequest(message, {
+    // Decision 147: the person AgentX answered here may reply without a mention for the next 24 hours.
+    answered: (request) => rememberAnswered(request.thread, request.userId), ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice,
     notify: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
     // Decision 134: a clear small change starts Quick on its own, through the broker's check and the requester's own start.
     autoStart: async ({ message: request, requestId }) => {
@@ -512,7 +516,7 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
       return api.startQuickFromIntake({ requestId });
     },
     answer: (question) => processRequest(question, context), finish: (subject) => threads.finish(subject), log })
-  : processRequest(message, context), {
+  : processRequest(message, context).then(async (result) => { await rememberAnswered(message.thread, message.userId); return result; }), {
   concurrency,
   maxReceiveCount: MAX_RECEIVE_COUNT,
   visibilitySeconds: VISIBILITY_SECONDS,
