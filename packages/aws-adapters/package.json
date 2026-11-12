@@ -1,0 +1,18 @@
+{
+  "name": "@rovara/aws-adapters",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./dynamodb": "./dist/dynamodb/plugin.js"
+  },
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=22.19.0 <23"
+  },
+  "dependencies": {
+    "@agentx/contracts": "0.1.0",
+    "@aws-sdk/client-dynamodb": "3.1134.0"
+  }
+}
