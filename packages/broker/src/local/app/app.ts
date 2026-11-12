@@ -24,30 +24,18 @@ import { remainingUsd, taskLimitUsd } from "../../core/cost/limits.js";
 import { createModelSelection, type ModelSelectionService } from "../../core/model-selection/service.js";
 import { createUsableModels } from "../../core/model-selection/usable-models.js";
 import { createLocalModelSelectionSeams } from "./model-selection.js";
-import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
-import { createDecisionActions } from "../../core/decisions/local-actions.js";
-import { createWorkflowDocumentSubject, currentDocumentType } from "../../core/decisions/workflow-subject.js";
 import type { LocalPageSessions } from "../../core/local-pages/guard.js";
 import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-pages/server.js";
-import { textReaderOf } from "../../core/build-step/plan-input.js";
-import { breakdownForApproval } from "../../core/work-breakdown/plan-graph.js";
-import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
-import { WorkflowArtifactSchema } from "@agentx/contracts";
 import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js";
 import { installCiFixDecider } from "../../core/ci-fix/ci-fix.js";
 import { registerMergeActionDecider } from "../../core/merge/merge-tracking.js";
-import { startSessionProjector } from "../../core/sessions/projector.js";
 import { createAsk } from "../../core/sessions/ask.js";
 import { createAskDiffReader, createPeekClient } from "../../core/sessions/peek.js";
-import { settleSteerDeliveriesFor } from "../../core/sessions/steer.js";
 import { createLocalAskModel } from "../ask-model.js";
 import { createLocalDiagnosisModel } from "../diagnosis-model.js";
 import { createLocalDiagnosis, type LocalDiagnosis } from "./diagnosis.js";
 import type { ProviderEndpoints } from "../model-proxy/providers.js";
-import { sweepOpenSessions } from "../../core/sessions/sweep.js";
-import { refreshSessionSummary, type SummaryDependencies } from "../../core/sessions/summary.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
-import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import { createTaskFlowFromRegistry, TASK_FLOW_INDEXES, type TaskFlow } from "../../core/task-flow/flow.js";
 import { createOwnerTaskAccess } from "../../core/task-flow/access.js";
 import { createLocalE2EAuthority } from "../../core/e2e/local-authority.js";
@@ -64,16 +52,13 @@ import { readTask, workspaceOperations } from "../../core/task-flow/reads.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
 import { isTerminalStatus } from "../../core/task-flow/results.js";
 import type { OperationModelChoice } from "../../core/task-flow/step-model.js";
-import { planFeedbackKey } from "../../core/task-flow/stage-machine.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { localOwnerPrincipal } from "../../ports/policy-defaults.js";
 import { modelKeyReadError, secretsPluginWords } from "../../ports/secret-stores.js";
 import { RepositoryGrantService, type RepositoryCredential } from "../../repository-access.js";
 import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
-import { createCallbackHandler } from "./callbacks.js";
 import { attachCitedCode } from "../../core/plan/store.js";
-import { loadPlanDocument, planFactsOf } from "../../core/plan/document.js";
 import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalLessons, type LocalLessons } from "./lessons.js";
@@ -99,7 +84,6 @@ import type { TaskEndRegistrar } from "../../context-sources/quotes.js";
 
 import { createSessionStartExtras } from "./session-start.js";
 import { createLocalDesignReview } from "./design-review.js";
-import { checkDesignApproval, designApprovalRecordItems, gradeApprovalRisk } from "../../core/design-review/decision.js";
 import { createLocalChat } from "./chat.js";
 import { createLocalIntake } from "./intake.js";
 import { sessionBindingsOf } from "../../core/sessions/bindings.js";
@@ -107,8 +91,8 @@ import { createLocalAutomation, type LocalAutomation } from "./automation.js";
 import { fixedAutomationSwitch, type AutomationSwitch } from "../../core/automation/switch.js";
 import { createScheduleRouter } from "../../core/automation/schedule-router.js";
 import { createChannelSink } from "../../core/channel/sink.js";
-import { readTaskThread } from "../../core/channel/threads.js";
-import { deliverAttention, queueAttention } from "../../core/notify/attention.js";
+import type { DecisionGate } from "../../core/decisions/approval-gate.js";
+import { createCallbackService, createDecisionService, createNoticeService, createSessionService } from "../../services/index.js";
 
 export { TASK_FLOW_INDEXES };
 
@@ -513,62 +497,30 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }), oneShot);
 
   // Sessions: facts over the task records, the cost ledger over the metering seam.
-  const canNotify = (): boolean => registry.names("channel").length > 0 || registry.names("email").some((name) => registry.get("email", name)?.capabilities.available === true);
-  const summaryDeps: SummaryDependencies = {
+  // What needs the owner reaches them in their chat, batched (one message at most every few minutes), through the notice service. Its footer is the laptop's words: the task is opened on the page of the machine Rovara runs on.
+  const notices = createNoticeService({ store, registry, now: clock, footer: ATTENTION_FOOTER, log });
+  const sessionService = createSessionService({
     store,
     facts: createTaskFactsSource(flow.deps),
     cost: { async costUsd(company, taskId) { return costUsdOf(await ledger.taskCost(company, taskId)) ?? 0; } },
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
     // A person is told what needs them through the chat adapters the registry holds, or an email plug-in that can send (`core/notify`; Code's default sends no email); with neither, nothing is queued. The row is only a
-    // queue entry: it is checked again before anything is sent. The install's own pages hear that it changed (ids only).
-    onChange: [async (change) => { if (canNotify()) await queueAttention({ store, now: clock, log, realtime: registry.get("realtime", registry.names("realtime")[0] ?? "") }, change); }, (change) => intake.onSessionChange(change)],
-    // A step that read a message's note settles the message `delivered`; a session that ended closes the ones no step took.
-    afterRefresh: (orgId, sessionId) => settleSteerDeliveriesFor({ store, ...(options.now === undefined ? {} : { now: options.now }), log }, orgId, sessionId),
-  };
+    // queue entry: it is checked again before anything is sent. The install's own pages hear that it changed (ids only). The tickets that asked for the work hear of it after.
+    notices,
+    onChange: [(change) => intake.onSessionChange(change)],
+  });
 
-  // Decisions: the one gate, over the workflow document of the task. A change request starts planning again with the owner's words (L9-wire writes them where the planner's prompt reads them).
-  const gate = createDecisionGate({
-    store, approvers: registry.require("approvers"), audit: registry.require("audit-sink"),
-    subjects: [testEnvironment.subject, ...setupDecisionSubjects(flow.deps), createWorkflowDocumentSubject({
-      store,
-      // The tier of the plan waiting now, read from the plan itself (the files it names, the claims nothing proves): a plan nobody could grade is never graded low, but a plan that names its files
-      // and its proof is not high just for being a plan.
-      riskOf: async (task, workflow) => {
-        const artifact = workflow.artifacts.filter((entry) => entry.type === currentDocumentType(workflow)).at(-1);
-        const parsed = artifact === undefined ? undefined : WorkflowArtifactSchema.safeParse(artifact);
-        const loaded = parsed?.success === true ? await loadWorkflowDocument(textReaderOf(blobs), parsed.data, {}).catch(() => undefined) : undefined;
-        // A design that went through design review is graded from the review's own facts (the areas it touches, the open blockers, how much of the review ran), never lower than the review says.
-        const estimate = (task["runEstimate"] as { highUsd?: unknown } | undefined)?.highUsd;
-        return gradeApprovalRisk({ loaded, workflow, requestText: typeof task["requestText"] === "string" ? task["requestText"] : undefined, ...(typeof estimate === "number" ? { costHighUsd: estimate } : {}) });
-      },
-      // The decided plan's own decisions, read from the checked document (the same load the work breakdown uses), so the owner's answers are held to the options it offered.
-      planFactsOf: async (_task, _workflow, artifact) => {
-        const loaded = await loadPlanDocument(blobs, artifact);
-        return loaded.kind === "structured" ? planFactsOf(loaded.plan) : "unreadable";
-      },
-      // A plan with a work breakdown (spec 059) is approved WITH its graph: every surface that approves binds the graph in the stored document the approval's digest names.
-      breakdown: ({ task, workflow, artifactDigest }) => breakdownForApproval(flow.deps, { taskId: String(task["taskId"]), project: String(task["project"]), startingRevision: Number(task["startingRevision"]) }, workflow, artifactDigest),
-      // A design with an open blocker is approved only with a one-line reason.
-      checkDecision: ({ workflow, attempt }) => checkDesignApproval(workflow, attempt),
-      onDecided: ({ taskId, before, after, attempt, at, approver, risk }) => {
-        // The plan was approved: coding starts with no one asking, as a row like every automatic step.
-        if (after.stage === "IMPLEMENT" && after.state === "READY" && before.stage !== "IMPLEMENT") return [dispatchRowItem(flow.deps, taskId, after.revision, "IMPLEMENT", at)];
-        if (after.stage !== "PLAN" || after.state !== "READY" || before.stage === "PLAN") return [];
-        // An approved design leaves its approval record under its digest (who, at what tier, the blockers and the reason) for the pull request's Proof section.
-        const approval = designApprovalRecordItems({ taskId, before, after, attempt, approverId: approver.personId, approverLabel: approver.displayName ?? approver.personId, risk, at });
-        if (approval.length > 0) return [...approval, dispatchRowItem(flow.deps, taskId, after.revision, "PLAN", at)];
-        const text = (attempt.reason ?? "").trim();
-        return [
-          ...(text === "" ? [] : [{ kind: "put" as const, item: { ...planFeedbackKey(taskId, after.revision), entityType: "PLAN_FEEDBACK", text, createdAt: at } }]),
-          dispatchRowItem(flow.deps, taskId, after.revision, "PLAN", at),
-        ];
-      },
-    }), designReview.choiceSubject],
+  // Decisions: the one gate, over the workflow document of the task. A change request starts planning again with the owner's words (L9-wire writes them where the planner's prompt reads them). The laptop's rule
+  // for who decides is the service's default: the one owner decides as the task's owner, and a verified collaborator as a project approver.
+  const decisions = createDecisionService({
+    flow: flow.deps, blobs, store, approvers: registry.require("approvers"), audit: registry.require("audit-sink"), companyId,
+    subjects: [testEnvironment.subject, ...setupDecisionSubjects(flow.deps), designReview.choiceSubject],
     ...(options.now === undefined ? {} : { now: options.now }),
   });
+  const gate = decisions.gate;
   const designPageActions = designReview.pageActions({ gate, owner });
-  const decisionActions = createDecisionActions({ gate, companyId });
+  const decisionActions = decisions.actions;
   // Chat (owner decision 58): the owner's own acts on the chat page, and what an adapter may hand the core. Nothing here approves: see chat.ts.
   const chat = createLocalChat({ registry, flow, store, companyId, owner, now: () => clock().getTime(), gate, log });
   // Lessons: what Rovara learned from finished tasks, loaded into later steps and decided on the owner's page. On unless `ROVARA_LESSONS=0`, in Suggest mode (every lesson waits for the owner); the pages still show what exists.
@@ -661,7 +613,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     replay: (taskId, key) => readWorkflowE2EReplayRecord({ store }, taskId, key),
     grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
-  const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}) });
+  const callbackHandler = createCallbackService({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}) });
   const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, modelSelection, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
@@ -672,11 +624,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });
-  const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => refreshSessionSummary(summaryDeps, orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
+  const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => sessionService.refresh(orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? ownerRoutes(request, caller);
 
-  const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
+  const projector = await sessionService.start().catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
   // The second review's track record is kept from the store's change feed (a store without one keeps none; nothing else depends on it).
   const trackIndexer = await secondReview.startTrackIndexer().catch((error: unknown) => { log({ event: "local_app.second_review_track_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
@@ -690,11 +642,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await milestones.deliverDue().catch(logFailure("local_app.milestones_failed"));
     await designReview.sweepWaits().catch(logFailure("local_app.design_wait_sweep_failed"));
     await automation.tick().catch(logFailure("local_app.automation_failed"));
-    await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
+    await sessionService.sweep({ budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
     // What needs the owner reaches them in their chat, batched (one message at most every few minutes). The sweep of the sessions above is what queues it.
-    if (canNotify()) {
-      await deliverAttention({ store, registry, now: () => clock().getTime(), thread: (org, sessionId) => readTaskThread(store, org, sessionId), footer: ATTENTION_FOOTER, log }, { deadlineMs: clock().getTime() + 4_000 }).catch(logFailure("local_app.attention_failed"));
-    }
+    await notices.deliver({ deadlineMs: clock().getTime() + 4_000 }).catch(logFailure("local_app.attention_failed"));
   };
   // Reading pull requests asks the code host over the network and may take seconds, so the timer runs it apart from the dispatch (a slow host never holds a step back); a test's `tick()` runs both in order.
   const tickTracking = async (): Promise<void> => {

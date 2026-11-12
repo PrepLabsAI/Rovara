@@ -63,6 +63,8 @@ export interface MergeWorldOptions {
   mergeMethod?: "squash" | "merge";
   /** A code host to use instead of the fake one (the repositories keep their GitHub addresses). */
   codeHost?: (model: FakeHostModel) => CodeHost;
+  /** The store to keep everything in, for a test that composes services over it (default: a fresh in-memory one). */
+  store?: MemoryDocumentStore;
 }
 
 export interface MergeWorld {
@@ -94,7 +96,7 @@ export interface MergeWorld {
 const urlOf = (repositoryId: string): string => `https://github.com/acme/${repositoryId}`;
 
 export async function mergeWorld(options: MergeWorldOptions = {}): Promise<MergeWorld> {
-  const store = new MemoryDocumentStore({ ttlAttribute: "indexExpiresAt" });
+  const store = options.store ?? new MemoryDocumentStore({ ttlAttribute: "indexExpiresAt" });
   const now = { value: CLOCK };
   const prList = options.pullRequests ?? [{ repositoryId: "app", number: 1 }];
   const models = new Map<string, FakeHostModel>();
