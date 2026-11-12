@@ -123,7 +123,7 @@ export function awsFidelityPercent(service: string): number | undefined {
 }
 
 /**
- * The evidence line of one planned service: what emulated it and how far that matches AWS (`<key>: Emulated by AWS Emulator 1.0.322, AWS fidelity score 83%`, or `AWS fidelity score: not scored`). Undefined for an id the
+ * The evidence line of one planned service: what emulated it and how far that matches AWS (`<key>: Emulated by AWS Emulator 1.0.337, AWS fidelity score 83%`, or `AWS fidelity score: not scored`). Undefined for an id the
  * table does not know. Fixed words and table values only: nothing the repository wrote.
  */
 export function awsEmulatorEvidenceLine(service: string): string | undefined {
