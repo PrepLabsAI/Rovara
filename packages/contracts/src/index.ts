@@ -253,6 +253,8 @@ export * from "./test-services-aws-resources.js";
 export * from "./test-services-shared.js";
 export * from "./test-env-dependency.js";
 export * from "./seed-script-lock.js";
+export * from "./generated/aws-emulator-services.js";
+export * from "./aws-emulator-service-keys.js";
 export * from "./test-services-usage.js";
 export * from "./service-catalog.js";
 export * from "./service-catalog-images.js";

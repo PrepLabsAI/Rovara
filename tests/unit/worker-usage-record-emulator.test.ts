@@ -1,6 +1,6 @@
 // Slice 2, s2-emulator-run: the emulator's ledger in the usage record (service-usage-record.ts, the ONE port). What the program chose (operation names, paths) is never shown unless it has the shape of an operation name and
 // the redactor leaves it alone; counts are coarse buckets; a ledger that cannot be read is "unreadable", never "no calls"; a run with no emulator has slice 1's record byte for byte.
-import { TestServicesAwsUsageSchema, TestServicesUsageRecordSchema } from "@agentx/contracts";
+import { TEST_SERVICES_AWS_USAGE_LIMITS, TestServicesAwsUsageSchema, TestServicesUsageRecordSchema } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import type { EmulatorLedger, LedgerService } from "../../packages/worker/src/emulator-ledger.js";
 import { newLocalAwsCredentials } from "../../packages/worker/src/service-helpers.js";
@@ -72,10 +72,11 @@ describe("reduceAwsUsage", () => {
     expect(aws.unsupportedOperations).toEqual([]);
     expect(JSON.stringify(aws).toLowerCase()).not.toContain(credentials.controlToken.toLowerCase());
   });
-  it("is capped: 24 services and 30 unsupported operations are named, and the rest are counted", () => {
-    const many: LedgerService[] = Array.from({ length: 30 }, (_value, index) => service(`svc${String(index).padStart(2, "0")}`, 3, 0));
+  it("is capped: the limit of services and 30 unsupported operations are named, and the rest are counted", () => {
+    const limit = TEST_SERVICES_AWS_USAGE_LIMITS.services;
+    const many: LedgerService[] = Array.from({ length: limit + 6 }, (_value, index) => service(`svc${String(index).padStart(2, "0")}`, 3, 0));
     const aws = reduceAwsUsage({ services: many }, redactor);
-    expect(aws.services).toHaveLength(24);
+    expect(aws.services).toHaveLength(limit);
     expect(aws.otherCalls).toBe(6);
     const ops: Record<string, [number, number]> = {};
     for (let index = 0; index < 40; index += 1) ops[`Op${String(index).padStart(2, "0")}`] = [1, 1];
@@ -154,10 +155,10 @@ describe("mergeAwsUsage (the rounds of one run)", () => {
     expect(mergeAwsUsage(UNREADABLE_AWS_USAGE, one)).toEqual(UNREADABLE_AWS_USAGE);
   });
   it("cuts the lists again and counts the overflow", () => {
-    const a = read(Array.from({ length: 24 }, (_v, index) => [`svc${String(index).padStart(2, "0")}`, 6, 0] as [string, number, number]));
+    const a = read(Array.from({ length: TEST_SERVICES_AWS_USAGE_LIMITS.services }, (_v, index) => [`svc${String(index).padStart(2, "0")}`, 6, 0] as [string, number, number]));
     const b = read([["zzz", 2, 0]]);
     const merged = mergeAwsUsage(a, b)!;
-    expect(merged.services).toHaveLength(24);
+    expect(merged.services).toHaveLength(TEST_SERVICES_AWS_USAGE_LIMITS.services);
     expect(merged.otherCalls).toBe(2);
   });
 });

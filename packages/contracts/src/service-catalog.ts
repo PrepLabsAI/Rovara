@@ -10,11 +10,13 @@
 //   - the data file is either unpinned (no digest, scan or SBOM anywhere: the v1 state, until the pin task TS19) or pinned (at least one entry, and every pinned entry that is not retired has an image digest, an SBOM
 //     and a scan with no critical finding open; an entry not pinned yet carries none of the three); a half-pinned ENTRY does not parse;
 //   - at most one entry is the default of a family;
-//   - Rovara local AWS (the emulator entry) lists its services in four tiers, each service in one tier, IAM is not enforced and storage is memory only.
+//   - Rovara local AWS (the emulator entry) lists the services it OVERRIDES in four tiers, each service in one tier; every other service of the generated table (`AWS_EMULATOR_SERVICES`) is `available`.
+//     IAM is not enforced and storage is memory only.
 // Nothing here imports a Node module.
 import { z } from "zod";
 import { AwsServiceIdSchema, CatalogIdSchema, ConnectTemplateSchema, DnsLabelSchema, EnvNameSchema, TEST_ENV_HELPER_CATALOG_NAMES, TEST_ENV_RESERVED_ALIASES, catalogIdName } from "./test-env-dependency.js";
 import { reservedDependencyEnvName } from "./test-services-shared.js";
+import { AWS_PLAN_SERVICES_MAX, awsEmulatorServiceRow, awsServiceKeyOrSelf } from "./aws-emulator-service-keys.js";
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -52,31 +54,41 @@ export function catalogFixedArgv(ids: readonly CatalogFixedArgId[]): string[] {
 // ---- Rovara local AWS: the services it supports (5.2)
 
 /**
- * The four tiers of 5.2. `supported`: tested in Rovara's compatibility suite. `functions`: Lambda through Rovara's function runner. `model_endpoint_front`: SageMaker Runtime routed to a fake or a model
- * helper. `available`: present but never chosen by default. The chooser (3.4) may pick the first three.
+ * The four tiers of 5.2. `supported`: tested in Rovara's compatibility suite and seedable. `functions`: Lambda through Rovara's function runner. `model_endpoint_front`: SageMaker Runtime routed to a fake or a model
+ * helper. `available`: present but never chosen by default. The chooser (3.4) may pick the first three. An entry lists the services it puts in a tier on purpose (an override); a service of the generated table that no
+ * list names is `available` (`emulatorServiceTier`), so the entry never has to list the engine's whole catalogue.
  */
 export const EMULATOR_SERVICE_TIERS = ["supported", "functions", "model_endpoint_front", "available"] as const;
 export type EmulatorServiceTier = (typeof EMULATOR_SERVICE_TIERS)[number];
 export const EMULATOR_CHOOSER_TIERS: readonly EmulatorServiceTier[] = ["supported", "functions", "model_endpoint_front"];
 
-const ServiceList = z.array(AwsServiceIdSchema).max(24);
+const ServiceList = z.array(AwsServiceIdSchema).max(AWS_PLAN_SERVICES_MAX);
 export const EmulatorSchema = z
   .object({
-    services: z.object({ supported: ServiceList.min(1), functions: ServiceList, model_endpoint_front: ServiceList, available: ServiceList }).strict(),
+    services: z.object({ supported: ServiceList.min(1), functions: ServiceList, model_endpoint_front: ServiceList, available: ServiceList.default([]) }).strict(),
+    /** The engine release the entry runs (`AWS_EMULATOR_ENGINE_VERSION` of the table): `checkEmulatorEngine` refuses an entry whose version differs. Optional so an entry made before the pin still parses. */
+    engineVersion: z.string().regex(/^\d{1,3}\.\d{1,3}\.\d{1,5}$/u).optional(),
     /** The evidence says "permissions were not checked": the emulator does not enforce IAM, and the data file says so. */
     iamEnforced: z.literal(false),
     storage: z.literal("memory"),
   })
   .strict()
   .superRefine((emulator, context) => {
-    const all = EMULATOR_SERVICE_TIERS.flatMap((tier) => emulator.services[tier]);
+    // A legacy id and its key are one service.
+    const all = EMULATOR_SERVICE_TIERS.flatMap((tier) => emulator.services[tier].map(awsServiceKeyOrSelf));
     if (new Set(all).size !== all.length) context.addIssue({ code: "custom", path: ["services"], message: "a service is in one tier only" });
   });
 export type Emulator = z.infer<typeof EmulatorSchema>;
 
-/** The tier a service is in on an emulator entry, or undefined when the emulator does not have it. */
+/**
+ * The tier a service is in on an emulator entry: the tier that lists it (a legacy id and its key are the same service), `available` when the service is in the generated table and no tier lists it, and undefined
+ * for anything the engine does not have.
+ */
 export function emulatorServiceTier(emulator: Emulator, serviceId: string): EmulatorServiceTier | undefined {
-  return EMULATOR_SERVICE_TIERS.find((tier) => emulator.services[tier].includes(serviceId));
+  const key = awsServiceKeyOrSelf(serviceId);
+  const listed = EMULATOR_SERVICE_TIERS.find((tier) => emulator.services[tier].some((id) => awsServiceKeyOrSelf(id) === key));
+  if (listed !== undefined) return listed;
+  return awsEmulatorServiceRow(key) === undefined ? undefined : "available";
 }
 
 /** Whether the chooser may pick the emulator for a service (the service is in a tier the chooser uses). */
