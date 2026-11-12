@@ -7,7 +7,9 @@
     ".": "./dist/index.js",
     "./e2e/discovery": "./dist/e2e/discovery.js",
     "./e2e/execution-plan": "./dist/e2e/execution-plan.js",
+    "./fakes": "./dist/plugins/fake/index.js",
     "./local": "./dist/local/index.js",
+    "./ports": "./dist/ports/index.js",
     "./plugins/channel-slack": "./dist/plugins/channel/slack/module.js",
     "./plugins/object-storage-s3": "./dist/plugins/object-storage/s3/module.js",
     "./plugins/secrets-aws": "./dist/plugins/secrets/aws-secrets-manager/module.js"
