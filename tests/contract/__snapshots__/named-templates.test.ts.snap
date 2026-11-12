@@ -4988,6 +4988,15 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "Environment": {
           "Variables": {
+            "ADMIN_CLAIM": {
+              "Ref": "AdminClaim",
+            },
+            "ADMIN_OIDC_ISSUER": {
+              "Ref": "OidcIssuer",
+            },
+            "ADMIN_VALUES": {
+              "Ref": "AdminValues",
+            },
             "AGENTX_ENV": "staging",
             "BUILT_IN_ADAPTER": {
               "Ref": "SlackViaChannel",

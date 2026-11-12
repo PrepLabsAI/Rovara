@@ -38,3 +38,10 @@ Named environments only: the legacy deployment has no developer sign-in.
 - **Secrets are hashed.** A confidential client's secret is shown once; the table keeps its SHA-256 only.
 - **Administrator is a session fact.** Read from the company-login ID token at sign-in, kept on the session, so ending
   the session ends it; a Slack session never has it.
+- **Only the admin client's own identity provider makes an administrator.** The sign-in Lambda gets the admin client's
+  `OidcIssuer`, `AdminClaim` and `AdminValues`. The claim counts only when company sign-in uses that same issuer;
+  another provider's claim of the same name means nothing, and anything unreadable makes nobody an administrator.
+- **A client is bound end to end.** The auth request, the code and the session each carry the client ID. A code or
+  refresh token presented by another client (the CLI included) is refused. A removed client is refused at once
+  (`invalid_client`); a session that started before the client's latest registration ends, so removing and
+  registering an ID again does not revive old sign-ins. Revoking ends only the calling client's own sessions.
