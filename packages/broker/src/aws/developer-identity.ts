@@ -20,7 +20,7 @@ const SECRET_CACHE_MS = 5 * 60 * 1000;
 const SLACK_JWKS_URI = "https://slack.com/openid/connect/keys";
 
 export type DeveloperIdentityLambdaConfig = DeveloperIdentityConfig & {
-  oidcSettings?: { issuer: string; clientId: string; requiredClaim?: string; requiredValues: string[] };
+  oidcSettings?: { issuer: string; clientId: string; requiredClaim?: string; requiredValues: string[]; administrator?: { claim: string; values: string[] } };
   /** Set instead of oidcSettings when the company sign-in settings are unusable. Only that method
    * then refuses ("not finished"); Slack sign-in, keys, refresh and the invoke keep working. */
   oidcProblem?: string;
@@ -43,6 +43,27 @@ function requiredValuesFrom(text: string | undefined): string[] {
   }
   if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === "string")) throw invalid();
   return parsed.filter((value) => value !== "");
+}
+
+/**
+ * Spec 063 FR-005: who is an administrator, read from the admin client's own settings (ADMIN_OIDC_ISSUER, ADMIN_CLAIM,
+ * ADMIN_VALUES). Only when company sign-in is that same identity provider: another provider's claim of the same name
+ * means nothing here. Anything unreadable makes nobody an administrator.
+ */
+function administratorFrom(env: NodeJS.ProcessEnv, issuer: string): { administrator: { claim: string; values: string[] } } | Record<string, never> {
+  const normalized = (text: string) => text.trim().replace(/\/+$/, "");
+  const adminIssuer = env.ADMIN_OIDC_ISSUER ?? "";
+  const claim = env.ADMIN_CLAIM ?? "";
+  if (adminIssuer === "" || claim === "" || normalized(adminIssuer) !== normalized(issuer)) return {};
+  let values: unknown;
+  try {
+    values = JSON.parse(env.ADMIN_VALUES ?? "");
+  } catch {
+    return {};
+  }
+  if (!Array.isArray(values) || !values.every((value) => typeof value === "string")) return {};
+  const nonEmpty = values.filter((value) => value !== "");
+  return nonEmpty.length === 0 ? {} : { administrator: { claim, values: nonEmpty } };
 }
 
 function sinceFrom(text: string | undefined): { since: number } | Record<string, never> {
@@ -73,7 +94,7 @@ export function developerIdentityConfigFromEnvironment(env: NodeJS.ProcessEnv): 
     return problem((error as Error).message);
   }
   if (requiredValues.length > 0 && requiredClaim === "") return problem("DEVELOPER_OIDC_REQUIRED_VALUES is set but DEVELOPER_OIDC_REQUIRED_CLAIM is empty");
-  return { ...withOidc, oidcSettings: { issuer, clientId, ...(requiredClaim === "" ? {} : { requiredClaim }), requiredValues } };
+  return { ...withOidc, oidcSettings: { issuer, clientId, ...(requiredClaim === "" ? {} : { requiredClaim }), requiredValues, ...administratorFrom(env, issuer) } };
 }
 
 /** A provider an admin has not finished setting up: every call says so, with what to fix. */

@@ -15,9 +15,15 @@ import {
 } from "@agentx/contracts";
 import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
-export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string }
+/** `clientId` (spec 063): the registered sign-in client this request is for; absent, the AgentX CLI. */
+export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string }
+/** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
+ * company sign-in carried the administrator claim (FR-005). */
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true }
+
+/** What a code carries into its session. */
+export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true }
 
 /** A method's enabled-since cutoff from its environment variable, epoch seconds; "0", empty or unreadable means none. */
 export function methodSince(text: string | undefined): number | undefined {
@@ -51,7 +57,7 @@ export type RefreshLookup =
  * stale-lock race between two local processes does not sign the person out. */
 export const REFRESH_REUSE_GRACE_SECONDS = 60;
 
-interface CodeRecord { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; codeChallenge: string; redirectUri: string; expiresAt: number; usedAt?: string }
+interface CodeRecord extends CodeGrant { codeChallenge: string; redirectUri: string; expiresAt: number; usedAt?: string }
 interface RefreshRecord { sessionId: string; expiresAt: number; usedAt?: string; graceUsedAt?: string }
 interface CancellationReason { Code?: string }
 
@@ -219,14 +225,14 @@ export class DeveloperSignInStore {
     return item === undefined ? undefined : strip(item);
   }
 
-  async issueCode(input: { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; codeChallenge: string; redirectUri: string }): Promise<string> {
+  async issueCode(input: CodeGrant & { codeChallenge: string; redirectUri: string }): Promise<string> {
     const code = randomToken("agxc_");
     const record: CodeRecord = { ...input, expiresAt: this.seconds() + DEVELOPER_CODE_SECONDS };
     await this.put({ pk: `CODE#${sha256Hex(code)}`, sk: META, entityType: "AUTH_CODE", ...record }, "attribute_not_exists(pk)");
     return code;
   }
 
-  async redeemCode(input: { code: string; verifier: string; redirectUri: string }): Promise<{ developerId: string; amr: DeveloperSignInMethod; slackUserId?: string } | undefined> {
+  async redeemCode(input: { code: string; verifier: string; redirectUri: string }): Promise<CodeGrant | undefined> {
     const pk = `CODE#${sha256Hex(input.code)}`;
     try {
       // Burned first, whatever the verifier: a code is tried once.
@@ -243,11 +249,16 @@ export class DeveloperSignInStore {
     }
     const record = await this.get<CodeRecord>(pk);
     if (record === undefined || record.redirectUri !== input.redirectUri || !pkceChallengeMatches(input.verifier, record.codeChallenge)) return undefined;
-    return { developerId: record.developerId, amr: record.amr, ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }) };
+    return {
+      developerId: record.developerId, amr: record.amr,
+      ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }),
+      ...(record.clientId === undefined ? {} : { clientId: record.clientId }),
+      ...(record.administrator === true ? { administrator: true as const } : {}),
+    };
   }
 
   /** `endsAt` (epoch seconds) is for a browser review sign-in, which has its own fixed length; every other session lasts DEVELOPER_SESSION_SECONDS. The stored record's clean-up time follows `endsAt`. */
-  async createSession(input: { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; reviewExpiresAt?: number; endsAt?: number }): Promise<{ session: SessionRecord; refreshToken: string }> {
+  async createSession(input: CodeGrant & { reviewExpiresAt?: number; endsAt?: number }): Promise<{ session: SessionRecord; refreshToken: string }> {
     const session: SessionRecord = { endsAt: this.seconds() + DEVELOPER_SESSION_SECONDS, ...input, sessionId: randomUUID(), startedAt: this.iso() };
     const refreshToken = randomToken("agxr_");
     await this.input.documentClient.send(new TransactWriteCommand({

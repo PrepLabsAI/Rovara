@@ -37,5 +37,27 @@ agentx admin sign-in-client remove scheduler
 
 After a client is removed, nobody can sign in to it.
 
-Status: phase 063a (the registry). The sign-in flows for registered clients and the access check come in 063b and
-063c ([spec](../specs/063-sign-in-clients/spec.md)).
+## Sign people in from the service
+
+The service uses Rovara's sign-in server as an OAuth 2.0 authorization server. Its discovery document is at
+`<api>/v1/auth/.well-known/openid-configuration`.
+
+1. Send the person to `<api>/v1/auth/authorize` with `response_type=code`, the service's `client_id`, one of its
+   registered `redirect_uri`s (or a loopback one, if it registered `--loopback`), `state`, and a PKCE
+   `code_challenge` with `code_challenge_method=S256`. They sign in with Slack or company login.
+2. Redeem the code at `<api>/v1/auth/token` (`grant_type=authorization_code`) with the same `client_id`,
+   `redirect_uri` and `code_verifier`. A confidential client also sends its secret, as `client_secret` or with HTTP
+   Basic.
+3. The access token is addressed to the service: its `aud` is the client's audience and its `azp` is the client ID.
+   It lasts as long as the CLI's. Refresh it with `grant_type=refresh_token`. The refresh token works only for this
+   client.
+4. Sign out with `<api>/v1/auth/revoke`.
+
+Rovara's own API refuses these tokens.
+
+A session records whether the person is a Rovara administrator. Only a company sign-in counts, and only when it uses
+the same identity provider as the admin client and its ID token carries the administrator claim (`AdminClaim`,
+`AdminValues`). A Slack sign-in never counts.
+
+Status: phases 063a (the registry) and 063b (sign-in). The access check comes in 063c
+([spec](../specs/063-sign-in-clients/spec.md)).

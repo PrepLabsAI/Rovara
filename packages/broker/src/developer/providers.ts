@@ -1,9 +1,11 @@
 // Spec 025 FR-002 to FR-004: the Slack and company OIDC providers. The code exchange runs here,
 // server side, with the client secret; the laptop never sees it.
 import { jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
+import { claimValues } from "../aws/lambda.js";
 import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayName, type DeveloperSignInMethod } from "@agentx/contracts";
 
-export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string }
+/** `administrator` (spec 063 FR-005): the company sign-in's ID token carried the administrator claim. Slack never sets it. */
+export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; administrator?: true }
 /** `wrongAccount`: the person signed in fine but is not one AgentX accepts (another Slack workspace,
  * or without the required claim), so signing in as someone else may help. */
 export type ProviderResult = { ok: true; identity: ProviderIdentity } | { ok: false; reason: string; wrongAccount?: true };
@@ -116,10 +118,18 @@ export function slackSignInProvider(input: {
   };
 }
 
+/** Read as the admin client reads it (identityFromJwtClaims): any of the values in the claim. */
+function isAdministrator(payload: JWTPayload, administrator: { claim: string; values: readonly string[] } | undefined): boolean {
+  if (administrator === undefined || administrator.values.length === 0) return false;
+  return claimValues(payload[administrator.claim]).some((value) => administrator.values.includes(value));
+}
+
 interface Discovery { issuer: string; authorization_endpoint: string; token_endpoint: string; jwks_uri: string }
 
 export function oidcSignInProvider(input: {
   issuer: string; clientId: string; clientSecret: () => Promise<string>; requiredClaim?: string; requiredValues: readonly string[];
+  /** Spec 063 FR-005: the claim and values that make an administrator, as the admin client reads them; absent, nobody is one. */
+  administrator?: { claim: string; values: readonly string[] };
   fetch: typeof fetch; jwksFor: (jwksUri: string) => JWTVerifyGetKey; now: () => number;
 }): SignInProvider {
   const issuer = input.issuer.replace(/\/+$/, "");
@@ -183,6 +193,7 @@ export function oidcSignInProvider(input: {
           method: "oidc", issuer, subject: payload.sub,
           displayName: (name === undefined ? undefined : cleanDisplayName(name)) ?? payload.sub,
           ...(email === undefined ? {} : { email }),
+          ...(isAdministrator(payload, input.administrator) ? { administrator: true as const } : {}),
         },
       };
     },

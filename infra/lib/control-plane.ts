@@ -857,6 +857,10 @@ export class ControlPlaneStack extends Stack {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
         naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
+      // Spec 063 FR-005: the admin client's own rule for who is an administrator, read at company sign-in.
+      developerSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
+      developerSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
+      developerSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
       if (naming.env === "agentxlivetest123" && taskPersonProofEnabled !== undefined) {
         new TaskPersonProof(this, "TaskPersonProof", {
           naming,
