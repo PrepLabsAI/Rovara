@@ -46,6 +46,7 @@ import {
   type ChannelAction,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
+import { STOP_WHILE_PUBLISHING_TEXT } from "../developer/workflow-actions.js";
 import {
   SLACK_TASK_THREADS_OFF_NOTICE, createAnswerQueue, parseSlackSecrets, threadPendingCounter, validSignature, type SlackIngressLog, type SlackSecrets,
 } from "./slack-ingress.js";
@@ -1158,7 +1159,7 @@ function closeRefusedView(message: string): Record<string, unknown> {
 
 const STALE_WORKFLOW_BUTTON = WORKFLOW_BUTTON_OUT_OF_DATE;
 /** Decision 134: said in the thread when Stop is pressed on a request that started Quick on its own. */
-export const QUICK_AUTO_START_STOPPING_TEXT = "Stopping this task. Nothing it planned or wrote will be kept, and no pull request will open.";
+export const QUICK_AUTO_START_STOPPING_TEXT = "Stopping this task. Nothing it planned or wrote will be kept.";
 
 /** Said in place of the close when an approved fix started after the owner opened the close form. */
 const CLOSE_AFTER_FIX_STARTED = "An approved fix started after you opened this, and closing now would discard it. Close this form and press Close task again if you still want to close.";
@@ -1565,7 +1566,10 @@ export function workflowSlackHandlers(deps: {
         let taskId: unknown;
         try { taskId = asRecord(JSON.parse(action.value)).taskId; } catch { taskId = undefined; }
         if (typeof taskId !== "string" || !CHANGE_ID.test(taskId)) throw new WorkflowInteractionRefusal(STALE_WORKFLOW_BUTTON);
-        await currentOwnedWorkflow({ ...action, taskId }, "stop this task", (workflow) => workflow.state !== "COMPLETE" && workflow.stage !== "WAIT_FOR_MERGE");
+        // Publication cannot be cancelled: once the pull request is being opened (or is open), Stop says so plainly.
+        const stage = asRecord(asRecord(await deps.loadTask(taskId)).workflow).stage;
+        if (stage === "PULL_REQUEST" || stage === "WAIT_FOR_MERGE") throw new WorkflowInteractionRefusal(STOP_WHILE_PUBLISHING_TEXT);
+        await currentOwnedWorkflow({ ...action, taskId }, "stop this task", (current) => current.state !== "COMPLETE");
         if (deps.close === undefined) throw new Error("closing tasks is not configured");
         await deps.close({ taskId, userId: action.userId, thread: action.thread, requestId: slackActionRequestId(action), stop: true });
         // Said privately: the close is handed over, and the thread hears "closed" once the workspace is released.

@@ -41,7 +41,7 @@ import type { InvokeCommand } from "@aws-sdk/client-lambda";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
 import { canvasCloseoutService, createCanvasCloseoutStore, createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { captureFeedbackNoteThroughBroker, createSlackIngressHandler, recordThreadNoteThroughBroker, startWorkflowThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
+import { captureFeedbackNoteThroughBroker, createSlackIngressHandler, recordIntakeThroughBroker, recordThreadNoteThroughBroker, startWorkflowThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
 import { createSlackInteractivityHandler, invokeWorkflowDecision, workflowSlackHandlers } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { answerChosenRequest, createDynamoWorkflowChoiceStore, offerWorkflowChoice, startChosenWorkflow, type SlackWorkflowStartInput } from "../../packages/broker/src/aws/slack-workflow-choice.js";
 import { createChoiceOffer, routeSlackRequest } from "../../packages/slack-service/src/request-routing.js";
@@ -1037,7 +1037,7 @@ export async function createWorkflowE2E(options: {
         offer: offerChoice, answer: async (question) => { chatQueue.push(question); }, finish: async () => undefined,
         notify: async (thread, text, blocks) => { slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }); },
         ...(options.autoStartQuick === true ? { autoStart: async ({ message: request, requestId }: { message: SlackRequestMessage; requestId: string }) =>
-          createThreadApi({ controlPlaneUrl: CONTROL_PLANE_URL, signedFetch: serviceFetch(request.thread, request.userId) }).startQuickFromIntake!({ requestId, instructions: request.text }) } : {}),
+          createThreadApi({ controlPlaneUrl: CONTROL_PLANE_URL, signedFetch: serviceFetch(request.thread, request.userId) }).startQuickFromIntake!({ requestId }) } : {}),
         log: (event, fields) => { routeLogs.push({ event, fields }); },
       });
     }
@@ -1072,6 +1072,8 @@ export async function createWorkflowE2E(options: {
     // The production adapters: a reply in the task's thread goes to the broker's thread-note event, and its
     // private acknowledgement through the strict Slack double.
     recordThreadNote: (input) => recordThreadNoteThroughBroker(invokeBroker(handler), input),
+    // Decision 134: the broker's own record of each routed request, through the production adapter.
+    recordIntake: (input) => recordIntakeThroughBroker(invokeBroker(handler), input),
     postEphemeral: async (input) => { slack.postEphemeral(input); },
     // A shared thread that is not a Slack-started task's own thread keeps the PR feedback note path.
     captureFeedbackNote: (input) => captureFeedbackNoteThroughBroker(invokeBroker(handler), input),
@@ -1256,7 +1258,7 @@ export async function createWorkflowE2E(options: {
         });
       }
     },
-    db, s3, handler, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, brokerEvents, credentialAttempts, routeCalls, routeLogs, dispatchReceipts, slackActionTimestamps,
+    db, s3, handler, serviceFetch, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, brokerEvents, credentialAttempts, routeCalls, routeLogs, dispatchReceipts, slackActionTimestamps,
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
     /** The broker's EC2 session deleter: each call removes one workspace's compute. */
     deleteEc2Session,
