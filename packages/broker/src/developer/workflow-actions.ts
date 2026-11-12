@@ -1,6 +1,6 @@
 // The Slack action IDs of a workflow task's buttons: shared by the messages that carry them and the router that answers them.
 
-import { WORKFLOW_PATH_ANSWER_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_QUICK_ACTION } from "@agentx/contracts";
+import { WORKFLOW_PATH_ANSWER_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_QUICK_ACTION, WORKFLOW_STOP_ACTION } from "@agentx/contracts";
 
 /** The Quick or Full question's buttons, and (Task 21) Just answer; defined with the routed card the Slack service posts. */
 export { WORKFLOW_PATH_ANSWER_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_QUICK_ACTION };
@@ -15,6 +15,8 @@ export const WORKFLOW_ACTION_IDS: ReadonlySet<string> = new Set([
   // An approved PR feedback fix that changed nothing: wait for the merge again, the pull request as it is.
   "agentx_workflow_keep_pull_requests",
   WORKFLOW_PATH_QUICK_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_ANSWER_ACTION,
+  // Decision 134: Stop on a request that started Quick on its own.
+  WORKFLOW_STOP_ACTION,
 ]);
 
 /** What a member hears when the project their task belongs to has AgentX tasks switched off. */

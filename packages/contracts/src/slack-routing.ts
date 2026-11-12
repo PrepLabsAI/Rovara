@@ -236,3 +236,41 @@ export function routeChoiceLabel(suggestion: RequestSuggestion, chosen: "QUICK" 
   if (suggestion === "unclear") return "picked_path";
   return (suggestion === "small_change") === (chosen === "QUICK") ? "suggestion_accepted" : "switched_path";
 }
+
+/**
+ * Decision 134: a clear small change starts Quick on its own. The started message's Stop button closes that task and
+ * discards anything it planned or wrote, before a pull request opens. Only the task's owner (the requester) can press it.
+ */
+export const WORKFLOW_STOP_ACTION = "agentx_workflow_stop";
+
+/** The Slack service's ask to start Quick on a routed request the classifier read as a clear small change. */
+export const QuickAutoStartRequestSchema = z.object({
+  /** The routed request's choice ID (a UUID derived from its Slack event), so a redelivery starts the same task. */
+  requestId: z.string().uuid(),
+  instructions: z.string().min(1).max(REQUEST_ROUTE_MESSAGE_MAX),
+}).strict();
+export type QuickAutoStartRequest = z.infer<typeof QuickAutoStartRequestSchema>;
+
+/** Why a clear small change was not started on its own: it then gets the card with Start, as before. */
+export const QUICK_AUTO_START_SKIPS = ["unusual_text", "high_risk", "too_long", "thread_busy", "start_refused"] as const;
+export type QuickAutoStartSkip = (typeof QUICK_AUTO_START_SKIPS)[number];
+
+export const QuickAutoStartResultSchema = z.discriminatedUnion("started", [
+  z.object({ started: z.literal(true), taskId: z.string().min(1) }).strict(),
+  z.object({ started: z.literal(false), reason: z.enum(QUICK_AUTO_START_SKIPS), code: z.string().max(64).optional() }).strict(),
+]);
+export type QuickAutoStartResult = z.infer<typeof QuickAutoStartResultSchema>;
+
+/** What the thread hears when a clear small change started on its own: what started, and how to stop it. */
+export function quickAutoStartedMessage(input: { requesterId: string; taskId: string }): { text: string; blocks: Array<Record<string, unknown>> } {
+  const text = "This looks like a small, clear change, so I started it as a quick change: plan → code → checks → draft PR.\n"
+    + "The plan comes first, here in this thread. Press Stop to cancel it: nothing it planned or wrote is kept, and no pull request opens.";
+  return {
+    text,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text } },
+      { type: "context", elements: [{ type: "mrkdwn", text: `Started for <@${input.requesterId}>. Only they can stop it.` }] },
+      { type: "actions", elements: [{ type: "button", action_id: WORKFLOW_STOP_ACTION, style: "danger", text: { type: "plain_text", text: "Stop" }, value: JSON.stringify({ taskId: input.taskId }) }] },
+    ],
+  };
+}

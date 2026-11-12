@@ -504,7 +504,13 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
     log })
   : route === "suggest"
   ? routeSlackRequest(message, { ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice,
-    notify: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
+    notify: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
+    // Decision 134: a clear small change starts Quick on its own, through the broker's check and the requester's own start.
+    autoStart: async ({ message: request, requestId }) => {
+      const api = threadApi(request);
+      if (api.startQuickFromIntake === undefined) return { started: false, reason: "start_refused" };
+      return api.startQuickFromIntake({ requestId, instructions: request.text });
+    },
     answer: (question) => processRequest(question, context), finish: (subject) => threads.finish(subject), log })
   : processRequest(message, context), {
   concurrency,

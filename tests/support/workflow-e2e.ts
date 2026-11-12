@@ -303,6 +303,8 @@ export async function createWorkflowE2E(options: {
    * classifier is unavailable, so every plain mention gets the Just answer / Quick / Full card.
    */
   route?: (text: string) => RequestRoute | Promise<RequestRoute>;
+  /** Decision 134: the Slack service asks the broker to start a clear small change on Quick (through the `/v1/service` route). */
+  autoStartQuick?: true;
   /**
    * A task started before plans became structured: the first planning step's stored document is this Markdown, with no
    * format and no evidence, as the table, the storage and the notifier's stream all see it.
@@ -1028,7 +1030,9 @@ export async function createWorkflowE2E(options: {
       await routeSlackRequest(message, {
         ...(route === undefined ? {} : { route: async (text: string) => { routeCalls.push(text); return route(text); } }),
         offer: offerChoice, answer: async (question) => { chatQueue.push(question); }, finish: async () => undefined,
-        notify: async (thread, text) => { slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text }); },
+        notify: async (thread, text, blocks) => { slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }); },
+        ...(options.autoStartQuick === true ? { autoStart: async ({ message: request, requestId }: { message: SlackRequestMessage; requestId: string }) =>
+          createThreadApi({ controlPlaneUrl: CONTROL_PLANE_URL, signedFetch: serviceFetch(request.thread, request.userId) }).startQuickFromIntake!({ requestId, instructions: request.text }) } : {}),
         log: (event, fields) => { routeLogs.push({ event, fields }); },
       });
     }

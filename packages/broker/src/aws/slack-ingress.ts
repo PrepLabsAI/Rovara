@@ -20,6 +20,8 @@ import {
   SlackTeamIdSchema,
   SlackUserIdSchema,
   TASK_NOTE_SAVED_TEXT,
+  smallTalkOf,
+  smallTalkReply,
   VIEW_ONLY_NOTICE,
   isStopCommand,
   parseConfirmationReply,
@@ -719,6 +721,20 @@ async function workflowThreadReply(
     }
   }
   if (replyText.length === 0) return ignore(log, "empty_thread_reply", { eventId });
+  // Smart intake: "thanks", "great", "ok" in a task's thread is small talk, not an instruction. It gets the fixed reply
+  // with no model call and is never saved as a task note. "thanks, but also fix X" is not small talk and is saved.
+  const smallTalk = smallTalkOf(replyText, { acknowledgements: true });
+  if (smallTalk !== undefined) {
+    // Slack also delivers an @AgentX reply as a plain message; its app_mention copy is the one answered.
+    if (mention.kind === "message" && mention.botUserId !== undefined && mention.text.includes(`<@${mention.botUserId}>`)) {
+      return ignore(log, "small_talk_mention_copy", { eventId });
+    }
+    log("thread_note.small_talk", { eventId, taskId, kind: smallTalk });
+    // A mention is answered in the thread; a plain reply only privately, so the thread is not filled with acknowledgements.
+    if (mention.kind === "mention") await post(dependencies, log, thread, smallTalkReply(smallTalk, "task"), "small_talk.reply_failed");
+    else await ephemeral(dependencies, log, thread, mention.userId, smallTalkReply(smallTalk, "task"));
+    return respond(200, { ok: true });
+  }
   if (dependencies.recordThreadNote === undefined) {
     // Never an ordinary coding request: the task moves on only through its owner's buttons.
     log("workflow_thread.reply_not_run", { eventId });

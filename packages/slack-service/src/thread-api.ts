@@ -8,6 +8,8 @@ import {
   WorkspaceCloseStartResultSchema,
   ProjectModelOptionsSchema,
   ProjectModelSelectionRequestSchema,
+  QuickAutoStartRequestSchema,
+  QuickAutoStartResultSchema,
   taskResultChecks,
 } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
@@ -54,6 +56,10 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
     async markCommentAnswered(input) {
       const body = CommentAnsweredRequestSchema.parse(input);
       await servicePost("/v1/tasks/comments/answered", body, "writing the comment answer failed");
+    },
+    async startQuickFromIntake(input) {
+      const body = QuickAutoStartRequestSchema.parse(input);
+      return QuickAutoStartResultSchema.parse(await servicePost("/v1/workflows/quick-start", body, "starting the quick change failed"));
     },
     async markThreadNoteAnswered(input) {
       const body = ThreadNoteAnsweredRequestSchema.parse(input);
