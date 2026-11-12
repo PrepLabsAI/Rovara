@@ -158,6 +158,11 @@ describe("S3 object storage: short-lived, scoped read links", () => {
       { input: { Bucket: BUCKET, Key: video, ResponseContentType: "video/webm", ResponseContentDisposition: "inline" }, expiresIn: 60 },
       { input: { Bucket: BUCKET, Key: trace, ResponseContentType: "application/zip", ResponseContentDisposition: "attachment" }, expiresIn: 300 },
     ]);
+    // Inline only for a picture or video: anything else (HTML, SVG, text, JSON) is a download, whatever the caller asked.
+    signed.length = 0;
+    for (const contentType of ["text/html", "image/svg+xml", "text/plain", "application/json", "application/pdf"]) await store.presignGet(trace, { contentType, disposition: "inline" });
+    await store.presignGet(video, { contentType: "IMAGE/PNG", disposition: "inline" });
+    expect(signed.map((entry) => entry.input.ResponseContentDisposition)).toEqual(["attachment", "attachment", "attachment", "attachment", "attachment", "inline"]);
     for (const expiresInSeconds of [0, 301, 3_600, 1.5]) await expect(store.presignGet("k", { contentType: "a/b", disposition: "inline", expiresInSeconds })).rejects.toBeInstanceOf(S3ObjectStorageError);
     await expect(store.presignGet("k", { contentType: "a/b", disposition: "inline; filename=x" as "inline" })).rejects.toBeInstanceOf(S3ObjectStorageError);
   });

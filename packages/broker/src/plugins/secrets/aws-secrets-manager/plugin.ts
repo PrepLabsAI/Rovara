@@ -3,6 +3,9 @@
 //   { "point": "secrets", "name": "aws-secrets-manager", "module": "@agentx/broker/plugins/secrets-aws",
 //     "settings": { "region": "us-west-2", "profile": "rovara-secrets", "namePrefix": "rovara/" } }
 // A reference is then `{ "awsSecret": "github" }` (reads `rovara/github`). The identity needs secretsmanager:GetSecretValue on `<prefix>*` (and kms:Decrypt on a customer key, if the secrets use one).
+// A HOSTED (many-company) setup must set both `namePrefix` (its environment's own path, `agentx/<env>/`, so no reference reaches another environment's secrets) and `companyPaths`
+// (`["org-connectors", "org-hooks"]`, so a company's secret is read only for that company), and give `clientFor` a per-company session; without `companyPaths` the adapter reads any name
+// under the prefix for any company. A one-owner laptop install needs neither.
 // A configured `secrets` plug-in is the source of truth (docs/ports.md): Code's model keys and GitHub token ask `{ "env" }` and `{ "key" }`, which this adapter does not know, so name those
 // sources in the adapters that read them, or keep Code's own `secrets` adapter.
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";

@@ -112,12 +112,15 @@ export function assertObjectPrefix(prefix: string): void {
   if (prefix === "" || !isValidObjectKey(body === "" ? "x" : body)) throw new ObjectKeyError("an object key prefix is the start of a key and is never empty");
 }
 
-/** The most small text facts an object can carry, and their size, so every adapter can keep them with the object. */
-export const OBJECT_METADATA_LIMITS = { entries: 32, bytes: 4_096 } as const;
+/**
+ * The most small text facts an object can carry, and their size (names and values, as UTF-8), so every adapter can keep them with the object. 2 KB is S3's own limit on user metadata
+ * (convergence lane A3), so what one adapter keeps every adapter keeps.
+ */
+export const OBJECT_METADATA_LIMITS = { entries: 32, bytes: 2_048 } as const;
 
 export function assertObjectMeta(meta: ObjectMeta): void {
   const entries = Object.entries(meta.metadata);
   const size = entries.reduce((sum, [name, value]) => sum + Buffer.byteLength(name) + Buffer.byteLength(value), 0);
-  if (entries.length > OBJECT_METADATA_LIMITS.entries || size > OBJECT_METADATA_LIMITS.bytes) throw new ObjectMetaError("an object's metadata is at most 32 small text facts");
+  if (entries.length > OBJECT_METADATA_LIMITS.entries || size > OBJECT_METADATA_LIMITS.bytes) throw new ObjectMetaError("an object's metadata is at most 32 small text facts of 2 KB in all");
   if (meta.contentType === "" || meta.contentType.length > 200) throw new ObjectMetaError("an object has a content type of 1 to 200 characters");
 }

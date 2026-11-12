@@ -20,11 +20,16 @@ export const S3_RETENTION_TAG_KEY = "rovara-retention";
 /** The largest object one PUT may carry (S3's own limit). */
 export const S3_SINGLE_PUT_MAX_BYTES = 5 * 1_024 * 1_048_576;
 export const S3_OBJECT_DEFAULT_MAX_BYTES = 256 * 1_048_576;
-/** S3 keeps at most 2 KB of user metadata (names and values, as UTF-8). The port allows more; this store refuses the rest with `ObjectMetaError`. */
+/** S3 keeps at most 2 KB of user metadata (names and values, as UTF-8); the port's `OBJECT_METADATA_LIMITS.bytes` is the same number. */
 export const S3_METADATA_MAX_BYTES = 2_048;
 /** A presigned read lives at most this long. The hosted evidence download uses 60 seconds. */
 export const S3_PRESIGN_MAX_SECONDS = 300;
 export const S3_PRESIGN_DEFAULT_SECONDS = 60;
+/**
+ * The content types a read link may show in the browser (`inline`): pictures and video, which a browser never runs as a page. Any other type (text, HTML, SVG, JSON, PDF, archives) is always
+ * served as a download (`attachment`), whatever the caller asked, so a stored file can never render as a page on the bucket's address.
+ */
+export const S3_INLINE_CONTENT_TYPES: ReadonlySet<string> = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "video/webm", "video/mp4"]);
 
 /** S3 lower-cases metadata names, so only lower-case names come back as they were written; values are printable ASCII (S3 re-encodes anything else). */
 const METADATA_NAME = /^[a-z0-9][a-z0-9_.-]{0,127}$/u;
@@ -227,7 +232,8 @@ export class S3ObjectStorage implements ObjectStorage {
   }
 
   /**
-   * A short-lived read link for ONE key, answered with the content type and disposition given (so a stored file is never rendered as a page by the bucket). Not part of the port: a caller that serves
+   * A short-lived read link for ONE key, answered with the content type given and a disposition: `inline` only for a picture or video type (`S3_INLINE_CONTENT_TYPES`), else always `attachment`
+   * (so a stored file is never rendered as a page by the bucket). Not part of the port: a caller that serves
    * downloads by link (a large video or trace) and has checked the reader's right to the object asks for it. The link lives `expiresInSeconds` (default 60, at most 300). It does not check the object exists.
    */
   async presignGet(key: string, options: { contentType: string; disposition: "inline" | "attachment"; expiresInSeconds?: number }): Promise<string> {
@@ -237,8 +243,9 @@ export class S3ObjectStorage implements ObjectStorage {
     if (options.contentType === "" || options.contentType.length > 200 || !METADATA_VALUE.test(options.contentType)) throw new S3ObjectStorageError("a read link names a content type");
     if (options.disposition !== "inline" && options.disposition !== "attachment") throw new S3ObjectStorageError("a read link is inline or attachment");
     if (this.#presign === undefined) throw new S3ObjectStorageError("read links are not set up for this object store");
+    const disposition = options.disposition === "inline" && S3_INLINE_CONTENT_TYPES.has(options.contentType.toLowerCase()) ? "inline" : "attachment";
     try {
-      return await this.#presign(this.#client, new GetObjectCommand({ Bucket: this.#bucket, Key: key, ResponseContentType: options.contentType, ResponseContentDisposition: options.disposition, ...this.#owner }), { expiresIn: seconds });
+      return await this.#presign(this.#client, new GetObjectCommand({ Bucket: this.#bucket, Key: key, ResponseContentType: options.contentType, ResponseContentDisposition: disposition, ...this.#owner }), { expiresIn: seconds });
     } catch { throw unavailable("sign a read link"); }
   }
 }
