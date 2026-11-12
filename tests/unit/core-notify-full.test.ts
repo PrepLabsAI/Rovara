@@ -12,7 +12,7 @@ import { createInProcessRealtime } from "../../packages/broker/src/ports/realtim
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionTaskFacts, type SummaryDependencies } from "../../packages/broker/src/core/sessions/index.js";
 import {
-  ATTENTION_RETRY_BASE_MS, ATTENTION_TARGET_TRIES_MAX, EMAIL_TARGET, PENDING_PK, attentionEmail, attentionNotice, deliverAttention, digestSlotDay, holdOf, inQuietHours, localClock, prefsKey, queueAttention, readNotifyPrefs,
+  ATTENTION_RETRY_BASE_MS, ATTENTION_TARGET_TRIES_MAX, EMAIL_TARGET, PENDING_PK, attentionEmail, attentionNotice, dayBefore, deliverAttention, digestSlotDay, holdOf, inQuietHours, localClock, prefsKey, queueAttention, readNotifyPrefs,
   writeNotifyPrefs,
 } from "../../packages/broker/src/core/notify/index.js";
 
@@ -207,6 +207,42 @@ describe("where: chat, email or both", () => {
     expect(await w.pending()).toHaveLength(0);
   });
 
+  it("claims the rows of one email all at once: a claim that fails part-way claims none, and a row that changed is left for later, so no task is lost", async () => {
+    const w = await world({ startMs: Date.parse("2026-11-09T10:05:00.000Z") });
+    await w.needsYou(0);
+    await w.needsYou(1);
+    // A store that refuses the second row's claim when claimed row by row, and fails the first transaction outright.
+    const realUpdate = w.store.update.bind(w.store), realTransact = w.store.transact.bind(w.store);
+    let claims = 0, transactFailures = 1;
+    w.store.update = async (request) => { if (request.ops.some((op) => op.path[0] === "emailClaimed" && op.op === "set") && ++claims === 2) throw new Error("throttled"); return realUpdate(request); };
+    w.store.transact = async (items) => { if (transactFailures-- > 0) throw new Error("throttled"); return realTransact(items); };
+    expect(await w.deliver()).toMatchObject({ emails: 0 });
+    expect(w.fake.sent()).toEqual([]);
+    // Nothing was claimed, so nothing is taken as emailed.
+    expect((await w.pending()).map((row) => row["emailClaimed"])).toEqual([undefined, undefined]);
+    w.clock.ms += NOTIFY_BATCH_MINUTES * 60_000 + 1;
+    expect(await w.deliver()).toMatchObject({ emails: 1 });
+    expect(w.fake.sent()[0]!.text).toContain("Add retry");
+    expect(w.fake.sent()[0]!.text).toContain("Fix login");
+    // A row replaced between the read and the claim is left out of this email and sent with a later one; the other is claimed and sent.
+    const r = await world({ startMs: Date.parse("2026-11-09T10:05:00.000Z") });
+    await r.needsYou(0);
+    await r.needsYou(1);
+    const inner = r.store.transact.bind(r.store);
+    let raced = false;
+    r.store.transact = async (items) => {
+      if (!raced) { raced = true; const second = items[1] as { key: { pk: string; sk: string } }; await r.store.update({ key: second.key, ops: [{ op: "set", path: ["at"], value: "2026-11-09T10:06:00.000Z" }] }); }
+      return inner(items);
+    };
+    expect(await r.deliver()).toMatchObject({ emails: 1 });
+    expect(await r.pending()).toHaveLength(1);
+    expect((await r.pending())[0]!["emailClaimed"]).toBeUndefined();
+    r.clock.ms += NOTIFY_BATCH_MINUTES * 60_000 + 1;
+    expect(await r.deliver()).toMatchObject({ emails: 1 });
+    expect(r.fake.sent()).toHaveLength(2);
+    expect(await r.pending()).toHaveLength(0);
+  });
+
   it("gives up at once on an email the sender refuses (never retried)", async () => {
     const w = await world({ email: { capabilities: { available: true, html: false, unsubscribeHeader: false }, send: async () => { throw new EmailError("refused", "the recipient is not one plain address"); } } });
     await w.needsYou(0);
@@ -324,6 +360,26 @@ describe("the daily digest", () => {
     expect(await w.deliver()).toMatchObject({ emails: 1 });
     expect(w.fake.sent()[0]).toMatchObject({ subject: "Rovara digest: 1 task" });
     expect(w.fake.sent()[0]!.text.startsWith("Your Rovara digest:")).toBe(true);
+  });
+
+  it("on New York's daylight-saving days the digest is never early and its slot is never skipped", () => {
+    const ny = { timeZone: "America/New_York", digestAt: "02:00" };
+    // Fall back, 2026-11-01: 01:30 happens twice. The second 01:30 (EST, 06:30Z) is still before 02:00, so yesterday's slot is the latest: already served, the digest waits.
+    expect(localClock(Date.parse("2026-11-01T06:30:00.000Z"), ny.timeZone)).toEqual({ day: "2026-11-01", minute: 90 });
+    expect(holdOf(ny, Date.parse("2026-11-01T05:30:00.000Z"), "2026-10-31")).toBe("digest");
+    expect(holdOf(ny, Date.parse("2026-11-01T06:30:00.000Z"), "2026-10-31")).toBe("digest");
+    expect(digestSlotDay(ny, Date.parse("2026-11-01T06:30:00.000Z"))).toBe("2026-10-31");
+    // 02:00 EST arrives: today's slot.
+    expect(holdOf(ny, Date.parse("2026-11-01T07:00:00.000Z"), "2026-10-31")).toBe("none");
+    expect(digestSlotDay(ny, Date.parse("2026-11-01T07:00:00.000Z"))).toBe("2026-11-01");
+    // Spring forward, 2026-03-08: 02:00 to 03:00 does not exist. A 02:30 digest is served at the first sweep after it (03:00 EDT), not skipped to the next day.
+    const spring = { timeZone: "America/New_York", digestAt: "02:30" };
+    expect(holdOf(spring, Date.parse("2026-03-08T06:59:00.000Z"), "2026-03-07")).toBe("digest");
+    expect(holdOf(spring, Date.parse("2026-03-08T07:00:00.000Z"), "2026-03-07")).toBe("none");
+    expect(digestSlotDay(spring, Date.parse("2026-03-08T07:00:00.000Z"))).toBe("2026-03-08");
+    expect(holdOf(spring, Date.parse("2026-03-08T07:00:00.000Z"), "2026-03-08")).toBe("digest");
+    expect(dayBefore("2026-03-01")).toBe("2026-02-28");
+    expect(dayBefore("2028-01-01")).toBe("2027-12-31");
   });
 
   it("a slot that falls in quiet hours is served when they end; a slot is never served twice; a first digest waits for today's slot", () => {
