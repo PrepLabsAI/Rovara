@@ -10,6 +10,7 @@ import {
   INDEX_EXPIRY_ATTRIBUTE, PRESENCE_TTL_SECONDS, PRESENCE_VIEWERS_MAX, SESSION_FOLLOWERS_MAX, SESSION_RETENTION_DAYS, SessionOwnerSchema, agentSessionKey, agentXError, change, cleanSessionName, livePresenceKey, when,
   type AgentSessionRecord, type DocumentStore, type OrgId, type Principal, type SessionId, type SessionLevel, type SessionOwner, type TransactItem,
 } from "@agentx/contracts";
+import { sessionAccessOf, localOwnerMembers, sessionPersonOf, type SessionMembers } from "./access.js";
 import { developerIdOf } from "./create.js";
 import { SessionStore } from "./store.js";
 
@@ -22,8 +23,10 @@ export const TOO_MANY_FOLLOWERS = "This session has the most followers it can ha
 
 export interface FollowerDependencies {
   store: DocumentStore;
-  /** The person's level on the session. Default: the company's owner has `edit` (and owns the session when it is theirs), anyone else `none`, which reads as a missing session. */
+  /** The person's level on the session; `none` reads as a missing session. Default: the session levels (`access.ts`) over `members`. */
   level?: ((principal: Principal, session: AgentSessionRecord) => Promise<SessionLevel | "none"> | SessionLevel | "none") | undefined;
+  /** Where the company's people come from for the session levels. Default: the local owner alone. */
+  members?: SessionMembers | undefined;
   now?: () => Date;
 }
 
@@ -38,9 +41,24 @@ async function viewable(deps: FollowerDependencies, principal: Principal, orgId:
   if (principal.companyId !== orgId) throw missing;
   const session = await new SessionStore(deps.store).get(orgId, sessionId);
   if (session === undefined) throw missing;
-  const level = deps.level === undefined ? (principal.roles.includes("owner") ? "edit" : "none") : await deps.level(principal, session);
-  if (level === "none") throw missing;
-  return { session, owner: session.owner.developerId === developerIdOf(principal) };
+  if (deps.level !== undefined) {
+    if (await deps.level(principal, session) === "none") throw missing;
+    return { session, owner: session.owner.developerId === developerIdOf(principal) };
+  }
+  // The effective owner (the taker once the task was taken over) follows without an item.
+  const found = await accessOf(deps, principal, session);
+  if (found === undefined) throw missing;
+  return { session, owner: found.owner };
+}
+
+/** The person's access by the session levels (following and presence need `view`, which every level holds); undefined for no access at all or a person who is not a member. */
+async function accessOf(deps: FollowerDependencies, principal: Principal, session: AgentSessionRecord): Promise<{ owner: boolean } | undefined> {
+  try {
+    return await sessionAccessOf({ store: deps.store, members: deps.members ?? localOwnerMembers() }, sessionPersonOf(principal), session);
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === "NOT_FOUND") return undefined;
+    throw error;
+  }
 }
 
 /** `POST /v1/app/sessions/<id>/follow` (needs `view`). Writes the follower item and counts it in one transaction. A person who follows already (an item, or the owner): nothing is written. At `SESSION_FOLLOWERS_MAX` it is refused. */

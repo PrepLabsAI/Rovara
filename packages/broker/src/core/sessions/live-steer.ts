@@ -16,7 +16,7 @@ import {
 } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../callbacks.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
-import { operationKey } from "../task-flow/keys.js";
+import { operationKey, taskPointerKey } from "../task-flow/keys.js";
 import { readTask } from "../task-flow/reads.js";
 import { fromDocument, type OperationRecord } from "../task-flow/records.js";
 import { readWorkspace } from "../task-flow/stage-machine.js";
@@ -66,12 +66,14 @@ export async function runningSteerableStep(deps: Pick<TaskFlowDeps, "store">, ta
   if (task === undefined || task.closedAt !== undefined) return undefined;
   const workspace = await readWorkspace(deps, task.workspaceId);
   if (workspace === undefined || workspace.status !== "BUSY" || workspace.activeOperationId === null || workspace.machine === undefined) return undefined;
+  // The workspace must be working for THIS task now: a workspace the task once had and another task holds is someone else's run, and a message never reaches it.
+  if ((await deps.store.get(taskPointerKey(workspace.id)))?.["taskId"] !== task.taskId) return undefined;
   const operation = fromDocument<OperationRecord>(await deps.store.get(operationKey(workspace.id, workspace.activeOperationId)));
   const mode = operation?.workflowMode;
   const step = LIVE_STEER_STEPS.find((candidate) => candidate === (typeof mode === "string" ? LIVE_STEER_STEP_OF_MODE[mode] ?? mode : mode));
   // A local worker's operation stays DISPATCHING while it runs (its events do not move the status), a Cloud one is RUNNING: both are handed to the machine. The worker is the judge of whether its session is open
   // (it answers `not_ready` or `not_running`), so a step it has not taken yet is never given a message.
-  if (operation === undefined || step === undefined || operation.kind !== "task" || (operation.status !== "RUNNING" && operation.status !== "DISPATCHING") || operation.machineId !== workspace.machine.machineId || operation.fence !== workspace.fence) return undefined;
+  if (operation === undefined || step === undefined || operation.kind !== "task" || operation.programStepId !== undefined || (operation.status !== "RUNNING" && operation.status !== "DISPATCHING") || operation.machineId !== workspace.machine.machineId || operation.fence !== workspace.fence) return undefined;
   return { workspaceId: workspace.id, fence: workspace.fence, projectRevision: workspace.projectRevision, machineId: workspace.machine.machineId, operationId: operation.id, step };
 }
 

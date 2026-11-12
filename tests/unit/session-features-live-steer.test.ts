@@ -15,7 +15,7 @@ const OPERATION = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const KEY = "k".repeat(40);
 const msg = (n: number): string => `msg_${String(n).padStart(20, "0")}`;
 
-async function world(options: { features?: readonly string[]; answers?: Array<Record<string, unknown>>; mode?: string; opStatus?: string; busy?: boolean; workspaceStatus?: string; operationMachine?: string } = {}) {
+async function world(options: { features?: readonly string[]; answers?: Array<Record<string, unknown>>; mode?: string; opStatus?: string; busy?: boolean; workspaceStatus?: string; operationMachine?: string; pointerTask?: string | null; programStep?: string } = {}) {
   const answers = [...(options.answers ?? [])];
   const machines = new FakeWorkerMachines({ startingChecks: 0, features: options.features ?? [LIVE_STEER_FEATURE], answer: () => answers.shift() ?? { accepted: true, outcome: "steered" } });
   const handle = await machines.start({ machineKey: WORKSPACE, companyId: "org_x" });
@@ -24,7 +24,9 @@ async function world(options: { features?: readonly string[]; answers?: Array<Re
   const store = new MemoryDocumentStore();
   await store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "META", taskId: TASK, workspaceId: WORKSPACE } });
   await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", id: WORKSPACE, status: options.workspaceStatus ?? "BUSY", activeOperationId: OPERATION, fence: 2, projectRevision: 1, machine: { machineId: handle.machineId, machineKey: WORKSPACE } } });
-  await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: `OPERATION#${OPERATION}`, id: OPERATION, kind: "task", status: options.opStatus ?? "RUNNING", fence: 2, workflowMode: options.mode ?? "PLAN", machineId: options.operationMachine ?? handle.machineId } });
+  await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: `OPERATION#${OPERATION}`, id: OPERATION, kind: "task", status: options.opStatus ?? "RUNNING", fence: 2, workflowMode: options.mode ?? "PLAN", machineId: options.operationMachine ?? handle.machineId, ...(options.programStep === undefined ? {} : { programStepId: options.programStep }) } });
+  // The workspace's task pointer: which task the workspace is working for now.
+  if (options.pointerTask !== null) await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: "DEVELOPER_TASK", taskId: options.pointerTask ?? TASK } });
   const sleeps: number[] = [];
   const deps: LiveSteerDeps = { store, machines, callbackSigningKey: KEY, sleep: async (ms) => { sleeps.push(ms); } };
   return { deps, machines, handle, sleeps, store };
@@ -86,6 +88,14 @@ describe("a message to a running step", () => {
     expect(await send(stopped.deps)).toBe("no_step");
     expect(stopped.machines.answered).toHaveLength(0);
     expect((await stopped.machines.health(stopped.handle.machineId)).state).toBe("stopped");
+  });
+
+  it("never reaches another task's run: a workspace the task once had that now works for another task, or has no task, takes no message; nor does a chain program's step", async () => {
+    for (const options of [{ pointerTask: "11111111-2222-4333-8444-555555555555" }, { pointerTask: null }, { programStep: "step-1" }] as const) {
+      const w = await world(options);
+      expect(await send(w.deps)).toBe("no_step");
+      expect(w.machines.answered).toHaveLength(0);
+    }
   });
 
   it("is a note for a worker that does not list the feature, with the switch off and with no signing key", async () => {

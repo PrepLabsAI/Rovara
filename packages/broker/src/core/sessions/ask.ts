@@ -15,6 +15,7 @@ import {
   type Admission, type AgentSessionRecord, type AskRecord, type AskStatus, type AuditSink, type DocumentStore, type OrgId, type Principal, type SessionId, type TransactItem,
 } from "@agentx/contracts";
 import { admissionRefusal } from "../task-flow/admission.js";
+import { createSessionAccess, requireAsk, requireLevelOf, type SessionMembers } from "./access.js";
 import { developerIdOf } from "./create.js";
 import { loadAskContext, storeAskReaders, type AskContextReaders, type AskLoadDeps } from "./ask-context-load.js";
 import { neutralizeSlackMentions } from "./slack-mentions.js";
@@ -64,7 +65,9 @@ export interface AskDependencies extends AskLoadDeps {
   recordUsage?: ((entry: { taskId: string; entryId: string; usage: NonNullable<Awaited<ReturnType<AskAnswerer["answer"]>>["usage"]> }) => Promise<unknown>) | undefined;
   /** The readers of the context beyond the task row (the diff and the check output); the timeline and the notes come from the store. */
   readers?: ((session: AgentSessionRecord) => Pick<AskContextReaders, "diff" | "checkTails">) | undefined;
-  /** Whether this person may ask about this session. Default: the company's owner. */
+  /** Where the company's people come from for the session levels (decisions 103, 104: `use`, or `view` with a working role on the project). Default: the local owner alone. */
+  members?: SessionMembers | undefined;
+  /** Replaces the session levels with a yes or no of its own (a test, or an adapter with its own rules); a no reads as a missing session. */
   authorize?: ((principal: Principal, session: AgentSessionRecord) => boolean | Promise<boolean>) | undefined;
   /** Keys the hash that recognises the same question again (at least 16 bytes: the broker's signing key). */
   questionHashKey: string | Uint8Array;
@@ -96,7 +99,7 @@ const causeOf = (error: unknown): string | undefined => {
   return typeof reason === "string" && /^[a-z0-9_]{1,40}$/u.test(reason) ? reason : undefined;
 };
 /** Failures that are Rovara's own (not the asker's and not the provider's): the Ask did not run, so it does not use up a rate slot. */
-const OWN_FAILURES: ReadonlySet<string> = new Set(["no_answerer", "no_context", "no_model", "provider_not_set_up", "no_credential", "sign_in_failed", "request_not_allowed"]);
+const OWN_FAILURES: ReadonlySet<string> = new Set(["access_lost", "no_answerer", "no_context", "no_model", "provider_not_set_up", "no_credential", "sign_in_failed", "request_not_allowed"]);
 
 /** A shared counter in a window (a person's hour, a task's day): whether there is room, and the write that takes one place, conditioned on the counter as it was read. */
 async function rateStep(store: DocumentStore, key: { pk: string; sk: string }, scope: { orgId: OrgId; sessionId?: string }, limit: number, windowMs: number, nowMs: number): Promise<{ room: boolean; item: TransactItem }> {
@@ -123,17 +126,36 @@ export function createAsk(deps: AskDependencies) {
   const sessions = new SessionStore(deps.store);
   const log = deps.log ?? (() => undefined);
   const running = new Set<Promise<void>>();
+  const access = createSessionAccess({ store: deps.store, members: deps.members });
 
   const notFound = () => agentXError("NOT_FOUND", "There is no such session.");
 
-  /** The session the person may ask about, or not-found: a person who may not reads what a missing session reads. */
-  async function sessionFor(principal: Principal, orgId: OrgId, sessionId: SessionId): Promise<AgentSessionRecord> {
+  /**
+   * The session the person may ask about (`ask`) or read an Ask of (`read`, which needs `view`). A person with no level reads what a missing session reads; a person who may view but not ask is told so
+   * (the hosted product's SESSION_LEVEL_REQUIRED).
+   */
+  async function sessionFor(principal: Principal, orgId: OrgId, sessionId: SessionId, purpose: "ask" | "read"): Promise<AgentSessionRecord> {
     if (principal.companyId !== orgId) throw notFound();
     const session = await sessions.get(orgId, sessionId);
     if (session === undefined) throw notFound();
-    const allowed = deps.authorize === undefined ? principal.roles.includes("owner") : await deps.authorize(principal, session);
-    if (!allowed) throw notFound();
-    return session;
+    if (deps.authorize !== undefined) {
+      if (!(await deps.authorize(principal, session))) throw notFound();
+      return session;
+    }
+    const found = await access.of(principal, session);
+    return (purpose === "ask" ? requireAsk(found) : requireLevelOf(found, "view", "read it")).session;
+  }
+
+  /** Whether the asker may still ask, checked again when the answer turn starts (a person whose access ended since asking gets nothing). */
+  async function mayStillAsk(principal: Principal, session: AgentSessionRecord): Promise<boolean> {
+    try {
+      const now1 = await sessions.get(session.orgId, session.sessionId);
+      if (now1 === undefined) return false;
+      if (deps.authorize !== undefined) return await deps.authorize(principal, now1);
+      return (await access.of(principal, now1)).mayAsk;
+    } catch {
+      return false;
+    }
   }
 
   const statusOf = async (orgId: OrgId, sessionId: SessionId, askId: string, request: Document): Promise<AskStatus> => {
@@ -179,7 +201,7 @@ export function createAsk(deps: AskDependencies) {
   }
 
   /** The answer turn: the context, one model call, the stored answer. Never throws; a failure ends the Ask `failed` in fixed words. */
-  async function turn(session: AgentSessionRecord, askId: string, askerKey: string, question: string, held: { reservationId?: string | undefined; submittedMs: number; estimateTokens: number }): Promise<void> {
+  async function turn(principal: Principal, session: AgentSessionRecord, askId: string, askerKey: string, question: string, held: { reservationId?: string | undefined; submittedMs: number; estimateTokens: number }): Promise<void> {
     const { orgId, sessionId } = session;
     // The allowance this Ask holds is given back or settled ONCE. Once the request may have reached the provider, it is only ever SETTLED (with what the call used, else the estimate): the model may have been paid.
     let reservation = held.reservationId;
@@ -201,6 +223,8 @@ export function createAsk(deps: AskDependencies) {
     };
     try {
       if (deps.answerer === undefined || session.subject.kind !== "task") return await fail("no_answerer");
+      // The context is built for the asker's access NOW: one whose access ended since asking gets nothing, and nothing is sent.
+      if (!(await mayStillAsk(principal, session))) return await fail("access_lost");
       const context = await loadAskContext(deps, session, storeAskReaders(deps, session, deps.readers?.(session)));
       if (context === undefined) return await fail("no_context");
       const outcome = await deps.answerer.answer({ context: `${ASK_TURN_RULES}\n\n${context.text}`, question, maxOutputTokens: ASK_LIMITS.answerMaxOutputTokens, signal: AbortSignal.timeout(ASK_TURN_TIMEOUT_MS), taskId: session.subject.taskId });
@@ -231,12 +255,12 @@ export function createAsk(deps: AskDependencies) {
   }
 
   return {
-    /** The owner asks about a task's session. Answers the Ask's id and that it is queued; the answer is read with `status`. A repeat of the same request is the same Ask and spends nothing. */
+    /** A person who may ask (decisions 103, 104) asks about a task's session. Answers the Ask's id and that it is queued; the answer is read with `status`. A repeat of the same request is the same Ask and spends nothing. */
     async submit(principal: Principal, orgId: OrgId, sessionId: SessionId, value: unknown): Promise<AskStatus> {
       if (deps.enabled === false) throw agentXError("NOT_FOUND", "route not found");
       const body = AskBodySchema.safeParse(value);
       if (!body.success) throw agentXError("CONFIG_INVALID", "an ask needs a request ID and a question of 1 to 1,000 characters");
-      const session = await sessionFor(principal, orgId, sessionId);
+      const session = await sessionFor(principal, orgId, sessionId, "ask");
       if (session.subject.kind !== "task") throw agentXError("CONFIG_INVALID", "You can ask about a task's session.");
       if (deps.answerer === undefined || (deps.answerer.available !== undefined && !(await deps.answerer.available().catch(() => false)))) throw agentXError("RUNTIME_UNAVAILABLE", ASK_NOT_SET_UP_TEXT);
       const task = await deps.store.get({ pk: `DEVTASK#${session.subject.taskId}`, sk: "META" });
@@ -291,7 +315,7 @@ export function createAsk(deps: AskDependencies) {
         throw error;
       }
       // The question travels in this process only: it is in no record while the Ask waits.
-      const running1 = turn(session, askId, askerKey, body.data.question, { reservationId, submittedMs: nowMs, estimateTokens }).finally(() => { running.delete(running1); });
+      const running1 = turn(principal, session, askId, askerKey, body.data.question, { reservationId, submittedMs: nowMs, estimateTokens }).finally(() => { running.delete(running1); });
       running.add(running1);
       return AskStatusSchema.parse({ askId, state: "queued" });
     },
@@ -299,7 +323,7 @@ export function createAsk(deps: AskDependencies) {
     /** Where an Ask is, for the person who asked: queued, answered (with the answer, to them alone) or failed. Anyone else gets "not found". */
     async status(principal: Principal, orgId: OrgId, sessionId: SessionId, askId: string): Promise<AskStatus> {
       if (deps.enabled === false) throw agentXError("NOT_FOUND", "route not found");
-      const session = await sessionFor(principal, orgId, sessionId);
+      const session = await sessionFor(principal, orgId, sessionId, "read");
       const request = await deps.store.get(askRequestKey(orgId, session.sessionId, askId));
       if (request === undefined || request["askerKey"] !== developerIdOf(principal) || request["orgId"] !== orgId || request["audience"] !== "web") throw notFound();
       return statusOf(orgId, session.sessionId, askId, request);

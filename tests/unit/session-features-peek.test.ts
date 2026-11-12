@@ -13,7 +13,7 @@ const PEEKED: PeekAnswer = {
   patch: "## repository demo\ndiff --git a/src/a.ts b/src/a.ts\n+one\n-two\ndiff --git a/src/b.ts b/src/b.ts\n+three", patchTruncated: false, filesTruncated: false,
 };
 
-async function world(options: { features?: readonly string[]; answer?: unknown; busy?: boolean; status?: string } = {}) {
+async function world(options: { features?: readonly string[]; answer?: unknown; busy?: boolean; status?: string; pointerTask?: string | null } = {}) {
   const machines = new FakeWorkerMachines({ startingChecks: 0, features: options.features ?? [PEEK_FEATURE], answer: () => (options.answer ?? PEEKED) as Record<string, unknown> });
   const handle = await machines.start({ machineKey: WORKSPACE, companyId: "org_x" });
   await machines.health(handle.machineId);
@@ -21,6 +21,7 @@ async function world(options: { features?: readonly string[]; answer?: unknown; 
   const store = new MemoryDocumentStore();
   await store.put({ item: { pk: `DEVTASK#${TASK}`, sk: "META", taskId: TASK, workspaceId: WORKSPACE } });
   await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", id: WORKSPACE, status: options.status ?? "READY", activeOperationId: null, fence: 3, projectRevision: 1, machine: { machineId: handle.machineId, machineKey: WORKSPACE } } });
+  if (options.pointerTask !== null) await store.put({ item: { pk: `WORKSPACE#${WORKSPACE}`, sk: "DEVELOPER_TASK", taskId: options.pointerTask ?? TASK } });
   return { machines, handle, store, peek: createPeekClient({ store, machines, newOperationId: () => "11111111-2222-4333-8444-555555555555", timeoutMs: 50 }) };
 }
 
@@ -47,6 +48,12 @@ describe("a peek at the working tree", () => {
     expect(old.machines.answered).toHaveLength(0);
     expect(await (await world({ status: "CLOSED" })).peek(TASK)).toBeUndefined();
     expect(await (await world()).peek("00000000-0000-4000-8000-000000000000")).toBeUndefined();
+    // A workspace that works for another task now (or for none) is someone else's run: nothing of it is read.
+    for (const pointerTask of ["11111111-2222-4333-8444-555555555555", null]) {
+      const other = await world({ pointerTask });
+      expect(await other.peek(TASK)).toBeUndefined();
+      expect(other.machines.answered).toHaveLength(0);
+    }
   });
 
   it("gives nothing for a worker that could not read the tree, an answer that does not parse, a refusal and a worker that never answers", async () => {

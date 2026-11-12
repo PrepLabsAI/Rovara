@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { AGENTX_PROTOCOL_VERSION, PEEK_FEATURE, PEEK_NO_CALLBACK_CAPABILITY, PEEK_PATCH_MAX_BYTES, PeekAnswerSchema, WorkerInvocationSchema, type PeekAnswer } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
+import { taskPointerKey } from "../task-flow/keys.js";
 import { readTask } from "../task-flow/reads.js";
 import { readWorkspace } from "../task-flow/stage-machine.js";
 import type { AskContextData } from "./ask-context.js";
@@ -22,6 +23,8 @@ export function createPeekClient(deps: Pick<TaskFlowDeps, "store" | "machines"> 
       if (task === undefined) return undefined;
       const workspace = await readWorkspace(deps, task.workspaceId);
       if (workspace === undefined || workspace.machine === undefined || (workspace.status !== "BUSY" && workspace.status !== "READY")) return undefined;
+      // Only the workspace that is working for THIS task now: a workspace another task holds is someone else's run, and nothing of it reaches this Ask.
+      if ((await deps.store.get(taskPointerKey(workspace.id)))?.["taskId"] !== task.taskId) return undefined;
       // Only a worker that is up and lists the feature: a stopped or starting machine is never woken for an Ask.
       const health = await deps.machines.health(workspace.machine.machineId);
       if ((health.state !== "busy" && health.state !== "ready") || !health.features.includes(PEEK_FEATURE)) return undefined;

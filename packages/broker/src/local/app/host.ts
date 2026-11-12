@@ -1,5 +1,6 @@
 // Lane L9-wire: the task flow's side of a session's stop, retry and message (L6b's `SessionControlHost`). Each runs only after the sessions module checked who is asking.
 import { INDEX_EXPIRY_ATTRIBUTE, WORKFLOW_THREAD_NOTES_MAX, WorkflowSnapshotSchema, WorkflowTransitionError, blockWorkflow, change, when, type TransactItem } from "@agentx/contracts";
+import type { SessionMembers } from "../../core/sessions/access.js";
 import { createSessionControl, type MessagePlan, type SessionControlHost } from "../../core/sessions/control.js";
 import { sendLiveSteer } from "../../core/sessions/live-steer.js";
 import { noteKey, sessionNoteItems } from "../../core/sessions/notes.js";
@@ -103,6 +104,6 @@ export function createSessionControlHost(deps: TaskFlowDeps, options: { expected
 }
 
 /** The session control (who may stop, retry or message; the request recorded once under its id, with the event and the audit step) over this install's flow. Every route that stops or retries uses this one. */
-export function createLocalSessionControl(deps: TaskFlowDeps, options: { expectedRevision?: number } = {}) {
-  return createSessionControl({ store: deps.store, audit: deps.audit, host: createSessionControlHost(deps, options), now: deps.now ?? (() => new Date()) });
+export function createLocalSessionControl(deps: TaskFlowDeps, options: { expectedRevision?: number; members?: SessionMembers | undefined } = {}) {
+  return createSessionControl({ store: deps.store, audit: deps.audit, host: createSessionControlHost(deps, options), members: options.members, now: deps.now ?? (() => new Date()) });
 }
