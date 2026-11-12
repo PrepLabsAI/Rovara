@@ -18,6 +18,7 @@ import { getTask, listTasks } from "./reads.js";
 import { recordOperationResult } from "./results.js";
 import type { OperationResult } from "./outcome.js";
 import { runDueDispatches } from "./stage-machine.js";
+import { sweepLostRuns } from "./run-watch.js";
 import { startTask } from "./start.js";
 import { WORKSPACE_PROJECT_INDEX } from "@agentx/contracts";
 
@@ -40,6 +41,8 @@ export interface TaskFlow {
   dispatchOnce(options?: { maxMessages?: number; waitSeconds?: number }): Promise<DispatchReport>;
   /** One pass of the recovery sweep over due workflow dispatch rows. */
   sweepOnce(options?: { limit?: number }): ReturnType<typeof runDueDispatches>;
+  /** One pass of the run-lost watchdog: an operation whose worker machine is lost or unhealthy past the grace period ends INTERRUPTED. */
+  sweepRunsOnce(options?: { limit?: number; graceSeconds?: number }): ReturnType<typeof sweepLostRuns>;
   /** Hands pending outbox messages to their queues (call from a timer; a start also relays its own). */
   relayOnce(options?: { limit?: number }): ReturnType<TaskFlowDeps["outbox"]["relay"]>;
 }
@@ -61,6 +64,7 @@ export function createTaskFlow(deps: TaskFlowDeps): TaskFlow {
     recordResult: (result) => recordOperationResult(deps, result),
     dispatchOnce: (options) => runDispatchOnce(deps, options),
     sweepOnce: (options) => runDueDispatches(deps, options),
+    sweepRunsOnce: (options) => sweepLostRuns(deps, options),
     relayOnce: (options) => deps.outbox.relay({ companyId: deps.companyId, ...(options?.limit === undefined ? {} : { limit: options.limit }) }),
   };
 }
