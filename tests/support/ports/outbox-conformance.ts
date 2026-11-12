@@ -73,7 +73,11 @@ export function runOutboxConformance(name: string, harness: OutboxHarness): void
       await Promise.all([under.outbox.relay({ companyId: COMPANY }), under.outbox.relay({ companyId: COMPANY }), under.outbox.relay({ companyId: COMPANY })]);
       await under.settleIndexes?.();
       expect(await under.outbox.relay({ companyId: COMPANY })).toEqual({ delivered: 0, failed: 0, dead: 0 });
-      expect(await drain(under, "dispatch")).toEqual(["three"]);
+      const copies = await drain(under, "dispatch");
+      // Relays that overlap each hand the message over: a queue with duplicate suppression keeps one copy; one without (SQS standard) may
+      // hold several, all the same message, which a consumer drops by its `outboxId`.
+      const queue = await under.queues.queue("dispatch");
+      expect(queue.capabilities.dedupe ? copies : [...new Set(copies)]).toEqual(["three"]);
     }));
 
     it("refuses to stage the same id twice", () => withOutbox(async (under) => {

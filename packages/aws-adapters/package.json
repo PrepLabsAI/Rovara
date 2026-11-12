@@ -8,7 +8,8 @@
     ".": "./dist/index.js",
     "./dynamodb": "./dist/dynamodb/plugin.js",
     "./s3": "./dist/s3/index.js",
-    "./secrets-manager": "./dist/secrets-manager/index.js"
+    "./secrets-manager": "./dist/secrets-manager/index.js",
+    "./sqs": "./dist/sqs/plugin.js"
   },
   "types": "./dist/index.d.ts",
   "engines": {
@@ -18,6 +19,7 @@
     "@agentx/contracts": "0.1.0",
     "@aws-sdk/client-dynamodb": "3.1134.0",
     "@aws-sdk/client-s3": "3.1134.0",
-    "@aws-sdk/client-secrets-manager": "3.1134.0"
+    "@aws-sdk/client-secrets-manager": "3.1134.0",
+    "@aws-sdk/client-sqs": "3.1134.0"
   }
 }

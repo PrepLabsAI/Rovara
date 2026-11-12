@@ -155,6 +155,42 @@ otherwise. A message that fails `maxAttempts` times is set aside as `DEAD` (repo
 `expiresAt`. Messages of one ordered group keep their order only if one relay runs at a time. `createTransactionalOutbox` is written
 once over the two ports; the store must keep `OUTBOX_PENDING_INDEX`.
 
+**SQS adapter (lane A2, `packages/aws-adapters/src/sqs`, `@rovara/aws-adapters/sqs`; public, opt-in, never Code's default).**
+`SqsQueueService` implements `Queue` on queues the deployment declares (settings `queues: { <name>: { url, deadLetterUrl? } }`, `region`,
+`endpoint`); it creates and changes no queue. At first use it reads the queue's attributes and takes its visibility timeout, redrive policy
+(`maxReceiveCount`, checked against `deadLetterUrl`) and size limit from SQS, and `queue(name, options)` throws for options that differ.
+It passes `runQueueConformance` in both modes, and the outbox suite over the DynamoDB store and either mode.
+- **Which mode, and why.** The mode is the queue's: a URL ending `.fifo` is FIFO. *Standard* is the default for task dispatch, because the
+  core already works with the weakest queue (at least once, no order, no duplicate suppression) and standard has no per-group throughput
+  cap; its consumers drop a repeat by `outboxId`. *FIFO* is for a use that needs order inside a group (`groupId`) or the 5 minute duplicate
+  window. Capabilities: standard `ordered false, dedupe false, maxDelaySeconds 900`; FIFO `ordered true, dedupe true, maxDelaySeconds 0`
+  (SQS refuses a per-message delay on FIFO). Both: `detectsStaleHandle false, deadLettersById false`.
+- **FIFO details.** A message with no `groupId` gets a group of its own (no order owed to any other message), hidden on receive. The
+  `dedupeId` is sent as its SHA-256 hex (SQS wants 128 characters of a narrow set); no `dedupeId` gets a fresh one. SQS does not say a send
+  was a duplicate, so `duplicate: true` is reported only for a repeat this process sent inside the window. An ordered queue is received one
+  message per request, because a FIFO request can return several messages of one group.
+- **Size.** SQS limits body plus attributes (names, type name, values) to 256 KiB, the port limits the body alone. The adapter refuses the
+  total before sending, and a queue with a smaller `MaximumMessageSize` is honoured. A message carries at most 9 attributes of its own
+  (SQS's 10, one kept for the dead-letter marker). U+FFFE and U+FFFF in a body are written as JSON escapes; other text SQS refuses
+  (control characters, an unpaired surrogate) in an attribute, group or reason is refused.
+- **Poison and dead letters.** SQS's redrive policy moves a message after `maxReceiveCount` receives and keeps its id. A body that is not
+  JSON is not delivered (reported to `onMalformed`) and ends in the dead letters the same way. `deadLetter(handle, reason)` sends the message
+  to the declared dead-letter queue with a marker attribute (reason, time, original id, count) and then deletes it, so a crash leaves it on both
+  queues, never neither; it needs the body, so only a delivery this process made (bounded memory) can be dead-lettered, and any other handle
+  answers false. `listDeadLetters` is a sample of one receive (at most 10, no cursor); `redrive` and `discardDeadLetter` by id scan up to
+  `deadLetterScanLimit` (100) messages, putting each other message straight back. For a large dead-letter queue use SQS's own redrive.
+- **Stale handles.** SQS answers true to an `ack` with the earlier handle of a message received again (and removes nothing); the core's
+  consumers are idempotent for this reason.
+- **Errors.** `SqsQueueError` names the call and SQS's error name, never SQS's text; `retryable` is false for refusals that will not change.
+
+**Outbox triggers on AWS (`sqs/outbox-relay.ts`; ports only).** `createOutboxRelayHook` is a change-feed consumer for the store's existing
+stream reader: an INSERT of a `PENDING` outbox row makes it call `relay({ companyId, ids })` for exactly the new rows, once per company in a batch.
+The relay's own updates (attempt counts, the move to `QUEUED`) are MODIFY records and start nothing. `createOutboxBackstop` is the scheduled
+run: one `relay({ companyId })` per company from a supplied list, sequentially, within an optional time budget (the rest is `deferred` to the
+next run), and one company's failure does not stop the others. The stream is never the only way a message reaches its queue: a missed record,
+a hook error or a failed hand-over is picked up by the backstop, and a row that keeps failing is set aside as `DEAD` by the outbox. Both are
+at least once; neither orders messages across calls, so nothing may rely on the outbox for order across overlapping relays.
+
 ## Local adapters (SQLite)
 
 `packages/local-adapters` holds the adapters for the laptop path (decision 44): a SQLite `DocumentStore` with its change feed, and a

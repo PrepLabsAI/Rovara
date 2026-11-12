@@ -80,6 +80,8 @@ export function runQueueConformance(name: string, harness: QueueHarness): void {
 
     it("holds a delayed message back until the delay is over", () => withQueue(harness, {}, async (queue, under) => {
       const delay = Math.min(20, queue.capabilities.maxDelaySeconds);
+      // A queue that takes no per-message delay (SQS FIFO: maxDelaySeconds 0) has nothing to hold back.
+      if (delay === 0) return;
       await queue.enqueue({ body: "later", delaySeconds: delay });
       expect(await queue.receive()).toEqual([]);
       await under.advance(delay + 1);
