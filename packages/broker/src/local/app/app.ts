@@ -108,6 +108,8 @@ import { fixedAutomationSwitch, type AutomationSwitch } from "../../core/automat
 import { createScheduleRouter } from "../../core/automation/schedule-router.js";
 import { createChannelSink } from "../../core/channel/sink.js";
 import { readTaskThread } from "../../core/channel/threads.js";
+import { channelThreadHandler, threadFollows } from "../../core/channel/thread-notices.js";
+import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
 import { deliverAttention, queueAttention } from "../../core/notify/attention.js";
 
 export { TASK_FLOW_INDEXES };
@@ -514,6 +516,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   // Sessions: facts over the task records, the cost ledger over the metering seam.
   const canNotify = (): boolean => registry.names("channel").length > 0 || registry.names("email").some((name) => registry.get("email", name)?.capabilities.available === true);
+  // A task started from a chat thread gets the `plan_ready` and `closed` milestones the thread is told (`core/channel/thread-notices.ts`); with no chat adapter there is no thread and no read is made.
+  const threadMoments = ticketMomentsOnChange({ store, milestones, now: () => clock().getTime(), log: (event, fields) => log({ component: "channel_thread", event, ...fields }), follows: threadFollows({ store }) });
   const summaryDeps: SummaryDependencies = {
     store,
     facts: createTaskFactsSource(flow.deps),
@@ -522,7 +526,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     log,
     // A person is told what needs them through the chat adapters the registry holds, or an email plug-in that can send (`core/notify`; Code's default sends no email); with neither, nothing is queued. The row is only a
     // queue entry: it is checked again before anything is sent. The install's own pages hear that it changed (ids only).
-    onChange: [async (change) => { if (canNotify()) await queueAttention({ store, now: clock, log, realtime: registry.get("realtime", registry.names("realtime")[0] ?? "") }, change); }, (change) => intake.onSessionChange(change)],
+    onChange: [async (change) => { if (canNotify()) await queueAttention({ store, now: clock, log, realtime: registry.get("realtime", registry.names("realtime")[0] ?? "") }, change); }, (change) => intake.onSessionChange(change), async (change) => { if (registry.names("channel").length > 0) await threadMoments(change); }],
     // A step that read a message's note settles the message `delivered`; a session that ended closes the ones no step took.
     afterRefresh: (orgId, sessionId) => settleSteerDeliveriesFor({ store, ...(options.now === undefined ? {} : { now: options.now }), log }, orgId, sessionId),
   };
@@ -571,6 +575,13 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const decisionActions = createDecisionActions({ gate, companyId });
   // Chat (owner decision 58): the owner's own acts on the chat page, and what an adapter may hand the core. Nothing here approves: see chat.ts.
   const chat = createLocalChat({ registry, flow, store, companyId, owner, now: () => clock().getTime(), gate, log });
+  // What a task tells the thread it was started from: the plan's approval card (low and medium risk are decided there, high on the page). Registered before the first milestone is written.
+  if (registry.names("channel").length > 0) {
+    milestones.register(channelThreadHandler({
+      store, registry, now: () => clock().getTime(), plan: { gate }, footer: ATTENTION_FOOTER,
+      log: (event, fields) => log({ component: "channel_thread", event, ...fields }),
+    }));
+  }
   // Lessons: what Rovara learned from finished tasks, loaded into later steps and decided on the owner's page. On unless `ROVARA_LESSONS=0`, in Suggest mode (every lesson waits for the owner); the pages still show what exists.
   const lessonNames = registry.names("learning");
   const lessons = createLocalLessons({

@@ -26,9 +26,12 @@ import {
   type ModuleImporter,
   loadAdapters,
   parsePluginConfig,
+  localOwnerPrincipal,
   registerCodeDefaults,
 } from "../ports/index.js";
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
+import { linkedPerson } from "../core/channel/links.js";
+import { developerIdOf } from "../core/sessions/create.js";
 import { registerNativeMonitoring } from "../monitoring/native-adapters.js";
 import { registryModelPrices } from "./model-prices.js";
 import { catalogPriceOf } from "../core/cost/price-table.js";
@@ -407,6 +410,12 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       fetchComment: async (commentId, request) => comments.current?.fetchComment(commentId, request),
       commentContext: async (request) => comments.current?.contextOf(request),
       commentsOn: () => comments.current?.available() === true,
+      // The owner may approve a low or medium risk request, and ask for changes, with a button in the chat they linked (owner decision of 2026-11-12). Only the owner's own linked account counts; a high-risk request is never
+      // decided there (`createLocalOwnerApprovers`, and again in the decision gate).
+      chat: {
+        channels: () => registry.names("channel"),
+        linkedToOwner: async (account) => (await linkedPerson({ store: registry.require("storage"), orgId: OrgIdSchema.parse(config.companyId ?? IMPLICIT_COMPANY_ID), now: () => Date.now() }, { channel: account.provider, tenant: account.tenant, userId: account.accountId })) === developerIdOf(localOwnerPrincipal({ ...(config.companyId === undefined ? {} : { companyId: config.companyId }) })),
+      },
     },
     modelKeys,
     // A model with no price in its provider's table or the catalog is recorded as "unknown", never guessed.

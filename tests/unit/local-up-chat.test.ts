@@ -122,7 +122,7 @@ describe("chat on rovara up", () => {
     const tasks = (await h.api("/v1/dev/tasks")).body["tasks"] as Array<{ taskId: string; client: string; project: string }>;
     expect(tasks).toHaveLength(1);
     expect(tasks[0]).toMatchObject({ project: "web" });
-    expect(await readTaskThread(h.store, ORG, taskSessionId(tasks[0]!.taskId))).toEqual({ conversation: CONVERSATION, personId: developerIdOf(localOwnerPrincipal()) });
+    expect(await readTaskThread(h.store, ORG, taskSessionId(tasks[0]!.taskId))).toEqual({ conversation: CONVERSATION, personId: developerIdOf(localOwnerPrincipal()), actor: { channel: "examplechat", tenant: CONVERSATION.tenant, userId: "user1" } });
     // The notice went to that account alone.
     expect((notice as unknown as { data: { onlyTo?: string } }).data.onlyTo).toBe("user1");
     // The same chat event again starts nothing.
