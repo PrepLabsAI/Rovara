@@ -2,3 +2,4 @@
 export * from "./channel-conformance.js";
 export * from "./fake-world.js";
 export * from "./slack-world.js";
+export * from "./isolation.js";

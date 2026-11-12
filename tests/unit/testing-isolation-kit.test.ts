@@ -138,6 +138,15 @@ describe("the kit's own rules", () => {
     await expect(assertSurfacesIsolated([leaky])).rejects.toThrow(/saw company/);
   });
 
+  it("tears a surface down after the observations, pass or fail", async () => {
+    let torn = 0;
+    const base: IsolationSurface = { kind: "read", name: "listening", plant: own, observe: async (as) => as.canary, teardown: async () => { torn += 1; } };
+    await assertSurfacesIsolated([base]);
+    expect(torn).toBe(1);
+    await expect(assertSurfacesIsolated([{ ...base, observe: async () => undefined }])).rejects.toThrow(/saw none of its own/);
+    expect(torn).toBe(2);
+  });
+
   it("a fail-closed probe that succeeds with data fails, and one that is refused or answers nothing passes", async () => {
     const give = (value: unknown) => ({ name: "p", prepare: async () => undefined, attempt: async () => value });
     await expect(assertFailsClosed([give({ file: "text" })])).rejects.toThrow(/succeeded with/);
