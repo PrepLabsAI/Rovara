@@ -55,6 +55,7 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.repo_file_pr_opened": { action: "lesson.repo_file_pr_opened", facts: (e) => ({ removals: num(e.facts["removals"]), edits: num(e.facts["edits"]), adds: num(e.facts["adds"]) }) },
   "lesson.repo_file_pr_closed": { action: "lesson.repo_file_pr_closed", facts: (e) => ({ cause: word(e.facts["cause"], "replaced"), pullRequest: num(e.facts["pullRequest"]) }) },
   "lesson.repo_file_switched": { action: "lesson.repo_file_switched", facts: (e) => ({ enabled: e.facts["enabled"] === true }) },
+  "lesson.local_tools_switched": { action: "lesson.local_tools_switched", facts: (e) => ({ scope: word(e.facts["scope"], "project"), enabled: e.facts["enabled"] === true }) },
   // A person's answer on lessons that went missing from the file (retire or keep, and how many).
   "lesson.repo_file_retire_decided": { action: "lesson.repo_file_retire_decided", facts: (e) => ({ verdict: word(e.facts["verdict"], "keep"), missing: num(e.facts["missing"]) }) },
   // An operator starts a replay copy of a past task (ids, fixed words and counts only; written BEFORE the copy is started), and a frozen snapshot is created for it.

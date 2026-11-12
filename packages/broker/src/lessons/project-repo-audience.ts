@@ -24,6 +24,12 @@ export interface ProjectRepoScopesPort {
    * revision, either side has no pinned id, or the repository is not one of the project's now. Throws when the project definition cannot be read. Absent: no pull request can name a repository-only lesson.
    */
   placeOf?(orgId: OrgId, project: string, name: string, startingRevision?: number): Promise<string | undefined>;
+  /**
+   * Lessons for local coding tools (decision 46b): the project repository whose REGISTERED address is `remote` (already normalised by `normalizeRemote`), by the project's latest revision, read now. `name` is its name in the
+   * project (what a lesson's scope names); `place` is its `<host>:repo/<id>`, absent when the host cannot say the repository's id (so a lesson restricted to a repository is then never returned for it). Undefined when no
+   * repository of the project has that address. Throws when the project definition cannot be read. Absent: a local tool's repository cannot be proved, so nothing is returned.
+   */
+  byRemote?(orgId: OrgId, project: string, remote: string): Promise<{ name: string; place?: string } | undefined>;
 }
 
 /** The port rides on the task-visibility port the access check carries (as the lesson audiences do), so the shared access port and the Team record's port types stay exactly as they were. */

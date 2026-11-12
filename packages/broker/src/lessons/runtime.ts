@@ -16,7 +16,8 @@ import type { CounterDeps } from "./counters.js";
 import type { CurateDeps } from "./curate.js";
 import { lessonDeletionPort, type LessonDeletionPort } from "./deletion.js";
 import { DocumentLessonStore } from "./document-store.js";
-import { documentLearningSettings, DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings } from "./document-settings.js";
+import { documentLearningSettings, DocumentLocalToolsSettings, DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings } from "./document-settings.js";
+import type { LocalToolsSettingsStore } from "./local-tools.js";
 import { documentLessonVectors } from "./document-vectors.js";
 import { modelCorrectionJudge } from "./judge-model.js";
 import type { LoadDeps } from "./load.js";
@@ -75,6 +76,8 @@ export interface LessonsRuntime {
   readonly pause: LessonsPauseStore;
   readonly vectors: LessonVectors;
   readonly deletion: LessonDeletionPort;
+  /** The two switches of decision 46b: whether local coding tools may fetch a project's lessons, and the company's "lessons stay in Rovara". */
+  readonly localTools: LocalToolsSettingsStore;
   /** What the loader needs at a stage's dispatch. */
   readonly load: LoadDeps;
   /** What `applyLoadReport` and the task-end counting need. */
@@ -147,5 +150,6 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
     presets: { settings: presetStore, changes: presetStore, audit, now: input.now, authority: createLocalTier0Authority(owner.id), soleOwnerLoosening: (workspaceId) => soleOwner.read(workspaceId) },
   } as LessonRouteDeps;
   const deletion = lessonDeletionPort({ store, vectors, audit, now: input.now });
-  return { store, documents: input.store, settings, access, directory, audit, pause, vectors, deletion, load, counters, routes, process, judgeModel, spend, edition };
+  const localTools = new DocumentLocalToolsSettings(input.store);
+  return { store, documents: input.store, settings, access, directory, audit, pause, vectors, deletion, localTools, load, counters, routes, process, judgeModel, spend, edition };
 }

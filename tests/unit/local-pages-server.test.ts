@@ -345,6 +345,58 @@ describe("lessons", () => {
     } finally { await aged.close(); }
   });
 
+  describe("lessons for local coding tools (decision 46b)", () => {
+    const localForms = (page: string): Array<{ action: string; fields: Record<string, string> }> => [...page.matchAll(/<form[^>]*action="([^"]+\/lessons\/local-tools)"[^>]*>([\s\S]*?)<\/form>/g)].map((match) => ({
+      action: match[1]!, fields: Object.fromEntries([...(match[2] ?? "").matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)].map((input) => [input[1]!, input[2]!])),
+    }));
+
+    it("shows the company switch and each project's, says why a project is off, and each switch is its own one-use form", async () => {
+      world.data.lessonLocalTools = { companyStays: false, projects: [{ project: "payments", enabled: true }, { project: "ledger", enabled: false, own: false, reason: "project_setting" }, { project: "audit", enabled: false, reason: "regulated" }] };
+      const page = (await get(`${base}/lessons`)).body;
+      expect(page).toContain("Lessons for local coding tools");
+      expect(page).toContain("the project is on the Regulated preset");
+      const forms = localForms(page);
+      expect(forms.map((form) => [form.fields["scope"], form.fields["project"], form.fields["enabled"] ?? form.fields["stays"]])).toEqual([["company", undefined, "true"], ["project", "payments", "false"], ["project", "ledger", "true"], ["project", "audit", "false"]]);
+      const ledger = forms[2]!;
+      // The token binds the project and the value: changing either is refused.
+      expect(String((await post(ledger.action, { ...ledger.fields, enabled: "false" })).headers.location)).toContain("n=form");
+      expect(String((await post(ledger.action, { ...ledger.fields, project: "payments" })).headers.location)).toContain("n=form");
+      expect(String((await post(ledger.action, { ...ledger.fields, enabled: "maybe" })).headers.location)).toContain("n=invalid");
+      expect(String((await post(ledger.action, { ...ledger.fields, scope: "company" })).headers.location)).toContain("n=invalid");
+      expect(world.actions.calls).toEqual([]);
+      expect(String((await post(ledger.action, ledger.fields)).headers.location)).toContain("n=lessonlocal");
+      expect(String((await post(ledger.action, ledger.fields)).headers.location)).toContain("n=form");
+      const company = forms[0]!;
+      expect(String((await post(company.action, company.fields)).headers.location)).toContain("n=lessonlocal");
+      expect(world.actions.calls).toEqual([
+        { name: "lessonLocalToolsAction", input: { scope: "project", project: "ledger", enabled: true } },
+        { name: "lessonLocalToolsAction", input: { scope: "company", stays: true } },
+      ]);
+    });
+
+    it("letting lessons leave Rovara for every project needs a page opened in the last few minutes; keeping them in Rovara and a project's switch do not", async () => {
+      world.data.lessonLocalTools = { companyStays: true, projects: [{ project: "payments", enabled: false, reason: "company_stays" }] };
+      let clock = Date.parse("2026-11-10T10:00:00.000Z");
+      const aged = await createLocalPagesServer({ data: world.data, actions: world.actions, now: () => clock });
+      try {
+        const agedBase = `/s/${aged.sessions.mint().token}`;
+        const aHost = new URL(aged.origin).host;
+        const getAged = (path: string) => raw(aged.origin, { path, headers: { host: aHost } });
+        const postAged = (path: string, fields: Record<string, string>) => raw(aged.origin, { method: "POST", path, body: formBody(fields), headers: { host: aHost, origin: aged.origin, "content-type": "application/x-www-form-urlencoded" } });
+        const [open, project] = localForms((await getAged(`${agedBase}/lessons`)).body);
+        expect(open!.fields).toMatchObject({ scope: "company", stays: "false" });
+        clock += 11 * 60 * 1000;
+        expect(String((await postAged(open!.action, open!.fields)).headers.location)).toContain("n=lessonlocalfresh");
+        expect(world.actions.calls).toEqual([]);
+        expect(String((await postAged(project!.action, project!.fields)).headers.location)).toContain("n=lessonlocal");
+        world.data.lessonLocalTools = { companyStays: false, projects: [] };
+        const [stay] = localForms((await getAged(`${agedBase}/lessons`)).body);
+        expect(String((await postAged(stay!.action, stay!.fields)).headers.location)).toContain("n=lessonlocal");
+        expect(world.actions.calls.map((call) => call.input)).toEqual([{ scope: "project", project: "payments", enabled: false }, { scope: "company", stays: true }]);
+      } finally { await aged.close(); }
+    });
+  });
+
   describe("lessons that went missing from a file", () => {
     const DIGEST = "0123456789abcdef";
     const missingRow = (over: Record<string, unknown> = {}) => ({ repo: "api", enabled: true, fileDeleted: false, pointer: "added" as const, notices: [], retireConfirm: { missing: 7, digest: DIGEST }, ...over });

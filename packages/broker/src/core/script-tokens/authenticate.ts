@@ -30,12 +30,15 @@ export const SCRIPT_TOKEN_CREATOR_STARTS_PER_HOUR = 20;
 
 const TASK_ID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const TASK_READ = new RegExp(`^/v1/dev/tasks/(${TASK_ID})(?:/events)?$`, "u");
+/** Decision 46b: a local coding tool reads the project-wide lessons of one project (`local/app/lessons-routes.ts`). The project is the path's. */
+const LESSONS_READ = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/lessons$/u;
 
 /** What one allowed request is: the permission it needs and how its project is found. */
 export type AllowedRoute =
   | { permission: "start"; project: "body" }
   | { permission: "read"; project: "query" }
-  | { permission: "read"; project: "task"; taskId: string };
+  | { permission: "read"; project: "task"; taskId: string }
+  | { permission: "lessons"; project: "path"; name: string };
 
 /** The whole list of what a script token may call. Anything not here is refused. Exported for the test that pins it. */
 export function scriptTokenRoute(method: string, pathname: string): AllowedRoute | undefined {
@@ -44,6 +47,8 @@ export function scriptTokenRoute(method: string, pathname: string): AllowedRoute
     if (method === "GET") return { permission: "read", project: "query" };
     return undefined;
   }
+  const lessons = method === "POST" ? LESSONS_READ.exec(pathname) : null;
+  if (lessons !== null) return { permission: "lessons", project: "path", name: lessons[1]! };
   const read = method === "GET" ? TASK_READ.exec(pathname) : null;
   return read === null ? undefined : { permission: "read", project: "task", taskId: read[1]! };
 }
@@ -133,7 +138,7 @@ export async function authenticateScriptToken(deps: ScriptTokenAuthDependencies,
   const route = scriptTokenRoute(request.method, url.pathname);
   if (route === undefined || !record.permissions.includes(route.permission)) throw notAllowed();
   const body = route.project === "body" ? bodyObject(request) : undefined;
-  const named = route.project === "body" ? (typeof body?.["project"] === "string" ? body["project"] : undefined) : route.project === "query" ? url.searchParams.get("project") ?? undefined : undefined;
+  const named = route.project === "body" ? (typeof body?.["project"] === "string" ? body["project"] : undefined) : route.project === "query" ? url.searchParams.get("project") ?? undefined : route.project === "path" ? route.name : undefined;
   if (route.project !== "task" && (named === undefined || !record.projects.includes(named))) throw notAllowed();
   if (route.project === "task") {
     // A task outside the token's projects (or company) answers as a missing task does, so a token learns nothing about it.

@@ -380,15 +380,22 @@ describe("rovara up: making a token on a page, and using it", () => {
     expect(JSON.stringify(rows.items)).not.toContain(secret.slice(-43));
   });
 
-  it("a token with only the lessons permission reaches nothing here (Rovara Code serves no lessons route for tools), and the page words say what it is for", async () => {
+  it("a token with only the lessons permission reaches the local coding tools read of its own projects and nothing else, and the page words say what it is for", async () => {
     const h = await launch();
     const made = await h.makeToken({ projects: ["payments"], permissions: ["lessons"] });
     expect(made.html).toContain("read the team lessons of these projects");
     const refused = { status: 403, body: { error: { code: "FORBIDDEN", message: SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE } } };
     expect(await start(h, made.secret, 50)).toMatchObject(refused);
     expect(await h.call(made.secret, "/v1/dev/tasks?project=payments")).toMatchObject(refused);
-    expect(await h.call(made.secret, "/v1/dev/projects/payments/lessons", { method: "POST", body: {} })).toMatchObject(refused);
+    expect(await h.call(made.secret, "/v1/dev/projects/payments/lessons", { method: "POST", body: {} })).toMatchObject({ status: 200, body: { status: "ok", project: "payments", lessons: [] } });
+    // Another project, another method and the owner's lessons routes stay closed.
+    expect(await h.call(made.secret, "/v1/dev/projects/billing/lessons", { method: "POST", body: {} })).toMatchObject(refused);
+    expect(await h.call(made.secret, "/v1/dev/projects/payments/lessons")).toMatchObject(refused);
     expect(await h.call(made.secret, "/v1/app/projects/payments/lessons")).toMatchObject(refused);
+    expect(await h.call(made.secret, "/v1/app/projects/payments/lessons/local-tools")).toMatchObject(refused);
+    // A read-only token has no lessons permission.
+    const reader = (await h.makeToken({ projects: ["payments"], permissions: ["read"] })).secret;
+    expect(await h.call(reader, "/v1/dev/projects/payments/lessons", { method: "POST", body: {} })).toMatchObject(refused);
     // The create form offers all three permissions.
     const drawn = await h.page(await h.browse("/tokens", true), "/tokens");
     for (const permission of SCRIPT_TOKEN_PERMISSIONS) expect(drawn.body).toContain(`name="permission" value="${permission}"`);
@@ -646,5 +653,64 @@ describe("review fixes", () => {
     vi.setSystemTime(new Date("2026-11-10T10:16:00.000Z"));
     expect((await h.page(fresh.at(-1)!, "/tokens")).status).toBe(404);
     expect((await h.page(owner, "/")).status).toBe(200);
+  });
+
+  describe("lessons for local coding tools (decision 46b)", () => {
+    /** The page's form for one local-tools switch, found by its hidden fields. */
+    const localForm = (body: string, want: Record<string, string>): Record<string, string> => {
+      const decode = (text: string) => text.replace(/&quot;/g, "\"").replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+      for (const match of body.matchAll(/<form[^>]*action="([^"]+)"[^>]*>([\s\S]*?)<\/form>/g)) {
+        if (!decode(match[1] ?? "").endsWith("/lessons/local-tools")) continue;
+        const fields: Record<string, string> = {};
+        for (const input of (match[2] ?? "").matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) fields[decode(input[1] ?? "")] = decode(input[2] ?? "");
+        if (Object.entries(want).every(([key, value]) => fields[key] === value)) return fields;
+      }
+      throw new Error(`no local-tools form with ${JSON.stringify(want)}`);
+    };
+
+    it("the owner's API token reads the project-wide lessons; a repository that is not the project's is no such project; the settings answer and their writes go to the page", async () => {
+      const h = await launch();
+      expect(await h.api("/v1/dev/projects/payments/lessons", { method: "POST", body: { task: "fix the retry", files: ["src/a.ts"], stage: "code" } })).toMatchObject({ status: 200, body: { status: "ok", lessons: [], complete: true } });
+      expect((await h.api("/v1/dev/projects/payments/lessons", { method: "POST", body: { repo: "https://examplehost/someone/else.git" } })).status).toBe(404);
+      expect((await h.api("/v1/dev/projects/nope/lessons", { method: "POST", body: {} })).status).toBe(404);
+      // A field the route does not take, named but not echoed.
+      const bad = await h.api("/v1/dev/projects/payments/lessons", { method: "POST", body: { secretThing: "do-not-echo" } });
+      expect(bad.status).toBe(400);
+      expect(bad.text).not.toContain("do-not-echo");
+      expect(await h.api("/v1/app/projects/payments/lessons/local-tools")).toMatchObject({ status: 200, body: { enabled: true, preset: "standard", companyStays: false } });
+      expect(await h.api("/v1/app/org/lessons/local-tools")).toMatchObject({ status: 200, body: { stays: false } });
+      expect((await h.api("/v1/app/projects/payments/lessons/local-tools", { method: "POST", body: { enabled: false } })).status).toBe(403);
+      expect((await h.api("/v1/app/org/lessons/local-tools", { method: "POST", body: { stays: true } })).status).toBe(403);
+      // The day's count holds numbers only.
+      const day = await h.store.query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#LESSON_LOCAL_DAY` });
+      expect(day.items.length).toBeGreaterThan(0);
+      expect(JSON.stringify(day.items)).not.toMatch(/retry|src\/a\.ts|examplehost/);
+    });
+
+    it("the lessons page switches a project off and the company to 'lessons stay in Rovara'; each change is audited first; a fresh page lets lessons leave again", async () => {
+      const h = await launch();
+      const where = await h.browse("/lessons", true);
+      const drawn = await h.page(where, "/lessons");
+      expect(drawn.body).toContain("Lessons for local coding tools");
+      const off = await h.post(where, "/lessons/local-tools", localForm(drawn.body, { scope: "project", project: "payments", enabled: "false" }));
+      expect(off.status).toBe(303);
+      expect(await h.api("/v1/app/projects/payments/lessons/local-tools")).toMatchObject({ body: { enabled: false, own: false, reason: "project_setting" } });
+      expect(await h.api("/v1/dev/projects/payments/lessons", { method: "POST", body: {} })).toMatchObject({ status: 200, body: { status: "off", reason: "project_setting", lessons: [] } });
+      expect(await h.api("/v1/dev/projects/billing/lessons", { method: "POST", body: {} })).toMatchObject({ body: { status: "ok" } });
+      // The form answers once.
+      expect((await h.post(where, "/lessons/local-tools", localForm(drawn.body, { scope: "project", project: "payments", enabled: "false" }))).headers["location"]).toContain("n=form");
+
+      const again = await h.page(where, "/lessons");
+      expect((await h.post(where, "/lessons/local-tools", localForm(again.body, { scope: "company", stays: "true" }))).status).toBe(303);
+      expect(await h.api("/v1/dev/projects/billing/lessons", { method: "POST", body: {} })).toMatchObject({ body: { status: "off", reason: "company_stays" } });
+      const switched = h.events.filter((event) => event.action === "lesson.local_tools_switched").map((event) => event.details);
+      expect(switched).toEqual([expect.objectContaining({ scope: "project", enabled: false }), expect.objectContaining({ scope: "company", enabled: false })]);
+
+      // Opening lessons to local tools for every project asks for a page opened in the last few minutes; a fresh one does it.
+      const fresh = await h.browse("/lessons", true);
+      const freshPage = await h.page(fresh, "/lessons");
+      expect((await h.post(fresh, "/lessons/local-tools", localForm(freshPage.body, { scope: "company", stays: "false" }))).headers["location"]).toContain("n=lessonlocal");
+      expect(await h.api("/v1/app/org/lessons/local-tools")).toMatchObject({ body: { stays: false } });
+    });
   });
 });

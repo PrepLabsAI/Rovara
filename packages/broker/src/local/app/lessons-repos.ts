@@ -7,6 +7,7 @@ import type { ProjectRepoScopesPort } from "../../lessons/project-repo-audience.
 import type { RepoFileTarget } from "../../lessons/repo-file-pass.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { createRepositoryResolver } from "./tracking.js";
+import { normalizeRemote } from "../../lessons/repo-remote.js";
 
 export interface LessonRepository {
   /** The project's name for the repository. */
@@ -85,6 +86,15 @@ export function createLessonRepositories(input: { flow: Pick<TaskFlowDeps, "proj
     ofProject, ofTask: place,
     scopes: () => ({
       async read(_orgId, project) { return new Set((await ofProject(project)).map((repository) => repository.place)); },
+      async byRemote(_orgId, project, remote) {
+        // The project's registered addresses, by its latest revision: the tool's remote is only a claim, matched against what the project pins. A repository whose host could not say its id has no place.
+        const latest = await input.flow.projects.latest(project);
+        if (latest === undefined) throw new Error("the project cannot be read");
+        const entry = codeRepositoriesOf(latest.definition).find((candidate) => normalizeRemote(candidate.url) === remote);
+        if (entry === undefined) return undefined;
+        const placed = (await ofProject(project)).find((repository) => repository.name === entry.name);
+        return placed === undefined ? { name: entry.name } : { name: entry.name, place: placed.place };
+      },
       async placeOf(_orgId, project, name, startingRevision) {
         if (startingRevision === undefined) return undefined;
         const home = await place(project, startingRevision, name);

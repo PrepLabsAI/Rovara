@@ -5,13 +5,13 @@ import {
 } from "@agentx/contracts";
 import { globToRegExp } from "./guards.js";
 import { safeScopeLabel } from "./render.js";
-import { approversRequired, modeAllows, resolveLearning, resolveLoadBudget, type ApprovalPolicy, type LearningSettingsReader } from "./policy.js";
+import { approversRequired, modeAllows, resolveLearning, resolveLoadBudget, type ApprovalPolicy, type LearningSettingsReader, type LoadBudget, type ResolvedLearning } from "./policy.js";
 import { hasStaleCitation, isTrialLesson } from "./trial.js";
 import type { LessonDeps, LessonEmbedder, LessonVectors } from "./ports.js";
 import { EMBED_TIMEOUT_MS, EMBED_WARM_MS, docOfText, rankLessons } from "./similarity.js";
 import type { LessonStore, LoadManifest, LoadManifestEntry, ScopeKey } from "./store.js";
 import type { AccessCheckPort } from "./access-port.js";
-import { createLessonLiveReader, lessonTaskRefs } from "./live-visibility.js";
+import { createLessonLiveReader, lessonTaskRefs, type LessonLiveReader } from "./live-visibility.js";
 import { readVisible, readVisibleRanked } from "./read-visible.js";
 import { memberView, type MemberOf, type MemberResolver } from "./members.js";
 import { normId, type IdentitySet, type Lesson } from "./types.js";
@@ -181,6 +181,116 @@ export function chooseWithTwins(ranked: readonly Lesson[], fits: (lesson: Lesson
   return out;
 }
 
+/** Who reads what is selected. A running task (a Rovara agent): its audience, read live. Nobody in particular (a local coding tool, decision 46b): the whole project, so only what every member may read (decision 32). */
+export type SelectReader = { running: { taskId: string } } | { running?: undefined };
+export interface SelectInput {
+  key: ScopeKey; stage: LessonStage; resolved: ResolvedLearning;
+  /** The project's active, unexpired lessons without a stale citation (the caller read them from the store). */
+  active: readonly Lesson[];
+  intent: string; planSummary?: string; repos: readonly string[]; files: readonly string[]; languages: readonly string[];
+  reader: SelectReader; where: string; budget: LoadBudget;
+  /** Lessons are checked this many at a time against the access records (default `CHECK_PAGE`). */
+  pageSize?: number;
+  /** A further cheap, caller-owned filter of the lessons that fit the stage and scope, before any are ranked or read (the local-tools filters). It may read; a lesson it drops is never read further. */
+  prefilter?: (eligible: readonly Lesson[]) => Promise<readonly Lesson[]>;
+}
+export type SelectOutcome =
+  | { ok: false; skipped: "members_unavailable" | "access_unavailable" }
+  | { ok: true; chosen: LearnedLesson[]; picked: Lesson[]; entries: LoadManifestEntry[]; bytes: number; complete: boolean; viewer: IdentitySet | undefined; live: LessonLiveReader; log: (event: string, fields: Record<string, unknown>) => void };
+
+/**
+ * The one ranking and budget of lessons, shared by the dispatch loader (`loadLessonsForStage`, reader = the running task) and the local-tools read (reader = the whole project): the approval rule now, the stage and scope, the fused
+ * similarity (keywords and paths, plus the cosine only where `deps.embedder` is set), then the best candidates are read a page at a time through the access records and the source tasks' live visibility (`readVisibleRanked`) until
+ * the budget is filled. It writes nothing and never reads a lesson past `readVisible`. Fail closed: a roster of members or an access port that is missing is a skip, never a weaker rule.
+ */
+export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise<SelectOutcome> {
+  const { key, stage, resolved, intent, budget } = input;
+  const now = deps.now();
+  let active: Lesson[] = [...input.active];
+  // The people a tier needs are counted as MEMBERS (a merged developer is the member they became); a merge record that cannot be read loads nothing.
+  const member = await memberView(deps.resolveMember, key.workspaceId, active.flatMap((l) => l.approvals.filter((a) => a.mode !== "auto" && a.mode !== "trial").map((a) => a.by)));
+  if (member === undefined) {
+    deps.metrics?.count("learning_load_skipped", { reason: "members_unavailable" });
+    return { ok: false, skipped: "members_unavailable" };
+  }
+  // A snapshot's lessons are held to the SAME approval rule as live ones (no bypass): the arm's export already kept only what is delivered without a person, and the project's own rules decide it again here.
+  active = active.filter((l) => approvedForUse(l, resolved.approval, member, resolved.trialAllowed));
+
+  // The access records, asked now for the places each candidate lesson was learned from (one batch for the whole load). A record that cannot be read loads nothing.
+  if ((deps.access as AccessCheckPort | undefined) === undefined) {
+    deps.log?.("learning.load_no_access_port", { stage });
+    deps.metrics?.count("learning_load_skipped", { reason: "access_unavailable" });
+    return { ok: false, skipped: "access_unavailable" };
+  }
+  // Every candidate goes through the one read path: the frozen snapshot AND the access records AND the source tasks' live visibility. The candidates are scored and scope-matched FIRST (cheap, no reads), then the
+  // best ones are checked a page at a time until enough survive, with one reader for the whole load so no task is read twice.
+  // No single person is the reader: restricted lessons and restricted places are checked as for nobody in particular, and the source tasks against the running task's audience (or, with no running task, the whole project).
+  const viewer: IdentitySet | undefined = undefined;
+  // Which of the lessons that fit the stage and scope fit THIS task best: the fused score (code-aware keywords, the files the task touches and, where there is an embedder, the cosine) against the task's intent, plan summary
+  // and touched files. It is a ranking only (it reads no access record and returns scores, never text): the visibility pages below still decide what may load, and an embedder that is down is keywords and paths.
+  const scope = { repos: input.repos, files: input.files, languages: input.languages };
+  let eligible = active.filter((lesson) => stageAllows(lesson, stage, member) && scopeMatch(lesson, scope).matches);
+  if (input.prefilter !== undefined) eligible = [...await input.prefilter(eligible)];
+  let similarity = new Map<string, number>();
+  try {
+    const task = docOfText(cleanLessonText(`${intent}\n${input.planSummary ?? ""}`, 2000), input.files);
+    similarity = new Map((await rankLessons({ embedder: deps.embedder, vectors: deps.vectors, log: deps.log, metrics: deps.metrics }, key, eligible, task, { queryKind: "query", timeoutMs: EMBED_TIMEOUT_MS.load, warmMs: EMBED_WARM_MS.load })).ranked.map((r) => [r.id, Math.max(0, Math.min(1, r.fused))]));
+  } catch { deps.metrics?.count("learning_load_similarity_failed"); }
+
+  const scored: Array<{ lesson: Lesson; score: number; why: LoadManifestEntry["why"] }> = [];
+  for (const lesson of eligible) {
+    const match = scopeMatch(lesson, scope);
+    const sim = similarity.get(lesson.id) ?? 0;
+    const recency = Math.exp(-Math.max(0, now - (lesson.lastValidatedAt ?? lesson.updatedAt)) / (90 * DAY));
+    const score = 0.6 * sim + 0.3 * wilsonLower(lesson.counters.helpful, lesson.counters.loaded) + 0.1 * recency;
+    scored.push({ lesson, score, why: match.byPath ? "path" : sim >= 0.6 ? "similar" : "scope" });
+  }
+  scored.sort((a, b) => b.score - a.score || a.lesson.id.localeCompare(b.lesson.id));
+  const rank = new Map(scored.map((entry) => [entry.lesson.id, entry] as const));
+
+  const log = (event: string, fields: Record<string, unknown>): void => {
+    deps.log?.(event, fields);
+    if (fields.reason === "bound") deps.metrics?.count("learning_live_bound_hit", { where: input.where });
+  };
+  const deadlineAt = Date.now() + LOAD_VISIBILITY_BUDGET_MS;
+  // Each batched task read gets only the time that is left, so the whole load stays inside the dispatcher's deadline whatever the State table does.
+  const live = createLessonLiveReader({ port: deps.access.taskVisibility, key, where: input.where, log, ...(input.reader.running === undefined ? {} : { running: input.reader.running }), timeoutMs: () => Math.max(1, deadlineAt - Date.now()) });
+  const chosen: LearnedLesson[] = [];
+  const picked: Lesson[] = [];
+  const entries: LoadManifestEntry[] = [];
+  let bytes = 0;
+  const choose = (candidates: readonly Lesson[]): void => {
+    chosen.length = 0; picked.length = 0; entries.length = 0; bytes = 0;
+    // Twins are reduced to one, preferring the repo-only one, and the other twin is tried when the preferred one does not fit the bytes left.
+    chooseWithTwins(candidates, (lesson) => {
+      if (chosen.length >= budget.lessons) return false;
+      const entry = rank.get(lesson.id)!;
+      const learned = toLearned(lesson);
+      const size = sizeOf(learned);
+      if (bytes + size > budget.bytes) return false;
+      chosen.push(learned);
+      picked.push(lesson);
+      entries.push({ id: lesson.id, version: lesson.version, score: Math.round(entry.score * 1000) / 1000, why: entry.why, citation: "unchecked", taskIds: lessonTaskRefs(lesson).taskIds });
+      bytes += size;
+      return true;
+    });
+  };
+  let complete: boolean;
+  try {
+    const checked = await readVisibleRanked({
+      access: deps.access, key, viewer, where: input.where, log, live, ranked: scored.map((entry) => entry.lesson), pageSize: input.pageSize ?? CHECK_PAGE,
+      enough: (kept) => { choose(kept); return chosen.length >= budget.lessons; }, deadlineAt,
+    });
+    choose(checked.kept);
+    complete = checked.complete;
+    if (!checked.complete) { deps.log?.(input.where === "load" ? "learning.load_visibility_budget" : `learning.${input.where}_visibility_budget`, { checked: checked.checked, ranked: scored.length }); deps.metrics?.count("learning_load_budget_hit"); }
+  } catch {
+    deps.metrics?.count("learning_load_skipped", { reason: "access_unavailable" });
+    return { ok: false, skipped: "access_unavailable" };
+  }
+  return { ok: true, chosen, picked, entries, bytes, complete, viewer, live, log };
+}
+
 export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest): Promise<LoadResult> {
   const key: ScopeKey = { workspaceId: request.workspaceId, project: request.project };
   const now = deps.now();
@@ -211,83 +321,14 @@ export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest):
     return empty("index_unreachable", setVersion);
   }
 
-  // The people a tier needs are counted as MEMBERS (a merged developer is the member they became); a merge record that cannot be read loads nothing.
-  const member = await memberView(deps.resolveMember, key.workspaceId, active.flatMap((l) => l.approvals.filter((a) => a.mode !== "auto" && a.mode !== "trial").map((a) => a.by)));
-  if (member === undefined) {
-    deps.metrics?.count("learning_load_skipped", { reason: "members_unavailable" });
-    return empty("members_unavailable", setVersion);
-  }
-  // A snapshot's lessons are held to the SAME approval rule as live ones (no bypass): the arm's export already kept only what is delivered without a person, and the project's own rules decide it again here.
-  active = active.filter((l) => approvedForUse(l, resolved.approval, member, resolved.trialAllowed));
-
-  // The access records, asked now for the places each candidate lesson was learned from (one batch for the whole load). A record that cannot be read loads nothing.
-  if ((deps.access as AccessCheckPort | undefined) === undefined) {
-    deps.log?.("learning.load_no_access_port", { stage });
-    deps.metrics?.count("learning_load_skipped", { reason: "access_unavailable" });
-    return empty("access_unavailable", setVersion);
-  }
-  // Every candidate goes through the one read path: the frozen snapshot AND the access records AND the source tasks' live visibility. The candidates are scored and scope-matched FIRST (cheap, no reads), then the
-  // best ones are checked a page at a time until enough survive, with one reader for the whole load so no task is read twice.
-  // No single person is the reader: restricted lessons and restricted places are checked as for nobody in particular, and the source tasks against the running task's audience.
-  const viewer: IdentitySet | undefined = undefined;
-  // Which of the lessons that fit the stage and scope fit THIS task best: the fused score (code-aware keywords, the files the task touches and, where there is an embedder, the cosine) against the task's intent, plan summary
-  // and touched files. It is a ranking only (it reads no access record and returns scores, never text): the visibility pages below still decide what may load, and an embedder that is down is keywords and paths.
-  const eligible = active.filter((lesson) => stageAllows(lesson, stage, member) && scopeMatch(lesson, request).matches);
-  let similarity = new Map<string, number>();
-  try {
-    const task = docOfText(cleanLessonText(`${request.intent}\n${request.planSummary ?? ""}`, 2000), request.files);
-    similarity = new Map((await rankLessons({ embedder: deps.embedder, vectors: deps.vectors, log: deps.log, metrics: deps.metrics }, key, eligible, task, { queryKind: "query", timeoutMs: EMBED_TIMEOUT_MS.load, warmMs: EMBED_WARM_MS.load })).ranked.map((r) => [r.id, Math.max(0, Math.min(1, r.fused))]));
-  } catch { deps.metrics?.count("learning_load_similarity_failed"); }
-
-  const scored: Array<{ lesson: Lesson; score: number; why: LoadManifestEntry["why"] }> = [];
-  for (const lesson of eligible) {
-    const match = scopeMatch(lesson, request);
-    const sim = similarity.get(lesson.id) ?? 0;
-    const recency = Math.exp(-Math.max(0, now - (lesson.lastValidatedAt ?? lesson.updatedAt)) / (90 * DAY));
-    const score = 0.6 * sim + 0.3 * wilsonLower(lesson.counters.helpful, lesson.counters.loaded) + 0.1 * recency;
-    scored.push({ lesson, score, why: match.byPath ? "path" : sim >= 0.6 ? "similar" : "scope" });
-  }
-  scored.sort((a, b) => b.score - a.score || a.lesson.id.localeCompare(b.lesson.id));
-  const rank = new Map(scored.map((entry) => [entry.lesson.id, entry] as const));
-
-  const log = (event: string, fields: Record<string, unknown>): void => {
-    deps.log?.(event, fields);
-    if (fields.reason === "bound") deps.metrics?.count("learning_live_bound_hit", { where: "load" });
-  };
-  const deadlineAt = Date.now() + LOAD_VISIBILITY_BUDGET_MS;
-  // Each batched task read gets only the time that is left, so the whole load stays inside the dispatcher's deadline whatever the State table does.
-  const live = createLessonLiveReader({ port: deps.access.taskVisibility, key, where: "load", log, running: { taskId: request.taskId }, timeoutMs: () => Math.max(1, deadlineAt - Date.now()) });
-  const chosen: LearnedLesson[] = [];
-  const entries: LoadManifestEntry[] = [];
-  let bytes = 0;
-  // At most the project's budget (default 5 lessons and 2 KB), never above the caps.
-  const budget = resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES });
-  const choose = (candidates: readonly Lesson[]): void => {
-    chosen.length = 0; entries.length = 0; bytes = 0;
-    // Twins are reduced to one, preferring the repo-only one, and the other twin is tried when the preferred one does not fit the bytes left.
-    chooseWithTwins(candidates, (lesson) => {
-      if (chosen.length >= budget.lessons) return false;
-      const picked = rank.get(lesson.id)!;
-      const learned = toLearned(lesson);
-      const size = sizeOf(learned);
-      if (bytes + size > budget.bytes) return false;
-      chosen.push(learned);
-      entries.push({ id: lesson.id, version: lesson.version, score: Math.round(picked.score * 1000) / 1000, why: picked.why, citation: "unchecked", taskIds: lessonTaskRefs(lesson).taskIds });
-      bytes += size;
-      return true;
-    });
-  };
-  try {
-    const checked = await readVisibleRanked({
-      access: deps.access, key, viewer, where: "load", log, live, ranked: scored.map((entry) => entry.lesson), pageSize: CHECK_PAGE,
-      enough: (kept) => { choose(kept); return chosen.length >= budget.lessons; }, deadlineAt,
-    });
-    choose(checked.kept);
-    if (!checked.complete) { deps.log?.("learning.load_visibility_budget", { checked: checked.checked, ranked: scored.length }); deps.metrics?.count("learning_load_budget_hit"); }
-  } catch {
-    deps.metrics?.count("learning_load_skipped", { reason: "access_unavailable" });
-    return empty("access_unavailable", setVersion);
-  }
+  // The ranking, the approval rule and the visibility pages are `selectLessons`, which the local-tools read shares (decision 46b); here the reader is the running task's audience.
+  const selected = await selectLessons(deps, {
+    key, stage, resolved, active, intent: request.intent, ...(request.planSummary === undefined ? {} : { planSummary: request.planSummary }),
+    repos: request.repos, files: request.files, languages: request.languages, reader: { running: { taskId: request.taskId } }, where: "load",
+    budget: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }),
+  });
+  if (!selected.ok) return empty(selected.skipped, setVersion);
+  const { chosen, entries, bytes, live, viewer, log } = selected;
 
   let priorLoaded: LearnedContext["priorLoaded"];
   if (stage === "PLAN_CRITIQUE" || stage === "REVIEW") {
