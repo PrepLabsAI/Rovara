@@ -146,6 +146,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/local/app/tracking.ts", "packages/broker/src/local/app/comments.ts",
       // Chat on a laptop: a link code (10 minutes), the once-claims of an adapter's events and notices (a day, an hour), a card Rovara posted (a day) and the conversation a task started from (the session's retention).
       "packages/broker/src/core/channel/links.ts", "packages/broker/src/core/channel/sink.ts", "packages/broker/src/core/channel/cards.ts", "packages/broker/src/core/channel/threads.ts",
+      // Thread notices (2026-11-12): the once-claim of each plan card and milestone line sent to a task's chat thread, kept for the session retention (SESSION_RETENTION_DAYS) and then expired; none a durable record.
+      "packages/broker/src/core/channel/thread-notices.ts",
       // Lessons: the rows that record a lesson's source events expire after a named retention (SOURCE_EVENT_TTL_DAYS), none a durable record.
       "packages/broker/src/lessons/document-store.ts",
       // Lessons for local coding tools (decision 46b): the day counter of a person's reads of one project (LESSON_LOCAL_DAY, numbers only) is a per-day row that must expire after the index retention, never a durable record.
