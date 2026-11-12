@@ -16,6 +16,7 @@ import {
   IacSeedRefSchema, TestEnvDependencyIdSchema, TestEnvDependencyKindSchema, TestEnvRegionSchema, catalogIdName, testEnvStartedCount,
 } from "./test-env-dependency.js";
 import { reservedDependencyEnvName } from "./test-services-shared.js";
+import { SAGEMAKER_DETECTION_SIGNALS, SageMakerEndpointNameSchema } from "./sagemaker-endpoint.js";
 import { AWS_PLAN_SERVICES_MAX, AwsPlanServiceSchema, normaliseAwsServiceKey } from "./aws-emulator-service-keys.js";
 import { TEST_ENV_ROUND_BUDGET_MIN, TEST_ENV_SELECTION_METHODS, TEST_ENV_SELECT_PLACEHOLDER, TestEnvValueSourceSchema, TestEnvironmentBodySchema, type TestEnvironmentBody } from "./test-environment.js";
 
@@ -131,6 +132,9 @@ export const TestEnvDependencyCandidateSchema = z
         resources: z.array(CandidateResource).max(TEST_ENV_DEPENDENCY_LIMITS.candidateResources).optional(),
         /** An AWS service no seed handler creates resources for: its emulator starts empty and the tests create their resources. */
         startsEmpty: z.boolean().optional(),
+        /** SM4: the SageMaker endpoint names the code, its settings or its infrastructure code write as literals (SageMaker's own name pattern), and fixed words for what else a detector saw. */
+        endpointNames: z.array(SageMakerEndpointNameSchema).max(16).optional(),
+        sagemakerSignals: z.array(z.enum(SAGEMAKER_DETECTION_SIGNALS)).max(SAGEMAKER_DETECTION_SIGNALS.length).optional(),
         seenBy: z.array(line(40)).max(8).optional(),
       })
       .strict(),
