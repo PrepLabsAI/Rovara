@@ -3,6 +3,7 @@
 // cannot be used (not enabled for the account, not priced under a limit) teaches the next choice to leave it out.
 import type { InvocationModelRoute, ModelFallback, ModelIdentifier, ModelSelection, StageId, ThinkingLevel } from "@agentx/contracts";
 import { STAGE_OF_WORKFLOW_MODE, type ModelSelectionService } from "../model-selection/service.js";
+import { CRITIC_MODEL_ATTEMPTS_MAX, PLAN_CHECK_NO_MODEL_LEFT, planCheckFailures } from "../plan/check-retry.js";
 import type { OperationRecord } from "./records.js";
 import { workspaceOperations } from "./reads.js";
 import type { TaskFlowDeps } from "./deps.js";
@@ -44,11 +45,19 @@ export async function chooseStepModel(deps: Pick<TaskFlowDeps, "stepModels" | "s
   // A checking step is told the model of the step it checks: the newest operation of that step that recorded one.
   let reference: ModelIdentifier | undefined;
   const modes = CHECKED_MODES[stage];
+  const others = modes === undefined ? [] : (await workspaceOperations(deps, operation.workspaceId)).filter((other) => other.id !== operation.id);
   if (modes !== undefined) {
-    const earlier = (await workspaceOperations(deps, operation.workspaceId)).filter((other) => other.id !== operation.id && other.workflowMode !== undefined && modes.includes(other.workflowMode) && other.modelChoice !== undefined);
+    const earlier = others.filter((other) => other.workflowMode !== undefined && modes.includes(other.workflowMode) && other.modelChoice !== undefined);
     reference = earlier.at(-1)?.modelChoice?.model;
   }
-  const outcome = await stepModels.choose({ stage, reference });
+  // A plan check after tries whose model could not serve this account: the models that failed are left out, and the last try may take the planner's own model. Every try made: no model is left.
+  let retry: { denied: ModelIdentifier[]; lastAttempt: boolean } | undefined;
+  if (stage === "plan_check") {
+    const failures = planCheckFailures(others);
+    if (failures.sinceLatestPlan >= CRITIC_MODEL_ATTEMPTS_MAX) return { ok: false, sentence: PLAN_CHECK_NO_MODEL_LEFT };
+    if (failures.models.length > 0 || failures.sinceLatestPlan > 0) retry = { denied: failures.models, lastAttempt: failures.sinceLatestPlan + 1 >= CRITIC_MODEL_ATTEMPTS_MAX };
+  }
+  const outcome = await stepModels.choose({ stage, reference, ...(retry === undefined ? {} : retry) });
   // No model at all (no key is set up): the step is handed over with no model route, as it always was, and the worker fails with its own reason. Any other refusal says why no model fits this step.
   if (!outcome.ok) return outcome.code === "NO_MODEL" ? undefined : { ok: false, sentence: outcome.words };
   const { step } = outcome;
