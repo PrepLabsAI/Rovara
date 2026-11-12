@@ -23,6 +23,8 @@ const FILES = [
   "application.properties", "application.yml", "application-test.yml", "appsettings.json", "config/a.yaml", "app/settings.py", ".env", ".env.example",
   "docker-compose.yml", ".devcontainer/devcontainer.json", ".github/workflows/ci.yml", ".gitlab-ci.yml", ".circleci/config.yml",
   "template.yaml", "cdk.out/a.template.json", "main.tf", "lib/stack.ts", "infra/app_stack.py", "README.md", "docs/runbook.md", ".kiro/steering/a.md", "cdk.json", "mvnw",
+  // the SageMaker detector's model signs (a cubic Dockerfile pattern hung this suite on PR #485)
+  "Dockerfile", "inference.py",
 ];
 const BODIES: Record<string, string> = {
   newlines: fill("\n"), "space-newline": fill(" \n"), "tab-newline": fill("\t\n"), spaces: fill(" "), dots: fill("."), "word-dot": fill("a."), "word-slash": fill("aa/"), word: fill("a"),
