@@ -104,7 +104,7 @@ describe("preferences", () => {
     expect((await w.store.get({ pk: `NOTIFY_PREFS#${ORG}`, sk: `DEV#${OWNER_ID}` }))!["channel"]).toBe("both");
     await expect(w.prefs([{ channel: "examplechat", conversation: OTHER_CONVERSATION }])).rejects.toThrow();
     await expect(w.prefs(Array.from({ length: 6 }, (_, index) => target({ ...CONVERSATION, thread: `t${String(index)}` })))).rejects.toThrow();
-    expect(await readNotifyPrefs(w.store, ORG, "e".repeat(64))).toEqual({ targets: [], muted: false });
+    expect(await readNotifyPrefs(w.store, ORG, "e".repeat(64))).toEqual({ targets: [], muted: false, emailUnsubscribed: false });
   });
 });
 

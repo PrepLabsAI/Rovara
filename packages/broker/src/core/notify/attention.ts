@@ -1,23 +1,30 @@
-// Notifications (lane L6b, inventory B10; the hosted product's UX2 slice 2 item 5): every event that needs a person reaches them, wherever the task was started. Channel only: the message goes out through
-// the plug-in registry's channel adapters (Pratik's `ChannelAdapter.deliver(ChannelEvent)`), never through a provider's own code. The hosted product's email and Slack direct messages are two channels of
-// the same kind; here they are adapters, and email is an adapter someone writes.
+// Notifications (lanes L6b and P4; the hosted product's UX2 slice 2 item 5, experience items S-11 and S-12): every event that needs a person reaches them, wherever the task was started. The message goes out
+// through the plug-in registry: the `channel` adapters (`ChannelAdapter.deliver(ChannelEvent)`) and the `email` point (`EmailSender.send`), never through a provider's own code. Code's email point sends nothing
+// (decision 101), so in Code notices go through the chats; the hosted product plugs its email service into the same point.
 //
 //   queue    When a session's summary commits a change into a state that asks someone to act (Needs you, Paused: needs more budget, Ready to merge, Failed) or is over (Merged, Closed), `queueAttention` writes one
-//            pending row per person to tell: the owner, and the people the summary names as needed. A later change of the same kind for the same person and session replaces the row, so nothing piles up.
-//   deliver  The session sweep calls `deliverAttention`. Each person gets at most one message per target every `NOTIFY_BATCH_MINUTES`: everything pending is batched into it. Before anything is sent, each row is
-//            checked again: the session still exists, it still stands in the state the row was written for, and the person may still READ it. Rows that fail any check are dropped silently.
+//            pending row per person to tell: the owner, and the people the summary names as needed. A later change of the same kind for the same person and session replaces the row, so nothing piles up. The
+//            person's open pages hear a realtime hint (ids only).
+//   deliver  The session sweep calls `deliverAttention`. Each person gets at most one message per target every `NOTIFY_BATCH_MINUTES`: everything pending is batched into it. Their quiet hours hold what is not
+//            urgent until they end; a digest time holds it for one list a day (`schedule.ts`). Before anything is sent, each row is checked again: the session still exists, it still stands in the state the row
+//            was written for, and the person may still READ it. Rows that fail any check are dropped silently.
 //
-// A TARGET is a conversation on a channel the person chose (`NotifyTarget`). The event id is derived from the batch it carries, so a retry of the same batch is the same event and the adapter drops a repeat
-// (the channel protocol: `event.id` is stable across retries). A message holds the task's title, its status sentence (fixed words) and a link supplied by the surface that serves the task page. Never task content
-// beyond that, never a secret. Logs carry fixed codes and counts only.
+// A TARGET is a conversation on a channel the person chose (`NotifyTarget`), or their email (`EMAIL_TARGET`) when they chose it and it can be sent (`prefs.ts`). The event id is derived from the batch it carries,
+// so a retry of the same batch is the same event and the adapter drops a repeat (the channel protocol: `event.id` is stable across retries); an email is claimed on the rows before it is sent, so it goes at most
+// once. A message holds the task's title, its status sentence (fixed words) and a link supplied by the surface that serves the task page. Never task content beyond that, never a secret. Logs carry fixed codes
+// and counts only.
 import { createHash } from "node:crypto";
-import { z } from "zod";
 import {
-  ConversationRefSchema, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, agentSessionKey, change, conversationSubject, hideEmailAddresses, sessionTaskStatus, taskStatusText, when,
-  type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type ConversationRef, type DocumentStore, type OrgId, type RegistryView, type SessionSummary, type StoredDocument,
+  EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
+  sessionTaskStatus, taskStatusText, when,
+  type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type ConversationRef, type DocumentStore, type EmailSender, type OrgId, type RealtimeEntry, type RealtimePublisher, type RegistryView,
+  type SessionSummary, type StoredDocument,
 } from "@agentx/contracts";
 import type { SessionChange } from "../sessions/summary.js";
 import { SessionStore } from "../sessions/store.js";
+import { attentionEmail, type AttentionEmailLinks } from "./email-text.js";
+import { NOTIFY_TARGETS_MAX, notifyTargetKey as targetKey, readNotifyPrefs, type NotifyTarget } from "./prefs.js";
+import { digestSlotDay, holdOf } from "./schedule.js";
 
 type Log = (entry: Record<string, unknown>) => void;
 
@@ -39,15 +46,7 @@ export const ATTENTION_SEND_TIMEOUT_MS = 2500;
 /** The queue is read in pages, at most this many rows a sweep. */
 const PENDING_PAGE = 100;
 export const ATTENTION_READ_MAX = 2000;
-export const NOTIFY_TARGETS_MAX = 5;
 
-/** Where a person is told: a conversation on a channel an adapter serves. */
-export const NotifyTargetSchema = z.object({ channel: z.string().regex(/^[a-z][a-z0-9-]{1,31}$/u), conversation: ConversationRefSchema }).strict()
-  .refine((target) => target.conversation.channel === target.channel, { message: "the conversation is on another channel", path: ["conversation"] });
-export type NotifyTarget = z.infer<typeof NotifyTargetSchema>;
-export const NotifyPrefsBodySchema = z.object({ targets: z.array(NotifyTargetSchema).max(NOTIFY_TARGETS_MAX), muted: z.boolean().optional() }).strict();
-
-export const prefsKey = (orgId: string, developerId: string) => ({ pk: `NOTIFY_PREFS#${orgId}`, sk: `DEV#${developerId}` });
 const sentKey = (orgId: string, developerId: string) => ({ pk: `NOTIFY_SENT#${orgId}`, sk: `DEV#${developerId}` });
 const pendingKey = (orgId: string, developerId: string, sessionId: string, kind: AttentionKind) => ({ pk: PENDING_PK, sk: `${orgId}#${developerId}#${sessionId}#${kind}` });
 
@@ -61,30 +60,6 @@ export function attentionKindOf(summary: Pick<SessionSummary, "status" | "lastRu
     case "merged": case "closed": return "done";
     default: return undefined;
   }
-}
-
-// ---- preferences
-
-export interface NotifyPrefs { targets: NotifyTarget[]; muted: boolean }
-
-const targetKey = (target: NotifyTarget): string => `${target.channel}:${conversationSubject(target.conversation)}`;
-
-export async function readNotifyPrefs(store: Pick<DocumentStore, "get">, orgId: string, developerId: string): Promise<NotifyPrefs> {
-  const item = await store.get(prefsKey(orgId, developerId));
-  if (item === undefined || item["orgId"] !== orgId) return { targets: [], muted: false };
-  const parsed = z.array(NotifyTargetSchema).max(NOTIFY_TARGETS_MAX).safeParse(item["targets"] ?? []);
-  return { targets: parsed.success ? parsed.data : [], muted: item["muted"] === true };
-}
-
-/** Sets where a person is told. The row's other attributes (the hosted product's channel choice) are left as they are. A body the schema refuses is an error. */
-export async function writeNotifyPrefs(deps: { store: Pick<DocumentStore, "update">; now: () => Date }, orgId: OrgId, developerId: string, body: unknown): Promise<NotifyPrefs> {
-  const parsed = NotifyPrefsBodySchema.parse(body);
-  const unique = [...new Map(parsed.targets.map((target) => [targetKey(target), target] as const)).values()];
-  await deps.store.update({
-    key: prefsKey(orgId, developerId),
-    ops: [change.setIfAbsent("entityType", "NOTIFY_PREFS"), change.set("orgId", orgId), change.set("developerId", developerId), change.set("targets", JSON.parse(JSON.stringify(unique)) as never), change.set("muted", parsed.muted === true), change.set("updatedAt", deps.now().toISOString())],
-  });
-  return { targets: unique, muted: parsed.muted === true };
 }
 
 // ---- queue
@@ -110,10 +85,26 @@ export async function attentionRecipients(store: Pick<DocumentStore, "query">, s
 }
 
 /**
+ * Tells each person's open pages that what waits for them changed, so they read again. A hint only: the notice carries the session id and the kind, never a title, a person's words or a secret
+ * (`attentionNotice`). Never throws (a push is never a reason for the queue to fail).
+ */
+export function attentionNotice(sessionId: string, kind: AttentionKind): { type: string; sessionId: string; kind: AttentionKind } {
+  return { type: "attention.changed", sessionId, kind };
+}
+
+async function publishAttentionChanged(realtime: Pick<RealtimePublisher, "publish"> | undefined, companyId: string, people: readonly string[], sessionId: string, kind: AttentionKind): Promise<void> {
+  if (realtime === undefined || people.length === 0) return;
+  const notice = attentionNotice(sessionId, kind);
+  if (!isRealtimeNotice(notice)) return;
+  const entries: RealtimeEntry[] = people.map((personId) => ({ audience: { kind: "person", personId }, notice }));
+  try { await realtime.publish({ companyId, entries, deadline: Date.now() + 1_000 }); } catch { /* a push never fails the queue */ }
+}
+
+/**
  * After a refresh committed: when the session moved into a state someone is told about, one pending row per person. Only task sessions. Never throws: a notification is never a reason for a refresh to fail.
  * Use it as a session change hook.
  */
-export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log }, change: SessionChange): Promise<number> {
+export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined }, change: SessionChange): Promise<number> {
   try {
     if (change.session.subject.kind !== "task") return 0;
     const kind = attentionKindOf(change.summary);
@@ -131,6 +122,7 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
         item: { ...pendingKey(change.orgId, developerId, change.sessionId, kind), entityType: "NOTIFY_PENDING", orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
       });
     }
+    await publishAttentionChanged(deps.realtime, change.orgId, people, change.sessionId, kind);
     return people.length;
   } catch (error) {
     (deps.log ?? ((entry) => console.log(JSON.stringify({ component: "broker", ...entry }))))({ event: "attention.queue_failed", sessionId: change.sessionId, error: error instanceof Error ? error.name : "unknown" });
@@ -138,12 +130,13 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
   }
 }
 
+
 // ---- deliver
 
 export interface AttentionDeliveryDependencies {
   store: DocumentStore;
-  /** Where the channel adapters are: `registry.get("channel", id)`. */
-  registry: Pick<RegistryView, "get">;
+  /** Where the adapters are: `registry.get("channel", id)` for the chats; the `email` point's one sender (Code's default says it cannot send). */
+  registry: Pick<RegistryView, "get" | "names">;
   now: () => number;
   /** The address of a session's page, built by the surface that serves it; undefined when there is none (the message then has no link). */
   link?: (session: AgentSessionRecord) => string | undefined;
@@ -158,6 +151,14 @@ export interface AttentionDeliveryDependencies {
   thread?: (orgId: OrgId, sessionId: string) => Promise<{ conversation: ConversationRef; personId: string } | undefined>;
   /** Whether the person may READ the session now. Default: the session's owner. */
   access?: (orgId: OrgId, developerId: string, session: AgentSessionRecord) => Promise<{ owner: boolean } | undefined>;
+  /** The person's own email address (from their sign-in record), or undefined. Absent: nobody has one, and email is never used. */
+  address?: (orgId: OrgId, developerId: string) => Promise<string | undefined>;
+  /**
+   * Whether a pending row is urgent: it breaks through quiet hours and is not held for a digest (owner answer Q20: a high-risk item). Absent, or a failure: not urgent. Called only for a row that would wait.
+   */
+  urgent?: (orgId: OrgId, row: { developerId: string; sessionId: string; kind: AttentionKind }) => Promise<boolean>;
+  /** The links an email carries (change the setting, stop these emails, the list of everything waiting); each only when it is a plain https link. */
+  emailLinks?: AttentionEmailLinks;
   log?: Log;
 }
 
@@ -187,12 +188,16 @@ export function attentionText(lines: readonly Line[], more: number, maxLength: n
 }
 
 const doneText = (lines: readonly Line[], maxLength: number, footer?: string): string => attentionText(lines, 0, maxLength, footer).replace(/^A task needs your attention in Rovara:/u, "A task finished in Rovara:").replace(/^These tasks need your attention in Rovara:/u, "These tasks finished in Rovara:");
+const digestText = (lines: readonly Line[], more: number, maxLength: number, footer?: string): string => attentionText(lines, more, maxLength, footer).replace(/^(?:A task needs|These tasks need) your attention in Rovara:/u, "Your Rovara digest:");
 
 /** The event id of a batch: the same rows to the same target are the same event, so an adapter that is told twice drops the repeat. */
 export function batchEventId(orgId: string, developerId: string, target: string, rows: readonly { sk: string; at: string }[]): string {
   const digest = createHash("sha256").update(JSON.stringify([orgId, developerId, target, rows.map((row) => `${row.sk}@${row.at}`).sort()]), "utf8").digest("base64url");
   return `evt_${digest.slice(0, 32)}`;
 }
+
+/** The email route's key among a person's targets (a chat target's key always has a `:`). */
+export const EMAIL_TARGET = "email";
 
 interface PendingRow { key: { pk: string; sk: string }; orgId: OrgId; developerId: string; sessionId: string; kind: AttentionKind; at: string; done: Set<string> }
 
@@ -204,32 +209,45 @@ function pendingRowOf(item: StoredDocument, nowSeconds: number): PendingRow | un
   const expires = item[INDEX_EXPIRY_ATTRIBUTE];
   if (typeof expires === "number" && expires <= nowSeconds) return undefined;
   const done = new Set(Array.isArray(item["doneTargets"]) ? item["doneTargets"].filter((entry): entry is string => typeof entry === "string") : []);
+  // The email is sent at most once: a row claimed for an email (the hosted product's `emailClaimed`, written before the send) or marked sent counts as sent.
+  if (item["emailSent"] === true || typeof item["emailClaimed"] === "number") done.add(EMAIL_TARGET);
   return { key: { pk: PENDING_PK, sk }, orgId: orgId, developerId, sessionId, kind: kind as AttentionKind, at, done };
 }
 
-/** One person's marker: when it last sent anything, and per target how many tries failed in a row and when it may try again. */
-interface SentMarker { lastAt: number; failures: Record<string, number>; retryAt: Record<string, number>; /** Every target owed to this person waits for a retry until then; they take no place before it. */ waitUntil?: number | undefined }
+/** One person's marker: when it last sent anything, per target how many tries failed in a row and when it may try again, and the local day whose digest was last sent. */
+interface SentMarker { lastAt: number; failures: Record<string, number>; retryAt: Record<string, number>; /** Every target owed to this person waits for a retry until then; they take no place before it. */ waitUntil?: number | undefined; digestDay?: string | undefined }
 
 function markerOf(item: StoredDocument | undefined): SentMarker {
   const numbers = (value: unknown): Record<string, number> => (typeof value === "object" && value !== null && !Array.isArray(value)
     ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]))) : {});
-  const waitUntil = item?.["waitUntil"];
-  return { lastAt: typeof item?.["lastAt"] === "number" ? item["lastAt"] : 0, failures: numbers(item?.["failures"]), retryAt: numbers(item?.["retryAt"]), ...(typeof waitUntil === "number" ? { waitUntil } : {}) };
+  const waitUntil = item?.["waitUntil"], digestDay = item?.["digestDay"];
+  return {
+    lastAt: typeof item?.["lastAt"] === "number" ? item["lastAt"] : 0, failures: numbers(item?.["failures"]), retryAt: numbers(item?.["retryAt"]),
+    ...(typeof waitUntil === "number" ? { waitUntil } : {}), ...(typeof digestDay === "string" && /^\d{4}-\d{2}-\d{2}$/u.test(digestDay) ? { digestDay } : {}),
+  };
+}
+
+/** The email point's one sender, or undefined when none is registered. */
+function emailSenderOf(registry: Pick<RegistryView, "get" | "names">): EmailSender | undefined {
+  const names = registry.names("email");
+  return names.length === 1 ? registry.get("email", names[0]!) : undefined;
 }
 
 export interface AttentionBudget { deadlineMs?: number | undefined }
-export interface AttentionOutcome { people: number; sent: number; dropped: number; failed: number; gaveUp: number; unreachable: number }
+export interface AttentionOutcome { people: number; sent: number; emails: number; dropped: number; failed: number; gaveUp: number; unreachable: number; held: number }
 
 /**
  * The sweep's delivery. The queue is read in pages (at most `ATTENTION_READ_MAX` rows; rows past their expiry are left out). People still inside their batching window are set aside BEFORE the
- * `PEOPLE_PER_SWEEP_MAX` people of this sweep are chosen, and those are taken oldest-waiting first, so nobody's rows are starved by others'. For each person, one event per chosen target lists what is still
- * current and still theirs to read. Each target is sent on its own: a failing one never holds back another; what one target received is marked on the rows, so it is not sent again; a failing target is tried
- * again after a growing wait and gives up after `ATTENTION_TARGET_TRIES_MAX` tries. A target whose adapter cannot message first (`proactive` false) or is not registered is not tried. Rows go once every chosen
- * target has them. Never past `deadlineMs`. Answers counts only.
+ * `PEOPLE_PER_SWEEP_MAX` people of this sweep are chosen, and those are taken oldest-waiting first, so nobody's rows are starved by others'. Rows a person's quiet hours or digest hold (`holdOf`) stay
+ * queued unless urgent; a person with nothing to send now takes no place. For each person, one event per target lists what is still current and still theirs to read. The targets are their chats
+ * and/or email as they chose (`effectiveNotify`: email only when the email point can send and they have an address, else the chats). Each target is sent on its own: a failing one never holds back
+ * another; what one target received is marked on the rows, so it is not sent again; a failing target is tried again after a growing wait and gives up after `ATTENTION_TARGET_TRIES_MAX` tries (an email
+ * the sender refuses gives up at once). A chat whose adapter cannot message first (`proactive` false) or is not registered is not tried. Rows go once every target has them. Never past `deadlineMs`.
+ * Answers counts only.
  */
 export async function deliverAttention(deps: AttentionDeliveryDependencies, budget: AttentionBudget = {}): Promise<AttentionOutcome> {
   const log = deps.log ?? ((entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...entry })));
-  const outcome: AttentionOutcome = { people: 0, sent: 0, dropped: 0, failed: 0, gaveUp: 0, unreachable: 0 };
+  const outcome: AttentionOutcome = { people: 0, sent: 0, emails: 0, dropped: 0, failed: 0, gaveUp: 0, unreachable: 0, held: 0 };
   const nowMs = deps.now();
   const late = () => budget.deadlineMs !== undefined && deps.now() >= budget.deadlineMs;
   const byPerson = new Map<string, PendingRow[]>();
@@ -247,8 +265,8 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     cursor = page.cursor;
   } while (cursor !== undefined && read < ATTENTION_READ_MAX && !late());
   if (cursor !== undefined) log({ event: "attention.queue_truncated", read });
-  // Who is due now (outside their window), oldest-waiting first: only they take this sweep's places.
-  const due: Array<{ rows: PendingRow[]; marker: SentMarker }> = [];
+  // Who is due now (outside their window, with something their quiet hours and digest let go), oldest-waiting first: only they take this sweep's places.
+  const due: Array<{ rows: PendingRow[]; marker: SentMarker; prefs: Awaited<ReturnType<typeof readNotifyPrefs>>; digest: boolean }> = [];
   for (const rows of byPerson.values()) {
     if (late()) break;
     const { orgId, developerId } = rows[0]!;
@@ -256,13 +274,26 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     if (nowMs - marker.lastAt < NOTIFY_BATCH_MINUTES * 60_000) continue;
     // Someone whose every owed target is waiting for a retry is not due either, so they never take a place from someone who can be told now.
     if ((marker.waitUntil ?? 0) > nowMs) continue;
-    due.push({ rows: [...rows].sort((a, b) => a.at.localeCompare(b.at)), marker });
+    const prefs = await readNotifyPrefs(deps.store, orgId, developerId);
+    const hold = prefs.muted ? "none" : holdOf(prefs, nowMs, marker.digestDay);
+    let sendable = rows;
+    if (hold !== "none") {
+      sendable = [];
+      for (const row of rows) {
+        const urgent = deps.urgent === undefined ? false : await deps.urgent(orgId, { developerId, sessionId: row.sessionId, kind: row.kind }).catch(() => false);
+        if (urgent === true) sendable.push(row);
+      }
+      outcome.held += rows.length - sendable.length;
+      if (sendable.length === 0) continue;
+    }
+    due.push({ rows: [...sendable].sort((a, b) => a.at.localeCompare(b.at)), marker, prefs, digest: hold === "none" && prefs.digestAt !== undefined && !prefs.muted });
   }
   due.sort((a, b) => a.rows[0]!.at.localeCompare(b.rows[0]!.at));
   const sessions = new SessionStore(deps.store);
   const dropRow = (row: PendingRow): Promise<unknown> => deps.store.delete({ key: row.key }).catch(() => undefined);
+  const email = emailSenderOf(deps.registry);
   let taken = 0;
-  for (const { rows, marker } of due) {
+  for (const { rows, marker, prefs, digest } of due) {
     if (late() || taken >= PEOPLE_PER_SWEEP_MAX) break;
     const { orgId, developerId } = rows[0]!;
     const current: Array<{ row: PendingRow; line: Line }> = [];
@@ -280,10 +311,11 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     }
     for (const row of stale) { await dropRow(row); outcome.dropped += 1; }
     if (current.length === 0) continue;
-    const prefs = await readNotifyPrefs(deps.store, orgId, developerId);
-    // Where each session's change is also told: the conversation it was started from, when this person started it. Never past a mute.
+    // A person who muted notices is told nowhere; the rows go (Home still lists what waits for them).
+    if (prefs.muted) { for (const { row } of current) await dropRow(row); continue; }
+    // Where each session's change is also told: the conversation it was started from, when this person started it.
     const threadSessions = new Map<string, { target: NotifyTarget; sessions: Set<string> }>();
-    if (!prefs.muted && deps.thread !== undefined) {
+    if (deps.thread !== undefined) {
       for (const sessionId of new Set(current.map(({ row }) => row.sessionId))) {
         const thread = await deps.thread(orgId, sessionId).catch(() => undefined);
         if (thread === undefined || thread.personId !== developerId) continue;
@@ -293,24 +325,33 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
         threadSessions.set(targetKey(target), found);
       }
     }
-    const chosen = new Set(prefs.targets.map((target) => targetKey(target)));
-    const wanted: NotifyTarget[] = [...prefs.targets, ...[...threadSessions.values()].map(({ target }) => target).filter((target) => !chosen.has(targetKey(target)))];
+    // Chat or email, as the person chose: email only when the email point can send and they have an address of their own; an email choice that cannot be sent falls back to the chats.
+    const chatReachable = prefs.targets.length > 0 || threadSessions.size > 0;
+    const rawAddress = email?.capabilities.available === true && deps.address !== undefined ? await deps.address(orgId, developerId).catch(() => undefined) : undefined;
+    const address = rawAddress !== undefined && isPlainEmailAddress(rawAddress) ? rawAddress : undefined;
+    const goes = effectiveNotify({ channel: prefs.channel ?? defaultNotifyChannel(chatReachable), slackLinked: chatReachable, emailAvailable: address !== undefined, emailUnsubscribed: prefs.emailUnsubscribed });
+    const chosen = new Set(goes.slack ? prefs.targets.map((target) => targetKey(target)) : []);
+    const wanted: NotifyTarget[] = goes.slack ? [...prefs.targets, ...[...threadSessions.values()].map(({ target }) => target).filter((target) => !chosen.has(targetKey(target)))] : [];
     const targets = wanted.slice(0, Math.min(NOTIFY_TARGETS_MAX * 2, deps.maxTargets ?? Number.POSITIVE_INFINITY));
     if (targets.length < wanted.length) log({ event: "attention.thread_targets_truncated", dropped: wanted.length - targets.length });
-    // A target tells the person about every row when they chose it, and only about the sessions started there when it is the conversation of a start.
-    const appliesTo = (tkey: string, row: PendingRow): boolean => chosen.has(tkey) || threadSessions.get(tkey)?.sessions.has(row.sessionId) === true;
-    // A person who muted notices, or has nowhere to be told, is not messaged; the rows go (Home still lists what waits for them).
-    if (prefs.muted || targets.length === 0) { for (const { row } of current) await dropRow(row); continue; }
+    const routes = [...targets.map((target) => targetKey(target)), ...(goes.email ? [EMAIL_TARGET] : [])];
+    // A target tells the person about every row when they chose it (email included), and only about the sessions started there when it is the conversation of a start.
+    const appliesTo = (tkey: string, row: PendingRow): boolean => tkey === EMAIL_TARGET || chosen.has(tkey) || threadSessions.get(tkey)?.sessions.has(row.sessionId) === true;
+    // Nowhere to be told: not messaged; the rows go.
+    if (routes.length === 0) { for (const { row } of current) await dropRow(row); continue; }
     taken += 1;
     let sentSomething = false, attempted = false;
-    const next: SentMarker = { lastAt: marker.lastAt, failures: { ...marker.failures }, retryAt: { ...marker.retryAt } };
-    for (const target of targets) {
-      const tkey = targetKey(target);
+    const next: SentMarker = { lastAt: marker.lastAt, failures: { ...marker.failures }, retryAt: { ...marker.retryAt }, ...(marker.digestDay === undefined ? {} : { digestDay: marker.digestDay }) };
+    const setOnRows = async (owed: ReadonlyArray<{ row: PendingRow }>, ops: Parameters<DocumentStore["update"]>[0]["ops"]): Promise<void> => {
+      for (const { row } of owed) await deps.store.update({ key: row.key, ops, condition: when.and(when.present(), when.eq("at", row.at)) });
+    };
+    for (const tkey of routes) {
       const owed = current.filter(({ row }) => appliesTo(tkey, row) && !row.done.has(tkey));
       if (owed.length === 0) continue;
-      const adapter: ChannelAdapter | undefined = deps.registry.get("channel", target.channel);
+      const target = targets.find((entry) => targetKey(entry) === tkey);
+      const adapter: ChannelAdapter | undefined = target === undefined ? undefined : deps.registry.get("channel", target.channel);
       // A channel nobody serves, or one that cannot message first (for a target the person chose; a conversation of a start is a reply), will not succeed by trying again: it is counted as unreachable and marked, never retried.
-      if (adapter === undefined || (!adapter.capabilities.proactive && chosen.has(tkey))) {
+      if (tkey !== EMAIL_TARGET && (adapter === undefined || (!adapter.capabilities.proactive && chosen.has(tkey)))) {
         outcome.unreachable += 1;
         for (const { row } of owed) row.done.add(tkey);
         continue;
@@ -320,44 +361,69 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       const lines = [...new Map(owed.map(({ row, line }) => [row.sessionId, line])).values()];
       const shown = lines.slice(0, NOTIFY_ITEMS_MAX), more = lines.length - shown.length;
       const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done");
-      const text = allDone ? doneText(shown, adapter.capabilities.maxTextLength, deps.footer) : attentionText(shown, more, adapter.capabilities.maxTextLength, deps.footer);
-      const base = { version: 1 as const, id: batchEventId(orgId, developerId, tkey, owed.map(({ row }) => ({ sk: row.key.sk, at: row.at }))), channel: target.channel, conversation: target.conversation, createdAt: new Date(nowMs).toISOString() };
-      const event = (allDone ? { ...base, type: "done", data: { text } } : allFailed ? { ...base, type: "error", data: { code: "task_failed", text } } : { ...base, type: "progress", data: { text } }) as ChannelEvent;
-      let ok = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([adapter.deliver(event), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("timeout")), ATTENTION_SEND_TIMEOUT_MS); })]);
-        ok = true;
-      } catch (error) {
-        log({ event: "attention.send_failed", channel: target.channel, error: error instanceof Error ? error.name : "unknown" });
-      } finally {
-        clearTimeout(timer);
+      let ok = false, refused = false;
+      if (tkey === EMAIL_TARGET) {
+        // Claimed before the send, so an email is sent at most once: a claim that cannot be written sends nothing now (tried again later).
+        try { await setOnRows(owed, [change.set("emailClaimed", nowMs)]); }
+        catch (error) { log({ event: "attention.claim_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }); continue; }
+        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : "attention", deps.emailLinks);
+        try {
+          await email!.send({ companyId: orgId, purpose: "attention", to: address!, subject: mail.subject, text: mail.text, ...(mail.unsubscribeUrl === undefined ? {} : { unsubscribeUrl: mail.unsubscribeUrl }), deadline: Date.now() + ATTENTION_SEND_TIMEOUT_MS }); // the port's deadline is on the real clock, whatever clock the sweep reads
+          ok = true;
+        } catch (error) {
+          refused = error instanceof EmailError && !error.retryable;
+          log({ event: "attention.send_failed", channel: EMAIL_TARGET, error: error instanceof EmailError ? error.code : error instanceof Error ? error.name : "unknown" });
+        }
+      } else {
+        const maxLength = adapter!.capabilities.maxTextLength;
+        const text = digest ? digestText(shown, more, maxLength, deps.footer) : allDone ? doneText(shown, maxLength, deps.footer) : attentionText(shown, more, maxLength, deps.footer);
+        const base = { version: 1 as const, id: batchEventId(orgId, developerId, tkey, owed.map(({ row }) => ({ sk: row.key.sk, at: row.at }))), channel: target!.channel, conversation: target!.conversation, createdAt: new Date(nowMs).toISOString() };
+        const event = (allDone && !digest ? { ...base, type: "done", data: { text } } : allFailed && !digest ? { ...base, type: "error", data: { code: "task_failed", text } } : { ...base, type: "progress", data: { text } }) as ChannelEvent;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([adapter!.deliver(event), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("timeout")), ATTENTION_SEND_TIMEOUT_MS); })]);
+          ok = true;
+        } catch (error) {
+          log({ event: "attention.send_failed", channel: target!.channel, error: error instanceof Error ? error.name : "unknown" });
+        } finally {
+          clearTimeout(timer);
+        }
       }
       const failures = ok ? 0 : (next.failures[tkey] ?? 0) + 1;
-      const gaveUp = !ok && failures >= ATTENTION_TARGET_TRIES_MAX;
+      const gaveUp = !ok && (refused || failures >= ATTENTION_TARGET_TRIES_MAX);
       if (ok || gaveUp) {
         for (const { row } of owed) row.done.add(tkey);
         delete next.failures[tkey];
         delete next.retryAt[tkey];
+        if (tkey === EMAIL_TARGET) await setOnRows(owed, [change.set("emailSent", true)]).catch((error: unknown) => log({ event: "attention.mark_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }));
+      } else if (tkey === EMAIL_TARGET) {
+        // Not sent: the claim is given back so the retry sends it. If even that fails it is never sent twice: at most once, logged.
+        await setOnRows(owed, [change.remove("emailClaimed")]).catch((error: unknown) => log({ event: "attention.unclaim_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }));
       }
-      if (ok) { sentSomething = true; outcome.sent += 1; }
-      else if (gaveUp) { outcome.gaveUp += 1; log({ event: "attention.target_gave_up", channel: target.channel }); }
+      if (ok) { sentSomething = true; if (tkey === EMAIL_TARGET) outcome.emails += 1; else outcome.sent += 1; }
+      else if (gaveUp) { outcome.gaveUp += 1; log({ event: "attention.target_gave_up", channel: tkey === EMAIL_TARGET ? EMAIL_TARGET : target!.channel }); }
       else { outcome.failed += 1; next.failures[tkey] = failures; next.retryAt[tkey] = nowMs + ATTENTION_RETRY_BASE_MS * 2 ** (failures - 1); }
     }
-    if (sentSomething) { outcome.people += 1; next.lastAt = nowMs; }
+    if (sentSomething) {
+      outcome.people += 1;
+      next.lastAt = nowMs;
+      if (digest) next.digestDay = digestSlotDay(prefs, nowMs);
+    }
     // When every target still owed waits for a retry, the person is not due again before the first of them.
-    const waiting = targets.filter((target) => current.some(({ row }) => appliesTo(targetKey(target), row) && !row.done.has(targetKey(target)))).map((target) => next.retryAt[targetKey(target)]);
+    const waiting = routes.filter((tkey) => current.some(({ row }) => appliesTo(tkey, row) && !row.done.has(tkey))).map((tkey) => next.retryAt[tkey]);
     if (!sentSomething && waiting.length > 0 && waiting.every((at) => at !== undefined && at > nowMs)) next.waitUntil = Math.min(...(waiting as number[]));
     if (!attempted) taken -= 1;
     // What each target received is marked on the rows; an event already sent has a stable id, so a mark that fails is only logged.
     for (const { row } of current) {
-      if (targets.every((target) => !appliesTo(targetKey(target), row) || row.done.has(targetKey(target)))) { await dropRow(row); continue; }
+      if (routes.every((tkey) => !appliesTo(tkey, row) || row.done.has(tkey))) { await dropRow(row); continue; }
       await deps.store.update({ key: row.key, ops: [change.set("doneTargets", [...row.done])], condition: when.and(when.present(), when.eq("at", row.at)) }).catch((error: unknown) => log({ event: "attention.mark_failed", error: error instanceof Error ? error.name : "unknown" }));
     }
     await deps.store.put({
       item: {
         ...sentKey(orgId, developerId), entityType: "NOTIFY_SENT", orgId, developerId, lastAt: next.lastAt, failures: next.failures, retryAt: next.retryAt,
-        ...(next.waitUntil === undefined ? {} : { waitUntil: next.waitUntil }), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + SENT_KEEP_SECONDS,
+        ...(next.waitUntil === undefined ? {} : { waitUntil: next.waitUntil }), ...(next.digestDay === undefined ? {} : { digestDay: next.digestDay }),
+        // The digest day must outlive a day, or tomorrow's slot would be served twice.
+        [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + (next.digestDay === undefined ? SENT_KEEP_SECONDS : 3 * SENT_KEEP_SECONDS),
       },
     });
   }

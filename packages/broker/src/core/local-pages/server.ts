@@ -87,6 +87,7 @@ const NOTICES: Record<string, string> = {
   unnoticed: "You will not be told there any more.",
   muted: "Notices are muted.",
   unmuted: "Notices are on again.",
+  scheduled: "Saved: when you are told.",
   badcode: "That code is not valid: it may have expired or been used. Message Rovara in the chat again for a new one.",
   chatfresh: "Changing chat settings needs a page you opened in the last few minutes. Run `rovara chat` to open one.",
   setupdone: "Done.",
@@ -645,7 +646,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const notice = code !== "" && found === undefined ? "badcode" : undefined;
       return page({ ...request, url: notice === undefined ? request.url : withNotice(request.url, notice) }, (context) => renderChat(context, view, found === undefined ? {} : { preview: { code, ...found } }));
     } },
-    { method: "POST", pattern: /^\/chat\/(link|unlink|bind|unbind|notice-add|notice-remove|mute)$/, handle: async (request, match) => {
+    { method: "POST", pattern: /^\/chat\/(link|unlink|bind|unbind|notice-add|notice-remove|mute|schedule)$/, handle: async (request, match) => {
       const action = match[1] ?? "";
       const back = `${request.base}/chat`;
       const data = options.actions;
@@ -655,6 +656,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const subjectOf: Record<string, string> = {
         link: field("code", 64), unlink: `${field("channel")}/${field("tenant")}/${field("userId")}`, bind: "new", unbind: `${field("channel")}/${field("tenant")}/${field("space")}`,
         "notice-add": "new", "notice-remove": `${field("channel")}/${field("tenant")}/${field("space")}/${field("thread")}`, mute: field("muted") === "yes" ? "on" : "off",
+        schedule: "schedule",
       };
       if (!verified(request, { action: `chat.${action}`, subject: subjectOf[action] ?? "" })) return redirect(`${back}?n=form`);
       // Linking an account, binding a space and choosing where task titles go change who can act as the owner: only from a page session opened a few minutes ago, checked here and not only when the page was drawn.
@@ -668,6 +670,10 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
         if (data.muteNotices === undefined) return redirect(`${back}?n=invalid`);
         const muted = field("muted") === "yes";
         return redirect(`${back}?n=${outcomeCode(await data.muteNotices({ muted }), muted ? "muted" : "unmuted")}`);
+      }
+      if (action === "schedule") {
+        if (data.setNoticeSchedule === undefined) return redirect(`${back}?n=invalid`);
+        return redirect(`${back}?n=${outcomeCode(await data.setNoticeSchedule({ quietStart: field("quietStart", 5), quietEnd: field("quietEnd", 5), timeZone: field("timeZone", 64), digestAt: field("digestAt", 5) }), "scheduled")}`);
       }
       if (!CHANNEL.test(channel) || !OPAQUE.test(tenant)) return redirect(`${back}?n=invalid`);
       if (action === "unlink") {

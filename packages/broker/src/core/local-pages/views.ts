@@ -213,7 +213,11 @@ export interface ChatPageView {
   bindings: Array<{ channel: string; tenant: string; space: string; project: string }>;
   /** The names a space may be bound to. */
   projects: string[];
-  notify: { muted: boolean; targets: Array<{ channel: string; tenant: string; space: string; thread: string }> };
+  notify: {
+    muted: boolean; targets: Array<{ channel: string; tenant: string; space: string; thread: string }>;
+    /** When the owner is told (lane P4): quiet hours and a daily digest time, local to `timeZone` (an IANA name). */
+    quietHours?: { start: string; end: string } | undefined; timeZone?: string | undefined; digestAt?: string | undefined;
+  };
 }
 
 /** A token the page just made: the secret is shown on the answer to the form, once, and kept nowhere. */
@@ -532,6 +536,8 @@ export interface LocalPageActions {
   addNoticeTarget?(input: { channel: string; tenant: string; space: string; thread?: string }): Promise<LocalActionResult>;
   removeNoticeTarget?(input: { channel: string; tenant: string; space: string; thread: string }): Promise<LocalActionResult>;
   muteNotices?(input: { muted: boolean }): Promise<LocalActionResult>;
+  /** Quiet hours (`HH:MM` to `HH:MM`, both empty for none), the time zone they are in (empty: this computer's) and a daily digest time (empty: none). */
+  setNoticeSchedule?(input: { quietStart: string; quietEnd: string; timeZone: string; digestAt: string }): Promise<LocalActionResult>;
   /** The setup agent (the owner's own acts on the setup page). A command, a website and the use of a setup are never decided by a route or a token. */
   setupStart?(input: { project: string; requestId: string }): Promise<LocalActionResult>;
   setupStop?(input: { project: string; requestId: string }): Promise<LocalActionResult>;

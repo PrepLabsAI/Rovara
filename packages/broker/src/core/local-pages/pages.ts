@@ -472,6 +472,12 @@ export function renderChat(context: PageContext, view: ChatPageView, options: { 
     + "<label>Workspace or team id<br><input type=\"text\" name=\"tenant\" maxlength=\"128\" required autocomplete=\"off\"></label><label>Space id (a channel or a direct message)<br><input type=\"text\" name=\"space\" maxlength=\"128\" required autocomplete=\"off\"></label>"
     + "<label>Thread (leave empty for the top of the space)<br><input type=\"text\" name=\"thread\" maxlength=\"128\" autocomplete=\"off\"></label>"
     + `${hidden("ft", context.formToken({ action: "chat.notice-add", subject: "new" }))}<div class="row"><button class="primary" type="submit">Tell me here</button></div></form>`;
+  const timeInput = (name: string, label: string, value: string | undefined): string => `<label>${esc(label)}<br><input type="time" name="${esc(name)}" value="${esc(value ?? "")}"></label>`;
+  const schedule = `<form class="decide" method="post" action="${esc(context.base)}/chat/schedule">`
+    + `<p class="muted">In quiet hours Rovara holds what needs you and sends it in one message when they end. With a digest time it sends one list a day at that time instead of a message every few minutes. Leave a field empty to switch it off.</p>`
+    + timeInput("quietStart", "Quiet hours from", view.notify.quietHours?.start) + timeInput("quietEnd", "Quiet hours until", view.notify.quietHours?.end) + timeInput("digestAt", "Daily digest at", view.notify.digestAt)
+    + `<label>Time zone (empty: this computer's)<br><input type="text" name="timeZone" maxlength="64" autocomplete="off" value="${esc(view.notify.timeZone ?? "")}"></label>`
+    + `${hidden("ft", context.formToken({ action: "chat.schedule", subject: "schedule" }))}<div class="row"><button type="submit">Save when I am told</button></div></form>`;
   const mute = form("mute", view.notify.muted ? "off" : "on", hidden("muted", view.notify.muted ? "no" : "yes"), view.notify.muted ? "Turn notices back on" : "Mute notices");
   return layout({
     title: "Chat", nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
@@ -479,6 +485,7 @@ export function renderChat(context: PageContext, view: ChatPageView, options: { 
       + `<section class="panel"><h2>Chats on this install</h2>${adapters}</section>${preview}${linkForm}`
       + `<section class="panel"><h2>Accounts linked to you</h2>${links}</section>`
       + `<section class="panel"><h2>Spaces bound to a project</h2>${bindings}${bindForm}</section>`
-      + `<section class="panel"><h2>Where you are told</h2><p>One message at most every few minutes: what needs you, in one list. ${view.notify.muted ? "<strong>Notices are muted.</strong>" : ""}</p>${targets}${noticeForm}<div class="row">${mute}</div></section>`,
+      + `<section class="panel"><h2>Where you are told</h2><p>One message at most every few minutes: what needs you, in one list. ${view.notify.muted ? "<strong>Notices are muted.</strong>" : ""}</p>${targets}${noticeForm}<div class="row">${mute}</div></section>`
+      + `<section class="panel" id="when"><h2>When you are told</h2>${schedule}</section>`,
   });
 }
