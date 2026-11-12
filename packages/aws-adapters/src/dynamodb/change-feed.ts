@@ -5,8 +5,10 @@
 // and the feed passes the changes to every consumer subscribed in that process. What the port asks of a feed maps onto the reader:
 //  - At least once, in commit order for one key: the event source mapping delivers a shard's records in order and keeps the
 //    checkpoint, so a crashed or timed-out batch comes again (the durable checkpoint per name is the mapping's, set up in the deployment).
-//  - Starts at the present: the mapping's starting position is LATEST; a consumer subscribed in this process sees the batches handed
-//    over after it subscribed.
+//  - Starts at the present: the mapping's starting position is LATEST. The checkpoint is shared by every consumer of the reader, so a
+//    batch is refused (`deliver` rejects, the mapping hands it over again) while any declared consumer is not subscribed (a cold start
+//    before every module has subscribed, or after a `stop`), and a batch is refused if a consumer stops in the middle of it: no
+//    declared consumer can lose a change because the checkpoint moved past it.
 //  - Bounded retries, then `onPoison`: a throwing handler is called again with the same changes up to `maxAttempts` times, then
 //    `onPoison` is told and the batch counts as handled for that consumer, so one bad batch cannot hold a shard for ever. `deliver`
 //    itself therefore resolves once every consumer has handled or given up on the batch, and the mapping moves on.
@@ -57,6 +59,14 @@ export function changeOfRecord(record: DynamoStreamRecord): DocumentChange {
     ...(before === undefined ? {} : { before }),
     ...(after === undefined ? {} : { after }),
   };
+}
+
+/** A batch refused because a declared consumer is not subscribed (or stopped during it); the stream reader hands it over again. */
+export class ConsumerNotReadyError extends DocumentStoreError {
+  constructor(readonly missing: readonly string[]) {
+    super("unavailable", missing.length === 0 ? "a consumer stopped during the batch" : `the declared consumers ${missing.map((name) => JSON.stringify(name).slice(0, 60)).join(", ")} are not subscribed yet`);
+    this.name = "ConsumerNotReadyError";
+  }
 }
 
 export interface DynamoStreamChangeFeedOptions {
@@ -110,18 +120,20 @@ export class DynamoStreamChangeFeed implements DocumentChangeFeed {
       stop: async () => {
         subscriber.stopped = true;
         if (this.#subscribers.get(consumer) === subscriber) this.#subscribers.delete(consumer);
-        await subscriber.running;
+        await subscriber.running?.catch(() => undefined);
       },
     };
   }
 
   /**
-   * The stream reader's entry: hand it a batch of stream records (a Lambda event's `Records`). Resolves when every consumer subscribed
-   * now has handled the batch or given up on it; rejects only if a record cannot be read and no `onUnreadable` is given, so the
-   * mapping retries (and, past its own limit, sends the batch to its failure destination).
+   * The stream reader's entry: hand it a batch of stream records (a Lambda event's `Records`). Resolves when every declared consumer
+   * has handled the batch or given up on it. Rejects, so the mapping hands the batch over again (and, past its own limit, sends it to
+   * its failure destination), when a declared consumer is not subscribed, when one stops during the batch, or when a record cannot be
+   * read and no `onUnreadable` is given.
    */
   deliver(records: readonly DynamoStreamRecord[]): Promise<void> {
-    // The consumers are those subscribed when the batch is handed over: one that subscribes later starts after it.
+    const missing = [...this.#consumers].filter((name) => !this.#subscribers.has(name));
+    if (missing.length > 0) return Promise.reject(new ConsumerNotReadyError(missing));
     const subscribers = [...this.#subscribers.values()];
     const run = this.#tail.then(() => this.#deliver(records, subscribers));
     this.#tail = run.catch(() => undefined);
@@ -150,7 +162,7 @@ export class DynamoStreamChangeFeed implements DocumentChangeFeed {
   async #handOver(subscriber: Subscriber, batch: readonly DocumentChange[]): Promise<void> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
-      if (subscriber.stopped) return;
+      if (subscriber.stopped) throw new ConsumerNotReadyError([]);
       try {
         // Each consumer gets its own copies, so one cannot change what another sees.
         await subscriber.handler(structuredClone(batch));
@@ -160,7 +172,7 @@ export class DynamoStreamChangeFeed implements DocumentChangeFeed {
         if (attempt < this.#maxAttempts) await this.#sleep(this.#retryDelayMs * 2 ** (attempt - 1));
       }
     }
-    if (subscriber.stopped) return;
+    if (subscriber.stopped) throw new ConsumerNotReadyError([]);
     try {
       subscriber.onPoison?.(batch, lastError);
     } catch {

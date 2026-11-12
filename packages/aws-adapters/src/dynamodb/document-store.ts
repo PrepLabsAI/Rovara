@@ -56,7 +56,7 @@ import {
   type UpdateRequest,
   type WriteResult,
 } from "@agentx/contracts";
-import { assertWellFormedText, fromWireItem, hasLoneSurrogate, toWireItem, type WireItem } from "./attribute-values.js";
+import { UnrepresentableValueError, assertCloudReadableNumbers, assertWellFormedText, fromWireItem, hasLoneSurrogate, toWireItem, type WireItem } from "./attribute-values.js";
 import { ExpressionBuilder } from "./expressions.js";
 
 /** The commands this adapter sends. */
@@ -83,6 +83,17 @@ export interface DynamoDocumentStoreOptions {
   /** Waits between retries; the first wait is about this long and each doubles, with jitter. Default 25 ms. */
   retryBaseMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Refuse to write a number whose size is past 2^53 - 1 (`invalid_request`), because the hosted broker's document client cannot read
+   * one back as a number. Default true. The port's own range is wider (to 9.99e125); false allows it, for a table only this store reads.
+   * An `add` that carries a stored number past the line is not caught here (the store does not read before it writes).
+   */
+  cloudReadableNumbers?: boolean;
+  /**
+   * Told about a stored item the port cannot represent (a set or bytes, decision 60), which a query page or a `getMany` then leaves out.
+   * Default: one JSON line on standard error naming the key. A `get` of such an item throws `UnrepresentableValueError` instead.
+   */
+  onUnreadable?: (key: DocumentKey, error: UnrepresentableValueError) => void;
 }
 
 const invalid = (message: string): DocumentStoreError => new DocumentStoreError("invalid_request", message);
@@ -112,16 +123,19 @@ function assertKeyText(key: DocumentKey): void {
   if (hasLoneSurrogate(key.pk) || hasLoneSurrogate(key.sk)) throw invalid("a key holds an unpaired surrogate, which DynamoDB cannot store");
 }
 
-function assertDocument(document: StoredDocument, indexes: readonly IndexDefinition[]): void {
+function assertDocument(document: StoredDocument, indexes: readonly IndexDefinition[], cloudNumbers: boolean): void {
   assertValidDocument(document);
+  if (cloudNumbers) assertCloudReadableNumbers(document, "the document");
   assertKeyText(document);
   assertWellFormedText(document, "the document");
   assertValidIndexAttributes(indexes, document);
 }
 
-function assertOps(ops: readonly UpdateOp[], indexes: readonly IndexDefinition[]): void {
+function assertOps(ops: readonly UpdateOp[], indexes: readonly IndexDefinition[], cloudNumbers: boolean): void {
   assertValidOps(ops);
   for (const op of ops) {
+    if (cloudNumbers && (op.op === "set" || op.op === "setIfAbsent")) assertCloudReadableNumbers(op.value, "the new value");
+    if (cloudNumbers && op.op === "add") assertCloudReadableNumbers(op.amount, "the amount");
     if (op.op === "set" || op.op === "setIfAbsent") assertWellFormedText(op.value, "the new value");
     for (const part of op.path) if (hasLoneSurrogate(part)) throw invalid("a path holds an unpaired surrogate");
     // A top-level index attribute must keep its type; DynamoDB refuses the write too, and checking here names the attribute. (`setIfAbsent`
@@ -198,6 +212,8 @@ export class DynamoDocumentStore implements DocumentStore {
   readonly #unprocessedAttempts: number;
   readonly #retryBaseMs: number;
   readonly #sleep: (ms: number) => Promise<void>;
+  readonly #cloudNumbers: boolean;
+  readonly #onUnreadable: (key: DocumentKey, error: UnrepresentableValueError) => void;
 
   constructor(options: DynamoDocumentStoreOptions) {
     if (typeof options.tableName !== "string" || options.tableName === "") throw invalid("tableName is the DynamoDB table's name");
@@ -216,6 +232,8 @@ export class DynamoDocumentStore implements DocumentStore {
     this.#unprocessedAttempts = Math.max(1, options.unprocessedAttempts ?? 8);
     this.#retryBaseMs = Math.max(0, options.retryBaseMs ?? 25);
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.#cloudNumbers = options.cloudReadableNumbers ?? true;
+    this.#onUnreadable = options.onUnreadable ?? ((key, error) => console.error(JSON.stringify({ component: "dynamodb-document-store", event: "unreadable_item", pk: key.pk, sk: key.sk, found: error.found })));
   }
 
   async get(key: DocumentKey): Promise<StoredDocument | undefined> {
@@ -236,8 +254,8 @@ export class DynamoDocumentStore implements DocumentStore {
       if (round > 0) await this.#backoff(round);
       const output = await this.#send<BatchGetItemCommandOutput>(new BatchGetItemCommand({ RequestItems: { [this.#table]: { Keys: pending, ConsistentRead: true } } }), "getMany");
       for (const item of output.Responses?.[this.#table] ?? []) {
-        const document = fromWireItem(item);
-        found.set(`${document.pk}\u0000${document.sk}`, document);
+        const document = this.#readable(item);
+        if (document !== undefined) found.set(`${document.pk}\u0000${document.sk}`, document);
       }
       pending = output.UnprocessedKeys?.[this.#table]?.Keys ?? [];
     }
@@ -245,7 +263,7 @@ export class DynamoDocumentStore implements DocumentStore {
   }
 
   async put(request: PutRequest): Promise<WriteResult> {
-    assertDocument(request.item, this.indexes);
+    assertDocument(request.item, this.indexes, this.#cloudNumbers);
     assertConditionText(request.condition);
     const builder = new ExpressionBuilder();
     const condition = request.condition === undefined ? undefined : builder.condition(request.condition);
@@ -263,7 +281,7 @@ export class DynamoDocumentStore implements DocumentStore {
 
   async update(request: UpdateRequest): Promise<WriteResult> {
     assertKeyText(request.key);
-    assertOps(request.ops, this.indexes);
+    assertOps(request.ops, this.indexes, this.#cloudNumbers);
     assertConditionText(request.condition);
     const builder = new ExpressionBuilder();
     const update = builder.update(request.ops);
@@ -370,14 +388,14 @@ export class DynamoDocumentStore implements DocumentStore {
       const builder = new ExpressionBuilder();
       switch (item.kind) {
         case "put": {
-          assertDocument(item.item, this.indexes);
+          assertDocument(item.item, this.indexes, this.#cloudNumbers);
           assertConditionText(item.condition);
           const condition = item.condition === undefined ? undefined : builder.condition(item.condition);
           return { Put: { TableName: this.#table, Item: toWireItem(item.item), ...(condition === undefined ? {} : { ConditionExpression: condition }), ...builder.placeholders() } };
         }
         case "update": {
           assertKeyText(item.key);
-          assertOps(item.ops, this.indexes);
+          assertOps(item.ops, this.indexes, this.#cloudNumbers);
           assertConditionText(item.condition);
           const update = builder.update(item.ops);
           const condition = item.condition === undefined ? undefined : builder.condition(item.condition);
@@ -431,9 +449,24 @@ export class DynamoDocumentStore implements DocumentStore {
   // ---- helpers ----
 
   #page(output: QueryOutputShape, scope: string): QueryPage {
-    const items = (output.Items ?? []).map(fromWireItem);
+    const items = (output.Items ?? []).flatMap((item) => { const document = this.#readable(item); return document === undefined ? [] : [document]; });
     const cursor = encodeCursor(scope, output.LastEvaluatedKey);
     return cursor === undefined ? { items } : { items, cursor };
+  }
+
+  /** The item as a document, or undefined (reported) when it holds what the port cannot represent. */
+  #readable(item: WireItem): StoredDocument | undefined {
+    try {
+      return fromWireItem(item);
+    } catch (error) {
+      if (!(error instanceof UnrepresentableValueError) || item.pk?.S === undefined || item.sk?.S === undefined) throw error;
+      try {
+        this.#onUnreadable({ pk: item.pk.S, sk: item.sk.S }, error);
+      } catch {
+        // A failing report does not fail the read.
+      }
+      return undefined;
+    }
   }
 
   async #send<T>(command: DynamoDbCommand, operation: string): Promise<T> {

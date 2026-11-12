@@ -98,10 +98,20 @@ document's attributes are the item's attributes in the form the hosted broker's 
 and the adapter adds no attribute of its own. `STATE_TABLE_INDEXES` names the table's four indexes; `outbox-pending` is listed apart as
 planned (adding it is a hosted deployment change, not made here). Conditions and updates become placeholder-only expressions (`add` is
 `SET p = if_not_exists(p, 0) + n`); single reads and table queries are strongly consistent; a lost transaction race is retried (4 attempts,
-a new client token each) and then `conflict`. A stored set or binary value is refused on read (`invalid_request`, decision 60). The change feed
-(`DynamoStreamChangeFeed`) adds no stream reader: the host's existing reader passes each batch of stream records to `deliver`, which hands
-it to the consumers declared for that process, retries a failing handler 3 times, then calls `onPoison`; a time-to-live removal is
-`cause: "expired"`. The durable checkpoint per consumer is the event source mapping's. The plug-in `@rovara/aws-adapters/dynamodb`
+a new client token each) and then `conflict`. By default it refuses to write a number past 2^53 - 1 (`invalid_request`), because the hosted
+broker's document client reads one as a BigInt or throws; `cloudReadableNumbers: false` allows the port's full range (the conformance suite
+runs that way, since it pins `1e125`). The change feed (`DynamoStreamChangeFeed`) adds no stream reader: the host's existing reader passes each
+batch of stream records to `deliver`, which hands it to the consumers declared for that process, retries a failing handler 3 times, then calls
+`onPoison`; a time-to-live removal is `cause: "expired"`. The checkpoint is the event source mapping's and is shared by the reader's consumers,
+so `deliver` refuses a batch (the mapping hands it over again) while any declared consumer is not subscribed, or when one stops during it.
+
+Rulings (controller review of lane A1, 2026-11-11):
+- **Sets and binary values stay refused on read until the D3 migration** (decision 60). A `get` throws `UnrepresentableValueError`; a query
+  page or `getMany` leaves the row out and reports its key (`onUnreadable`). Before Cloud cuts over to this store, a one-off scan must prove
+  the State table holds no `SS`, `NS`, `BS` or `B` attribute.
+- **The port's size cap stays 400 KiB of compact JSON.** DynamoDB measures size its own way (about 3 bytes per one-digit number in a list,
+  3 bytes per empty map), so it may refuse some documents under the cap, such as number-dense lists. Such a refusal is `invalid_request`
+  (a conformance case pins this for every store). The plug-in `@rovara/aws-adapters/dynamodb`
 (settings `tableName`, `region`, `endpoint`, `indexes`, `ttlAttribute`) builds the store without a feed. The suite runs against
 `tests/support/ports/dynamodb-fake.ts`, an in-memory DynamoDB that parses the real expressions; it is not yet run against DynamoDB Local.
 
