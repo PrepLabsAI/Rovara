@@ -4,12 +4,16 @@ import type { GetObjectCommand } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
 import { EVIDENCE_ARTIFACT_RETENTION, ObjectConflictError, ObjectKeyError, ObjectMetaError, ObjectTooBigError } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
-import { S3ObjectStorage, S3ObjectStorageError, S3_METADATA_MAX_BYTES, S3_RETENTION_TAG_KEY, s3ExpiryOf, s3RetentionTagging, type S3ObjectClient } from "../../packages/aws-adapters/src/s3/index.js";
+import { S3ObjectStorage, S3ObjectStorageError, S3_METADATA_MAX_BYTES, s3ExpiryOf, s3RetentionTagging, type S3ObjectClient, type S3RetentionTag } from "../../packages/aws-adapters/src/s3/index.js";
 import { S3ObjectStorageSettingsSchema, s3ObjectStoragePlugin } from "../../packages/broker/src/plugins/object-storage/s3/plugin.js";
 import { awsError, FakeS3, lifecycleExpiry, type FakeLifecycleRule } from "../support/ports/aws-fakes.js";
 import { runObjectStorageConformance } from "../support/ports/object-storage-conformance.js";
 
 const DAY = 86_400_000;
+/** The tag key the hosted bucket's rules read, as the hosted deployment would pass it in its settings (the adapter names none itself). */
+const S3_RETENTION_TAG_KEY = ["rovara", "retention"].join("-");
+/** The hosted deployment's map: each class it expires, written with the tag its rule reads. */
+const HOSTED_TAGS: Record<string, S3RetentionTag> = Object.fromEntries(["evidence-short", "evidence-std", "e2e-screenshot"].map((retention) => [retention, { key: S3_RETENTION_TAG_KEY, value: retention }]));
 const BUCKET = "rovara-artifacts-test";
 /** The hosted product's lifecycle rules on its artifacts bucket (infra control-plane): by tag, evidence also by the `private/` prefix, nightly maps by prefix. */
 const HOSTED_RULES: FakeLifecycleRule[] = [
@@ -24,7 +28,7 @@ const SUITE_RULES: FakeLifecycleRule[] = [{ id: "ExpireEvidenceStd", tag: { key:
 function world(options: { rules?: FakeLifecycleRule[]; maxObjectBytes?: number; owner?: string } = {}) {
   let now = Date.parse("2026-11-09T10:00:00.000Z");
   const s3 = new FakeS3({ bucket: BUCKET, rules: options.rules ?? HOSTED_RULES, now: () => now, ...(options.owner === undefined ? {} : { owner: options.owner }) });
-  const store = new S3ObjectStorage({ client: s3, bucket: BUCKET, now: () => now, ...(options.maxObjectBytes === undefined ? {} : { maxObjectBytes: options.maxObjectBytes }) });
+  const store = new S3ObjectStorage({ client: s3, bucket: BUCKET, now: () => now, retentionTags: HOSTED_TAGS, ...(options.maxObjectBytes === undefined ? {} : { maxObjectBytes: options.maxObjectBytes }) });
   return { s3, store, advance: (ms: number) => { now += ms; } };
 }
 
@@ -54,8 +58,25 @@ describe("S3 object storage: the hosted layout", () => {
     expect(await store.stat(key)).toEqual({ bytes: 3, metadata: { sha256: "a".repeat(64), kind: "log_txt" } });
   });
 
-  it("tags every evidence kind with the class the hosted store uses for it", () => {
-    for (const retention of new Set(Object.values(EVIDENCE_ARTIFACT_RETENTION))) expect(s3RetentionTagging(retention)).toBe(`rovara-retention=${retention}`);
+  it("tags every evidence kind the hosted map names with the tag its rule reads", () => {
+    for (const retention of new Set(Object.values(EVIDENCE_ARTIFACT_RETENTION))) {
+      expect(s3RetentionTagging(retention, HOSTED_TAGS)).toBe(retention in HOSTED_TAGS ? `rovara-retention=${retention}` : undefined);
+    }
+  });
+
+  it("names no tag of its own: without a map, or for a class the map does not name, an object is written untagged (and kept)", async () => {
+    const s3 = new FakeS3({ bucket: BUCKET, rules: HOSTED_RULES });
+    const bare = new S3ObjectStorage({ client: s3, bucket: BUCKET });
+    await bare.put("private/o/w/evidence/t/s", new Uint8Array([1]), { contentType: "image/jpeg", metadata: {}, retention: "e2e-screenshot" });
+    expect(s3.tagsOf("private/o/w/evidence/t/s")).toEqual({});
+    expect(s3.calls.find((call) => call.command === "PutObjectCommand")!.input).not.toHaveProperty("Tagging");
+    const mapped = new S3ObjectStorage({ client: s3, bucket: BUCKET, retentionTags: { "evidence-std": { key: "k", value: "v" } } });
+    await mapped.put("a", new Uint8Array([1]), { contentType: "a/b", metadata: {}, retention: "e2e-screenshot" });
+    await mapped.put("b", new Uint8Array([1]), { contentType: "a/b", metadata: {}, retention: "evidence-std" });
+    expect(s3.tagsOf("a")).toEqual({});
+    expect(s3.tagsOf("b")).toEqual({ k: "v" });
+    expect(() => new S3ObjectStorage({ client: s3, bucket: BUCKET, retentionTags: { "evidence-std": { key: "bad key", value: "v" } } })).toThrow(S3ObjectStorageError);
+    expect(s3RetentionTagging("toString", {})).toBeUndefined();
   });
 
   it("leaves the lifetime to the bucket's rules: evidence-short ends after 14 days, evidence-std after 30, an unknown class never", async () => {
@@ -183,10 +204,10 @@ describe("S3 object storage: the plug-in", () => {
     expect(S3ObjectStorageSettingsSchema.safeParse({ bucket: "Bad_Bucket", region: "us-west-2", profile: "p" }).success).toBe(false);
     const s3 = new FakeS3({ bucket: BUCKET });
     const registry = createAdapterRegistry();
-    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "object-storage", name: "s3", module: "@agentx/broker/plugins/object-storage-s3", settings: { bucket: BUCKET, region: "us-west-2", profile: "rovara-objects", maxObjectMiB: 1 } }] }), { registry, importModule: importer(s3) });
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "object-storage", name: "s3", module: "@agentx/broker/plugins/object-storage-s3", settings: { bucket: BUCKET, region: "us-west-2", profile: "rovara-objects", maxObjectMiB: 1, retentionTags: { "evidence-std": { key: "expiry", value: "std" } } } }] }), { registry, importModule: importer(s3) });
     const store = registry.require("object-storage");
     await store.put("k", new Uint8Array([7]), { contentType: "a/b", metadata: {}, retention: "evidence-std" });
-    expect(s3.objects.has("k")).toBe(true);
+    expect(s3.tagsOf("k")).toEqual({ expiry: "std" });
     await expect(store.put("big", new Uint8Array(1_048_577), { contentType: "a/b", metadata: {}, retention: "r" })).rejects.toBeInstanceOf(ObjectTooBigError);
   });
 

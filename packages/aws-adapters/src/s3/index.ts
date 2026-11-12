@@ -4,19 +4,19 @@
 // The layout, unchanged from the hosted evidence store (`aws/evidence-artifacts.ts` there):
 //   - the key is the caller's key, as it is (`private/<owner>/<workspace>/evidence/<task>/<sha256>`); no prefix is added;
 //   - the metadata is the object's S3 user metadata (`x-amz-meta-<name>`; the evidence store writes `sha256` and `kind`);
-//   - the retention class is the object tag `rovara-retention=<class>` on every write. The bucket's lifecycle rules expire by that tag (`evidence-short`, `evidence-std`, `e2e-screenshot`);
-//     a class no rule names is kept until it is deleted, which is the port's rule for an unknown class. The adapter never sets a lifetime itself: the bucket's rules are the one place it is decided.
+//   - a retention class becomes an object tag ONLY when the deployment's settings map that class to a tag (`retentionTags`: class -> { key, value }); the bucket's lifecycle rules expire
+//     by those tags. The adapter names no tag itself, so no object can carry an expiry tag by accident (in particular the screenshot tag, which the hosted deployment maps from its one
+//     class). A class the settings do not map gets no tag and is kept until it is deleted (the port's rule for an unknown class). The hosted deployment passes its own map, so the objects
+//     it writes carry exactly the tags they carry today. The adapter never sets a lifetime itself: the bucket's rules are the one place it is decided.
 //
 // Write once: a `put` is `If-None-Match: *` (S3 conditional writes), so of several writers racing for a new key exactly one wins and the rest get `ObjectConflictError`. An object whose lifecycle
 // expiry has passed but which S3 has not yet removed (removal runs up to a day or so later) reads as gone, and a put replaces it with `If-Match: <its ETag>`, so that replacement is also one winner.
 // `overwrite: true` is a plain PUT (S3 keeps the last whole object; a reader never sees half of one).
 //
 // Errors never carry S3's own words (they can name the bucket or the key): a refusal is one of the port's errors, and anything else is `S3ObjectStorageError` with a fixed sentence.
-import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, type PutObjectCommandInput } from "@aws-sdk/client-s3";
 import { ObjectConflictError, ObjectMetaError, ObjectTooBigError, assertObjectKey, assertObjectMeta, assertObjectPrefix, type ObjectMeta, type ObjectPutOptions, type ObjectStat, type ObjectStorage } from "@agentx/contracts";
 
-/** The tag key the bucket's lifecycle rules read. The hosted product's `E2E_ARTIFACT_RETENTION_TAG_KEY`. */
-export const S3_RETENTION_TAG_KEY = "rovara-retention";
 /** The largest object one PUT may carry (S3's own limit). */
 export const S3_SINGLE_PUT_MAX_BYTES = 5 * 1_024 * 1_048_576;
 export const S3_OBJECT_DEFAULT_MAX_BYTES = 256 * 1_048_576;
@@ -66,7 +66,21 @@ export interface S3ObjectStorageOptions {
   now?: () => number;
   /** Needed only for `presignGet`. */
   presign?: S3PresignFunction;
+  /**
+   * Which retention classes get an object tag, and which: class -> { key, value }, each an S3 tag (key up to 128, value up to 256 of letters, digits and `+ - = . _ : / @`). Absent or
+   * empty: no object is tagged, so the bucket's tag rules expire nothing this adapter writes.
+   */
+  retentionTags?: Readonly<Record<string, S3RetentionTag>>;
 }
+
+/** The object tag a retention class is written with. */
+export interface S3RetentionTag {
+  key: string;
+  value: string;
+}
+
+const TAG_KEY = /^[A-Za-z0-9+\-=._:/@]{1,128}$/u;
+const TAG_VALUE = /^[A-Za-z0-9+\-=._:/@]{0,256}$/u;
 
 type Output = { ETag?: string; ContentLength?: number; Metadata?: Record<string, string>; Expiration?: string; Body?: { transformToByteArray(): Promise<Uint8Array>; destroy?: () => void } };
 
@@ -91,9 +105,10 @@ export function s3ExpiryOf(expiration: string | undefined): number | undefined {
   return Number.isFinite(at) ? at : undefined;
 }
 
-/** The tag set of a write: the one retention tag, in the URL-encoded form S3 takes. */
-export function s3RetentionTagging(retention: string): string {
-  return `${encodeURIComponent(S3_RETENTION_TAG_KEY)}=${encodeURIComponent(retention)}`;
+/** The tag set of a write in the URL-encoded form S3 takes: the class's mapped tag, or undefined when the settings map no tag for the class. */
+export function s3RetentionTagging(retention: string, tags: Readonly<Record<string, S3RetentionTag>> | undefined): string | undefined {
+  const tag = tags !== undefined && Object.hasOwn(tags, retention) ? tags[retention] : undefined;
+  return tag === undefined ? undefined : `${encodeURIComponent(tag.key)}=${encodeURIComponent(tag.value)}`;
 }
 
 function assertS3Meta(meta: ObjectMeta): void {
@@ -105,7 +120,7 @@ function assertS3Meta(meta: ObjectMeta): void {
     bytes += Buffer.byteLength(name) + Buffer.byteLength(value);
   }
   if (bytes > S3_METADATA_MAX_BYTES) throw new ObjectMetaError("an S3 object's metadata is at most 2 KB");
-  if (!RETENTION_CLASS.test(meta.retention)) throw new ObjectMetaError("a retention class is 1 to 128 letters, digits or + - = . _ : / @ (it is stored as an S3 tag)");
+  if (!RETENTION_CLASS.test(meta.retention)) throw new ObjectMetaError("a retention class is 1 to 128 letters, digits or + - = . _ : / @ (the settings may map it to an S3 tag)");
   if (!METADATA_VALUE.test(meta.contentType)) throw new ObjectMetaError("an object's content type is printable ASCII");
 }
 
@@ -116,6 +131,7 @@ export class S3ObjectStorage implements ObjectStorage {
   readonly #maxBytes: number;
   readonly #now: () => number;
   readonly #presign: S3PresignFunction | undefined;
+  readonly #tags: Readonly<Record<string, S3RetentionTag>>;
 
   constructor(options: S3ObjectStorageOptions) {
     if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/u.test(options.bucket)) throw new S3ObjectStorageError("an S3 bucket name is 3 to 63 lower-case letters, digits, dots and hyphens");
@@ -128,6 +144,12 @@ export class S3ObjectStorage implements ObjectStorage {
     this.#maxBytes = max;
     this.#now = options.now ?? Date.now;
     this.#presign = options.presign;
+    const tags: Record<string, S3RetentionTag> = {};
+    for (const [retention, tag] of Object.entries(options.retentionTags ?? {})) {
+      if (!RETENTION_CLASS.test(retention) || !TAG_KEY.test(tag.key) || !TAG_VALUE.test(tag.value)) throw new S3ObjectStorageError("a retention tag maps a retention class to an S3 tag key and value of plain characters");
+      tags[retention] = { key: tag.key, value: tag.value };
+    }
+    this.#tags = Object.freeze(tags);
   }
 
   #expired(output: Output): boolean {
@@ -143,8 +165,11 @@ export class S3ObjectStorage implements ObjectStorage {
     assertObjectKey(key);
     assertS3Meta(meta);
     if (bytes.byteLength > this.#maxBytes) throw new ObjectTooBigError(bytes.byteLength, this.#maxBytes);
-    const input = {
-      Bucket: this.#bucket, Key: key, Body: bytes, ContentLength: bytes.byteLength, ContentType: meta.contentType, Metadata: { ...meta.metadata }, Tagging: s3RetentionTagging(meta.retention), ...this.#owner,
+    // A tag only for a class the settings map (see the header): this adapter names no tag of its own.
+    const tagging = s3RetentionTagging(meta.retention, this.#tags);
+    const input: PutObjectCommandInput = {
+      Bucket: this.#bucket, Key: key, Body: bytes, ContentLength: bytes.byteLength, ContentType: meta.contentType, Metadata: { ...meta.metadata }, ...this.#owner,
+      ...(tagging === undefined ? {} : { Tagging: tagging }),
     };
     if (options?.overwrite === true) {
       try { await this.#send(new PutObjectCommand(input)); } catch { throw unavailable("store the object"); }
