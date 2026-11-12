@@ -40,10 +40,12 @@ export interface SessionMembers {
   chainReadAccess?(person: SessionPerson, session: AgentSessionRecord): Promise<boolean>;
 }
 
-/** A Code install's members: the local owner (a principal with the `owner` role of the install's company) is the company's owner and a maintainer of every project; nobody else is a member. */
+/**
+ * A Code install's members: the local owner (a principal with the `owner` role of the install's company) is the company's owner and a maintainer of every project; nobody else is a member. The `owner` role is
+ * trusted because on a Code install only the Identity seam's `localOwnerPrincipal` carries it (a code-host approver's principal carries `collaborator`), and a follower's re-check, which has no principal, finds no one.
+ */
 export function localOwnerMembers(): SessionMembers {
-  const isOwner = (person: SessionPerson): boolean => person.principal !== undefined && person.principal.companyId === person.companyId && person.principal.roles.includes("owner")
-    && developerIdOf(person.principal) === person.developerId;
+  const isOwner = (person: SessionPerson): boolean => person.principal !== undefined && person.principal.companyId === person.companyId && person.principal.roles.includes("owner");
   return {
     companyRole: (person) => (isOwner(person) ? "owner" : undefined),
     projectGrant: (person) => (isOwner(person) ? "maintainer" : undefined),
@@ -155,7 +157,11 @@ function effectiveOwnerOf(session: AgentSessionRecord, task: Item | undefined): 
 
 // ---- the level
 
-interface Computed { level: "none" | SessionLevel; owner: boolean; effectiveOwner: { developerId: string; name: string }; projectRole: SessionProjectRole | undefined; orgAdmin: boolean; denied: boolean }
+interface Computed {
+  level: "none" | SessionLevel; owner: boolean; effectiveOwner: { developerId: string; name: string }; projectRole: SessionProjectRole | undefined; orgAdmin: boolean; denied: boolean;
+  /** The project role a person really holds (a grant, or a role found elsewhere), never the maintainership a company owner or admin is given: the only role that opens Ask at `view`. */
+  heldRole: SessionProjectRole | undefined;
+}
 
 async function compute(deps: SessionAccessDependencies, person: SessionPerson, companyRole: SessionCompanyRole, session: AgentSessionRecord, options: SessionAccessOptions): Promise<Computed> {
   const readOnly = options.readOnlyPath === true;
@@ -228,7 +234,7 @@ async function compute(deps: SessionAccessDependencies, person: SessionPerson, c
   if (!owner && projectRole === "viewer" && RANK[level] > RANK.view) level = "view";
   // An auditor reads and works on nothing, whatever it owns or is shared.
   if (!isWriterRole(companyRole) && RANK[level] > RANK.view) level = "view";
-  return { level, owner, effectiveOwner, projectRole, orgAdmin, denied };
+  return { level, owner, effectiveOwner, projectRole, orgAdmin, denied, heldRole: isAdmin ? grantRole : projectRole };
 }
 
 /** Whether the computed access may ask about the session (decisions 103, 104). */
@@ -236,7 +242,8 @@ function mayAskOf(session: AgentSessionRecord, companyRole: SessionCompanyRole, 
   if (session.subject.kind !== "task" || computed.level === "none" || computed.denied || !isWriterRole(companyRole)) return false;
   // (A project viewer who is not the owner is held to `view` above, and `viewer` is no asking role, so they never ask.)
   if (atLeast(computed.level, "use")) return true;
-  return computed.projectRole !== undefined && ASKING_ROLES.has(computed.projectRole);
+  // At `view`, only a project role the person really holds opens Ask; a company owner's or admin's maintainership does not (they ask with `use`, as anyone does).
+  return computed.heldRole !== undefined && ASKING_ROLES.has(computed.heldRole);
 }
 
 function finish(session: AgentSessionRecord, companyRole: SessionCompanyRole, computed: Computed): SessionAccess {

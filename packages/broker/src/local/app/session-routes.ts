@@ -30,7 +30,7 @@ const SESSIONS = /^\/v1\/app\/sessions(?:\/([A-Za-z0-9_-]{1,100})(?:\/(stop|retr
 /** `POST /v1/app/sessions/<id>/ask` asks about a task; `GET /v1/app/sessions/<id>/asks/<askId>` reads it back, for the person who asked. */
 const ASK_PATH = /^\/v1\/app\/sessions\/([A-Za-z0-9_-]{1,100})\/(?:ask|asks\/(ask_[0-9a-z]{20}))$/u;
 
-const STATUS_OF_REFUSAL: Record<string, number> = { not_found: 404, forbidden: 403, ended: 409, unavailable: 409, nothing_to_retry: 409, invalid: 400, request_id_reused: 409 };
+const STATUS_OF_REFUSAL: Record<string, number> = { not_found: 404, forbidden: 403, task_access_denied: 403, ended: 409, unavailable: 409, nothing_to_retry: 409, invalid: 400, request_id_reused: 409 };
 
 export interface SessionRoutesDeps {
   flow: TaskFlow;
@@ -63,9 +63,10 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   const control = createLocalSessionControl(flow.deps, { members: deps.members });
   const access = createSessionAccess({ store, members: deps.members });
   const followerDeps = { store, members: deps.members, ...(flow.deps.now === undefined ? {} : { now: flow.deps.now }) };
-  const tile = (session: AgentSessionRecord): Record<string, unknown> => JSON.parse(JSON.stringify({
+  /** A row of the list, with the person's own level on that session. */
+  const tile = (session: AgentSessionRecord, level: string): Record<string, unknown> => JSON.parse(JSON.stringify({
     contractVersion: AGENT_SESSION_CONTRACT_VERSION, sessionId: session.sessionId, kind: session.kind, title: session.title, project: session.project, agent: session.agent, owner: session.owner,
-    where: session.where, level: "edit", revision: session.revision, summary: session.summary, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
+    where: session.where, level, revision: session.revision, summary: session.summary, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
   })) as Record<string, unknown>;
 
   /** What the person may do, for the session's header (the hosted product's `sessionActionsFor`): `view` watches, `use` also steers, `edit` also stops and retries; a company admin may stop; close is the owner's. */
@@ -100,7 +101,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   };
 
   const refused = (result: Extract<ControlResult, { status: "refused" }>): BrokerResponse =>
-    json(STATUS_OF_REFUSAL[result.reason] ?? 400, { error: { code: result.reason === "not_found" ? "NOT_FOUND" : result.reason === "forbidden" ? "SESSION_LEVEL_REQUIRED" : "CONFIG_INVALID", message: result.message } });
+    json(STATUS_OF_REFUSAL[result.reason] ?? 400, { error: { code: result.reason === "not_found" ? "NOT_FOUND" : result.reason === "forbidden" ? "SESSION_LEVEL_REQUIRED" : result.reason === "task_access_denied" ? "TASK_ACCESS_DENIED" : "CONFIG_INVALID", message: result.message } });
 
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
@@ -133,7 +134,13 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
           ...(Number.isInteger(limit) && limit > 0 ? { limit } : {}), ...(query.get("cursor") === null ? {} : { cursor: query.get("cursor")! }),
           ...(status === "open" || status === "needs_me" || status === "failed" ? { filter: status } : {}),
         });
-        return json(200, { sessions: listed.sessions.map(tile), ...(listed.cursor === undefined ? {} : { next: listed.cursor }) });
+        // Each row carries the person's real level on it; a row they hold no level on (a share taken back, a denial) is left out.
+        const rows: Array<Record<string, unknown>> = [];
+        for (const row of listed.sessions) {
+          const level = await access.levelOf({ companyId: caller.principal.companyId, developerId: developerIdOf(caller.principal), principal: caller.principal }, row, {});
+          if (level !== "none") rows.push(tile(row, level));
+        }
+        return json(200, { sessions: rows, ...(listed.cursor === undefined ? {} : { next: listed.cursor }) });
       }
       if (sessionId === undefined || !SessionIdSchema.safeParse(sessionId).success) throw agentXError("NOT_FOUND", "There is no such session.");
       const session = await sessions.get(orgId, sessionId);

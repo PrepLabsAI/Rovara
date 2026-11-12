@@ -91,6 +91,20 @@ describe("the session levels", () => {
     expect(await levelOf(w.store, { aud: { role: "auditor", grants: { web: "maintainer" } } }, person("aud"))).toMatchObject({ level: "view", mayAsk: false });
   });
 
+  it("Ask at view comes only from a project role the person really holds: a company owner or admin with no grant, or with a viewer grant, may not ask; with a working grant or `use` they may", async () => {
+    const w = await world();
+    expect(await levelOf(w.store, { ada: { role: "admin" } }, person("ada"))).toMatchObject({ level: "view", orgAdmin: true, mayAsk: false });
+    expect(await levelOf(w.store, { ada: { role: "admin", grants: { web: "viewer" } } }, person("ada"))).toMatchObject({ level: "view", orgAdmin: true, mayAsk: false });
+    expect(await levelOf(w.store, { oli: { role: "owner" } }, person("oli"))).toMatchObject({ level: "view", mayAsk: false });
+    expect(await levelOf(w.store, { ada: { role: "admin", grants: { web: "contributor" } } }, person("ada"))).toMatchObject({ level: "view", mayAsk: true });
+    const shared = await world({ shares: [{ principal: { kind: "member", developerId: id(person("ada")) }, level: "use" }] });
+    expect(await levelOf(shared.store, { ada: { role: "admin" } }, person("ada"))).toMatchObject({ level: "use", mayAsk: true });
+    // And an admin still stops at view.
+    const admin = await createSessionAccess({ store: w.store, members: members({ ada: { role: "admin" } }) }).of(person("ada"), await w.session());
+    expect(() => requireLevelOf(admin, "edit", "stop it", { orgAdminMay: true })).not.toThrow();
+    expect(() => requireAsk(admin)).toThrow(`SESSION_LEVEL_REQUIRED: ${ASK_NOT_ALLOWED_TEXT}`);
+  });
+
   it("shares: to a person, to a project the person has a role on, to the company; a project share never reaches an admin who is not in the project", async () => {
     const w = await world({ shares: [{ principal: { kind: "member", developerId: id(person("pat")) }, level: "use" }, { principal: { kind: "project", project: "api" }, level: "view" }] });
     expect(await levelOf(w.store, { pat: { role: "member" } }, person("pat"))).toMatchObject({ level: "use", mayAsk: true });
@@ -161,6 +175,12 @@ describe("what each feature asks of the levels", () => {
     expect(await w.control.tell(OWNER, ORG, SESSION, { requestId: REQ(5), text: "use the other table" })).toMatchObject({ status: "done" });
     expect(w.plans[1]).toEqual({ owner: true, developerId: id(OWNER) });
     expect(w.plans).toHaveLength(2);
+  });
+
+  it("a task whose taker does not read refuses every action with its own reason, never as a level", async () => {
+    const w = await world({ task: { currentOwner: { developerId: "x", provider: "carrier-pigeon", since: T0 } } });
+    const control = createSessionControl({ store: w.store, audit: createNoopAuditSink(), host: { cancelTask: async () => undefined, retryWorkflow: async () => undefined }, now: () => new Date(clock.ms), log: () => undefined });
+    expect(await control.stop(OWNER, ORG, SESSION, { requestId: REQ(30) })).toEqual({ status: "refused", reason: "task_access_denied", message: "Rovara can't tell who owns this task right now, so it did nothing." });
   });
 
   it("stop needs edit, and a company admin may stop; retry and close need edit; nothing reaches the task for a person short of the level", async () => {
