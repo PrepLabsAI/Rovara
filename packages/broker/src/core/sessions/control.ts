@@ -2,8 +2,9 @@
 // control host (lane L6a fills it: the task's own cancel, its workflow retry, its notes and live steer), after this module checked who is asking. The request is recorded once under its request id, with the
 // event and the audit steps, in ONE transaction, so a repeat answers what was answered and writes nothing.
 //
-// Who may act: the company's owner (on a Code install that is the session's owner too: it has one). A Code install has one owner; an adapter for a company with members supplies `authorize` (it is the seam the hosted product's session levels plug into). The caller is a
-// `Principal` the surface already authenticated through the Identity seam; nothing here believes an id it is handed.
+// Who may act: the hosted product's session levels (`access.ts`): a message to the agent needs `use`; stop, retry and close need `edit` (a company owner or admin may stop). On a Code install the local owner holds
+// `edit` on every session and nobody else holds anything; a company's members come in through `members`. A person with no level reads a missing session; a person short of the level reads what they need. The caller
+// is a `Principal` the surface already authenticated through the Identity seam; nothing here believes an id it is handed.
 //
 // What a message to the agent is: information for the model, never an instruction that can decide an approval, change a tool or a budget. It is stored as the session's message with its fate
 // (`queued`, `delivered`, `not_delivered`), and its text is in no log line and no event.
@@ -12,6 +13,7 @@ import {
   INDEX_EXPIRY_ATTRIBUTE, SESSION_ENDED_MESSAGE, SESSION_MESSAGE_MAX_CHARS, SessionMessageSchema, agentSessionKey, cleanSessionName, redactText, sessionEventId, when,
   type AgentSessionRecord, type AuditSink, type DocumentStore, type IdentityProvider, type OrgId, type PresentedCredential, type Principal, type SessionEvent, type SessionId, type SessionMessage, type TransactItem,
 } from "@agentx/contracts";
+import { createSessionAccess, requireLevelOf, type SessionAccess, type SessionMembers } from "./access.js";
 import { developerIdOf } from "./create.js";
 import { answerMessage, queuedSteersItem } from "./steer.js";
 import { SessionStore, jsonOf, sessionEventItem } from "./store.js";
@@ -57,7 +59,9 @@ export interface ControlDependencies {
   host?: SessionControlHost | undefined;
   /** Needed to act with a raw credential (`{ credential }`) instead of a principal the surface already authenticated. */
   identity?: IdentityProvider | undefined;
-  /** Whether this person may act on this session. Default: the company's owner. */
+  /** Where the company's people come from for the session levels. Default: the local owner alone. */
+  members?: SessionMembers | undefined;
+  /** Replaces the session levels with a yes or no of its own (a test, or an adapter with its own rules). A no reads as a missing session. */
   authorize?: (principal: Principal, session: AgentSessionRecord, action: "stop" | "retry" | "tell" | "close") => boolean | Promise<boolean>;
   /** Recomputes the session's summary after the action (the sweep does it anyway). A failure is logged, never thrown. */
   refresh?: (orgId: OrgId, sessionId: SessionId) => Promise<unknown>;
@@ -105,6 +109,7 @@ export function createSessionControl(deps: ControlDependencies) {
   const sessions = new SessionStore(deps.store);
   const now = deps.now ?? (() => new Date());
   const log = deps.log ?? ((entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...entry })));
+  const access = createSessionAccess({ store: deps.store, members: deps.members });
 
   /** The principal behind the actor: a principal as given, or the one the Identity seam vouches for. A credential it does not know is a missing session to the caller. */
   async function principalOf(actor: ControlActor): Promise<Principal | undefined> {
@@ -114,15 +119,28 @@ export function createSessionControl(deps: ControlDependencies) {
     return result.ok ? result.principal : undefined;
   }
 
-  /** The session the person may act on, or the refusal. A session of another company reads as absent. */
-  async function open(principal: Principal, orgId: OrgId, sessionId: SessionId, action: "stop" | "retry" | "tell" | "close"): Promise<{ session: AgentSessionRecord } | ReturnType<typeof refuse>> {
+  /** The session the person may act on (with their access when the session levels judged it), or the refusal. A session of another company reads as absent. */
+  async function open(principal: Principal, orgId: OrgId, sessionId: SessionId, action: "stop" | "retry" | "tell" | "close"): Promise<{ session: AgentSessionRecord; access?: SessionAccess } | ReturnType<typeof refuse>> {
     if (principal.companyId !== orgId) return refuse("not_found", "There is no such session.");
     const session = await sessions.get(orgId, sessionId);
     if (session === undefined) return refuse("not_found", "There is no such session.");
-    const allowed = deps.authorize === undefined ? principal.roles.includes("owner") : await deps.authorize(principal, session, action);
-    // A person who may not act reads the answer a missing session gets, so a session id tells them nothing.
-    if (!allowed) return refuse("not_found", "There is no such session.");
-    return { session };
+    if (deps.authorize !== undefined) {
+      // A person who may not act reads the answer a missing session gets, so a session id tells them nothing.
+      return (await deps.authorize(principal, session, action)) ? { session } : refuse("not_found", "There is no such session.");
+    }
+    try {
+      const found = await access.of(principal, session);
+      const judged = action === "tell" ? requireLevelOf(found, "use", "send messages to the agent")
+        : action === "stop" ? requireLevelOf(found, "edit", "stop it", { orgAdminMay: true })
+          : requireLevelOf(found, "edit", action === "retry" ? "retry it" : "close it");
+      return { session, access: judged };
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      // No level at all reads as a missing session; a level short of the action says what is needed (the hosted product's SESSION_LEVEL_REQUIRED), and so does a task whose owner cannot be read.
+      if (code === "SESSION_LEVEL_REQUIRED" || code === "TASK_ACCESS_DENIED") return refuse("forbidden", messageOf(error));
+      if (code === "NOT_FOUND") return refuse("not_found", "There is no such session.");
+      throw error;
+    }
   }
 
   async function afterControl(session: AgentSessionRecord): Promise<void> {
@@ -231,6 +249,8 @@ export function createSessionControl(deps: ControlDependencies) {
       const found = await open(principal, orgId, sessionId, "tell");
       if ("status" in found) return found;
       const { session } = found;
+      // Whether the sender is the task's effective owner (the taker once it was taken over): only their message is an instruction inside the approved plan; anyone else's is information.
+      const senderIsOwner = found.access !== undefined ? found.access.owner : session.owner.developerId === developerIdOf(principal);
       const messageId = `msg_${sha(`${session.sessionId}\u0000${input.requestId}`).slice(0, 20)}`;
       const key = agentSessionKey(session.orgId, session.sessionId, `MESSAGE#${messageId}`);
       const prior = await deps.store.get(key);
@@ -250,7 +270,7 @@ export function createSessionControl(deps: ControlDependencies) {
         const at = now().toISOString();
         // A host with notes plans the message (its items join the message's transaction); any other host answers where it went.
         const plan: MessagePlan = host.planMessage !== undefined
-          ? await host.planMessage(taskId, { messageId, text, sessionId: session.sessionId, author, owner: session.owner.developerId === author.developerId })
+          ? await host.planMessage(taskId, { messageId, text, sessionId: session.sessionId, author, owner: senderIsOwner })
           : await host.deliverMessage!(taskId, { messageId, text });
         const message: SessionMessage = SessionMessageSchema.parse({
           messageId, sessionId: session.sessionId, kind: "steer", source: "app", author, text, createdAt: at, rev: 1,
@@ -280,6 +300,13 @@ export function createSessionControl(deps: ControlDependencies) {
       return refuse("unavailable", "That message could not be saved just now. Try again.");
     },
   };
+}
+
+/** An AgentXError's own message (without its code), else a fixed sentence. */
+function messageOf(error: unknown): string {
+  const code = (error as { code?: unknown } | null)?.code;
+  const message = error instanceof Error ? error.message : "";
+  return typeof code === "string" && message.startsWith(`${code}: `) ? message.slice(code.length + 2) : message === "" ? NOT_AVAILABLE : message;
 }
 
 const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");

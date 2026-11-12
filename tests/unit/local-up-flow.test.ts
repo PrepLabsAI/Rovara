@@ -428,6 +428,10 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const read = await h.api(`/v1/app/sessions/${sessionId}`);
     const parsed = SessionResponseReaderSchema.safeParse(read.body);
     expect(parsed.success, JSON.stringify(parsed.success ? {} : parsed.error.issues.slice(0, 3))).toBe(true);
+    // The session levels: the local owner holds `edit` on their install's sessions, and the header offers what that level may do.
+    const you = (read.body as unknown as { session: { you: { level: string; owner: boolean; following: boolean; actions: string[] } } }).session.you;
+    expect(you).toMatchObject({ level: "edit", owner: true, following: true });
+    for (const action of ["watch", "steer", "stop", "close"]) expect(you.actions).toContain(action);
 
     // The owner answers; Understand runs again with the answers, and then Plan follows from its assessment.
     const answered = await h.api(`/v1/app/sessions/${sessionId}/answers`, { method: "POST", body: { requestId: "77777777-7777-4777-8777-777777777777", round: 1, answers: [{ questionId: "q1", optionId: "a" }] } });
