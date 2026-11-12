@@ -41,8 +41,9 @@ export function fromWire(value: WireValue, where = "the item"): JsonValue {
   if (value.S !== undefined) return value.S;
   if (value.N !== undefined) {
     const number = Number(value.N);
-    // DynamoDB keeps 38 significant digits and JavaScript about 17. The hosted broker's document client refuses to write an integer past
-    // 2^53, so its rows hold none; a longer number is read as the nearest double, as that client reads it.
+    // DynamoDB keeps 38 significant digits and JavaScript about 17. This reader takes any finite number as the nearest double. The hosted
+    // broker's document client does not: it reads a number whose size is past 2^53 - 1 as a BigInt, or throws. So the store refuses to
+    // write one by default (`DynamoDocumentStoreOptions.cloudReadableNumbers`), and a row it wrote stays readable by the hosted broker.
     if (!Number.isFinite(number)) throw new UnrepresentableValueError(where, "number JavaScript cannot hold");
     return number;
   }
@@ -88,4 +89,21 @@ export function assertWellFormedText(value: JsonValue, where: string): void {
     if (hasLoneSurrogate(name)) throw new DocumentStoreError("invalid_request", `${where} has an attribute name with an unpaired surrogate`);
     assertWellFormedText(entry, `${where}.${name}`);
   }
+}
+
+/** The largest number the hosted broker's document client reads as a JavaScript number (past it: a BigInt, or an error). */
+export const CLOUD_READABLE_NUMBER_MAX = Number.MAX_SAFE_INTEGER;
+
+/** Refuses a number whose size is past 2^53 - 1 anywhere in a value (`1e21` and `1e100` included), so the hosted broker can read it. */
+export function assertCloudReadableNumbers(value: JsonValue, where: string): void {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Math.abs(value) > CLOUD_READABLE_NUMBER_MAX) throw new DocumentStoreError("invalid_request", `${where} is a number past 2^53 - 1, which the hosted broker cannot read back as a number`);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => assertCloudReadableNumbers(entry, `${where}[${index}]`));
+    return;
+  }
+  for (const [name, entry] of Object.entries(value)) assertCloudReadableNumbers(entry, `${where}.${name}`);
 }
