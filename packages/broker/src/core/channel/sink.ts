@@ -12,11 +12,11 @@
 // A refusal runs nothing and says nothing but a fixed sentence (never the text of what was sent). The sink never throws for a refusal; it throws only when the store or the work seam failed, and then a claim made for this event is
 // released so the adapter's retry is not taken as a repeat.
 import {
-  ChannelDecisionSchema, InboundMessageSchema, INDEX_EXPIRY_ATTRIBUTE, LINK_REQUIRED_INTERVAL_SECONDS, adapterMayDecide, channelEventId, orgScoped, when,
+  ChannelDecisionSchema, InboundMessageSchema, INDEX_EXPIRY_ATTRIBUTE, LINK_REQUIRED_INTERVAL_SECONDS, channelEventId, orgScoped, when,
   type ActorRef, type ChannelAdapter, type ChannelDecision, type ChannelEvent, type ChannelInboundSink, type ConversationRef, type DocumentKey, type DocumentStore, type InboundMessage, type OrgId,
 } from "@agentx/contracts";
 import { readChannelBinding } from "./bindings.js";
-import { readApprovalCard, type ApprovalCard } from "./cards.js";
+import { cardMayBeDecidedInChat, readApprovalCard, type ApprovalCard } from "./cards.js";
 import { issueChannelLinkCode, linkedPerson } from "./links.js";
 import { personIsServed, type ChannelCompanyOf, type ChannelMemberRule } from "./company.js";
 
@@ -179,7 +179,7 @@ export function createChannelSink(deps: ChannelSinkDeps): ChannelInboundSink {
           return;
         }
         // A kind that asks for a sign-in is decided on the task page, whatever a message says; so is a decision the card did not offer.
-        if (!adapterMayDecide({ stepUp: [...deps.adapter.stepUp] }, card.kind) || !card.offered.includes(decision.decision)) {
+        if (!cardMayBeDecidedInChat(deps.adapter, card) || !card.offered.includes(decision.decision)) {
           log({ event: "channel.refused", reason: "step_up" });
           await say(decision.conversation, "error", decisionRefusalWords("step_up"));
           return;

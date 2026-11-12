@@ -3,7 +3,8 @@
 //   the owner's own acts   linking a chat account to the owner, binding a space to a project, choosing where notices go and muting them. They are made on the local chat page only (`core/local-pages`): each one lets a chat
 //                          account act as the owner or sends task titles to a place, so none is reachable with the API token an AI tool may hold. The reads (what is set up) are open to that token and show no code and no token.
 //   what a chat may do     a message from a linked account in a bound space starts work on the space's project, the same start as `rovara session start`, with the conversation remembered so what the task later needs is told there
-//                          too; a decision that comes back from a card is handed to the approval gate as a credential of the chat's own method (`chat-<channel>`), which Code's approvers do not offer: the plan is decided on its page.
+//                          too; a decision that comes back from a card is handed to the approval gate as a credential of the chat's own method (`chat-<channel>`). Code's approvers take it only for the owner's own linked account, for a low or medium risk
+//                          request (a plan's Approve and Request changes), and never for a high risk one: that is decided on its page.
 import { createHash } from "node:crypto";
 import {
   AgentXError, ChannelSpaceRefSchema, agentXError, maskChannelUserId, type AdapterRegistry, type ChannelAdapter, type ChannelDecision, type DocumentStore, type OrgId, type Principal,
@@ -40,6 +41,13 @@ export interface LocalChatDeps {
 export const chatDecisionMethod = (channel: string): string => `${CHAT_METHOD_PREFIX}${channel}`;
 
 const OUTCOME_OF: Readonly<Record<ChannelDecision["decision"], DecisionOutcome | undefined>> = { APPROVE: "approve", REJECT: "reject", REQUEST_CHANGES: "request_changes", SKIP: undefined };
+
+/**
+ * The token a chat press carries. It is made from the card and the account that pressed, NOT from the press itself, so the same person pressing the same card again presents the same proof: the gate answers a repeat of a
+ * decision it already made as the repeat it is ("Recorded." once more, and nothing changes), and a press by another account is another proof. A decision that did not commit leaves no mark, so a retry is a fresh try.
+ */
+const pressToken = (card: Pick<ApprovalCard, "requestId">, actor: { tenant: string; userId: string }): string =>
+  createHash("sha256").update(`chat-press\0${card.requestId}\0${actor.tenant}\0${actor.userId}`).digest("hex");
 
 /** A UUID made from a text, so the same chat message always asks for the same start and a repeat starts nothing new. */
 function uuidOf(text: string): string {
@@ -167,7 +175,7 @@ export function createLocalChat(deps: LocalChatDeps): LocalChat {
       // One owner: a link to anyone else (a stale row from another install) starts nothing.
       if (personId !== ownerId) { log({ event: "chat.not_the_owner", channel }); return; }
       const started = await deps.flow.start({ principal: deps.owner, client: channel }, { project: projectName, instructions: message.text, requestId: uuidOf(`${channel}/${message.eventId}`), workflow: true });
-      await recordTaskThread({ store, orgId, now: deps.now }, { sessionId: taskSessionId(started.task.taskId), conversation: message.conversation, personId });
+      await recordTaskThread({ store, orgId, now: deps.now }, { sessionId: taskSessionId(started.task.taskId), conversation: message.conversation, personId, actor: message.actor });
     },
     async decide({ card, decision, personId }: { card: ApprovalCard; decision: ChannelDecision; personId: string; projectName: string }): Promise<ChannelDecisionAnswer> {
       const outcome = OUTCOME_OF[decision.decision];
@@ -176,7 +184,7 @@ export function createLocalChat(deps: LocalChatDeps): LocalChat {
         companyId: orgId, kind: card.subject.type, subjectId: card.subject.id, requestId: card.requestId, outcome, seen: { revision: card.revision, artifactDigest: card.artifactDigest },
         // The credential names the account that pressed (the sink already matched it to the owner); it is a claim for the approvers plug-in to check against its own identity data, never believed by the gate. A `chat-*` method
         // can never be a strong method (`isCommentMethod`): the gate refuses it for a high-risk approval and a rejection whatever the plug-in names.
-        credentials: [{ method: chatDecisionMethod(card.channel), token: decision.eventId, claimedAccount: { provider: card.channel, tenant: decision.actor.tenant, accountId: decision.actor.userId } }], reason: decision.reason,
+        credentials: [{ method: chatDecisionMethod(card.channel), token: pressToken(card, decision.actor), claimedAccount: { provider: card.channel, tenant: decision.actor.tenant, accountId: decision.actor.userId } }], reason: decision.reason,
       });
       return result.status === "refused" ? { status: "refused", reason: result.reason } : { status: "decided" };
     },

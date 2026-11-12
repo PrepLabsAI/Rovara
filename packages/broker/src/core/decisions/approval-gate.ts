@@ -264,6 +264,8 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
       const request: ApprovalRequest = {
         companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), kind: record.approvalKind, outcome: attempt.outcome, subject: { type: record.subjectType, id: record.subjectId }, revision: record.revision, artifactDigest: record.artifactDigest,
         ...(record.projectName === undefined ? {} : { projectName: record.projectName }),
+        // The risk the decision was made at: a method that is good only below high risk (a chat press) is asked about the same request again.
+        ...(record.risk === "low" || record.risk === "medium" || record.risk === "high" ? { risk: record.risk } : {}),
       };
       const verdict = await deps.approvers.verify(request, {
         proofId: randomUUID(), method: credential.method, requestId: request.requestId, revision: record.revision, artifactDigest: record.artifactDigest, token: credential.token,

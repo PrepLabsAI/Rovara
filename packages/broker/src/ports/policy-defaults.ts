@@ -113,6 +113,16 @@ export function createLocalOwnerIdentity(options: LocalOwnerIdentityOptions = {}
 
 export const LOCAL_SESSION_METHOD = "local-session";
 export const CODE_HOST_COMMENT_METHOD = "code-host-comment";
+/** The prefix of a chat adapter's decision method (`chat-<channel>`): a press or a reply in a chat, which proves one act and no sign-in. */
+export const CHAT_METHOD_PREFIX = "chat-";
+
+/** A chat the owner decides in (the approval card's buttons): which chats count, and whether a chat account is the owner's. */
+export interface LocalOwnerChatOptions {
+  /** The chat adapters whose button presses may answer a request (`chat-<channel>` methods). Read at each call, so a chat set up later counts. */
+  channels: () => readonly string[];
+  /** Whether this chat account is linked to the owner now (the link the owner made on the chat page). A failure counts as not linked. */
+  linkedToOwner: (account: ExternalAccountRef) => boolean | Promise<boolean>;
+}
 
 export interface LocalOwnerApproversOptions {
   /** The local owner, for the `local-session` proof. */
@@ -128,6 +138,11 @@ export interface LocalOwnerApproversOptions {
   commentsOn?: () => boolean;
   /** Where Rovara's own record says the request was posted, and since when (`CommentRequestContext`). Absent or undefined: a comment answers nothing. */
   commentContext?: (request: ApprovalRequest) => CommentRequestContext | undefined | Promise<CommentRequestContext | undefined>;
+  /**
+   * Chats the owner may approve a LOW or MEDIUM risk request in, and ask for changes in (owner decision of 2026-11-12). A chat press proves one act and no sign-in, so it is never a strong method: a high-risk request and every
+   * rejection refuse it, here and in the decision gate. Absent: no chat is a way to approve.
+   */
+  chat?: LocalOwnerChatOptions;
   /** Turns a verified comment author into a principal. Default: a principal built from the account, vouched for by its own provider. */
   principalForAccount?: (account: ExternalAccountRef) => Principal;
   now?: () => Date;
@@ -144,7 +159,10 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
   const used = new Set<string>();
   return {
     async requirement(): Promise<ApprovalRequirement> {
-      const methods = [...(options.verifySession === undefined ? [] : [LOCAL_SESSION_METHOD]), ...(options.fetchComment === undefined || options.commentsOn?.() === false ? [] : [CODE_HOST_COMMENT_METHOD])];
+      const methods = [
+        ...(options.verifySession === undefined ? [] : [LOCAL_SESSION_METHOD]), ...(options.fetchComment === undefined || options.commentsOn?.() === false ? [] : [CODE_HOST_COMMENT_METHOD]),
+        ...(options.chat?.channels() ?? []).map((channel) => `${CHAT_METHOD_PREFIX}${channel}`),
+      ];
       // The plug-in names its own strong methods (lane P3, item A3): a high-risk approval and every rejection need the local session, never a comment (decisions 45.3 and 62); asking for changes may use either.
       const session = methods.filter((method) => method === LOCAL_SESSION_METHOD);
       return { methods, minApprovers: 1, selfApprovalAllowed: true, strongMethods: session, rejectMethods: session, changesMethods: methods };
@@ -174,6 +192,17 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
         const account = comment.author;
         const approver = options.principalForAccount?.(account) ?? { companyId: owner.companyId, personId: `${account.provider}:${account.tenant}:${account.accountId}`, displayName: account.accountId, roles: ["collaborator"], provider: account.provider };
         verdict = { approved: true, approver, method: proof.method, proofId: proof.proofId };
+      } else if (proof.method.startsWith(CHAT_METHOD_PREFIX)) {
+        // A press in a chat. It names the account that pressed; this check is the one that matters: the account must be the owner's linked one. Never for a high-risk request (or one with no risk named), and never for a rejection.
+        const channel = proof.method.slice(CHAT_METHOD_PREFIX.length);
+        if (options.chat === undefined || !options.chat.channels().includes(channel)) return refuse("method_not_available");
+        if (request.risk !== "low" && request.risk !== "medium") return refuse("chat_not_enough_for_this_risk");
+        if (request.outcome === "reject") return refuse("chat_cannot_reject");
+        const claimed = proof.claimedAccount;
+        if (claimed === undefined || claimed.provider !== channel) return refuse("account_mismatch");
+        const chat = options.chat;
+        const linked = await (async () => chat.linkedToOwner(claimed))().then((answer) => answer === true, () => false);
+        verdict = linked ? { approved: true, approver: owner, method: proof.method, proofId: proof.proofId } : refuse("not_the_local_owner");
       } else {
         return refuse("unknown_method");
       }
