@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES, testEnvDigest, type JsonValue, type TestEnvironmentBody,
 } from "@agentx/contracts";
+import { AWS_EMULATOR_SERVICES } from "../../packages/contracts/src/generated/aws-emulator-services.js";
 import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
 import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
 import { createTaskTestEnvironment } from "../../packages/broker/src/core/test-env/seam.js";
@@ -114,5 +115,21 @@ describe("a wide plan at the dispatch guard", () => {
     await w.h.flow.dispatchOnce({ maxMessages: 10 });
     const workspace = (await readWorkspace(w.h.deps, workspaceId))!;
     expect(w.h.machines.delivered(workspace.machine!.machineId).some((entry) => entry.operationId === operation.id)).toBe(true);
+  });
+
+  // The environment's cap on one backing's services is the plan's (64), not the 24 it was: a dependency that names 40 services is pinned whole, and still only goes to a worker that lists the feature.
+  it("a dependency naming 40 services (past the old cap of 24) is pinned whole, requires the feature, and is refused by a worker without it", async () => {
+    const keys = AWS_EMULATOR_SERVICES.slice(0, 40).map((row) => row.key);
+    const many = [aws(keys[0]!, { backing: { kind: "emulated", catalogId: "local-aws@r1", awsServices: keys, region: "us-east-1" }, connect: { env: [], hostAliases: ["aws"] } })];
+    const ok = await world(many, WORKER_INVOCATION_FEATURES);
+    const accepted = await acceptChecks(ok);
+    expect(accepted.stepPlan.plan.dependencies![0]!.aws!.services).toEqual(keys);
+    expect(accepted.stepPlan.requires).toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
+    const old = await world(many, OLD_WORKER);
+    const refused = await acceptChecks(old);
+    await old.h.flow.dispatchOnce({ maxMessages: 10 });
+    const after = (await workspaceOperations(old.h.deps, refused.workspaceId)).find((entry) => entry.id === refused.operation.id)!;
+    expect(after).toMatchObject({ status: "FAILED", error: TOO_OLD });
+    expect(old.h.machines.delivered((await readWorkspace(old.h.deps, refused.workspaceId))!.machine!.machineId).map((job) => job.operationId)).not.toContain(refused.operation.id);
   });
 });

@@ -18,6 +18,7 @@ import { RelativeWorkspacePathSchema, ProjectCommandSchema } from "./project.js"
 import type { TestEnvService } from "./test-environment.js";
 import { TestEnvValueSourceSchema } from "./test-env-value-source.js";
 import { SeedScriptLockSchema } from "./seed-script-lock.js";
+import { AWS_PLAN_SERVICES_MAX } from "./aws-emulator-service-keys.js";
 import { TestServiceHostSchema, looksLikeSecretValue, reservedDependencyEnvName } from "./test-services-shared.js";
 import { sha256Hex } from "./web-hash.js";
 
@@ -38,8 +39,12 @@ export const TEST_ENV_NONE_REASONS = ["not_supported", "declined", "faked_by_tes
 /** What a fake does with a request it has no recording for (the same words as the v1 mock's `unmatched`). */
 export const TEST_ENV_FAKE_UNMATCHED = ["fail", "schema_synth"] as const;
 
-/** The caps of 11.2: how many dependencies an environment holds, and how many a run starts (the company may raise the second, never past the Rovara maximum). */
-export const TEST_ENV_DEPENDENCY_LIMITS = { dependencies: 24, started: 12, startedMax: 16, excludedTests: 64, awsServices: 24, sources: 8, connectEnv: 16, hostAliases: 4, seeds: 8 } as const;
+/**
+ * The caps of 11.2: how many dependencies an environment holds, and how many a run starts (the company may raise the second, never past the Rovara maximum). `awsServices` is the most services one emulated backing names:
+ * the same number a plan allows (`AWS_PLAN_SERVICES_MAX`), so an environment can never name more than its plan carries; it was 24 before the plan went wide, and a body stored with up to 24 still parses. `candidateResources` is the
+ * most resources one detected candidate lists.
+ */
+export const TEST_ENV_DEPENDENCY_LIMITS = { dependencies: 24, started: 12, startedMax: 16, excludedTests: 64, awsServices: AWS_PLAN_SERVICES_MAX, candidateResources: 24, sources: 8, connectEnv: 16, hostAliases: 4, seeds: 8 } as const;
 
 // ---- identifiers
 
