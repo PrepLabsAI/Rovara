@@ -210,6 +210,12 @@ describe("the Slack adapter's events", () => {
     expect(slack.calls).toEqual([{ method: "chat.postEphemeral", body: { channel: thread.channelId, thread_ts: thread.threadTs, user: "U0123456789", text: "Only you can see this." } }]);
   });
 
+  it("shows a progress note meant for one person (code/next's onlyTo) only to that person, never in the thread", async () => {
+    const { deliver, slack } = slackAdapter();
+    await deliver(event("progress", { text: "Your link code is 123456.", onlyTo: "U0123456789" }));
+    expect(slack.calls).toEqual([{ method: "chat.postEphemeral", body: { channel: thread.channelId, thread_ts: thread.threadTs, user: "U0123456789", text: "Your link code is 123456." } }]);
+  });
+
   it("asks for a confirmation with Slack's own Approve and Cancel buttons", async () => {
     const { deliver, slack } = slackAdapter();
     const requestId = "44444444-4444-4444-8444-444444444444";

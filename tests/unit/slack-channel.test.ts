@@ -107,6 +107,16 @@ describe("what Rovara says", () => {
     expect((pointer.blocks![1] as { elements: unknown[] }).elements).toHaveLength(1);
   });
 
+  it("shows mainline's message event as its text, to one person when its audience is one, and says nothing for a done with no closing line or a direct message", () => {
+    expect(renderEvent({ ...base, type: "message", data: { text: "Working on <it>" } }, 3_000)).toEqual({ text: "Working on &lt;it&gt;" });
+    const privately = renderEvent({ ...base, type: "message", data: { text: "Only you.", audience: { kind: "ephemeral", actor: { channel: "slack", tenant: TEAM, userId: PERSON } } } }, 3_000)!;
+    expect(privately.ephemeralTo).toBe(PERSON);
+    expect(renderEvent({ ...base, type: "done", data: {} }, 3_000)).toBeUndefined();
+    expect(renderEvent({ ...base, type: "done", data: { text: "Finished." } }, 3_000)).toEqual({ text: "Finished." });
+    const { conversation: _conversation, ...rest } = base;
+    expect(renderEvent({ ...rest, type: "direct", to: { channel: "slack", tenant: TEAM, userId: PERSON }, data: { text: "Hi" } }, 3_000)).toBeUndefined();
+  });
+
   it("shows a link request only to the person who asked", () => {
     const rendered = renderEvent({ ...base, type: "link_required", data: { linkUrl: "https://example.test/link", expiresAt: "2026-11-10T11:00:00.000Z", actor: { channel: "slack", tenant: TEAM, userId: PERSON } } }, 3_000)!;
     expect(rendered.ephemeralTo).toBe(PERSON);
@@ -283,6 +293,13 @@ describe("the adapter", () => {
     expect(adapter.stepUp).toEqual(["plan_approval", "admin"]);
     expect(adapter.noThread).toBe(NO_THREAD);
     expect(adapter.projects).toEqual(["web"]);
+  });
+
+  it("refuses a direct message, which needs the `direct` ability it does not declare, and posts nothing", async () => {
+    const { slack, adapter } = make();
+    const direct = { version: 1, id: "evt_cccccccccccccccccccc", channel: "slack", createdAt: "2026-11-10T10:00:00.000Z", type: "direct", to: { channel: "slack", tenant: TEAM, userId: PERSON }, data: { text: "Hi" } } as ChannelEvent;
+    await expect(adapter.deliver(direct)).rejects.toMatchObject({ code: "direct_not_supported" });
+    expect(posts(slack)).toHaveLength(0);
   });
 
   it("posts an event in its thread, or at the top of a space when the conversation has no thread, and drops a repeat of an event id", async () => {

@@ -187,7 +187,15 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
         await post({ channel: thread.channelId, threadTs: thread.threadTs, text: event.data.text,
           ...(event.data.actions === undefined ? {} : { blocks: confirmationBlocks(event.data.text, event.data.requestId) }) });
         return "posted";
-      case "progress": case "question": case "check_report": case "error":
+      case "progress":
+        // code/next's `onlyTo`: one person only (a one-use link code), never posted for the whole thread.
+        if (event.data.onlyTo !== undefined) {
+          await chatPostEphemeral(await deps.botToken(), { channel: thread.channelId, threadTs: thread.threadTs, user: event.data.onlyTo, text: event.data.text }, fetchFn);
+          return "posted";
+        }
+        await text(event.data.text);
+        return "posted";
+      case "question": case "check_report": case "error":
         await text(event.data.text);
         return "posted";
       case "pr":
