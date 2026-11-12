@@ -5255,6 +5255,29 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             },
             {
               "Action": [
+                "dynamodb:Query",
+                "dynamodb:DeleteItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:LeadingKeys": [
+                    "SIGNIN_CLIENTS",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
                 "kms:Sign",
                 "kms:GetPublicKey",
               ],
