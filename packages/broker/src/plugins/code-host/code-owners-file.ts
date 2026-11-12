@@ -37,28 +37,30 @@ class Automaton {
   run(test: (char: string) => boolean): void { const loop = this.add(); this.states[this.tail]!.next.push(loop); this.states[loop]!.on = { test, to: loop }; const out = this.add(); this.states[loop]!.next.push(out); this.tail = out; }
   /** `(?:<build>)?` */
   optional(build: () => void): void { const start = this.tail; build(); this.states[start]!.next.push(this.tail); }
-  private closures: number[][] | undefined;
-  /** Each state and every state its empty steps reach, computed once. */
-  private closureOf(state: number): number[] {
-    this.closures ??= this.states.map((_, from) => {
-      const seen = new Set<number>();
-      const stack = [from];
-      while (stack.length > 0) { const at = stack.pop()!; if (seen.has(at)) continue; seen.add(at); stack.push(...this.states[at]!.next); }
-      return [...seen];
-    });
-    return this.closures[state]!;
+  /** Adds `from` and every state its empty steps reach to `into`, each state once per step (`mark[state] === stamp` means already added). No
+   *  per-state reach list is kept: with one, a run of k wildcards cost k^2 work per character (a review measured 5.9 s for `*` x 4000). */
+  private reach(from: number, mark: Int32Array, stamp: number, into: number[]): void {
+    const stack = [from];
+    while (stack.length > 0) {
+      const at = stack.pop()!;
+      if (mark[at] === stamp) continue;
+      mark[at] = stamp;
+      into.push(at);
+      for (const to of this.states[at]!.next) if (mark[to] !== stamp) stack.push(to);
+    }
   }
+  /** One pass over the path: each character costs at most every state and empty step once, so the whole match is linear in path length x pattern size. */
   accepts(path: string): boolean {
     const mark = new Int32Array(this.states.length);
     let stamp = 1;
-    let current = this.closureOf(0);
+    let current: number[] = [];
+    this.reach(0, mark, stamp, current);
     for (const char of path) {
       stamp += 1;
       const next: number[] = [];
       for (const state of current) {
         const on = this.states[state]!.on;
-        if (on === undefined || !on.test(char)) continue;
-        for (const reached of this.closureOf(on.to)) if (mark[reached] !== stamp) { mark[reached] = stamp; next.push(reached); }
+        if (on !== undefined && on.test(char)) this.reach(on.to, mark, stamp, next);
       }
       if (next.length === 0) return false;
       current = next;
