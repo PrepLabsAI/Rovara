@@ -864,6 +864,11 @@ export async function createWorkflowE2E(options: {
       await callbacks.terminalSink({ operationId, status: "SUCCEEDED", result: await inspectWorkspaceForClose(root) });
       return;
     }
+    if (invocation.kind === "cancel") {
+      // Decision 134: a stop that reached the worker before its target ran, as worker/cancel.ts answers it (the target never starts).
+      await callbacks.terminalSink({ operationId, status: "SUCCEEDED", result: { status: "CANCELLED", remainingProcesses: 0 } });
+      return;
+    }
     if (invocation.kind !== "task" && invocation.kind !== "publish" && invocation.kind !== "maintain") throw new Error(`the E2E worker does not run ${invocation.kind} invocations`);
     let result: unknown;
     github.during = invocation.kind;

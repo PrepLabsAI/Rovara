@@ -17,7 +17,7 @@ import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { PLAN_UNREADABLE_CATEGORIES, planCheckSummary, planUnreadableCategory } from "../developer/plan-check-summary.js";
 import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, planRevisionsUsed, type PlanSelfCheckView } from "../developer/plan-self-check.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
-import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
+import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, STOPPED_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
 import { AUTOFIX_CARD_HOLD_MS, AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
@@ -895,7 +895,8 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
     : getItem<{ id: string; kind: string; status: string; error?: string; result?: unknown }>(deps, { pk: `WORKSPACE#${notice.workspaceId}`, sk: `OPERATION#${notice.operationId}` }));
   const said = (text: string | undefined): Reply | undefined => (text === undefined ? undefined : { text });
   switch (notice.kind) {
-    case "ready": return said(READY_REPLY);
+    // Decision 134: a task its owner stopped during setup closes instead of running; the thread hears that, not "running".
+    case "ready": return said(task.stopRequest === undefined ? READY_REPLY : STOPPED_REPLY);
     case "cancelled": return said(CANCELLED_REPLY);
     case "closed": return said(CLOSED_REPLY);
     // A change a later one replaced is not said: the later notice says the current mode.

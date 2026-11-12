@@ -42,6 +42,8 @@ function fitRedacted(text: string, limit: number, quoted = false): string {
 const clean = (text: string, limit: number) => fitRedacted(text.replace(/\s+/g, " ").trim(), limit);
 
 export const READY_REPLY = "The workspace is ready, and the task is running.";
+/** Decision 134: said once a Stop pressed on a request that started Quick on its own takes effect. */
+export const STOPPED_REPLY = "Stopped as you asked. Nothing was planned or written, and no pull request will open. I'll say here once the task is closed.";
 
 /** #225: how much of a failed setup step's last lines of output the notice quotes, quote marks included. */
 export const SETUP_OUTPUT_SHOWN_MAX = 700;
