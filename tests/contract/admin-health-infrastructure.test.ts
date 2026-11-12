@@ -141,9 +141,9 @@ describe("the health route's grants (A13)", () => {
       // L7a: the pull request head and branch index rows (90 days). L7b: the merge commit index (MERGE_COMMIT_INDEX_KEPT_DAYS), the proof evidence blobs (their retention class) and the CI fix record (EVIDENCE_RETENTION_SECONDS).
       "packages/broker/src/core/merge/store.ts", "packages/broker/src/core/proof/revert/merge-commit-index.ts", "packages/broker/src/core/proof/evidence-blob-store.ts", "packages/broker/src/core/ci-fix/ci-fix.ts",
       // L9-wire: a worker's event rows (14 days), the message bucket (2 hours) and the saved message rows (30 days), and the store's own `ttlAttribute`, which must be this attribute for any of them to expire.
-      "packages/broker/src/local/app/callbacks.ts", "packages/broker/src/local/app/host.ts", "packages/broker/src/local/runtime.ts",
+      "packages/broker/src/services/callbacks.ts", "packages/broker/src/local/app/host.ts", "packages/broker/src/local/runtime.ts",
       // L12: the milestone rows (30 days) merge tracking writes with a session line, and the comment poll's thread and cursor rows (30 days).
-      "packages/broker/src/local/app/tracking.ts", "packages/broker/src/local/app/comments.ts",
+      "packages/broker/src/services/merge-tracking.ts", "packages/broker/src/local/app/comments.ts",
       // Chat on a laptop: a link code (10 minutes), the once-claims of an adapter's events and notices (a day, an hour), a card Rovara posted (a day) and the conversation a task started from (the session's retention).
       "packages/broker/src/core/channel/links.ts", "packages/broker/src/core/channel/sink.ts", "packages/broker/src/core/channel/cards.ts", "packages/broker/src/core/channel/threads.ts",
       // Thread notices (2026-11-12): the once-claim of each plan card and milestone line sent to a task's chat thread, kept for the session retention (SESSION_RETENTION_DAYS) and then expired; none a durable record.
