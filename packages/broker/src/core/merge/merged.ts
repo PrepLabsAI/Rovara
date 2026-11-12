@@ -3,7 +3,8 @@
 // The save that moves a task to MERGED adds these items to its transaction, so they exist exactly when the merge is recorded, once, whichever path recorded it (a webhook, the merge sweep, or a
 // pushed fix found merged). The milestone lists every merged pull request and the session's bindings, which is what the notification lane's handlers read to close the tracker item and to
 // post the chat line. Handlers are told after the commit (`CodeMilestones.deliver`).
-import { SessionIdSchema, mergeTrackingDecisionDigest, sessionEventId, type CodeMilestone, type DocumentStore, type MergeTrackingItem, type OrgId, type TransactItem, type WorkflowSnapshot } from "@agentx/contracts";
+import { createHash } from "node:crypto";
+import { SessionIdSchema, mergeTrackingDecisionDigest, sessionEventId, type AuditSink, type CodeMilestone, type DocumentStore, type MergeTrackingItem, type OrgId, type TransactItem, type WorkflowSnapshot } from "@agentx/contracts";
 import { change } from "@agentx/contracts";
 import { mergedLines } from "./merged-lines.js";
 import { githubPullRequestAddress, mergeCommitIndexStep } from "../proof/revert/merge-commit-index.js";
@@ -70,11 +71,12 @@ const isMerged = (workflow: WorkflowSnapshot, repositoryId: string, number: numb
 
 /**
  * The items that bring the merge-tracking row and the pull request record of each pull request this save moves to MERGED up to date, the merge commit's index row, and the timeline line for one
- * merged on the host with no approval recorded. None for a pull request already merged in `before`. Reads failing are logged and leave the merge recorded without them: recording the merge
+ * merged on the host with no approval recorded, and the `pull_request.merged` audit event (staged with the sink, so it commits with the merge or not at all; its id names the task and the pull request, so a
+ * merge seen again records nothing twice). None for a pull request already merged in `before`, and nothing at all for one that closed without merging. Reads failing are logged and leave the merge recorded without them: recording the merge
  * never waits on this.
  */
 export async function mergedStateItems(
-  deps: { store: DocumentStore; timeline: SessionTimeline; log?: (event: string, fields: Record<string, unknown>) => void },
+  deps: { store: DocumentStore; timeline: SessionTimeline; audit: AuditSink; log?: (event: string, fields: Record<string, unknown>) => void },
   task: MergedStateTask, before: WorkflowSnapshot, after: WorkflowSnapshot, now: string, observed: readonly MergedObservation[] = [],
   recordsWrittenByCaller: readonly MergedRecordWrittenByCaller[] = [],
 ): Promise<TransactItem[]> {
@@ -115,6 +117,17 @@ export async function mergedStateItems(
     if (indexed !== undefined) items.push(indexed);
     else if (mergeCommit === undefined || address === undefined) missed[mergeCommit === undefined ? "no_merge_commit" : "bad_merge_commit"] += 1; // an address the index cannot hold (not GitHub-shaped) counts as a miss too
     else missed.bad_merge_commit += 1;
+    // The audit fact that the merge was observed, in the same transaction as the move to MERGED. The actor is the system part that saw it; the host's login for who merged is a detail, never the actor.
+    const observedBy = observed.find((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number);
+    const repositoryKey = address?.repositoryFullName ?? pullRequest.repositoryId;
+    items.push(...deps.audit.stage({
+      eventId: createHash("sha256").update(`pull_request.merged\n${task.taskId}\n${pullRequest.repositoryId}\n${String(pullRequest.number)}`).digest("hex"),
+      companyId: orgId, at: now, actor: { type: "system", id: "merge-tracking" }, action: "pull_request.merged", subject: { type: "change_request", id: `${repositoryKey}#${String(pullRequest.number)}` },
+      details: {
+        repository: repositoryKey, number: pullRequest.number, taskId: task.taskId,
+        ...(mergeCommit === undefined ? {} : { mergeCommit }), ...(observedBy?.mergedBy !== undefined && LOGIN.test(observedBy.mergedBy) ? { mergedBy: observedBy.mergedBy } : {}),
+      },
+    }));
     // Merged on the host (not by Rovara's Merge, which claims the pull request first) with no approval that counts: a fact for the timeline, not an error.
     if (prior !== undefined && prior.mergeClaim === undefined && prior.approval === undefined && session.success) {
       const by = observed.find((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number)?.mergedBy;

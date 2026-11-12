@@ -43,7 +43,7 @@ describe("what a merge leaves behind", () => {
     const { world, pr } = await arranged();
     const before = { ...workflow("OPEN"), pullRequests: [{ ...workflow("OPEN").pullRequests![0]!, number: pr.number, url: `https://github.com/acme/app/pull/${String(pr.number)}` }] } as WorkflowSnapshot;
     const after = { ...workflow("MERGED"), pullRequests: [{ ...workflow("MERGED").pullRequests![0]!, number: pr.number, url: before.pullRequests![0]!.url }] } as WorkflowSnapshot;
-    const items = await mergedStateItems({ store: world.store, timeline: world.timeline }, { taskId: TASK_ID, orgId: ORG, sessionId: SESSION_ID, workspaceId: "ws-1" }, before, after, NOW, [{ repositoryId: "app", number: pr.number, mergeCommit: SHA }]);
+    const items = await mergedStateItems({ store: world.store, timeline: world.timeline, audit: world.audit }, { taskId: TASK_ID, orgId: ORG, sessionId: SESSION_ID, workspaceId: "ws-1" }, before, after, NOW, [{ repositoryId: "app", number: pr.number, mergeCommit: SHA }]);
     expect((await world.store.transact(items)).applied).toBe(true);
     expect(((await readMergeTracking(world.store, TASK_ID, ORG))[0])!.state).toBe("merged");
     expect((await world.store.get({ pk: "WORKSPACE#ws-1", sk: `PULL_REQUEST#app#${String(pr.number).padStart(12, "0")}` }))!["state"]).toBe("merged");
@@ -55,7 +55,7 @@ describe("what a merge leaves behind", () => {
     const { world, pr } = await arranged();
     const sweeping = wrapStore(world.store, { ttlAttribute: "expiresAt" });
     const make = (state: "OPEN" | "MERGED") => ({ ...workflow(state, state === "MERGED" ? "MERGED" : "WAIT_FOR_MERGE"), pullRequests: [{ ...workflow(state).pullRequests![0]!, number: pr.number, url: `https://github.com/acme/app/pull/${String(pr.number)}` }] }) as WorkflowSnapshot;
-    const items = await mergedStateItems({ store: sweeping, timeline: world.timeline }, { taskId: TASK_ID, orgId: ORG, workspaceId: "ws-1" }, make("OPEN"), make("MERGED"), NOW, [{ repositoryId: "app", number: pr.number, mergeCommit: SHA }]);
+    const items = await mergedStateItems({ store: sweeping, timeline: world.timeline, audit: world.audit }, { taskId: TASK_ID, orgId: ORG, workspaceId: "ws-1" }, make("OPEN"), make("MERGED"), NOW, [{ repositoryId: "app", number: pr.number, mergeCommit: SHA }]);
     const index = items.find((item) => item.kind === "put" && String(item.item.pk).includes("GITHUB_MERGE"));
     expect(index).toBeDefined();
     expect((index as { item: Record<string, unknown> }).item["expiresAt"]).toBeTypeOf("number");
@@ -68,15 +68,59 @@ describe("what a merge leaves behind", () => {
     const { world, pr } = await arranged({ approval: undefined, review: "requested" });
     const make = (n: number) => ({ ...workflow("OPEN"), pullRequests: [{ ...workflow("OPEN").pullRequests![0]!, number: n, url: `https://github.com/acme/app/pull/${String(n)}` }] }) as WorkflowSnapshot;
     const merged = (n: number) => ({ ...workflow("MERGED"), pullRequests: [{ ...workflow("MERGED").pullRequests![0]!, number: n, url: `https://github.com/acme/app/pull/${String(n)}` }] }) as WorkflowSnapshot;
-    const deps = { store: world.store, timeline: world.timeline };
+    const deps = { store: world.store, timeline: world.timeline, audit: world.audit };
     await mergedStateItems(deps, { taskId: TASK_ID, orgId: ORG, sessionId: SESSION_ID }, make(pr.number), merged(pr.number), NOW, [{ repositoryId: "app", number: pr.number, mergedBy: "ana-dev" }]);
     await mergedStateItems(deps, { taskId: TASK_ID, orgId: ORG, sessionId: SESSION_ID }, make(pr.number), merged(pr.number), NOW, [{ repositoryId: "app", number: pr.number, mergedBy: "ana @everyone" }]);
     expect(world.timeline.lines).toEqual(["Merged on the code host by ana-dev; no approval was recorded.", "Merged on the code host; no approval was recorded."]);
   });
 
+  describe("the pull_request.merged audit event", () => {
+    const at = (n: number, state: "OPEN" | "MERGED" | "CLOSED") => ({ ...workflow("OPEN"), pullRequests: [{ ...workflow("OPEN").pullRequests![0]!, number: n, state, url: `https://github.com/acme/app/pull/${String(n)}` }] }) as unknown as WorkflowSnapshot;
+
+    it("commits once with the merge, as the same save's step, and names the pull request, the task and the merge commit", async () => {
+      const { world, pr } = await arranged();
+      const items = await mergedStateItems({ store: world.store, timeline: world.timeline, audit: world.audit }, { taskId: TASK_ID, orgId: ORG, workspaceId: "ws-1" }, at(pr.number, "OPEN"), at(pr.number, "MERGED"), NOW, [{ repositoryId: "app", number: pr.number, mergeCommit: SHA, mergedBy: "ana-dev" }]);
+      expect(world.audit.events).toHaveLength(1);
+      expect(world.audit.events[0]).toMatchObject({
+        companyId: ORG, at: NOW, action: "pull_request.merged", actor: { type: "system", id: "merge-tracking" }, subject: { type: "change_request", id: `acme/app#${String(pr.number)}` },
+        details: { repository: "acme/app", number: pr.number, taskId: TASK_ID, mergeCommit: SHA, mergedBy: "ana-dev" },
+      });
+      expect((await world.store.transact(items)).applied).toBe(true);
+      expect(await world.auditRows()).toHaveLength(1);
+      expect(((await readMergeTracking(world.store, TASK_ID, ORG))[0])!.state).toBe("merged");
+    });
+
+    it("is not written again when the same merge is delivered again, and a replayed save cannot commit it twice", async () => {
+      const { world, pr } = await arranged();
+      const deps = { store: world.store, timeline: world.timeline, audit: world.audit };
+      const first = await mergedStateItems(deps, { taskId: TASK_ID, orgId: ORG, workspaceId: "ws-1" }, at(pr.number, "OPEN"), at(pr.number, "MERGED"), NOW);
+      expect((await world.store.transact(first)).applied).toBe(true);
+      // Redelivery: the stored workflow already says merged, so the save has nothing to add.
+      expect(await mergedStateItems(deps, { taskId: TASK_ID, orgId: ORG, workspaceId: "ws-1" }, at(pr.number, "MERGED"), at(pr.number, "MERGED"), NOW)).toEqual([]);
+      expect(world.audit.events).toHaveLength(1);
+      // A replay of the first save (a stale reader) hits the same event id and is refused as a whole.
+      expect((await world.store.transact(first)).applied).toBe(false);
+      expect(await world.auditRows()).toHaveLength(1);
+    });
+
+    it("is not written for a pull request that closed without merging", async () => {
+      const { world, pr } = await arranged();
+      const items = await mergedStateItems({ store: world.store, timeline: world.timeline, audit: world.audit }, { taskId: TASK_ID, orgId: ORG, workspaceId: "ws-1" }, at(pr.number, "OPEN"), at(pr.number, "CLOSED"), NOW);
+      expect(items).toEqual([]);
+      expect(world.audit.events).toEqual([]);
+      expect(await world.auditRows()).toEqual([]);
+    });
+
+    it("leaves a login the host could not have issued out of the details", async () => {
+      const { world, pr } = await arranged();
+      await mergedStateItems({ store: world.store, timeline: world.timeline, audit: world.audit }, { taskId: TASK_ID, orgId: ORG, workspaceId: "ws-1" }, at(pr.number, "OPEN"), at(pr.number, "MERGED"), NOW, [{ repositoryId: "app", number: pr.number, mergedBy: "ana @everyone" }]);
+      expect(world.audit.events[0]!.details).not.toHaveProperty("mergedBy");
+    });
+  });
+
   it("is nothing for a pull request already merged, a task without a company, or one that was not moved to merged", async () => {
     const { world } = await arranged();
-    const deps = { store: world.store, timeline: world.timeline };
+    const deps = { store: world.store, timeline: world.timeline, audit: world.audit };
     expect(await mergedStateItems(deps, { taskId: TASK_ID, orgId: ORG }, workflow("MERGED"), workflow("MERGED"), NOW)).toEqual([]);
     expect(await mergedStateItems(deps, { taskId: TASK_ID }, workflow("OPEN"), workflow("MERGED"), NOW)).toEqual([]);
     expect(await mergedStateItems(deps, { taskId: TASK_ID, orgId: ORG }, workflow("OPEN"), workflow("OPEN"), NOW)).toEqual([]);
