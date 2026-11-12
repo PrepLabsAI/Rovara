@@ -83,6 +83,8 @@ export interface IsolationSurface {
   observe(as: IsolationCompany, planted: PlantedPair): Promise<unknown>;
   /** False for a surface where the observing company may legitimately see nothing of its own (for example, a delivery the adapter refuses by design). Default: it must see its own marker. */
   readonly expectOwn?: boolean;
+  /** Runs once after every company has observed, pass or fail: stops what `plant` started (a listening adapter). */
+  teardown?(): Promise<void>;
 }
 
 export type ResolverFailure = "throws" | "undefined";
@@ -140,6 +142,14 @@ export function isNothing(value: unknown): boolean {
  */
 export async function assertSurfacesIsolated(surfaces: readonly IsolationSurface[]): Promise<void> {
   expect(surfaces.length, "an isolation set with no surfaces proves nothing").toBeGreaterThan(0);
+  try {
+    await plantAndObserve(surfaces);
+  } finally {
+    for (const surface of surfaces) await surface.teardown?.();
+  }
+}
+
+async function plantAndObserve(surfaces: readonly IsolationSurface[]): Promise<void> {
   const planted = new Map<IsolationSurface, { A: Planted | void; B: Planted | void }>();
   for (const surface of surfaces) {
     const a = await surface.plant(COMPANY_A);
