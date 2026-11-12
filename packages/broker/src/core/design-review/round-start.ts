@@ -6,7 +6,8 @@
 //   3. the estimate, with the real packet size and the rounds still to run, and the cost gate with what the review has already spent: either the spend card (`holdDesignReviewForCost`) or on;
 //   4. the round's money: the review's room (less what the planner's revision is expected to cost) and the task's remaining run limit, split into one ceiling per slot; the install's Admission port is asked for the
 //      sum of the ceilings (`model.call`: Code allows all, a hosted install charges the payer's budget), and the ceilings and the port's reservation are written in ONE conditional write (`allocateSlotBudgets`). A refusal
-//      is the review not run (`task_limit`); the reservation is settled with the keys' measured spend when the round ends (`settleRoundAdmission`) and given back on every path where no round runs;
+//      is the review not run (`task_limit`); the reservation is given back when the round ends (`releaseRoundAdmission`: what the keys spent is booked by the proxy's own metering, so holding it on would charge
+//      it twice) and on every path where no round runs. One dispatch at a time prepares a round (`claimRound`): a second one racing it waits, and never ends the review on a refusal the first one's hold caused;
 //   5. the stored packets (`putSlotPackets`): the route serves these bytes and never rebuilds them;
 //   6. the PLAN_CRITIQUE operation, created with the `designReview` binding in the SAME write (the merge prompt from the registry, `mergeBindingFor`), the packet capability and no other model channel, and the workflow moved to RUNNING by
 //      `startDesignReview`.
@@ -16,7 +17,7 @@
 import {
   AgentXError, DESIGN_REVIEW_ROUNDS_MAX, DESIGN_REVIEW_WORKER_FEATURE, DesignReviewBindingSchema, WorkflowTransitionError, agentXError, closeDesignReview, holdDesignReviewForCost, reholdDesignReviewForCost, startDesignReview, when,
   workflowIsDesignReviewing, workflowRequestId,
-  type Admission, type DesignReviewBinding, type DesignReviewTier, type ModelIdentifier, type ModelSelection, type ReviewerRole, type WorkflowSnapshot, type DESIGN_REVIEW_NOT_RUN_REASONS,
+  INDEX_EXPIRY_ATTRIBUTE, type Admission, type DesignReviewBinding, type DocumentStore, type DesignReviewTier, type ModelIdentifier, type ModelSelection, type ReviewerRole, type WorkflowSnapshot, type DESIGN_REVIEW_NOT_RUN_REASONS,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
@@ -31,7 +32,7 @@ import { conversationKey } from "../task-flow/keys.js";
 import { estimateDesignReviewUsd, gateDesignReviewCost, nextLowerTier, reviewersForRound, TIER_HAS_MERGE_MODEL, designReviewKeyBudgets, type DesignReviewCapGate, type DesignReviewEstimate } from "./estimate.js";
 import { mergeBindingFor } from "./merge-binding.js";
 import { buildReviewerPacket, estimateInputTokens, PacketBuildError, PACKET_BYTES_MAX, type BuiltPacket, type PacketReaders } from "./packet.js";
-import { putSlotPackets } from "./packet-store.js";
+import { designReviewPartition, putSlotPackets } from "./packet-store.js";
 import { designSourcesOf, pinsOf } from "./round-inputs.js";
 import type { DesignReviewResolved, DesignReviewRoundPorts, DesignReviewRuntime } from "./round-ports.js";
 import { allocateSlotBudgets, planSlotBudgets } from "./slot-keys.js";
@@ -150,7 +151,7 @@ export async function prepareDesignReviewRound(input: RoundInputs, resolved: Des
     try {
       built = await Promise.all(roles.map((role) => buildReviewerPacket({
         role, tier: review.tier, design: { ref: input.design.ref, revision: input.design.revision, text: input.design.text }, requirements: { ref: input.requirements.ref, revision: input.requirements.revision, text: input.requirements.text },
-        ...(task.requestText === undefined ? {} : { requestText: task.requestText }), baseCommits, 
+        ...(task.requestText === undefined ? {} : { requestText: task.requestText }), baseCommits, ...(task.knowledgeCommit === undefined ? {} : { knowledgeCommit: task.knowledgeCommit }),
         sources, ...(origin.length === 0 ? {} : { origin: [...origin] }),
       }, shared)));
     } catch (error) {
@@ -210,6 +211,28 @@ export async function prepareDesignReviewRound(input: RoundInputs, resolved: Des
     console.log(JSON.stringify({ component: "broker", event: "design_review.round_not_prepared", taskId: task.taskId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
     throw notRun("worker_failed");
   }
+}
+
+/** How long one dispatch holds a round's preparation to itself: past any preparation (packets are read with their own time limits), short enough that a dispatch that died frees the round soon. */
+export const ROUND_CLAIM_SECONDS = 10 * 60;
+const claimKey = (companyId: string, taskId: string, revision: number) => ({ pk: designReviewPartition(companyId, `task-${taskId}`), sk: `CLAIM#R${String(revision)}` });
+
+/**
+ * Takes the round of this workflow revision for one dispatch (`operationId`), or answers false when another dispatch holds it. Two dispatches of the same row could otherwise each ask the Admission port under their own key, and the
+ * second, refused because the first one's hold took the room, would end the review as not run while the first one runs. A claim older than `ROUND_CLAIM_SECONDS` is free again.
+ */
+export async function claimRound(store: Pick<DocumentStore, "put">, scope: { companyId: string; taskId: string; revision: number; operationId: string; nowMs: number }): Promise<boolean> {
+  const written = await store.put({
+    item: { ...claimKey(scope.companyId, scope.taskId, scope.revision), entityType: "DESIGN_REVIEW_ROUND_CLAIM", operationId: scope.operationId, expiresAt: scope.nowMs + ROUND_CLAIM_SECONDS * 1000,
+      [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(scope.nowMs / 1000) + ROUND_CLAIM_SECONDS },
+    condition: when.or(when.absent(), when.lt("expiresAt", scope.nowMs)),
+  });
+  return written.applied;
+}
+
+/** Frees a round this dispatch claimed and did not start. Never throws: an unfreed claim expires by itself. */
+async function freeRound(store: Pick<DocumentStore, "delete">, scope: { companyId: string; taskId: string; revision: number; operationId: string }): Promise<void> {
+  try { await store.delete({ key: claimKey(scope.companyId, scope.taskId, scope.revision), condition: when.eq("operationId", scope.operationId) }); } catch { /* it expires by itself */ }
 }
 
 /** The text the design review's operation carries as its prompt. The worker runs the reviewers from the binding and the packets; the prompt names nothing a model could be steered by. */
@@ -272,6 +295,9 @@ export async function startDesignReviewRound(
   // The model the round runs on, fixed by the install (one model on a laptop): never the worker's. None: there is no reviewer to run.
   const chosen = await runtime.model();
   const operationId = deps.newId?.() ?? (await import("node:crypto")).randomUUID();
+  const claim = { companyId: deps.companyId, taskId: task.taskId, revision: workflow.revision, operationId };
+  // Another dispatch is preparing this round: this one waits (its row stays due) and changes nothing.
+  if (!(await claimRound(deps.store, { ...claim, nowMs: Date.parse(receivedAt) }))) return "WAITING";
   let prepared: Prepared;
   try {
     prepared = await prepareDesignReviewRound(roundInputs, { operationId, model: chosen?.selection, modelRoute: chosen?.route, sourceId: chosen?.sourceId });
@@ -279,8 +305,11 @@ export async function startDesignReviewRound(
     if (error instanceof DesignReviewRoundStop) {
       // A hold nobody can answer here is the end of the review, said plainly: the design goes to the owner as not reviewed.
       const stop: RoundStop = error.stop.kind === "hold" && runtime.holdAnswerable !== true ? { kind: "not_run", reason: "cost_declined" } : error.stop;
-      return applyStop(deps, task, workflow, stop, receivedAt);
+      const answer = await applyStop(deps, task, workflow, stop, receivedAt);
+      await freeRound(deps.store, claim);
+      return answer;
     }
+    await freeRound(deps.store, claim);
     throw error;
   }
   let next: WorkflowSnapshot;
@@ -289,6 +318,7 @@ export async function startDesignReviewRound(
     next = startDesignReview(workflow, { expectedRevision: workflow.revision, ...(prepared.estimateUsd === undefined ? {} : { estimateUsd: prepared.estimateUsd }), ...(input.costApprovedBy === undefined ? {} : { costApproved: { by: { actorId: input.costApprovedBy } } }), now: receivedAt });
   } catch (error) {
     await releaseHeld(deps.admission, prepared.reservationId);
+    await freeRound(deps.store, claim);
     if (error instanceof WorkflowTransitionError) return "STALE";
     throw error;
   }
@@ -299,7 +329,7 @@ export async function startDesignReviewRound(
     payload: { conversationId, designReview: toDocument(prepared.binding) }, designReview: prepared.binding, ...(chosen === undefined ? {} : { modelSourceId: chosen.sourceId }),
   });
   // Only a round whose operation was created runs; any other answer leaves this round's allowance unused.
-  if (accepted.result !== "STARTED") await releaseHeld(deps.admission, prepared.reservationId);
+  if (accepted.result !== "STARTED") { await releaseHeld(deps.admission, prepared.reservationId); await freeRound(deps.store, claim); }
   if (accepted.result === "DUPLICATE") await deps.store.transact([resolveRowItem(deps, task.taskId, workflow.revision)]);
   return accepted.result;
 }

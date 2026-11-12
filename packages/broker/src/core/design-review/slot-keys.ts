@@ -63,8 +63,8 @@ export interface SlotBudgetAllocationInput {
   taskRoomUsd: number;
   nowMs: number;
   /**
-   * The allowance the install's Admission port held for this round (`AdmissionDecision.reservationId`), kept on the allocation so the round's end can settle it with what the keys were measured to spend
-   * (`settleRoundAdmission`). Absent: the port held nothing back (Code's allow-all).
+   * The allowance the install's Admission port held for this round (`AdmissionDecision.reservationId`), kept on the allocation so the round's end can give it back
+   * (`releaseRoundAdmission`). Absent: the port held nothing back (Code's allow-all).
    */
   reservationId?: string | undefined;
 }
@@ -106,6 +106,13 @@ export function planSlotBudgets(input: Pick<SlotBudgetAllocationInput, "binding"
   const totalUsd = Object.values(ceilings).reduce((sum, usd) => sum + usd, 0);
   if (!(share.reviewerUsd > 0) || totalUsd > room + 1e-9) throw agentXError("BUDGET_EXCEEDED", "The design review has no budget left for this round.");
   return { ceilings, totalUsd };
+}
+
+/** The sum of the ceilings allocated to an operation's slots (what its keys could be given at most), or undefined when it has no allocation. */
+export async function readSlotAllocationTotal(deps: Pick<DocumentStore, "get">, scope: { orgId: OrgId; operationId: string }): Promise<number | undefined> {
+  const item = await deps.get(allocationItem(scope.orgId, scope.operationId));
+  if (item === undefined || item.entityType !== ALLOCATION_ENTITY || item.orgId !== scope.orgId || item.operationId !== scope.operationId) return undefined;
+  return typeof item.totalUsd === "number" && Number.isFinite(item.totalUsd) && item.totalUsd >= 0 ? item.totalUsd : undefined;
 }
 
 /** The Admission port's reservation kept on an operation's allocation, or undefined when there is none (no allocation, or the port held nothing back). */

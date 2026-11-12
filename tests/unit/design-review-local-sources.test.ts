@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 import type { CodeHost, ContextSource, ProjectDefinition } from "@agentx/contracts";
 import { localPacketSources } from "../../packages/broker/src/local/app/design-review-sources.js";
 import type { ContextToolsDependencies } from "../../packages/broker/src/context-sources/routes.js";
+import { readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
+import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { COMPANY } from "../support/task-flow-harness.js";
+import { design, finish, nextJob, planned, toDesignPhase, world } from "../support/design-review-flow-world.js";
+import { DesignReviewBindingSchema } from "@agentx/contracts";
 
 const COMMIT = "a".repeat(40);
 const repositories = [
@@ -52,15 +57,42 @@ describe("the packet readers of a design review on a laptop", () => {
     expect(await none.readers.readRepoFile({ repo: "app", path: "src/pay.ts", commit: COMMIT, maxBytes: 1000 })).toBeUndefined();
   });
 
-  it("withholds the sources of the tracker a task's ticket came from, and every tracker's when the tracker is not known", async () => {
-    const source = (sourceId: string, system: string | undefined): ContextSource => ({ sourceId, system, stages: ["PLAN_CRITIQUE"] }) as unknown as ContextSource;
-    const contextTools = { now: () => 0, sources: async () => ({ sources: [source("lin", "linear"), source("jir", "jira"), source("docs", "notion"), source("other", "linear")].map((entry, index) => (index === 3 ? { ...entry, stages: ["PLAN"] } as unknown as ContextSource : entry)) }) } as unknown as ContextToolsDependencies;
+  it("withholds the sources of the tracker a task's ticket came from, its own source always, and for a tracker with no rule every source that is not a known non-tracker kind", async () => {
+    const source = (sourceId: string, system: string | undefined, stages: string[] = ["PLAN_CRITIQUE"]): ContextSource => ({ sourceId, ...(system === undefined ? {} : { system }), stages }) as unknown as ContextSource;
+    const configured = [source("lin", "linear"), source("jir", "jira"), source("docs", "notion"), source("sc", "shortcut"), source("gl", "gitlab"), source("nokind", undefined), source("planonly", "linear", ["PLAN"])];
+    const contextTools = { now: () => 0, sources: async () => ({ sources: configured }) } as unknown as ContextToolsDependencies;
     const deps = { companyId: "c1", projectAt: async () => ({ definition }), codeHostOf: host({}, []), contextTools };
-    const linear = await localPacketSources(deps, { ...task, ticket: { system: "linear", id: "LIN-1" } }, "op1");
-    expect(linear.origin.map((item) => item.sourceId)).toEqual(["lin"]);
-    const unknown = await localPacketSources(deps, { ...task, ticket: { system: "shortcut", id: "SC-1" } }, "op1");
-    expect(unknown.origin.map((item) => item.sourceId).sort()).toEqual(["jir", "lin"]);
-    const plain = await localPacketSources(deps, task, "op1");
-    expect(plain.origin).toEqual([]);
+    const withheld = async (system: string | undefined): Promise<string[]> => (await localPacketSources(deps, system === undefined ? task : { ...task, ticket: { system, id: "T-1" } }, "op1")).origin.map((item) => item.sourceId).sort();
+    // A known tracker: its own sources and a source that names no kind.
+    expect(await withheld("linear")).toEqual(["lin", "nokind"]);
+    // A tracker with no rule: its OWN source is withheld, and so is every source that is not a known non-tracker kind; the documents source is still read.
+    expect(await withheld("shortcut")).toEqual(["gl", "jir", "lin", "nokind", "sc"]);
+    expect(await withheld("gitlab")).toEqual(["gl", "jir", "lin", "nokind", "sc"]);
+    expect(await withheld("GitLab")).toContain("gl");
+    // A task no ticket started withholds nothing.
+    expect(await withheld(undefined)).toEqual([]);
+  });
+});
+
+describe("a design that names a meta repository file", () => {
+  it("has it read for the reviewers at the task's knowledge commit, and put in their packets", async () => {
+    const w = await world();
+    const reads: string[] = [];
+    w.runtime.ports.sourceReaders = async () => ({
+      readers: { readRepoFile: async () => undefined, readMetaFile: async ({ path, commit }) => { reads.push(`${path}@${commit}`); return "# Payments glossary\n"; }, fetchMcpItem: async () => ({ ok: false }) },
+      repositoryNames: ["demo"], origin: [],
+    });
+    await toDesignPhase(w);
+    const knowledge = "c".repeat(40);
+    await w.h.store.update({ key: taskKey(w.taskId), ops: [{ op: "set", path: ["knowledgeCommit"], value: knowledge }] });
+    const planning = await nextJob(w);
+    const withMeta = design().replace('"sources":[]', '"sources":[{"kind":"meta_repo_file","ref":"docs/glossary.md"}]');
+    expect(withMeta).toContain("docs/glossary.md");
+    await finish(w, planning.operation, planned(w, planning.operation, "design", withMeta, 1));
+    const round = await nextJob(w);
+    const binding = DesignReviewBindingSchema.parse(round.operation.designReview);
+    expect(reads).toEqual([`docs/glossary.md@${knowledge}`]);
+    const packets = await Promise.all(binding.reviewers.map((reviewer) => readSlotPacket(w.h.store, COMPANY, round.operation.id, 1, reviewer.keySlot)));
+    expect(packets.some((packet) => packet!.text.includes("Payments glossary"))).toBe(true);
   });
 });

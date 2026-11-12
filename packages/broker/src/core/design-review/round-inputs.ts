@@ -55,6 +55,32 @@ const ORIGIN_SYSTEMS: Readonly<Record<string, readonly string[]>> = {
   linear: ["linear"], jira: ["jira"], github_issue: ["github", "github_issues"], tracker: ["linear", "jira", "github", "github_issues"],
 };
 
+/**
+ * The kinds of source that are known NOT to hold tickets (documents, knowledge bases, monitoring). Only these are read for a task whose ticket came from a tracker Rovara has no rule for: every other source, and one that names
+ * no kind, may be that tracker under another name, so it is withheld (fail closed). Chat systems are refused by the allowlist on their own.
+ */
+export const NON_TRACKER_SOURCE_SYSTEMS: readonly string[] = ["notion", "confluence", "google_drive", "gdrive", "sharepoint", "onedrive", "dropbox", "box", "wiki", "docs", "sentry", "datadog", "grafana", "pagerduty", "newrelic", "honeycomb", "figma"];
+
+/** The origin key a ticket's tracker has in the rule above (`linear`, `jira`, `github_issue`), or undefined for a tracker Rovara has no rule for. */
+const TICKET_ORIGINS: Readonly<Record<string, string>> = { linear: "linear", jira: "jira", github: "github_issue", github_issues: "github_issue" };
+
+/**
+ * The request threads to keep out of the packets for a task a ticket started (`ticket.system` is the tracker's name). Always withheld: every source of that same system, and every source that names no kind. A known tracker also
+ * withholds its other names (`github` and `github_issues`); a tracker Rovara has no rule for withholds every source that is not a known non-tracker kind.
+ */
+export function originOfTicket(ticketSystem: string, sources: readonly Pick<ContextSource, "sourceId" | "system">[]): PacketOriginItem[] {
+  const system = ticketSystem.toLowerCase();
+  const key = TICKET_ORIGINS[system];
+  const known = key === undefined ? undefined : ORIGIN_SYSTEMS[key];
+  const withheld = (kind: string | undefined): boolean => {
+    if (kind === undefined) return true;
+    const lower = kind.toLowerCase();
+    if (lower === system) return true;
+    return known === undefined ? !NON_TRACKER_SOURCE_SYSTEMS.includes(lower) : known.includes(lower);
+  };
+  return sources.filter((source) => withheld(source.system)).map((source) => ({ sourceId: source.sourceId, itemRef: "" }));
+}
+
 /** The request threads to keep out of the packets: for a task that came from a tracker, every configured source of that tracker. Fail closed: a task from a tracker whose sources cannot be told apart withholds all of the tracker kinds. */
 export function originOf(taskOrigin: string | undefined, sources: readonly Pick<ContextSource, "sourceId" | "system">[]): PacketOriginItem[] {
   const systems = taskOrigin === undefined ? undefined : ORIGIN_SYSTEMS[taskOrigin];

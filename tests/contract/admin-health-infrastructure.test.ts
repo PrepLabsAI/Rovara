@@ -151,7 +151,7 @@ describe("the health route's grants (A13)", () => {
       // Parallel parts: the first progress line of a coding run (event rows, kept as long as the other event rows) and the milestone rows (their retention).
       "packages/broker/src/core/task-flow/accept.ts", "packages/broker/src/core/milestones/milestones.ts",
       // Design review: the reviewers' stored packets and a slot's key record and budget, which expire after the stage's retention (SLOT_PACKET_TTL_SECONDS).
-      "packages/broker/src/core/design-review/packet-store.ts", "packages/broker/src/core/design-review/slot-keys.ts",
+      "packages/broker/src/core/design-review/packet-store.ts", "packages/broker/src/core/design-review/slot-keys.ts", "packages/broker/src/core/design-review/round-start.ts",
       // Script tokens: the rate window rows, and a token's rows and request marks, which expire after the token's life plus a grace period.
       "packages/broker/src/core/script-tokens/rate.ts", "packages/broker/src/core/script-tokens/store.ts",
       // Sessions: thread notes and the live-message counters (session retention), followers and presence rows, and Ask's records, locks, request marks and rate rows.
