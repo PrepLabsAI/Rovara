@@ -3265,6 +3265,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     "SESSION#*",
                     "DEVELOPER#*",
                     "EMAIL#*",
+                    "SIGNIN_CLIENTS",
                   ],
                 },
               },

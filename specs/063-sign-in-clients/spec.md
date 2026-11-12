@@ -43,12 +43,13 @@ from it, or replayed by it, could act on Rovara. And the service cannot ask Rova
   is refused.
 - **FR-003 (refused by Rovara):** Rovara's API accepts only `agentx-developer` tokens, so a client's token is refused
   everywhere but the access check. A test holds this for every registered audience.
-- **FR-004 (access check):** `POST /v1/access` answers `{ developerId, displayName, administrator, projects }`
+- **FR-004 (access check):** `POST /v1/dev/access` answers `{ developerId, displayName, administrator, projects }`
   for a client's own token (`Authorization: Bearer`), or, for a confidential client authenticated with its secret,
   for a developer ID. It reads the live session and grants, so a revoked grant, an ended sign-in or a revoked
   developer shows on the next call within the token's lifetime: an ended session or a revoked developer answers 401.
   `projects` lists the projects the person can use now, with Rovara's own rules (granted, or a member of a bound
-  channel).
+  channel), and `notices` says when Slack could not be asked (channel projects are then left out). Every refusal is
+  the same 401. The developer-ID form always answers `administrator: false` (FR-005).
 - **FR-005 (administrator):** `administrator` is true only for a company-login session whose ID token carried the
   administrator claim (`AdminClaim`, `AdminValues`) when it signed in. It is recorded on the session, so it ends with
   the session.

@@ -38,7 +38,8 @@ async function importKeys(jwks: unknown[]): Promise<Map<string, VerifyKey>> {
   return keys;
 }
 
-export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (authorization: string | undefined) => Promise<JWTPayload> {
+/** `audience` defaults to Rovara's own; only the access check (spec 063 FR-004) names a registered client's. */
+export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (authorization: string | undefined, audience?: string) => Promise<JWTPayload> {
   let cached: Map<string, VerifyKey> | undefined;
   let fetchedAt = Number.NEGATIVE_INFINITY;
 
@@ -65,7 +66,7 @@ export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (aut
     return (await load()).get(kid);
   }
 
-  return async (authorization) => {
+  return async (authorization, audience = DEVELOPER_TOKEN_AUDIENCE) => {
     const token = COMPACT_JWT.exec(authorization ?? "")?.[1];
     if (token === undefined) throw refused();
     let header: ReturnType<typeof decodeProtectedHeader>;
@@ -82,7 +83,7 @@ export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (aut
       ({ payload } = await jwtVerify(token, key, {
         algorithms: ["RS256"],
         issuer: input.issuer,
-        audience: DEVELOPER_TOKEN_AUDIENCE,
+        audience,
         clockTolerance: LEEWAY_SECONDS,
         currentDate: new Date(input.now()),
         requiredClaims: ["exp", "nbf"],

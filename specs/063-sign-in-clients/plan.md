@@ -11,14 +11,14 @@ flowchart LR
   S --- T[(Sign-in table: CLIENT#id)]
   P[Person] -->|authorize, token| S
   X[Service] -->|token with its audience| P
-  X -->|POST /v1/access| B
+  X -->|POST /v1/dev/access| B
   B -.reads.-> T
   B -->|grants, bindings, channel members| G[(State table, Slack directory)]
 ```
 
 - **The sign-in table owns the registry** (`CLIENT#<id>`): the sign-in Lambda reads it on every authorize, token and
   refresh. Changes go through the sign-in Lambda, as ending sessions does; the broker only reads it.
-- **The broker plans and applies the admin changes**, and serves the access check (`POST /v1/access`), since it
+- **The broker plans and applies the admin changes**, and serves the access check (`POST /v1/dev/access`), since it
   already reads sessions and developers from the sign-in table and owns project access.
 
 ## Phases
@@ -27,7 +27,7 @@ flowchart LR
 |---|---|
 | 063a | Contracts: `SignInClient`, its registration, the admin change kinds `register_sign_in_client` and `remove_sign_in_client`. Sign-in Lambda: register (new, replace, rotate the secret: only its hash is kept) and remove. Broker: the two planners, applied through the sign-in Lambda; a read route for the list. CLI: `agentx admin sign-in-client add|list|remove`. |
 | 063b | Sign-in server: a registered client's authorize (exact redirect or loopback, PKCE), token and refresh (bound to the client; its secret for a confidential client); tokens with its audience and `azp`. A company-login session records `administrator` from `AdminClaim` and `AdminValues`. A test holds that Rovara's API refuses every client audience. |
-| 063c | Broker: `POST /v1/access`, by the person's client token, or by developer ID with a confidential client's secret: the live session and developer, `administrator`, and the projects Rovara's own rules give. |
+| 063c | Broker: `POST /v1/dev/access`, by the person's client token, or by developer ID with a confidential client's secret: the live session and developer, `administrator`, and the projects Rovara's own rules give. |
 
 Named environments only: the legacy deployment has no developer sign-in.
 
@@ -45,3 +45,10 @@ Named environments only: the legacy deployment has no developer sign-in.
   refresh token presented by another client (the CLI included) is refused. A removed client is refused at once
   (`invalid_client`); a session that started before the client's latest registration ends, so removing and
   registering an ID again does not revive old sign-ins. Revoking ends only the calling client's own sessions.
+- **The access check lives under `/v1/dev/`.** That route already reaches the broker with no API Gateway authorizer
+  (the broker verifies tokens itself) and is throttled, so no new route is needed. The broker reads the client rows
+  (`SIGNIN_CLIENTS`) directly; DeveloperIdentity still owns writing them.
+- **The developer-ID form is never an administrator.** Administrator is a fact of the person's own company sign-in,
+  so a service asking with only its own secret never learns it as true.
+- **Defense in depth:** Rovara's own routes refuse any session that belongs to a registered client, even under a
+  token addressed to Rovara.

@@ -80,7 +80,7 @@ describe("admin change infrastructure", () => {
     const changes = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("CHANGE#"));
     expect(changes).toEqual([{ Effect: "Allow", Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"], Resource: tableRef(named, "TurnRecords"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } } }]);
     const emails = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("EMAIL#"));
-    expect(emails).toEqual([{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: tableRef(named, "DeveloperSignInTable"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*"] } } }]);
+    expect(emails).toEqual([{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: tableRef(named, "DeveloperSignInTable"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } } }]);
   });
 
   it("gives the ingress's ADMIN_CHANGE statement the State table only, with the projection pinned", () => {
