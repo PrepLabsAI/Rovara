@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "The generic AWS adapters on Rovara Code's ports (owner decision 72, O2): DynamoDB storage, S3 objects and Secrets Manager secrets. Opt-in; scripts/boundary-allowlist.json lists what may live here.",
   "exports": {
     ".": "./dist/index.js",
-    "./dynamodb": "./dist/dynamodb/plugin.js"
+    "./dynamodb": "./dist/dynamodb/plugin.js",
+    "./s3": "./dist/s3/index.js",
+    "./secrets-manager": "./dist/secrets-manager/index.js"
   },
   "types": "./dist/index.d.ts",
   "engines": {
@@ -13,6 +16,8 @@
   },
   "dependencies": {
     "@agentx/contracts": "0.1.0",
-    "@aws-sdk/client-dynamodb": "3.1134.0"
+    "@aws-sdk/client-dynamodb": "3.1134.0",
+    "@aws-sdk/client-s3": "3.1134.0",
+    "@aws-sdk/client-secrets-manager": "3.1134.0"
   }
 }
