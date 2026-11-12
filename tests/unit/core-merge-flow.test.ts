@@ -6,6 +6,7 @@ import {
   TrackingRequestCapError, registerMergeActionDecider, pressMerge, prepareMerge, trackPullRequest, trackTask, reconcileTrackingTask, readMergeTracking, mergeViewOf, trackingRequestCap,
   type MergeReadBudget,
 } from "../../packages/broker/src/core/merge/index.js";
+import { requireRepositoryKey } from "../../packages/broker/src/core/merge/repository-key.js";
 import { ORG, OWNER_SESSION, TASK_ID, githubShapedHost, mergeWorld, wrapStore, type MergeWorld } from "../support/merge-world.js";
 
 const budget = (limit = 1_000): MergeReadBudget & { used: () => number } => {
@@ -276,6 +277,8 @@ describe("the press", () => {
     expect(item["mergeClaim"]).toMatchObject({ headSha: pr.head });
     expect(world.audit.events).toHaveLength(1);
     expect(world.audit.events[0]).toMatchObject({ action: "pull_request.merge_requested", companyId: ORG, actor: { type: "person" }, details: { repository: "acme/app", number: pr.number, method: "squash", requestId: prepared.request.requestId, proofId: proof.proofId } });
+    // The repository is named by the key function the opened event uses too (tests/unit/local-up-flow.test.ts pins that side).
+    expect(world.audit.events[0]!.details?.["repository"]).toBe(requireRepositoryKey("github", "https://github.com/acme/app"));
     expect(await world.store.get({ pk: `ORG#${ORG}#MERGE_PROOF`, sk: approvalProofKey(proof) })).toBeDefined();
   });
 

@@ -14,7 +14,7 @@ import { lessonsUsedOf, riskFromFiles, ticketIssueKeyOf } from "./changed-files.
 import { openBranchWriters } from "../branch-sync/branch-writers.js";
 import { linkedChangeRequestStep } from "../proof/revert/linked-change-requests.js";
 import { pullRequestTitle, workflowPullRequestBody } from "../proof/workflow-pull-request-body.js";
-import { requireRepositoryKey } from "../merge/repository-key.js";
+import { codeHostRepositoryKey, requireRepositoryKey } from "../merge/repository-key.js";
 import { prHeadItems, recoveryRowKey } from "../merge/store.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { stageAudit } from "../task-flow/admission.js";
@@ -231,7 +231,12 @@ export async function openPullRequest(deps: TaskFlowDeps, operation: OperationRe
     createdByOperationId: operation.id, updatedAt: iso(deps),
   };
   // The record and the audit fact of the opening commit together (a repeat of this callback is the same occurrence: its event is already there, and the record is only written again).
-  const audit = stageAudit(deps, { eventId: `pull_request.opened:${operation.id}`, actor: { type: "person", id: task.developerId }, action: "pull_request.opened", subject: { type: "task", id: task.taskId }, details: { repository: expected.repository, number: String(number) } });
+  // `repositoryKey` names the repository the way the merge audit event does (the same key function), so one pull request's events can be matched. `repository` stays as it was.
+  const repositoryKey = codeHostRepositoryKey(providerOf(host), expected.repositoryUrl);
+  const audit = stageAudit(deps, {
+    eventId: `pull_request.opened:${operation.id}`, actor: { type: "person", id: task.developerId }, action: "pull_request.opened", subject: { type: "task", id: task.taskId },
+    details: { repository: expected.repository, ...(repositoryKey === undefined ? {} : { repositoryKey }), number: String(number) },
+  });
   const written = await deps.store.transact([{ kind: "put", item: toDocument(record) }, ...audit]);
   if (!written.applied) await deps.store.put({ item: toDocument(record) });
   return { number, url: reconciled.ref.url, reconciled: reconciled.reconciled, draft: reconciled.draftRefused !== true };
