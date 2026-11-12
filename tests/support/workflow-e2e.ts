@@ -49,7 +49,7 @@ import { createHostedSlackRuntime } from "../../packages/slack-service/src/runti
 import { handleTaskQuestion, runTaskAnswer } from "../../packages/slack-service/src/task-question.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
 import { createContinuationRecorder } from "../../packages/slack-service/src/thread-continuation.js";
-import { isThreadContinuation } from "../../packages/contracts/src/index.js";
+import { threadContinuationOf } from "../../packages/contracts/src/index.js";
 import { runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import type { RequestRoute } from "../../packages/orchestrator/src/request-router.js";
@@ -1039,7 +1039,8 @@ export async function createWorkflowE2E(options: {
       const route = options.route;
       await routeSlackRequest(message, {
         ...(route === undefined ? {} : { route: async (text: string) => { routeCalls.push(text); return route(text); } }),
-        offer: offerChoice, answer: async (question) => { chatQueue.push(question); }, finish: async () => undefined,
+        // Decision 148: a question the chat assistant answers marks the thread as the assistant's.
+        offer: offerChoice, answer: async (question) => { chatQueue.push(question); await rememberAnswered(question.thread, question.userId, { assistant: true }); }, finish: async () => undefined,
         notify: async (thread, text, blocks) => { slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }); },
         // Decision 147: the production recorder of whom AgentX answered, on the fake Slack threads table.
         answered: (request: SlackRequestMessage) => rememberAnswered(request.thread, request.userId),
@@ -1083,7 +1084,7 @@ export async function createWorkflowE2E(options: {
     recordIntake: (input) => recordIntakeThroughBroker(invokeBroker(handler), input),
     ...(options.appPosted === undefined ? {} : { appPosted: options.appPosted }),
     // Decision 147: the production check of a plain reply against the Slack service's record.
-    threadContinuation: (thread, userId, nowSeconds) => isThreadContinuation(async (key) => db.get(key.pk, key.sk), thread, userId, nowSeconds),
+    threadContinuation: (thread, userId, nowSeconds) => threadContinuationOf(async (key) => db.get(key.pk, key.sk), thread, userId, nowSeconds),
     postEphemeral: async (input) => { slack.postEphemeral(input); },
     // A shared thread that is not a Slack-started task's own thread keeps the PR feedback note path.
     captureFeedbackNote: (input) => captureFeedbackNoteThroughBroker(invokeBroker(handler), input),

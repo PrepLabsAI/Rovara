@@ -307,6 +307,29 @@ export function threadContinuationItems(thread: ContinuationThread, userId: stri
 }
 
 /**
+ * Decision 148: the UpdateItem input (without the table) for the thread's item: the last answer and its window, and, once
+ * the chat assistant answered here (`assistant`), that mark, which stays (a later small-talk reply or card does not take it away).
+ */
+export function threadContinuationThreadUpdate(thread: ContinuationThread, nowMs: number, assistant: boolean): {
+  Key: { pk: string; sk: string };
+  UpdateExpression: string;
+  ExpressionAttributeValues: Record<string, unknown>;
+} {
+  const nowSeconds = Math.floor(nowMs / 1_000);
+  return {
+    Key: threadContinuationKey(thread),
+    UpdateExpression: `SET entityType = :type, lastAnsweredAt = :now, expiresAt = :expires${assistant ? ", assistant = :assistant" : ""}`,
+    ExpressionAttributeValues: { ":type": "THREAD_CONTINUATION", ":now": nowSeconds, ":expires": nowSeconds + THREAD_CONTINUATION_SECONDS, ...(assistant ? { ":assistant": true } : {}) },
+  };
+}
+
+/** The person's item (without the table): AgentX answered `userId` in `thread` at `nowMs`. */
+export function threadContinuationPersonItem(thread: ContinuationThread, userId: string, nowMs: number): Record<string, unknown> {
+  const nowSeconds = Math.floor(nowMs / 1_000);
+  return { ...threadContinuationKey(thread, userId), entityType: "THREAD_CONTINUATION_PERSON", answeredAt: nowSeconds, expiresAt: nowSeconds + THREAD_CONTINUATION_KEEP_SECONDS };
+}
+
+/**
  * Whether `userId`'s reply in `thread` is addressed to AgentX without a mention: AgentX answered this person in this
  * thread, and its last answer there is under 24 hours old. `read` gets one item by its key (undefined when absent).
  */
@@ -316,9 +339,24 @@ export async function isThreadContinuation(
   userId: string,
   nowSeconds: number,
 ): Promise<boolean> {
+  return (await threadContinuationOf(read, thread, userId, nowSeconds)) !== undefined;
+}
+
+/**
+ * Decision 148: the continuation of `userId`'s plain reply in `thread`, or undefined when it is not addressed to AgentX
+ * (see `isThreadContinuation`). `assistant`: the chat assistant already answered in this thread (it has the thread's
+ * workspace and conversation), so the reply goes to it as a message, never to a new task or the card.
+ */
+export async function threadContinuationOf(
+  read: (key: { pk: string; sk: string }) => Promise<Record<string, unknown> | undefined>,
+  thread: ContinuationThread,
+  userId: string,
+  nowSeconds: number,
+): Promise<{ assistant: boolean } | undefined> {
   const meta = await read(threadContinuationKey(thread));
   const last = meta?.lastAnsweredAt;
-  if (typeof last !== "number" || nowSeconds - last > THREAD_CONTINUATION_SECONDS || nowSeconds < last - 300) return false;
+  if (typeof last !== "number" || nowSeconds - last > THREAD_CONTINUATION_SECONDS || nowSeconds < last - 300) return undefined;
   const person = await read(threadContinuationKey(thread, userId));
-  return person !== undefined && typeof person.answeredAt === "number";
+  if (person === undefined || typeof person.answeredAt !== "number") return undefined;
+  return { assistant: meta?.assistant === true };
 }
