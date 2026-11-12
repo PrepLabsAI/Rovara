@@ -263,6 +263,8 @@ export * from "./test-env-dependency.js";
 export * from "./sagemaker-fixtures.js";
 export * from "./sagemaker-endpoint.js";
 export * from "./sagemaker-words.js";
+export * from "./pii-scan.js";
+export * from "./sagemaker-recording.js";
 export * from "./seed-script-lock.js";
 export * from "./generated/aws-emulator-services.js";
 export * from "./aws-emulator-service-keys.js";
