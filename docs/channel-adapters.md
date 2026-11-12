@@ -131,6 +131,42 @@ form is opened by the adapter itself, and only the submission is posted:
 
 Rovara drops a repeated `eventId`, so resending after a failure is safe.
 
+#### Read a conversation's state
+
+`POST /v1/channels/{channel}/conversation-state` tells a service that drives conversations on its own where one of
+them stands. Use it after a restart or when an event may have been missed. Sign it like the other requests. Its body
+names the conversation:
+
+```json
+{ "conversation": { "channel": "scheduler", "tenant": "acme", "space": "graph-7", "thread": "task-3" } }
+```
+
+```json
+{
+  "conversation": { "...": "as asked" },
+  "workspace": { "state": "ready" },
+  "task": { "taskId": "…", "kind": "publish", "status": "running", "startedAt": "…" },
+  "pendingDecision": { "requestId": "…", "kind": "other", "expectedRevision": 1, "artifactDigest": "…", "expiresAt": "…" },
+  "checks": { "taskId": "…", "status": "passed" },
+  "pullRequests": [{ "repository": "acme/web", "number": 42, "url": "…", "state": "open", "headSha": "…", "baseBranch": "main", "taskId": "…" }],
+  "lastEvent": { "id": "evt_…", "type": "progress", "createdAt": "…" }
+}
+```
+
+- `workspace.state` is `preparing`, `ready`, `closing`, `closed` or `failed`.
+- `task` is the current or last task. `status` is `queued`, `running`, `succeeded`, `failed` or `cancelled`, and
+  `endedAt` is set once it is over.
+- `pendingDecision` is a decision waiting on a person. It has the same fields as its `approval_request`, so you can
+  answer it at `decisions`.
+- `checks` is the latest task's check report.
+- `lastEvent` is the newest event Rovara sent for the conversation, whether or not you received it. If it isn't the
+  last one you got, you missed events.
+- A field is `null` (or `[]`) when there's nothing yet.
+
+The state comes from Rovara's own records, not from events, so it is right even after an event was dead-lettered.
+You can read only your own conversations, in spaces bound to your projects; anything else is refused as the other
+requests are.
+
 ### Signing
 
 Both directions use [Standard Webhooks](https://www.standardwebhooks.com/):

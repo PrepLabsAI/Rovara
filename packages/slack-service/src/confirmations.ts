@@ -1,6 +1,7 @@
-import { createHash } from "node:crypto";
 import {
   CONFIRMATION_TTL_MS,
+  confirmationApprovalKind,
+  confirmationDigest,
   parseConfirmationClickEventId,
   parseConfirmationReply,
   type ConfirmationReply,
@@ -85,16 +86,8 @@ export interface ConfirmationMessage { eventId: string; text: string; userId: st
  */
 export interface ConfirmationAnswer { confirmationId: string; digest: string; reply: "yes" | "cancel" }
 
-/** The digest an approval request carries: the confirmation and each call it lists, so a decision binds to exactly those. */
-export function confirmationDigest(confirmation: Pick<PendingConfirmation, "confirmationId" | "calls">): string {
-  const calls = confirmation.calls.map((call) => [call.tool, call.argumentsHash]);
-  return createHash("sha256").update(JSON.stringify([confirmation.confirmationId, calls])).digest("hex");
-}
-
-/** FR-032: a confirmation an administrator's policy asked for is step-up kind `admin`; any other is `other`. */
-export function confirmationApprovalKind(confirmation: Pick<PendingConfirmation, "calls">): "admin" | "other" {
-  return confirmation.calls.some((call) => call.kind === "admin") ? "admin" : "other";
-}
+// Issue #437: in contracts now, so the broker's conversation state names the same digest and kind.
+export { confirmationApprovalKind, confirmationDigest };
 
 export const STEP_UP_TEXT = "An administrator requires a signed-in approval for this, and this channel can't give one, so nothing was run. Ask for it from Slack instead.";
 
