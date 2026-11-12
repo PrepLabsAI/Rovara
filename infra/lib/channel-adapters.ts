@@ -27,9 +27,8 @@ export interface ChannelAdaptersProps {
     threadTurnsPerMinute: string;
   };
   /**
-   * Phase 7d: whether administrators may register third-party adapters (named environments, where developer sign-in
-   * links their actors). The legacy deployment has no sign-in: it gets the built-in Slack adapter only, no registry,
-   * no `ChannelAdapters` parameter and nothing on the broker.
+   * Phase 7d: whether administrators may register third-party adapters, whose actors developer sign-in links. Spec 064:
+   * every deployment, the legacy one included, since it now has sign-in for linking.
    */
   registry: boolean;
   /** Whether Slack-started tasks share their threads (named environments), as Slack's ingress is told. */
@@ -40,8 +39,8 @@ export interface ChannelAdaptersProps {
 
 /**
  * Spec 062 Phase 3: the channel API (signed adapter requests in), the event sender (signed events out), the short-lived
- * channel state and the two queues. Third-party adapters are registered in named environments only, where developer
- * sign-in exists to link actors to, and only while `ChannelAdapters` is `enabled`. Phase 7d: every deployment has the
+ * channel state and the two queues. Third-party adapters are registered only while `ChannelAdapters` is `enabled`, and
+ * their actors are linked through developer sign-in. Phase 7d: every deployment has the
  * built-in Slack adapter, off until `SlackViaChannel` is `enabled`; until either is on the channel API answers 404.
  */
 export class ChannelAdapters extends Construct {

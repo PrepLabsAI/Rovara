@@ -1,5 +1,5 @@
-// Spec 025 phase 25a: the control plane as the developers' sign-in server. Named environments only
-// (R3): the legacy deployment must not change.
+// Spec 025 phase 25a: the control plane as the developers' sign-in server. Spec 064: the legacy deployment has it too,
+// for account linking only (scope "linking"): no developer tasks, task people or AI-tool confirmations there.
 import { ArnFormat, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, aws_apigatewayv2 as apigwv2, aws_dynamodb as dynamodb, aws_iam as iam, aws_kms as kms, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
@@ -14,15 +14,23 @@ export interface DeveloperSignInParameters {
   slackTeamId: CfnParameter; slack: CfnParameter; oidcIssuer: CfnParameter; oidcClientId: CfnParameter;
   oidcRequiredClaim: CfnParameter; oidcRequiredValues: CfnParameter; oidcDisplayName: CfnParameter;
   slackSince: CfnParameter; oidcSince: CfnParameter;
+  /** Named environments only: the developer task settings, which the legacy deployment does not have. */
+  tasks?: DeveloperTaskParameters;
+}
+
+export interface DeveloperTaskParameters {
   taskPeopleChangesEnabled: CfnParameter; taskPeoplePublicInvitationsEnabled: CfnParameter; taskPeoplePrivateInvitationsEnabled: CfnParameter;
   workflowDependenciesEnabled: CfnParameter;
   /** Spec 025 E16: whether an admin may confirm a change in the AI tool's own pop-up. */
   mcpConfirmElicitation: CfnParameter;
 }
 
-/** Declared on the stack itself, so the parameter names are exactly these. */
-export function developerSignInParameters(stack: Stack): DeveloperSignInParameters {
-  return {
+/**
+ * Declared on the stack itself, so the parameter names are exactly these. Spec 064: the legacy deployment
+ * (`tasks: false`) gets the sign-in ones only, declared in the same order so named templates are unchanged.
+ */
+export function developerSignInParameters(stack: Stack, options: { tasks: boolean } = { tasks: true }): DeveloperSignInParameters {
+  const signIn = {
     slackTeamId: new CfnParameter(stack, "SlackTeamId", { type: "String", default: "", allowedPattern: "^$|^[TE][A-Z0-9]{2,31}$", description: "The Slack workspace (team) ID this environment serves; Slack sign-in is refused while it is empty" }),
     slack: new CfnParameter(stack, "DeveloperSignInSlack", { type: "String", default: "disabled", allowedValues: ["enabled", "disabled"], description: "enabled: developers may sign in with Slack; disabled: they may not" }),
     oidcIssuer: new CfnParameter(stack, "DeveloperOidcIssuer", { type: "String", default: "", allowedPattern: "^$|^https://\\S+$", description: "Company OIDC issuer URL for developer sign-in; empty turns company sign-in off" }),
@@ -34,12 +42,16 @@ export function developerSignInParameters(stack: Stack): DeveloperSignInParamete
     // it stays ended. agentx signin enable sets these; 0 means the method was never turned back on.
     slackSince: new CfnParameter(stack, "DeveloperSignInSlackSince", { type: "String", default: "0", allowedPattern: "^[0-9]{1,12}$", description: "When Slack sign-in was last turned on, in epoch seconds; Slack sessions started before it are refused" }),
     oidcSince: new CfnParameter(stack, "DeveloperOidcSince", { type: "String", default: "0", allowedPattern: "^[0-9]{1,12}$", description: "When company sign-in was last turned on, in epoch seconds; company sessions started before it are refused" }),
+  };
+  if (!options.tasks) return signIn;
+  const tasks: DeveloperTaskParameters = {
     taskPeopleChangesEnabled: new CfnParameter(stack, "TaskPeopleChangesEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether task people role changes are enabled in this environment" }),
     taskPeoplePublicInvitationsEnabled: new CfnParameter(stack, "TaskPeoplePublicInvitationsEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether task people may invite members to public channels in this environment" }),
     taskPeoplePrivateInvitationsEnabled: new CfnParameter(stack, "TaskPeoplePrivateInvitationsEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether task people may invite members to private channels in this environment" }),
     workflowDependenciesEnabled: new CfnParameter(stack, "WorkflowDependenciesEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether bounded serial task work breakdowns are enabled in this environment" }),
     mcpConfirmElicitation: new CfnParameter(stack, "McpConfirmElicitation", { type: "String", default: "enabled", allowedValues: ["enabled", "disabled"], description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)" }),
   };
+  return { ...signIn, tasks };
 }
 
 export interface DeveloperSignInProps {
@@ -70,6 +82,8 @@ export class DeveloperSignIn extends Construct {
     super(scope, id);
     const stack = Stack.of(this);
     const p = props.parameters;
+    // Spec 064: without the task settings (the legacy deployment) the broker serves account linking only.
+    const tasks = p.tasks;
     const issuer = `${props.api.attrApiEndpoint}/v1/auth`;
 
     const table = this.table = new dynamodb.Table(this, "Table", {
@@ -110,7 +124,7 @@ export class DeveloperSignIn extends Construct {
       DEVELOPER_OIDC_SECRET_ID: oidcSecretName,
       DEVELOPER_SIGNIN_SLACK_SINCE: p.slackSince.valueAsString,
       DEVELOPER_OIDC_SINCE: p.oidcSince.valueAsString,
-      MCP_CONFIRM_ELICITATION: p.mcpConfirmElicitation.valueAsString,
+      ...(tasks === undefined ? {} : { MCP_CONFIRM_ELICITATION: tasks.mcpConfirmElicitation.valueAsString }),
     }, Duration.seconds(15));
     // Exactly what DeveloperSignInStore sends: GetItem, PutItem, UpdateItem, and TransactWriteItems
     // made of Put and Update items (IAM authorizes each item as PutItem or UpdateItem).
@@ -180,7 +194,8 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("DEVELOPER_OIDC_ISSUER", p.oidcIssuer.valueAsString);
     broker.addEnvironment("DEVELOPER_SIGNIN_SLACK_SINCE", p.slackSince.valueAsString);
     broker.addEnvironment("DEVELOPER_OIDC_SINCE", p.oidcSince.valueAsString);
-    broker.addEnvironment("MCP_CONFIRM_ELICITATION", p.mcpConfirmElicitation.valueAsString);
+    if (tasks !== undefined) broker.addEnvironment("MCP_CONFIRM_ELICITATION", tasks.mcpConfirmElicitation.valueAsString);
+    else broker.addEnvironment("DEVELOPER_API_SCOPE", "linking");
     fn.grantInvoke(broker);
     // Spec 025 25e: EMAIL# is the email index resolveDeveloper reads to name a developer by email.
     // Spec 063: SIGNIN_CLIENTS holds the registered clients the access check authenticates.
@@ -189,6 +204,10 @@ export class DeveloperSignIn extends Construct {
       resources: [table.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } },
     }));
+    // The output first: the rest is for developer tasks and admin changes, which the legacy deployment does not have.
+    new CfnOutput(stack, "DeveloperSignInIssuer", { value: issuer });
+    if (tasks === undefined) return;
+
     // The workflow E2E terminal authority transaction also condition-checks the original creator
     // record. Keep that cross-table fence to developer identity rows only.
     broker.addToRolePolicy(new iam.PolicyStatement({
@@ -214,8 +233,5 @@ export class DeveloperSignIn extends Construct {
       resources: [props.turnRecords.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } },
     }));
-
-    // The issuer the tokens carry and the broker checks, for operators and scripts to read.
-    new CfnOutput(stack, "DeveloperSignInIssuer", { value: issuer });
   }
 }

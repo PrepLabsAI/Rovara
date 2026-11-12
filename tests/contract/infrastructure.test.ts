@@ -271,8 +271,8 @@ describe("control-plane infrastructure", () => {
 
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
-    // (spec 062 Phase 7d: the built-in Slack adapter).
-    template.resourceCountIs("AWS::Lambda::Function", 10);
+    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064).
+    template.resourceCountIs("AWS::Lambda::Function", 11);
     expect(json).not.toContain("ZipFile");
     expect(json).not.toContain("not packaged");
     expect(json).toContain("STATE_TABLE_NAME");
@@ -316,7 +316,7 @@ describe("control-plane infrastructure", () => {
     const template = Template.fromStack(stack);
 
     // One per Lambda, plus the EC2 session provisioner's and deleter's (#83).
-    template.resourceCountIs("AWS::Logs::LogGroup", 12);
+    template.resourceCountIs("AWS::Logs::LogGroup", 13);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
@@ -542,8 +542,8 @@ describe("Slack interactivity infrastructure (spec 014)", () => {
     template.hasOutput("SlackInteractivityUrl", {});
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
-    // (spec 062 Phase 7d: the built-in Slack adapter).
-    template.resourceCountIs("AWS::Lambda::Function", 10);
+    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064).
+    template.resourceCountIs("AWS::Lambda::Function", 11);
   });
 });
 

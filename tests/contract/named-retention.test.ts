@@ -66,7 +66,8 @@ describe("retained resources in a named environment", () => {
     const legacy = templates({});
     const retained = Object.entries(legacy).flatMap(([stackName, resources]) => kept(resources, "Retain").map((entry) => `${stackName} ${entry}`));
     expect(retained).toEqual([
-      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
+      // Spec 064: developer records and session history outlive the stack, as in named environments.
+      "AgentXControlPlane Artifacts AWS::S3::Bucket", "AgentXControlPlane DeveloperSignInTable AWS::DynamoDB::Table", "AgentXControlPlane SlackSecret AWS::SecretsManager::Secret", "AgentXControlPlane SlackThreadSessions AWS::S3::Bucket",
       "AgentXControlPlane SlackThreads AWS::DynamoDB::Table", "AgentXControlPlane State AWS::DynamoDB::Table", "AgentXControlPlane TurnRecords AWS::DynamoDB::Table",
       "AgentXProductionFoundation VpcFlowLogs AWS::Logs::LogGroup", "AgentXProductionFoundation WorkspaceKey AWS::KMS::Key",
       "AgentXReleasePipeline Artifacts AWS::S3::Bucket",

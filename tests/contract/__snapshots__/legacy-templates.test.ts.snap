@@ -65,6 +65,22 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Ref": "ChannelApiRequests36EE2867",
       },
     },
+    "DeveloperSignInIssuer": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "/v1/auth",
+          ],
+        ],
+      },
+    },
     "DispatchDeadLetterQueueUrl": {
       "Value": {
         "Ref": "DispatchDeadLetterQueue3E30F4B8",
@@ -231,6 +247,67 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "NoEcho": true,
       "Type": "String",
     },
+    "ChannelAdapters": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "disabled",
+      "Description": "enabled: administrators can register channel adapters (spec 062) and the channel API accepts their signed requests",
+      "Type": "String",
+    },
+    "DeveloperOidcClientId": {
+      "Default": "",
+      "Description": "Client ID of the company OIDC app for developer sign-in",
+      "MaxLength": 256,
+      "Type": "String",
+    },
+    "DeveloperOidcDisplayName": {
+      "Default": "Company sign-in",
+      "Description": "Name on the company sign-in button, for example Okta",
+      "MaxLength": 40,
+      "MinLength": 1,
+      "Type": "String",
+    },
+    "DeveloperOidcIssuer": {
+      "AllowedPattern": "^$|^https://\\S+$",
+      "Default": "",
+      "Description": "Company OIDC issuer URL for developer sign-in; empty turns company sign-in off",
+      "Type": "String",
+    },
+    "DeveloperOidcRequiredClaim": {
+      "Default": "",
+      "Description": "Claim a company sign-in must carry, for example groups; empty for none",
+      "MaxLength": 128,
+      "Type": "String",
+    },
+    "DeveloperOidcRequiredValues": {
+      "AllowedPattern": "^\\[.*\\]$",
+      "Default": "[]",
+      "Description": "JSON string array; the required claim must contain one of these values",
+      "Type": "String",
+    },
+    "DeveloperOidcSince": {
+      "AllowedPattern": "^[0-9]{1,12}$",
+      "Default": "0",
+      "Description": "When company sign-in was last turned on, in epoch seconds; company sessions started before it are refused",
+      "Type": "String",
+    },
+    "DeveloperSignInSlack": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "disabled",
+      "Description": "enabled: developers may sign in with Slack; disabled: they may not",
+      "Type": "String",
+    },
+    "DeveloperSignInSlackSince": {
+      "AllowedPattern": "^[0-9]{1,12}$",
+      "Default": "0",
+      "Description": "When Slack sign-in was last turned on, in epoch seconds; Slack sessions started before it are refused",
+      "Type": "String",
+    },
     "DispatcherSecurityGroupId": {
       "Description": "The foundation's dispatcher security group",
       "Type": "String",
@@ -302,6 +379,12 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "Maximum Slack thread workspaces for the whole Slack organization",
       "MinValue": 1,
       "Type": "Number",
+    },
+    "SlackTeamId": {
+      "AllowedPattern": "^$|^[TE][A-Z0-9]{2,31}$",
+      "Default": "",
+      "Description": "The Slack workspace (team) ID this environment serves; Slack sign-in is refused while it is empty",
+      "Type": "String",
     },
     "SlackThreadTurnsPerMinute": {
       "AllowedPattern": "^([1-9]|[1-5][0-9]|60)$",
@@ -489,6 +572,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Ref": "AdminValues",
             },
             "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID": "agentx-production-e2e-mock-runtime-v1",
+            "AGENTX_ENV": "production",
             "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-production-project-setup-runtime-v1",
             "ARTIFACT_BUCKET_NAME": {
               "Ref": "Artifacts82DD59A1",
@@ -496,8 +580,48 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "CALLBACK_SIGNING_KEY": {
               "Ref": "CallbackSigningKey",
             },
+            "CHANNEL_ADAPTERS": {
+              "Ref": "ChannelAdapters",
+            },
+            "CHANNEL_ADAPTER_SECRET_PREFIX": "agentx/production/",
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
+            },
+            "DEVELOPER_API_SCOPE": "linking",
+            "DEVELOPER_IDENTITY_FUNCTION_ARN": {
+              "Fn::GetAtt": [
+                "DeveloperSignInFunction10B62B05",
+                "Arn",
+              ],
+            },
+            "DEVELOPER_OIDC_ISSUER": {
+              "Ref": "DeveloperOidcIssuer",
+            },
+            "DEVELOPER_OIDC_SINCE": {
+              "Ref": "DeveloperOidcSince",
+            },
+            "DEVELOPER_SIGNIN_SLACK": {
+              "Ref": "DeveloperSignInSlack",
+            },
+            "DEVELOPER_SIGNIN_SLACK_SINCE": {
+              "Ref": "DeveloperSignInSlackSince",
+            },
+            "DEVELOPER_SIGNIN_TABLE_NAME": {
+              "Ref": "DeveloperSignInTable26CE739E",
+            },
+            "DEVELOPER_TOKEN_ISSUER": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/auth",
+                ],
+              ],
             },
             "GITHUB_APP_CREDENTIAL_REF": {
               "Ref": "GitHubAppCredentialRef",
@@ -528,6 +652,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_REQUEST_QUEUE_URL": {
               "Ref": "SlackRequestQueueCC82C864",
+            },
+            "SLACK_TEAM_ID": {
+              "Ref": "SlackTeamId",
             },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
@@ -1183,6 +1310,79 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
             },
             {
+              "Action": [
+                "secretsmanager:CreateSecret",
+                "secretsmanager:PutSecretValue",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/channel-adapter/*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "DeveloperSignInFunction10B62B05",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "DeveloperSignInFunction10B62B05",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SESSION#*",
+                    "DEVELOPER#*",
+                    "EMAIL#*",
+                    "SIGNIN_CLIENTS",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
               "Action": "states:StartExecution",
               "Effect": "Allow",
               "Resource": {
@@ -1385,7 +1585,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
             },
             "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
-            "CHANNEL_ADAPTERS": "disabled",
+            "CHANNEL_ADAPTERS": {
+              "Ref": "ChannelAdapters",
+            },
             "CHANNEL_EVENT_QUEUE_URL": {
               "Ref": "ChannelApiEvents5999C77C",
             },
@@ -1679,7 +1881,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
             },
             "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
-            "CHANNEL_ADAPTERS": "disabled",
+            "CHANNEL_ADAPTERS": {
+              "Ref": "ChannelAdapters",
+            },
             "CHANNEL_EVENT_QUEUE_URL": {
               "Ref": "ChannelApiEvents5999C77C",
             },
@@ -2501,14 +2705,508 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::CloudWatch::Alarm",
     },
     "DefaultStage": {
+      "DependsOn": [
+        "DeveloperSignInAuthRoute98555360",
+        "DeveloperSignInDevRoute4BB932E2",
+        "DeveloperSignInFeedbackReviewRoute881C7CFE",
+      ],
       "Properties": {
         "ApiId": {
           "Ref": "HttpApi",
         },
         "AutoDeploy": true,
+        "RouteSettings": {
+          "ANY /review/{proxy+}": {
+            "ThrottlingBurstLimit": 50,
+            "ThrottlingRateLimit": 20,
+          },
+          "ANY /v1/auth/{proxy+}": {
+            "ThrottlingBurstLimit": 50,
+            "ThrottlingRateLimit": 20,
+          },
+          "ANY /v1/dev/{proxy+}": {
+            "ThrottlingBurstLimit": 50,
+            "ThrottlingRateLimit": 20,
+          },
+        },
         "StageName": "$default",
       },
       "Type": "AWS::ApiGatewayV2::Stage",
+    },
+    "DeveloperSignInAuthRoute98555360": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "ANY /v1/auth/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "DeveloperSignInIntegration50CD0372",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "DeveloperSignInDevRoute4BB932E2": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "ANY /v1/dev/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "DeveloperSignInFeedbackReviewRoute881C7CFE": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "ANY /review/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "DeveloperSignInFunction10B62B05": {
+      "DependsOn": [
+        "DeveloperSignInFunctionServiceRoleDefaultPolicy41099DC0",
+        "DeveloperSignInFunctionServiceRole47322E59",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "ADMIN_CLAIM": {
+              "Ref": "AdminClaim",
+            },
+            "ADMIN_OIDC_ISSUER": {
+              "Ref": "OidcIssuer",
+            },
+            "ADMIN_VALUES": {
+              "Ref": "AdminValues",
+            },
+            "AGENTX_ENV": "production",
+            "DEVELOPER_OIDC_CLIENT_ID": {
+              "Ref": "DeveloperOidcClientId",
+            },
+            "DEVELOPER_OIDC_DISPLAY_NAME": {
+              "Ref": "DeveloperOidcDisplayName",
+            },
+            "DEVELOPER_OIDC_ISSUER": {
+              "Ref": "DeveloperOidcIssuer",
+            },
+            "DEVELOPER_OIDC_REQUIRED_CLAIM": {
+              "Ref": "DeveloperOidcRequiredClaim",
+            },
+            "DEVELOPER_OIDC_REQUIRED_VALUES": {
+              "Ref": "DeveloperOidcRequiredValues",
+            },
+            "DEVELOPER_OIDC_SECRET_ID": "agentx/production/developer-oidc",
+            "DEVELOPER_OIDC_SINCE": {
+              "Ref": "DeveloperOidcSince",
+            },
+            "DEVELOPER_SIGNIN_SLACK": {
+              "Ref": "DeveloperSignInSlack",
+            },
+            "DEVELOPER_SIGNIN_SLACK_SINCE": {
+              "Ref": "DeveloperSignInSlackSince",
+            },
+            "DEVELOPER_SIGNIN_TABLE_NAME": {
+              "Ref": "DeveloperSignInTable26CE739E",
+            },
+            "DEVELOPER_TOKEN_ISSUER": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/auth",
+                ],
+              ],
+            },
+            "DEVELOPER_TOKEN_KEY_ARN": {
+              "Fn::GetAtt": [
+                "DeveloperSignInTokenKey9F4912A4",
+                "Arn",
+              ],
+            },
+            "SLACK_SECRET_ARN": {
+              "Ref": "SlackSecretEA96F13F",
+            },
+            "SLACK_TEAM_ID": {
+              "Ref": "SlackTeamId",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "DeveloperSignInFunctionLogs5DF3C3D2",
+          },
+        },
+        "MemorySize": 512,
+        "Role": {
+          "Fn::GetAtt": [
+            "DeveloperSignInFunctionServiceRole47322E59",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 15,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "DeveloperSignInFunctionApiInvoke4664A0AE": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "DeveloperSignInFunction10B62B05",
+            "Arn",
+          ],
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition",
+              },
+              ":execute-api:",
+              {
+                "Ref": "AWS::Region",
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId",
+              },
+              ":",
+              {
+                "Ref": "HttpApi",
+              },
+              "/*/*/v1/auth/*",
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "DeveloperSignInFunctionLogs5DF3C3D2": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperSignInFunctionServiceRole47322E59": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "DeveloperSignInFunctionServiceRoleDefaultPolicy41099DC0": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:Query",
+                "dynamodb:DeleteItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:LeadingKeys": [
+                    "SIGNIN_CLIENTS",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "kms:Sign",
+                "kms:GetPublicKey",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTokenKey9F4912A4",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "SlackSecretEA96F13F",
+              },
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/developer-oidc-??????",
+                  ],
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "DeveloperSignInFunctionServiceRoleDefaultPolicy41099DC0",
+        "Roles": [
+          {
+            "Ref": "DeveloperSignInFunctionServiceRole47322E59",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "DeveloperSignInIntegration50CD0372": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {
+          "Fn::GetAtt": [
+            "DeveloperSignInFunction10B62B05",
+            "Arn",
+          ],
+        },
+        "PayloadFormatVersion": "2.0",
+      },
+      "Type": "AWS::ApiGatewayV2::Integration",
+    },
+    "DeveloperSignInTable26CE739E": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "sk",
+            "AttributeType": "S",
+          },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "sk",
+            "KeyType": "RANGE",
+          },
+        ],
+        "PointInTimeRecoverySpecification": {
+          "PointInTimeRecoveryEnabled": true,
+        },
+        "SSESpecification": {
+          "SSEEnabled": true,
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "expiresAt",
+          "Enabled": true,
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "DeveloperSignInTokenKey9F4912A4": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "Signs AgentX production developer access tokens",
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "kms:Sign",
+                "kms:GetPublicKey",
+              ],
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "DeveloperSignInFunctionServiceRole47322E59",
+                      "Arn",
+                    ],
+                  },
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "SignAndGetPublicKeyOnlyAsDeveloperIdentity",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "KeySpec": "RSA_2048",
+        "KeyUsage": "SIGN_VERIFY",
+        "PendingWindowInDays": 7,
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperSignInTokenKeyAlias797634DB": {
+      "Properties": {
+        "AliasName": "alias/agentx/developer-tokens",
+        "TargetKeyId": {
+          "Fn::GetAtt": [
+            "DeveloperSignInTokenKey9F4912A4",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::KMS::Alias",
     },
     "DispatchDeadLetterQueue3E30F4B8": {
       "DeletionPolicy": "Delete",

@@ -42,16 +42,20 @@ describe("channel adapters infrastructure", () => {
     expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTERS).toEqual({ Ref: "ChannelAdapters" });
   });
 
-  it("gives the legacy stack the built-in Slack adapter only: no registry, nothing on the broker (Phase 7d)", () => {
-    expect(legacy.Parameters.ChannelAdapters).toBeUndefined();
+  it("gives the legacy stack the built-in Slack adapter and (spec 064) the registry behind ChannelAdapters, off by default", () => {
+    expect(legacy.Parameters.ChannelAdapters).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
     expect(legacy.Parameters.SlackViaChannel).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
     const variables = (prefix: string) => (functionNamed(legacy, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-    expect(variables("ChannelApiIngress")).toMatchObject({ CHANNEL_ADAPTERS: "disabled", BUILT_IN_ADAPTER: { Ref: "SlackViaChannel" }, SHARED_TASKS: "disabled",
+    expect(variables("ChannelApiIngress")).toMatchObject({ CHANNEL_ADAPTERS: { Ref: "ChannelAdapters" }, BUILT_IN_ADAPTER: { Ref: "SlackViaChannel" }, SHARED_TASKS: "disabled",
       BUILT_IN_ADAPTER_SECRET_NAME: "agentx/production/channel-adapter/slack" });
     const broker = ofType(legacy, "AWS::Lambda::Function").find(([id]) => withoutHash(id).startsWith("Broker"))![1];
-    expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTERS).toBeUndefined();
+    expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({
+      CHANNEL_ADAPTERS: { Ref: "ChannelAdapters" }, CHANNEL_ADAPTER_SECRET_PREFIX: "agentx/production/" });
+    // The broker writes adapter secrets under the deployment's own prefix, and creates or updates nothing else.
     const brokerRole = (broker.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
-    expect(JSON.stringify(statementsOf(legacy, brokerRole))).not.toContain("channel-adapter");
+    const secretWrites = statementsOf(legacy, brokerRole).filter((statement) => JSON.stringify(statement.Action).includes("secretsmanager:CreateSecret"));
+    expect(secretWrites).toHaveLength(1);
+    expect(JSON.stringify(secretWrites[0]!.Resource)).toContain("agentx/production/channel-adapter/*");
     // No shared tasks in the legacy deployment, so nothing reads them.
     expect(JSON.stringify(statementsOf(legacy, roleOf(legacy, "ChannelApiIngress")))).not.toContain("SHARED_TASK#");
     // The event sender never takes more than two of the account's concurrent Lambdas.

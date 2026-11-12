@@ -1049,6 +1049,20 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   throw agentXError("NOT_FOUND", "route not found");
 }
 
+/**
+ * Spec 064: the legacy deployment's developer API, which is for account linking only: the link page, a registered
+ * service's access check, and a person's own links. Everything else (tasks, projects, ChatGPT) is not there.
+ */
+export async function routeLinkingRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (url.pathname.startsWith("/review/link/")) return routeDeveloperRequest(deps, request, url);
+  if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
+  if (url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/")) {
+    const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
+    return routeOwnChannelLinks(deps, caller, request, url);
+  }
+  throw agentXError("NOT_FOUND", "route not found");
+}
+
 /** Spec 062 FR-031: a developer lists and removes their own channel links, and only theirs. */
 async function routeOwnChannelLinks(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const links = deps.channelLinks;
