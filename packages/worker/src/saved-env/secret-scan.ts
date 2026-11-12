@@ -96,7 +96,9 @@ const ENV_FILE_SAFE_SUFFIX = /\.(?:example|sample|template|dist|defaults?|schema
 /** A token or password in a package manager's config file. */
 const REGISTRY_AUTH_LINE = /(?:_authToken|_auth|_password|npmAuthToken|npmAuthIdent|password|token|Authorization)\s*[:=]\s*["']?[^\s"'$]{6,}/iu;
 const REGISTRY_CONFIG_NAMES: ReadonlySet<string> = new Set([".npmrc", ".pypirc", ".yarnrc", ".yarnrc.yml", "pip.conf", "pip.ini", ".gem/credentials", "settings.xml"]);
-const GIT_CONFIG_CREDENTIAL = /^\s*\[credential|extraheader|^\s*helper\s*=|^\s*askpass\s*=/imu;
+// After a line start, blanks that are not line breaks: `^\s*` with the `m` flag rescanned a run of blank lines from every line of it (64 KiB of newlines took 5.7 s; this reads files up to 4 MiB).
+// It finds the same files: a match that ran over blank lines matches from the last of them.
+const GIT_CONFIG_CREDENTIAL = /^[^\S\n\r\u2028\u2029]*\[credential|extraheader|^[^\S\n\r\u2028\u2029]*helper\s*=|^[^\S\n\r\u2028\u2029]*askpass\s*=/imu;
 
 const isDependencyPath = (parts: readonly string[]): boolean => parts.some((part) => DEPENDENCY_DIRECTORIES.has(part));
 

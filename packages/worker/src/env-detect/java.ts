@@ -257,10 +257,10 @@ async function detectGradle(context: DetectorContext, hasTests: boolean): Promis
   // JaCoCo: coverage only when the build enables the XML report; the report task is added to the command unless the build already runs it after the tests.
   let coverage: { path: string; source: DetectedSource; extraTask: boolean } | undefined;
   if (gradlePluginLine(build, "jacoco") !== undefined) {
-    const xml = /xml\.required(?:\.set)?\s{0,40}(?:=|\()\s{0,40}true|xml\.enabled\s{0,40}(?:=\s{0,40})?true|xml\s{0,40}\{[^}]*required\s{0,40}(?:=|\.set\()\s{0,40}true/u.exec(build);
-    if (xml === null) notes.push("JaCoCo is configured but the build does not write an XML report, so changed-line coverage will show as not measured.");
+    const xmlAt = jacocoXmlReportAt(build);
+    if (xmlAt === undefined) notes.push("JaCoCo is configured but the build does not write an XML report, so changed-line coverage will show as not measured.");
     else if (multi) notes.push("JaCoCo writes one report per module, so no coverage path is proposed.");
-    else coverage = { path: "build/reports/jacoco/test/jacocoTestReport.xml", source: { path: buildPath, line: lineOf(build, xml.index) }, extraTask: !/finalizedBy[^\n]*jacocoTestReport/u.test(build) };
+    else coverage = { path: "build/reports/jacoco/test/jacocoTestReport.xml", source: { path: buildPath, line: lineOf(build, xmlAt) }, extraTask: !/finalizedBy[^\n]*jacocoTestReport/u.test(build) };
   }
   const ownLocation = /junitXml|testResultsDir/u.test(build);
   if (ownLocation) notes.push("The build sets its own test result location, which Rovara does not read; no report path is proposed until a maintainer sets one.");
@@ -387,6 +387,28 @@ export function javaCodeCandidates(path: string, text: string): DependencyCandid
     if (item !== undefined) found.push(item);
   }
   return found;
+}
+
+/**
+ * Where a Gradle build turns on JaCoCo's XML report (`xml.required = true`, `xml.enabled true`, or `xml { required.set(true) }`), or undefined: the leftmost, as one alternation found it.
+ * The block form is not a pattern: `xml\s{0,40}\{[^}]*required…` rescanned to the next `}` from every `xml {`, so a build of `xml{` repeated took seconds (quadratic). Here each `}` and
+ * each `required … true` is looked for once and reused while it is still ahead: a block with none before its `}` makes every later `xml {` before that `}` fail the same way.
+ */
+function jacocoXmlReportAt(build: string): number | undefined {
+  const direct = /xml\.required(?:\.set)?\s{0,40}(?:=|\()\s{0,40}true|xml\.enabled\s{0,40}(?:=\s{0,40})?true/u.exec(build)?.index;
+  const required = /required\s{0,40}(?:=|\.set\()\s{0,40}true/gu;
+  let close = -1;
+  let next = -1;
+  for (const opener of build.matchAll(/xml\s{0,40}\{/gu)) {
+    if (direct !== undefined && opener.index >= direct) break;
+    const inside = opener.index + opener[0].length;
+    if (inside <= close) continue;
+    close = build.indexOf("}", inside);
+    if (close === -1) close = build.length;
+    if (next < inside) { required.lastIndex = inside; next = required.exec(build)?.index ?? Number.POSITIVE_INFINITY; }
+    if (next < close) return opener.index;
+  }
+  return direct;
 }
 
 export const detectJava: Detector = async (context) => {
