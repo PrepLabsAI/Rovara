@@ -515,8 +515,8 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
       if (api.startQuickFromIntake === undefined) return { started: false, reason: "start_refused" };
       return api.startQuickFromIntake({ requestId });
     },
-    answer: (question) => processRequest(question, context), finish: (subject) => threads.finish(subject), log })
-  : processRequest(message, context).then(async (result) => { await rememberAnswered(message.thread, message.userId); return result; }), {
+    answer: (question) => processRequest(question, context).then(async (result) => { await rememberAnswered(question.thread, question.userId, { assistant: true }); return result; }), finish: (subject) => threads.finish(subject), log })
+  : processRequest(message, context).then(async (result) => { await rememberAnswered(message.thread, message.userId, { assistant: true }); return result; }), {
   concurrency,
   maxReceiveCount: MAX_RECEIVE_COUNT,
   visibilitySeconds: VISIBILITY_SECONDS,

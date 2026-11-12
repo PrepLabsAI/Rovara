@@ -2,7 +2,7 @@
 // addressed to AgentX for 24 hours after its last answer there; anyone else still needs an @mention. A continued reply
 // gets the mention's handling: small talk the fixed reply, a clear small request an automatic Quick start with Stop.
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { THREAD_CONTINUATION_SECONDS, WORKFLOW_PATH_QUICK_ACTION, WORKFLOW_STOP_ACTION, isThreadContinuation, threadContinuationItems, type RequestRouteKind, type RequestRouteOutcome } from "../../packages/contracts/src/index.js";
+import { THREAD_CONTINUATION_SECONDS, WORKFLOW_PATH_QUICK_ACTION, WORKFLOW_STOP_ACTION, isThreadContinuation, threadContinuationItems, threadContinuationKey, threadContinuationOf, type RequestRouteKind, type RequestRouteOutcome, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import { createWorkflowE2E } from "../support/workflow-e2e.js";
 import { MAYA } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
@@ -62,6 +62,25 @@ describe("decision 147: replies without a mention from the person AgentX answere
     expect(inThread(e2e).length).toBeGreaterThan(posts);
   }, 120_000);
 
+  it("sends a continued clear request to the chat assistant where it already answered (decision 148): a message in its conversation, no task, no card", async () => {
+    const e2e = await createWorkflowE2E({ route: (text) => ROUTES[text] ?? { kind: "unclear", outcome: "ok" }, autoStartQuick: true, model: { plan: PLAN, edits: [] },
+      appPosted: { accept: true, checkMember: async () => ({ outcome: "person" }) } });
+    // The chat assistant answers Maya's question in its thread.
+    expect(await e2e.mention("what does the payments service do?", { ts: THREAD, threadTs: THREAD })).toBe(200);
+    expect((e2e.chatQueue as SlackRequestMessage[]).map((message) => message.text)).toEqual(["what does the payments service do?"]);
+    const asked = e2e.routeCalls.length;
+    // Her plain follow-up is a message for the assistant, in the same thread: not routed, not a task, not a card.
+    expect(await reply(e2e, "fix the typo in README")).toBe(200);
+    expect((e2e.chatQueue as SlackRequestMessage[]).map((message) => [message.text, message.thread.threadTs, message.userId])).toEqual([
+      ["what does the payments service do?", THREAD, MAYA.slackUserId], ["fix the typo in README", THREAD, MAYA.slackUserId]]);
+    expect(e2e.routeCalls).toHaveLength(asked);
+    expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#") && item.sk === "META")).toEqual([]);
+    expect(e2e.slack.posts.some((post) => JSON.stringify(post.blocks ?? []).includes(WORKFLOW_PATH_QUICK_ACTION) || JSON.stringify(post.blocks ?? []).includes(WORKFLOW_STOP_ACTION))).toBe(false);
+    // Another person without a mention is still ignored.
+    expect(await reply(e2e, "fix the typo in README", { user: "U0TEAMMATE1" })).toBe(200);
+    expect(e2e.chatQueue).toHaveLength(2);
+  }, 120_000);
+
   it("ignores the same person's reply once 24 hours passed since AgentX's last answer in the thread", async () => {
     const e2e = await start();
     e2e.clock.advance((THREAD_CONTINUATION_SECONDS - 60) * 1_000);
@@ -93,6 +112,16 @@ describe("the continuation record", () => {
     expect(await isThreadContinuation(read, thread, "U0TEAMMATE1", now + 60)).toBe(false);
     expect(await isThreadContinuation(read, thread, String(MAYA.slackUserId), now + THREAD_CONTINUATION_SECONDS)).toBe(true);
     expect(await isThreadContinuation(read, thread, String(MAYA.slackUserId), now + THREAD_CONTINUATION_SECONDS + 1)).toBe(false);
+  });
+
+  it("says where the chat assistant answered, and only for this thread and company", async () => {
+    const marked = new Map(store);
+    marked.set(`${threadContinuationKey(thread).pk}|META`, { ...store.get(`${threadContinuationKey(thread).pk}|META`)!, assistant: true });
+    const readMarked = async (key: { pk: string; sk: string }) => marked.get(`${key.pk}|${key.sk}`);
+    expect(await threadContinuationOf(read, thread, String(MAYA.slackUserId), now + 60)).toEqual({ assistant: false });
+    expect(await threadContinuationOf(readMarked, thread, String(MAYA.slackUserId), now + 60)).toEqual({ assistant: true });
+    expect(await threadContinuationOf(readMarked, { ...thread, teamId: "T0OTHERCO01" }, String(MAYA.slackUserId), now + 60)).toBeUndefined();
+    expect(await threadContinuationOf(readMarked, thread, "U0TEAMMATE1", now + 60)).toBeUndefined();
   });
 
   it("keeps every item bounded by a TTL", () => {
