@@ -15,6 +15,8 @@ import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { runCollected, TIMEOUT_KILL_GRACE_MS } from "./collected-process.js";
 import {
   DOCKER_DATA_DIRECTORY,
+  DEVCONTAINER_NETWORK_UNWALLED,
+  DEVCONTAINER_NET_RAW,
   DOCKER_DATA_VISIBLE,
   WORKER_STATE_VISIBLE,
   containerProblems,
@@ -162,6 +164,12 @@ export interface DevcontainerCli {
    * as Docker ran it after, removed when it breaks them. The bundled CLI has these; a test seam without them skips both.
    */
   checks?: DevcontainerChecks;
+  /**
+   * Set by a host that walls the network of its dev containers (a cloud worker): every container this CLI starts joins this network (the host's docker wrapper puts it on `docker run` and `docker create`), which has the fixed
+   * interface the host firewall walls. `ensure` makes the network right before a start. With it set, the policy refuses a `runArgs` or `build.options` network of the repository's own, and a started container that is not on the
+   * network alone, or kept NET_RAW, is created again once and then refused. Unset (a laptop, `rovara up`; the bundled CLI never sets it): nothing is walled by the worker, and these checks do not apply.
+   */
+  walledNetwork?: { name: string; ensure(): Promise<void> };
 }
 
 /** The configuration `devcontainer up` would use, read by the devcontainer CLI without starting anything. */
@@ -234,11 +242,12 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
   const environment = options.environment ?? process.env;
   // On a laptop the worker reaches Docker only through the socket guard, which serves an image that is ready to run and no build (devcontainer-policy.ts localDevcontainerRefusal).
   const local = environment["AGENTX_RUNTIME"] !== "ec2" && sandboxNetworkFromEnvironment(environment) !== undefined;
-  const config = await assertDevcontainerConfigAllowed(target, local);
+  const walledNetwork = cli.walledNetwork?.name;
+  const config = await assertDevcontainerConfigAllowed(target, local, walledNetwork);
   // On a laptop the Docker socket guard allows a bind mount of the workspace folder itself and of nothing below it (a link inside the workspace could lead a deeper path anywhere on the computer), but the tool would also mount the
   // repository folder at /workspaces/<name> on its own. So the tool is given the project's config with its workspace mount and folder set to the workspace and the repository at their own paths, which is where the worker, the
   // agent's tools and every command already expect them (the config's own workspace settings are not used: they are the project's, and these are the worker's).
-  const lockfile = cli.checks === undefined ? undefined : await assertFullConfigurationAllowed(cli.checks, target, local);
+  const lockfile = cli.checks === undefined ? undefined : await assertFullConfigurationAllowed(cli.checks, target, local, walledNetwork);
   // After the checks, which read the project's own config as the tool would without the override.
   if (local && config !== undefined) target.overrideConfigPath = await writeLocalOverride(target, config);
   // `up` fetches remote features again. With a lockfile of the digests just checked, and --frozen-lockfile, it uses
@@ -249,16 +258,18 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
   // On an EC2 worker the workspace volume also holds Docker's data root, the verifier's runtime and the worker's own state,
   // none of them the project's: a volume mounted over each inside the dev container hides it there.
   let hidden = await hiddenWorkspaceDirectories(target.rootPath);
+  // The network is made (or made again) before any container can join it.
+  await cli.walledNetwork?.ensure();
   const started = await start(hidden);
   if (cli.checks === undefined) return started;
-  let { problems, volumes } = await startedContainerProblems(cli.checks, started.containerId, target, hidden);
+  let { problems, volumes } = await startedContainerProblems(cli.checks, started.containerId, target, hidden, walledNetwork);
   let current = started;
-  if (problems.length > 0 && problems.every((problem) => problem === DOCKER_DATA_VISIBLE || problem === WORKER_STATE_VISIBLE)) {
-    // A container created before AgentX hid these folders: created again, with them hidden.
+  if (problems.length > 0 && problems.every((problem) => problem === DOCKER_DATA_VISIBLE || problem === WORKER_STATE_VISIBLE || problem === DEVCONTAINER_NETWORK_UNWALLED || problem === DEVCONTAINER_NET_RAW)) {
+    // A container created before AgentX hid these folders, or before it was walled (an earlier release's, on the default bridge, with NET_RAW): created again, with them hidden and walled.
     await removeStartedContainer(cli.checks, current.containerId, volumes);
     hidden = await hiddenWorkspaceDirectories(target.rootPath);
     current = await start(hidden);
-    ({ problems, volumes } = await startedContainerProblems(cli.checks, current.containerId, target, hidden));
+    ({ problems, volumes } = await startedContainerProblems(cli.checks, current.containerId, target, hidden, walledNetwork));
   }
   if (problems.length > 0) {
     await removeStartedContainer(cli.checks, current.containerId, volumes);
@@ -268,7 +279,7 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
 }
 
 /** Refuses a devcontainer.json that asks Docker for part of the worker host (devcontainer-policy.ts). */
-async function assertDevcontainerConfigAllowed(target: DevcontainerTarget, local = false): Promise<Record<string, unknown> | undefined> {
+async function assertDevcontainerConfigAllowed(target: DevcontainerTarget, local = false, walledNetwork?: string): Promise<Record<string, unknown> | undefined> {
   const shown = relative(target.rootPath, target.configPath);
   let text: string;
   try {
@@ -286,7 +297,7 @@ async function assertDevcontainerConfigAllowed(target: DevcontainerTarget, local
   }
   const buildReason = local ? localDevcontainerRefusal(config) : undefined;
   if (buildReason !== undefined) throw agentXError("CONFIG_INVALID", localBuildMessage(shown, buildReason));
-  const reason = devcontainerConfigRefusal(config, policyContext(target));
+  const reason = devcontainerConfigRefusal(config, policyContext(target, walledNetwork));
   if (reason !== undefined) {
     throw agentXError("CONFIG_INVALID", `The dev container config ${shown} uses ${reason}, which AgentX does not allow: it would give code in the container the worker host. Remove it; see "Dev container" in docs/project-configuration.md for what is allowed.`.slice(0, 1_000));
   }
@@ -308,8 +319,9 @@ function localBuildMessage(shown: string, setting: string): string {
   return `The dev container config ${shown} uses ${setting}, which needs an image build. On this computer a dev container must name an image that is ready to run ("image": "..."), with no Dockerfile, build section or features, because Rovara's Docker guard does not allow a build. The same dev container works on a cloud worker.`.slice(0, 512);
 }
 
-function policyContext(target: DevcontainerTarget) {
+function policyContext(target: DevcontainerTarget, walledNetwork?: string) {
   return {
+    ...(walledNetwork === undefined ? {} : { walledNetwork }),
     rootPath: target.rootPath,
     workspaceFolder: target.workspaceFolder,
     configFolder: dirname(target.configPath),
@@ -321,14 +333,14 @@ function policyContext(target: DevcontainerTarget) {
  * Refuses, before any container starts, what the dev container's features or its image's `devcontainer.metadata` label
  * would add: the devcontainer CLI merges them into the configuration `up` uses, and reads that without starting anything.
  */
-async function assertFullConfigurationAllowed(checks: DevcontainerChecks, target: DevcontainerTarget, local = false): Promise<FeatureLockfile> {
+async function assertFullConfigurationAllowed(checks: DevcontainerChecks, target: DevcontainerTarget, local = false, walledNetwork?: string): Promise<FeatureLockfile> {
   let full: DevcontainerFullConfiguration;
   try {
     full = await checks.fullConfiguration(target);
   } catch (error) {
     throw new Error(`AgentX could not read the dev container's full configuration (with its features and image), so it did not start it: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512), { cause: error });
   }
-  const context = policyContext(target);
+  const context = policyContext(target, walledNetwork);
   const buildReason = local ? (localDevcontainerRefusal(full.configuration) ?? localDevcontainerRefusal(full.mergedConfiguration)) : undefined;
   if (buildReason !== undefined) throw agentXError("CONFIG_INVALID", localBuildMessage(relative(target.rootPath, target.configPath), buildReason));
   const reason = devcontainerConfigRefusal(full.configuration, context)
@@ -438,6 +450,7 @@ async function startedContainerProblems(
   containerId: string,
   target: DevcontainerTarget,
   hidden: readonly string[],
+  walledNetwork?: string,
 ): Promise<{ problems: string[]; volumes: string[] }> {
   let inspection: ContainerInspection;
   try {
@@ -453,6 +466,7 @@ async function startedContainerProblems(
     resolvePath: hostPathResolver(target.rootPath),
     ...(dockerDataPath === undefined ? {} : { dockerDataPath }),
     maskedPaths,
+    ...(walledNetwork === undefined ? {} : { walledNetwork }),
   });
   // The mask volumes this container was given, which go with it.
   const volumes = (inspection.Mounts ?? []).flatMap((mount) => (mount.Type === "volume" && mount.Name !== undefined && isMaskVolumeName(mount.Name) ? [mount.Name] : []));
