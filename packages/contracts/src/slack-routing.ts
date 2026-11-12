@@ -243,16 +243,19 @@ export function routeChoiceLabel(suggestion: RequestSuggestion, chosen: "QUICK" 
  */
 export const WORKFLOW_STOP_ACTION = "agentx_workflow_stop";
 
-/** The Slack service's ask to start Quick on a routed request the classifier read as a clear small change. */
+/**
+ * The Slack service's ask to start Quick on a routed request the classifier read as a clear small change. It names the
+ * request only: the text and the requester come from the broker's own record of the message, written when the Slack
+ * ingress queued it (`SlackIntakeRecord`), never from this body.
+ */
 export const QuickAutoStartRequestSchema = z.object({
   /** The routed request's choice ID (a UUID derived from its Slack event), so a redelivery starts the same task. */
   requestId: z.string().uuid(),
-  instructions: z.string().min(1).max(REQUEST_ROUTE_MESSAGE_MAX),
 }).strict();
 export type QuickAutoStartRequest = z.infer<typeof QuickAutoStartRequestSchema>;
 
 /** Why a clear small change was not started on its own: it then gets the card with Start, as before. */
-export const QUICK_AUTO_START_SKIPS = ["unusual_text", "high_risk", "too_long", "thread_busy", "start_refused"] as const;
+export const QUICK_AUTO_START_SKIPS = ["unusual_text", "high_risk", "too_long", "thread_busy", "start_refused", "not_recorded"] as const;
 export type QuickAutoStartSkip = (typeof QUICK_AUTO_START_SKIPS)[number];
 
 export const QuickAutoStartResultSchema = z.discriminatedUnion("started", [
@@ -264,13 +267,16 @@ export type QuickAutoStartResult = z.infer<typeof QuickAutoStartResultSchema>;
 /** What the thread hears when a clear small change started on its own: what started, and how to stop it. */
 export function quickAutoStartedMessage(input: { requesterId: string; taskId: string }): { text: string; blocks: Array<Record<string, unknown>> } {
   const text = "This looks like a small, clear change, so I started it as a quick change: plan → code → checks → draft PR.\n"
-    + "The plan comes first, here in this thread. Press Stop to cancel it: nothing it planned or wrote is kept, and no pull request opens.";
+    + "The plan comes first, here in this thread. Press Stop to cancel it before its pull request opens: nothing it planned or wrote is kept.";
   return {
     text,
     blocks: [
       { type: "section", text: { type: "mrkdwn", text } },
-      { type: "context", elements: [{ type: "mrkdwn", text: `Started for <@${input.requesterId}>. Only they can stop it.` }] },
+      { type: "context", elements: [{ type: "mrkdwn", text: `Started for <@${input.requesterId}>. Only the task's owners can stop it.` }] },
       { type: "actions", elements: [{ type: "button", action_id: WORKFLOW_STOP_ACTION, style: "danger", text: { type: "plain_text", text: "Stop" }, value: JSON.stringify({ taskId: input.taskId }) }] },
     ],
   };
 }
+
+/** How long the broker keeps a routed message's record for a quick start: the Slack service asks within seconds. */
+export const SLACK_INTAKE_RECORD_SECONDS = 10 * 60;

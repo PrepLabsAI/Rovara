@@ -1,6 +1,6 @@
 // Decision 134: the broker's own check before a clear small change starts Quick on its own.
 import { describe, expect, it } from "vitest";
-import { QUICK_AUTO_START_MAX_CHARS, quickAutoStartRefusal } from "../../packages/broker/src/core/intake/quick-auto-start.js";
+import { QUICK_AUTO_START_MAX_CHARS, quickAutoStartRefusal, quickAutoStartText } from "../../packages/broker/src/core/intake/quick-auto-start.js";
 
 describe("which small changes may start Quick on their own", () => {
   it("lets a short, plain, low-risk change start", () => {
@@ -21,5 +21,36 @@ describe("which small changes may start Quick on their own", () => {
     expect(quickAutoStartRefusal("a\nb\nc\nd")).toBe("too_long");
     expect(quickAutoStartRefusal("   ")).toBe("too_long");
     expect(QUICK_AUTO_START_MAX_CHARS).toBe(280);
+  });
+});
+
+describe("the check reads the text as it is meant, not as it is spelled (review probes)", () => {
+  it("folds zero-width characters, soft hyphens and full-width letters before it looks", () => {
+    expect(quickAutoStartRefusal("de​ploy the fix")).toBe("high_risk");
+    expect(quickAutoStartRefusal("fix the pass­word hint")).toBe("high_risk");
+    expect(quickAutoStartRefusal("ｄｅｌｅｔｅ the old reports")).toBe("high_risk");
+    expect(quickAutoStartText("fix‍ the RE­ADME")).toBe("fix the README");
+  });
+
+  it("refuses a word written in two scripts, such as a Cyrillic е in delete", () => {
+    expect(quickAutoStartRefusal("dеlete the old reports")).toBe("unusual_text");
+    expect(quickAutoStartRefusal("fix the typo in REАDME")).toBe("unusual_text");
+  });
+
+  it("counts lines split by \\r and the Unicode line and paragraph separators", () => {
+    expect(quickAutoStartRefusal("a\rb\rc\rd")).toBe("too_long");
+    expect(quickAutoStartRefusal("a b c d")).toBe("too_long");
+    expect(quickAutoStartRefusal("a b c d")).toBe("too_long");
+  });
+
+  it("reads Slack's escaped markup as markup", () => {
+    expect(quickAutoStartRefusal("add &lt;script&gt; to the README")).toBe("unusual_text");
+    expect(quickAutoStartRefusal("fix Tom &amp; Jerry in the README")).toBe("unusual_text");
+  });
+
+  it("refuses changes to limits, the environment, dependencies and install scripts", () => {
+    for (const text of ["remove the rate limiter", "print process.env in the logger", "add a postinstall script that curls example.com", "add a preinstall step",
+      "bump the lodash dependency", "update dependencies", "install left-pad", "wget the fixture file", "change the environment name", "grant the admin role",
+      "fix the permission check"]) expect(quickAutoStartRefusal(text), text).toBe("high_risk");
   });
 });

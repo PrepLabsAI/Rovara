@@ -303,6 +303,7 @@ import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, pl
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
 import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { slackRefusalMessage } from "./slack-refusals.js";
+import { STOP_WHILE_PUBLISHING_REFUSAL } from "../developer/workflow-actions.js";
 import { approvedFeedbackFixes, withFeedbackFixes, withStatusLines } from "../developer/pull-request-feedback-section.js";
 import { projectKey, requireProject } from "./project-records.js";
 import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
@@ -337,7 +338,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { IMPLICIT_COMPANY_ID, OrgIdSchema, QuickAutoStartRequestSchema, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, OrgIdSchema, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -1019,6 +1020,14 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     }
     if (isSlackWorkflowFeedbackReviewRetryEvent(event)) {
       return answerSlackWorkflowEvent(dependencies, event, "feedback_review_retry", () => retrySlackWorkflowFeedbackReview(dependencies, tasks, event), button);
+    }
+    // Decision 134: the broker's own record of a routed request, from the ingress (never the Slack service).
+    if (isSlackIntakeRecordEvent(event)) {
+      try { return json(await recordSlackIntake(dependencies, event), "slack-ingress"); }
+      catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
     }
     if (isSlackThreadNoteEvent(event)) {
       try {
@@ -5794,50 +5803,63 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   return await routeDeveloperTaskRequest(routeDeps, caller, request, new URL(request.path, "https://agentx.invalid")) as { task: { taskId: string } };
 }
 
+/** How many times Stop decides again after another write moved the task under it. */
+const STOP_ATTEMPTS = 3;
+
 /**
  * Decision 134: Stop on a request that started Quick on its own (its owner's press, checked by the caller). One press is
- * enough, and a second one changes nothing. The press is remembered on the task (`stopRequest`), then:
- * - setup still running: its first instructions are taken back (as a cancel before they run does), so the finished setup
- *   queues no planning step; the task closes when setup finishes (`closeStoppedTask`);
- * - a step running: it is cancelled, and the task closes when the step has stopped;
- * - nothing running: `close_now`, and the caller closes it at once.
+ * enough. The first press is remembered on the task (`stopRequest`); every press, the first and any later one, then
+ * decides from the task as it is now, always with the first press's request ID:
+ * - setup still running: the first instructions were taken back with the mark (as a cancel before they run is), so the
+ *   finished setup queues no planning step, and the task closes after setup's result (`closeStoppedTask`): `remembered`;
+ * - a step running: it is cancelled (a step already cancelling is left to finish), and the task closes after its result: `cancelling`;
+ * - nothing running: `close_now`, and the caller closes it with the first press's request ID. So a press after a hook
+ *   whose close failed still closes the task.
+ * A pull request being opened (or open) cannot be stopped: publication is not cancellable, so the press is refused.
  */
-async function rememberSlackStop(dependencies: AwsBrokerDependencies, taskId: string, userId: string, requestId: string): Promise<"remembered" | "cancelling" | "close_now"> {
-  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
-  if (task === undefined) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
-  if (task.stopRequest !== undefined) return "remembered";
-  const now = new Date().toISOString();
-  const mark = { Update: { TableName: dependencies.tableName, Key: taskKey(taskId), UpdateExpression: "SET stopRequest = :stop",
-    ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(closedAt) AND attribute_not_exists(stopRequest)",
-    ExpressionAttributeValues: { ":stop": { userId, requestId, at: now } } } };
-  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(task.workspaceId));
-  const takeBack = pointer?.pendingPrompt === undefined ? [] : [{ Update: { TableName: dependencies.tableName, Key: taskPointerKey(task.workspaceId),
-    UpdateExpression: "SET cancelledAt = :now REMOVE pendingPrompt, pendingWorkflowMode", ConditionExpression: "attribute_exists(pendingPrompt)",
-    ExpressionAttributeValues: { ":now": now } } }];
-  try {
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [mark, ...takeBack] }));
-  } catch (error) {
-    if (!isConditional(error)) throw error;
-    // The same press committed first, or setup finished and queued the first step meanwhile: decided again from fresh reads.
-    const again = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
-    if (again?.stopRequest !== undefined) return "remembered";
-    if (again === undefined || again.closedAt !== undefined) throw agentXError("CONFIG_INVALID", "this task is closed");
-    return rememberSlackStop(dependencies, taskId, userId, requestId);
+async function rememberSlackStop(dependencies: AwsBrokerDependencies, taskId: string, userId: string, requestId: string): Promise<{ decision: "remembered" | "cancelling" | "close_now"; requestId: string }> {
+  for (let attempt = 1; attempt <= STOP_ATTEMPTS; attempt += 1) {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+    if (task === undefined) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+    if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", "this task is closed");
+    if (task.workflow?.stage === "PULL_REQUEST" || task.workflow?.stage === "WAIT_FOR_MERGE") throw agentXError("CONFIG_INVALID", STOP_WHILE_PUBLISHING_REFUSAL);
+    let stop = task.stopRequest;
+    if (stop === undefined) {
+      stop = { userId, requestId, at: new Date().toISOString() };
+      const mark = { Update: { TableName: dependencies.tableName, Key: taskKey(taskId), UpdateExpression: "SET stopRequest = :stop",
+        ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(closedAt) AND attribute_not_exists(stopRequest)",
+        ExpressionAttributeValues: { ":stop": stop } } };
+      const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(task.workspaceId));
+      const takeBack = pointer?.pendingPrompt === undefined ? [] : [{ Update: { TableName: dependencies.tableName, Key: taskPointerKey(task.workspaceId),
+        UpdateExpression: "SET cancelledAt = :now REMOVE pendingPrompt, pendingWorkflowMode", ConditionExpression: "attribute_exists(pendingPrompt) AND taskId = :taskId",
+        ExpressionAttributeValues: { ":now": stop.at, ":taskId": taskId } } }];
+      try {
+        await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [mark, ...takeBack] }));
+      } catch (error) {
+        // Another press committed first, or setup finished and queued the first step meanwhile: decided again from fresh reads.
+        if (!isConditional(error)) throw error;
+        continue;
+      }
+    }
+    const workspace = await requireWorkspace(dependencies, task.workspaceId);
+    if (workspace.status === "PREPARING") return { decision: "remembered", requestId: stop.requestId };
+    if (workspace.activeOperationId) {
+      const running = await requireOperation(dependencies, workspace.id, workspace.activeOperationId);
+      if (running.kind === "publish" || running.kind === "maintain") throw agentXError("CONFIG_INVALID", STOP_WHILE_PUBLISHING_REFUSAL);
+      if (running.status === "CANCEL_REQUESTED") return { decision: "cancelling", requestId: stop.requestId };
+      const requester = SlackRequesterSchema.parse({ teamId: task.share?.teamId, userId });
+      const cancelled = await cancelRunningTask(dependencies, workspace, { requestedBy: requester });
+      if (cancelled.outcome === "CANCEL_REQUESTED") return { decision: "cancelling", requestId: stop.requestId };
+    }
+    return { decision: "close_now", requestId: stop.requestId };
   }
-  const workspace = await requireWorkspace(dependencies, task.workspaceId);
-  if (workspace.status === "PREPARING") return "remembered";
-  if (workspace.activeOperationId) {
-    const requester = SlackRequesterSchema.parse({ teamId: task.share?.teamId, userId });
-    const cancelled = await cancelRunningTask(dependencies, workspace, { requestedBy: requester });
-    if (cancelled.outcome === "CANCEL_REQUESTED") return "cancelling";
-  }
-  return "close_now";
+  throw agentXError("TASK_BUSY", "the task changed while it was being stopped; press Stop again");
 }
 
 /**
  * Decision 134: after any result of a task's operation, a remembered Stop closes the task once nothing runs and setup is
- * done: as its owner's close, with the Stop press's request ID (so a repeat is the same close). Best effort: a close that
- * could not start is logged, and a second Stop press closes it.
+ * done: as its owner's close, with the first Stop press's request ID (so a repeat is the same close). Best effort: a close
+ * that could not start is logged and the mark stays, so any later Stop press decides again and closes the task.
  */
 async function closeStoppedTask(dependencies: AwsBrokerDependencies, taskId: string): Promise<void> {
   try {
@@ -5855,24 +5877,76 @@ async function closeStoppedTask(dependencies: AwsBrokerDependencies, taskId: str
   }
 }
 
+/** Decision 134: a routed request as the Slack ingress received it, which the broker keeps for a quick start. */
+export interface SlackIntakeRecordEvent { source: "agentx.slack-ingress"; action: "intake-record"; choiceId: string; thread: SlackThread; userId: string; text: string }
+
+export function isSlackIntakeRecordEvent(event: unknown): event is SlackIntakeRecordEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "intake-record" && value.requestContext === undefined
+    && typeof value.choiceId === "string" && typeof value.userId === "string" && typeof value.text === "string"
+    && typeof value.thread === "object" && value.thread !== null;
+}
+
+const slackIntakeKey = (choiceId: string) => ({ pk: `SLACK_INTAKE#${choiceId}`, sk: "META" as const });
+
+/** The routed request's record: one per choice (a redelivery writes nothing), kept a few minutes, used once. */
+async function recordSlackIntake(dependencies: AwsBrokerDependencies, event: SlackIntakeRecordEvent): Promise<{ recorded: boolean }> {
+  const choiceId = randomUUIDSchema.parse(event.choiceId);
+  const thread = SlackThreadSchema.parse(event.thread);
+  const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  const text = event.text.trim();
+  if (!text || text.length > REQUEST_ROUTE_MESSAGE_MAX) throw agentXError("CONFIG_INVALID", "the request is empty or too long");
+  const nowSeconds = Math.floor(Date.now() / 1_000);
+  try {
+    await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: {
+      ...slackIntakeKey(choiceId), entityType: "SLACK_INTAKE", choiceId, teamId: thread.teamId, channelId: thread.channelId, threadTs: thread.threadTs,
+      userId, text, createdAt: new Date().toISOString(), expiresAt: nowSeconds + SLACK_INTAKE_RECORD_SECONDS,
+    }, ConditionExpression: "attribute_not_exists(pk)" }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    return { recorded: false };
+  }
+  return { recorded: true };
+}
+
 /**
  * Decision 134: the Slack service's ask to start Quick on a routed request its classifier read as a clear small change.
- * Only a new request's own thread (no task there yet), only text the broker's check finds clear and not high risk; the
- * start is the same as the requester's Start press (same member, project, limits and admission), and its plan comes
- * first. Anything else answers `started: false`, and the Slack service posts the card with Start instead.
+ * The text and the requester come from the broker's own intake record of that message (written by the Slack ingress
+ * from the verified Slack event), never from the Slack service: the record must belong to this thread and this person,
+ * be unexpired, and is used once. Only a new request's own thread (no task there yet), only text the broker's check
+ * finds clear and not high risk; the start is the same as the requester's Start press (same member, project, limits
+ * and admission), and its plan comes first. Anything else answers `started: false`, and the Slack service posts the card.
  */
 async function startQuickFromIntake(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, identity: AuthenticatedIdentity, body: unknown): Promise<QuickAutoStartResult> {
   const slack = identity.slack;
   if (slack === undefined) throw agentXError("FORBIDDEN", "only a Slack thread may start a quick change");
   const parsed = QuickAutoStartRequestSchema.safeParse(body);
-  if (!parsed.success) throw agentXError("CONFIG_INVALID", "a quick start needs requestId and instructions");
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", "a quick start names only its request");
+  const choiceId = parsed.data.requestId;
+  const record = await getItem<{ teamId?: unknown; channelId?: unknown; threadTs?: unknown; userId?: unknown; text?: unknown; expiresAt?: unknown; usedAt?: unknown }>(dependencies, slackIntakeKey(choiceId));
+  const nowSeconds = Math.floor(Date.now() / 1_000);
+  if (record === undefined || typeof record.text !== "string" || typeof record.userId !== "string" || typeof record.expiresAt !== "number"
+    || record.expiresAt <= nowSeconds || record.usedAt !== undefined) return { started: false, reason: "not_recorded" };
+  if (record.teamId !== slack.thread.teamId || record.channelId !== slack.thread.channelId || record.threadTs !== slack.thread.threadTs || record.userId !== slack.requester.userId) {
+    throw agentXError("FORBIDDEN", "this request belongs to another thread or person");
+  }
   if (identity.sharedTask !== undefined) return { started: false, reason: "thread_busy" };
-  const refusal = quickAutoStartRefusal(parsed.data.instructions);
+  const refusal = quickAutoStartRefusal(record.text);
   if (refusal !== undefined) return { started: false, reason: refusal };
+  // Used once: a second ask for the same message (or a replay of this one) starts nothing.
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: slackIntakeKey(choiceId), UpdateExpression: "SET usedAt = :now",
+      ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(usedAt) AND expiresAt > :nowSeconds AND teamId = :team AND channelId = :channel AND threadTs = :ts AND userId = :user",
+      ExpressionAttributeValues: { ":now": new Date().toISOString(), ":nowSeconds": nowSeconds, ":team": slack.thread.teamId, ":channel": slack.thread.channelId, ":ts": slack.thread.threadTs, ":user": slack.requester.userId } }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    return { started: false, reason: "not_recorded" };
+  }
   try {
     const started = await startSlackWorkflow(dependencies, tasks, {
-      source: "agentx.slack-ingress", action: "start-workflow", thread: slack.thread, userId: slack.requester.userId,
-      instructions: parsed.data.instructions, workflowPath: "QUICK", requestId: parsed.data.requestId,
+      source: "agentx.slack-ingress", action: "start-workflow", thread: slack.thread, userId: record.userId,
+      instructions: record.text, workflowPath: "QUICK", requestId: choiceId,
     });
     return { started: true, taskId: started.task.taskId };
   } catch (error) {
@@ -6064,14 +6138,17 @@ async function sendSlackWorkflowBack(dependencies: AwsBrokerDependencies, tasks:
  */
 async function closeSlackWorkflowTask(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowCloseEvent) {
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "close this task");
+  let closeRequestId = requestId;
   if (event.stop === true) {
-    const remembered = await rememberSlackStop(dependencies, taskId, event.userId, requestId);
-    if (remembered !== "close_now") return { stopped: remembered };
+    // The close a Stop leads to carries the first press's request ID, so every later press (or the post-result hook) is the same close.
+    const stop = await rememberSlackStop(dependencies, taskId, event.userId, requestId);
+    if (stop.decision !== "close_now") return { stopped: stop.decision };
+    closeRequestId = stop.requestId;
   }
   const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
-  const body = JSON.stringify({ requestId, discard_unpublished: true });
+  const body = JSON.stringify({ requestId: closeRequestId, discard_unpublished: true });
   const path = `/v1/dev/tasks/${taskId}/close`;
-  return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
+  return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId: closeRequestId, body }, new URL(path, "https://agentx.invalid"));
 }
 
 export function isSlackWorkflowReviewRetryEvent(event: unknown): event is SlackWorkflowReviewRetryEvent {
@@ -6277,6 +6354,8 @@ async function captureSlackWorkflowFeedbackNote(dependencies: AwsBrokerDependenc
 export interface SlackThreadNoteEvent {
   source: "agentx.slack-ingress"; action: "thread-note"; taskId: string; userId: string; thread: SlackThread;
   eventId: string; messageTs: string; text: string;
+  /** Decision 134: the ingress read the reply as small talk; it is saved only when the task waits on this person. */
+  smallTalk?: true;
 }
 
 export function isSlackThreadNoteEvent(event: unknown): event is SlackThreadNoteEvent {
@@ -6294,7 +6373,7 @@ export function isSlackThreadNoteEvent(event: unknown): event is SlackThreadNote
  * Every expected answer (saved, already saved, or not saved because the thread or task no longer takes notes)
  * is a 200 with its outcome, so Slack is never asked to retry it.
  */
-async function recordSlackThreadNote(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackThreadNoteEvent): Promise<{ outcome: "captured" | "duplicate" | "refused" }> {
+async function recordSlackThreadNote(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackThreadNoteEvent): Promise<{ outcome: "captured" | "duplicate" | "refused" | "small_talk" }> {
   if (dependencies.developer === undefined) return { outcome: "refused" };
   const thread = SlackThreadSchema.safeParse(event.thread);
   const userId = SlackRequesterSchema.shape.userId.safeParse(event.userId);
@@ -6310,6 +6389,7 @@ async function recordSlackThreadNote(dependencies: AwsBrokerDependencies, tasks:
     || access.task.share.threadTs !== thread.data.threadTs) return { outcome: "refused" };
   const result = await recordWorkflowThreadNote({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now },
     { taskId, thread: thread.data, userId: userId.data, messageTs: messageTs.data, eventId: event.eventId, text: event.text,
+      ...(event.smallTalk === true ? { smallTalk: true } : {}),
       peopleAccess: { ...(access.peopleRevision === undefined ? {} : { peopleRevision: access.peopleRevision }), isOwner: access.role === "owner" } });
   // The PR feedback review page keeps showing the owner's own replies, as before (best effort).
   if (result.outcome === "captured") {
