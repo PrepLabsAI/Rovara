@@ -28,8 +28,8 @@ const notSecretText = (value: string): boolean => !looksLikeSecretValue(value) &
 const matching = (pattern: RegExp, value: unknown): string | undefined => (typeof value === "string" && pattern.test(value) && notSecretText(value) ? value : undefined);
 /** A literal parameter default: one plain printable line, no template syntax (`${...}`), not shaped like a key. Anything built from a function, a reference or a variable is not a literal. */
 const literalValue = (value: unknown): string | undefined => (typeof value === "string" && value.length <= 200 && /^[\x20-\x7e]*$/u.test(value) && !/\$\{|\{\{|^!/u.test(value) && notSecretText(value) ? value : undefined);
-const PARAMETER_TYPES = ["String", "StringList", "SecureString"] as const;
-const parameterType = (value: unknown): (typeof PARAMETER_TYPES)[number] => PARAMETER_TYPES.find((type) => type === value) ?? "String";
+/** Only a plain `String` parameter is seeded (a type that is not written is `String`, as in CloudFormation and Terraform's default); a SecureString or a StringList is left to the tests. */
+const isStringParameter = (value: unknown): boolean => value === undefined || value === "String";
 const attributeType = (value: unknown): "S" | "N" | "B" | undefined => {
   const text = typeof value === "string" ? value.toUpperCase() : "";
   return text === "S" || text === "STRING" ? "S" : text === "N" || text === "NUMBER" ? "N" : text === "B" || text === "BINARY" ? "B" : undefined;
@@ -78,10 +78,8 @@ function cfnResource(logicalId: string, value: unknown, literal: string | undefi
   if (kind === "parameter") {
     const name = matching(PARAMETER_NAME, ownGet(properties, "Name")) ?? plainName(logicalId.slice(0, 64));
     if (name === undefined) return undefined;
-    const declared = parameterType(ownGet(properties, "Type"));
-    const resource: DependencyResource = { kind, name, parameterType: declared };
-    if (declared !== "SecureString" && literal !== undefined) resource.value = literal;
-    return resource;
+    if (!isStringParameter(ownGet(properties, "Type"))) return undefined;
+    return { kind, name, ...(literal === undefined ? {} : { value: literal }) };
   }
   if (kind === "key") {
     // A key is called by its logical id; its alias comes from an `AWS::KMS::Alias` that targets it (`templateResources`).
@@ -310,10 +308,9 @@ function readTerraform(path: string, text: string, out: DependencyCandidate[]): 
     if (kind === "secret") { const name = matching(SECRET_NAME, tfString(top, "name")) ?? plainName(label); resource = name === undefined ? undefined : { kind, name }; }
     else if (kind === "parameter") {
       const name = matching(PARAMETER_NAME, tfString(top, "name")) ?? plainName(label);
-      if (name !== undefined) {
-        const declared = parameterType(tfString(top, "type"));
-        const value = declared === "SecureString" ? undefined : literalValue(tfString(top, "value"));
-        resource = { kind, name, parameterType: declared, ...(value === undefined ? {} : { value }) };
+      if (name !== undefined && isStringParameter(tfString(top, "type"))) {
+        const value = literalValue(tfString(top, "value"));
+        resource = { kind, name, ...(value === undefined ? {} : { value }) };
       }
     } else if (kind === "key") { const name = plainName(label); resource = name === undefined ? undefined : { kind, name }; }
     else if (kind === "rule") {
@@ -394,6 +391,10 @@ function cdkModules(text: string): Array<{ module: string; line: number }> {
   for (const line of text.matchAll(/^[ \t]*from[ \t]+aws_cdk[ \t]+import[ \t]+([^\n]{1,300})$/gmu)) {
     for (const word of line[1]!.matchAll(/\baws_([a-z0-9_]{2,40})\b/gu)) found.push({ module: word[1]!.replace(/_/gu, "-"), line: lineOf(text, line.index) });
   }
+  // TypeScript and JavaScript: `import { aws_s3 as s3, aws_sns } from "aws-cdk-lib"` (possibly over several lines), and `const { aws_s3 } = require("aws-cdk-lib")`.
+  for (const block of text.matchAll(/(?:\bimport\s{0,10}\{([^}]{1,600})\}\s{0,10}from|\bconst\s{1,10}\{([^}]{1,600})\}\s{0,10}=\s{0,10}require\()\s{0,10}["'](?:aws-cdk-lib|@aws-cdk\/core)["']/gu)) {
+    for (const word of (block[1] ?? block[2] ?? "").matchAll(/\baws_([a-z0-9_]{2,40})\b/gu)) found.push({ module: word[1]!.replace(/_/gu, "-"), line: lineOf(text, block.index) });
+  }
   return found;
 }
 /** CDK module names that are not the key, legacy key or boto3 name of the service they are about (`aws-cognito` is user pools). */
@@ -428,7 +429,7 @@ function readCdk(path: string, text: string, out: DependencyCandidate[]): void {
     else if (kind === "parameter") {
       const name = matching(PARAMETER_NAME, named) ?? plainName(id.slice(0, 64));
       const value = literalValue(new RegExp(`\\b(?:stringValue\\s{0,40}:|string_value\\s{0,40}=)\\s{0,40}["'\`]([^"'\`$]+)["'\`]`, "u").exec(args)?.[1]);
-      resource = name === undefined ? undefined : { kind, name, parameterType: "String", ...(value === undefined ? {} : { value }) };
+      resource = name === undefined ? undefined : { kind, name, ...(value === undefined ? {} : { value }) };
     } else if (kind === "key") { const name = plainName(id.slice(0, 64)); const alias = matching(KEY_ALIAS, named); resource = name === undefined ? undefined : { kind, name, ...(alias === undefined ? {} : { alias }) }; }
     else if (kind === "bus") { const name = plainName(named) ?? plainName(id.slice(0, 64)); resource = name === undefined ? undefined : { kind, name }; }
     else {

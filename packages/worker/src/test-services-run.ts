@@ -34,7 +34,7 @@ import { constants as fsConstants, readFileSync } from "node:fs";
 import { open, readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import {
-  CATALOG_REGISTRY_ROOT, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, agentXError, awsPlanNeedsAllServices, catalogEntryById, catalogRepositoryName, checkEmulatorEngine, normaliseAwsServiceKey,
+  CATALOG_REGISTRY_ROOT, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, AWS_EMULATOR_ENGINE_VERSION, agentXError, awsPlanNeedsAllServices, catalogEntryById, catalogRepositoryName, checkEmulatorEngine, normaliseAwsServiceKey,
   type CatalogEdition, type CatalogEntry, type ServiceCatalog, type TaskAwsResource, type TaskDependencyPlan, type TestEnvTaskPlan, type TestServicesStartFailure, type TestServicesUsageRecord,
 } from "@agentx/contracts";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, type TaskSandbox } from "./task-sandbox.js";
@@ -49,7 +49,7 @@ import {
 import type { ContainerExec } from "./devcontainer.js";
 import { runNetworkHelperIp, runNetworkLabelArgs, servicesNetworkStaleAfterMs } from "./run-network.js";
 import {
-  HELPER_CREDENTIAL_PATTERNS, HelperStartError, newLocalAwsCredentials, sweepServicesNetworksAtWorkerStart,
+  HELPER_CREDENTIAL_PATTERNS, HelperStartError, LOCAL_AWS_FORK_KEYS_OF, newLocalAwsCredentials, sweepServicesNetworksAtWorkerStart,
   type HelperFiles, type HelperRequest,
 } from "./service-helpers.js";
 import {
@@ -492,6 +492,7 @@ function resolveEmulator(catalog: ServiceCatalog, emulated: readonly TaskDepende
   if (entry.image.digest !== first.digest) return notAvailable();
   // The catalog may say which engine release the entry runs (optional for now): a different one is refused, one that says nothing is let through.
   if (!checkEmulatorEngine(entry, { pinned: "optional" }).ok) throw new TestServicesError("mismatch");
+  const servesTableEngine = entry.emulator?.engineVersion === AWS_EMULATOR_ENGINE_VERSION;
   const services = new Set<string>();
   const refs = new Map<string, { path: string }>();
   const seeds: TaskDependencyPlan["seeds"] = [];
@@ -501,7 +502,8 @@ function resolveEmulator(catalog: ServiceCatalog, emulated: readonly TaskDepende
     // Any service of the generated table (the plan's parse already turned a legacy spelling into its key); the services Rovara creates resources for are `AWS_SEEDED_KINDS`, every other one starts empty.
     for (const service of plan.aws.services) {
       const key = normaliseAwsServiceKey(service);
-      if (key === undefined) throw new TestServicesError("mismatch");
+      // A service outside the fork's own is served only by the table's engine, which the entry must say it runs: no version (or another) means the image is the fork's, and the plan is refused.
+      if (key === undefined || (!servesTableEngine && !Object.hasOwn(LOCAL_AWS_FORK_KEYS_OF, key))) throw new TestServicesError("mismatch");
       services.add(key);
     }
     if (plan.aws.resources !== undefined) refs.set(plan.aws.resources.path, { path: plan.aws.resources.path });
@@ -768,7 +770,8 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
   const failures = new Map<string, TestServicesStartFailure>();
   const ids = input.dependencies.map((dependency) => dependency.id);
   const emulatorBase = bases.find((base) => base.emulator !== undefined);
-  // The endpoint variables the repositories' own settings set: pointed at the emulator too, so no value of the repository sends a service elsewhere (service-env.ts). Only a run with an emulator needs them.
+  // The endpoint variables the repositories' own settings set, as the working phase starts: pointed at the emulator too, so no value of the repository sends a service elsewhere (service-env.ts). Only a run with an
+  // emulator needs them. Each sealed round reads them again.
   const repoEndpointNames = emulatorBase === undefined ? [] : await repoAwsEndpointNames({ repositoryPaths: input.repositoryPaths });
   const secrets: string[] = [];
   const pendingStarts = new Set<Promise<ServiceSession>>();
@@ -990,7 +993,8 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
       throw error;
     }
     const resolved = materializeAll(current, "check", fixtures);
-    const environment = environmentFor("check", resolved, repoEndpointNames);
+    // The names are read again for each round: the agent may have edited a `.env` or a settings file since the last one, and a round's variables must name what the code it checks reads.
+    const environment = environmentFor("check", resolved, emulatorBase === undefined ? [] : await repoAwsEndpointNames({ repositoryPaths: input.repositoryPaths }));
     secrets.push(...helperSecretValues(resolved.map((item) => item.request)), ...environment.secretValues);
     redactor = createServiceRedactor(secrets);
     const roundRedactor = redactor;
@@ -1279,8 +1283,9 @@ export function testServicesAdvertisedFeatures(environment: NodeJS.ProcessEnv = 
   // Slice 3: a worker whose image carries the catalog's fake server (a helper that runs from the worker's own image) can run a plan with a fake; it needs no image pulled.
   // TS-UX-1 item 9: every worker with test services loads a seed file (service-seed-file.ts). SEED-RISK-1: and checks a locked seed command's script before it runs it (service-seed-lock.ts).
   const features: Array<typeof TEST_SERVICES_PLAN_FEATURE | typeof TEST_SERVICES_AWS_PLAN_FEATURE | typeof TEST_SERVICES_AWS_ALL_SERVICES_FEATURE | typeof TEST_SERVICES_FAKE_PLAN_FEATURE | typeof TEST_SERVICES_FILE_SEED_FEATURE | typeof TEST_SERVICES_SEED_LOCK_FEATURE> = [TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE];
-  // A worker that can run an emulated plan at all reads a plan naming any service of the table (`resolveEmulator`), so the two go together; the broker adds the second to a plan that needs it (`featuresForTestPlan`).
-  if (emulatorImagePrepulled(shipped, environment)) features.push(TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
+  // Only a worker whose emulator image IS the table's engine takes a plan naming any service of the table (`resolveEmulator`); the broker adds the feature to a plan that needs it (`featuresForTestPlan`).
+  if (emulatorImagePrepulled(shipped, environment)) features.push(TEST_SERVICES_AWS_PLAN_FEATURE);
+  if (emulatorServesAllServices(shipped, environment)) features.push(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
   if (fakeServerBaked(shipped)) features.push(TEST_SERVICES_FAKE_PLAN_FEATURE);
   return features;
 }
@@ -1312,18 +1317,18 @@ export function notPulledRepositories(environment: NodeJS.ProcessEnv = process.e
 }
 
 /** The emulator image the shipped files pin and list, read from the image's own (immutable) files ONCE per path pair: /ping asks on every call and must not read two files each time. Tests clear it with `forgetEmulatorImageCache`. */
-const emulatorImageCache = new Map<string, { repository: string } | undefined>();
+const emulatorImageCache = new Map<string, { repository: string; engineVersion?: string } | undefined>();
 export function forgetEmulatorImageCache(): void { emulatorImageCache.clear(); }
-function shippedEmulatorImage(shipped: ShippedCatalogFiles): { repository: string } | undefined {
+function shippedEmulatorImage(shipped: ShippedCatalogFiles): { repository: string; engineVersion?: string } | undefined {
   const key = `${String(shipped.catalog)}\n${String(shipped.prepull)}`;
   if (emulatorImageCache.has(key)) return emulatorImageCache.get(key);
-  let found: { repository: string } | undefined;
+  let found: { repository: string; engineVersion?: string } | undefined;
   try {
     const catalog = ServiceCatalogSchema.parse(JSON.parse(readFileSync(shipped.catalog, "utf8")));
     const list = PrepullListSchema.parse(JSON.parse(readFileSync(shipped.prepull, "utf8")));
     const entry = catalog.entries.find((item) => item.backing === "emulated" && item.family === "local-aws" && item.status !== "retired" && item.image.digest !== undefined
       && list.images.some((image) => image.repository === item.image.repository && image.digest === item.image.digest));
-    found = entry === undefined ? undefined : { repository: entry.image.repository };
+    found = entry === undefined ? undefined : { repository: entry.image.repository, ...(entry.emulator?.engineVersion === undefined ? {} : { engineVersion: entry.emulator.engineVersion }) };
   } catch {
     found = undefined;
   }
@@ -1339,6 +1344,15 @@ export function emulatorImagePrepulled(shipped: ShippedCatalogFiles = SHIPPED_CA
   const image = shippedEmulatorImage(shipped);
   const missing = notPulledRepositories(environment);
   return image !== undefined && missing !== "all" && !missing.has(image.repository);
+}
+
+/**
+ * Whether the emulator image this worker pre-pulls is the ENGINE the table was made from: its catalog entry says so (`emulator.engineVersion` equals `AWS_EMULATOR_ENGINE_VERSION`). The image shipped before that engine
+ * (the fork) serves about eighteen services, and no catalog entry named an engine then, so an entry with no version, or another one, is not this: the worker then runs only the services of the fork
+ * (`LOCAL_AWS_FORK_KEYS_OF`) and does not advertise `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE`.
+ */
+export function emulatorServesAllServices(shipped: ShippedCatalogFiles = SHIPPED_CATALOG_FILES, environment: NodeJS.ProcessEnv = process.env): boolean {
+  return emulatorImagePrepulled(shipped, environment) && shippedEmulatorImage(shipped)?.engineVersion === AWS_EMULATOR_ENGINE_VERSION;
 }
 
 // ---- the candidate check (Prove, worker side): prepare.ts

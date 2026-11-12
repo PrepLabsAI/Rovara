@@ -4,8 +4,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, WORKER_INVOCATION_FEATURES, catalogPrepullList } from "@agentx/contracts";
+import { AWS_EMULATOR_ENGINE_VERSION, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, WORKER_INVOCATION_FEATURES, catalogPrepullList } from "@agentx/contracts";
 import { LOCAL_AWS_FORK_KEYS_OF, LOCAL_AWS_SERVICE_KEYS, localAwsEnvLines, newLocalAwsCredentials } from "../../packages/worker/src/service-helpers.js";
+import { REPO_ENDPOINT_NAMES_MAX, ServiceEnvError, buildServiceEnvironment } from "../../packages/worker/src/service-env.js";
 import { repoAwsEndpointNames } from "../../packages/worker/src/repo-aws-endpoints.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 import { forgetEmulatorImageCache, testServicesAdvertisedFeatures } from "../../packages/worker/src/test-services-run.js";
@@ -53,7 +54,10 @@ describe("the features a worker advertises", () => {
   afterEach(() => forgetEmulatorImageCache());
   const IMAGE = `registry.example.test/agentx/worker@sha256:${"b".repeat(64)}`;
   const environment = { AGENTX_TEST_SERVICES_REGISTRY: "123456789012.dkr.ecr.us-west-2.amazonaws.com", AGENTX_TEST_SERVICES_ENV: "test", AGENTX_TEST_SERVICES_RUN_DIR: "/run/rovara", AGENTX_SANDBOX_IMAGE: IMAGE, AGENTX_WORKER_IMAGE: IMAGE };
-  it("the all-services feature is a contract feature, and a worker that can run an emulated plan advertises it beside the AWS plan feature (never without it)", async () => {
+  const withEngine = (engineVersion: string) => (entries: Array<Record<string, unknown>>) => {
+    for (const entry of entries) if (entry["id"] === "local-aws@r1") (entry["emulator"] as { engineVersion?: string }).engineVersion = engineVersion;
+  };
+  it("the all-services feature is a contract feature, and a worker advertises it only when its emulator image is the table's engine (never without the AWS plan feature)", async () => {
     expect(WORKER_INVOCATION_FEATURES).toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
     // No test-services configuration: neither feature.
     expect(testServicesAdvertisedFeatures({})).toEqual([]);
@@ -61,8 +65,19 @@ describe("the features a worker advertises", () => {
     try {
       const verified = verifiedCatalog(pinnedCatalog());
       const shipped = { catalog: join(dir, "catalog.json"), prepull: join(dir, "prepull.json") };
+      // The catalog as shipped today: its emulator entry names no engine release (the image is the old fork's).
       await writeFile(shipped.catalog, JSON.stringify(pinnedCatalog()));
       await writeFile(shipped.prepull, JSON.stringify(catalogPrepullList(verified)));
+      const fork = testServicesAdvertisedFeatures(environment, shipped);
+      expect(fork).toContain(TEST_SERVICES_AWS_PLAN_FEATURE);
+      expect(fork).not.toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
+      // An entry that names another engine release is not the table's either.
+      forgetEmulatorImageCache();
+      await writeFile(shipped.catalog, JSON.stringify(pinnedCatalog(withEngine("1.0.321"))));
+      expect(testServicesAdvertisedFeatures(environment, shipped)).not.toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
+      // The entry names the table's engine: the worker advertises the feature beside the AWS plan feature.
+      forgetEmulatorImageCache();
+      await writeFile(shipped.catalog, JSON.stringify(pinnedCatalog(withEngine(AWS_EMULATOR_ENGINE_VERSION))));
       const features = testServicesAdvertisedFeatures(environment, shipped);
       expect(features).toContain(TEST_SERVICES_AWS_PLAN_FEATURE);
       expect(features).toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
@@ -73,6 +88,7 @@ describe("the features a worker advertises", () => {
       expect(none).not.toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
       // An empty prepull list: the catalog pins an emulator image that is not here.
       forgetEmulatorImageCache();
+      await writeFile(shipped.catalog, JSON.stringify(pinnedCatalog(withEngine(AWS_EMULATOR_ENGINE_VERSION))));
       await writeFile(shipped.prepull, JSON.stringify({ ...catalogPrepullList(verified), images: [] }));
       const empty = testServicesAdvertisedFeatures(environment, shipped);
       expect(empty).not.toContain(TEST_SERVICES_AWS_ALL_SERVICES_FEATURE);
@@ -80,6 +96,20 @@ describe("the features a worker advertises", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the names of the repository's endpoint variables are bounded in the environment too", () => {
+  const input = (repoEndpointNames: string[]) => ({
+    sandbox: "working" as const, sinkholeUrl: "http://sinkhole", dependencies: [],
+    aws: { alias: "aws", port: 4566, region: "us-east-1", emulatedServices: ["s3"], repoEndpointNames },
+  });
+  it("takes 128 names and refuses 129, however the repository's reader was limited", () => {
+    const names = (count: number) => Array.from({ length: count }, (_v, index) => `AWS_ENDPOINT_URL_SVC${String(index).padStart(3, "0")}`);
+    expect(buildServiceEnvironment(input(names(REPO_ENDPOINT_NAMES_MAX))).entries.filter(([name]) => name.startsWith("AWS_ENDPOINT_URL_SVC"))).toHaveLength(128);
+    expect(() => buildServiceEnvironment(input(names(REPO_ENDPOINT_NAMES_MAX + 1)))).toThrow(ServiceEnvError);
+    // A name listed twice is one name, but the list itself is what is bounded.
+    expect(() => buildServiceEnvironment(input([...names(REPO_ENDPOINT_NAMES_MAX), ...names(1)]))).toThrow(ServiceEnvError);
   });
 });
 

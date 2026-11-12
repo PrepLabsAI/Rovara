@@ -45,6 +45,8 @@ const SINKHOLE_URL = /^http:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|172\.30\
 
 /** The names of the variables that point one AWS service at an address (`AWS_ENDPOINT_URL_<SUFFIX>`): the suffix is the SDK's, from the emulator's table. */
 const ENDPOINT_VARIABLE = /^AWS_ENDPOINT_URL_[A-Z0-9_]{2,60}$/u;
+/** The most names of the repository's own settings one run points at the emulator (a plan names at most 64 services; the reader of the settings keeps no more than this). */
+export const REPO_ENDPOINT_NAMES_MAX = 128;
 
 /** The environment variable that points one AWS service at another address: from the table, a key or a legacy key. Refuses a service id the table does not know (a wrong name would silently not redirect). */
 export function awsEndpointVariableName(serviceId: string): string {
@@ -159,7 +161,7 @@ export function buildServiceEnvironment(input: ServiceEnvInput): ServiceEnvironm
     const emulated = new Set(aws.emulatedServices.map(awsEndpointVariableName));
     if (emulated.size !== aws.emulatedServices.length) refuse();
     const repoNames = new Set(aws.repoEndpointNames ?? []);
-    if ([...repoNames].some((name) => !ENDPOINT_VARIABLE.test(name))) refuse();
+    if (repoNames.size > REPO_ENDPOINT_NAMES_MAX || (aws.repoEndpointNames?.length ?? 0) > REPO_ENDPOINT_NAMES_MAX || [...repoNames].some((name) => !ENDPOINT_VARIABLE.test(name))) refuse();
     const endpoint = `http://${alias}:${String(port)}`;
     // The planned services, then the names the repository sets that no planned service already took, then the GLOBAL endpoint (for every service no variable names): all at the emulator, in both sandboxes.
     for (const name of emulated) add(name, endpoint);
