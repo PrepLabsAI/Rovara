@@ -19,6 +19,25 @@ const cut = (text: string, max: number): string => {
 export interface ButtonValue { r: string; v: number; d: string; o: ChannelDecision["decision"] }
 export const ACTION_PREFIX = "rovara_decide_";
 
+/** The box that asks "What should change?" when Request changes is pressed: its callback name, and the names of its one input. */
+export const CHANGES_CALLBACK = "rovara_changes";
+export const CHANGES_INPUT = "rovara_changes_reason";
+export const CHANGES_FIELD = "text";
+/** What the box carries for itself (the tool keeps it to 3,000 characters): the request it is for, where the card is, and who opened it. */
+export interface ChangesContext { r: string; v: number; d: string; t: string; s: string; h: string; u: string; w: string }
+
+/** The box (a modal view) that asks what should change. The words typed in it come back as the reason of the request for changes. */
+export function changesModal(context: ChangesContext): unknown {
+  return {
+    type: "modal", callback_id: CHANGES_CALLBACK, private_metadata: JSON.stringify(context),
+    title: { type: "plain_text", text: "Request changes" }, submit: { type: "plain_text", text: "Send" }, close: { type: "plain_text", text: "Cancel" },
+    blocks: [{
+      type: "input", block_id: CHANGES_INPUT, label: { type: "plain_text", text: "What should change?" },
+      element: { type: "plain_text_input", action_id: CHANGES_FIELD, multiline: true, max_length: 500 },
+    }],
+  };
+}
+
 const LABEL_STYLE: Partial<Record<ChannelDecision["decision"], "primary" | "danger">> = { APPROVE: "primary", REJECT: "danger" };
 
 export interface Rendered {

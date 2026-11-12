@@ -18,6 +18,11 @@ export interface SocketOptions {
   web: Pick<SlackWeb, "openConnection">;
   /** Sets up a socket for an address; default: the runtime's own `WebSocket`. */
   connect?: SocketFactory;
+  /**
+   * What an envelope is answered with besides its acknowledgement, decided at once (the tool waits for it): the box that asks what should change shows an error when nothing was typed. Absent, or nothing returned: a plain
+   * acknowledgement. A throw is a plain acknowledgement too.
+   */
+  answer?: (envelope: { type: string; payload: unknown }) => unknown;
   /** Handles one envelope's payload after it was acknowledged. A throw is logged by name and the next envelope is read. */
   handle: (envelope: { type: string; payload: unknown }) => Promise<void>;
   log?: (entry: Record<string, unknown>) => void;
@@ -65,7 +70,9 @@ export function startSocket(options: SocketOptions): SocketRun {
         if (envelope.type === "disconnect") { try { socket.close(); } catch { /* already closed */ } return; }
         // Acknowledged before anything is done with it.
         if (typeof envelope.envelope_id === "string" && envelope.envelope_id.length <= 128) {
-          try { socket.send(JSON.stringify({ envelope_id: envelope.envelope_id })); } catch { log({ event: "slack.ack_failed" }); }
+          let reply: unknown;
+          try { reply = options.answer?.({ type: envelope.type, payload: envelope.payload }); } catch { reply = undefined; }
+          try { socket.send(JSON.stringify(reply === undefined ? { envelope_id: envelope.envelope_id } : { envelope_id: envelope.envelope_id, payload: reply })); } catch { log({ event: "slack.ack_failed" }); }
         }
         const type = envelope.type, payload = envelope.payload;
         if (waiting >= SOCKET_QUEUE_MAX) { log({ event: "slack.queue_full" }); return; }

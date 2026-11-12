@@ -162,12 +162,17 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         const chatTakes = risk !== "high" && found.requirement.methods.includes(`${CHAT_METHOD_PREFIX}${conversation.channel}`);
         const taskUrl = deps.taskUrl?.(taskId);
         const words = `The plan for "${title}" is ready for review. Risk: ${risk}.`;
+        // Request changes asks "What should change?" in a form the chat opens (an adapter that declares `forms`); a chat with none sends the person to the task page for it instead, and the card offers Approve alone.
+        const asks = adapter.capabilities.forms === true;
+        const extra = chatTakes
+          ? (asks ? (taskUrl === undefined ? undefined : `Details: ${taskUrl}`) : `To ask for changes, open the task page.${taskUrl !== undefined ? ` ${taskUrl}` : deps.footer !== undefined ? `\n${deps.footer}` : ""}`)
+          : (taskUrl === undefined ? deps.footer : undefined);
         await send(orgId, sessionId, key, async () => {
           await postApprovalCard({ store: deps.store, orgId, now: deps.now, companyOf: deps.companyOf }, {
             channel: conversation.channel, adapter, conversation, kind: "plan_approval", subject: { type: WORKFLOW_DOCUMENT_KIND, id: taskId }, revision: found.revision, artifactDigest: found.artifactDigest, risk, signInOnly: !chatTakes,
-            text: chatTakes && taskUrl !== undefined ? `${words}\nDetails: ${taskUrl}` : taskUrl === undefined && deps.footer !== undefined ? `${words}\n${deps.footer}` : words,
+            text: extra === undefined ? words : `${words}\n${extra}`,
             ...(taskUrl === undefined ? {} : { taskUrl }),
-            actions: chatTakes ? [{ decision: "APPROVE", label: "Approve" }, { decision: "REQUEST_CHANGES", label: "Request changes" }] : [],
+            actions: chatTakes ? [{ decision: "APPROVE", label: "Approve" }, ...(asks ? [{ decision: "REQUEST_CHANGES" as const, label: "Request changes" }] : [])] : [],
           });
         });
         return;
