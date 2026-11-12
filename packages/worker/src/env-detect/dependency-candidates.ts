@@ -1,6 +1,6 @@
 // Shared helpers of the dependency detectors (test services D1-D7): the image/driver name tables, safe names, and the merge that turns many sightings of one family into one candidate.
 // Everything a detector puts in a candidate is a family id, a kind, a fixed word, a number or an environment variable NAME. A value read from a file (a password, a host, a token) is never copied.
-import { looksLikeSecretValue, type TestEnvDependencyKind } from "@agentx/contracts";
+import { awsSeededKinds, awsServiceKeyFromSdkName, awsEmulatorServiceRow, looksLikeSecretValue, normaliseAwsServiceKey, type AwsSdkNameKind, type TestEnvDependencyKind } from "@agentx/contracts";
 import { DEPENDENCY_REFUSED_FIELDS, type DependencyCandidate, type DependencyEvidence, type DependencyHints, type DependencyStrength } from "./types.js";
 
 export const MAX_EVIDENCE = 8;
@@ -17,13 +17,19 @@ export const FAMILY_KINDS: Readonly<Record<string, TestEnvDependencyKind>> = {
 };
 
 export function kindOfFamily(family: string): TestEnvDependencyKind {
-  if (family.startsWith("aws:")) return family === "aws:s3" ? "object_store" : family === "aws:sqs" || family === "aws:sns" ? "queue" : family === "aws:kinesis" ? "stream" : family === "aws:dynamodb" || family === "aws:rds" ? "database" : family === "aws:sagemaker-runtime" ? "model_endpoint" : family === "aws:ses" ? "email" : family === "aws:cognito-idp" ? "identity" : family === "aws:opensearch" || family === "aws:es" ? "search" : family === "aws:elasticache" ? "cache" : "cloud_api";
+  if (family.startsWith("aws:")) {
+    // A legacy spelling (`cognito-idp`, `es`) is read as the key of the table.
+    const service = normaliseAwsServiceKey(family.slice(4)) ?? family.slice(4);
+    return service === "s3" ? "object_store" : service === "sqs" || service === "sns" ? "queue" : service === "kinesis" ? "stream" : service === "dynamodb" || service === "rds" ? "database" : service === "sagemaker-runtime" ? "model_endpoint" : service === "ses" ? "email" : service === "cognito-identity-provider" ? "identity" : service === "opensearch" || service === "elasticsearch-service" ? "search" : service === "elasticache" ? "cache" : "cloud_api";
+  }
   if (family.startsWith("http:")) return "http_api";
   return FAMILY_KINDS[family] ?? "other";
 }
 
 /** An environment variable name that is safe to carry: upper-case, at most 64 characters, and not shaped like a key. */
 export function safeEnvName(name: unknown): string | undefined {
+  // `AWS_ENDPOINT_URL_<suffix>` of a service of the emulator's table is the SDK's own variable name: long and upper-case, which the key-shape rule below would take for a token (`..._SECRETS_MANAGER`).
+  if (typeof name === "string" && name.startsWith("AWS_ENDPOINT_URL_") && awsServiceKeyFromSdkName("endpointVariable", name.slice("AWS_ENDPOINT_URL_".length)) !== undefined) return name;
   if (typeof name !== "string" || !/^[A-Z][A-Z0-9_]{1,63}$/u.test(name) || looksLikeSecretValue(name)) return undefined;
   // Real variable names have words joined by `_`. A long name without one, mixing letters and digits (or very long), looks like a token pasted as a key.
   if (!name.includes("_") && ((name.length >= 16 && /[0-9]/u.test(name) && /[A-Z]/u.test(name)) || name.length >= 24)) return undefined;
@@ -75,14 +81,22 @@ export function familyFromImage(reference: unknown): { family: string; version?:
 /** Services LocalStack names in `SERVICES`, as AWS service ids; unknown words are dropped. */
 export function awsServicesFromList(value: unknown): string[] {
   if (typeof value !== "string") return [];
-  return [...new Set(value.split(",").map((part) => part.trim().toLowerCase()).filter((part) => /^[a-z][a-z0-9-]{1,39}$/u.test(part)).map((part) => LOCALSTACK_ALIASES[part] ?? part))].slice(0, 24);
+  return [...new Set(value.split(",").map((part) => part.trim().toLowerCase()).filter((part) => /^[a-z][a-z0-9-]{1,39}$/u.test(part)).map((part) => LOCALSTACK_ALIASES[part] ?? normalizeAwsService(part) ?? part))].slice(0, 24);
 }
-const LOCALSTACK_ALIASES: Record<string, string> = { ddb: "dynamodb", cognito: "cognito-idp", "sagemaker-runtime": "sagemaker-runtime", secretsmanager: "secretsmanager" };
+/** LocalStack's own short names that no SDK uses (the table knows every other spelling). */
+const LOCALSTACK_ALIASES: Record<string, string> = { ddb: "dynamodb" };
 
 // ---- constructing and merging
 
 export function candidate(family: string, strength: DependencyStrength, evidence: DependencyEvidence, hints: DependencyHints = {}, kind?: TestEnvDependencyKind): DependencyCandidate {
-  return { family, kind: kind ?? kindOfFamily(family), evidence: [evidence], strength, hints };
+  return { family, kind: kind ?? kindOfFamily(family), evidence: [evidence], strength, hints: awsStartsEmpty(family) && hints.startsEmpty === undefined ? { ...hints, startsEmpty: true } : hints };
+}
+
+/** Whether a family is an AWS service of the emulator's table that no seed handler creates resources for (`AWS_SEEDED_KINDS`): its emulator starts empty. The model-endpoint family has its own detector. */
+export function awsStartsEmpty(family: string): boolean {
+  if (!family.startsWith("aws:") || isOwnedElsewhere(family)) return false;
+  const service = normaliseAwsServiceKey(family.slice(4));
+  return service !== undefined && awsSeededKinds(service).length === 0;
 }
 
 const union = <T>(left: readonly T[] | undefined, right: readonly T[] | undefined, max: number): T[] | undefined => {
@@ -108,6 +122,7 @@ function mergeHints(left: DependencyHints, right: DependencyHints): DependencyHi
   if (left.explicitEndpoint === true || right.explicitEndpoint === true) merged.explicitEndpoint = true;
   if (left.fakedByTests === true || right.fakedByTests === true) merged.fakedByTests = true;
   if (left.testcontainers === true || right.testcontainers === true) merged.testcontainers = true;
+  if (left.startsEmpty === true || right.startsEmpty === true) merged.startsEmpty = true;
   const url = left.url ?? right.url;
   if (url !== undefined) merged.url = url;
   const seenResources = new Set<string>();
@@ -155,21 +170,25 @@ export const DEPENDENCY_SKIP_DIRS = /(?:^|\/)(?:node_modules|dist|build|\.git|ve
 
 // ---- AWS service ids
 
-const AWS_SERVICE_ALIASES: Readonly<Record<string, string>> = {
-  "secrets-manager": "secretsmanager", sfn: "stepfunctions", "step-functions": "stepfunctions", "cognito-identity-provider": "cognito-idp", cognitoidentityprovider: "cognito-idp", eventbridge: "events", cloudwatchevents: "events",
-  "cloudwatch-logs": "logs", cloudwatchlogs: "logs", "dynamodb-streams": "dynamodbstreams", apigatewayv2: "apigateway", "api-gateway": "apigateway", sagemakerruntime: "sagemaker-runtime", "sagemaker-runtime": "sagemaker-runtime",
-  "bedrock-runtime": "bedrock-runtime", bedrockruntime: "bedrock-runtime", "elastic-search-service": "es", elasticsearchservice: "es", opensearchserverless: "opensearch-serverless",
-};
-
 /**
- * An AWS service id as the emulator's catalog spells it (`s3`, `dynamodb`, `secretsmanager`, `cognito-idp`), from a boto3, SDK package or Java package spelling. Undefined for anything that is not an id.
+ * An AWS service id as the emulator's table spells it (a key such as `s3`, `secrets-manager`, `sfn`), from the spelling one SDK, package or setting uses. `kind` says which of the table's columns the spelling comes from
+ * (boto3's client name, the `@aws-sdk/client-*` suffix, the last part of a Java package or Go module, CloudFormation's `AWS::<name>::`, the `AWS_ENDPOINT_URL_<name>` suffix); a spelling that is not in that column is read as a
+ * key, a legacy key, or a name of any other column. A spelling the table does not know but that has the shape of an id comes back as that id (a candidate, never dropped); undefined for anything that is not an id.
  * `sagemaker-runtime` is returned as is: the model-endpoint detector (D9, `services.ts`) owns it, and the SDK rules skip it (`isOwnedElsewhere`).
  */
-export function normalizeAwsService(raw: string): string | undefined {
+export function normalizeAwsService(raw: string, kind?: AwsSdkNameKind): string | undefined {
   const lower = raw.toLowerCase().replace(/_/gu, "-");
-  const id = AWS_SERVICE_ALIASES[lower] ?? lower;
-  return /^[a-z][a-z0-9-]{1,39}$/u.test(id) ? id : undefined;
+  const spellings = [raw, lower];
+  const columns: AwsSdkNameKind[] = [...(kind === undefined ? [] : [kind]), "boto3", "js", "java", "go"];
+  const found = (kind === undefined ? undefined : spellings.map((name) => awsServiceKeyFromSdkName(kind, name)).find((key) => key !== undefined))
+    ?? normaliseAwsServiceKey(lower)
+    ?? columns.flatMap((column) => [awsServiceKeyFromSdkName(column, lower)]).find((key) => key !== undefined);
+  if (found !== undefined) return found;
+  return /^[a-z][a-z0-9-]{1,39}$/u.test(lower) ? lower : undefined;
 }
+
+/** The service `service` is in the table (a key or legacy key), for callers that must not keep an unknown id. */
+export const isTableAwsService = (service: string): boolean => awsEmulatorServiceRow(normaliseAwsServiceKey(service) ?? service) !== undefined;
 
 /** Families an older detector already reports through `Detection.services` (SageMaker Runtime, D9): the SDK rules leave them out so that output stays as it was. */
 export const isOwnedElsewhere = (family: string): boolean => family === "aws:sagemaker-runtime";
@@ -245,8 +264,8 @@ export function urlLiteralCandidates(path: string, text: string): DependencyCand
 }
 
 /** An AWS client built in code: one candidate per service, flagged when its builder hard-codes an endpoint. */
-export function awsClientCandidate(path: string, text: string, index: number, service: string, explicit: boolean): DependencyCandidate | undefined {
-  const normalized = normalizeAwsService(service);
+export function awsClientCandidate(path: string, text: string, index: number, service: string, explicit: boolean, kind?: AwsSdkNameKind): DependencyCandidate | undefined {
+  const normalized = normalizeAwsService(service, kind);
   if (normalized === undefined || isOwnedElsewhere(`aws:${normalized}`)) return undefined;
   return candidate(`aws:${normalized}`, "used", { path, line: lineAt(text, index) }, { ...(explicit ? { explicitEndpoint: true } : {}), seenBy: ["sdk"] });
 }

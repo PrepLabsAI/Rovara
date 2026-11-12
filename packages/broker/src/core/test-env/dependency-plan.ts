@@ -4,10 +4,9 @@
 // offered in this edition, and pinned to an image digest; the catalog must be newer than the release's minimum (a rolled-back catalog could pin a digest that was later found critical). Anything else is refused
 // with a fixed reason, never a plan that leaves a dependency out (a run with no database would only fail its tests in a confusing way). Pure apart from the catalog source; it never reads a clock, a network or a file itself.
 //
-// starts real software from the catalog only (backing `local`, no substitute image). adds Rovara local AWS (backing `emulated`, entry `local-aws`) for exactly S3, SQS and DynamoDB. adds a fake (backing `fake`,
-// entry `fake-server`, which runs from the worker's own image) for an APPROVED, digest-pinned fixture set of this organisation, answering requests with no recording with an error (`fail`). Every other backing, and every
-// other AWS service, is "not available yet", at approval (`dependenciesStartableNow`) and again here.
-import { SEEDED_AWS_SERVICES, emulatorServiceTier, loadSignedCatalog, type CatalogEntry, type CatalogTrustContext, type TaskDependencyPlan, type TestEnvDependency, type TestEnvironmentBody, type VerifiedCatalog, TaskDependencyPlanSchema, TASK_DEPENDENCY_PLAN_MAX, catalogEntryById, catalogIdName, catalogPrepullList } from "@agentx/contracts";
+// starts real software from the catalog only (backing `local`, no substitute image). adds Rovara local AWS (backing `emulated`, entry `local-aws`) for any service of the generated table. adds a fake (backing `fake`,
+// entry `fake-server`, which runs from the worker's own image) for an APPROVED, digest-pinned fixture set of this organisation, answering requests with no recording with an error (`fail`). Every other backing is "not available yet", at approval (`dependenciesStartableNow`) and again here.
+import { checkEmulatorEngine, emulatorServiceTier, loadSignedCatalog, normaliseAwsServiceKey, type CatalogEntry, type CatalogTrustContext, type TaskDependencyPlan, type TestEnvDependency, type TestEnvironmentBody, type VerifiedCatalog, TaskDependencyPlanSchema, TASK_DEPENDENCY_PLAN_MAX, catalogEntryById, catalogIdName, catalogPrepullList } from "@agentx/contracts";
 import { STATEFUL_KINDS, chooseBacking, effectiveAllowedBackings, type BackingPlace, type SkipReason } from "./backing-choice.js";
 import type { ApprovedFixture } from "./fixture-lookup.js";
 
@@ -41,19 +40,20 @@ export type SeedFileHashes = ReadonlyArray<{ id: string; path: string; sha256: s
 export type DependencyPlanResult = { ok: true; dependencies: TaskDependencyPlan[] } | { ok: false; reason: DependencyPlanRefusal };
 
 /**
- * The AWS services Rovara local AWS backs on a task . The emulator has more, and the contract allows more; every other service is "not available yet" until its own slice (design 5.2 tiers, the compatibility suite).
- * The names are AWS service ids (`aws:s3` is the family of `s3`).
+ * Whether Rovara local AWS can back an AWS service on a task: any service of the generated table (`AWS_EMULATOR_SERVICES`, a legacy spelling read as its key). Which of them are CREATED from the project's declarations is
+ * `AWS_SEEDED_KINDS`; every other one starts empty. The names are AWS service ids (`aws:s3` is the family of `s3`).
  */
-export const EMULATED_TASK_SERVICES: readonly string[] = SEEDED_AWS_SERVICES;
+export const isEmulatedTaskService = (service: string): boolean => normaliseAwsServiceKey(service) !== undefined;
 
 type DependencyBacking = TestEnvDependency["backing"];
 type EmulatedBacking = Extract<DependencyBacking, { kind: "emulated" }>;
 type FakeBacking = Extract<DependencyBacking, { kind: "fake" }>;
 
 const startableLocal = (backing: DependencyBacking): boolean => backing.kind === "local" && backing.substituteImage === undefined;
-/** Rovara local AWS for S3, SQS or DynamoDB only: the family and every service the backing lists are among them. */
+/** Rovara local AWS for any service of the table: the family and every service the backing lists are among them, and the backing lists the family's own service (a legacy spelling and its key are one service). */
 const startableEmulated = (family: string, backing: DependencyBacking): backing is EmulatedBacking =>
-  backing.kind === "emulated" && family.startsWith("aws:") && EMULATED_TASK_SERVICES.includes(family.slice(4)) && backing.awsServices.every((service) => EMULATED_TASK_SERVICES.includes(service)) && backing.awsServices.includes(family.slice(4));
+  backing.kind === "emulated" && family.startsWith("aws:") && isEmulatedTaskService(family.slice(4)) && backing.awsServices.every(isEmulatedTaskService)
+  && backing.awsServices.some((service) => normaliseAwsServiceKey(service) === normaliseAwsServiceKey(family.slice(4)));
 /**
  * A fake : the policy for a request with no recording is `fail` (a made-up answer is not available yet), and the dependency is reset by a new fake each round (`fresh_per_round`): a restart between checks would lose the
  * fake's request ledger, and with it the count of what the tests asked it. Whether the set is approved is asked at the plan (`planFake`), which has the store.
@@ -83,9 +83,13 @@ const REFUSAL_OF_SKIP: Partial<Record<SkipReason, DependencyPlanRefusal>> = {
   not_allowed: "not_allowed", not_in_catalog: "not_in_catalog", not_in_edition: "not_in_edition", retired: "retired", no_such_version: "not_in_catalog", not_pinned: "not_pinned",
 };
 
-/** Whether a `local-aws` catalog entry serves every one of the services in its `supported` tier (the tier the compatibility suite covers). */
+/**
+ * Whether a `local-aws` catalog entry serves every one of the services: each is in a tier of the entry or in the generated table (`emulatorServiceTier`; a service no tier lists is `available`), and the entry runs the
+ * engine the table was made from when it says which one it runs (`checkEmulatorEngine`; the version is optional in the catalog for now, so an entry without one passes).
+ */
 export function emulatorServesAll(entry: CatalogEntry, services: readonly string[]): boolean {
-  return entry.backing === "emulated" && catalogIdName(entry.id) === "local-aws" && entry.emulator !== undefined && services.every((service) => emulatorServiceTier(entry.emulator!, service) === "supported");
+  return entry.backing === "emulated" && catalogIdName(entry.id) === "local-aws" && entry.emulator !== undefined && checkEmulatorEngine(entry, { pinned: "optional" }).ok
+    && services.every((service) => emulatorServiceTier(entry.emulator!, service) !== undefined);
 }
 
 /** The refusals for Rovara local AWS: an entry that is missing, unpinned or not covering the service is "not available yet"; the company's setting, the edition and a retired entry keep their own words. */

@@ -121,7 +121,7 @@ export async function pythonManifestCandidates(repo: DetectorContext["repo"]): P
         const stub = PY_STUBS.exec(name)?.[1];
         const services = name === "boto3-stubs" || name === "types-boto3" ? (token[2] ?? "").split(",") : stub !== undefined ? [stub] : [];
         for (const service of services) {
-          const id = normalizeAwsService(service.trim());
+          const id = normalizeAwsService(service.trim(), "boto3");
           if (id !== undefined && !["essential", "full", "boto3", "lite"].includes(id) && !isOwnedElsewhere(`aws:${id}`)) found.push(candidate(`aws:${id}`, "mentioned", evidence, { seenBy: ["driver"] }));
         }
       }
@@ -150,7 +150,7 @@ export function pythonCodeCandidates(path: string, text: string): DependencyCand
     for (const match of text.matchAll(/\.(?:client|resource)\(\s{0,120}(?:service_name\s{0,40}=\s{0,40})?["']([A-Za-z0-9_-]+)["']/gu)) {
       const open = text.indexOf("(", match.index);
       const args = callArguments(text, open);
-      const item = awsClientCandidate(path, text, match.index, match[1]!, /\bendpoint_url\s{0,40}=\s{0,40}[fFrb]?["']/u.test(args));
+      const item = awsClientCandidate(path, text, match.index, match[1]!, /\bendpoint_url\s{0,40}=\s{0,40}[fFrb]?["']/u.test(args), "boto3");
       if (item !== undefined) found.push(item);
     }
   }

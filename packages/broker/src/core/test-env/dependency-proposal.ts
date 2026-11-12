@@ -6,7 +6,7 @@
 // fixed note, never described. A person still approves the proposal on a card; nothing here approves anything.
 import { RelativeWorkspacePathSchema, TestEnvDependenciesSchema, TestEnvDependencySchema, type TestEnvDependency, type TestEnvDependencyCandidate, type VerifiedCatalog } from "@agentx/contracts";
 import { chooseBacking, effectiveAllowedBackings } from "./backing-choice.js";
-import { EMULATED_TASK_SERVICES } from "./dependency-plan.js";
+import { isEmulatedTaskService } from "./dependency-plan.js";
 
 export const DEPENDENCIES_NOT_PROPOSED_NOTE = "Some dependencies were found that Rovara cannot start yet. They are not part of the proposal.";
 export const DEPENDENCIES_NO_CATALOG_NOTE = "Dependencies were found, but Rovara's image list could not be read, so none are proposed.";
@@ -70,9 +70,9 @@ export function proposeDependencies(candidates: readonly TestEnvDependencyCandid
 function proposeOne(candidate: TestEnvDependencyCandidate, catalog: VerifiedCatalog, context: DependencyProposalContext): TestEnvDependency | undefined {
   const id = idOfFamily(candidate.family);
   if (id === undefined) return undefined;
-  // Tests that fake it themselves, and anything the chooser would back with something else, are not proposed: only real software from the catalog, and Rovara local AWS for S3, SQS and DynamoDB.
+  // Tests that fake it themselves, and anything the chooser would back with something else, are not proposed: only real software from the catalog, and Rovara local AWS for the services the catalog entry puts in a chooser tier.
   if (candidate.hints.fakedByTests === true) return undefined;
-  if (candidate.family.startsWith("aws:") && !EMULATED_TASK_SERVICES.includes(candidate.family.slice(4))) return undefined;
+  if (candidate.family.startsWith("aws:") && !isEmulatedTaskService(candidate.family.slice(4))) return undefined;
   let catalogId: string | undefined;
   let backingKind: "local" | "emulated" | undefined;
   for (const place of ["task_check", "working"] as const) {

@@ -226,7 +226,7 @@ const AWS_GO_SERVICE = /^github\.com\/aws\/aws-sdk-go(?:-v2)?\/service\/([a-z0-9
 function goModuleFamily(module: string): string | undefined {
   for (const [pattern, family] of GO_MODULES) if (pattern.test(module)) return family;
   const raw = AWS_GO_SERVICE.exec(module)?.[1];
-  const id = raw === undefined ? undefined : normalizeAwsService(raw);
+  const id = raw === undefined ? undefined : normalizeAwsService(raw, "go");
   return id === undefined || isOwnedElsewhere(`aws:${id}`) ? undefined : `aws:${id}`;
 }
 
@@ -265,7 +265,7 @@ export function goCodeCandidates(path: string, text: string): DependencyCandidat
   const found = scanDrivers(path, text, GO_DRIVERS);
   const explicit = /\b(?:BaseEndpoint|Endpoint)\s{0,40}[:=]\s{0,40}aws\.String\(\s{0,120}"/u.test(text);
   for (const match of text.matchAll(/"github\.com\/aws\/aws-sdk-go(?:-v2)?\/service\/([a-z0-9]+)(?:\/[^"]*)?"/gu)) {
-    const item = awsClientCandidate(path, text, match.index, match[1]!, explicit);
+    const item = awsClientCandidate(path, text, match.index, match[1]!, explicit, "go");
     if (item !== undefined) found.push(item);
   }
   return found;
