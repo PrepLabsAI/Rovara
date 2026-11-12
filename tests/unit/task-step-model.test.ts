@@ -131,6 +131,8 @@ describe("the model a step is handed to a worker with", () => {
     expect(retriesPlanCheck(chosen, refused, tries(CRITIC_MODEL_ATTEMPTS_MAX - 1))).toBe(false);
     // The install's one model (no choice recorded) has no next model; another failure is not a refused model.
     expect(retriesPlanCheck({}, refused, [])).toBe(false);
+    // A check that ran on the install's one model (the laptop default) has no next model either, so no try is made that could only fail.
+    expect(retriesPlanCheck({ modelChoice: { stage: "plan_check", model: SONNET, route: { alias: "a", api: "anthropic-messages", catalog: "m" }, reason: "INSTALL_MODEL" } }, refused, [])).toBe(false);
     expect(retriesPlanCheck(chosen, "the model did not answer", [])).toBe(false);
     expect(retriesPlanCheck(chosen, undefined, [])).toBe(false);
     // Tries made before the latest plan do not count.
