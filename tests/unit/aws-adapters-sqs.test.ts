@@ -3,7 +3,7 @@
 // AWS triggers (the stream hook and the scheduled backstop).
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { GetQueueAttributesCommand, SQSServiceException } from "@aws-sdk/client-sqs";
+import { GetQueueAttributesCommand, ReceiptHandleIsInvalid, SQSServiceException } from "@aws-sdk/client-sqs";
 import { OUTBOX_PENDING_INDEX, QUEUE_LIMITS, change, companyScoped, isAllowedModuleSpecifier, when, type DocumentChange, type OutboxRelayReport } from "@agentx/contracts";
 import {
   DEAD_LETTER_ATTRIBUTE,
@@ -100,6 +100,17 @@ describe("the SQS adapter reads a queue's policy from SQS and declares what it c
     await expect(mismatched.queue("main")).rejects.toThrow(/not the queue its redrive policy names/);
     await expect(mismatched.queue("kind")).rejects.toThrow(/same kind/);
     expect(await mismatched.queue("ok", { maxReceiveCount: 3 })).toBeDefined();
+  });
+
+  it("checks a declared dead-letter URL even when the queue has no redrive policy: it must exist and be of the queue's kind", async () => {
+    const world = sqsWorld();
+    world.fake.createQueue(urlOf("plain"));
+    world.fake.createQueue(urlOf("somewhere"));
+    world.fake.createQueue(urlOf("somewhere", true));
+    const open = (deadLetterUrl: string) => new SqsQueueService({ client: world.fake, queues: { q: { url: urlOf("plain"), deadLetterUrl } } }).queue("q");
+    await expect(open(urlOf("missing"))).rejects.toBeInstanceOf(SqsQueueError);
+    await expect(open(urlOf("somewhere", true))).rejects.toThrow(/same kind/);
+    expect(await open(urlOf("somewhere"))).toBeDefined();
   });
 
   it("refuses a queue URL that is not an SQS queue URL, and one that says FIFO while the queue is not", async () => {
@@ -315,6 +326,38 @@ describe("duplicates: suppressed on FIFO by the deduplication id, reported only 
     expect(world.fake.stored(urlOf("dup", true))).toHaveLength(1);
   });
 
+  it("names the solo group of a message with no group after its dedupe id, so a repeat is dropped even when SQS deduplicates only within a group", async () => {
+    for (const deduplicationScope of ["queue", "messageGroup"] as const) {
+      const world = sqsWorld();
+      const name = `scope-${deduplicationScope}`;
+      world.provision(name, { ordered: true }, { deduplicationScope });
+      const queue = await world.service.queue(name);
+      const first = await queue.enqueue({ body: "x", dedupeId: "same" });
+      const second = await queue.enqueue({ body: "x again", dedupeId: "same" });
+      expect(world.fake.stored(urlOf(name, true)), deduplicationScope).toHaveLength(1);
+      const groups = sends(world.fake, urlOf(name, true)).map((request) => request.input.MessageGroupId);
+      expect(groups[0]).toBe(groups[1]);
+      expect(groups[0]).toBe(`rovara-solo-${sha("same")}`);
+      // The solo group is hidden from the caller.
+      expect((await queue.receive())[0]!.groupId).toBeUndefined();
+      // The flag is reported only where the queue promises suppression across groups.
+      expect(second, deduplicationScope).toEqual(deduplicationScope === "queue" ? { messageId: first.messageId, duplicate: true } : { messageId: second.messageId, duplicate: false });
+    }
+  });
+
+  it("reports dedupe false for a queue that deduplicates only within a message group, because a repeat in another group is kept", async () => {
+    const world = sqsWorld();
+    world.provision("by-group", { ordered: true }, { deduplicationScope: "messageGroup" });
+    const queue = await world.service.queue("by-group");
+    expect(queue.capabilities.dedupe).toBe(false);
+    await queue.enqueue({ body: "x", groupId: "a", dedupeId: "same" });
+    await queue.enqueue({ body: "x", groupId: "b", dedupeId: "same" });
+    expect(world.fake.stored(urlOf("by-group", true))).toHaveLength(2);
+    const whole = sqsWorld();
+    whole.provision("by-queue", { ordered: true });
+    expect((await whole.service.queue("by-queue")).capabilities.dedupe).toBe(true);
+  });
+
   it("sends no deduplication id to a standard queue (SQS refuses one) and so stores both copies", async () => {
     const world = sqsWorld();
     const queue = await world.provisioning(false).queue("std");
@@ -430,8 +473,43 @@ describe("poison messages: SQS's redrive policy moves them, and the adapter reac
     expect(world.fake.stored(dead).map((message) => message.messageId)).toEqual([a.messageId]);
     expect(await queue.redrive("no-such-id")).toBe(false);
     const releases = world.fake.requests.filter((request) => request.operation === "ChangeMessageVisibility" && request.input.QueueUrl === dead);
-    expect(releases.every((request) => request.input.VisibilityTimeout === 0)).toBe(true);
+    // Every change of visibility is a release (0) or the hold of the found message (60).
+    expect(releases.every((request) => request.input.VisibilityTimeout === 0 || request.input.VisibilityTimeout === 60)).toBe(true);
+    expect(releases.some((request) => request.input.VisibilityTimeout === 0)).toBe(true);
     void url;
+  });
+
+  it("keeps the messages a scan has looked at hidden until it ends, so a long dead-letter queue is read through and an id past the first batch is found", async () => {
+    const world = sqsWorld({ order: "oldest-first" });
+    const queue = await world.provisioning(false).queue("jobs", { visibilityTimeoutSeconds: 10, maxReceiveCount: 1 });
+    const sent = [];
+    for (let index = 0; index < 25; index += 1) sent.push(await queue.enqueue({ body: index }));
+    for (let round = 0; round < 3; round += 1) await queue.receive({ maxMessages: 10 });
+    world.fake.advance(11);
+    for (let round = 0; round < 3; round += 1) await queue.receive({ maxMessages: 10 });
+    expect(world.fake.stored(urlOf("jobs-dead"))).toHaveLength(25);
+    for (const target of [sent[0]!, sent[12]!, sent[24]!]) expect(await queue.redrive(target.messageId)).toBe(true);
+    expect(world.fake.stored(urlOf("jobs-dead"))).toHaveLength(22);
+    // Messages already looked at stay hidden, so each scan reads the 25 in at most three batches and one empty one (without that, a batch can bring back
+    // messages the scan has seen, and it takes many more).
+    const dead = world.fake.requests.filter((request) => request.input.QueueUrl === urlOf("jobs-dead"));
+    expect(dead.filter((request) => request.operation === "ReceiveMessage").length).toBeLessThanOrEqual(3 * 4);
+    expect(dead.filter((request) => request.operation === "ChangeMessageVisibility" && request.input.VisibilityTimeout === 60)).toHaveLength(3);
+  });
+
+  it("sends nothing when the hide on the found dead letter has run out and another reader holds it (no duplicate)", async () => {
+    const world = sqsWorld();
+    const queue = await world.provisioning(false).queue("jobs", { visibilityTimeoutSeconds: 10, maxReceiveCount: 1 });
+    const only = await queue.enqueue({ body: "only" });
+    await queue.receive();
+    world.fake.advance(11);
+    await queue.receive();
+    expect(world.fake.stored(urlOf("jobs-dead"))).toHaveLength(1);
+    world.fake.fail("ChangeMessageVisibility", new ReceiptHandleIsInvalid({ message: "stale", $metadata: {} }));
+    const before = sends(world.fake, urlOf("jobs")).length;
+    expect(await queue.redrive(only.messageId)).toBe(false);
+    expect(sends(world.fake, urlOf("jobs")).length).toBe(before);
+    expect(world.fake.stored(urlOf("jobs-dead"))).toHaveLength(1);
   });
 
   it("stops a by-id scan at its limit rather than reading the dead-letter queue for ever", async () => {

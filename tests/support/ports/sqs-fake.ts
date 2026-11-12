@@ -6,7 +6,7 @@
 //    one), per-message delay up to 900 seconds, a redrive policy that moves a message to the dead-letter queue when a receive finds it
 //    already received `maxReceiveCount` times.
 //  - FIFO queues (URL ends in `.fifo`): a message group id and a deduplication id are required, per-message delay is refused, a repeat of
-//    a deduplication id inside 5 minutes is accepted and dropped (the first message's id comes back), a group with a message in flight
+//    a deduplication id inside 5 minutes is accepted and dropped (the first message's id comes back; with `deduplicationScope: "messageGroup"` only a repeat in the same group), a group with a message in flight
 //    is not delivered, and one ReceiveMessage may return several messages of one group, in order (as SQS does).
 //  - A message is its body plus its attributes, at most `MaximumMessageSize` bytes (names, the type name and values count); at most 10
 //    attributes; body and attribute values in SQS's character set; no empty body or attribute value.
@@ -38,6 +38,8 @@ export interface FakeSqsQueueSpec {
   maxReceiveCount?: number;
   deadLetterUrl?: string;
   maximumMessageSize?: number;
+  /** FIFO only. `messageGroup` limits duplicate suppression to one message group (SQS's DeduplicationScope); default `queue`. */
+  deduplicationScope?: "queue" | "messageGroup";
 }
 
 interface Stored {
@@ -158,7 +160,7 @@ export class FakeSqs implements SqsSender {
       VisibilityTimeout: String(queue.spec.visibilityTimeout),
       MaximumMessageSize: String(queue.spec.maximumMessageSize),
       DelaySeconds: "0",
-      ...(queue.fifo ? { FifoQueue: "true" } : {}),
+      ...(queue.fifo ? { FifoQueue: "true", DeduplicationScope: queue.spec.deduplicationScope ?? "queue" } : {}),
     };
     if (queue.spec.maxReceiveCount !== undefined && queue.spec.deadLetterUrl !== undefined) {
       available.RedrivePolicy = JSON.stringify({ deadLetterTargetArn: `arn:aws:sqs:us-west-2:000000000000:${nameOf(queue.spec.deadLetterUrl)}`, maxReceiveCount: queue.spec.maxReceiveCount });
@@ -191,9 +193,11 @@ export class FakeSqs implements SqsSender {
       if (input.MessageDeduplicationId === undefined) throw invalid("The queue should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly");
       if (!ID_CHARACTERS.test(input.MessageDeduplicationId)) throw invalid("MessageDeduplicationId is invalid.");
       for (const [key, entry] of queue.dedupe) if (this.now - entry.at >= 300_000) queue.dedupe.delete(key);
-      const seen = queue.dedupe.get(input.MessageDeduplicationId);
+      // With the scope on the message group, the same deduplication id in another group is another message.
+      const dedupeKey = queue.spec.deduplicationScope === "messageGroup" ? `${input.MessageGroupId}\u0000${input.MessageDeduplicationId}` : input.MessageDeduplicationId;
+      const seen = queue.dedupe.get(dedupeKey);
       if (seen !== undefined) return { MessageId: seen.messageId, MD5OfMessageBody: "" };
-      queue.dedupe.set(input.MessageDeduplicationId, { messageId, at: this.now });
+      queue.dedupe.set(dedupeKey, { messageId, at: this.now });
     } else {
       if (input.MessageDeduplicationId !== undefined || input.MessageGroupId !== undefined) throw invalid("The request include parameter that is not valid for this queue type.");
     }
