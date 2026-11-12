@@ -41,9 +41,21 @@ describe("channel adapters infrastructure", () => {
     expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTERS).toEqual({ Ref: "ChannelAdapters" });
   });
 
-  it("is absent from the legacy stack", () => {
+  it("gives the legacy stack the built-in Slack adapter only: no registry, nothing on the broker (Phase 7d)", () => {
     expect(legacy.Parameters.ChannelAdapters).toBeUndefined();
-    expect(functionNamed(legacy, "ChannelApiIngress")).toBeUndefined();
+    expect(legacy.Parameters.SlackViaChannel).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
+    const variables = (prefix: string) => (functionNamed(legacy, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(variables("ChannelApiIngress")).toMatchObject({ CHANNEL_ADAPTERS: "disabled", BUILT_IN_ADAPTER: { Ref: "SlackViaChannel" }, SHARED_TASKS: "disabled",
+      BUILT_IN_ADAPTER_SECRET_NAME: "agentx/production/channel-adapter/slack" });
+    const broker = ofType(legacy, "AWS::Lambda::Function").find(([id]) => withoutHash(id).startsWith("Broker"))![1];
+    expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTERS).toBeUndefined();
+    const brokerRole = (broker.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    expect(JSON.stringify(statementsOf(legacy, brokerRole))).not.toContain("channel-adapter");
+    // No shared tasks in the legacy deployment, so nothing reads them.
+    expect(JSON.stringify(statementsOf(legacy, roleOf(legacy, "ChannelApiIngress")))).not.toContain("SHARED_TASK#");
+    // The event sender never takes more than two of the account's concurrent Lambdas.
+    const mapping = ofType(legacy, "AWS::Lambda::EventSourceMapping").map(([, entry]) => entry.Properties).find((entry) => JSON.stringify(entry.FunctionName).includes("ChannelApiEventSender"));
+    expect(mapping).toMatchObject({ ScalingConfig: { MaximumConcurrency: 2 } });
   });
 
   it("routes only the three signed POSTs to the channel API, with no API Gateway authorizer", () => {
@@ -101,7 +113,7 @@ describe("channel adapters infrastructure", () => {
 
   it("registers the built-in Slack adapter at deploy, off until SlackViaChannel is enabled (FR-073, FR-074)", () => {
     expect(named.Parameters.SlackViaChannel).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
-    expect(legacy.Parameters.SlackViaChannel).toBeUndefined();
+    // Phase 7d: the legacy stack has it too (see above).
     const secrets = ofType(named, "AWS::SecretsManager::Secret").filter(([id]) => withoutHash(id) === "ChannelApiSlackAdapterSecret");
     expect(secrets).toHaveLength(1);
     expect(secrets[0]![1].Properties).toMatchObject({
@@ -120,13 +132,13 @@ describe("channel adapters infrastructure", () => {
     expect(JSON.stringify(reads)).not.toContain("channel-adapter/*");
     const route = ofType(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => resource.Properties).find((properties) => properties.RouteKey === "POST /v1/slack/channel-events");
     expect(route).toMatchObject({ AuthorizationType: "NONE" });
-    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-events")).toBe(false);
+    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-events")).toBe(true);
   });
 
   it("takes the core's commands for Slack, and lets the notifier, reconciler and sign-in sign them (Phase 7c)", () => {
     const route = ofType(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => resource.Properties).find((properties) => properties.RouteKey === "POST /v1/slack/channel-commands");
     expect(route).toMatchObject({ AuthorizationType: "NONE" });
-    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-commands")).toBe(false);
+    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-commands")).toBe(true);
     const variables = (prefix: string) => (functionNamed(named, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
     // Phase 7c1b: sign-in's Slack directory reads too.
     for (const prefix of ["DeveloperTaskNotifierFunction", "SessionsReconciler", "DeveloperSignInFunction"]) {
@@ -149,12 +161,15 @@ describe("channel adapters infrastructure", () => {
     // connection finished in an asynchronous invoke of the channel API itself.
     expect((ingress.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ ADMIN_CHANGES: "enabled" });
     expect(ingressStatements).toContain("TurnRecords");
-    const selfInvoke = ofType(named, "AWS::IAM::Policy").find(([id]) => withoutHash(id).startsWith("ChannelApiSelfInvoke"));
-    expect(JSON.stringify(selfInvoke?.[1].Properties)).toContain("lambda:InvokeFunction");
-    expect(ofType(legacy, "AWS::IAM::Policy").some(([id]) => withoutHash(id).startsWith("ChannelApiSelfInvoke"))).toBe(false);
-    // A Canvas takes three Slack calls; the legacy Slack ingress keeps its 10 seconds.
+    for (const template of [named, legacy]) {
+      for (const name of ["ChannelApiSelfInvoke", "ChannelApiSlackAdapterSelfInvoke"]) {
+        const selfInvoke = ofType(template, "AWS::IAM::Policy").find(([id]) => withoutHash(id).startsWith(name));
+        expect(JSON.stringify(selfInvoke?.[1].Properties), name).toContain("lambda:InvokeFunction");
+      }
+    }
+    // A Canvas takes three Slack calls.
     expect(functionNamed(named, "SlackIngress")![1].Properties.Timeout).toBe(30);
-    expect(functionNamed(legacy, "SlackIngress")![1].Properties.Timeout).toBe(10);
+    expect(functionNamed(legacy, "SlackIngress")![1].Properties.Timeout).toBe(30);
   });
 
   it("expires short-lived channel state by expiresAt", () => {

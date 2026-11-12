@@ -121,10 +121,11 @@ export function createSlackNoticeChannel(deps: SlackNoticeChannelDependencies): 
  * (`SlackViaChannel`) and the adapter's commands URL and the Slack team are set; otherwise undefined, and they post to
  * Slack themselves as before.
  */
-export function slackNoticeChannelFromEnvironment(secretsManager: Pick<SecretsManagerClient, "send">): SlackNoticeChannel | undefined {
+export function slackNoticeChannelFromEnvironment(secretsManager: Pick<SecretsManagerClient, "send">, team?: string): SlackNoticeChannel | undefined {
   if (process.env.SLACK_VIA_CHANNEL !== "enabled") return undefined;
   const adapter = builtInAdapterFromEnvironment(process.env);
-  const teamId = process.env.SLACK_ADAPTER_TEAM_ID;
+  // Phase 7d: the legacy deployment names no team; the channel API passes the message's own.
+  const teamId = team ?? process.env.SLACK_ADAPTER_TEAM_ID;
   if (adapter?.commandsUrl === undefined || !teamId || !/^[TE][A-Z0-9]{2,31}$/.test(teamId)) {
     console.log(JSON.stringify({ component: "slack-notice-channel", event: "not_configured" }));
     return undefined;
@@ -134,4 +135,30 @@ export function slackNoticeChannelFromEnvironment(secretsManager: Pick<SecretsMa
     adapter, teamId, getSecret: () => secret(), fetch, checkAddresses: (url) => checkEndpointAddresses(url), now: Date.now,
     log: (entry) => console.log(JSON.stringify({ component: "slack-notice-channel", ...entry })),
   });
+}
+
+/**
+ * Phase 7d: a Slack client for whichever team is answering now, so a deployment that names no team (the legacy one)
+ * posts as the message it answers belongs to. `teamOf` reads the current team; each team's client is made once.
+ */
+export function slackNoticeChannelForCurrentTeam(secretsManager: Pick<SecretsManagerClient, "send">, teamOf: () => string | undefined): SlackNoticeChannel {
+  const clients = new Map<string, SlackNoticeChannel>();
+  const current = (): SlackNoticeChannel => {
+    const team = teamOf() ?? process.env.SLACK_ADAPTER_TEAM_ID;
+    if (team === undefined) throw new Error("no Slack team is known for this post");
+    let client = clients.get(team);
+    if (client === undefined) {
+      client = slackNoticeChannelFromEnvironment(secretsManager, team);
+      if (client === undefined) throw new Error("the Slack adapter is not configured");
+      clients.set(team, client);
+    }
+    return client;
+  };
+  return {
+    post: (input) => current().post(input),
+    update: (input) => current().update(input),
+    postEphemeral: (input) => current().postEphemeral(input),
+    createPlanCanvas: (input, onCreated) => current().createPlanCanvas(input, onCreated),
+    deleteCanvas: (canvasId) => current().deleteCanvas(canvasId),
+  };
 }

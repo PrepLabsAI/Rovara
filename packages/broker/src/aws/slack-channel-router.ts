@@ -25,7 +25,7 @@ import { requiredEnvironment } from "./lambda.js";
 import { slackAdapterSecretReader } from "./slack-adapter.js";
 import { awsSlackRouterDependencies, createSlackMentionRouter, slackMentionOfInbound, threadPendingCounter, type SlackRouterTransport } from "./slack-ingress.js";
 import type { SlackMemberCheck } from "./slack-members.js";
-import { slackNoticeChannelFromEnvironment, type SlackNoticeChannel } from "./slack-notice-channel.js";
+import { slackNoticeChannelForCurrentTeam, type SlackNoticeChannel } from "./slack-notice-channel.js";
 
 const MEMBER_TTL_MS = 60 * 60 * 1_000;
 const MEMBER_CACHE_CAP = 5_000;
@@ -91,10 +91,10 @@ export function slackChannelTransport(deps: SlackChannelTransportDependencies): 
   };
 }
 
-/** The channel API's surface for channel `slack`: each message is routed in its bound project. */
-export function slackChannelSurface(route: ReturnType<typeof createSlackMentionRouter>, project: AsyncLocalStorage<string>): ChannelSurface {
+/** The channel API's surface for channel `slack`: each message is routed in its bound project, as its own team. */
+export function slackChannelSurface(route: ReturnType<typeof createSlackMentionRouter>, project: AsyncLocalStorage<{ projectName: string; teamId: string }>): ChannelSurface {
   return async (message, context) => {
-    const response = await project.run(context.projectName, () => route(slackMentionOfInbound(message)));
+    const response = await project.run({ projectName: context.projectName, teamId: message.conversation.tenant }, () => route(slackMentionOfInbound(message)));
     return { statusCode: response.statusCode, body: response.body };
   };
 }
@@ -103,19 +103,22 @@ export function slackChannelSurface(route: ReturnType<typeof createSlackMentionR
 export function createAwsSlackChannelRouter(): ChannelSurface {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const secretsManager = new SecretsManagerClient(clientConfiguration);
-  const notices = slackNoticeChannelFromEnvironment(secretsManager);
+  const project = new AsyncLocalStorage<{ projectName: string; teamId: string }>();
+  // Phase 7d: as the message's own team, so a deployment that names none (the legacy one) still answers.
+  const notices = slackNoticeChannelForCurrentTeam(secretsManager, () => project.getStore()?.teamId);
   const adapter = builtInAdapterFromEnvironment(process.env);
-  const teamId = process.env.SLACK_ADAPTER_TEAM_ID;
-  if (notices === undefined || adapter === undefined || !teamId) throw new Error("the Slack adapter is not configured for routing");
+  if (adapter === undefined) throw new Error("the Slack adapter is not configured for routing");
   const secret = slackAdapterSecretReader(secretsManager, adapter.secretName);
   const commandDeps = { getSecret: () => secret(), fetch, checkAddresses: (url: URL) => checkEndpointAddresses(url), now: Date.now };
   const sqs = new SQSClient(clientConfiguration);
   const requestQueueUrl = requiredEnvironment("CHANNEL_REQUEST_QUEUE_URL");
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
-  const project = new AsyncLocalStorage<string>();
   const transport = slackChannelTransport({
     notices,
-    user: async (userId) => (await sendChannelCommand(commandDeps, adapter, "user", { tenant: teamId, userId })).user,
+    async user(userId) {
+      const tenant = project.getStore()?.teamId;
+      return (await sendChannelCommand(commandDeps, adapter, "user", { ...(tenant === undefined ? {} : { tenant }), userId })).user;
+    },
     async enqueue(item, groupId) {
       await sqs.send(new SendMessageCommand({
         QueueUrl: requestQueueUrl, MessageBody: JSON.stringify(item), MessageGroupId: groupId,
@@ -124,7 +127,7 @@ export function createAwsSlackChannelRouter(): ChannelSurface {
     },
     changePending: threadPendingCounter(documentClient, requiredEnvironment("SLACK_THREADS_TABLE_NAME")),
     projectName() {
-      const name = project.getStore();
+      const name = project.getStore()?.projectName;
       if (name === undefined) throw new Error("no project is bound for this message");
       return name;
     },
