@@ -136,7 +136,8 @@ export function runAdmissionConformance(name: string, harness: AdmissionHarness)
       const { request, fits } = harness.capacity;
       const admission = await harness.create();
       expect((await raceAdmissions(admission, request, fits, "fill")).allowed).toBe(fits);
-      const { estimate: _known, ...unknown } = request;
+      const unknown: AdmissionRequest = { ...request };
+      delete unknown.estimate;
       expect((await admission.admit({ ...unknown, idempotencyKey: "unknown-cost" })).allowed).toBe(false);
     });
 
