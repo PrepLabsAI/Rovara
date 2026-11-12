@@ -79,3 +79,22 @@ describe("the classifier's instruction", () => {
     expect(REQUEST_ROUTER_SYSTEM_PROMPT).toContain("When in doubt between question and unclear, answer question");
   });
 });
+
+describe("small talk in a task's thread (decision 134)", () => {
+  it("also reads a bare acknowledgement as small talk there, and only there", () => {
+    for (const text of ["ok", "great", "Got it!", "sounds good", "lgtm", "ok 👍"]) {
+      expect(smallTalkOf(text, { acknowledgements: true }), text).toBe("ack");
+      expect(smallTalkOf(text), text).toBeUndefined();
+    }
+    expect(smallTalkOf("thanks", { acknowledgements: true })).toBe("thanks");
+    for (const text of ["thanks, but also fix the second typo", "ok, now add a test", "great, rename it to getUser", "looks good so far"]) {
+      expect(smallTalkOf(text, { acknowledgements: true }), text).toBeUndefined();
+    }
+  });
+
+  it("says in a task's thread that the reply was not added to the task", () => {
+    expect(smallTalkReply("thanks", "task")).toMatch(/^You're welcome! I didn't add that to the task\./);
+    expect(smallTalkReply("ack", "task")).toMatch(/^Got it! I didn't add that to the task\./);
+    expect(smallTalkReply("greeting", "task")).toMatch(/^Hi!/);
+  });
+});
