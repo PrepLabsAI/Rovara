@@ -149,6 +149,18 @@ describe("companies stay apart: cards and decisions", () => {
     expect(w.store.size).toBe(rows);
   });
 
+  it("posts no card when the host cannot say whose tenant it is (companyOf throws)", async () => {
+    const w = await twoCompanies();
+    const rows = w.store.size;
+    const failing = () => { throw new Error("tenant map down"); };
+    await expect(postApprovalCard({ ...w.deps(A), companyOf: failing }, {
+      channel: "examplechat", adapter: w.adapter, conversation: conversationOf(A), kind: "other", subject: { type: "workflow-document", id: "task-1" }, revision: 3, artifactDigest: DIGEST,
+      text: "Plan waits.", taskUrl: "https://example.test/tasks/1", actions: [{ decision: "APPROVE", label: "Approve" }],
+    })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(w.store.size).toBe(rows);
+    expect(w.adapter.delivered.filter((event) => event.type === "approval_request")).toEqual([]);
+  });
+
   it("a card of A is not readable by B, and a decision for it from B's conversation decides nothing", async () => {
     const w = await twoCompanies();
     const { requestId } = await cardIn(w, A, conversationOf(A));
@@ -201,6 +213,14 @@ describe("companies stay apart: commands and the directory", () => {
     expect(await directoryUser(c.deps(A), "teamA", "plain")).toMatchObject({ userId: "plain" });
   });
 
+  it("sends nothing when the host cannot say whose tenant it is (companyOf throws)", async () => {
+    const c = commanding();
+    const failing = { ...c.deps(A), companyOf: () => { throw new Error("tenant map down"); } };
+    await expect(directoryUser(failing, "teamA", "u1")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(sendChannelCommand(failing, "post_message", { tenant: "teamA", space: "room1", message: { text: "hi" } })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(c.sent).toEqual([]);
+  });
+
   it("sends a kind that names no tenant only in an install of one company", async () => {
     const c = commanding();
     await expect(sendChannelCommand(c.deps(A), "check", {})).rejects.toMatchObject({ code: "FORBIDDEN" });
@@ -241,6 +261,12 @@ describe("the host's explicit-member rule (owner decision 131)", () => {
     expect(w.decided).toEqual([]);
     expect(w.adapter.delivered.length).toBe(before);
     expect((await w.store.query({ pk: `ORG#${A}#CHANNEL_CLAIM#examplechat/EVENT#message/m1` })).items).toHaveLength(0);
+  });
+
+  it("serves only on an answer of exactly true: a truthy 1 is not a yes", async () => {
+    const w = await twoCompanies({ isMember: () => 1 as unknown as boolean });
+    await w.sink.message(message(A, "m1"));
+    expect(w.ran).toEqual([]);
   });
 
   it("serves nobody when the rule fails", async () => {

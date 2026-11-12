@@ -47,6 +47,7 @@ import {
   ActorRefSchema,
   SignInClientViewSchema,
   AccessCheckRequestSchema,
+  AccessCheckResponseSchema,
   SignInClientIdSchema,
   SignInClientRecordSchema,
   signInClientKey,
@@ -702,7 +703,10 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
   const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
   if (ruled === undefined) throw refused();
-  return ruled;
+  // What leaves is exactly the answer's shape, whatever a rule did.
+  const checked = AccessCheckResponseSchema.safeParse(ruled);
+  if (!checked.success) throw refused();
+  return checked.data;
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {

@@ -221,6 +221,13 @@ describe("delivering", () => {
     expect(w.adapter.delivered.map((event) => (event as { conversation: ConversationRef }).conversation)).toEqual([CONVERSATION]);
   });
 
+  it("sends to no chat when the host cannot say whose tenant a target is (companyOf throws)", async () => {
+    const w = await needsYou();
+    await w.prefs([target()]);
+    expect(await w.deliver({ companyOf: () => { throw new Error("tenant map down"); } })).toMatchObject({ sent: 0, unreachable: 1 });
+    expect(w.adapter.delivered).toEqual([]);
+  });
+
   it("the event id belongs to the batch: the same rows to the same target give the same id", () => {
     const rows = [{ sk: "a", at: "t1" }, { sk: "b", at: "t2" }];
     expect(batchEventId("o", "p", "x", rows)).toBe(batchEventId("o", "p", "x", [...rows].reverse()));

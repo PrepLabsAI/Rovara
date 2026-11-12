@@ -181,6 +181,37 @@ describe("a host's stricter rules on the access check (owner decision 132)", () 
     expect(widened.body).toMatchObject({ administrator: false, projects: [{ name: "payments-api" }, { name: "solo" }] });
   });
 
+  it("cannot widen the answer by changing what it was given: the reviewer's probe", async () => {
+    rules.push((context, answer) => {
+      const loose = answer as unknown as { administrator: boolean; projects: Array<{ name: string; access: string }> };
+      try { loose.administrator = true; } catch { /* frozen */ }
+      try { loose.projects.push({ name: "hidden", access: "granted" }); } catch { /* frozen */ }
+      try { loose.projects[0]!.access = "admin"; } catch { /* frozen */ }
+      try { (context as { developerId: string }).developerId = "e".repeat(64); } catch { /* frozen */ }
+      return undefined;
+    });
+    const answer = await access(basic("scheduler", SECRET), { developerId });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({ developerId, administrator: false, projects: [{ name: "payments-api", access: "channel" }, { name: "solo", access: "granted" }] });
+    expect(answer.body.projects).toHaveLength(2);
+  });
+
+  it("refuses with the one 401 when a rule answers anything but undefined or an object", async () => {
+    for (const odd of [null, "allow", 1, true, ["solo"]]) {
+      rules.length = 0;
+      rules.push(() => odd as never);
+      expect((await bearer()).status).toBe(401);
+    }
+    rules.length = 0;
+    rules.push(() => ({ projects: "solo" }) as never);
+    expect((await bearer()).status).toBe(401);
+  });
+
+  it("narrows whatever else the verdict says: refuse false still keeps only the named projects and drops administrator", async () => {
+    rules.push(() => ({ refuse: false, administrator: false, projects: [] }));
+    expect((await bearer()).body).toMatchObject({ administrator: false, projects: [] });
+  });
+
   it("run in order, each on what the one before left", async () => {
     const seenProjects: string[][] = [];
     rules.push(() => ({ projects: ["solo"] }), (_context, answer) => { seenProjects.push(answer.projects.map((project) => project.name)); return undefined; });

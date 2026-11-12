@@ -88,6 +88,8 @@ function fitActionParts(parts: Extract<ChannelEvent, { type: "message" }>["data"
 export function unsendableReason(event: ChannelEvent, adapter: Pick<ChannelAdapterRecord, "capabilities">): string | undefined {
   if (event.type === "direct" && adapter.capabilities.direct !== true) return "direct_unsupported";
   if (event.type === "message" && event.data.audience?.kind === "ephemeral" && adapter.capabilities.ephemeral !== true) return "ephemeral_unsupported";
+  // code/next's one-person progress note (a one-use link code) is the same: never posted for everyone.
+  if (event.type === "progress" && event.data.onlyTo !== undefined && adapter.capabilities.ephemeral !== true) return "ephemeral_unsupported";
   return undefined;
 }
 

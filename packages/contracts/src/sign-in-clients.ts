@@ -60,13 +60,14 @@ export const AccessCheckRequestSchema = z.object({ developerId: z.string().regex
 export type AccessCheckRequest = z.infer<typeof AccessCheckRequestSchema>;
 
 /** Who the person is and what they can use now. `notices` names a check that could not run (`slack_unavailable`). */
-export interface AccessCheckResponse {
-  developerId: string;
-  displayName: string;
-  administrator: boolean;
-  projects: Array<{ name: string; access: "granted" | "channel" }>;
-  notices: string[];
-}
+export const AccessCheckResponseSchema = z.object({
+  developerId: z.string().regex(/^[a-f0-9]{64}$/),
+  displayName: z.string(),
+  administrator: z.boolean(),
+  projects: z.array(z.object({ name: z.string().min(1), access: z.enum(["granted", "channel"]) }).strict()),
+  notices: z.array(z.string()),
+}).strict();
+export type AccessCheckResponse = z.infer<typeof AccessCheckResponseSchema>;
 
 // ---- The broker's requests to the sign-in Lambda, which owns the registry ----
 
