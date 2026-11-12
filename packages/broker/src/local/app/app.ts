@@ -108,7 +108,7 @@ import { fixedAutomationSwitch, type AutomationSwitch } from "../../core/automat
 import { createScheduleRouter } from "../../core/automation/schedule-router.js";
 import { createChannelSink } from "../../core/channel/sink.js";
 import { readTaskThread } from "../../core/channel/threads.js";
-import { channelThreadHandler, threadFollows } from "../../core/channel/thread-notices.js";
+import { channelThreadHandler, planCardPosted, threadFollows } from "../../core/channel/thread-notices.js";
 import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
 import { deliverAttention, queueAttention } from "../../core/notify/attention.js";
 
@@ -710,7 +710,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
     // What needs the owner reaches them in their chat, batched (one message at most every few minutes). The sweep of the sessions above is what queues it.
     if (canNotify()) {
-      await deliverAttention({ store, registry, now: () => clock().getTime(), thread: (org, sessionId) => readTaskThread(store, org, sessionId), footer: ATTENTION_FOOTER, doneToldInThread: () => registry.names("channel").length > 0 && channelMilestonesOn(), log }, { deadlineMs: clock().getTime() + 4_000 }).catch(logFailure("local_app.attention_failed"));
+      await deliverAttention({ store, registry, now: () => clock().getTime(), thread: (org, sessionId) => readTaskThread(store, org, sessionId), footer: ATTENTION_FOOTER, doneToldInThread: () => registry.names("channel").length > 0 && channelMilestonesOn(), planCarded: planCardPosted({ store }), log }, { deadlineMs: clock().getTime() + 4_000 }).catch(logFailure("local_app.attention_failed"));
     }
   };
   // Reading pull requests asks the code host over the network and may take seconds, so the timer runs it apart from the dispatch (a slow host never holds a step back); a test's `tick()` runs both in order.

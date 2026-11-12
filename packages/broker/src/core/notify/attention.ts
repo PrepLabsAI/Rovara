@@ -160,6 +160,11 @@ export interface AttentionDeliveryDependencies {
    * the places the person chose, and the other notices (needs you, paused, ready, failed) still go to the thread. Absent: the thread is told as before.
    */
   doneToldInThread?: () => boolean;
+  /**
+   * Whether the plan this session waits on already got its approval card in the conversation the task was started from (`core/channel/thread-notices.ts`). The needs-you reminder is then not sent to THAT conversation again; it still
+   * goes to the places the person chose, and every other kind of notice is unchanged. A failure counts as "no card", so the reminder is sent.
+   */
+  planCarded?: (session: AgentSessionRecord) => Promise<boolean>;
   /** Whether the person may READ the session now. Default: the session's owner. */
   access?: (orgId: OrgId, developerId: string, session: AgentSessionRecord) => Promise<{ owner: boolean } | undefined>;
   /** The person's own email address (from their sign-in record), or undefined. Absent: nobody has one, and email is never used. */
@@ -324,6 +329,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     const { orgId, developerId } = rows[0]!;
     const current: Array<{ row: PendingRow; line: Line }> = [];
     const stale: PendingRow[] = [];
+    const carded = new Set<string>();
     for (const row of rows) {
       const earlier = current.find((entry) => entry.row.sessionId === row.sessionId);
       if (earlier !== undefined) { current.push({ row, line: earlier.line }); continue; }
@@ -332,6 +338,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       const kind = session === undefined ? undefined : attentionKindOf(session.summary);
       // Still current (a later change of state supersedes the row), never "needs you" for an ended session, and still theirs to read: anything else is dropped without a word.
       if (session === undefined || access === undefined || kind !== row.kind || (session.endedAt !== undefined && kind !== "done" && kind !== "failed")) { stale.push(row); continue; }
+      if (kind === "needs_you" && deps.planCarded !== undefined && await deps.planCarded(session).catch(() => false)) carded.add(row.sessionId);
       const link = deps.link?.(session);
       current.push({ row, line: { title: oneLine(access.owner ? session.title : hideEmailAddresses(session.title), TITLE_MAX) || "A task", status: oneLine(taskStatusText(sessionTaskStatus(session.summary)), 200), link, kind } });
     }
@@ -363,7 +370,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     const routes = [...targets.map((target) => targetKey(target)), ...(goes.email ? [EMAIL_TARGET] : [])];
     // A target tells the person about every row when they chose it (email included), and only about the sessions started there when it is the conversation of a start.
     const doneInThread = deps.doneToldInThread?.() === true;
-    const appliesTo = (tkey: string, row: PendingRow): boolean => tkey === EMAIL_TARGET || chosen.has(tkey) || (threadSessions.get(tkey)?.sessions.has(row.sessionId) === true && !(doneInThread && row.kind === "done"));
+    const appliesTo = (tkey: string, row: PendingRow): boolean => tkey === EMAIL_TARGET || chosen.has(tkey) || (threadSessions.get(tkey)?.sessions.has(row.sessionId) === true && !(doneInThread && row.kind === "done") && !(row.kind === "needs_you" && carded.has(row.sessionId)));
     // Nowhere to be told: not messaged; the rows go.
     if (routes.length === 0) { for (const { row } of current) await dropRow(row); continue; }
     taken += 1;
