@@ -16,7 +16,8 @@ export function chargeItems(charge: WorkspaceCharge, limits: { member: number; o
   return [
     { kind: "update", key: charge.organization, ops: [change.add("count", 1), change.set("entityType", entityOf(charge.organization))], condition: hasRoom(limits.organization) },
     { kind: "update", key: charge.member, ops: [change.add("count", 1), change.set("entityType", entityOf(charge.member))], condition: hasRoom(limits.member) },
-    { kind: "put", item: { ...chargeMarkerKey(charge, taskId), entityType: "DEVELOPER_LIMIT_TASK", taskId, chargedAt: now }, condition: when.absent() },
+    // `memberSk` names the member counter the slot is on: a host whose member counters share one partition (one per team) tells its members' markers apart by it.
+    { kind: "put", item: { ...chargeMarkerKey(charge, taskId), entityType: "DEVELOPER_LIMIT_TASK", taskId, memberSk: charge.member.sk, chargedAt: now }, condition: when.absent() },
   ];
 }
 
