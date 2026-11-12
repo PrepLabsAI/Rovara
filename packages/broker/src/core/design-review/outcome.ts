@@ -39,7 +39,7 @@ export function modelUnusable(error: string | undefined): boolean {
 /** The ports a round is recorded with: the store, what the proxy knows of the keys, and the operation's saved result. */
 export function roundRecordPortsOf(deps: TaskFlowDeps, runtime: DesignReviewRuntime): RoundRecordPorts {
   return {
-    table: deps.store, keySpend: (ids) => runtime.keys.keySpend(ids), closeKeys: (orgId, ids) => runtime.keys.closeKeys(orgId, ids),
+    table: deps.store, keySpend: (ids) => runtime.keys.keySpend(ids), closeKeys: (orgId, ids) => runtime.keys.closeKeys(orgId, ids), admission: deps.admission,
     readResult: (operation) => runtime.readArtifactText(operation, DESIGN_REVIEW_ARTIFACT, DESIGN_REVIEW_RESULT_MAX_BYTES),
   };
 }

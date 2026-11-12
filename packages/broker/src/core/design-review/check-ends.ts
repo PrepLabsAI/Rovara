@@ -1,7 +1,7 @@
 // Design review stage: the plan check's other ends, answered for a design review. The plan check closes with `closePlanCritique` when it cannot start, or its run was lost, or its run was stopped, and the
 // plan check's moves REFUSE a workflow that is reviewing a design (`runningPlanCheck`). Each of those places calls one of these instead: for a plan check they return exactly what the call they replace returned; for a
 // design review they make the design review's own move (`closeDesignReview`), with what the round's keys already cost, and release the round (stored packets removed). Pure for a plan check; the design form reads the table.
-import { DesignReviewBindingSchema, closeDesignReview, closePlanCritique, queryAll, resumeBlockedDesignReview, workflowIsDesignReviewing, type DocumentStore, type WorkflowSnapshot } from "@agentx/contracts";
+import { DesignReviewBindingSchema, closeDesignReview, closePlanCritique, queryAll, resumeBlockedDesignReview, workflowIsDesignReviewing, type Admission, type DocumentStore, type WorkflowSnapshot } from "@agentx/contracts";
 import { releaseDesignReviewRound } from "./round-record.js";
 
 const text = (value: unknown): string => (typeof value === "string" ? value : "");
@@ -25,11 +25,12 @@ export function closeUnstartedCheck(workflow: WorkflowSnapshot, now: string, rea
  * (`worker_failed`), what its keys cost is added to the total (the proxy is not asked from here, so each slot that had a key is charged its key's whole budget: never under-counted), and the stored packets are removed. The
  * operation's keys are blocked by the operation's own end, which every ended task operation has.
  */
-export async function closeEndedCheck(table: RoundTable, workflow: WorkflowSnapshot, operation: EndedCheckOperation, now: string): Promise<WorkflowSnapshot> {
+export async function closeEndedCheck(table: RoundTable, workflow: WorkflowSnapshot, operation: EndedCheckOperation, now: string, admission?: Pick<Admission, "settle">): Promise<WorkflowSnapshot> {
   if (!workflowIsDesignReviewing(workflow)) return closePlanCritique(workflow, { expectedRevision: workflow.revision, status: "done", now });
   const binding = DesignReviewBindingSchema.safeParse(operation.designReview);
+  // The round's Admission reservation, when the caller has the port, is settled with the same whole-budget charge.
   const { spentUsd } = !binding.success || operation.orgId === undefined ? { spentUsd: 0 }
-    : await releaseDesignReviewRound({ table, keySpend: async () => undefined, closeKeys: async () => undefined }, { id: operation.id, orgId: operation.orgId, designReview: binding.data });
+    : await releaseDesignReviewRound({ table, keySpend: async () => undefined, closeKeys: async () => undefined, ...(admission === undefined ? {} : { admission }) }, { id: operation.id, orgId: operation.orgId, designReview: binding.data });
   return closeDesignReview(workflow, { expectedRevision: workflow.revision, outcome: "not_run", notRunReason: "worker_failed", addedSpendUsd: spentUsd, now });
 }
 

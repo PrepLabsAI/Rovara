@@ -14,7 +14,7 @@ const REASON_WORDS: Record<NotRunReason, string> = {
   rearm_limit: "the design was sent back more often than a review is repeated",
   skipped: "it was skipped",
   cancelled: "it was cancelled",
-  task_limit: "the task's own limit left no room for it",
+  task_limit: "the spending limit left no room for it",
   switched_off: "it was switched off",
 };
 

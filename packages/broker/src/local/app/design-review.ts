@@ -2,10 +2,10 @@
 // proxy's slot keys (one token per reviewer, with its own ceiling and spend record), the object storage for the files workers save, and the document store. It also gives the proxy's grant source the two functions a design review needs
 // (`describeSlot`, `slotMinted`), which look a slot up in the binding the broker stored and never in anything the worker sends.
 //
-// Not here yet (listed in docs/local.md): repository files at the pinned commit are not read for the packets (no `CodeHost.fileAtRevision` caller on a laptop), so a reviewer reads the design, the requirements and the checkout itself; meta repository
-// files and MCP items are not read (no context sources); the planner's own resolve run spend is counted by the cost ledger, not added to the review's total.
+// The packets' sources (repository files at the pinned commits, the meta repository, MCP items through the project's context sources) are read by the broker (`design-review-sources.ts`). Not here yet (listed in
+// docs/local.md): the planner's own resolve run spend is counted by the cost ledger, not added to the review's total.
 import { createHash } from "node:crypto";
-import { DesignReviewBindingSchema, agentXError, type WorkflowDesignReview, designReviewActive, type AdapterRegistry, type ModelProviderAdapter, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
+import { DesignReviewBindingSchema, agentXError, type WorkflowDesignReview, designReviewActive, type RegistryView, type ModelProviderAdapter, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
 import { createDesignReviewSteps } from "../../core/design-review/steps.js";
 import { answerReviewQuestions, designFirstOf, resumeParkedReview, retryBlockedReview } from "../../core/design-review/actions.js";
 import { readEffectiveDesignReview } from "../../core/design-review/setting.js";
@@ -29,6 +29,10 @@ import { fromDocument, type OperationRecord, type TaskPointerRecord, type TaskRe
 import type { LocalModelChoice } from "../model-choice.js";
 import type { CapabilityGrantOptions, LocalModelProxy, ModelGrantSource, ProxyRoute } from "../model-proxy/index.js";
 import { PLAN_RETENTION, artifactKey } from "./callbacks.js";
+import { codeHostForRecord } from "../../plugins/routing.js";
+import type { ContextSourcesRuntime } from "../../context-sources/runtime.js";
+import { contextToolsDependencies } from "./context-tools.js";
+import { localPacketSources } from "./design-review-sources.js";
 import { readVerifiedText } from "./documents.js";
 
 /**
@@ -67,7 +71,7 @@ export function unpricedNoteOf(price: { inputMicrosPerMillionTokens: number; out
 export interface LocalDesignReviewOptions {
   flow: TaskFlowDeps;
   blobs: ObjectStorage;
-  registry: Pick<AdapterRegistry, "get" | "names">;
+  registry: RegistryView;
   companyId: OrgId;
   environment: NodeJS.ProcessEnv;
   /** The model a step calls: the owner's choice (one model on a laptop), and its route for the proxy and for the worker. */
@@ -79,6 +83,8 @@ export interface LocalDesignReviewOptions {
   slotKeys(): LocalModelProxy["slotKeys"] | undefined;
   /** Where a reminder is written for the owner (a line on the task's session). */
   timeline?: SessionTimeline | undefined;
+  /** The project's context sources, for the MCP items a design cites. Absent: none are read. */
+  contextSources?: ContextSourcesRuntime | undefined;
 }
 
 export interface LocalDesignReview {
@@ -125,10 +131,12 @@ export function createLocalDesignReview(options: LocalDesignReviewOptions): Loca
       capCeilingUsd: async () => undefined,
       // Code has no run limit before a price table exists (docs/local.md): the review's own cap is the limit.
       taskRoomUsd: async () => Number.MAX_SAFE_INTEGER,
-      sourceReaders: async () => ({
-        readers: { readRepoFile: async () => undefined, readMetaFile: async () => undefined, fetchMcpItem: async () => ({ ok: false }) },
-        repositoryNames: [], origin: [],
-      }),
+      // The broker's own readers: the repository's code host at the pinned commits, and the context sources through the plan check's stage.
+      sourceReaders: (task, operationId) => localPacketSources({
+        companyId, projectAt: (project, revision) => flow.projects.revision(project, revision),
+        codeHostOf: (repository) => codeHostForRecord(options.registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }),
+        contextTools: options.contextSources === undefined ? undefined : contextToolsDependencies(flow, options.contextSources, () => (flow.now?.() ?? new Date()).getTime()),
+      }, task, operationId),
     },
     async model() {
       const choice = await options.chosen();
