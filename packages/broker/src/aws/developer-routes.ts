@@ -3,6 +3,7 @@
 // access token itself, then checks the environment, the method and the sign-in session on every
 // request (R12, R13), so a revoked session stops at once.
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -44,6 +45,12 @@ import {
   type TaskPeopleDisplayReadResponse,
   SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
   ActorRefSchema,
+  SignInClientViewSchema,
+  type ListSignInClientsRequest,
+  type PutSignInClientRequest,
+  type RemoveSignInClientRequest,
+  type SignInClientRecord,
+  type SignInClientView,
 } from "@agentx/contracts";
 import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
@@ -93,6 +100,8 @@ export interface DeveloperApiConfiguration {
   slackAuthCheck?: () => Promise<SlackAuthCheckResponse>;
   /** Spec 025 E9: an admin ends a developer's sign-in sessions, through DeveloperIdentity (the broker only reads the sign-in table). */
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
+  /** Spec 063: the sign-in clients' registry, which the sign-in Lambda owns. */
+  signInClients?: SignInClientRegistry;
   /** Spec 025 E12: a public channel by its name, through DeveloperIdentity. */
   channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
@@ -147,7 +156,8 @@ type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_r
  */
 async function identityInvoke<T>(
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
-  request: ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
+  request: ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
+    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest,
   readReply: (reply: Record<string, unknown>) => T | undefined,
   event: string,
 ): Promise<T | IdentityRefusal> {
@@ -298,6 +308,31 @@ export function endDeveloperSessionsThroughLambda(invoke: (payload: Uint8Array) 
     }, "developer.end_sessions");
     if (answer.ok || answer.error === "not_found" || answer.error === "invalid_request") return answer;
     return { ok: false, error: "unavailable" };
+  };
+}
+
+/** Spec 063: the sign-in clients' registry, through the sign-in Lambda that owns it. Throws when it cannot be reached. */
+export interface SignInClientRegistry {
+  put(client: SignInClientRecord): Promise<void>;
+  remove(clientId: string): Promise<boolean>;
+  list(): Promise<SignInClientView[]>;
+}
+
+export function signInClientsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): SignInClientRegistry {
+  const ask = async <T>(request: PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest, read: (reply: Record<string, unknown>) => T | undefined): Promise<T> => {
+    const answer = await identityInvoke(invoke, request, (reply) => (reply.ok === true ? read(reply) : undefined), "developer.sign_in_clients");
+    if (typeof answer === "object" && answer !== null && "ok" in answer && (answer as { ok: unknown }).ok === false) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not reach its sign-in service; try again");
+    }
+    return answer as T;
+  };
+  return {
+    async put(client) { await ask({ kind: "put-sign-in-client", client }, () => true); },
+    remove: (clientId) => ask({ kind: "remove-sign-in-client", clientId }, (reply) => reply.removed === true),
+    list: () => ask({ kind: "list-sign-in-clients" }, (reply) => {
+      const parsed = z.array(SignInClientViewSchema).safeParse(reply.clients);
+      return parsed.success ? parsed.data : undefined;
+    }),
   };
 }
 

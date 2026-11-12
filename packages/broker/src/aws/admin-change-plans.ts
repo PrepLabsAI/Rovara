@@ -403,6 +403,54 @@ const planEndSessions: Planner = async (deps, identity, input) => {
   };
 };
 
+/** Spec 063: the sign-in client registry, or NOT_FOUND where developer sign-in is not set up. */
+function signInClientRegistry(deps: PlanDependencies) {
+  const registry = deps.actions.signInClients;
+  if (registry === undefined) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment, so no service can sign people in through it");
+  return registry;
+}
+
+const planRegisterSignInClient: Planner = async (deps, identity, input) => {
+  if (input.kind !== "register_sign_in_client") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const registry = signInClientRegistry(deps);
+  const clients = await registry.list();
+  const current = clients.find((client) => client.clientId === input.clientId);
+  const { registration } = input;
+  const clash = clients.find((client) => client.clientId !== input.clientId && client.audience === registration.audience);
+  if (clash !== undefined) throw agentXError("CONFIG_INVALID", `sign-in client ${clash.clientId} already uses the audience ${registration.audience}; give each client its own`);
+  const where = [
+    ...(registration.redirectUris.length === 0 ? [] : [`a browser returning to ${registration.redirectUris.join(", ")}`]),
+    ...(registration.loopback ? ["a terminal (a loopback redirect, as agentx login uses)"] : []),
+  ].join(" and ");
+  const secret = registration.secretHash === undefined ? "" : " It is confidential: it signs in with its own secret, which AgentX keeps only as a hash.";
+  const replaced = current === undefined ? "" : " Its people stay signed in until they next refresh, which then follows these settings.";
+  return {
+    effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}, which AgentX's own API never accepts.${secret}${replaced}`,
+    details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential: registration.secretHash !== undefined },
+    snapshot: { client: current ?? null },
+    apply: async (applier) => {
+      const at = new Date(deps.actions.now()).toISOString();
+      await registry.put({ clientId: input.clientId, ...registration, createdAt: current?.createdAt ?? at, updatedAt: at, updatedBy: applier.ownerKey });
+      return { clientId: input.clientId, registered: true };
+    },
+  };
+};
+
+const planRemoveSignInClient: Planner = async (deps, identity, input) => {
+  if (input.kind !== "remove_sign_in_client") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const registry = signInClientRegistry(deps);
+  const current = (await registry.list()).find((client) => client.clientId === input.clientId);
+  if (current === undefined) throw agentXError("NOT_FOUND", `there is no sign-in client ${input.clientId}`);
+  return {
+    effect: `Remove sign-in client ${input.clientId} (${current.name}): nobody can sign in to it, its refresh tokens stop working at once, and its access tokens stop working at the access check.`,
+    details: { clientId: input.clientId },
+    snapshot: { client: current },
+    apply: async () => ({ clientId: input.clientId, removed: await registry.remove(input.clientId) }),
+  };
+};
+
 /** How many people at or over the new limit the effect names; details carry the full count. */
 const EFFECT_PEOPLE_MAX = 10;
 
@@ -543,6 +591,8 @@ export const PLANNERS: Partial<Record<AdminChangeKind, Planner>> = {
   revoke_signin: planEndSessions,
   set_workspace_limits: planLimits,
   set_chatgpt: planChatGpt,
+  register_sign_in_client: planRegisterSignInClient,
+  remove_sign_in_client: planRemoveSignInClient,
 };
 
 /**
