@@ -112,6 +112,19 @@ the company from each call (`ModelKeyStore`, `IdentityProvider`, the outbox, `Wo
 - `document-semantics.ts` holds the rules as plain functions; the fake and a SQLite adapter can use them, a DynamoDB adapter
   translates and is held to the same answers by the suite.
 
+**DynamoDB adapter (lane A1, `packages/aws-adapters`, `@rovara/aws-adapters`; public under owner decision 72 O2; opt-in, never Code's default).**
+`DynamoDocumentStore` keeps the hosted State table's layout unchanged, so no data moves: table keys `pk`/`sk` (text) are the port's key, a
+document's attributes are the item's attributes in the form the hosted broker's document client writes (`S`, `N`, `BOOL`, `NULL`, `L`, `M`),
+and the adapter adds no attribute of its own. `STATE_TABLE_INDEXES` names the table's four indexes; `outbox-pending` is listed apart as
+planned (adding it is a hosted deployment change, not made here). Conditions and updates become placeholder-only expressions (`add` is
+`SET p = if_not_exists(p, 0) + n`); single reads and table queries are strongly consistent; a lost transaction race is retried (4 attempts,
+a new client token each) and then `conflict`. A stored set or binary value is refused on read (`invalid_request`, decision 60). The change feed
+(`DynamoStreamChangeFeed`) adds no stream reader: the host's existing reader passes each batch of stream records to `deliver`, which hands
+it to the consumers declared for that process, retries a failing handler 3 times, then calls `onPoison`; a time-to-live removal is
+`cause: "expired"`. The durable checkpoint per consumer is the event source mapping's. The plug-in `@rovara/aws-adapters/dynamodb`
+(settings `tableName`, `region`, `endpoint`, `indexes`, `ttlAttribute`) builds the store without a feed. The suite runs against
+`tests/support/ports/dynamodb-fake.ts`, an in-memory DynamoDB that parses the real expressions; it is not yet run against DynamoDB Local.
+
 ## Queue and outbox
 
 `QueueService.queue(name, options)` gives a `Queue`: `enqueue` (delay, `dedupeId`, `groupId`), `receive` (visibility timeout,
