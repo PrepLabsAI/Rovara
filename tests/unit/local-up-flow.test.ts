@@ -37,6 +37,7 @@ import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.j
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { BASE_MERGED_NEEDS_YOU_MILESTONE, BASE_MERGED_RECHECKING_MILESTONE, BASE_MERGED_RETRY_REASON, workflowAutoFixCounts, type Admission } from "@agentx/contracts";
 import { dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { requireRepositoryKey } from "../../packages/broker/src/core/merge/repository-key.js";
 import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/branch-writers.js";
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
@@ -116,7 +117,7 @@ const planText = (extra: string[] = []): string => planAnswer(planDoc(extra), NO
 const PLAN_TEXT = planText();
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { planFormat?: "markdown" | "structured"; features?: readonly string[]; connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string }; connections?: { fetch?: typeof fetch; checkEndpoint?: (url: string) => Promise<void>; serverPort?: NonNullable<Parameters<typeof startLocalRuntime>[0]["connectionsServerPort"]> } } = {}) {
+async function launch(extra: { planFormat?: "markdown" | "structured"; features?: readonly string[]; connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; provider?: string; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string }; connections?: { fetch?: typeof fetch; checkEndpoint?: (url: string) => Promise<void>; serverPort?: NonNullable<Parameters<typeof startLocalRuntime>[0]["connectionsServerPort"]> } } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -129,7 +130,7 @@ async function launch(extra: { planFormat?: "markdown" | "structured"; features?
   const model = extra.model ?? new FakeHostModel({ url: hostedUrl, id: "1", fullName: "example/demo" });
   // `connection`: the same GitHub host registered under another name (a second GitHub connection called `github-main`), which a repository record then names (lane P2, review N1/N3/L1).
   const connection = extra.connection ?? "github";
-  const fakeHost = Object.defineProperties(new FakeCodeHost(model), { kind: { value: connection }, ...(connection === "github" ? {} : { provider: { value: "github" } }) });
+  const fakeHost = Object.defineProperties(new FakeCodeHost(model), { kind: { value: connection }, ...(connection === "github" && extra.provider === undefined ? {} : { provider: { value: extra.provider ?? "github" } }) });
   // A project cannot yet name another code host at registration (51 gap: the project contract refuses `repositories[].host`), so a repository is on the code host registered as `github`; the
   // test's host is the fake one under that name.
   const readiness = extra.readiness === true ? [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }] : [];
@@ -1624,6 +1625,9 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     h.model.branches.set(branch, commit);
     await h.callback(first, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
     expect(events.filter((event) => event.action === "pull_request.opened")).toHaveLength(1);
+    // The event names its repository the way the merge audit event does: the project's repository id as before, and the normalized key the merge path files the repository under.
+    expect(events.find((event) => event.action === "pull_request.opened")?.details).toEqual({ repository: "demo", repositoryKey: requireRepositoryKey("github", h.project.repositories[0]!.url), number: "1" });
+    expect(events.find((event) => event.action === "pull_request.opened")?.details?.["repositoryKey"]).toBe("example/demo");
     // The result is lost: the draft is open on the host and nothing tracks it.
     await h.callback(first, "result", { status: "FAILED", error: "the machine was lost" });
     expect(h.model.getChangeRequest("1").state).toBe("open");
@@ -1633,6 +1637,24 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     const branch2 = String((second.payload as { headBranch: string }).headBranch);
     h.model.branches.set(branch2, commit);
     expect((await h.callback(second, "pull-request", { ...{ repository: "demo", repositoryUrl: h.project.repositories[0]!.url, baseBranch: "main", commit, title: payload["title"], body: payload["body"] }, headBranch: branch2 })).body).toMatchObject({ number: 2 });
+  });
+
+  it("names the repository of a pull request opened on a host that is not GitHub by the same key the merge path uses", async () => {
+    const events: AuditEvent[] = [];
+    const h = await launch({ host: true, audit: events, connection: "gitlab-main", provider: "gitlab" });
+    const { workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    await h.callback(coding, "result", builtResult(tree, h.base, commit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    const payload = publish.payload as Record<string, unknown>;
+    h.model.branches.set(String(payload["headBranch"]), commit);
+    await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: payload["headBranch"], baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+    const details = events.find((event) => event.action === "pull_request.opened")?.details;
+    expect(details).toEqual({ repository: "demo", repositoryKey: requireRepositoryKey("gitlab", h.project.repositories[0]!.url), number: "1" });
+    expect(details?.["repositoryKey"]).toBe("gitlab:https://github.com/example/demo");
   });
 
   it("leaves an earlier draft open when a person took it up (pushed to it, or marked it ready), and says why", async () => {
