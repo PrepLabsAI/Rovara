@@ -15,6 +15,7 @@
 import { z } from "zod";
 import type { DecisionRisk } from "./decision-cards.js";
 import { RelativeWorkspacePathSchema, ProjectCommandSchema } from "./project.js";
+import { SageMakerEndpointBackingSchema } from "./sagemaker-endpoint.js";
 import type { TestEnvService } from "./test-environment.js";
 import { TestEnvValueSourceSchema } from "./test-env-value-source.js";
 import { SeedScriptLockSchema } from "./seed-script-lock.js";
@@ -286,8 +287,8 @@ export const TestEnvDependencySchema = z
     backing: TestEnvBackingSchema,
     workingBacking: TestEnvWorkingBackingSchema.optional(),
     fallback: TestEnvFallbackSchema.optional(),
-    /** The endpoint name of a model endpoint (`aws:sagemaker-runtime`). */
-    config: z.object({ endpointName: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})$/u).optional() }).strict().optional(),
+    /** The endpoint name of a model endpoint (`aws:sagemaker-runtime`), and what answers it (SM4: canned fixtures, a model stand-in or the project's own model image). */
+    config: z.object({ endpointName: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})$/u).optional(), model: SageMakerEndpointBackingSchema.optional() }).strict().optional(),
     connect: z
       .object({
         env: z.array(z.object({ name: EnvNameSchema, template: ConnectTemplateSchema }).strict()).max(TEST_ENV_DEPENDENCY_LIMITS.connectEnv),
@@ -317,6 +318,12 @@ export const TestEnvDependencySchema = z
     const endpointFamily = family === "aws:sagemaker-runtime";
     if (endpointFamily && (dependency.kind !== "model_endpoint" || dependency.config?.endpointName === undefined)) problem(["config"], "a SageMaker Runtime dependency is a model endpoint with its endpoint name");
     if (!endpointFamily && dependency.config?.endpointName !== undefined) problem(["config", "endpointName"], "only a SageMaker Runtime dependency has an endpoint name");
+    // SM4: a model backing says how the endpoint is answered. Fixtures and a stand-in are served by Rovara local AWS; an image is the project's own image on the function runner.
+    const model = dependency.config?.model;
+    if (model !== undefined) {
+      if (!endpointFamily) problem(["config", "model"], "only a SageMaker Runtime dependency has a model backing");
+      else if (model.mode === "image" ? backing.kind !== "project_image" || backing.imageId !== model.imageId : backing.kind !== "emulated") problem(["backing"], model.mode === "image" ? "an image endpoint runs the project image its model backing names" : "a canned or stand-in endpoint is answered by Rovara local AWS");
+    }
     // A reset between checks needs something Rovara can reset: a helper it starts. A customer's account is never reset by Rovara.
     if (dependency.reset === "between_checks" && !STARTING_KINDS.has(backing.kind)) problem(["reset"], "only a helper Rovara starts can be reset between checks");
     if (backing.kind === "none" && (dependency.connect.env.length > 0 || dependency.connect.hostAliases.length > 0)) problem(["connect"], "nothing backs this dependency, so there is nothing to point the code at");
@@ -381,6 +388,9 @@ function lessSafeSignatures(dependencies: readonly TestEnvDependency[], verified
       if (backing.kind === "project_image") add("project_image", `${where}/${backing.imageId}`);
       if (backing.kind === "local" && backing.substituteImage !== undefined) add("substitute_image", `${where}/${backing.substituteImage.digest}/${backing.substituteImage.approvalRef}`);
       if (backing.kind === "fake" && backing.unmatched === "schema_synth") add("schema_synth", where);
+      // SM4: a SageMaker fixture set that answers requests it has no recording for with a made-up answer, and a stand-in (which builds every answer from a schema), are the same kind of choice as a fake that makes answers up.
+      const model = dependency.config?.model;
+      if (slot === "backing" && model !== undefined && (model.mode === "stand_in" || (model.mode === "canned" && model.unmatched === "made_up"))) add("schema_synth", `${where}/sagemaker`);
       if (backing.kind === "none") for (const selector of backing.excludedTests ?? []) add("none_excluded_tests", `${where}/${selector}`);
     }
   }

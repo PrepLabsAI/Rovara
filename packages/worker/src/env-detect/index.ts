@@ -11,6 +11,7 @@ import { detectIac } from "./iac.js";
 import { detectJava } from "./java.js";
 import { detectNode } from "./node.js";
 import { detectPython } from "./python.js";
+import { detectSageMaker } from "./sagemaker.js";
 import { detectSdkCalls, detectServices } from "./services.js";
 import { detectSeedFiles } from "./seed-files.js";
 import { emptyDetection, type DependencyCandidate, type Detection, type Detector, type RepositoryReader } from "./types.js";
@@ -26,13 +27,14 @@ export const DETECTORS: ReadonlyArray<{ name: string; run: Detector }> = [
   { name: "ci", run: detectCiServices },
   { name: "env", run: detectEnvConfig },
   { name: "sdk", run: detectSdkCalls },
+  { name: "sagemaker", run: detectSageMaker },
   { name: "test-fakes", run: detectTestFakes },
   { name: "iac-resources", run: detectIacResources },
   { name: "seed-files", run: detectSeedFiles },
 ];
 
 /** The detectors that only report dependency candidates (test services D1-D7). The language detectors also report their manifests' drivers, which `legacyOnly` drops. */
-export const DEPENDENCY_DETECTOR_NAMES: ReadonlySet<string> = new Set(["compose", "ci", "env", "sdk", "test-fakes", "iac-resources", "seed-files"]);
+export const DEPENDENCY_DETECTOR_NAMES: ReadonlySet<string> = new Set(["compose", "ci", "env", "sdk", "sagemaker", "test-fakes", "iac-resources", "seed-files"]);
 
 /** The names of the built-in detectors: a build-system plug-in's detector may not use one. */
 export const BUILT_IN_DETECTOR_NAMES: ReadonlySet<string> = new Set(DETECTORS.map((detector) => detector.name));
