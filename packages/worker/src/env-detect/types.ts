@@ -1,6 +1,6 @@
 // Environment detectors (E2, design proof-test-env section 4.1): CODE reads the repository first and says what it found, with where (file and line) or which detector. The read-only setup agent then fills only the gaps.
 // Detectors are pure over a bounded reader: they never run a command and never read outside the file list they are given.
-import type { CheckKind, ProjectCommand, TestEnvDependencyKind } from "@agentx/contracts";
+import type { CheckKind, ProjectCommand, SageMakerDetectionSignal, TestEnvDependencyKind } from "@agentx/contracts";
 
 /** Where a detected value came from: a file and line, or a detector's name. */
 export type DetectedSource = { path: string; line: number } | `detector:${string}` | `recipe:${string}@${string}`;
@@ -90,6 +90,9 @@ export interface DependencyHints {
   resources?: DependencyResource[];
   /** An AWS service of the emulator's table that no seed handler creates resources for: it starts empty and the tests create their resources. */
   startsEmpty?: boolean;
+  /** SM4: the SageMaker endpoint names the code, its settings or its infrastructure code write as literals (at most 16), and fixed words for the signs of SageMaker use a detector saw. */
+  endpointNames?: string[];
+  sagemakerSignals?: SageMakerDetectionSignal[];
   /** Which detector families saw it (`compose`, `ci`, `env`, `driver`, `sdk`, `test`, `iac`). */
   seenBy?: string[];
 }

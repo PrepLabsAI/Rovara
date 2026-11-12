@@ -128,6 +128,10 @@ function mergeHints(left: DependencyHints, right: DependencyHints): DependencyHi
   const seenResources = new Set<string>();
   const resources = [...(left.resources ?? []), ...(right.resources ?? [])].filter((item) => { const key = `${item.kind}:${item.name}`; if (seenResources.has(key)) return false; seenResources.add(key); return true; }).slice(0, MAX_RESOURCES);
   if (resources.length > 0) merged.resources = resources;
+  const endpointNames = union(left.endpointNames, right.endpointNames, MAX_NAMES);
+  if (endpointNames !== undefined) merged.endpointNames = endpointNames;
+  const sagemakerSignals = union(left.sagemakerSignals, right.sagemakerSignals, 10);
+  if (sagemakerSignals !== undefined) merged.sagemakerSignals = sagemakerSignals;
   const seenBy = union(left.seenBy, right.seenBy, 8);
   if (seenBy !== undefined) merged.seenBy = seenBy;
   return merged;
