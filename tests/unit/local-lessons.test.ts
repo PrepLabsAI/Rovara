@@ -591,6 +591,22 @@ describe("lessons for local coding tools on a laptop (decision 46b)", () => {
     provenance: { ...draft().provenance, supportTasks: [], audience: { kind: "restricted", acl: { source: "github", scope: "github:repo/77", capturedAt: "2026-11-01T00:00:00.000Z", liveCheck: "on_read" } }, sourceScopes: ["github:repo/77"] }, ...over,
   });
 
+  it("allows 60 reads a minute per person: the 61st is refused, and a new minute opens again", async () => {
+    const w = await world();
+    for (let n = 0; n < 60; n += 1) expect((await ask(w, {})).status, String(n)).toBe(200);
+    expect(await ask(w, {})).toMatchObject({ status: 429, body: { error: { code: "TOO_MANY_REQUESTS" } } });
+    w.h.clock.advance(60);
+    expect((await ask(w, {})).status).toBe(200);
+  });
+
+  it("re-checks a script token's lessons permission and projects itself, whatever the authentication let through", async () => {
+    const w = await world();
+    const token = (permissions: ReadonlyArray<"read" | "start" | "lessons">, projects: readonly string[]) => ({ ...w.h.owner, scriptToken: { tokenId: "stk_x", name: "tool", permissions, projects } });
+    expect((await ask(w, {}, token(["lessons"], ["payments"]))).status).toBe(200);
+    expect(await ask(w, {}, token(["read", "start"], ["payments"]))).toMatchObject({ status: 404, body: { error: { message: "No such project." } } });
+    expect(await ask(w, {}, token(["lessons"], ["billing"]))).toMatchObject({ status: 404, body: { error: { message: "No such project." } } });
+  });
+
   it("proves the tool's repository against the project's registered address, by any spelling of it, with the place the host gives", async () => {
     const w = await world();
     const scopes = w.lessons.repositories.scopes();

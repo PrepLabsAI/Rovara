@@ -28,11 +28,10 @@ const codeOf = async (promise: Promise<unknown>): Promise<string | undefined> =>
 };
 
 describe("the address", () => {
-  it("is accepted only on this machine: loopback hosts over http or https, with no user, password or query", () => {
+  it("is accepted only on this machine: 127.0.0.1 or [::1] over http or https, with no user, password or query; a name, 0.0.0.0 and a mapped address are refused", () => {
     expect(loopbackBase("http://127.0.0.1:11434/v1/")).toBe("http://127.0.0.1:11434/v1");
-    expect(loopbackBase("http://localhost:8080")).toBe("http://localhost:8080");
     expect(loopbackBase("http://[::1]:9000/api")).toBe("http://[::1]:9000/api");
-    for (const refused of ["https://api.example.com/v1", "http://10.0.0.5:11434", "http://127.0.0.1.nip.io/v1", "http://user:pw@127.0.0.1:1/v1", "http://127.0.0.1:1/v1?key=x", "file:///tmp/x", "ftp://127.0.0.1/", "not a url"]) {
+    for (const refused of ["http://localhost:8080", "http://LOCALHOST:8080/v1", "http://0.0.0.0:11434/v1", "http://[::ffff:127.0.0.1]:11434/v1", "http://[::]:11434/v1", "http://127.0.0.2:11434/v1", "https://api.example.com/v1", "http://10.0.0.5:11434", "http://127.0.0.1.nip.io/v1", "http://user:pw@127.0.0.1:1/v1", "http://127.0.0.1:1/v1?key=x", "file:///tmp/x", "ftp://127.0.0.1/", "not a url"]) {
       expect(loopbackBase(refused), refused).toBeUndefined();
     }
     expect(() => make(server().fetch, { url: "https://api.example.com/v1" })).toThrow(LoopbackEmbedderError);
@@ -88,6 +87,14 @@ describe("a call", () => {
       expect((failure as LoopbackEmbedderError).code).toBe(code);
       expect((failure as Error).message).not.toContain("secret");
     }
+    // An answer that is not an object, or whose list holds a null, a number or a list, is the fixed code, never a TypeError.
+    for (const reply of [[], 7, "text", { data: null }, { data: [null, null] }, { data: [1, 2] }, { data: [[1], [2]] }, { data: [{ index: 0, embedding: null }, { index: 1, embedding: null }] }]) {
+      const failure = await make(server({ reply: () => reply }).fetch).embedMany(["a", "b"]).then(() => undefined, (error: unknown) => error);
+      expect(failure, JSON.stringify(reply)).toBeInstanceOf(LoopbackEmbedderError);
+      expect((failure as LoopbackEmbedderError).code).toBe("BAD_RESPONSE");
+    }
+    const nullBody = (async () => new Response("null", { status: 200 })) as unknown as typeof fetch;
+    expect(await codeOf(make(nullBody).embedMany(["a"]))).toBe("BAD_RESPONSE");
     // A blank text is the zero vector, and the server is not asked about it.
     const s = server();
     const [fine, blank] = await make(s.fetch).embedMany(["fine", "   "]);
@@ -134,4 +141,21 @@ runLessonEmbedderConformance("Code's loopback model embedder", {
     }) as typeof fetch;
     return { embedder: createLoopbackEmbedder({ url: "http://127.0.0.1:11434/v1", model: "bge-small-en-v1.5", dimension: backend.dimension, fetch: fake }) };
   },
+});
+
+describe("the answer's size", () => {
+  it("is capped before it is parsed: a declared or a streamed answer over the cap is refused with the fixed code", async () => {
+    const declared = (async () => new Response("{}", { status: 200, headers: { "content-length": String(LOOPBACK_EMBEDDER_LIMITS.maxResponseBytes + 1) } })) as unknown as typeof fetch;
+    expect(await codeOf(make(declared).embedMany(["a"]))).toBe("BAD_RESPONSE");
+    const chunk = new Uint8Array(1024 * 1024).fill(0x20);
+    let sent = 0;
+    const streamed = (async () => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) { if (sent > LOOPBACK_EMBEDDER_LIMITS.maxResponseBytes + chunk.byteLength) controller.close(); else { sent += chunk.byteLength; controller.enqueue(chunk); } },
+    }), { status: 200 })) as unknown as typeof fetch;
+    expect(await codeOf(make(streamed).embedMany(["a"]))).toBe("BAD_RESPONSE");
+    expect(sent).toBeLessThanOrEqual(LOOPBACK_EMBEDDER_LIMITS.maxResponseBytes + 2 * chunk.byteLength);
+    // Just under the cap is read.
+    const fine = server();
+    expect(await make(fine.fetch).embedMany(["a"])).toHaveLength(1);
+  });
 });

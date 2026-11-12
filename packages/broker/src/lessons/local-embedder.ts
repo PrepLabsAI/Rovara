@@ -60,8 +60,8 @@ export function createLocalLearningAdapter(options: { embedder?: boolean | Lesso
 
 // ---- a small open model served on this machine
 
-/** The limits of one call: texts per request, characters per text (a longer text is cut), and the longest wait. */
-export const LOOPBACK_EMBEDDER_LIMITS = { maxTexts: 16, maxTextChars: 24_000, timeoutMs: 10_000 } as const;
+/** The limits of one call: texts per request, characters per text (a longer text is cut), the longest wait, and the largest answer read (16 vectors of 8,192 numbers fit well inside it). */
+export const LOOPBACK_EMBEDDER_LIMITS = { maxTexts: 16, maxTextChars: 24_000, timeoutMs: 10_000, maxResponseBytes: 8 * 1024 * 1024 } as const;
 export const LOOPBACK_EMBEDDER_CODES = ["NOT_LOOPBACK", "BAD_CONFIG", "UNREACHABLE", "BAD_RESPONSE"] as const;
 export type LoopbackEmbedderCode = (typeof LOOPBACK_EMBEDDER_CODES)[number];
 /** A refusal or failure with a fixed code. The message is the code, so it is safe to log. */
@@ -69,10 +69,11 @@ export class LoopbackEmbedderError extends Error {
   constructor(readonly code: LoopbackEmbedderCode) { super(`embedder: ${code}`); this.name = "LoopbackEmbedderError"; }
 }
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+// Literal loopback addresses only: a name such as `localhost` is resolved through the hosts file and may point anywhere, and other spellings (0.0.0.0, an IPv4-mapped IPv6 address) are refused.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]"]);
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$/u;
 
-/** The server's base address, accepted only on this machine (http or https to a loopback host, no user name or password, no query). Undefined otherwise. */
+/** The server's base address, accepted only on this machine (http or https to 127.0.0.1 or [::1], no user name or password, no query). Undefined otherwise. */
 export function loopbackBase(raw: string): string | undefined {
   let url: URL;
   try { url = new URL(raw); } catch { return undefined; }
@@ -104,6 +105,25 @@ function unitVector(value: unknown, dimension: number): number[] {
   return (value as number[]).map((item) => item / length);
 }
 
+/** The answer's text, read only up to `max` bytes: a larger answer (by its declared length or as it streams) is refused before it is held whole or parsed. */
+async function readCapped(response: Response, max: number): Promise<string> {
+  const declared = Number(response.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > max) throw new LoopbackEmbedderError("BAD_RESPONSE");
+  if (response.body === null) return "";
+  const reader: ReadableStreamDefaultReader<Uint8Array> = (response.body as ReadableStream<Uint8Array>).getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const chunk = await reader.read() as { done: true; value?: undefined } | { done: false; value: Uint8Array };
+    if (chunk.done) break;
+    const value = chunk.value;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel().catch(() => undefined); throw new LoopbackEmbedderError("BAD_RESPONSE"); }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export function createLoopbackEmbedder(options: LoopbackEmbedderOptions): LessonEmbedder {
   const base = loopbackBase(options.url);
   if (base === undefined) throw new LoopbackEmbedderError("NOT_LOOPBACK");
@@ -123,18 +143,21 @@ export function createLoopbackEmbedder(options: LoopbackEmbedderOptions): Lesson
         signal: AbortSignal.timeout(left), redirect: "error",
       });
       if (!response.ok) throw new LoopbackEmbedderError("UNREACHABLE");
-      body = await response.json();
+      body = JSON.parse(await readCapped(response, LOOPBACK_EMBEDDER_LIMITS.maxResponseBytes)) as unknown;
     } catch (error) {
       if (error instanceof LoopbackEmbedderError) throw error;
       throw new LoopbackEmbedderError("UNREACHABLE");
     }
-    const data = (body as { data?: unknown } | null)?.data;
+    const data = typeof body === "object" && body !== null && !Array.isArray(body) ? (body as { data?: unknown }).data : undefined;
     if (!Array.isArray(data) || data.length !== texts.length) throw new LoopbackEmbedderError("BAD_RESPONSE");
     const out = new Array<number[] | undefined>(texts.length).fill(undefined);
     data.forEach((entry: unknown, position) => {
-      const index = (entry as { index?: unknown } | null)?.index ?? position;
+      // Every entry must be an object: a null, a number or a list is a refusal with the fixed code, never a TypeError.
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw new LoopbackEmbedderError("BAD_RESPONSE");
+      const fields = entry as { index?: unknown; embedding?: unknown };
+      const index = fields.index ?? position;
       if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= texts.length || out[index] !== undefined) throw new LoopbackEmbedderError("BAD_RESPONSE");
-      out[index] = unitVector((entry as { embedding?: unknown }).embedding, dimension);
+      out[index] = unitVector(fields.embedding, dimension);
     });
     return out as number[][];
   }
