@@ -153,7 +153,7 @@ export class FakeSqs implements SqsSender {
   #attributes(input: GetQueueAttributesCommand["input"]): { Attributes: Record<string, string> } {
     const queue = this.#queue(input.QueueUrl);
     const all = input.AttributeNames?.includes("All") === true;
-    const wanted = new Set(input.AttributeNames ?? []);
+    const wanted = new Set<string>(input.AttributeNames ?? []);
     const arn = `arn:aws:sqs:us-west-2:000000000000:${nameOf(queue.url)}`;
     const available: Record<string, string> = {
       QueueArn: arn,
