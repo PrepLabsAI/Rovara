@@ -6,7 +6,7 @@
 //  - the backstop: a schedule that relays every company's pending rows, oldest first. It is what delivers a row whose insert record
 //    was missed (a reader outage, a hook error, a failed hand-over), so the stream is never the only way a message reaches its queue.
 // Both are at least once and idempotent: a row handed over twice reaches a queue with duplicate suppression once, and any other queue
-// with its `outboxId` attribute, which every consumer drops a repeat by. Neither promises order across calls: two relays running
+// with its `outboxId` attribute; the consumer is idempotent on its operation (dispatch claims it conditionally and drops an ended or running one). Neither promises order across calls: two relays running
 // together may hand over two messages of one ordered group in either order, so nothing may rely on the outbox for order.
 import type { DocumentChange, OutboxRelayReport, TransactionalOutbox } from "@agentx/contracts";
 

@@ -18,7 +18,7 @@
 //    an attribute value outside the set is refused.
 //  - SQS cannot say "this is a duplicate". On a FIFO queue a repeat inside the window is accepted and silently dropped, so `duplicate:
 //    true` is reported only when this process sent the same id inside the window; another process's repeat is dropped just the same
-//    and reported `false`. Nothing in the core depends on the flag (the outbox's consumers drop a repeat by `outboxId`).
+//    and reported `false`. Nothing in the core depends on the flag: a consumer is idempotent on its operation (the dispatch consumer claims it conditionally and drops an ended or running one).
 //  - A FIFO ReceiveMessage can return several messages of one group at once. The port says one at a time, so an ordered queue is
 //    received one message per request (extra messages would burn a receive of the dead-letter budget for nothing).
 //  - A receipt handle that SQS no longer knows is refused by SQS only some of the time, so a stale `ack` may answer true.
@@ -183,6 +183,13 @@ function messageBytes(body: string, attributes: Record<string, MessageAttributeV
   return total;
 }
 
+/**
+ * The group of a message that names none. With a dedupe id the group is named after it, so two sends of one id land in one group and SQS
+ * drops the second whichever DeduplicationScope the queue has; with none it is a group of its own (no order owed to any other message).
+ */
+const SOLO_GROUP_PREFIX = "rovara-solo-";
+const soloGroup = (key: string | undefined): string => `${SOLO_GROUP_PREFIX}${key ?? randomUUID()}`;
+
 /** SQS wants its own text for a deduplication id: 128 characters of a narrow set. The port's ids are free text, so a hash stands in. */
 const dedupeKey = (dedupeId: string): string => createHash("sha256").update(dedupeId, "utf8").digest("hex");
 
@@ -191,6 +198,8 @@ interface QueueFacts {
   visibilityTimeoutSeconds: number;
   maxReceiveCount?: number;
   deadLetterArn?: string;
+  /** FIFO only: whether SQS suppresses a repeat across the whole queue, or only within one message group (DeduplicationScope). */
+  dedupeScope: "queue" | "messageGroup";
   maxMessageBytes: number;
 }
 
@@ -201,7 +210,7 @@ function parseFacts(url: string, attributes: Record<string, string> | undefined)
   const visibility = Number(attributes.VisibilityTimeout);
   const size = Number(attributes.MaximumMessageSize);
   if (!Number.isInteger(visibility) || !Number.isInteger(size)) throw new SqsQueueError("SQS GetQueueAttributes returned no visibility timeout or maximum message size");
-  const facts: QueueFacts = { fifo, visibilityTimeoutSeconds: visibility, maxMessageBytes: Math.min(size, SQS_LIMITS.maxMessageBytes) };
+  const facts: QueueFacts = { fifo, visibilityTimeoutSeconds: visibility, dedupeScope: fifo && attributes.DeduplicationScope === "messageGroup" ? "messageGroup" : "queue", maxMessageBytes: Math.min(size, SQS_LIMITS.maxMessageBytes) };
   if (attributes.RedrivePolicy !== undefined) {
     let policy: unknown;
     try {
@@ -273,13 +282,18 @@ export class SqsQueueService implements QueueService {
       throw new Error(`the dead-letter URL declared for queue ${JSON.stringify(name)} is not an SQS queue URL of the same kind`);
     }
     const facts = parseFacts(url, await this.#attributes(url, ["All"], "GetQueueAttributes"));
-    if (deadLetterUrl !== undefined && facts.deadLetterArn !== undefined) {
-      const arn = (await this.#attributes(deadLetterUrl, ["QueueArn"], "GetQueueAttributes (dead letters)"))?.QueueArn;
-      if (arn !== facts.deadLetterArn) throw new Error(`the dead-letter URL declared for queue ${JSON.stringify(name)} is not the queue its redrive policy names`);
+    if (deadLetterUrl !== undefined) {
+      // The dead-letter queue is read back whether or not the queue has a redrive policy: `deadLetter` and the by-id calls send to and read
+      // from this URL, so it must be a queue that exists, of the queue's kind, and (when there is a policy) the one the policy names.
+      const dead = await this.#attributes(deadLetterUrl, ["QueueArn", "FifoQueue"], "GetQueueAttributes (dead letters)");
+      if (dead?.QueueArn === undefined || (dead.FifoQueue === "true") !== facts.fifo) throw new Error(`the dead-letter URL declared for queue ${JSON.stringify(name)} is not a queue of the same kind`);
+      if (facts.deadLetterArn !== undefined && dead.QueueArn !== facts.deadLetterArn) throw new Error(`the dead-letter URL declared for queue ${JSON.stringify(name)} is not the queue its redrive policy names`);
     }
     const capabilities: QueueCapabilities = {
       ordered: facts.fifo,
-      dedupe: facts.fifo,
+      // With the deduplication scope on the message group, SQS drops a repeat only inside one group, so a repeat in another group is kept:
+      // the queue's duplicate suppression cannot be promised across groups (a message with no group of its own is still held to one, below).
+      dedupe: facts.fifo && facts.dedupeScope === "queue",
       maxDelaySeconds: facts.fifo ? 0 : SQS_LIMITS.maxDelaySeconds,
       detectsStaleHandle: false,
       deadLettersById: false,
@@ -291,7 +305,7 @@ export class SqsQueueService implements QueueService {
     return { queue, facts };
   }
 
-  async #attributes(url: string, names: ("All" | "QueueArn")[], operation: string): Promise<Record<string, string> | undefined> {
+  async #attributes(url: string, names: ("All" | "QueueArn" | "FifoQueue")[], operation: string): Promise<Record<string, string> | undefined> {
     try {
       const out = (await this.#client.send(new GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: names }))) as GetQueueAttributesCommandOutput;
       return out.Attributes;
@@ -353,7 +367,7 @@ class SqsQueue implements Queue {
     const now = s.now();
     const key = dedupeId === undefined ? undefined : dedupeKey(dedupeId);
     let seen: { messageId: string; at: number } | undefined;
-    if (s.facts.fifo && key !== undefined) {
+    if (this.capabilities.dedupe && key !== undefined) {
       this.#prune(now);
       const earlier = this.#sent.get(key);
       // `#prune` has dropped every id older than the window.
@@ -366,9 +380,9 @@ class SqsQueue implements Queue {
         MessageBody: body,
         ...(Object.keys(attributes).length === 0 ? {} : { MessageAttributes: attributes }),
         ...(s.facts.fifo
-          // FIFO wants a group and a deduplication id on every message. A message with no group of its own gets a group of its own (no
-          // order owed to any other); one with no dedupe id gets a fresh one (nothing is suppressed).
-          ? { MessageGroupId: groupId ?? `rovara-solo-${randomUUID()}`, MessageDeduplicationId: key ?? randomUUID() }
+          // FIFO wants a group and a deduplication id on every message. A message with no group gets a solo group (named after its dedupe
+          // id when it has one); one with no dedupe id gets a fresh id (nothing is suppressed).
+          ? { MessageGroupId: groupId ?? soloGroup(key), MessageDeduplicationId: key ?? randomUUID() }
           : delay === 0 ? {} : { DelaySeconds: delay }),
       }))) as SendMessageCommandOutput;
     } catch (error) {
@@ -376,7 +390,7 @@ class SqsQueue implements Queue {
     }
     if (out.MessageId === undefined) throw new SqsQueueError("SQS SendMessage returned no message id");
     if (seen !== undefined) return { messageId: seen.messageId, duplicate: true };
-    if (s.facts.fifo && key !== undefined) this.#sent.set(key, { messageId: out.MessageId, at: now });
+    if (this.capabilities.dedupe && key !== undefined) this.#sent.set(key, { messageId: out.MessageId, at: now });
     return { messageId: out.MessageId, duplicate: false };
   }
 
@@ -445,7 +459,7 @@ class SqsQueue implements Queue {
         QueueUrl: s.deadLetterUrl,
         MessageBody: held.body,
         ...(Object.keys(attributes).length === 0 ? {} : { MessageAttributes: attributes }),
-        ...(s.facts.fifo ? { MessageGroupId: held.groupId ?? `rovara-solo-${randomUUID()}`, MessageDeduplicationId: dedupeKey(`dead:${held.messageId}`) } : {}),
+        ...(s.facts.fifo ? { MessageGroupId: held.groupId ?? soloGroup(dedupeKey(`dead:${held.messageId}`)), MessageDeduplicationId: dedupeKey(`dead:${held.messageId}`) } : {}),
       }));
     } catch (error) {
       return failure(error, "SendMessage (dead letters)");
@@ -472,6 +486,8 @@ class SqsQueue implements Queue {
     const found = await this.#findDeadLetter(plainText(messageId, "the message id"));
     if (found === undefined) return false;
     const { message } = found;
+    // The scan hid the message for a minute; if that has run out another reader may hold or have removed it, and sending now would duplicate it.
+    if (!(await this.#hold(this.#deadLetterUrl(), message.ReceiptHandle))) return false;
     const attributes = { ...message.MessageAttributes };
     delete attributes[DEAD_LETTER_ATTRIBUTE];
     const groupId = message.Attributes?.MessageGroupId;
@@ -480,7 +496,7 @@ class SqsQueue implements Queue {
         QueueUrl: s.url,
         MessageBody: message.Body ?? "",
         ...(Object.keys(attributes).length === 0 ? {} : { MessageAttributes: attributes }),
-        ...(s.facts.fifo ? { MessageGroupId: groupId !== undefined && !groupId.startsWith("rovara-solo-") ? groupId : `rovara-solo-${randomUUID()}`, MessageDeduplicationId: randomUUID() } : {}),
+        ...(s.facts.fifo ? { MessageGroupId: groupId !== undefined && !groupId.startsWith(SOLO_GROUP_PREFIX) ? groupId : soloGroup(undefined), MessageDeduplicationId: randomUUID() } : {}),
       }));
     } catch (error) {
       return failure(error, "SendMessage (redrive)");
@@ -536,7 +552,7 @@ class SqsQueue implements Queue {
       const enqueuedAt = Number(message.Attributes?.SentTimestamp ?? s.now());
       this.#remember(message.ReceiptHandle, {
         messageId: message.MessageId, body: message.Body ?? "", attributes: { ...message.MessageAttributes },
-        ...(groupId === undefined || groupId.startsWith("rovara-solo-") ? {} : { groupId }), receiveCount, enqueuedAt,
+        ...(groupId === undefined || groupId.startsWith(SOLO_GROUP_PREFIX) ? {} : { groupId }), receiveCount, enqueuedAt,
       });
       out.push({
         messageId: message.MessageId,
@@ -545,7 +561,7 @@ class SqsQueue implements Queue {
         attributes,
         receiveCount: Number.isInteger(receiveCount) && receiveCount >= 1 ? receiveCount : 1,
         enqueuedAt: new Date(Number.isFinite(enqueuedAt) ? enqueuedAt : s.now()).toISOString(),
-        ...(groupId === undefined || groupId.startsWith("rovara-solo-") ? {} : { groupId }),
+        ...(groupId === undefined || groupId.startsWith(SOLO_GROUP_PREFIX) ? {} : { groupId }),
       });
     }
     return out;
@@ -613,30 +629,47 @@ class SqsQueue implements Queue {
 
   /**
    * Looks through the dead-letter queue for one message by the id the core knows it by. SQS has no lookup, so this takes messages in
-   * batches (hidden for a minute, so no one else takes the one it wants), puts the others straight back, and stops when it finds the
-   * one, when a batch brings nothing it has not seen, or at the scan limit. A message not found in that many is reported missing: with
-   * a very large dead-letter queue use SQS's own redrive.
+   * batches (hidden for a minute), keeps the ones that do not match hidden until the scan ends so that no batch brings one it has already
+   * looked at, then puts them all back. It stops when it finds the one, when a batch brings nothing new, or at the scan limit. A message
+   * not found in that many is reported missing: with a very large dead-letter queue use SQS's own redrive.
    */
   async #findDeadLetter(messageId: string): Promise<{ message: Message; entry: DeadLetter } | undefined> {
     const url = this.#deadLetterUrl();
     const seen = new Set<string>();
-    while (seen.size < this.#s.scanLimit) {
-      const batch = await this.#receiveFrom(url, QUEUE_LIMITS.maxReceive, 60, 1);
-      let fresh = 0;
-      let found: { message: Message; entry: DeadLetter } | undefined;
-      for (const message of batch) {
-        const entry = this.#deadLetterOf(message);
-        if (message.MessageId !== undefined && !seen.has(message.MessageId)) {
-          seen.add(message.MessageId);
-          fresh += 1;
+    const others: string[] = [];
+    try {
+      while (seen.size < this.#s.scanLimit) {
+        const batch = await this.#receiveFrom(url, QUEUE_LIMITS.maxReceive, 60, 1);
+        let fresh = 0;
+        let found: { message: Message; entry: DeadLetter } | undefined;
+        for (const message of batch) {
+          const entry = this.#deadLetterOf(message);
+          if (message.MessageId !== undefined && !seen.has(message.MessageId)) {
+            seen.add(message.MessageId);
+            fresh += 1;
+          }
+          if (found === undefined && entry !== undefined && (entry.messageId === messageId || message.MessageId === messageId)) found = { message, entry };
+          else if (message.ReceiptHandle !== undefined) others.push(message.ReceiptHandle);
         }
-        if (found === undefined && entry !== undefined && (entry.messageId === messageId || message.MessageId === messageId)) found = { message, entry };
-        else if (message.ReceiptHandle !== undefined) await this.#release(url, message.ReceiptHandle);
+        if (found !== undefined) return found;
+        if (fresh === 0) return undefined;
       }
-      if (found !== undefined) return found;
-      if (fresh === 0) return undefined;
+      return undefined;
+    } finally {
+      for (const handle of others) await this.#release(url, handle);
     }
-    return undefined;
+  }
+
+  /** Hides a message found by the scan for another minute. False when SQS no longer knows the handle (another reader took or removed it). */
+  async #hold(url: string, receiptHandle: string | undefined): Promise<boolean> {
+    if (receiptHandle === undefined) return false;
+    try {
+      await this.#s.client.send(new ChangeMessageVisibilityCommand({ QueueUrl: url, ReceiptHandle: receiptHandle, VisibilityTimeout: 60 }));
+      return true;
+    } catch (error) {
+      if (isStaleHandleError(error)) return false;
+      return failure(error, "ChangeMessageVisibility (dead letters)");
+    }
   }
 
   async #release(url: string, receiptHandle: string): Promise<void> {
