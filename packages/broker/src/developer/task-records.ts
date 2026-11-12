@@ -79,7 +79,12 @@ export interface DeveloperTaskRecord {
   canvasCloseoutRetry?: { requestId: string; workflowRevision: number; manifestDigest?: string; actorId: string; requestedAt: string; dispatchAttempt: number };
   createdAt: string;
   updatedAt: string;
-  closedAt?: string;
+closedAt?: string;
+  /**
+   * Decision 134: the requester pressed Stop on a request that started Quick on its own. Remembered until the task can
+   * close (setup finished, or the running step was cancelled); then the broker closes it with this press's request ID.
+   */
+  stopRequest?: { userId: string; requestId: string; at: string };
   /**
    * When a finished workflow task (all its pull requests merged, or its workflow closed) gave back its workspace slot and
    * its workspace. A closed task gives them back with its close instead, and has none.
