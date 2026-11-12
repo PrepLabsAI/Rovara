@@ -2,6 +2,7 @@
 // (R3): the legacy deployment must not change.
 import { ArnFormat, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, aws_apigatewayv2 as apigwv2, aws_dynamodb as dynamodb, aws_iam as iam, aws_kms as kms, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager } from "aws-cdk-lib";
 import { Construct } from "constructs";
+import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { packagedFunction } from "./control-plane.js";
 
@@ -62,6 +63,8 @@ export interface DeveloperSignInProps {
 export class DeveloperSignIn extends Construct {
   /** Existing table, exposed without changing its construct path or permissions. */
   readonly table: dynamodb.Table;
+  /** Spec 062 Phase 7c1b: the sign-in function, whose Slack directory reads go through the Slack adapter when asked. */
+  readonly function: lambdaNodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: DeveloperSignInProps) {
     super(scope, id);
@@ -91,7 +94,7 @@ export class DeveloperSignIn extends Construct {
     });
 
     const oidcSecretName = `agentx/${props.env}/developer-oidc`;
-    const fn = packagedFunction(this, "Function", "packages/broker/src/aws/developer-identity.ts", {
+    const fn = this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-identity.ts", {
       AGENTX_ENV: props.env,
       DEVELOPER_TOKEN_ISSUER: issuer,
       DEVELOPER_SIGNIN_TABLE_NAME: table.tableName,
@@ -114,6 +117,12 @@ export class DeveloperSignIn extends Construct {
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
       resources: [table.tableArn],
+    }));
+    // Spec 063: listing and removing sign-in clients, only in their own partition.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:Query", "dynamodb:DeleteItem"],
+      resources: [table.tableArn],
+      conditions: { "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [SIGN_IN_CLIENTS_PK] }, Null: { "dynamodb:LeadingKeys": "false" } },
     }));
     tokenKey.grant(fn, "kms:Sign", "kms:GetPublicKey");
     tokenKey.addToResourcePolicy(new iam.PolicyStatement({
@@ -174,10 +183,11 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("MCP_CONFIRM_ELICITATION", p.mcpConfirmElicitation.valueAsString);
     fn.grantInvoke(broker);
     // Spec 025 25e: EMAIL# is the email index resolveDeveloper reads to name a developer by email.
+    // Spec 063: SIGNIN_CLIENTS holds the registered clients the access check authenticates.
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],
       resources: [table.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*"] } },
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } },
     }));
     // The workflow E2E terminal authority transaction also condition-checks the original creator
     // record. Keep that cross-table fence to developer identity rows only.

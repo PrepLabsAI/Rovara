@@ -9,6 +9,7 @@ import { GetCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { parseSlackThreadSubject } from "@agentx/contracts";
 import { releaseConflict, releaseItems } from "../developer/limits.js";
 import { taskKey, taskPointerKey, type DeveloperTaskRecord, type DeveloperTaskPointerRecord } from "../developer/task-records.js";
+import { channelThreadReleaseItems, conversationChargeMarker, storedCharge } from "./channel-conversation.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 type Log = (entry: Record<string, unknown>) => void;
@@ -26,7 +27,7 @@ export const slackMemberLimitKey = (teamId: string, userId: string) => ({ pk: `S
 export const slackThreadKey = (ownerKey: string) => ({ pk: `SLACK_THREAD#${ownerKey}`, sk: "META" });
 
 interface FailedWorkspace { ownerKey?: unknown; status?: unknown; activeOperationId?: unknown; fence?: unknown }
-interface ThreadRecord { thread?: unknown; starterUserId?: unknown; closedAt?: unknown }
+interface ThreadRecord { thread?: unknown; starterUserId?: unknown; starterDeveloperId?: unknown; charge?: unknown; closedAt?: unknown }
 
 /**
  * Releases the charge a PREPARATION_FAILED workspace still holds, idempotently. Never throws: the
@@ -72,6 +73,27 @@ async function attemptRelease(client: Client, tableName: string, workspaceId: st
   const thread = await get<ThreadRecord>(slackThreadKey(workspace.ownerKey));
   if (thread !== undefined && typeof thread.starterUserId === "string" && thread.closedAt === undefined && typeof thread.thread === "string") {
     return releaseThreadCharge(client, tableName, get, { subject: thread.thread, starterUserId: thread.starterUserId, ownerKey: workspace.ownerKey }, stillFailed);
+  }
+  // Spec 062: an adapter conversation holds its linked developer's charge, stored on its record.
+  const charge = storedCharge(thread?.charge);
+  if (thread !== undefined && typeof thread.starterDeveloperId === "string" && thread.closedAt === undefined && typeof thread.thread === "string" && charge !== undefined) {
+    const marker = conversationChargeMarker(thread.thread);
+    try {
+      // releaseItems first, at positions 0 and 1, as releaseConflict reads them.
+      await client.send(new TransactWriteCommand({ TransactItems: [
+        ...channelThreadReleaseItems({ tableName, threadKey: slackThreadKey(workspace.ownerKey), subject: thread.thread, developerId: thread.starterDeveloperId, charge }),
+        stillFailed,
+      ] }));
+      return "slack_thread";
+    } catch (error) {
+      if (!isCancelled(error)) throw error;
+      try {
+        await releaseConflict(client, tableName, charge, marker, error);
+        return "not_charged";
+      } catch {
+        return "retry";
+      }
+    }
   }
   // A Slack thread with no charge left falls through: it has no task pointer, so it ends "not_charged".
 

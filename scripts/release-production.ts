@@ -376,6 +376,11 @@ async function releaseSlackOrchestrator(
     ...parameter("TurnRecordsTableName", stackOutput(controlPlane, "TurnRecordsTableName")),
     ...parameter("ThreadSessionBucketName", stackOutput(controlPlane, "SlackThreadSessionBucketName")),
     ...parameter("SlackSecretArn", stackOutput(controlPlane, "SlackSecretArn")),
+    // Spec 062 Phase 7d: the channel API's queues and the built-in Slack adapter's commands, once the control plane has them.
+    ...["ChannelRequestQueueUrl", "ChannelEventQueueUrl", "SlackAdapterCommandsUrl", "SlackAdapterSecretName"].flatMap((name) => {
+      const value = controlPlane.Outputs?.find((output) => output.OutputKey === name)?.OutputValue;
+      return value ? parameter(name, value) : [];
+    }),
     ...parameter("VpcId", stackOutput(foundation, "VpcId")),
     ...parameter("PrivateSubnetIds", stackOutput(foundation, "PrivateSubnetIds")),
     "--outputs-file",

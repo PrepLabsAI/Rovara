@@ -10,7 +10,7 @@ import { isBuiltin } from "node:module";
 import { z } from "zod";
 import { PluginKindSchema } from "../plugins/common.js";
 import { ExternalAccountRefSchema } from "../outside-account.js";
-import type { ChannelCapabilities, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
+import type { ChannelCapabilities, ChannelCommand, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
 import type { InboundMessage } from "../conversation.js";
 import type { CodeHost } from "../plugins/code-host.js";
 import type { Tracker } from "../plugins/tracker.js";
@@ -148,6 +148,12 @@ export interface ChannelAdapter {
   deliver(event: ChannelEvent): Promise<void>;
   /** In-process adapters begin listening here. Webhook adapters need no listener: they post to the channel API. */
   start?(sink: ChannelInboundSink): Promise<{ stop(): Promise<void> }>;
+  /**
+   * Optional. Spec 062 FR-072 in process: a command the core sends and waits for (post a message and learn its id, the directory, documents). It is the in-process form of a webhook adapter's `commandsUrl`, and answers
+   * the same `ChannelCommandAnswer` (`{ ok: true, result }` or `{ ok: false, error }`). The core sends a kind only when the adapter declares its capability (`COMMAND_CAPABILITY`), and only through
+   * `core/channel/commands.ts`, which keeps every command and every answer inside the asking company.
+   */
+  command?(command: ChannelCommand): Promise<unknown>;
 }
 
 /**

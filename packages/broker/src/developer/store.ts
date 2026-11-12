@@ -2,18 +2,28 @@
 // The DeveloperSignIn table (spec 025 FR-005, FR-008). Codes and refresh tokens are stored only as
 // SHA-256 hashes. Every expiry is checked here; the table's TTL only cleans up afterwards.
 import { randomUUID } from "node:crypto";
-import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   DEVELOPER_AUTH_REQUEST_SECONDS,
   DEVELOPER_CODE_SECONDS,
   DEVELOPER_SESSION_SECONDS,
+  SIGN_IN_CLIENTS_PK,
+  SignInClientRecordSchema,
+  signInClientKey,
   type DeveloperSignInMethod,
+  type SignInClientRecord,
 } from "@agentx/contracts";
 import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
-export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string }
+/** `clientId` (spec 063): the registered sign-in client this request is for; absent, the AgentX CLI. */
+export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string; clientId?: string }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string }
+/** Spec 063: `clientId`, the registered client it belongs to (absent: the CLI or a review page); `administrator`, its
+ * company sign-in carried the administrator claim (FR-005). */
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string; clientId?: string; administrator?: true }
+
+/** What a code carries into its session. */
+export interface CodeGrant { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true }
 
 /** A method's enabled-since cutoff from its environment variable, epoch seconds; "0", empty or unreadable means none. */
 export function methodSince(text: string | undefined): number | undefined {
@@ -47,7 +57,7 @@ export type RefreshLookup =
  * stale-lock race between two local processes does not sign the person out. */
 export const REFRESH_REUSE_GRACE_SECONDS = 60;
 
-interface CodeRecord { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; codeChallenge: string; redirectUri: string; expiresAt: number; usedAt?: string }
+interface CodeRecord extends CodeGrant { codeChallenge: string; redirectUri: string; expiresAt: number; usedAt?: string }
 interface RefreshRecord { sessionId: string; expiresAt: number; usedAt?: string; graceUsedAt?: string }
 interface CancellationReason { Code?: string }
 
@@ -81,6 +91,42 @@ export class DeveloperSignInStore {
 
   private async put(item: Record<string, unknown>, condition?: string): Promise<void> {
     await this.input.documentClient.send(new PutCommand({ TableName: this.input.tableName, Item: item, ...(condition === undefined ? {} : { ConditionExpression: condition }) }));
+  }
+
+  // ---- Spec 063: the sign-in clients an administrator registered ----
+
+  /** Registers a client or replaces it; its first registration's time is kept. */
+  async putClient(client: SignInClientRecord): Promise<void> {
+    const record = SignInClientRecordSchema.parse(client);
+    const current = await this.getClient(record.clientId);
+    await this.input.documentClient.send(new PutCommand({ TableName: this.input.tableName,
+      Item: { ...signInClientKey(record.clientId), entityType: "SIGN_IN_CLIENT", ...record, createdAt: current?.createdAt ?? record.createdAt } }));
+  }
+
+  async removeClient(clientId: string): Promise<boolean> {
+    const response = await this.input.documentClient.send(new DeleteCommand({ TableName: this.input.tableName, Key: signInClientKey(clientId), ReturnValues: "ALL_OLD" })) as { Attributes?: unknown };
+    return response.Attributes !== undefined;
+  }
+
+  /** A registered client, or undefined for one never registered or since removed (an unreadable row reads as none). */
+  async getClient(clientId: string): Promise<SignInClientRecord | undefined> {
+    const response = await this.input.documentClient.send(new GetCommand({ TableName: this.input.tableName, Key: signInClientKey(clientId), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+    return response.Item === undefined ? undefined : clientOf(response.Item);
+  }
+
+  async listClients(): Promise<SignInClientRecord[]> {
+    const clients: SignInClientRecord[] = [];
+    let start: Record<string, unknown> | undefined;
+    do {
+      const response = await this.input.documentClient.send(new QueryCommand({ TableName: this.input.tableName, KeyConditionExpression: "pk = :pk",
+        ExpressionAttributeValues: { ":pk": SIGN_IN_CLIENTS_PK }, ConsistentRead: true, ...(start === undefined ? {} : { ExclusiveStartKey: start }) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+      for (const item of response.Items ?? []) {
+        const client = clientOf(item);
+        if (client !== undefined) clients.push(client);
+      }
+      start = response.LastEvaluatedKey;
+    } while (start !== undefined);
+    return clients.sort((a, b) => a.clientId.localeCompare(b.clientId));
   }
 
   async createAuthRequest(input: Omit<AuthRequestRecord, "id" | "expiresAt" | "method" | "consumedAt">): Promise<AuthRequestRecord> {
@@ -179,14 +225,14 @@ export class DeveloperSignInStore {
     return item === undefined ? undefined : strip(item);
   }
 
-  async issueCode(input: { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; codeChallenge: string; redirectUri: string }): Promise<string> {
+  async issueCode(input: CodeGrant & { codeChallenge: string; redirectUri: string }): Promise<string> {
     const code = randomToken("agxc_");
     const record: CodeRecord = { ...input, expiresAt: this.seconds() + DEVELOPER_CODE_SECONDS };
     await this.put({ pk: `CODE#${sha256Hex(code)}`, sk: META, entityType: "AUTH_CODE", ...record }, "attribute_not_exists(pk)");
     return code;
   }
 
-  async redeemCode(input: { code: string; verifier: string; redirectUri: string }): Promise<{ developerId: string; amr: DeveloperSignInMethod; slackUserId?: string } | undefined> {
+  async redeemCode(input: { code: string; verifier: string; redirectUri: string }): Promise<CodeGrant | undefined> {
     const pk = `CODE#${sha256Hex(input.code)}`;
     try {
       // Burned first, whatever the verifier: a code is tried once.
@@ -203,11 +249,16 @@ export class DeveloperSignInStore {
     }
     const record = await this.get<CodeRecord>(pk);
     if (record === undefined || record.redirectUri !== input.redirectUri || !pkceChallengeMatches(input.verifier, record.codeChallenge)) return undefined;
-    return { developerId: record.developerId, amr: record.amr, ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }) };
+    return {
+      developerId: record.developerId, amr: record.amr,
+      ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }),
+      ...(record.clientId === undefined ? {} : { clientId: record.clientId }),
+      ...(record.administrator === true ? { administrator: true as const } : {}),
+    };
   }
 
   /** `endsAt` (epoch seconds) is for a browser review sign-in, which has its own fixed length; every other session lasts DEVELOPER_SESSION_SECONDS. The stored record's clean-up time follows `endsAt`. */
-  async createSession(input: { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; reviewExpiresAt?: number; endsAt?: number }): Promise<{ session: SessionRecord; refreshToken: string }> {
+  async createSession(input: CodeGrant & { reviewExpiresAt?: number; endsAt?: number }): Promise<{ session: SessionRecord; refreshToken: string }> {
     const session: SessionRecord = { endsAt: this.seconds() + DEVELOPER_SESSION_SECONDS, ...input, sessionId: randomUUID(), startedAt: this.iso() };
     const refreshToken = randomToken("agxr_");
     await this.input.documentClient.send(new TransactWriteCommand({
@@ -372,4 +423,12 @@ function strip<T extends { pk: string; sk: string }>(item: T): Omit<T, "pk" | "s
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the keys
   const { pk: _pk, sk: _sk, entityType: _type, ...rest } = item as T & { entityType?: string };
   return rest;
+}
+
+/** A stored client row as its record, without the table's own fields; undefined for a row that does not read. */
+function clientOf(item: Record<string, unknown>): SignInClientRecord | undefined {
+  const rest: Record<string, unknown> = { ...item };
+  for (const key of ["pk", "sk", "entityType"]) delete rest[key];
+  const parsed = SignInClientRecordSchema.safeParse(rest);
+  return parsed.success ? parsed.data : undefined;
 }

@@ -5,7 +5,7 @@ import type { SlackRequestMessage } from "../../packages/contracts/src/index.js"
 import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-api.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { LIMIT_REFUSAL, unavailableRefusal } from "../../packages/slack-service/src/lazy-worker.js";
-import { processSlackRequest, type ThreadState, type ThreadStore } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ThreadState, type ThreadStore } from "../../packages/slack-service/src/slack-processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";

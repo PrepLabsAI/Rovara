@@ -1,6 +1,7 @@
 // tests/contract/slack-limit-tasks.test.ts
 // Spec 025 C16 (25b owner decision 10): a member whose AI-tool tasks fill the limit is told so.
 import { randomUUID } from "node:crypto";
+import { SLACK_FORMAT } from "../../packages/slack-service/src/slack-format.js";
 import { describe, expect, it } from "vitest";
 import { limitMessage } from "../../packages/slack-service/src/messages.js";
 import { MAYA, createDeveloperTaskBroker, grantProject, type Developer } from "../support/developer-task-broker.js";
@@ -42,7 +43,7 @@ describe("the Slack limit refusal (C16)", () => {
     const taskIds = db.find((item) => item.entityType === "DEVELOPER_TASK").map((item) => String(item.taskId));
     expect(taskIds).toHaveLength(3);
     for (const secret of [...titles, ...taskIds, "Task 0"]) expect(text).not.toContain(secret);
-    expect(text + limitMessage(asked.body as never)).not.toContain("Secret task title");
+    expect(text + limitMessage(asked.body as never, SLACK_FORMAT)).not.toContain("Secret task title");
   });
 
   it("counts them on the prepare route too, for a lazily created thread", async () => {
@@ -112,33 +113,33 @@ describe("the Slack limit refusal counts only the member's own tasks (C16)", () 
     const refusal = result(asked.body);
     expect(refusal).toMatchObject({ outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 3, openTaskCount: 0 });
     expect(refusal.starterThreads).toHaveLength(3);
-    const text = limitMessage(refusal as never);
+    const text = limitMessage(refusal as never, SLACK_FORMAT);
     expect(text.split("\n")[0]).toBe(TODAY);
-    expect(text).toBe(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: refusal.starterThreads as never }));
+    expect(text).toBe(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: refusal.starterThreads as never }, SLACK_FORMAT));
     expect(text).not.toContain("AI tool");
   });
 });
 
 describe("limitMessage (C16)", () => {
   it("keeps today's words exactly when no AI-tool task is open", () => {
-    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 0 }).split("\n")[0]).toBe(TODAY);
-    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread] })).toBe(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 0 }));
+    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 0 }, SLACK_FORMAT).split("\n")[0]).toBe(TODAY);
+    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread] }, SLACK_FORMAT)).toBe(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 0 }, SLACK_FORMAT));
   });
 
   it("names the AI-tool tasks beside the threads, and says how to close one", () => {
-    const text = limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 2 });
+    const text = limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 2 }, SLACK_FORMAT);
     expect(text.split("\n")[0]).toBe(TODAY);
     expect(text.split("\n").at(-1)).toBe("You also have 2 tasks started from an AI tool; closing one there with agentx_close_task frees a workspace.");
   });
 
   it("says so plainly when the tasks are all there is", () => {
-    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [], openTaskCount: 3 })).toBe(
+    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [], openTaskCount: 3 }, SLACK_FORMAT)).toBe(
       "You already have 3 AgentX workspaces, the most one person can have, so I can't start a new one. 3 of them are tasks started from an AI tool; close one there with agentx_close_task to free a workspace.",
     );
-    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [], openTaskCount: 1 })).toContain("One of them is a task started from an AI tool");
+    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [], openTaskCount: 1 }, SLACK_FORMAT)).toContain("One of them is a task started from an AI tool");
   });
 
   it("uses no em dash", () => {
-    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 2 })).not.toContain("—");
+    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 2 }, SLACK_FORMAT)).not.toContain("—");
   });
 });

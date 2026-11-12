@@ -9,6 +9,7 @@ import {
   ChannelAdapterRegistrationSchema,
   ChannelOpaqueIdSchema,
   agentXError,
+  builtInAdapterRecord,
   channelAdapterKey,
   channelAdapterSecretName,
   channelBindingAttributes,
@@ -66,8 +67,10 @@ async function getRow(deps: ChannelAdapterDependencies, key: { pk: string; sk: s
 }
 
 function recordOf(item: Record<string, unknown>): ChannelAdapterRecord {
+  // Never `builtIn`: a stored record is a registered adapter, whatever the row says.
   return ChannelAdapterRecordSchema.parse({
-    channel: item.channel, callbackUrl: item.callbackUrl, capabilities: item.capabilities, projects: item.projects,
+    channel: item.channel, callbackUrl: item.callbackUrl, ...(item.commandsUrl === undefined ? {} : { commandsUrl: item.commandsUrl }),
+    capabilities: item.capabilities, projects: item.projects,
     stepUp: item.stepUp, secretName: item.secretName, createdAt: item.createdAt, updatedAt: item.updatedAt, updatedBy: item.updatedBy,
   });
 }
@@ -75,6 +78,39 @@ function recordOf(item: Record<string, unknown>): ChannelAdapterRecord {
 export async function getChannelAdapter(deps: Pick<ChannelAdapterDependencies, "documentClient" | "tableName">, channel: string): Promise<ChannelAdapterRecord | undefined> {
   const item = await getRow(deps as ChannelAdapterDependencies, channelAdapterKey(channel));
   return item === undefined ? undefined : recordOf(item);
+}
+
+/**
+ * FR-073: the deployment's built-in adapter (Slack), when the deployment turns it on and names its channel, callback
+ * URL and secret. Undefined otherwise.
+ */
+export function builtInAdapterFromEnvironment(environment: Readonly<Record<string, string | undefined>>): ChannelAdapterRecord | undefined {
+  if (environment.BUILT_IN_ADAPTER !== "enabled") return undefined;
+  const channel = environment.BUILT_IN_ADAPTER_CHANNEL;
+  const callbackUrl = environment.BUILT_IN_ADAPTER_CALLBACK_URL;
+  const secretName = environment.BUILT_IN_ADAPTER_SECRET_NAME;
+  if (!channel || !callbackUrl || !secretName) return undefined;
+  try {
+    const commandsUrl = environment.BUILT_IN_ADAPTER_COMMANDS_URL || undefined;
+    return builtInAdapterRecord({ channel, callbackUrl, commandsUrl, secretName });
+  } catch {
+    // Settings that do not read stay off; registered adapters are unaffected.
+    return undefined;
+  }
+}
+
+/**
+ * The adapter a channel names: the built-in one for its own channel, otherwise a registered one, and none at all while
+ * the registry is off (the `ChannelAdapters` setting). A registered adapter can never take the built-in's channel.
+ */
+export async function adapterForChannel(
+  deps: Pick<ChannelAdapterDependencies, "documentClient" | "tableName">,
+  channel: string,
+  options: { builtIn?: ChannelAdapterRecord | undefined; registry: boolean },
+): Promise<ChannelAdapterRecord | undefined> {
+  if (options.builtIn !== undefined && channel === options.builtIn.channel) return options.builtIn;
+  if (!options.registry || !RegisteredChannelIdSchema.safeParse(channel).success) return undefined;
+  return getChannelAdapter(deps, channel);
 }
 
 async function requireAdministers(deps: ChannelAdapterDependencies, identity: AuthenticatedIdentity, projects: readonly string[]): Promise<void> {

@@ -40,11 +40,20 @@ import {
   channelBindingKey,
   readChannelBindingItem,
   slackBindingOf,
+  ChannelActionSchema,
+  InboundMessageSchema,
+  conversationFromSlackThread,
+  slackThreadOf,
+  type ChannelAction,
+  type InboundMessage,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
+import {
+  SLACK_CHANNEL_COMMANDS_PATH, SLACK_CHANNEL_EVENTS_PATH, createAwsSlackChannelCommandsHandler, createAwsSlackChannelEventsHandler, rovaraThreads, slackChannelForwarderFromEnvironment,
+} from "./slack-adapter.js";
 import { createAwsSlackInteractivityHandler } from "./slack-interactivity.js";
-import { chatPostEphemeral, chatUpdate } from "./slack-web.js";
+import { chatPostEphemeral, chatUpdate, slackWebFetch } from "./slack-web.js";
 import { chatGptCommandReply, chatGptSlackCommand, isHandedOffChatGptFinish, readBrokerAnswer, type BrokerAnswer, type ChatGptSlackCommand, type HandedOffChatGptFinish } from "./slack-chatgpt.js";
 import {
   SlackWorkflowStartError,
@@ -172,13 +181,17 @@ export interface SlackIngressDependencies {
   };
 }
 
-interface HttpResponse {
+/** What the router needs: everything the ingress does but Slack's signing secret. */
+export type SlackRouterDependencies = Omit<SlackIngressDependencies, "secrets">;
+
+export interface HttpResponse {
   statusCode: number;
   headers: Record<string, string>;
   body: string;
 }
 
-interface Mention {
+/** A parsed Slack mention or thread reply. */
+export interface SlackMention {
   /** An app_mention, or (gap 2) a plain message posted in a thread. */
   kind: "mention" | "message";
   eventId: string;
@@ -273,6 +286,7 @@ export async function recordThreadNoteThroughBroker(
 export function createSlackIngressHandler(dependencies: SlackIngressDependencies) {
   const now = dependencies.now ?? Date.now;
   const log: SlackIngressLog = dependencies.log ?? (() => undefined);
+  const route = createSlackMentionRouter(dependencies);
   return async (event: HttpApiV2Event): Promise<HttpResponse> => {
     const rawBody = event.body === undefined
       ? ""
@@ -298,6 +312,111 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
 
     const mention = parseMention(payload);
     if ("reason" in mention) return ignore(log, mention.reason);
+    return route(mention);
+  };
+}
+
+/**
+ * Spec 062 Phase 7c2: the built-in Slack adapter's front, with SlackViaChannel on. It checks Slack's signature, keeps
+ * Slack's own filters (its own messages, malformed events, other organisations), reads a plain reply only in a thread
+ * Rovara posted in, and hands the rest to the channel API as neutral messages, after Slack has its answer. Everything
+ * the core decides (bindings, stops, tasks, limits) is decided there.
+ */
+export function createSlackAdapterFront(deps: {
+  secrets: () => Promise<Pick<SlackSecrets, "signingSecret">>;
+  isRovaraThread: (thread: SlackThread) => Promise<boolean>;
+  /** Hands the message on; it reaches the channel API after this request is answered. Throws when it cannot. */
+  handOff: (message: InboundMessage) => Promise<void>;
+  now?: () => number;
+  log?: SlackIngressLog;
+}) {
+  const now = deps.now ?? Date.now;
+  const log: SlackIngressLog = deps.log ?? (() => undefined);
+  return async (event: HttpApiV2Event): Promise<HttpResponse> => {
+    const rawBody = event.body === undefined ? "" : event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body;
+    const headers = Object.fromEntries(Object.entries(event.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]));
+    const secrets = await deps.secrets();
+    if (!validSignature(secrets.signingSecret, headers["x-slack-request-timestamp"], headers["x-slack-signature"], rawBody, now())) {
+      log("request.rejected", { reason: "invalid_signature" });
+      return respond(401, { error: "invalid Slack signature" });
+    }
+    let payload: Record<string, unknown>;
+    try {
+      payload = asRecord(JSON.parse(rawBody));
+    } catch {
+      return respond(400, { error: "request body is not JSON" });
+    }
+    if (payload.type === "url_verification") return respond(200, { challenge: typeof payload.challenge === "string" ? payload.challenge : "" });
+    if (payload.type !== "event_callback") return ignore(log, "not_event_callback");
+    const mention = parseMention(payload);
+    if ("reason" in mention) return ignore(log, mention.reason);
+    if (mention.kind === "message") {
+      let ours: boolean;
+      try {
+        ours = await deps.isRovaraThread(mention.thread);
+      } catch (error) {
+        // Nothing was handed on: Slack's retry is handled as new.
+        log("adapter.thread_lookup_failed", { eventId: mention.eventId, errorName: errorName(error) });
+        return respond(500, { error: "thread could not be checked" });
+      }
+      if (!ours) return ignore(log, "not_rovara_thread");
+    }
+    try {
+      await deps.handOff(inboundOfSlackMention(mention, now()));
+    } catch (error) {
+      log("adapter.hand_off_failed", { eventId: mention.eventId, errorName: errorName(error) });
+      return respond(500, { error: "request could not be handed on" });
+    }
+    log("adapter.handed_off", { eventId: mention.eventId, kind: mention.kind });
+    return respond(200, { ok: true });
+  };
+}
+
+/** A parsed Slack mention or reply as the channel API takes it: the bot's own mention removed, the rest as typed. */
+export function inboundOfSlackMention(mention: SlackMention, nowMs: number): InboundMessage {
+  const text = slackRequestText(mention.text, mention.botUserId);
+  return InboundMessageSchema.parse({
+    version: 2,
+    channel: SLACK_CHANNEL,
+    eventId: mention.eventId,
+    conversation: conversationFromSlackThread(mention.thread),
+    actor: { channel: SLACK_CHANNEL, tenant: mention.thread.teamId, userId: mention.userId },
+    // An empty mention is still a request: the core answers that it needs one.
+    text: text === "" ? " " : text,
+    receivedAt: new Date(nowMs).toISOString(),
+    ...(mention.kind === "message" ? { addressed: false } : {}),
+    messageId: mention.messageTs,
+    ...(mention.appPosted ? { viaApp: true } : {}),
+  });
+}
+
+/** The router's mention for a message the built-in adapter handed on: its text has no bot mention left to remove. */
+export function slackMentionOfInbound(message: InboundMessage): SlackMention {
+  const thread = slackThreadOf(message.conversation);
+  const messageTs = message.messageId ?? thread.threadTs;
+  return {
+    kind: message.addressed === false ? "message" : "mention",
+    eventId: message.eventId,
+    thread,
+    userId: message.actor.userId,
+    text: message.text,
+    messageTs,
+    isThreadReply: messageTs !== thread.threadTs,
+    // No user ID is "-": a mention of someone else at the start of the text is kept, as Slack's own ingress keeps it.
+    botUserId: "-",
+    appPosted: message.viaApp === true,
+  };
+}
+
+/**
+ * Everything the ingress decides about one parsed mention or thread reply: whether it is read at all, a stop, a
+ * ChatGPT command, a task thread's note, a Quick or Full answer, a new task, or a request for the chat agent. Spec 062
+ * Phase 7c2: the channel API runs this same router for the built-in Slack adapter, with its own transport.
+ */
+export function createSlackMentionRouter(dependencies: SlackRouterDependencies): (mention: SlackMention) => Promise<HttpResponse> {
+  const now = dependencies.now ?? Date.now;
+  const log: SlackIngressLog = dependencies.log ?? (() => undefined);
+  return async (mention) => {
     if (mention.appPosted && !dependencies.appPosted) return ignore(log, "bot_or_edited_message");
     if (mention.appPosted && !dependencies.appPosted?.accept) return ignore(log, "app_posted_disabled");
     const { thread } = mention;
@@ -512,9 +631,9 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
  * the service to route first. A queue that failed undoes every record of the event and answers 500, so Slack retries it.
  */
 async function queueRequest(
-  dependencies: SlackIngressDependencies,
+  dependencies: SlackRouterDependencies,
   log: SlackIngressLog,
-  mention: Mention,
+  mention: SlackMention,
   text: string,
   countedWindowStart: number | undefined,
   now: () => number,
@@ -591,9 +710,9 @@ export function validSignature(
  * retries them; only a save that could not be attempted answers 500, with the claim released.
  */
 async function workflowThreadReply(
-  dependencies: SlackIngressDependencies,
+  dependencies: SlackRouterDependencies,
   log: SlackIngressLog,
-  mention: Mention,
+  mention: SlackMention,
   taskId: string,
   replyText: string,
   memberCheckError: string | undefined,
@@ -676,9 +795,9 @@ async function workflowThreadReply(
  * the note is saved, and the claim stays, so Slack's retry (if any) is a duplicate.
  */
 async function routeTaskQuestion(
-  dependencies: SlackIngressDependencies,
+  dependencies: SlackRouterDependencies,
   log: SlackIngressLog,
-  mention: Mention,
+  mention: SlackMention,
   taskId: string,
   replyText: string,
 ): Promise<boolean> {
@@ -710,7 +829,7 @@ async function routeTaskQuestion(
 }
 
 /** A Slack task cannot start, or its path be chosen, where task threads cannot be read: say so, and start nothing. */
-async function threadsOff(dependencies: SlackIngressDependencies, log: SlackIngressLog, thread: SlackThread, eventId: string): Promise<HttpResponse> {
+async function threadsOff(dependencies: SlackRouterDependencies, log: SlackIngressLog, thread: SlackThread, eventId: string): Promise<HttpResponse> {
   log("workflow.task_threads_off", { eventId });
   await post(dependencies, log, thread, SLACK_TASK_THREADS_OFF_NOTICE, "workflow.task_threads_off_notice_failed");
   return respond(200, { ok: true });
@@ -721,7 +840,7 @@ async function threadsOff(dependencies: SlackIngressDependencies, log: SlackIngr
  * choice. Checked before the event is claimed, so no other channel message is claimed or stored. The plain copy of an
  * @AgentX answer is not: its app_mention copy answers.
  */
-async function isChoiceAnswer(dependencies: SlackIngressDependencies, mention: Mention): Promise<boolean> {
+async function isChoiceAnswer(dependencies: SlackRouterDependencies, mention: SlackMention): Promise<boolean> {
   if (dependencies.pendingWorkflowChoice === undefined || dependencies.chooseWorkflowPath === undefined) return false;
   if (mention.botUserId !== undefined && mention.text.includes(`<@${mention.botUserId}>`)) return false;
   if (choiceReply(dependencies, slackRequestText(mention.text, mention.botUserId)) === undefined) return false;
@@ -739,13 +858,13 @@ function answers(reply: WorkflowChoice, pending: { suggested?: true } | undefine
 }
 
 /** A loose answer to a waiting choice: `quick` or `full`, and (Task 21) `answer` where this ingress can send it to the chat agent. */
-function choiceReply(dependencies: SlackIngressDependencies, text: string): WorkflowChoice | undefined {
+function choiceReply(dependencies: SlackRouterDependencies, text: string): WorkflowChoice | undefined {
   const reply = parseWorkflowChoiceReply(text);
   return reply === "ANSWER" && dependencies.answerWorkflowChoice === undefined ? undefined : reply;
 }
 
 /** Gap 3: a Quick or Full answer in a thread. Only the requester's answer starts the request waiting there. */
-async function chooseFromThread(dependencies: SlackIngressDependencies, log: SlackIngressLog, mention: Mention, workflowPath: WorkflowChoice): Promise<HttpResponse> {
+async function chooseFromThread(dependencies: SlackRouterDependencies, log: SlackIngressLog, mention: SlackMention, workflowPath: WorkflowChoice): Promise<HttpResponse> {
   const { thread, eventId } = mention;
   if (dependencies.sharedTask === undefined) return threadsOff(dependencies, log, thread, eventId);
   let outcome: WorkflowChoiceOutcome;
@@ -770,9 +889,9 @@ async function chooseFromThread(dependencies: SlackIngressDependencies, log: Sla
 
 /** Gap 3: starts a task from a mention: on the path its prefix names, or by asking Quick or Full. */
 async function startFromMention(
-  dependencies: SlackIngressDependencies,
+  dependencies: SlackRouterDependencies,
   log: SlackIngressLog,
-  mention: Mention,
+  mention: SlackMention,
   request: { path?: WorkflowPath; instructions: string },
   /** Task 21: queues a plain top-level request for the Slack service to route, instead of asking Quick or Full here. */
   route?: () => Promise<HttpResponse>,
@@ -818,10 +937,10 @@ function startFailureNotice(error: unknown, eventId: string): string {
 
 /** #340: a ChatGPT command, answered privately. Its claim stays whatever happens: the person asks again. */
 async function chatGptCommandFromMention(
-  dependencies: SlackIngressDependencies,
+  dependencies: SlackRouterDependencies,
   ask: NonNullable<SlackIngressDependencies["chatgpt"]>,
   log: SlackIngressLog,
-  mention: Mention,
+  mention: SlackMention,
   command: ChatGptSlackCommand,
 ): Promise<HttpResponse> {
   let answer: ReturnType<typeof readBrokerAnswer>;
@@ -838,7 +957,7 @@ async function chatGptCommandFromMention(
 }
 
 /** A best-effort private message: a failure is logged and never makes Slack retry the event. */
-async function ephemeral(dependencies: SlackIngressDependencies, log: SlackIngressLog, thread: SlackThread, user: string, text: string, blocks?: Array<Record<string, unknown>>): Promise<void> {
+async function ephemeral(dependencies: SlackRouterDependencies, log: SlackIngressLog, thread: SlackThread, user: string, text: string, blocks?: Array<Record<string, unknown>>): Promise<void> {
   if (dependencies.postEphemeral === undefined) return;
   try {
     await dependencies.postEphemeral({ channel: thread.channelId, threadTs: thread.threadTs, user, text, ...(blocks === undefined ? {} : { blocks }) });
@@ -849,7 +968,7 @@ async function ephemeral(dependencies: SlackIngressDependencies, log: SlackIngre
 
 const THREAD_REPLY_SUBTYPES: ReadonlySet<string> = new Set(["thread_broadcast", "file_share"]);
 
-function parseMention(payload: Record<string, unknown>): Mention | { reason: string } {
+export function parseMention(payload: Record<string, unknown>): SlackMention | { reason: string } {
   const event = asRecord(payload.event);
   // Gap 2: a plain message is read only as a thread reply: posted, also sent to the channel, or posted with
   // files (only its text is read); never an edit, a deletion, or any other subtype.
@@ -898,7 +1017,7 @@ function parseMention(payload: Record<string, unknown>): Mention | { reason: str
 }
 
 async function post(
-  dependencies: SlackIngressDependencies,
+  dependencies: SlackRouterDependencies,
   log: SlackIngressLog,
   thread: SlackThread,
   text: string,
@@ -918,7 +1037,7 @@ async function post(
  * decision or crash the handler, only leave the claim in place until it expires (M2).
  */
 async function releaseQuietly(
-  dependencies: SlackIngressDependencies,
+  dependencies: SlackRouterDependencies,
   log: SlackIngressLog,
   eventId: string,
   failureEvent: string,
@@ -952,11 +1071,9 @@ export async function postSlackMessage(
   input: { channel: string; threadTs: string; text: string; blocks?: Array<Record<string, unknown>> },
   fetchImplementation: typeof fetch = fetch,
 ): Promise<{ ts?: string }> {
-  const response = await fetchImplementation("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    headers: { authorization: `Bearer ${botToken}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel: input.channel, thread_ts: input.threadTs, text: input.text, ...(input.blocks === undefined ? {} : { blocks: input.blocks }), unfurl_links: false }),
-  });
+  const response = await slackWebFetch("chat.postMessage", botToken, {
+    body: { channel: input.channel, thread_ts: input.threadTs, text: input.text, ...(input.blocks === undefined ? {} : { blocks: input.blocks }), unfurl_links: false },
+  }, fetchImplementation);
   const result = asRecord(await response.json());
   if (!response.ok || result.ok !== true) {
     throw new Error(`Slack chat.postMessage failed: ${typeof result.error === "string" ? result.error : `HTTP ${response.status}`}`);
@@ -1033,35 +1150,32 @@ export function threadPendingCounter(documentClient: { send(command: UpdateComma
   };
 }
 
-function createAwsSlackIngressHandler() {
+/**
+ * Spec 062 Phase 7c2: how the router's words and queued requests leave. Slack's ingress posts to Slack and queues on
+ * Slack's request queue; the channel API posts through the Slack adapter's commands and queues on the channel queue.
+ */
+export interface SlackRouterTransport {
+  postMessage(input: { channel: string; threadTs: string; text: string; blocks?: Array<Record<string, unknown>> }): Promise<{ ts?: string }>;
+  update(input: { channel: string; ts: string; text: string; blocks: unknown[] }): Promise<void>;
+  postEphemeral(input: { channel: string; threadTs: string; user: string; text: string; blocks?: Array<Record<string, unknown>> }): Promise<void>;
+  checkMember(userId: string): Promise<SlackMemberCheck>;
+  enqueue(message: SlackRequestMessage, messageGroupId: string, queuedBehind: number): Promise<void>;
+  route(message: SlackRequestMessage, messageGroupId: string, taskQuestion?: TaskQuestionRoute): Promise<void>;
+  enqueueAnswer(answer: { thread: SlackThread; userId: string; text: string; eventId: string }): Promise<void>;
+}
+
+/** The router's AWS dependencies (Slack's threads table, the state table, the broker, the settings), over `transport`. */
+export function awsSlackRouterDependencies(transport: SlackRouterTransport): SlackRouterDependencies {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), {
     marshallOptions: { removeUndefinedValues: true },
   });
-  const sqs = new SQSClient(clientConfiguration);
-  const secretsManager = new SecretsManagerClient(clientConfiguration);
   const lambda = new LambdaClient(clientConfiguration);
   const stateTableName = requiredEnvironment("STATE_TABLE_NAME");
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
-  const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
-  const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
   const brokerFunctionName = process.env.BROKER_FUNCTION_NAME;
   const settings = slackIngressSettings(process.env);
-  let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
-  const secrets = (): Promise<SlackSecrets> => {
-    if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
-      const loading = secretsManager.send(new GetSecretValueCommand({ SecretId: secretArn })).then((response) => {
-        if (!response.SecretString) throw new Error("Slack secret is empty");
-        return parseSlackSecrets(response.SecretString);
-      });
-      cached = { secrets: loading, loadedAt: Date.now() };
-      loading.catch(() => {
-        cached = undefined;
-      });
-    }
-    return cached.secrets;
-  };
-  const checkMember = createSlackMemberCheck({ token: async () => (await secrets()).botToken });
+  const checkMember = (userId: string) => transport.checkMember(userId);
   /** A direct broker invoke: the broker's answer, or a throw when the broker itself failed. */
   const invokeBroker = async (event: Record<string, unknown>): Promise<BrokerReply> => {
     if (brokerFunctionName === undefined) throw new Error("the broker is not configured");
@@ -1078,9 +1192,8 @@ function createAwsSlackIngressHandler() {
   };
   const choices = createDynamoWorkflowChoiceStore({ documentClient, tableName: threadsTableName });
   const changePending = threadPendingCounter(documentClient, threadsTableName);
-  const enqueueAnswer = createAnswerQueue({ sqs, queueUrl, changePending });
-  return createSlackIngressHandler({
-    secrets,
+  const enqueueAnswer = (answer: Parameters<SlackRouterTransport["enqueueAnswer"]>[0]) => transport.enqueueAnswer(answer);
+  return {
     appPosted: { accept: settings.acceptAppPosted, checkMember },
     turnLimit: {
       perMinute: settings.turnsPerMinute,
@@ -1133,38 +1246,31 @@ function createAwsSlackIngressHandler() {
     },
     ...(brokerFunctionName === undefined ? {} : {
       async requestWorkflowChoice(input: { thread: SlackThread; userId: string; instructions: string; requestId: string }) {
-        await offerWorkflowChoice({ store: choices, postMessage: async (message) => postSlackMessage((await secrets()).botToken, message) }, input);
+        await offerWorkflowChoice({ store: choices, postMessage: (message) => transport.postMessage(message) }, input);
       },
       // Task 19: a typed answer also takes the question's buttons away once its task started.
       async chooseWorkflowPath(input: { thread: SlackThread; userId: string; workflowPath: WorkflowPath }) {
         return startChosenWorkflow({ store: choices, startWorkflow: invokeWorkflow,
-          updateQuestion: async (question) => chatUpdate((await secrets()).botToken, question) }, input);
+          updateQuestion: (question) => transport.update(question) }, input);
       },
       async pendingWorkflowChoice(thread: SlackThread) {
         return choices.pending(thread);
       },
       // Task 21: the Slack service routes a plain top-level request; the queue mark (not the body) says so.
       async routeRequest(message: SlackRequestMessage, messageGroupId: string, taskQuestion?: TaskQuestionRoute) {
-        await sqs.send(new SendMessageCommand({ QueueUrl: queueUrl, MessageBody: JSON.stringify(message), MessageGroupId: messageGroupId,
-          MessageDeduplicationId: message.eventId, MessageAttributes: taskQuestion === undefined ? routeAttributes() : taskQuestionAttributes(taskQuestion) }));
+        await transport.route(message, messageGroupId, taskQuestion);
       },
       async answerWorkflowChoice(input: { thread: SlackThread; userId: string }) {
         return answerChosenRequest({ store: choices, enqueueAnswer: (answer) => enqueueAnswer(answer),
-          updateQuestion: async (question) => chatUpdate((await secrets()).botToken, question) }, input);
+          updateQuestion: (question) => transport.update(question) }, input);
       },
     }),
     changePending,
     async enqueue(message, messageGroupId, queuedBehind) {
-      await sqs.send(new SendMessageCommand({
-        QueueUrl: queueUrl,
-        MessageBody: JSON.stringify(message),
-        MessageGroupId: messageGroupId,
-        MessageDeduplicationId: message.eventId,
-        MessageAttributes: queuedBehindAttributes(queuedBehind),
-      }));
+      await transport.enqueue(message, messageGroupId, queuedBehind);
     },
     async postMessage(input) {
-      await postSlackMessage((await secrets()).botToken, input);
+      await transport.postMessage(input);
     },
     ...(process.env.SHARED_TASKS === "enabled" ? {
       sharedTask: {
@@ -1210,12 +1316,68 @@ function createAwsSlackIngressHandler() {
       },
     }),
     async postEphemeral(input) {
-      await chatPostEphemeral((await secrets()).botToken, input);
+      await transport.postEphemeral(input);
     },
     log(event, fields) {
       console.log(JSON.stringify({ component: "slack-ingress", event, ...fields }));
     },
-  });
+  };
+}
+
+/** Slack's own transport: the bot token for Slack, and Slack's request queue. */
+function slackDirectTransport(secrets: () => Promise<SlackSecrets>): SlackRouterTransport {
+  const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
+  const sqs = new SQSClient(clientConfiguration);
+  const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
+  const enqueueAnswer = createAnswerQueue({ sqs, queueUrl, changePending: threadPendingCounter(documentClient, requiredEnvironment("SLACK_THREADS_TABLE_NAME")) });
+  const checkMember = createSlackMemberCheck({ token: async () => (await secrets()).botToken });
+  return {
+    postMessage: async (input) => postSlackMessage((await secrets()).botToken, input),
+    update: async (input) => chatUpdate((await secrets()).botToken, input),
+    postEphemeral: async (input) => chatPostEphemeral((await secrets()).botToken, input),
+    checkMember,
+    async enqueue(message, messageGroupId, queuedBehind) {
+      await sqs.send(new SendMessageCommand({
+        QueueUrl: queueUrl,
+        MessageBody: JSON.stringify(message),
+        MessageGroupId: messageGroupId,
+        MessageDeduplicationId: message.eventId,
+        MessageAttributes: queuedBehindAttributes(queuedBehind),
+      }));
+    },
+    async route(message, messageGroupId, taskQuestion) {
+      await sqs.send(new SendMessageCommand({ QueueUrl: queueUrl, MessageBody: JSON.stringify(message), MessageGroupId: messageGroupId,
+        MessageDeduplicationId: message.eventId, MessageAttributes: taskQuestion === undefined ? routeAttributes() : taskQuestionAttributes(taskQuestion) }));
+    },
+    enqueueAnswer,
+  };
+}
+
+/** Slack's bot and signing secrets, reread at most every five minutes. */
+function cachedSlackSecrets(): () => Promise<SlackSecrets> {
+  const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const secretsManager = new SecretsManagerClient(clientConfiguration);
+  const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
+  return () => {
+    if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
+      const loading = secretsManager.send(new GetSecretValueCommand({ SecretId: secretArn })).then((response) => {
+        if (!response.SecretString) throw new Error("Slack secret is empty");
+        return parseSlackSecrets(response.SecretString);
+      });
+      cached = { secrets: loading, loadedAt: Date.now() };
+      loading.catch(() => {
+        cached = undefined;
+      });
+    }
+    return cached.secrets;
+  };
+}
+
+function createAwsSlackIngressHandler() {
+  const secrets = cachedSlackSecrets();
+  return createSlackIngressHandler({ secrets, ...awsSlackRouterDependencies(slackDirectTransport(secrets)) });
 }
 
 /** Slack's interactivity request URL path (spec 014): button presses, and 14d's Details view. */
@@ -1223,15 +1385,92 @@ export const SLACK_INTERACTIONS_PATH = "/v1/slack/interactions";
 
 let awsHandler: ReturnType<typeof createSlackIngressHandler> | undefined;
 let awsInteractivityHandler: ReturnType<typeof createAwsSlackInteractivityHandler> | undefined;
+let awsChannelEventsHandler: ReturnType<typeof createAwsSlackChannelEventsHandler> | undefined;
+let awsChannelCommandsHandler: ReturnType<typeof createAwsSlackChannelCommandsHandler> | undefined;
+let awsAdapterBotToken: (() => Promise<string>) | undefined;
+let awsAdapterFront: ReturnType<typeof createSlackAdapterFront> | undefined;
+let awsForward: ((message: InboundMessage | ChannelAction) => Promise<void>) | undefined;
+
+/** Phase 7c2: a message the adapter's front handed to an asynchronous invoke of this Lambda, for the channel API. */
+interface HandedOffSlackMessage { source: "agentx.slack-adapter"; kind: "forward"; message: unknown }
+function isHandedOffSlackMessage(event: unknown): event is HandedOffSlackMessage {
+  const value = event as Partial<HandedOffSlackMessage> | null;
+  return typeof value === "object" && value !== null && value.source === "agentx.slack-adapter" && value.kind === "forward";
+}
+
+/** The adapter's front, with its hand-off to this same Lambda and the record of Rovara's threads. */
+function createAwsSlackAdapterFront(): ReturnType<typeof createSlackAdapterFront> {
+  const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const lambda = new LambdaClient(clientConfiguration);
+  const threads = rovaraThreads(DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration)), requiredEnvironment("SLACK_THREADS_TABLE_NAME"));
+  const functionName = requiredEnvironment("AWS_LAMBDA_FUNCTION_NAME");
+  return createSlackAdapterFront({
+    secrets: cachedSlackSecrets(),
+    isRovaraThread: (thread) => threads.has(thread.channelId, thread.threadTs),
+    async handOff(message) {
+      const payload: HandedOffSlackMessage = { source: "agentx.slack-adapter", kind: "forward", message };
+      const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "Event", Payload: Buffer.from(JSON.stringify(payload)) }));
+      if (response.StatusCode !== 202) throw Object.assign(new Error("the message was not handed over"), { name: "HandOffRefused" });
+    },
+    log(event, fields) {
+      console.log(JSON.stringify({ component: "slack-adapter", event, ...fields }));
+    },
+  });
+}
+
+/** The bot token for the Slack adapter's posts, read as the ingress reads it. */
+function awsBotToken(): () => Promise<string> {
+  const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const secretsManager = new SecretsManagerClient(clientConfiguration);
+  const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  let cached: { token: Promise<string>; loadedAt: number } | undefined;
+  return () => {
+    if (cached === undefined || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
+      const token = secretsManager.send(new GetSecretValueCommand({ SecretId: secretArn })).then((response) => {
+        if (!response.SecretString) throw new Error("Slack secret is empty");
+        return parseSlackSecrets(response.SecretString).botToken;
+      });
+      cached = { token, loadedAt: Date.now() };
+      token.catch(() => { cached = undefined; });
+    }
+    return cached.token;
+  };
+}
 
 /**
  * The Events API and, since spec 014, Slack's interactivity request URL share this Lambda. Task 19: so does the
  * asynchronous start of a Quick or Full choice, which the interactivity handler hands to this same Lambda.
  */
-export const handler = (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish): Promise<HttpResponse> => {
+export const handler = async (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish | HandedOffSlackMessage): Promise<HttpResponse> => {
+  // Phase 7c2: a handed-off message goes to the channel API; a throw has Lambda try it again (then its failure queue).
+  if (isHandedOffSlackMessage(event)) {
+    awsForward ??= slackChannelForwarderFromEnvironment(new SecretsManagerClient(process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION }));
+    if (awsForward === undefined) throw new Error("Slack does not go through the channel API here");
+    // Phase 7c3: a press is an action.
+    const handed = event.message as { actionId?: unknown };
+    await awsForward(typeof handed.actionId === "string" ? ChannelActionSchema.parse(event.message) : InboundMessageSchema.parse(event.message));
+    return respond(200, { ok: true });
+  }
+  // Spec 062 Phase 7b: the core's events for Slack, when Slack goes through the channel API.
+  if (!isHandedOffWorkflowStart(event) && !isHandedOffChatGptFinish(event) && event.rawPath === SLACK_CHANNEL_EVENTS_PATH) {
+    awsAdapterBotToken ??= awsBotToken();
+    awsChannelEventsHandler ??= createAwsSlackChannelEventsHandler(awsAdapterBotToken);
+    return awsChannelEventsHandler(event);
+  }
+  // Phase 7c: the core's commands for Slack (posts it must know the result of, Canvases).
+  if (!isHandedOffWorkflowStart(event) && !isHandedOffChatGptFinish(event) && event.rawPath === SLACK_CHANNEL_COMMANDS_PATH) {
+    awsAdapterBotToken ??= awsBotToken();
+    awsChannelCommandsHandler ??= createAwsSlackChannelCommandsHandler(awsAdapterBotToken);
+    return awsChannelCommandsHandler(event);
+  }
   if (isHandedOffWorkflowStart(event) || isHandedOffChatGptFinish(event) || event.rawPath === SLACK_INTERACTIONS_PATH) {
     awsInteractivityHandler ??= createAwsSlackInteractivityHandler();
     return awsInteractivityHandler(event);
+  }
+  // Phase 7c2: with SlackViaChannel on, Slack's events go to the channel API, which decides what they are.
+  if (process.env.SLACK_VIA_CHANNEL === "enabled") {
+    awsAdapterFront ??= createAwsSlackAdapterFront();
+    return awsAdapterFront(event);
   }
   awsHandler ??= createAwsSlackIngressHandler();
   return awsHandler(event);

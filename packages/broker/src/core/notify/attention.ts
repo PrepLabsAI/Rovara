@@ -25,6 +25,7 @@ import { SessionStore } from "../sessions/store.js";
 import { attentionEmail, type AttentionEmailLinks } from "./email-text.js";
 import { NOTIFY_TARGETS_MAX, notifyTargetKey as targetKey, readNotifyPrefs, type NotifyTarget } from "./prefs.js";
 import { digestSlotDay, holdOf } from "./schedule.js";
+import { tenantIsCompanys, type ChannelCompanyOf } from "../channel/company.js";
 
 type Log = (entry: Record<string, unknown>) => void;
 
@@ -149,6 +150,11 @@ export interface AttentionDeliveryDependencies {
    * answers them where they asked, so a channel that may not message first (`proactive` false) is still used for it. Absent: no session has one.
    */
   thread?: (orgId: OrgId, sessionId: string) => Promise<{ conversation: ConversationRef; personId: string } | undefined>;
+  /**
+   * Owner decision 131: which company a chat tenant belongs to (as the channel sink's `companyOf`). A target whose conversation is in another company's tenant (or
+   * nobody's) is never sent to: it counts as unreachable. Absent: one company, whose every tenant is.
+   */
+  companyOf?: ChannelCompanyOf;
   /** Whether the person may READ the session now. Default: the session's owner. */
   access?: (orgId: OrgId, developerId: string, session: AgentSessionRecord) => Promise<{ owner: boolean } | undefined>;
   /** The person's own email address (from their sign-in record), or undefined. Absent: nobody has one, and email is never used. */
@@ -366,7 +372,9 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       const target = targets.find((entry) => targetKey(entry) === tkey);
       const adapter: ChannelAdapter | undefined = target === undefined ? undefined : deps.registry.get("channel", target.channel);
       // A channel nobody serves, or one that cannot message first (for a target the person chose; a conversation of a start is a reply), will not succeed by trying again: it is counted as unreachable and marked, never retried.
-      if (tkey !== EMAIL_TARGET && (adapter === undefined || (!adapter.capabilities.proactive && chosen.has(tkey)))) {
+      const otherCompany = target !== undefined && !(await tenantIsCompanys(deps.companyOf, orgId, target.channel, target.conversation.tenant));
+      if (otherCompany) log({ event: "attention.other_company", channel: target.channel });
+      if (tkey !== EMAIL_TARGET && (adapter === undefined || otherCompany || (!adapter.capabilities.proactive && chosen.has(tkey)))) {
         outcome.unreachable += 1;
         for (const { row } of owed) row.done.add(tkey);
         continue;

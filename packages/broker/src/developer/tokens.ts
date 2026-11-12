@@ -57,13 +57,16 @@ const base64url = (value: unknown) => Buffer.from(JSON.stringify(value)).toStrin
 
 export async function issueAccessToken(signer: TokenSigner, input: {
   issuer: string; subject: string; amr: DeveloperSignInMethod; env: string; sessionId: string; now: number;
+  /** Spec 063 FR-002: a registered client's own audience and ID (azp); absent, the token is the CLI's, for Rovara. */
+  client?: { clientId: string; audience: string };
 }): Promise<{ token: string; expiresIn: number }> {
   const { kid } = await signer.publicJwk();
   const iat = Math.floor(input.now / 1000);
   const header = { alg: "RS256", typ: "JWT", kid };
   const payload = {
     iss: input.issuer,
-    aud: DEVELOPER_TOKEN_AUDIENCE,
+    aud: input.client?.audience ?? DEVELOPER_TOKEN_AUDIENCE,
+    ...(input.client === undefined ? {} : { azp: input.client.clientId }),
     sub: input.subject,
     amr: input.amr,
     env: input.env,

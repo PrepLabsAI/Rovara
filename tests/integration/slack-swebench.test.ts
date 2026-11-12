@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectModelOptions, SlackRequestMessage, SwebenchRun } from "../../packages/contracts/src/index.js";
 import { HANDOFF_FINAL_IDLE_TEXT, HANDOFF_TEXT, TurnHandedOffError } from "../../packages/slack-service/src/interrupted-turn.js";
-import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/slack-processor.js";
 import { resultMessage } from "../../packages/slack-service/src/swebench-command.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };

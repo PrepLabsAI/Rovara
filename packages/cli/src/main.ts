@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
-import { open, rename, rm } from "node:fs/promises";
+import { open, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -34,6 +34,7 @@ import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { showTaskE2EReplays, startTaskE2EReplay } from "./admin/task-e2e-replay.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
+import { describeSignInClient, listSignInClients, newClientSecret, signInClientId, signInClientRegistration, type SignInClientAddOptions } from "./admin/sign-in-clients.js";
 import { batchResultsOutput, evalBatchShowText, evalBatchStartText, fetchEvalBatchResults, showEvalBatch, startEvalBatch, stopEvalBatch } from "./admin/eval-batch.js";
 import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
@@ -659,6 +660,77 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId }, globals.json));
       });
   }
+
+  // Spec 063 FR-001: services that sign Rovara users in. A change shows its effect and asks first, as grant does.
+  const adminSignInClient = admin.command("sign-in-client").description("services that sign Rovara users in and get tokens of their own, which Rovara's API refuses");
+  adminSignInClient
+    .command("add <client-id>")
+    .description("register a sign-in client, or replace one; shows the change and asks first")
+    .requiredOption("--audience <audience>", "the audience its tokens carry, such as scheduler; never agentx-developer")
+    .option("--name <name>", "the name people see; defaults to the client ID")
+    .option("--redirect <url>", "an exact https URL its web page returns to (repeat for more, at most 10)", (value: string, previous: string[] = []) => [...previous, value])
+    .option("--loopback", "it may sign people in from a terminal with a loopback redirect, as agentx login does")
+    .option("--confidential", "it signs in with a secret of its own; a new one is made and shown once (each add makes a new one)")
+    .option("--secret-file <path>", "with --confidential, write the secret to this new file (mode 600) instead of printing it")
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (id: string, options: SignInClientAddOptions & { secretFile?: string; yes: boolean }, command: Command) => {
+      const globals = globalOptions(command);
+      const clientId = signInClientId(id);
+      if (options.secretFile !== undefined && options.confidential !== true) throw agentXError("CONFIG_INVALID", "--secret-file only goes with --confidential");
+      const secret = options.confidential === true ? newClientSecret() : undefined;
+      const registration = signInClientRegistration(clientId, options, secret?.secretHash);
+      const confirm = changeConfirmer(options.yes);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      // The secret file is written before anything applies, so an unwritable path never leaves a hash nobody holds.
+      if (secret !== undefined && options.secretFile !== undefined) await writeFile(options.secretFile, `${secret.secret}\n`, { mode: 0o600, flag: "wx" });
+      let result: Awaited<ReturnType<typeof runCliChange>>;
+      try {
+        result = await runCliChange({
+          controlPlaneUrl: settings.controlPlaneUrl, accessToken, cliVersion: CLI_VERSION,
+          change: { kind: "register_sign_in_client", clientId, registration },
+          confirm: () => confirm("Apply this change?"),
+          write: (line) => { services.stderr.write(`${line}\n`); },
+        }, services.fetchImplementation);
+      } catch (error) {
+        if (options.secretFile !== undefined && secret !== undefined) services.stderr.write(`${options.secretFile} keeps the client secret in case the change applied; delete it if agentx admin changes says it did not.\n`);
+        throw error;
+      }
+      const applied = secret !== undefined && result.outcome === "applied";
+      if (secret !== undefined && options.secretFile !== undefined) {
+        if (applied) services.stderr.write(`Wrote the client secret to ${options.secretFile}. Give it to the service; Rovara keeps only its hash.\n`);
+        else await rm(options.secretFile, { force: true });
+      } else if (applied && !globals.json) {
+        services.stderr.write(`Client secret (shown once; give it to the service, Rovara keeps only its hash):\n${secret.secret}\n`);
+      }
+      const printedSecret = !applied ? {} : options.secretFile !== undefined ? { clientSecretFile: options.secretFile } : globals.json ? { clientSecret: secret.secret } : {};
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, clientId, ...printedSecret }, globals.json));
+    });
+  adminSignInClient
+    .command("list")
+    .description("list the registered sign-in clients")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const clients = await listSignInClients({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, services.fetchImplementation);
+      services.stdout.write(globals.json ? formatSuccess({ clients }, true) : clients.length === 0 ? "No sign-in clients are registered.\n" : `${clients.map(describeSignInClient).join("\n")}\n`);
+    });
+  adminSignInClient
+    .command("remove <client-id>")
+    .description("remove a sign-in client: nobody can sign in to it, and its tokens stop working; shows the change and asks first")
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (id: string, options: { yes: boolean }, command: Command) => {
+      const globals = globalOptions(command);
+      const clientId = signInClientId(id);
+      const confirm = changeConfirmer(options.yes);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await runCliChange({
+        controlPlaneUrl: settings.controlPlaneUrl, accessToken, cliVersion: CLI_VERSION,
+        change: { kind: "remove_sign_in_client", clientId },
+        confirm: () => confirm("Apply this change?"),
+        write: (line) => { services.stderr.write(`${line}\n`); },
+      }, services.fetchImplementation);
+      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, clientId }, globals.json));
+    });
 
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");
   adminWorkspace

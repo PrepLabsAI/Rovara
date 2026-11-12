@@ -1,13 +1,14 @@
-import type { SlackWorkspaceLimit } from "@agentx/contracts";
+import type { WorkspaceLimit } from "@agentx/contracts";
 import type { WorkerAccess, WorkerRefusal } from "@agentx/orchestrator";
 import { deterministicUuid } from "./ids.js";
+import type { ConversationFormat } from "./conversation-format.js";
 import {
-  NEW_WORKSPACE_MESSAGE,
-  PREPARATION_SLOW_MESSAGE,
-  STILL_PREPARING_MESSAGE,
-  WORKSPACE_UNCONFIRMED_MESSAGE,
   limitMessage,
+  newWorkspaceMessage,
   preparationFailedMessage,
+  preparationSlowMessage,
+  stillPreparingMessage,
+  workspaceUnconfirmedMessage,
 } from "./messages.js";
 import type { ServiceLog, ThreadServiceApi } from "./processor.js";
 
@@ -28,7 +29,7 @@ export const ORGANIZATION_LIMIT_REFUSAL: WorkerRefusal = {
   message: `No coding work can run in this thread because the workspace limit is reached. AgentX has told the member in the thread. ${CONTINUE}`,
 };
 
-function limitRefusal(limit: SlackWorkspaceLimit): WorkerRefusal {
+function limitRefusal(limit: WorkspaceLimit): WorkerRefusal {
   return limit === "ORGANIZATION" ? ORGANIZATION_LIMIT_REFUSAL : LIMIT_REFUSAL;
 }
 
@@ -48,7 +49,10 @@ export function createLazyWorker(input: {
   log: ServiceLog;
   eventId: string;
   waitDeadlineMilliseconds?: number;
+  /** Spec 062: how the posts are written. */
+  format: ConversationFormat;
 }): WorkerAccess {
+  const format = input.format;
   let ready = false;
   let attempt: Promise<WorkerRefusal | undefined> | undefined;
 
@@ -66,17 +70,17 @@ export function createLazyWorker(input: {
     }
     if (result.outcome === "LIMIT_REACHED") {
       input.log("request.limit_reached", { eventId: input.eventId, limit: result.limit, maximum: result.maximum });
-      await input.post(limitMessage(result));
+      await input.post(limitMessage(result, format));
       return limitRefusal(result.limit);
     }
-    if (result.outcome === "CLOSED") return unavailableRefusal("this thread's workspace is closed; start a new Slack thread for coding work");
+    if (result.outcome === "CLOSED") return unavailableRefusal(`this thread's workspace is closed; start ${format.fresh} for coding work`);
     // Spec 025 C11: a shared task's thread that stopped taking requests mid-turn. The next message
     // gets the thread's notice from the ensure route.
     if (result.outcome === "VIEW_ONLY") {
       return unavailableRefusal(result.closed ? "the task this thread followed is closed" : "this thread only follows a task a developer is driving from their AI tool");
     }
     if (result.status === "PREPARING" && result.operationId) {
-      await input.post(result.created ? NEW_WORKSPACE_MESSAGE : STILL_PREPARING_MESSAGE);
+      await input.post(result.created ? newWorkspaceMessage(format) : stillPreparingMessage(format));
       const controller = new AbortController();
       let prepared: { status: string; error?: string | undefined } | "TIMED_OUT";
       try {
@@ -87,17 +91,17 @@ export function createLazyWorker(input: {
         );
       } catch (error) {
         input.log("workspace.preparation_failed", { eventId: input.eventId, errorName: error instanceof Error ? error.name : "unknown" });
-        await input.post(WORKSPACE_UNCONFIRMED_MESSAGE);
+        await input.post(workspaceUnconfirmedMessage(format));
         return unavailableRefusal("workspace setup could not be confirmed");
       }
       if (prepared === "TIMED_OUT") {
         input.log("workspace.preparation_slow", { eventId: input.eventId });
-        await input.post(PREPARATION_SLOW_MESSAGE);
+        await input.post(preparationSlowMessage(format));
         return unavailableRefusal("workspace setup is taking longer than expected; it continues in the background");
       }
       if (prepared.status !== "SUCCEEDED") {
         input.log("workspace.preparation_failed", { eventId: input.eventId, status: prepared.status });
-        await input.post(preparationFailedMessage(prepared.status, prepared.error));
+        await input.post(preparationFailedMessage(prepared.status, prepared.error, format));
         return unavailableRefusal(`workspace setup ${prepared.status.toLowerCase()}`);
       }
       return undefined;

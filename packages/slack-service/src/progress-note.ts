@@ -4,7 +4,6 @@
 // interval with how long it has run, so the thread shows progress without a stream of messages.
 // Nothing here throws: a failed post or edit is logged (event and error name only) and the turn goes on.
 import type { ServiceLog } from "./processor.js";
-import { escapeText } from "./slack-format.js";
 
 /** How often the note is edited while the task runs. */
 export const PROGRESS_INTERVAL_MS = 3 * 60_000;
@@ -13,12 +12,12 @@ const SUBJECT_MAX = 120;
 
 /**
  * What the note calls the task: what the member approved when this turn ran on their "yes",
- * otherwise their own words, without mentions or backticks, on one Slack-safe line and shortened.
+ * otherwise their own words, without mentions or backticks, on one line made inert by the surface's `escape`, shortened.
  */
-export function progressSubject(memberText: string, approved?: string): string {
+export function progressSubject(memberText: string, approved: string | undefined, escape: (text: string) => string): string {
   const own = memberText.replace(/<[@#!][^>]*>/gu, " ").replace(/[`\s]+/gu, " ").trim();
   // A trailing full stop is dropped, since the note puts its own after the task.
-  const flat = (own.length > 0 ? escapeText(own) : (approved ?? "").replace(/\s+/gu, " ").trim()).replace(/[.\s]+$/u, "");
+  const flat = (own.length > 0 ? escape(own) : (approved ?? "").replace(/\s+/gu, " ").trim()).replace(/[.\s]+$/u, "");
   if (flat.length === 0) return "your request";
   return flat.length > SUBJECT_MAX ? `${flat.slice(0, SUBJECT_MAX - 1).replace(/&[a-z]{0,3}$/u, "")}…` : flat;
 }

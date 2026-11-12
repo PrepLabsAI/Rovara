@@ -212,6 +212,22 @@ describe("delivering", () => {
     expect(await w.pending()).toHaveLength(0);
   });
 
+  it("never sends to a conversation in another company's chat tenant (owner decision 131): it is unreachable, and the company's own target still gets it", async () => {
+    const w = await needsYou();
+    const theirs: ConversationRef = { ...CONVERSATION, tenant: "team2", space: "room9" };
+    await w.prefs([target(theirs), target()]);
+    const companyOf = ({ tenant }: { channel: string; tenant: string }) => (tenant === "team1" ? ORG : tenant === "team2" ? ("other-company" as OrgId) : undefined);
+    expect(await w.deliver({ companyOf })).toMatchObject({ sent: 1, unreachable: 1 });
+    expect(w.adapter.delivered.map((event) => (event as { conversation: ConversationRef }).conversation)).toEqual([CONVERSATION]);
+  });
+
+  it("sends to no chat when the host cannot say whose tenant a target is (companyOf throws)", async () => {
+    const w = await needsYou();
+    await w.prefs([target()]);
+    expect(await w.deliver({ companyOf: () => { throw new Error("tenant map down"); } })).toMatchObject({ sent: 0, unreachable: 1 });
+    expect(w.adapter.delivered).toEqual([]);
+  });
+
   it("the event id belongs to the batch: the same rows to the same target give the same id", () => {
     const rows = [{ sk: "a", at: "t1" }, { sk: "b", at: "t2" }];
     expect(batchEventId("o", "p", "x", rows)).toBe(batchEventId("o", "p", "x", [...rows].reverse()));

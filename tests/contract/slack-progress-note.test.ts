@@ -1,9 +1,10 @@
 // tests/contract/slack-progress-note.test.ts
 // Issue 219: a long Slack task says it started on the worker and then edits ONE message at a steady
 // interval with how long it has run, instead of staying silent for many minutes.
+import { escapeText } from "../../packages/slack-service/src/slack-format.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SlackRequestMessage } from "../../packages/contracts/src/index.js";
-import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { PROGRESS_INTERVAL_MS, createProgressNote, progressSubject } from "../../packages/slack-service/src/progress-note.js";
 
 const START = Date.parse("2026-10-02T10:00:00.000Z");
@@ -89,11 +90,11 @@ describe("the progress note (#219)", () => {
   });
 
   it("names the task by the member's words or what they approved, Slack-safe and short", () => {
-    expect(progressSubject("<@U0BOT00001> run `sleep 2400` & tell me <!channel>")).toBe("run sleep 2400 &amp; tell me");
-    expect(progressSubject("  ", 'Start a coding task: "list files"')).toBe('Start a coding task: "list files"');
-    expect(progressSubject("<@U0BOT00001> run the tests.")).toBe("run the tests");
-    expect(progressSubject("<@U0BOT00001>")).toBe("your request");
-    const long = progressSubject(`<@U0BOT00001> ${"word ".repeat(60)}`);
+    expect(progressSubject("<@U0BOT00001> run `sleep 2400` & tell me <!channel>", undefined, escapeText)).toBe("run sleep 2400 &amp; tell me");
+    expect(progressSubject("  ", 'Start a coding task: "list files"', escapeText)).toBe('Start a coding task: "list files"');
+    expect(progressSubject("<@U0BOT00001> run the tests.", undefined, escapeText)).toBe("run the tests");
+    expect(progressSubject("<@U0BOT00001>", undefined, escapeText)).toBe("your request");
+    const long = progressSubject(`<@U0BOT00001> ${"word ".repeat(60)}`, undefined, escapeText);
     expect(long.length).toBeLessThanOrEqual(120);
     expect(long.endsWith("…")).toBe(true);
   });

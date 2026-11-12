@@ -173,7 +173,7 @@ export function requiredEnvironment(name: string): string {
   return value;
 }
 
-function claimValues(value: unknown): string[] {
+export function claimValues(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string");
   if (typeof value !== "string") return [];
   const serialized = value.trim();

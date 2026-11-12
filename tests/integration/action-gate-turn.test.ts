@@ -69,7 +69,7 @@ describe("the action gate in a real Pi turn", () => {
     const { reply, results, callConnectorTool } = await turn({ session, prompt: "close TRK-9",
       script: [toolUse(fauxToolCall("tracker__close_item", { id: "TRK-9" })), fauxAssistantMessage([fauxText("I asked you to confirm closing TRK-9.")])] });
     expect(callConnectorTool).not.toHaveBeenCalled();
-    expect(results).toEqual([{ tool: "tracker__close_item", isError: true, text: expect.stringContaining("AgentX has already posted a confirmation request for this action to the member in the Slack thread") as string }]);
+    expect(results).toEqual([{ tool: "tracker__close_item", isError: true, text: expect.stringContaining("AgentX has already posted a confirmation request for this action to the member in this conversation") as string }]);
     expect(results[0]!.text).not.toContain("TRK-9");
     expect(session.ran).toBe(0);
     expect(session.asks).toMatchObject([{ tool: "tracker__close_item", kind: "destructive", summary: "Use tracker to close item: id TRK-9" }]);

@@ -61,6 +61,12 @@ export const InboundMessageSchema = z.object({
   actor: ActorRefSchema,
   text: z.string().min(1).max(40_000),
   receivedAt: z.string().datetime(),
+  /** Phase 7c2: false for a message not addressed to Rovara (a plain reply in a thread Rovara is in). Absent: addressed. */
+  addressed: z.boolean().optional(),
+  /** Phase 7c2: the message's own ID in its space, where the surface has one (a Slack message's timestamp). */
+  messageId: ChannelOpaqueIdSchema.optional(),
+  /** Phase 7c2: the surface says the person posted it through another app; the core confirms they are a person. */
+  viaApp: z.literal(true).optional(),
 }).strict().superRefine((message, context) => {
   if (message.conversation.channel !== message.channel) context.addIssue({ code: "custom", path: ["conversation", "channel"], message: "must equal channel" });
   if (message.actor.channel !== message.channel) context.addIssue({ code: "custom", path: ["actor", "channel"], message: "must equal channel" });

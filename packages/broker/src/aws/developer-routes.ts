@@ -3,6 +3,7 @@
 // access token itself, then checks the environment, the method and the sign-in session on every
 // request (R12, R13), so a revoked session stops at once.
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -44,6 +45,18 @@ import {
   type TaskPeopleDisplayReadResponse,
   SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
   ActorRefSchema,
+  SignInClientViewSchema,
+  AccessCheckRequestSchema,
+  AccessCheckResponseSchema,
+  SignInClientIdSchema,
+  SignInClientRecordSchema,
+  signInClientKey,
+  type AccessCheckResponse,
+  type ListSignInClientsRequest,
+  type PutSignInClientRequest,
+  type RemoveSignInClientRequest,
+  type SignInClientRecord,
+  type SignInClientView,
 } from "@agentx/contracts";
 import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
@@ -51,6 +64,9 @@ import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access
 import { evaluateProjectAuthority } from "../developer/task-project-access.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { decodeJwt } from "jose";
+import { applyAccessRules, type AccessCheckContext, type AccessCheckRule } from "../developer/access-rules.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -93,10 +109,17 @@ export interface DeveloperApiConfiguration {
   slackAuthCheck?: () => Promise<SlackAuthCheckResponse>;
   /** Spec 025 E9: an admin ends a developer's sign-in sessions, through DeveloperIdentity (the broker only reads the sign-in table). */
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
+  /** Spec 063: the sign-in clients' registry, which the sign-in Lambda owns. */
+  signInClients?: SignInClientRegistry;
   /** Spec 025 E12: a public channel by its name, through DeveloperIdentity. */
   channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
-  verifyAccessToken(authorization: string | undefined): Promise<Record<string, unknown>>;
+  verifyAccessToken(authorization: string | undefined, audience?: string): Promise<Record<string, unknown>>;
+  /**
+   * Owner decision 132: a host's stricter rules on the access check (spec 063 FR-004), such as a fresh sign-in or an approval it keeps. They can only refuse
+   * or narrow Rovara's own answer (`developer/access-rules.ts`); none means Rovara's answer as is.
+   */
+  accessRules?: readonly AccessCheckRule[];
   /** Spec 061 slice 2: the Slack service's request queue, set only with SLACK_REQUEST_QUEUE_URL; "Ask AgentX to reply to this comment" needs it. */
   slackRequestQueue?: SlackRequestQueue;
 }
@@ -147,7 +170,8 @@ type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_r
  */
 async function identityInvoke<T>(
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
-  request: ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
+  request: ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
+    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest,
   readReply: (reply: Record<string, unknown>) => T | undefined,
   event: string,
 ): Promise<T | IdentityRefusal> {
@@ -301,6 +325,31 @@ export function endDeveloperSessionsThroughLambda(invoke: (payload: Uint8Array) 
   };
 }
 
+/** Spec 063: the sign-in clients' registry, through the sign-in Lambda that owns it. Throws when it cannot be reached. */
+export interface SignInClientRegistry {
+  put(client: SignInClientRecord): Promise<void>;
+  remove(clientId: string): Promise<boolean>;
+  list(): Promise<SignInClientView[]>;
+}
+
+export function signInClientsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): SignInClientRegistry {
+  const ask = async <T>(request: PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest, read: (reply: Record<string, unknown>) => T | undefined): Promise<T> => {
+    const answer = await identityInvoke(invoke, request, (reply) => (reply.ok === true ? read(reply) : undefined), "developer.sign_in_clients");
+    if (typeof answer === "object" && answer !== null && "ok" in answer && (answer as { ok: unknown }).ok === false) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not reach its sign-in service; try again");
+    }
+    return answer as T;
+  };
+  return {
+    async put(client) { await ask({ kind: "put-sign-in-client", client }, () => true); },
+    remove: (clientId) => ask({ kind: "remove-sign-in-client", clientId }, (reply) => reply.removed === true),
+    list: () => ask({ kind: "list-sign-in-clients" }, (reply) => {
+      const parsed = z.array(SignInClientViewSchema).safeParse(reply.clients);
+      return parsed.success ? parsed.data : undefined;
+    }),
+  };
+}
+
 /** E12 (Q8): a public channel by name through DeveloperIdentity; fails closed as slack_unavailable. */
 export function channelByNameThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelByNameRequest) => Promise<ChannelByNameResponse> {
   return (request) => identityInvoke(invoke, request, (reply) => {
@@ -380,10 +429,12 @@ export async function authenticateDeveloper(deps: DeveloperRouteDependencies, cl
 }
 
 async function authenticateSession(deps: DeveloperRouteDependencies, token: { developerId: string; sessionId: string; amr: DeveloperSignInMethod }): Promise<DeveloperCaller> {
-  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr" | "endsAt" | "revokedAt" | "startedAt" | "slackUserId">>(deps, `SESSION#${token.sessionId}`);
+  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr" | "endsAt" | "revokedAt" | "startedAt" | "slackUserId" | "clientId">>(deps, `SESSION#${token.sessionId}`);
   if (session === undefined || session.developerId !== token.developerId || session.revokedAt !== undefined || session.endsAt <= Math.floor(deps.now() / 1000)) {
     throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   }
+  // Spec 063 FR-003: a registered client's session never acts on Rovara, whatever token names it.
+  if (session.clientId !== undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   if (session.amr !== token.amr) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   // The broker may only read the sign-in table (R13), so it refuses; the token endpoint revokes the
   // session at its next refresh.
@@ -546,6 +597,116 @@ async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessS
 
 async function bindingsOf(deps: DeveloperRouteDependencies): Promise<SlackChannelBinding[]> {
   return deps.developer.slackTeamId === undefined ? [] : queryAll<SlackChannelBinding>(deps, channelBindingPartition(SLACK_CHANNEL, deps.developer.slackTeamId), channelBindingSortPrefix(SLACK_CHANNEL));
+}
+
+/** One answer for every refusal at the access check, so it tells a caller nothing about why. */
+const ACCESS_REFUSED = "this access check needs a signed-in person's token for this service, or a confidential service's own credentials";
+
+/** A registered sign-in client, read from the sign-in table; undefined for an unknown ID or an unreadable row. */
+async function signInClientOf(deps: DeveloperRouteDependencies, clientId: unknown): Promise<SignInClientRecord | undefined> {
+  if (!SignInClientIdSchema.safeParse(clientId).success) return undefined;
+  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: signInClientKey(clientId as string), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  if (response.Item === undefined) return undefined;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the keys
+  const { pk: _pk, sk: _sk, entityType: _type, ...rest } = response.Item;
+  const parsed = SignInClientRecordSchema.safeParse(rest);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** RFC 6749 2.3.1 HTTP Basic client credentials, or undefined. */
+function basicClientCredentials(authorization: string | undefined): { clientId: string; secret: string } | undefined {
+  const match = /^Basic ([A-Za-z0-9+/=]+)$/i.exec((authorization ?? "").trim());
+  if (match === null) return undefined;
+  const decoded = Buffer.from(match[1]!, "base64").toString("utf8");
+  const colon = decoded.indexOf(":");
+  if (colon < 1) return undefined;
+  try {
+    const formDecode = (text: string) => decodeURIComponent(text.replace(/\+/g, " "));
+    return { clientId: formDecode(decoded.slice(0, colon)), secret: formDecode(decoded.slice(colon + 1)) };
+  } catch {
+    return undefined;
+  }
+}
+
+function clientSecretMatches(secret: string, secretHash: string | undefined): boolean {
+  if (secretHash === undefined || secret === "") return false;
+  const given = createHash("sha256").update(secret).digest();
+  const kept = Buffer.from(secretHash, "hex");
+  return kept.length === given.length && timingSafeEqual(given, kept);
+}
+
+/**
+ * Spec 063 FR-004: who a registered service's signed-in person is, and what they can use now. Asked with the person's
+ * own token for that service (Bearer), or by developer ID with a confidential service's credentials (HTTP Basic). It
+ * reads the live session, developer and grants each time, so an ended sign-in or a revoked developer answers 401 at
+ * once. Administrator comes only from the person's own company sign-in (FR-005), so the developer-ID form never has it.
+ */
+export async function checkSignInAccess(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest): Promise<AccessCheckResponse> {
+  const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  const parsed = AccessCheckRequestSchema.safeParse(jsonBody(request));
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", "the access check takes an optional developerId (64 hex characters) and nothing else");
+  const authorization = request.headers.authorization;
+  const basic = basicClientCredentials(authorization);
+  const nowSeconds = Math.floor(deps.now() / 1000);
+  let developerId: string;
+  let administrator = false;
+  let clientId: string;
+  let sessionFacts: AccessCheckContext["session"];
+  if (basic !== undefined) {
+    const client = await signInClientOf(deps, basic.clientId);
+    if (client === undefined || !clientSecretMatches(basic.secret, client.secretHash) || parsed.data.developerId === undefined) throw refused();
+    developerId = parsed.data.developerId;
+    clientId = client.clientId;
+  } else {
+    if (parsed.data.developerId !== undefined) throw refused();
+    // The unverified azp only picks which client's audience the token must then verify against.
+    let azp: unknown;
+    try {
+      azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
+    } catch {
+      throw refused();
+    }
+    const client = await signInClientOf(deps, azp);
+    if (client === undefined) throw refused();
+    let claims: Record<string, unknown>;
+    try {
+      claims = await deps.developer.verifyAccessToken(authorization, client.audience);
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "RUNTIME_UNAVAILABLE") throw error;
+      throw refused();
+    }
+    if (claims.azp !== client.clientId || claims.env !== deps.developer.env || typeof claims.sub !== "string" || typeof claims.sid !== "string") throw refused();
+    const amr = claims.amr;
+    if ((amr !== "slack" && amr !== "oidc") || !deps.developer.methods[amr]) throw refused();
+    const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
+    if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
+      || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)
+      || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr])) throw refused();
+    developerId = session.developerId;
+    administrator = amr === "oidc" && session.administrator === true;
+    clientId = client.clientId;
+    sessionFacts = { sessionId: claims.sid, amr, startedAt: session.startedAt, administrator };
+    const developer = await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${developerId}`);
+    if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
+  }
+  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "provider">>(deps, `DEVELOPER#${developerId}`);
+  if (developer === undefined || developer.revoked) throw refused();
+  const listed = await listProjects(deps, {
+    developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
+    ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
+  });
+  const answer: AccessCheckResponse = {
+    developerId, displayName: developer.displayName, administrator,
+    projects: listed.projects.map((project) => ({ name: project.name, access: project.access })),
+    notices: listed.notices,
+  };
+  const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
+  const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
+  if (ruled === undefined) throw refused();
+  // What leaves is exactly the answer's shape, whatever a rule did.
+  const checked = AccessCheckResponseSchema.safeParse(ruled);
+  if (!checked.success) throw refused();
+  return checked.data;
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {
@@ -888,6 +1049,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     });
     return web(request, url);
   }
+  // Spec 063 FR-004: a registered service's own route, authenticated as such, never as a Rovara caller.
+  if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);

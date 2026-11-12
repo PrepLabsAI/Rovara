@@ -55,6 +55,16 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Ref": "Artifacts82DD59A1",
       },
     },
+    "ChannelEventQueueUrl": {
+      "Value": {
+        "Ref": "ChannelApiEvents5999C77C",
+      },
+    },
+    "ChannelRequestQueueUrl": {
+      "Value": {
+        "Ref": "ChannelApiRequests36EE2867",
+      },
+    },
     "DispatchDeadLetterQueueUrl": {
       "Value": {
         "Ref": "DispatchDeadLetterQueue3E30F4B8",
@@ -98,6 +108,25 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Value": {
         "Ref": "SessionsProvisioner9C44055B",
       },
+    },
+    "SlackAdapterCommandsUrl": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "/v1/slack/channel-commands",
+          ],
+        ],
+      },
+    },
+    "SlackAdapterSecretName": {
+      "Value": "agentx/production/channel-adapter/slack",
     },
     "SlackEventsUrl": {
       "Value": {
@@ -279,6 +308,15 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "ConstraintDescription": "must be a whole number from 1 to 60",
       "Default": "6",
       "Description": "Most requests one Slack thread may start in a minute; further requests pause the thread with one notice",
+      "Type": "String",
+    },
+    "SlackViaChannel": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "disabled",
+      "Description": "enabled: Slack conversations go through the channel API as the built-in Slack adapter (spec 062 Phase 7); disabled: Slack's own queue, as before",
       "Type": "String",
     },
     "WorkspaceKmsKeyArn": {
@@ -1162,6 +1200,1120 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         ],
       },
       "Type": "AWS::IAM::Policy",
+    },
+    "ChannelApiActionsRoute7A0ACA43": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/channels/{channel}/actions",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "ChannelApiIntegration4BC4F1DE",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "ChannelApiDecisionsRoute248618C4": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/channels/{channel}/decisions",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "ChannelApiIntegration4BC4F1DE",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "ChannelApiEventDeadLettersAlarm99EF8A79": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A channel adapter event exhausted its deliveries and is in the channel event dead-letter queue. Check the channel event sender logs for its event ID.",
+        "AlarmName": "AgentXChannelEventDeadLetters",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "ChannelApiEventDeadLettersE21C25D1",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "ChannelApiEventDeadLettersE21C25D1": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "FifoQueue": true,
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "ChannelApiEventDeadLettersPolicy376E0350": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiEventDeadLettersE21C25D1",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "ChannelApiEventDeadLettersE21C25D1",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "ChannelApiEventSenderDECD5203": {
+      "DependsOn": [
+        "ChannelApiEventSenderServiceRoleDefaultPolicy79DBC27F",
+        "ChannelApiEventSenderServiceRole41BFD85F",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "BUILT_IN_ADAPTER": {
+              "Ref": "SlackViaChannel",
+            },
+            "BUILT_IN_ADAPTER_CALLBACK_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-events",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_CHANNEL": "slack",
+            "BUILT_IN_ADAPTER_COMMANDS_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-commands",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
+            "CHANNEL_ADAPTERS": "disabled",
+            "CHANNEL_EVENT_QUEUE_URL": {
+              "Ref": "ChannelApiEvents5999C77C",
+            },
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "ChannelApiEventSenderLogs0C236FEE",
+          },
+        },
+        "MemorySize": 512,
+        "Role": {
+          "Fn::GetAtt": [
+            "ChannelApiEventSenderServiceRole41BFD85F",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 30,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "ChannelApiEventSenderLogs0C236FEE": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "ChannelApiEventSenderServiceRole41BFD85F": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "ChannelApiEventSenderServiceRoleDefaultPolicy79DBC27F": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "CHANNEL_ADAPTERS",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/channel-adapter/*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiEvents5999C77C",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ChannelApiEventSenderServiceRoleDefaultPolicy79DBC27F",
+        "Roles": [
+          {
+            "Ref": "ChannelApiEventSenderServiceRole41BFD85F",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "ChannelApiEventSenderSqsEventSourceAgentXControlPlaneChannelApiEvents7F78C2EE09597321": {
+      "Properties": {
+        "BatchSize": 10,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "ChannelApiEvents5999C77C",
+            "Arn",
+          ],
+        },
+        "FunctionName": {
+          "Ref": "ChannelApiEventSenderDECD5203",
+        },
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures",
+        ],
+        "ScalingConfig": {
+          "MaximumConcurrency": 2,
+        },
+      },
+      "Type": "AWS::Lambda::EventSourceMapping",
+    },
+    "ChannelApiEvents5999C77C": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "FifoQueue": true,
+        "MessageRetentionPeriod": 86400,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "ChannelApiEventDeadLettersE21C25D1",
+              "Arn",
+            ],
+          },
+          "maxReceiveCount": 8,
+        },
+        "SqsManagedSseEnabled": true,
+        "VisibilityTimeout": 180,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "ChannelApiEventsPolicyD65F6342": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiEvents5999C77C",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "ChannelApiEvents5999C77C",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "ChannelApiIngress9235D30E": {
+      "DependsOn": [
+        "ChannelApiIngressServiceRoleDefaultPolicyC884F6EB",
+        "ChannelApiIngressServiceRole2BBC113A",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "BROKER_FUNCTION_NAME": {
+              "Ref": "BrokerE1355FD6",
+            },
+            "BUILT_IN_ADAPTER": {
+              "Ref": "SlackViaChannel",
+            },
+            "BUILT_IN_ADAPTER_CALLBACK_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-events",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_CHANNEL": "slack",
+            "BUILT_IN_ADAPTER_COMMANDS_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-commands",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
+            "CHANNEL_ADAPTERS": "disabled",
+            "CHANNEL_EVENT_QUEUE_URL": {
+              "Ref": "ChannelApiEvents5999C77C",
+            },
+            "CHANNEL_LINK_ORIGIN": {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "CHANNEL_REQUEST_QUEUE_URL": {
+              "Ref": "ChannelApiRequests36EE2867",
+            },
+            "CHANNEL_STATE_TABLE_NAME": {
+              "Ref": "ChannelApiStateE5478A65",
+            },
+            "SHARED_TASKS": "disabled",
+            "SLACK_APP_POSTED_MESSAGES": {
+              "Ref": "SlackAppPostedMessages",
+            },
+            "SLACK_THREADS_TABLE_NAME": {
+              "Ref": "SlackThreads36E14C1E",
+            },
+            "SLACK_THREAD_TURNS_PER_MINUTE": {
+              "Ref": "SlackThreadTurnsPerMinute",
+            },
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+            "TURN_RECORDS_TABLE_NAME": {
+              "Ref": "TurnRecords69ECFCD9",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "ChannelApiIngressLogs50BE826D",
+          },
+        },
+        "MemorySize": 512,
+        "Role": {
+          "Fn::GetAtt": [
+            "ChannelApiIngressServiceRole2BBC113A",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 30,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "ChannelApiIngressApiInvoke125374F6": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "ChannelApiIngress9235D30E",
+            "Arn",
+          ],
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition",
+              },
+              ":execute-api:",
+              {
+                "Ref": "AWS::Region",
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId",
+              },
+              ":",
+              {
+                "Ref": "HttpApi",
+              },
+              "/*/POST/v1/channels/*",
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "ChannelApiIngressLogs50BE826D": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "ChannelApiIngressServiceRole2BBC113A": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "ChannelApiIngressServiceRoleDefaultPolicyC884F6EB": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "CHANNEL_ADAPTERS",
+                    "BINDING#*",
+                    "CHANNEL_LINK#*",
+                    "SLACK_BINDING#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:PutItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "CHANNEL_LINK_CODE#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:DeleteItem",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiStateE5478A65",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/channel-adapter/*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiRequests36EE2867",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiEvents5999C77C",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreads36E14C1E",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreads36E14C1E",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "BrokerE1355FD6",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "BrokerE1355FD6",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "exportPk",
+                    "exportSk",
+                    "eventId",
+                    "subject",
+                    "receivedAt",
+                    "requestedBy",
+                    "disposition",
+                    "durationMs",
+                    "model",
+                    "offeredTools",
+                    "calls",
+                    "callsTruncated",
+                    "emptyResponse",
+                    "usage",
+                    "usageError",
+                    "recordingErrors",
+                    "argumentsOmitted",
+                    "error",
+                    "expiresAt",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "THREAD#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "TurnRecords69ECFCD9",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ChannelApiIngressServiceRoleDefaultPolicyC884F6EB",
+        "Roles": [
+          {
+            "Ref": "ChannelApiIngressServiceRole2BBC113A",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "ChannelApiIntegration4BC4F1DE": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {
+          "Fn::GetAtt": [
+            "ChannelApiIngress9235D30E",
+            "Arn",
+          ],
+        },
+        "PayloadFormatVersion": "2.0",
+      },
+      "Type": "AWS::ApiGatewayV2::Integration",
+    },
+    "ChannelApiMessagesRouteCECC4513": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/channels/{channel}/messages",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "ChannelApiIntegration4BC4F1DE",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "ChannelApiRequestDeadLettersAlarm7622806F": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A channel adapter request failed every attempt and is in the channel request dead-letter queue. Check the Slack orchestrator logs for its event ID.",
+        "AlarmName": "AgentXChannelRequestDeadLetters",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "ChannelApiRequestDeadLettersBF0B0E40",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "ChannelApiRequestDeadLettersBF0B0E40": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "FifoQueue": true,
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "ChannelApiRequestDeadLettersPolicyFBD04435": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiRequestDeadLettersBF0B0E40",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "ChannelApiRequestDeadLettersBF0B0E40",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "ChannelApiRequests36EE2867": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "FifoQueue": true,
+        "MessageRetentionPeriod": 345600,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "ChannelApiRequestDeadLettersBF0B0E40",
+              "Arn",
+            ],
+          },
+          "maxReceiveCount": 5,
+        },
+        "SqsManagedSseEnabled": true,
+        "VisibilityTimeout": 900,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "ChannelApiRequestsPolicyC6A2F570": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiRequests36EE2867",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "ChannelApiRequests36EE2867",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "ChannelApiSelfInvoke808681B8": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiIngress9235D30E",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ChannelApiSelfInvoke808681B8",
+        "Roles": [
+          {
+            "Ref": "ChannelApiIngressServiceRole2BBC113A",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "ChannelApiSlackAdapterSecret5DDDDC01": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "Signing secret of the built-in Slack channel adapter (spec 062 FR-073); 64 letters and digits, read as base64",
+        "GenerateSecretString": {
+          "ExcludePunctuation": true,
+          "IncludeSpace": false,
+          "PasswordLength": 64,
+        },
+        "Name": "agentx/production/channel-adapter/slack",
+      },
+      "Type": "AWS::SecretsManager::Secret",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "ChannelApiSlackAdapterSelfInvokeCEFFE71C": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackIngress5C88FFA0",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ChannelApiSlackAdapterSelfInvokeCEFFE71C",
+        "Roles": [
+          {
+            "Ref": "SlackIngressServiceRole8DA92EC7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "ChannelApiSlackCommandsRoute2A3464BE": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/slack/channel-commands",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "SlackIngressIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "ChannelApiSlackEventsRouteC008BAED": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/slack/channel-events",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "SlackIngressIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "ChannelApiStateE5478A65": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "sk",
+            "AttributeType": "S",
+          },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "sk",
+            "KeyType": "RANGE",
+          },
+        ],
+        "SSESpecification": {
+          "SSEEnabled": true,
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "expiresAt",
+          "Enabled": true,
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Delete",
     },
     "ConnectorBrokenAlarmBE25C37B": {
       "Properties": {
@@ -5497,6 +6649,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "BROKER_FUNCTION_NAME": {
               "Ref": "BrokerE1355FD6",
             },
+            "CHANNEL_API_URL": {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "SLACK_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
             "SLACK_APP_POSTED_MESSAGES": {
               "Ref": "SlackAppPostedMessages",
             },
@@ -5511,6 +6670,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_THREAD_TURNS_PER_MINUTE": {
               "Ref": "SlackThreadTurnsPerMinute",
+            },
+            "SLACK_VIA_CHANNEL": {
+              "Ref": "SlackViaChannel",
             },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
@@ -5534,7 +6696,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           ],
         },
         "Runtime": "nodejs22.x",
-        "Timeout": 10,
+        "Timeout": 30,
         "TracingConfig": {
           "Mode": "Active",
         },
@@ -5572,6 +6734,80 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 "Ref": "HttpApi",
               },
               "/*/*/v1/slack/events",
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "SlackIngressChannelCommandsInvoke5564C00D": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "SlackIngress5C88FFA0",
+            "Arn",
+          ],
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition",
+              },
+              ":execute-api:",
+              {
+                "Ref": "AWS::Region",
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId",
+              },
+              ":",
+              {
+                "Ref": "HttpApi",
+              },
+              "/*/*/v1/slack/channel-commands",
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "SlackIngressChannelEventsInvoke529B714F": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "SlackIngress5C88FFA0",
+            "Arn",
+          ],
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition",
+              },
+              ":execute-api:",
+              {
+                "Ref": "AWS::Region",
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId",
+              },
+              ":",
+              {
+                "Ref": "HttpApi",
+              },
+              "/*/*/v1/slack/channel-events",
             ],
           ],
         },
@@ -5835,6 +7071,16 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 ],
               },
             },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "ChannelApiSlackAdapterSecret5DDDDC01",
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -6075,6 +7321,46 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     "/*/*/v1/service/*",
                   ],
                 ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiRequests36EE2867",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiEvents5999C77C",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "ChannelApiSlackAdapterSecret5DDDDC01",
               },
             },
           ],
@@ -9150,6 +10436,16 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
       "Type": "AWS::SSM::Parameter::Value<String>",
     },
+    "ChannelEventQueueUrl": {
+      "AllowedPattern": "^$|^https://sqs\\..+$",
+      "Default": "",
+      "Type": "String",
+    },
+    "ChannelRequestQueueUrl": {
+      "AllowedPattern": "^$|^https://sqs\\..+\\.fifo$",
+      "Default": "",
+      "Type": "String",
+    },
     "ControlPlaneUrl": {
       "AllowedPattern": "^https://.+$",
       "Type": "String",
@@ -9214,6 +10510,16 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
     "PrivateSubnetIds": {
       "Description": "Private subnets with NAT egress, such as AgentXProductionFoundation's PrivateSubnetIds",
       "Type": "List<AWS::EC2::Subnet::Id>",
+    },
+    "SlackAdapterCommandsUrl": {
+      "AllowedPattern": "^$|^https://.+$",
+      "Default": "",
+      "Type": "String",
+    },
+    "SlackAdapterSecretName": {
+      "AllowedPattern": "^$|^agentx/[a-z0-9-]+/channel-adapter/slack$",
+      "Default": "",
+      "Type": "String",
     },
     "SlackRequestQueueUrl": {
       "AllowedPattern": "^https://sqs\\..+\\.fifo$",
@@ -9548,6 +10854,30 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
                 "Name": "SLACK_REQUEST_QUEUE_URL",
                 "Value": {
                   "Ref": "SlackRequestQueueUrl",
+                },
+              },
+              {
+                "Name": "CHANNEL_REQUEST_QUEUE_URL",
+                "Value": {
+                  "Ref": "ChannelRequestQueueUrl",
+                },
+              },
+              {
+                "Name": "CHANNEL_EVENT_QUEUE_URL",
+                "Value": {
+                  "Ref": "ChannelEventQueueUrl",
+                },
+              },
+              {
+                "Name": "SLACK_ADAPTER_COMMANDS_URL",
+                "Value": {
+                  "Ref": "SlackAdapterCommandsUrl",
+                },
+              },
+              {
+                "Name": "SLACK_ADAPTER_SECRET_NAME",
+                "Value": {
+                  "Ref": "SlackAdapterSecretName",
                 },
               },
               {

@@ -54,6 +54,15 @@ export class SlackOrchestratorStack extends Stack {
     });
     const controlPlaneUrl = new CfnParameter(this, "ControlPlaneUrl", { type: "String", allowedPattern: "^https://.+$" });
     const queueUrl = new CfnParameter(this, "SlackRequestQueueUrl", { type: "String", allowedPattern: "^https://sqs\\..+\\.fifo$" });
+    // Spec 062 Phase 4: the channel API's queues; empty runs no channel consumer. Phase 7d: every deployment, the
+    // production stack included, since every one has the built-in Slack adapter.
+    const channelQueues = {
+      requests: new CfnParameter(this, "ChannelRequestQueueUrl", { type: "String", default: "", allowedPattern: "^$|^https://sqs\\..+\\.fifo$" }),
+      events: new CfnParameter(this, "ChannelEventQueueUrl", { type: "String", default: "", allowedPattern: "^$|^https://sqs\\..+$" }),
+      // Phase 7c2: the built-in Slack adapter's commands, for the routing card and a task question's private answer.
+      slackAdapterCommandsUrl: new CfnParameter(this, "SlackAdapterCommandsUrl", { type: "String", default: "", allowedPattern: "^$|^https://.+$" }),
+      slackAdapterSecretName: new CfnParameter(this, "SlackAdapterSecretName", { type: "String", default: "", allowedPattern: "^$|^agentx/[a-z0-9-]+/channel-adapter/slack$" }),
+    };
     const threadsTableName = new CfnParameter(this, "SlackThreadsTableName", { type: "String", minLength: 3 });
     const sessionBucketName = new CfnParameter(this, "ThreadSessionBucketName", { type: "String", minLength: 3 });
     const turnRecordsTableName = new CfnParameter(this, "TurnRecordsTableName", {
@@ -363,6 +372,10 @@ export class SlackOrchestratorStack extends Stack {
           { name: "AWS_REGION", value: this.region },
           { name: "CONTROL_PLANE_URL", value: controlPlaneUrl.valueAsString },
           { name: "SLACK_REQUEST_QUEUE_URL", value: queueUrl.valueAsString },
+          { name: "CHANNEL_REQUEST_QUEUE_URL", value: channelQueues.requests.valueAsString },
+          { name: "CHANNEL_EVENT_QUEUE_URL", value: channelQueues.events.valueAsString },
+          { name: "SLACK_ADAPTER_COMMANDS_URL", value: channelQueues.slackAdapterCommandsUrl.valueAsString },
+          { name: "SLACK_ADAPTER_SECRET_NAME", value: channelQueues.slackAdapterSecretName.valueAsString },
           { name: "SLACK_THREADS_TABLE_NAME", value: threadsTableName.valueAsString },
           { name: "THREAD_SESSION_BUCKET_NAME", value: sessionBucketName.valueAsString },
           { name: "TURN_RECORDS_TABLE_NAME", value: turnRecordsTableName.valueAsString },

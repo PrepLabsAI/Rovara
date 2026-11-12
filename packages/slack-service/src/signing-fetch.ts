@@ -1,6 +1,6 @@
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { SignatureV4 } from "@smithy/signature-v4";
-import { cleanDisplayName, slackThreadSubject, type SlackThread } from "@agentx/contracts";
+import { cleanDisplayName, conversationSubject, slackThreadSubject, type ConversationRef, type SlackThread } from "@agentx/contracts";
 
 type Credentials = ConstructorParameters<typeof SignatureV4>[0]["credentials"];
 
@@ -20,6 +20,9 @@ export function createSignedServiceFetch(options: {
   thread?: SlackThread;
   userId?: string;
   userName?: string;
+  /** Spec 062: an adapter conversation and its actor's user ID, in place of a Slack thread and member. */
+  conversation?: ConversationRef;
+  actorUserId?: string;
   baseFetch?: typeof fetch;
 }): typeof fetch {
   const signer = new SignatureV4({ service: "execute-api", region: options.region, credentials: options.credentials, sha256: Sha256 });
@@ -32,6 +35,10 @@ export function createSignedServiceFetch(options: {
     new Headers(init?.headers).forEach((value, key) => {
       if (key !== "authorization") headers[key] = value;
     });
+    if (options.conversation !== undefined) {
+      headers["x-agentx-conversation"] = conversationSubject(options.conversation);
+      if (options.actorUserId !== undefined) headers["x-agentx-actor"] = options.actorUserId;
+    }
     if (options.thread !== undefined) headers["x-agentx-slack-thread"] = slackThreadSubject(options.thread);
     if (options.userId !== undefined) headers["x-agentx-slack-user"] = options.userId;
     const userName = options.userName ? encodedDisplayName(options.userName) : undefined;
