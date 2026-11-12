@@ -20,6 +20,7 @@ import {
 } from "@agentx/contracts";
 import {
   DynamoDocumentStore,
+  ConsumerNotReadyError,
   DynamoStreamChangeFeed,
   STATE_TABLE_INDEXES,
   STATE_TABLE_KEY,
@@ -89,7 +90,35 @@ describe("the DynamoDB store keeps the hosted State table's stored form (no data
     world.fake.seed({ pk: { S: PK }, sk: { S: "BLOB" }, bytes: { B: new Uint8Array([1]) } });
     await expect(world.store.get({ pk: PK, sk: "LIMITS" })).rejects.toBeInstanceOf(UnrepresentableValueError);
     await expect(world.store.get({ pk: PK, sk: "LIMITS" })).rejects.toMatchObject({ code: "invalid_request" });
-    await expect(world.store.query({ pk: PK })).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
+  it("leaves an unreadable row out of a query page or a getMany and reports its key, instead of failing the read", async () => {
+    const reported: string[] = [];
+    const world = dynamoWorld({ store: { onUnreadable: (key, error) => void reported.push(`${key.sk}:${error.found}`) } });
+    world.fake.seed({ pk: { S: PK }, sk: { S: "A" }, n: { N: "1" } });
+    world.fake.seed({ pk: { S: PK }, sk: { S: "LIMITS" }, tasks: { SS: ["t1"] } });
+    world.fake.seed({ pk: { S: PK }, sk: { S: "Z" }, n: { N: "2" } });
+    expect((await world.store.query({ pk: PK })).items.map((item) => item.sk)).toEqual(["A", "Z"]);
+    expect((await world.store.getMany([{ pk: PK, sk: "LIMITS" }, { pk: PK, sk: "Z" }])).map((item) => item?.sk)).toEqual([undefined, "Z"]);
+    expect(reported).toEqual(["LIMITS:string set", "LIMITS:string set"]);
+  });
+
+  it("by default refuses to write a number the hosted broker's document client cannot read back (past 2^53 - 1)", async () => {
+    const world = dynamoWorld();
+    for (const n of [2 ** 53, -(2 ** 53), 1e21, 1e100, 1e125]) {
+      await expect(world.store.put({ item: { pk: PK, sk: "N", n } })).rejects.toMatchObject({ code: "invalid_request" });
+      await expect(world.store.put({ item: { pk: PK, sk: "N", deep: { list: [n] } } })).rejects.toMatchObject({ code: "invalid_request" });
+      await expect(world.store.update({ key: { pk: PK, sk: "N" }, ops: [change.set("n", n)] })).rejects.toMatchObject({ code: "invalid_request" });
+      await expect(world.store.update({ key: { pk: PK, sk: "N" }, ops: [change.add("n", n)] })).rejects.toMatchObject({ code: "invalid_request" });
+      await expect(world.store.transact([{ kind: "put", item: { pk: PK, sk: "N", n } }])).rejects.toMatchObject({ code: "invalid_request" });
+    }
+    expect(world.fake.requests).toEqual([]);
+    const fine = { pk: PK, sk: "OK", max: Number.MAX_SAFE_INTEGER, min: -Number.MAX_SAFE_INTEGER, small: 1e-129, ms: 1_762_819_200_000, fraction: 0.125 };
+    expect((await world.store.put({ item: fine })).applied).toBe(true);
+    // What it wrote, the hosted broker's reader reads as plain numbers.
+    expect(unmarshall(world.fake.raw(PK, "OK")!)).toEqual(fine);
+    const wide = dynamoWorld({ store: { cloudReadableNumbers: false } });
+    expect((await wide.store.put({ item: { pk: PK, sk: "N", n: 1e125 } })).applied).toBe(true);
   });
 
   it("refuses an unpaired surrogate anywhere, which DynamoDB cannot store", async () => {
@@ -270,10 +299,38 @@ describe("the change feed over the table's stream", () => {
     expect((other[0]!.after as unknown as { v: number }).v).toBe(2);
   });
 
+  it("refuses a batch while a declared consumer has not subscribed, so the checkpoint cannot pass it (cold start)", async () => {
+    const feed = new DynamoStreamChangeFeed({ consumers: ["outbox", "notifier"], retryDelayMs: 0 });
+    const seen: string[] = [];
+    await feed.subscribe("outbox", async (batch) => void seen.push(...batch.map((entry) => `outbox:${entry.key.sk}`)));
+    await expect(feed.deliver([lambdaRecord()])).rejects.toBeInstanceOf(ConsumerNotReadyError);
+    expect(seen).toEqual([]);
+    const notifier = await feed.subscribe("notifier", async (batch) => void seen.push(...batch.map((entry) => `notifier:${entry.key.sk}`)));
+    await feed.deliver([lambdaRecord()]);
+    expect(seen.sort()).toEqual(["notifier:META", "outbox:META"]);
+    // After a stop the reader is short of a consumer again.
+    await notifier.stop();
+    await expect(feed.deliver([lambdaRecord()])).rejects.toMatchObject({ code: "unavailable" });
+  });
+
+  it("refuses the batch a consumer stops in the middle of, so it is handed over again", async () => {
+    const feed = new DynamoStreamChangeFeed({ consumers: ["slow"], retryDelayMs: 0 });
+    let release!: () => void;
+    let entered!: () => void;
+    const inside = new Promise<void>((resolve) => { entered = resolve; });
+    const subscription = await feed.subscribe("slow", async () => { entered(); await new Promise<void>((resolve) => { release = resolve; }); throw new Error("interrupted"); });
+    const delivery = feed.deliver([lambdaRecord()]);
+    await inside;
+    const stopping = subscription.stop();
+    release();
+    await stopping;
+    await expect(delivery).rejects.toBeInstanceOf(ConsumerNotReadyError);
+  });
+
   it("feeds every write of the store through the stream, and nothing for a write that changed nothing", async () => {
     const world = dynamoWorld();
     const seen: DocumentChange[] = [];
-    await world.feed.subscribe("suite", async (batch) => void seen.push(...batch));
+    await world.store.changes!.subscribe("suite", async (batch) => void seen.push(...batch));
     await world.store.put({ item: { pk: PK, sk: "S", v: 1 } });
     await world.store.put({ item: { pk: PK, sk: "S", v: 1 } });
     await world.store.update({ key: { pk: PK, sk: "S" }, ops: [change.set("v", 2)] });

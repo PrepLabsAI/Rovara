@@ -164,6 +164,21 @@ export function runDocumentStoreConformance(name: string, harness: DocumentStore
         await rejects(store.put({ item: doc(A, "huge", { huge: "x".repeat(DOCUMENT_STORE_LIMITS.maxDocumentBytes + 1) }) }));
       }));
 
+      it("answers a document under the size cap that the store's own size rules refuse with invalid_request, and stores nothing", () => withStore(harness, async ({ store }) => {
+        // About 280 KB as compact JSON, inside the port's cap. A store that measures size its own way (DynamoDB: a list element costs
+        // about 3 bytes for a one-digit number) may refuse it; if it does, the refusal is the caller's `invalid_request`, never a fault.
+        const dense = Array.from({ length: 140_000 }, () => 5);
+        expect(JSON.stringify(doc(A, "dense", { dense })).length).toBeLessThan(DOCUMENT_STORE_LIMITS.maxDocumentBytes);
+        try {
+          expect((await store.put({ item: doc(A, "dense", { dense }) })).applied).toBe(true);
+          expect(((await store.get({ pk: A, sk: "dense" }))!.dense as number[]).length).toBe(dense.length);
+        } catch (error) {
+          expect(error).toBeInstanceOf(DocumentStoreError);
+          expect((error as DocumentStoreError).code).toBe("invalid_request");
+          expect(await store.get({ pk: A, sk: "dense" })).toBeUndefined();
+        }
+      }));
+
       it("accepts nesting up to the depth limit and refuses deeper", () => withStore(harness, async ({ store }) => {
         const nest = (levels: number): StoredDocument[string] => (levels === 0 ? "leaf" : { next: nest(levels - 1) });
         expect((await store.put({ item: doc(A, "ok", { tree: nest(DOCUMENT_STORE_LIMITS.maxDepth - 2) }) })).applied).toBe(true);
