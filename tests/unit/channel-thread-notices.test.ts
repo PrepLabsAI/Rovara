@@ -10,7 +10,7 @@ import { createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } f
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import {
-  bindChannelSpace, channelThreadHandler, createChannelSink, decisionRefusalWords, issueChannelLinkCode, linkedPerson, readApprovalCard, recordTaskThread, redeemChannelLinkCode, threadFollows, cardKey,
+  bindChannelSpace, channelThreadHandler, createChannelSink, decisionRefusalWords, planCardPosted, issueChannelLinkCode, linkedPerson, readApprovalCard, recordTaskThread, redeemChannelLinkCode, threadFollows, cardKey,
   type ChannelCompanyOf, type ChannelMemberRule,
 } from "../../packages/broker/src/core/channel/index.js";
 import { createDocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
@@ -478,5 +478,35 @@ describe("from a session change to the card", () => {
     // A task the thread follows that ended closed gets its `closed` milestone as well.
     await onChange(changeOf(TASK, SESSION, "closed", true));
     expect((await w.store.query({ pk: `DEVTASK#${TASK}`, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#closed" } })).items).toHaveLength(1);
+  });
+});
+
+describe("the reminder after a plan's card", () => {
+  const sessionOf = (org: OrgId = ORG) => ({ orgId: org, sessionId: SESSION, subject: { kind: "task", taskId: TASK } }) as never;
+
+  it("says a plan is carded only once its card for this revision was sent, and not for a revised plan, another company or a task that waits for something else", async () => {
+    const w = await world({ risk: "low" });
+    const carded = planCardPosted({ store: w.store });
+    expect(await carded(sessionOf())).toBe(false);
+    await w.handler.on(milestone("plan_ready"));
+    expect(await carded(sessionOf())).toBe(true);
+    expect(await carded(sessionOf(OTHER))).toBe(false);
+    expect(await carded({ orgId: ORG, sessionId: SESSION, subject: { kind: "chain" } } as never)).toBe(false);
+    // The plan was revised after the card: that plan has no card yet.
+    const before = await workflowOf(w);
+    await w.store.update({ key: workflowTaskKey(TASK), ops: [change.set("workflow", JSON.parse(JSON.stringify({ ...before, revision: before.revision + 1, artifacts: [...before.artifacts, { ...before.artifacts.at(-1)!, id: "plan-v2", version: 2, sha256: DIGEST_2 }] })) as JsonValue)] });
+    expect(await carded(sessionOf())).toBe(false);
+    // Not waiting on a plan any more.
+    await w.store.update({ key: workflowTaskKey(TASK), ops: [change.set("workflow", JSON.parse(JSON.stringify(before)) as JsonValue)] });
+    expect(await carded(sessionOf())).toBe(true);
+    await w.store.update({ key: workflowTaskKey(TASK), ops: [change.set("closedAt", "2026-11-12T11:00:00.000Z")] });
+    expect(await carded(sessionOf())).toBe(false);
+  });
+
+  it("a card whose send failed is not a card: the reminder is still sent", async () => {
+    const w = await world({ risk: "low" });
+    w.adapter.deliver = async () => { throw new Error("down"); };
+    await expect(w.handler.on(milestone("plan_ready"))).rejects.toThrow("down");
+    expect(await planCardPosted({ store: w.store })(sessionOf())).toBe(false);
   });
 });

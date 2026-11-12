@@ -343,6 +343,45 @@ describe("followers, the conversation a task was started from, and the footer", 
     expect(quiet.delivered).toHaveLength(1);
   });
 
+  it("skips the thread's reminder for a plan that already got its card, and only for that: the places the person chose and every other notice still get theirs", async () => {
+    const started: ConversationRef = { channel: "otherchat", tenant: "team1", space: "room1", thread: "main" };
+    const thread = async (_org: OrgId, sessionId: string) => (sessionId === SESSION ? { conversation: started, personId: OWNER_ID } : undefined);
+    const setup = async (move: typeof needsYou) => {
+      const w = await move();
+      const quiet = new FakeChannelAdapter();
+      w.registry.register("channel", "otherchat", quiet);
+      return { w, quiet };
+    };
+    // A carded plan: the thread is not told again; the chosen place is.
+    const carded = await setup(needsYou);
+    await carded.w.prefs([target()]);
+    const asked: string[] = [];
+    await carded.w.deliver({ thread, planCarded: async (session: { sessionId: string }) => { asked.push(session.sessionId); return true; } });
+    expect(asked).toEqual([SESSION]);
+    expect(carded.quiet.delivered).toEqual([]);
+    expect(carded.w.adapter.delivered).toHaveLength(1);
+    expect(await carded.w.pending()).toHaveLength(0);
+    // A plan with no card, and a check that fails: the thread is told.
+    for (const planCarded of [async () => false, async () => { throw new Error("store down"); }]) {
+      const open = await setup(needsYou);
+      await open.w.prefs([target()]);
+      await open.w.deliver({ thread, planCarded });
+      expect(open.quiet.delivered).toHaveLength(1);
+      expect(open.w.adapter.delivered).toHaveLength(1);
+    }
+    // Not asked, and not skipped, for a notice that is not a wait: failed and done still go to the thread.
+    const failed = await setup(async () => {
+      const w = await world();
+      await w.move({});
+      await w.move({ workflow: undefined, runStatus: "FAILED", failureCategory: "timed_out" });
+      return w;
+    });
+    let questions = 0;
+    await failed.w.deliver({ thread, planCarded: async () => { questions += 1; return true; } });
+    expect(questions).toBe(0);
+    expect(failed.quiet.delivered).toHaveLength(1);
+  });
+
   it("adds the footer after the list and keeps it whole when the text is cut", async () => {
     const w = await needsYou();
     await w.prefs([target()]);

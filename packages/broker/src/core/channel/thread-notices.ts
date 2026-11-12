@@ -16,12 +16,12 @@
 import { createHash } from "node:crypto";
 import {
   INDEX_EXPIRY_ATTRIBUTE, SESSION_RETENTION_DAYS, change, orgScoped, when,
-  type ChannelEvent, type CodeMilestone, type CodeMilestoneKind, type DocumentKey, type DocumentStore, type OrgId, type RegistryView, type WorkflowSnapshot,
+  type AgentSessionRecord, type ChannelEvent, type CodeMilestone, type CodeMilestoneKind, type DocumentKey, type DocumentStore, type OrgId, type RegistryView, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { CodeMilestoneHandler } from "../milestones/milestones.js";
 import type { DecisionGate } from "../decisions/approval-gate.js";
 import { CHAT_METHOD_PREFIX } from "../decisions/strong-methods.js";
-import { WORKFLOW_DOCUMENT_KIND } from "../decisions/workflow-subject.js";
+import { WORKFLOW_DOCUMENT_KIND, waitingDocumentDigest } from "../decisions/workflow-subject.js";
 import { taskKey } from "../task-flow/keys.js";
 import { taskSessionId } from "../sessions/create.js";
 import { inertTicketTitle } from "../ticket-updates/handler.js";
@@ -82,6 +82,26 @@ async function claim(store: Pick<DocumentStore, "put" | "get">, orgId: OrgId, se
   });
   if (written.applied) return "claimed";
   return (await store.get(claimKey(orgId, sessionId, key)))?.["state"] === "sending" ? "busy" : "done";
+}
+
+/** The key a plan's card is claimed under: one per plan revision and content (the card handler and the reminder's check agree on it). */
+const planCardKey = (revision: number, artifactDigest: string): string => `plan#${String(revision)}#${artifactDigest.slice(0, 16)}`;
+
+/**
+ * Whether the plan this task waits on now already got its approval card in the thread: the answer the needs-you reminder asks (`deliverAttention`'s `planCarded`), so the thread is not told twice. True only for a task whose plan
+ * waits for review right now and whose card for exactly that revision and content was sent; a task waiting for anything else, or a plan revised since its card, is not carded.
+ */
+export function planCardPosted(deps: { store: Pick<DocumentStore, "get"> }): (session: AgentSessionRecord) => Promise<boolean> {
+  return async (session) => {
+    if (session.subject.kind !== "task") return false;
+    const task = await deps.store.get(taskKey(session.subject.taskId));
+    const workflow = task?.["workflow"] as Partial<WorkflowSnapshot> | undefined;
+    if (task === undefined || (task["orgId"] ?? task["companyId"]) !== session.orgId || task["closedAt"] !== undefined || workflow?.stage !== "PLAN_REVIEW" || workflow.state !== "WAITING" || typeof workflow.revision !== "number") return false;
+    const digest = waitingDocumentDigest(workflow as WorkflowSnapshot);
+    if (digest === undefined) return false;
+    const sessionId = typeof task["sessionId"] === "string" ? task["sessionId"] : session.sessionId;
+    return (await deps.store.get(claimKey(session.orgId, sessionId, planCardKey(workflow.revision, digest))))?.["state"] === "done";
+  };
 }
 
 /**
@@ -157,7 +177,7 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         const found = await deps.plan.gate.requirement(orgId, WORKFLOW_DOCUMENT_KIND, taskId);
         if (found === undefined) return;
         const risk = found.risk === "low" || found.risk === "medium" ? found.risk : "high";
-        const key = `plan#${String(found.revision)}#${found.artifactDigest.slice(0, 16)}`;
+        const key = planCardKey(found.revision, found.artifactDigest);
         // Buttons only where the approvers take a decision made in this chat (and never for a high risk plan); otherwise the card is a pointer to the task page.
         const chatTakes = risk !== "high" && found.requirement.methods.includes(`${CHAT_METHOD_PREFIX}${conversation.channel}`);
         const taskUrl = deps.taskUrl?.(taskId);
