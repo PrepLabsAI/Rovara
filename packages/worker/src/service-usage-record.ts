@@ -30,8 +30,8 @@
 //
 // The record is the broker contract's `TestServicesUsageRecord` (contracts/src/test-services-usage.ts, s1-broker T1); the tests parse every record this module builds with `TestServicesUsageRecordSchema`.
 import {
-  AwsOperationNameSchema, AwsServiceKeySchema, TEST_SERVICES_AWS_USAGE_LIMITS, normaliseAwsLedgerName, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_SCHEMA_VERSION, TestServicesAwsUsageSchema, hostProblem, looksLikeSecretValue, registrableDomain,
-  type TestServicesAwsUsage, type TestServicesDependencyUsage, type TestServicesFakeUsage, type TestServicesStartFailure, type TestServicesUsageRecord,
+  AwsHeavyFunctionSchema, AwsOperationNameSchema, AwsServiceKeySchema, TEST_SERVICES_AWS_USAGE_LIMITS, normaliseAwsLedgerName, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_SCHEMA_VERSION, TestServicesAwsUsageSchema, hostProblem, looksLikeSecretValue, registrableDomain,
+  type AwsHeavyFunction, type TestServicesAwsUsage, type TestServicesDependencyUsage, type TestServicesFakeUsage, type TestServicesStartFailure, type TestServicesUsageRecord,
 } from "@agentx/contracts";
 import { readSealedDnsRecord, type SealedDnsRecord } from "./check-sandbox.js";
 import { EmulatorControlError } from "./emulator-control.js";
@@ -82,6 +82,11 @@ export interface ServiceUsageRecordInput {
    * strictly (at most 24 services, no `outOfPlan`), and only the plans it could not read the record of go to a worker that lists the feature. Default false: the narrow record, as before.
    */
   awsWide?: boolean;
+  /**
+   * The Lambda functions of the plan's own resources that Rovara local AWS does not run itself, each with a fixed reason. Written to the record only when `awsWide` is true and the ledger was read (an older broker reads the
+   * record strictly and has no slot for them); a name that is not a function name, that the redactor would change, or past the limit is left out, and a function is listed once.
+   */
+  heavyFunctions?: readonly AwsHeavyFunction[];
   /**
    * Slice 3, the ONE port for the round's fake servers: reads each fake's ledger summary, bound to the round's own fakes while they still run. Present only when the run started a fake. A summary that is missing (undefined), or a
    * port that throws or never answers within the ledger limit, gives `ledger: "unreadable"` for that fake; absent, the record has no `fakes` field at all (the earlier slices' record, byte for byte).
@@ -161,7 +166,9 @@ export async function buildServiceUsageRecord(input: ServiceUsageRecordInput): P
   }
   const dns = input.dns === undefined ? undefined : "unknown" in input.dns ? input.dns : await readSealedDnsRecord(input.dns.docker, input.dns.dnsHelperName).catch(() => undefined);
   const unknownCalls = dns === undefined ? { domains: [], otherCount: 0 } : reduceUnknownNames(dns, input.redactor);
-  const aws = input.emulator === undefined ? undefined : await readAwsUsage(input.emulator, input.redactor, input.ledgerLimitMs ?? USAGE_LEDGER_LIMIT_MS, input.awsWide === true);
+  const read = input.emulator === undefined ? undefined : await readAwsUsage(input.emulator, input.redactor, input.ledgerLimitMs ?? USAGE_LEDGER_LIMIT_MS, input.awsWide === true);
+  const heavy = input.awsWide === true && read?.ledger === "read" ? reduceHeavyFunctions(input.heavyFunctions ?? [], input.redactor) : [];
+  const aws = read !== undefined && heavy.length > 0 ? { ...read, heavyFunctions: heavy } : read;
   const fakes = input.fakes === undefined ? undefined : await readFakeUsage(input.fakes, input.planned, input.ledgerLimitMs ?? USAGE_LEDGER_LIMIT_MS);
   return { schemaVersion: TEST_SERVICES_USAGE_SCHEMA_VERSION, dependencies, unknownCalls, ...(aws === undefined ? {} : { aws }), ...(fakes === undefined ? {} : { fakes }) };
 }
@@ -218,6 +225,18 @@ export function mergeFakeUsage(earlier: readonly TestServicesFakeUsage[] | undef
 }
 
 // ---- the emulator's ledger
+
+/** The heavy functions a record may show: each passes the contract's function-name and reason rules and the redactor, a name once (the first), at most `TEST_SERVICES_AWS_USAGE_LIMITS.heavyFunctions`. */
+export function reduceHeavyFunctions(functions: readonly unknown[], redactor: ServiceRedactor): AwsHeavyFunction[] {
+  const shown = new Map<string, AwsHeavyFunction>();
+  for (const entry of functions) {
+    const parsed = AwsHeavyFunctionSchema.safeParse(entry);
+    if (!parsed.success || shown.has(parsed.data.name) || !isShowable(parsed.data.name, redactor)) continue;
+    shown.set(parsed.data.name, parsed.data);
+    if (shown.size === TEST_SERVICES_AWS_USAGE_LIMITS.heavyFunctions) break;
+  }
+  return [...shown.values()];
+}
 
 /** What the record says when the ledger cannot be read: nothing, and that it could not be read. */
 export const UNREADABLE_AWS_USAGE: TestServicesAwsUsage = { ledger: "unreadable", services: [], unsupportedOperations: [], otherCalls: 0, otherUnsupported: 0 };
@@ -331,8 +350,11 @@ export function mergeAwsUsage(earlier: TestServicesAwsUsage | undefined, later: 
   const rankedOps = [...operations.values()].sort((a, b) => b.count - a.count || (a.service + a.operation < b.service + b.operation ? -1 : 1));
   const overflowCalls = rankedServices.slice(servicesMax).reduce((sum, [, row]) => sum + row.calls, 0);
   const overflowUnsupported = rankedServices.slice(servicesMax).reduce((sum, [, row]) => sum + row.unsupported, 0) + rankedOps.slice(TEST_SERVICES_AWS_USAGE_LIMITS.unsupportedOperations).reduce((sum, row) => sum + row.count, 0);
+  // A wide merge keeps the functions of both rounds (a function once, with the later round's reason), cut at the limit; a narrow one never carries any.
+  const heavyFunctions = wide ? [...new Map([...(earlier.heavyFunctions ?? []), ...(later.heavyFunctions ?? [])].map((row) => [row.name, row] as const)).values()].slice(0, TEST_SERVICES_AWS_USAGE_LIMITS.heavyFunctions) : [];
   return {
     ledger: "read",
+    ...(heavyFunctions.length > 0 ? { heavyFunctions } : {}),
     services: rankedServices.slice(0, servicesMax).map(([service, row]) => ({ service, calls: row.calls, unsupported: row.unsupported, ...(wide && row.outOfPlan > 0 ? { outOfPlan: Math.min(row.outOfPlan, row.calls) } : {}) })),
     unsupportedOperations: rankedOps.slice(0, TEST_SERVICES_AWS_USAGE_LIMITS.unsupportedOperations),
     otherCalls: Math.min(max, earlier.otherCalls + later.otherCalls + overflowCalls),
