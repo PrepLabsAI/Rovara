@@ -57,17 +57,20 @@ describe("the packet readers of a design review on a laptop", () => {
     expect(await none.readers.readRepoFile({ repo: "app", path: "src/pay.ts", commit: COMMIT, maxBytes: 1000 })).toBeUndefined();
   });
 
-  it("withholds the sources of the tracker a task's ticket came from, its own source always, and for a tracker with no rule every source that is not a known non-tracker kind", async () => {
+  it("withholds the sources of the tracker a task's ticket came from, its own source always, and for a tracker with no rule every source that could carry a thread", async () => {
     const source = (sourceId: string, system: string | undefined, stages: string[] = ["PLAN_CRITIQUE"]): ContextSource => ({ sourceId, ...(system === undefined ? {} : { system }), stages }) as unknown as ContextSource;
-    const configured = [source("lin", "linear"), source("jir", "jira"), source("docs", "notion"), source("sc", "shortcut"), source("gl", "gitlab"), source("nokind", undefined), source("planonly", "linear", ["PLAN"])];
+    const configured = [source("lin", "linear"), source("jir", "jira"), source("docs", "notion"), source("mon", "sentry"), source("sc", "shortcut"), source("gl", "gitlab"), source("nokind", undefined), source("planonly", "linear", ["PLAN"])];
     const contextTools = { now: () => 0, sources: async () => ({ sources: configured }) } as unknown as ContextToolsDependencies;
     const deps = { companyId: "c1", projectAt: async () => ({ definition }), codeHostOf: host({}, []), contextTools };
     const withheld = async (system: string | undefined): Promise<string[]> => (await localPacketSources(deps, system === undefined ? task : { ...task, ticket: { system, id: "T-1" } }, "op1")).origin.map((item) => item.sourceId).sort();
     // A known tracker: its own sources and a source that names no kind.
     expect(await withheld("linear")).toEqual(["lin", "nokind"]);
-    // A tracker with no rule: its OWN source is withheld, and so is every source that is not a known non-tracker kind; the documents source is still read.
-    expect(await withheld("shortcut")).toEqual(["gl", "jir", "lin", "nokind", "sc"]);
-    expect(await withheld("gitlab")).toEqual(["gl", "jir", "lin", "nokind", "sc"]);
+    // A tracker with no rule: its OWN source is withheld, and so is every source that could hold or mirror a thread (a documents source included); only the monitor is still read.
+    expect(await withheld("shortcut")).toEqual(["docs", "gl", "jir", "lin", "nokind", "sc"]);
+    expect(await withheld("gitlab")).toEqual(["docs", "gl", "jir", "lin", "nokind", "sc"]);
+    // A ticket from a documents tool withholds its own source; one from a monitor that keeps tickets withholds that monitor's source too, though a monitor is otherwise read.
+    expect(await withheld("notion")).toContain("docs");
+    expect(await withheld("sentry")).toContain("mon");
     expect(await withheld("GitLab")).toContain("gl");
     // A task no ticket started withholds nothing.
     expect(await withheld(undefined)).toEqual([]);

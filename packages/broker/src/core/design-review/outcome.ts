@@ -44,10 +44,13 @@ export function roundRecordPortsOf(deps: TaskFlowDeps, runtime: DesignReviewRunt
   };
 }
 
+/** What a released round adds to the review's spend: its figure, or nothing when it could not be told (never a $0 that reads as a measurement). */
+const spendOf = (spentUsd: number | undefined): { addedSpendUsd?: number } => (spentUsd === undefined ? {} : { addedSpendUsd: spentUsd });
+
 /** The step the blocked round reads as in the block's own words. */
-const blockedWith = (workflow: WorkflowSnapshot, reason: string, spentUsd: number, now: string): WorkflowSnapshot => {
+const blockedWith = (workflow: WorkflowSnapshot, reason: string, spentUsd: number | undefined, now: string): WorkflowSnapshot => {
   const blocked = blockWorkflow(workflow, reason, now);
-  return blocked.designReview === undefined ? blocked : WorkflowSnapshotSchema.parse({ ...blocked, designReview: { ...blocked.designReview, spentUsd: addDesignUsd(blocked.designReview.spentUsd, spentUsd) } });
+  return blocked.designReview === undefined || spentUsd === undefined ? blocked : WorkflowSnapshotSchema.parse({ ...blocked, designReview: { ...blocked.designReview, spentUsd: addDesignUsd(blocked.designReview.spentUsd, spentUsd) } });
 };
 
 /** The workflow after the design review's operation ended. Never throws for an end it cannot read. `release` collects the steps that remove the round's packets, for the commit that records the round . */
@@ -70,15 +73,15 @@ export async function designReviewOutcome(
     if (designArtifact === undefined || design === undefined) {
       // The design that was reviewed cannot be read back: nothing can be checked against it.
       const released = await releaseDesignReviewRound(ports, operation);
-      return closeDesignReview(workflow, { expectedRevision, outcome: "not_run", notRunReason: "inputs_unverified", addedSpendUsd: released.spentUsd, now });
+      return closeDesignReview(workflow, { expectedRevision, outcome: "not_run", notRunReason: "inputs_unverified", ...spendOf(released.spentUsd), now });
     }
     return recordDesignReviewRound(ports, { workflow, operation, design: { text: design.markdown, sha256: designArtifact.sha256 }, requirementsText: requirements?.markdown ?? "", ...(release === undefined ? {} : { release }), now });
   }
 
   // The operation ended without a result to read: what its keys cost is added to the review's total either way (a lost run still spent it), and the round is released.
   const { spentUsd } = await releaseDesignReviewRound(ports, operation);
-  if (ended.error === BUDGET_EXHAUSTED_FAILURE_MESSAGE) return closeDesignReview(workflow, { expectedRevision, outcome: "stopped_at_cap", addedSpendUsd: spentUsd, now });
+  if (ended.error === BUDGET_EXHAUSTED_FAILURE_MESSAGE) return closeDesignReview(workflow, { expectedRevision, outcome: "stopped_at_cap", ...spendOf(spentUsd), now });
   if (ended.error?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true) return blockedWith(workflow, WORKFLOW_BLOCK_REASONS.stepRuleFilesUnverified, spentUsd, now);
   if (ended.error?.includes(WORKFLOW_LEFTOVER_PROCESSES_MESSAGE) === true) return blockedWith(workflow, WORKFLOW_BLOCK_REASONS.leftoverProcesses, spentUsd, now);
-  return closeDesignReview(workflow, { expectedRevision, outcome: "not_run", notRunReason: modelUnusable(ended.error) ? "no_model_source" : ended.status === "CANCELLED" ? "cancelled" : "worker_failed", addedSpendUsd: spentUsd, now });
+  return closeDesignReview(workflow, { expectedRevision, outcome: "not_run", notRunReason: modelUnusable(ended.error) ? "no_model_source" : ended.status === "CANCELLED" ? "cancelled" : "worker_failed", ...spendOf(spentUsd), now });
 }

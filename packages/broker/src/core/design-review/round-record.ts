@@ -122,10 +122,11 @@ function parsedResult(text: string | undefined, binding: DesignReviewBinding): D
  * A design-review operation ended with no result to read (it failed, was stopped, or was lost): what its keys cost so far, the packets removed and the keys blocked and finalized. The cost is the proxy's measured spend for each slot's key;
  * a slot whose spend cannot be read is charged its key's whole budget (never under-counted). Never throws.
  */
-export async function releaseDesignReviewRound(ports: Pick<RoundRecordPorts, "table" | "keySpend" | "closeKeys" | "admission">, operation: Pick<OperationRecord, "id" | "orgId" | "designReview">): Promise<{ spentUsd: number }> {
+export async function releaseDesignReviewRound(ports: Pick<RoundRecordPorts, "table" | "keySpend" | "closeKeys" | "admission">, operation: Pick<OperationRecord, "id" | "orgId" | "designReview">): Promise<{ spentUsd: number | undefined }> {
   const orgId = operation.orgId;
   if (orgId === undefined) return { spentUsd: 0 };
-  let spentUsd = 0;
+  // Undefined: what the round spent could not be told at all (neither its keys nor its allocation could be read). The caller then records no figure rather than a $0 one.
+  let spentUsd: number | undefined = 0;
   // the keys are blocked FIRST and the spend measured after, so a request admitted in between cannot go uncounted.
   try {
     const keys = await designReviewKeyIds(ports.table, operation);
@@ -136,11 +137,12 @@ export async function releaseDesignReviewRound(ports: Pick<RoundRecordPorts, "ta
   } catch {
     // The keys could not be read: the round is charged everything its keys could have been given (the allocation's total), never nothing.
     console.log(JSON.stringify({ component: "broker", event: "design_review.spend_not_read", operationId: operation.id }));
-    spentUsd = await readSlotAllocationTotal(ports.table, { orgId, operationId: operation.id }).catch(() => undefined) ?? spentUsd;
+    spentUsd = await readSlotAllocationTotal(ports.table, { orgId, operationId: operation.id }).catch(() => undefined);
+    if (spentUsd === undefined) console.log(JSON.stringify({ component: "broker", event: "design_review.spend_unknown", operationId: operation.id }));
   }
   await releaseRoundAdmission(ports, { orgId, operationId: operation.id });
   try { await removeSlotPackets(ports.table, orgId, operation.id); } catch { console.log(JSON.stringify({ component: "broker", event: "design_review.packets_not_removed", operationId: operation.id })); }
-  return { spentUsd: Math.round(spentUsd * 1e6) / 1e6 };
+  return { spentUsd: spentUsd === undefined ? undefined : Math.round(spentUsd * 1e6) / 1e6 };
 }
 
 /**
@@ -152,7 +154,11 @@ export async function recordDesignReviewRound(ports: RoundRecordPorts, input: Ro
   const review = workflow.designReview;
   const orgId = operation.orgId;
   const parsedBinding = DesignReviewBindingSchema.safeParse(operation.designReview);
-  if (review === undefined || orgId === undefined || !parsedBinding.success) return closeDesignReview(workflow, { expectedRevision: workflow.revision, outcome: "not_run", notRunReason: "worker_failed", now: input.now });
+  if (review === undefined || orgId === undefined || !parsedBinding.success) {
+    // Nothing of this round can be read, but its hold can still be given back (the allocation is found by the operation alone).
+    if (orgId !== undefined) await releaseRoundAdmission(ports, { orgId, operationId: operation.id });
+    return closeDesignReview(workflow, { expectedRevision: workflow.revision, outcome: "not_run", notRunReason: "worker_failed", now: input.now });
+  }
   const binding = parsedBinding.data;
   const keys = await designReviewKeyIds(ports.table, operation);
   const allKeyIds = [...new Set([...keys.bySlot.values(), ...keys.askedAgain.values()])];
