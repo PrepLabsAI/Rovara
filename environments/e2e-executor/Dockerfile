@@ -21,6 +21,7 @@ COPY packages/orchestrator/package.json packages/orchestrator/package.json
 COPY packages/broker/package.json packages/broker/package.json
 COPY packages/local-adapters/package.json packages/local-adapters/package.json
 COPY packages/aws-adapters/package.json packages/aws-adapters/package.json
+COPY packages/testing/package.json packages/testing/package.json
 COPY packages/slack-service/package.json packages/slack-service/package.json
 COPY upstream/e2e-0.20.0.tgz upstream/e2e-0.20.0.tgz
 COPY infra/package.json infra/package.json
