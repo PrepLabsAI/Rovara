@@ -56,10 +56,11 @@ const ORIGIN_SYSTEMS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * The kinds of source that are known NOT to hold tickets (documents, knowledge bases, monitoring). Only these are read for a task whose ticket came from a tracker Rovara has no rule for: every other source, and one that names
- * no kind, may be that tracker under another name, so it is withheld (fail closed). Chat systems are refused by the allowlist on their own.
+ * The kinds of source that clearly cannot hold or mirror a ticket thread: error and metrics monitors, whose items are events and graphs, not people's threads. Only these are read for a task whose ticket came from a
+ * tracker Rovara has no rule for. Anything a person can write a thread in, or copy one into (documents, wikis, drives, incident tools with their own comments), may be that tracker or carry its thread, so it is withheld,
+ * and so is a source that names no kind (fail closed). A kind joins this list only when it cannot carry a person's words at all. Chat systems are refused by the allowlist on their own.
  */
-export const NON_TRACKER_SOURCE_SYSTEMS: readonly string[] = ["notion", "confluence", "google_drive", "gdrive", "sharepoint", "onedrive", "dropbox", "box", "wiki", "docs", "sentry", "datadog", "grafana", "pagerduty", "newrelic", "honeycomb", "figma"];
+export const NON_TRACKER_SOURCE_SYSTEMS: readonly string[] = ["sentry", "datadog", "grafana", "newrelic", "honeycomb"];
 
 /** The origin key a ticket's tracker has in the rule above (`linear`, `jira`, `github_issue`), or undefined for a tracker Rovara has no rule for. */
 const TICKET_ORIGINS: Readonly<Record<string, string>> = { linear: "linear", jira: "jira", github: "github_issue", github_issues: "github_issue" };

@@ -30,7 +30,7 @@ export async function closeEndedCheck(table: RoundTable, workflow: WorkflowSnaps
   const binding = DesignReviewBindingSchema.safeParse(operation.designReview);
   const { spentUsd } = !binding.success || operation.orgId === undefined ? { spentUsd: 0 }
     : await releaseDesignReviewRound({ table, keySpend: async () => undefined, closeKeys: async () => undefined }, { id: operation.id, orgId: operation.orgId, designReview: binding.data });
-  return closeDesignReview(workflow, { expectedRevision: workflow.revision, outcome: "not_run", notRunReason: "worker_failed", addedSpendUsd: spentUsd, now });
+  return closeDesignReview(workflow, { expectedRevision: workflow.revision, outcome: "not_run", notRunReason: "worker_failed", ...(spentUsd === undefined ? {} : { addedSpendUsd: spentUsd }), now });
 }
 
 /**
