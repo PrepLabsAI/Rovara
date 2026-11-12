@@ -18,6 +18,15 @@ export function localClock(nowMs: number, timeZone: string | undefined): { day: 
   return { day: `${part("year")}-${part("month")}-${part("day")}`, minute: (Number(part("hour")) % 24) * 60 + Number(part("minute")) };
 }
 
+/**
+ * The calendar day before a local `YYYY-MM-DD`, counted on the calendar itself: a day with a daylight-saving change is 23 or 25 hours long, so stepping back from the wall clock's minutes can land in the
+ * same day (the fall-back night repeats an hour).
+ */
+export function dayBefore(day: string): string {
+  const [year, month, date] = day.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(year, month - 1, date - 1)).toISOString().slice(0, 10);
+}
+
 /** Whether a minute of the day falls inside quiet hours: from the start (included) to the end (not included); a span whose end is before its start crosses midnight. */
 export function inQuietHours(quiet: QuietHours | undefined, minute: number): boolean {
   if (quiet === undefined) return false;
@@ -39,8 +48,7 @@ export function holdOf(prefs: Pick<NotifyPrefs, "quietHours" | "timeZone" | "dig
   if (prefs.digestAt === undefined) return "none";
   const passedToday = minute >= minutesOf(prefs.digestAt);
   if (lastDigestDay === undefined) return passedToday ? "none" : "digest";
-  // The instant just before local midnight is yesterday on the person's clock (whatever a daylight-saving change did to the day's length).
-  const slot = passedToday ? day : localClock(nowMs - (minute + 1) * 60_000, prefs.timeZone).day;
+  const slot = passedToday ? day : dayBefore(day);
   return lastDigestDay >= slot ? "digest" : "none";
 }
 
@@ -48,5 +56,5 @@ export function holdOf(prefs: Pick<NotifyPrefs, "quietHours" | "timeZone" | "dig
 export function digestSlotDay(prefs: Pick<NotifyPrefs, "timeZone" | "digestAt">, nowMs: number): string {
   const { day, minute } = localClock(nowMs, prefs.timeZone);
   if (prefs.digestAt === undefined || minute >= minutesOf(prefs.digestAt)) return day;
-  return localClock(nowMs - (minute + 1) * 60_000, prefs.timeZone).day;
+  return dayBefore(day);
 }

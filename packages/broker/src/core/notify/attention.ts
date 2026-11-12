@@ -11,11 +11,11 @@
 //
 // A TARGET is a conversation on a channel the person chose (`NotifyTarget`), or their email (`EMAIL_TARGET`) when they chose it and it can be sent (`prefs.ts`). The event id is derived from the batch it carries,
 // so a retry of the same batch is the same event and the adapter drops a repeat (the channel protocol: `event.id` is stable across retries); an email is claimed on the rows before it is sent, so it goes at most
-// once. A message holds the task's title, its status sentence (fixed words) and a link supplied by the surface that serves the task page. Never task content beyond that, never a secret. Logs carry fixed codes
-// and counts only.
+// once. That is at most once, not exactly once: when the transport took an email but its answer was lost, or giving a failed claim back fails, that email is not sent again. A message holds the task's title, its
+// status sentence (fixed words) and a link supplied by the surface that serves the task page. Never task content beyond that, never a secret. Logs carry fixed codes and counts only.
 import { createHash } from "node:crypto";
 import {
-  EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
+  DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
   sessionTaskStatus, taskStatusText, when,
   type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type ConversationRef, type DocumentStore, type EmailSender, type OrgId, type RealtimeEntry, type RealtimePublisher, type RegistryView,
   type SessionSummary, type StoredDocument,
@@ -227,6 +227,21 @@ function markerOf(item: StoredDocument | undefined): SentMarker {
   };
 }
 
+/**
+ * Claims rows for one email in ONE transaction (all or none), at most `DOCUMENT_STORE_LIMITS.maxTransactItems` rows, oldest first; the rest wait for the next email. A row that changed since it was read (a later
+ * change replaced it, or it went) is left out and the others are claimed again, once. Answers the rows claimed (empty when none could be), or throws when the store fails (nothing is claimed then).
+ */
+async function claimEmailRows<T extends { row: PendingRow }>(store: Pick<DocumentStore, "transact">, owed: readonly T[], nowMs: number): Promise<T[]> {
+  let rows = [...owed].sort((a, b) => a.row.at.localeCompare(b.row.at)).slice(0, DOCUMENT_STORE_LIMITS.maxTransactItems);
+  for (let round = 0; round < 2 && rows.length > 0; round += 1) {
+    const result = await store.transact(rows.map(({ row }) => ({ kind: "update" as const, key: row.key, ops: [change.set("emailClaimed", nowMs)], condition: when.and(when.present(), when.eq("at", row.at)) })));
+    if (result.applied) return rows;
+    const failed = new Set(result.failed);
+    rows = rows.filter((_entry, index) => !failed.has(index));
+  }
+  return [];
+}
+
 /** The email point's one sender, or undefined when none is registered. */
 function emailSenderOf(registry: Pick<RegistryView, "get" | "names">): EmailSender | undefined {
   const names = registry.names("email");
@@ -346,7 +361,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       for (const { row } of owed) await deps.store.update({ key: row.key, ops, condition: when.and(when.present(), when.eq("at", row.at)) });
     };
     for (const tkey of routes) {
-      const owed = current.filter(({ row }) => appliesTo(tkey, row) && !row.done.has(tkey));
+      let owed = current.filter(({ row }) => appliesTo(tkey, row) && !row.done.has(tkey));
       if (owed.length === 0) continue;
       const target = targets.find((entry) => targetKey(entry) === tkey);
       const adapter: ChannelAdapter | undefined = target === undefined ? undefined : deps.registry.get("channel", target.channel);
@@ -358,14 +373,18 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       }
       if ((next.retryAt[tkey] ?? 0) > nowMs) continue;
       attempted = true;
+      if (tkey === EMAIL_TARGET) {
+        // Claimed before the send, so an email is sent at most once. The claim is one transaction over the rows it covers: either every row is claimed or none is, so a claim that fails part-way never
+        // leaves a row marked as emailed that no email carried. A claim that cannot be written sends nothing now (tried again later).
+        const claimed = await claimEmailRows(deps.store, owed, nowMs).catch((error: unknown) => { log({ event: "attention.claim_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }); return undefined; });
+        if (claimed === undefined || claimed.length === 0) continue;
+        owed = claimed;
+      }
       const lines = [...new Map(owed.map(({ row, line }) => [row.sessionId, line])).values()];
       const shown = lines.slice(0, NOTIFY_ITEMS_MAX), more = lines.length - shown.length;
       const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done");
       let ok = false, refused = false;
       if (tkey === EMAIL_TARGET) {
-        // Claimed before the send, so an email is sent at most once: a claim that cannot be written sends nothing now (tried again later).
-        try { await setOnRows(owed, [change.set("emailClaimed", nowMs)]); }
-        catch (error) { log({ event: "attention.claim_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }); continue; }
         const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : "attention", deps.emailLinks);
         try {
           await email!.send({ companyId: orgId, purpose: "attention", to: address!, subject: mail.subject, text: mail.text, ...(mail.unsubscribeUrl === undefined ? {} : { unsubscribeUrl: mail.unsubscribeUrl }), deadline: Date.now() + ATTENTION_SEND_TIMEOUT_MS }); // the port's deadline is on the real clock, whatever clock the sweep reads
@@ -398,7 +417,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
         if (tkey === EMAIL_TARGET) await setOnRows(owed, [change.set("emailSent", true)]).catch((error: unknown) => log({ event: "attention.mark_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }));
       } else if (tkey === EMAIL_TARGET) {
         // Not sent: the claim is given back so the retry sends it. If even that fails it is never sent twice: at most once, logged.
-        await setOnRows(owed, [change.remove("emailClaimed")]).catch((error: unknown) => log({ event: "attention.unclaim_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }));
+        await deps.store.transact(owed.map(({ row }) => ({ kind: "update" as const, key: row.key, ops: [change.remove("emailClaimed")], condition: when.present() }))).catch((error: unknown) => log({ event: "attention.unclaim_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }));
       }
       if (ok) { sentSomething = true; if (tkey === EMAIL_TARGET) outcome.emails += 1; else outcome.sent += 1; }
       else if (gaveUp) { outcome.gaveUp += 1; log({ event: "attention.target_gave_up", channel: tkey === EMAIL_TARGET ? EMAIL_TARGET : target!.channel }); }
