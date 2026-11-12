@@ -37,7 +37,7 @@ function world(options: { isMember?: ChannelMemberRule } = {}) {
   const logs: Array<Record<string, unknown>> = [];
   // The sink's own `orgId` is a third company: with `companyOf`, nothing may fall back to it.
   const sink = createChannelSink({
-    channel: "examplechat", adapter, store, orgId: "org_zzzzzzzzzzzzzzzzzzzz" as OrgId, companyOf, now, work, linkWords: (code) => `Link with ${code}.`, log: (entry) => logs.push(entry),
+    channel: "examplechat", adapter, store, orgId: "org_zzzzzzzzzzzzzzzzzzzz", companyOf, now, work, linkWords: (code) => `Link with ${code}.`, log: (entry) => logs.push(entry),
     ...(options.isMember === undefined ? {} : { isMember: options.isMember }),
   });
   const deps = (orgId: OrgId) => ({ store, orgId, now });

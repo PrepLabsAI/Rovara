@@ -373,7 +373,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       const adapter: ChannelAdapter | undefined = target === undefined ? undefined : deps.registry.get("channel", target.channel);
       // A channel nobody serves, or one that cannot message first (for a target the person chose; a conversation of a start is a reply), will not succeed by trying again: it is counted as unreachable and marked, never retried.
       const otherCompany = target !== undefined && !(await tenantIsCompanys(deps.companyOf, orgId, target.channel, target.conversation.tenant));
-      if (otherCompany) log({ event: "attention.other_company", channel: target!.channel });
+      if (otherCompany) log({ event: "attention.other_company", channel: target.channel });
       if (tkey !== EMAIL_TARGET && (adapter === undefined || otherCompany || (!adapter.capabilities.proactive && chosen.has(tkey)))) {
         outcome.unreachable += 1;
         for (const { row } of owed) row.done.add(tkey);

@@ -113,7 +113,7 @@ describe("what Rovara says", () => {
     expect(privately.ephemeralTo).toBe(PERSON);
     expect(renderEvent({ ...base, type: "done", data: {} }, 3_000)).toBeUndefined();
     expect(renderEvent({ ...base, type: "done", data: { text: "Finished." } }, 3_000)).toEqual({ text: "Finished." });
-    const { conversation: _conversation, ...rest } = base;
+    const rest = { version: base.version, id: base.id, channel: base.channel, createdAt: base.createdAt };
     expect(renderEvent({ ...rest, type: "direct", to: { channel: "slack", tenant: TEAM, userId: PERSON }, data: { text: "Hi" } }, 3_000)).toBeUndefined();
   });
 
