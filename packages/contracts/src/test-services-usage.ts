@@ -8,6 +8,7 @@ import { z } from "zod";
 import { TestEnvDependencyIdSchema } from "./test-env-dependency.js";
 import { RelativeWorkspacePathSchema } from "./project.js";
 import { TestServiceHostSchema, looksLikeSecretValue } from "./test-services-shared.js";
+import { awsServiceKeyOrSelf } from "./aws-emulator-service-keys.js";
 
 export const TEST_SERVICES_USAGE_SCHEMA_VERSION = 1;
 /** The key under which a candidate check's (a preparation's) usage record rides in its result. */
@@ -52,7 +53,18 @@ export type TestServicesDependencyUsage = z.infer<typeof TestServicesDependencyU
 export const AwsServiceKeySchema = z.string().regex(/^[a-z][a-z0-9-]{1,39}$/u);
 /** An AWS operation name (`PutObject`, `SendMessage`): an upper camel case word. A path, a method or any other text the program chose is not one. */
 export const AwsOperationNameSchema = z.string().regex(/^[A-Z][A-Za-z0-9]{2,63}$/u).refine((name) => !looksLikeSecretValue(name) && !looksLikeSecretValue(name.toUpperCase()), { message: "an operation name, not a secret" });
-export const TEST_SERVICES_AWS_USAGE_LIMITS = { services: 24, unsupportedOperations: 30 } as const;
+export const TEST_SERVICES_AWS_USAGE_LIMITS = { services: 64, unsupportedOperations: 30 } as const;
+
+/**
+ * One service of the ledger. `outOfPlan` is how many of its `calls` were to a service the plan did not name (the emulator serves every service, so the code can call one the plan left out): all of them or none.
+ * Absent on a record made before the field existed (the same as 0 when the service is in the plan; the verdict also compares the plan itself).
+ */
+export const AwsServiceUsageSchema = z
+  .object({ service: AwsServiceKeySchema, calls: z.number().int().min(1).max(TEST_SERVICES_USAGE_LIMITS.count), unsupported: Count, outOfPlan: Count.optional() })
+  .strict()
+  .superRefine((entry, context) => {
+    if (entry.outOfPlan !== undefined && entry.outOfPlan > entry.calls) context.addIssue({ code: "custom", path: ["outOfPlan"], message: "out-of-plan calls are some of the calls" });
+  });
 
 /**
  * Slice 2: what Rovara local AWS's request ledger said about a run (`GET /_rovara/ledger/summary`): calls per AWS service, and the operations the emulator does not offer. Present only when an emulator ran. Counts follow the
@@ -66,7 +78,7 @@ export const TestServicesAwsUsageSchema = z
      * limits (the emulator's counters are not capped; the reading side is), which is a failure of its own, not a quiet one.
      */
     ledger: z.enum(["read", "unreadable", "flooded"]),
-    services: z.array(z.object({ service: AwsServiceKeySchema, calls: z.number().int().min(1).max(TEST_SERVICES_USAGE_LIMITS.count), unsupported: Count }).strict()).max(TEST_SERVICES_AWS_USAGE_LIMITS.services),
+    services: z.array(AwsServiceUsageSchema).max(TEST_SERVICES_AWS_USAGE_LIMITS.services),
     unsupportedOperations: z.array(z.object({ service: AwsServiceKeySchema, operation: AwsOperationNameSchema, count: z.number().int().min(1).max(TEST_SERVICES_USAGE_LIMITS.count) }).strict()).max(TEST_SERVICES_AWS_USAGE_LIMITS.unsupportedOperations),
     /** Calls to a service that is not shown (an unknown key, or past the list). */
     otherCalls: Count,
@@ -168,7 +180,9 @@ export function testServicesAwsUsageVerdict(usage: TestServicesUsageRecord | und
   const aws = usage?.aws;
   if (aws === undefined || aws.ledger === "unreadable") return { ok: false, problem: "not_checked", services: [] };
   if (aws.ledger === "flooded") return { ok: false, problem: "flooded", services: [] };
-  const outside = aws.services.filter((entry) => !planned.includes(entry.service)).map((entry) => entry.service);
+  // A legacy id and its key are one service, so a plan that spells it one way and a ledger that spells it the other agree.
+  const plannedKeys = new Set(planned.map(awsServiceKeyOrSelf));
+  const outside = aws.services.filter((entry) => !plannedKeys.has(awsServiceKeyOrSelf(entry.service)) || (entry.outOfPlan ?? 0) > 0).map((entry) => entry.service);
   if (outside.length > 0 || aws.otherCalls > 0) return { ok: false, problem: "out_of_plan", services: outside };
   if (aws.services.some((entry) => entry.unsupported > 0) || aws.unsupportedOperations.length > 0 || aws.otherUnsupported > 0) return { ok: false, problem: "unsupported", services: [] };
   return { ok: true };

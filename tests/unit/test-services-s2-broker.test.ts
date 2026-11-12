@@ -162,13 +162,14 @@ describe("the plan of Rovara local AWS", () => {
     expect(TaskDependencyPlanSchema.safeParse({ ...local, catalogId: "local-aws@r1" }).success).toBe(false);
   });
 
-  it("wire: aws.services is exactly S3, SQS and DynamoDB (at most 3), and a region is a short region name", () => {
+  it("wire: aws.services is any service Rovara local AWS serves (at most 64, each once), and a region is a short region name", () => {
     const [, s3] = (plansOf([postgres(), aws("s3", { connect: AWS_CONNECT })]) as { ok: true; dependencies: Array<Record<string, unknown>> }).dependencies;
     const withAws = (value: unknown) => TaskDependencyPlanSchema.safeParse({ ...s3, aws: value }).success;
     expect(withAws({ services: ["s3", "sqs", "dynamodb"], region: "us-east-1" })).toBe(true);
-    expect(withAws({ services: ["s3", "sns"], region: "us-east-1" })).toBe(false);
+    expect(withAws({ services: ["s3", "sns"], region: "us-east-1" })).toBe(true);
     expect(withAws({ services: ["s3", "s3", "sqs", "dynamodb"], region: "us-east-1" })).toBe(false);
-    expect(withAws({ services: ["s3", "lambda"], region: "us-east-1" })).toBe(false);
+    expect(withAws({ services: ["s3", "lambda"], region: "us-east-1" })).toBe(true);
+    expect(withAws({ services: ["s3", "not-an-aws-service"], region: "us-east-1" })).toBe(false);
     expect(withAws({ services: [], region: "us-east-1" })).toBe(false);
     expect(TestEnvRegionSchema.safeParse("us-east-1").success).toBe(true);
     expect(TestEnvRegionSchema.safeParse(`us-${"a".repeat(40)}-1`).success).toBe(false);
