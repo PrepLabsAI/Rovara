@@ -686,6 +686,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await flow.relayOnce().catch(logFailure("local_app.relay_failed"));
     await flow.dispatchOnce({ maxMessages: 10 }).catch(logFailure("local_app.dispatch_failed"));
     await flow.sweepOnce().catch(logFailure("local_app.sweep_failed"));
+    await flow.sweepRunsOnce().catch(logFailure("local_app.run_watch_failed"));
     await milestones.deliverDue().catch(logFailure("local_app.milestones_failed"));
     await designReview.sweepWaits().catch(logFailure("local_app.design_wait_sweep_failed"));
     await automation.tick().catch(logFailure("local_app.automation_failed"));

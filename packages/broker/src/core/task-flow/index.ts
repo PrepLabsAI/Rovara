@@ -17,6 +17,8 @@ export * from "./reads.js";
 export * from "./records.js";
 export * from "./results.js";
 export * from "./routes.js";
+export * from "./run-watch-rows.js";
+export * from "./run-watch.js";
 export * from "./stage-machine.js";
 export * from "./start.js";
 export * from "./support.js";
