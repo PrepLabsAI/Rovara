@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { formOfSlackModal, slackModalOf } from "../../packages/contracts/src/index.js";
 // A Slack Web API double that refuses what Slack refuses.
 // Limits are Slack's documented ones, plus the project's own brief limit on thread posts.
 import { SlackPostError } from "../../packages/broker/src/aws/slack-web.js";
@@ -258,6 +260,10 @@ export class StrictSlackWeb {
     }
     if (view.private_metadata !== undefined && (typeof view.private_metadata !== "string" || view.private_metadata.length > SLACK_LIMITS.privateMetadata)) refuse(method, "invalid_arguments");
     validateBlocks(method, view.blocks, SLACK_LIMITS.modalBlocks, "modal");
+    // Spec 062 Phase 7c3b: every modal the core opens must read as a form that renders back to itself, so the Slack
+    // adapter shows the same modal when the core opens it through the channel API.
+    const form = formOfSlackModal(view);
+    if (form === undefined || !isDeepStrictEqual(slackModalOf(form), view)) throw new Error(`views.open: this modal does not round-trip as a channel form: ${JSON.stringify(view).slice(0, 400)}`);
     this.views.push({ triggerId, view });
   }
 

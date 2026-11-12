@@ -3,7 +3,7 @@
 // picks it up within seconds, not after the 15-minute visibility timeout.
 import { describe, expect, it } from "vitest";
 import type { SlackRequestMessage } from "../../packages/contracts/src/index.js";
-import { processGroup, runConsumer, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/consumer.js";
+import { processGroup, runConsumer, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/slack-consumer.js";
 import { TurnHandedOffError } from "../../packages/slack-service/src/interrupted-turn.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };

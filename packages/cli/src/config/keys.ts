@@ -105,6 +105,11 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   { key: "alerts.slowTurnMinutes", description: "a turn slower than this many minutes raises the SlowTurns alarm", target: parameter("slack", "SlowTurnMinutes"), defaultValue: "5", parse: wholeNumber("alerts.slowTurnMinutes", 1, 60) },
   { key: "budget.monthlyUsd", description: "the monthly AWS budget in whole US dollars; 0 for none", target: parameter("control-plane", "BudgetMonthlyUsd"), defaultValue: "0", parse: wholeNumber("budget.monthlyUsd", 0, MAX_BUDGET_USD) },
   { key: "budget.scope", description: "tag: costs tagged agentx:env for this environment; account: the whole account", target: parameter("control-plane", "BudgetScope"), defaultValue: "tag", parse: oneOf("budget.scope", ["tag", "account"]) },
+  // Spec 062: channel adapters (FR-020) and Slack through the channel API as the built-in adapter (FR-074).
+  { key: "channels.adapters", description: "enabled: administrators can register channel adapters (WhatsApp and others) and the channel API takes their signed requests; disabled: none",
+    target: parameter("control-plane", "ChannelAdapters"), defaultValue: "disabled", parse: oneOf("channels.adapters", ["enabled", "disabled"]) },
+  { key: "slack.viaChannel", description: "enabled: Slack goes through the channel API as the built-in Slack adapter; disabled: Slack's own path, as before",
+    target: parameter("control-plane", "SlackViaChannel"), defaultValue: "disabled", parse: oneOf("slack.viaChannel", ["enabled", "disabled"]) },
   { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },
 ];
 

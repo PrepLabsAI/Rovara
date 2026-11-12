@@ -7,10 +7,11 @@ import { KMSClient } from "@aws-sdk/client-kms";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
-import type { ChannelByNameRequest, ChannelInfoRequest, ChannelMembersRequest, DeveloperSignInMethod, EndDeveloperSessionsRequest, SlackAuthCheckRequest, SlackUserByEmailRequest, TaskChannelPeopleRequest, TaskPersonProofRequest } from "@agentx/contracts";
+import type { ChannelByNameRequest, ChannelInfoRequest, ChannelMembersRequest, DeveloperSignInMethod, EndDeveloperSessionsRequest, ListSignInClientsRequest, PutSignInClientRequest, RemoveSignInClientRequest, SlackAuthCheckRequest, SlackUserByEmailRequest, TaskChannelPeopleRequest, TaskPersonProofRequest } from "@agentx/contracts";
 import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
 import { createDeveloperIdentityHandler, type DeveloperIdentityConfig } from "../developer/server.js";
 import { slackDirectory } from "../developer/slack-directory.js";
+import { slackDirectoryCallFromEnvironment } from "./slack-directory-channel.js";
 import { DeveloperSignInStore, methodSince } from "../developer/store.js";
 import { kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
@@ -19,7 +20,7 @@ const SECRET_CACHE_MS = 5 * 60 * 1000;
 const SLACK_JWKS_URI = "https://slack.com/openid/connect/keys";
 
 export type DeveloperIdentityLambdaConfig = DeveloperIdentityConfig & {
-  oidcSettings?: { issuer: string; clientId: string; requiredClaim?: string; requiredValues: string[] };
+  oidcSettings?: { issuer: string; clientId: string; requiredClaim?: string; requiredValues: string[]; administrator?: { claim: string; values: string[] } };
   /** Set instead of oidcSettings when the company sign-in settings are unusable. Only that method
    * then refuses ("not finished"); Slack sign-in, keys, refresh and the invoke keep working. */
   oidcProblem?: string;
@@ -42,6 +43,27 @@ function requiredValuesFrom(text: string | undefined): string[] {
   }
   if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === "string")) throw invalid();
   return parsed.filter((value) => value !== "");
+}
+
+/**
+ * Spec 063 FR-005: who is an administrator, read from the admin client's own settings (ADMIN_OIDC_ISSUER, ADMIN_CLAIM,
+ * ADMIN_VALUES). Only when company sign-in is that same identity provider: another provider's claim of the same name
+ * means nothing here. Anything unreadable makes nobody an administrator.
+ */
+function administratorFrom(env: NodeJS.ProcessEnv, issuer: string): { administrator: { claim: string; values: string[] } } | Record<string, never> {
+  const normalized = (text: string) => text.trim().replace(/\/+$/, "");
+  const adminIssuer = env.ADMIN_OIDC_ISSUER ?? "";
+  const claim = env.ADMIN_CLAIM ?? "";
+  if (adminIssuer === "" || claim === "" || normalized(adminIssuer) !== normalized(issuer)) return {};
+  let values: unknown;
+  try {
+    values = JSON.parse(env.ADMIN_VALUES ?? "");
+  } catch {
+    return {};
+  }
+  if (!Array.isArray(values) || !values.every((value) => typeof value === "string")) return {};
+  const nonEmpty = values.filter((value) => value !== "");
+  return nonEmpty.length === 0 ? {} : { administrator: { claim, values: nonEmpty } };
 }
 
 function sinceFrom(text: string | undefined): { since: number } | Record<string, never> {
@@ -72,7 +94,7 @@ export function developerIdentityConfigFromEnvironment(env: NodeJS.ProcessEnv): 
     return problem((error as Error).message);
   }
   if (requiredValues.length > 0 && requiredClaim === "") return problem("DEVELOPER_OIDC_REQUIRED_VALUES is set but DEVELOPER_OIDC_REQUIRED_CLAIM is empty");
-  return { ...withOidc, oidcSettings: { issuer, clientId, ...(requiredClaim === "" ? {} : { requiredClaim }), requiredValues } };
+  return { ...withOidc, oidcSettings: { issuer, clientId, ...(requiredClaim === "" ? {} : { requiredClaim }), requiredValues, ...administratorFrom(env, issuer) } };
 }
 
 /** A provider an admin has not finished setting up: every call says so, with what to fix. */
@@ -174,6 +196,8 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
     },
     directory: slackDirectory({
       teamId: config.slack.teamId, botToken: async () => (await slackSecret()).botToken, fetch, now,
+      // Spec 062 Phase 7c1b: through the Slack adapter when Slack goes through the channel API.
+      ...directoryCall(secrets),
       report: (problem) => log({ event: "signin.slack_problem", ...problem }),
     }),
     now,
@@ -181,7 +205,13 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
   });
 }
 
-export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest) => {
+function directoryCall(secrets: SecretsManagerClient): { call?: NonNullable<Parameters<typeof slackDirectory>[0]["call"]> } {
+  const call = slackDirectoryCallFromEnvironment(secrets);
+  return call === undefined ? {} : { call };
+}
+
+export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
+  | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest) => {
   built ??= build(process.env);
   return built(event);
 };

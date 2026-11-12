@@ -28,8 +28,10 @@ describe("discovery (FR-001, FR-048)", () => {
     const discovery = json((await h.http(httpEvent("GET", "/v1/auth/.well-known/openid-configuration"))).body);
     expect(discovery).toMatchObject({
       issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token`, revocation_endpoint: `${ISSUER}/revoke`,
-      jwks_uri: `${ISSUER}/.well-known/jwks.json`, code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"],
-      revocation_endpoint_auth_methods_supported: ["none"], id_token_signing_alg_values_supported: ["RS256"],
+      jwks_uri: `${ISSUER}/.well-known/jwks.json`, code_challenge_methods_supported: ["S256"],
+      // Spec 063: a confidential sign-in client authenticates; the CLI stays public.
+      token_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"],
+      revocation_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"], id_token_signing_alg_values_supported: ["RS256"],
     });
     expect(json((await h.http(httpEvent("GET", "/v1/auth/.well-known/jwks.json"))).body)).toEqual(await h.signer.jwks());
   });

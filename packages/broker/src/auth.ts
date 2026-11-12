@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import {
   agentXError,
+  type ActorRef,
+  type ChannelAdapterRecord,
+  type ConversationRef,
   type SlackChannelBinding,
   type SlackRequester,
   type SlackThread,
@@ -25,6 +28,8 @@ export interface AuthenticatedIdentity {
     requesterName?: string;
     binding: SlackChannelBinding;
   };
+  /** Spec 062 Phase 4: an adapter conversation's owner; never set with `slack` or `developer`. */
+  channel?: ChannelConversation;
   /** Spec 025: a developer task's workspace owner (FR-017); never set with `slack`. */
   developer?: {
     developerId: string;
@@ -43,6 +48,16 @@ export interface AuthenticatedIdentity {
     /** Only a Slack-started task's own open thread: the chat agent may be given its read-only task view there, when it asks for task mode. */
     taskAnswer?: true;
   };
+}
+
+/** An adapter conversation on the service routes: checked against its adapter, binding and link on every call. */
+export interface ChannelConversation {
+  ref: ConversationRef;
+  actor: ActorRef;
+  projectName: string;
+  adapter: ChannelAdapterRecord;
+  /** The developer the actor is linked to, who is charged and recorded as the requester. */
+  developer: { developerId: string; provider: "slack" | "oidc" | "cloud" | "github" | "saml"; name: string; slackUserId?: string };
 }
 
 export interface JwtAuthenticatorConfig {

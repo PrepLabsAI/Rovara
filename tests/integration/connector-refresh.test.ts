@@ -4,7 +4,7 @@ import type { ConnectorCatalog, SlackRequestMessage } from "../../packages/contr
 import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-api.js";
 import { createOrchestratorRuntime } from "../../packages/orchestrator/src/orchestrator.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
-import { processSlackRequest, type ProcessorDependencies, type ThreadState, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type ThreadState, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";

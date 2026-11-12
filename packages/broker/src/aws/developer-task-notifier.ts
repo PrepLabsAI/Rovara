@@ -17,7 +17,7 @@ import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { PLAN_UNREADABLE_CATEGORIES, planCheckSummary, planUnreadableCategory } from "../developer/plan-check-summary.js";
 import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, planRevisionsUsed, type PlanSelfCheckView } from "../developer/plan-self-check.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
-import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
+import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, STOPPED_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
 import { AUTOFIX_CARD_HOLD_MS, AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
@@ -25,6 +25,7 @@ import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
 import { runTaskCanvasCloseout, type CanvasCloseoutStore, type TaskCanvasCloseoutTask } from "./developer-task-closeout.js";
+import { slackNoticeChannelFromEnvironment } from "./slack-notice-channel.js";
 import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
 import { readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "../e2e-presentation.js";
@@ -895,7 +896,8 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
     : getItem<{ id: string; kind: string; status: string; error?: string; result?: unknown }>(deps, { pk: `WORKSPACE#${notice.workspaceId}`, sk: `OPERATION#${notice.operationId}` }));
   const said = (text: string | undefined): Reply | undefined => (text === undefined ? undefined : { text });
   switch (notice.kind) {
-    case "ready": return said(READY_REPLY);
+    // Decision 134: a task its owner stopped during setup closes instead of running; the thread hears that, not "running".
+    case "ready": return said(task.stopRequest === undefined ? READY_REPLY : STOPPED_REPLY);
     case "cancelled": return said(CANCELLED_REPLY);
     case "closed": return said(CLOSED_REPLY);
     // A change a later one replaced is not said: the later notice says the current mode.
@@ -1828,9 +1830,12 @@ function createAwsNotifierHandler() {
   const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
   const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
     .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
+  // Spec 062 Phase 7c: with SlackViaChannel on, every post, edit and Canvas goes through the Slack adapter's commands.
+  const viaChannel = slackNoticeChannelFromEnvironment(secretsManager);
   const closeoutStore = createCanvasCloseoutStore({ documentClient, s3,
     tableName: () => requiredEnvironment("STATE_TABLE_NAME"), bucketName: () => requiredEnvironment("ARTIFACT_BUCKET_NAME"),
     async deleteCanvas(canvasId) {
+      if (viaChannel !== undefined) return viaChannel.deleteCanvas(canvasId);
       const token = await secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
         .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken);
       return deleteTaskPlanCanvas(token, canvasId);
@@ -1859,7 +1864,7 @@ function createAwsNotifierHandler() {
     async retryLater(receiptHandle, seconds) {
       await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl(), ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
     },
-    post: slack.post,
+    post: viaChannel?.post ?? slack.post,
     ...(reviewUrlBase === undefined ? {} : { reviewUrlBase }),
     async readArtifact(key) {
       const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
@@ -1867,12 +1872,13 @@ function createAwsNotifierHandler() {
       return response.Body.transformToString("utf8");
     },
     createPlanCanvas(input, onCreated) {
+      if (viaChannel !== undefined) return viaChannel.createPlanCanvas(input, onCreated);
       return cachedBotToken(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
         .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken))((token) => createTaskPlanCanvas(token, input, fetch, onCreated));
     },
     closeTaskCanvases: canvasCloseoutService(closeoutStore),
-    update: slack.update,
-    postEphemeral: slack.postEphemeral,
+    update: viaChannel?.update ?? slack.update,
+    postEphemeral: viaChannel?.postEphemeral ?? slack.postEphemeral,
     now: Date.now,
     log: (entry) => console.log(JSON.stringify({ component: "developer-task-notifier", ...entry })),
     deliveryFailed: () => console.log(JSON.stringify({

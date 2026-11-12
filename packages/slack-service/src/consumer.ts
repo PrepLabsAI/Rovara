@@ -1,4 +1,4 @@
-import { SlackPageCommentMessageSchema, readSlackRequestMessage, type SlackPageCommentMessage, type SlackRequestMessage, type TaskQuestionRoute } from "@agentx/contracts";
+import type { TaskQuestionRoute } from "@agentx/contracts";
 import { HANDOFF_MILLISECONDS, TurnHandedOffError } from "./interrupted-turn.js";
 import type { ServiceLog } from "./processor.js";
 
@@ -13,7 +13,7 @@ export interface QueueMessage {
   route?: "suggest";
   /** A task-thread mention, already saved as a thread note, sent to be answered if it is a question. */
   taskQuestion?: TaskQuestionRoute;
-  /** Spec 061 slice 2: a task page comment for AgentX to answer (`SlackPageCommentMessageSchema` body), never a chat request. */
+  /** Spec 061 slice 2: a task page comment for AgentX to answer, never a chat request. */
   pageComment?: true;
 }
 
@@ -23,7 +23,9 @@ export interface QueueClient {
   extendVisibility(receiptHandle: string, seconds: number): Promise<void>;
 }
 
-export interface ConsumerOptions {
+export interface ConsumerOptions<M> {
+  /** Spec 062: reads a queued body (parsed JSON); undefined discards the message. */
+  read: (value: unknown) => M | undefined;
   concurrency: number;
   maxReceiveCount: number;
   visibilitySeconds: number;
@@ -37,9 +39,13 @@ export interface ConsumerOptions {
   log?: ServiceLog;
 }
 
-export type PageCommentHandler = (message: SlackPageCommentMessage, context: { handoff?: AbortSignal }) => Promise<void>;
+/** Answers a page comment message from its parsed body; it reads and checks the body itself (slack-consumer.ts). */
+export type PageCommentHandler = (body: unknown, context: { handoff?: AbortSignal }) => Promise<void>;
 
-export type RequestHandler = (message: SlackRequestMessage, context: {
+export type RequestHandler<M> = (message: M, context: RequestContext) => Promise<void>;
+
+/** What the queue runner tells a handler about the message it runs. */
+export type RequestContext = {
   finalAttempt: boolean;
   queuedBehind?: number;
   /** Task 21: route this plain request first (see QueueMessage.route). */
@@ -51,9 +57,9 @@ export type RequestHandler = (message: SlackRequestMessage, context: {
   handoff?: AbortSignal;
   /** Issue 173: calls the listener on each SQS heartbeat while this message runs, so the turn can show it is alive. */
   onHeartbeat?: (listener: () => void) => void;
-}) => Promise<void>;
+};
 
-type GroupOptions = Pick<ConsumerOptions, "maxReceiveCount" | "visibilitySeconds" | "heartbeatMilliseconds" | "pageComment"> & {
+type GroupOptions<M> = Pick<ConsumerOptions<M>, "maxReceiveCount" | "visibilitySeconds" | "heartbeatMilliseconds" | "pageComment" | "read"> & {
   /** Once aborted, a later message of the group is released rather than started. */
   stop?: AbortSignal;
   handoff?: AbortSignal;
@@ -62,7 +68,7 @@ type GroupOptions = Pick<ConsumerOptions, "maxReceiveCount" | "visibilitySeconds
 };
 
 // Each Slack thread is one FIFO message group: its messages run one at a time, and different threads run in parallel.
-export async function runConsumer(queue: QueueClient, handle: RequestHandler, options: ConsumerOptions): Promise<void> {
+export async function runConsumer<M>(queue: QueueClient, handle: RequestHandler<M>, options: ConsumerOptions<M>): Promise<void> {
   const log: ServiceLog = options.log ?? (() => undefined);
   const active = new Set<Promise<void>>();
   // Issue 157: the hand-off deadline starts with the stop, and sits under Fargate's 120-second stopTimeout.
@@ -74,7 +80,7 @@ export async function runConsumer(queue: QueueClient, handle: RequestHandler, op
   };
   if (options.signal.aborted) startHandoffClock();
   else options.signal.addEventListener("abort", startHandoffClock, { once: true });
-  const groupOptions: GroupOptions = { ...options, stop: options.signal, handoff: handoff.signal };
+  const groupOptions: GroupOptions<M> = { ...options, stop: options.signal, handoff: handoff.signal };
   while (!options.signal.aborted) {
     if (active.size >= options.concurrency) {
       await Promise.race(active);
@@ -105,11 +111,11 @@ export async function runConsumer(queue: QueueClient, handle: RequestHandler, op
   options.signal.removeEventListener("abort", startHandoffClock);
 }
 
-export async function processGroup(
+export async function processGroup<M>(
   queue: QueueClient,
-  handle: RequestHandler,
+  handle: RequestHandler<M>,
   group: readonly QueueMessage[],
-  options: GroupOptions,
+  options: GroupOptions<M>,
   log: ServiceLog,
 ): Promise<void> {
   for (const [index, entry] of group.entries()) {
@@ -133,15 +139,13 @@ export async function processGroup(
     }, options.heartbeatMilliseconds);
     try {
       if (entry.pageComment === true) {
-        // Its own handler only: a page comment never runs as a chat request, and an unreadable one is dropped.
-        const comment = SlackPageCommentMessageSchema.safeParse(parseJson(entry.body));
-        if (!comment.success || options.pageComment === undefined) log("message.discarded", { reason: comment.success ? "page_comment_unavailable" : "invalid_message" });
-        else await options.pageComment(comment.data, options.handoff === undefined ? {} : { handoff: options.handoff });
+        // Its own handler only: a page comment never runs as a chat request; the handler drops an unreadable one.
+        if (options.pageComment === undefined) log("message.discarded", { reason: "page_comment_unavailable" });
+        else await options.pageComment(parseJson(entry.body), options.handoff === undefined ? {} : { handoff: options.handoff });
         await queue.delete(entry.receiptHandle);
         continue;
       }
-      // Spec 062: version 1 or a Slack version 2 inbound message; another channel's message is discarded.
-      const parsed = readSlackRequestMessage(parseJson(entry.body));
+      const parsed = options.read(parseJson(entry.body));
       if (parsed === undefined) {
         log("message.discarded", { reason: "invalid_message" });
       } else {

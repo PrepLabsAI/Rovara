@@ -4,6 +4,7 @@
 // What a client reads (the `...WireSchema` variants) is loose all the way down, like 25d's admin
 // answers: a newer control plane may add fields, kinds, statuses, methods, outcomes and refusal
 // reasons, and an older CLI must still read the answer (R23), so those are plain strings there.
+import { SignInClientIdSchema, SignInClientRegistrationSchema } from "./sign-in-clients.js";
 import { ChatGptModelIdSchema } from "./chatgpt.js";
 import { z } from "zod";
 import { INDEX_EXPIRY_ATTRIBUTE } from "./admin.js";
@@ -41,6 +42,8 @@ export const AdminChangeKindSchema = z.enum([
   "set_config",
   // #343: Sign in with ChatGPT's switch and preferred model.
   "set_chatgpt",
+  // Spec 063: services that sign Rovara users in.
+  "register_sign_in_client", "remove_sign_in_client",
 ]);
 export type AdminChangeKind = z.infer<typeof AdminChangeKindSchema>;
 export const ConfirmationMethodSchema = z.enum(["elicitation", "slack", "cli"]);
@@ -60,6 +63,8 @@ export const AdminChangeInputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("revoke_signin"), developer: DeveloperRef }).strict(),
   z.object({ kind: z.literal("set_workspace_limits"), perPerson: z.number().int().min(1).max(50).optional(), perOrganization: z.number().int().min(1).max(1_000).optional() }).strict(),
   z.object({ kind: z.literal("set_chatgpt"), enabled: z.boolean().optional(), preferredModel: ChatGptModelIdSchema.optional() }).strict(),
+  z.object({ kind: z.literal("register_sign_in_client"), clientId: SignInClientIdSchema, registration: SignInClientRegistrationSchema }).strict(),
+  z.object({ kind: z.literal("remove_sign_in_client"), clientId: SignInClientIdSchema }).strict(),
 ]);
 export type AdminChangeInput = z.infer<typeof AdminChangeInputSchema>;
 

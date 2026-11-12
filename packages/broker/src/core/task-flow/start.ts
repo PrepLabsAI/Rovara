@@ -18,6 +18,7 @@ import {
   workspaceProjectIndexAttributes,
   when,
   DocumentStoreError,
+  type AdmissionTaskStart,
   type JsonValue,
   type StartDeveloperTaskRequest,
   type TransactItem,
@@ -226,12 +227,18 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     ...(testEnvironment?.pin === undefined ? [] : [testEnvironment.pin]),
     ...(run?.setupAgent === undefined ? [] : [setupAgentPointerItem({ orgId: deps.companyId, project: request.project, taskId, requestId: request.requestId, requestedBy: developerIdOf(principal), basedOnRevision: revision, startedAt: receivedAt, limits: run.setupAgent.limits, seenTaskId: run.setupAgent.seenTaskId })]),
   ];
+  // What the host's admission may set its allowance by: the path (Quick or Full) and the flow options. A task that understands first and was not told the path has none yet: Understand chooses it.
+  const admissionTaskStart: AdmissionTaskStart = {
+    workflow: asWorkflow,
+    ...(asWorkflow ? { ...(request.workflowPath === undefined && understandFirst ? { pathFrom: "understand" as const } : { path: workflowPath, pathFrom: "request" as const }) } : {}),
+    ...(designFirst?.designFirst === true ? { designFirst: true } : {}),
+  };
   const idempotencyIndex = (items: readonly TransactItem[]): number => items.findIndex((item) => item.kind === "put" && item.item.pk === idempotencyKey.pk && item.item.sk === idempotencyKey.sk);
 
   for (let attempt = 1; attempt <= START_ATTEMPTS; attempt += 1) {
     // The admission key is made from this call's own task id and the try: a second call for the same request holds its own allowance (the first
     // call that commits wins; the other gives back only its own), and a try after a lost race is not answered with the old decision.
-    const admitted = await stageAdmission(deps, { idempotencyKey: `task.start:${taskId}:${attempt}`, action: "task.start", actor: principal, projectName: request.project, subject: { type: "task", id: taskId } });
+    const admitted = await stageAdmission(deps, { idempotencyKey: `task.start:${taskId}:${attempt}`, action: "task.start", actor: principal, projectName: request.project, subject: { type: "task", id: taskId }, taskStart: admissionTaskStart });
     if ("refusal" in admitted) return refused(admitted.refusal);
     const taskItem: TaskRecord = admitted.reservationId === undefined ? task : { ...task, admissionReservationId: admitted.reservationId };
     const items = steps(admitted.items, taskItem);

@@ -92,7 +92,7 @@ describe("delivery", () => {
     const { run, fetchMock } = setup({ getAdapter });
     const slack = { ...done, channel: "slack", conversation: { channel: "slack", tenant: "T0AAAAAAA", space: "C0ROOM001", thread: "1700000000.000100" } };
     expect(await run(JSON.stringify(slack))).toEqual({ batchItemFailures: [] });
-    expect(getAdapter).not.toHaveBeenCalled();
+    // Merged with mainline's built-in adapter (FR-073): the lookup may run, but a record that is not the built-in one is never posted to.
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

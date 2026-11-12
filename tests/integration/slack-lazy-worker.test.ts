@@ -1,15 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { SLACK_FORMAT } from "../../packages/slack-service/src/slack-format.js";
 import type { SlackRequestMessage, SlackThreadPrepareResult, SlackThreadWorkspaceResult, TurnRecord } from "../../packages/contracts/src/index.js";
 import { deterministicUuid } from "../../packages/slack-service/src/ids.js";
 import { LIMIT_REFUSAL, ORGANIZATION_LIMIT_REFUSAL, createLazyWorker, unavailableRefusal } from "../../packages/slack-service/src/lazy-worker.js";
-import {
-  NEW_WORKSPACE_MESSAGE,
-  PREPARATION_SLOW_MESSAGE,
-  STILL_PREPARING_MESSAGE,
-  WORKSPACE_UNCONFIRMED_MESSAGE,
-  limitMessage,
-} from "../../packages/slack-service/src/messages.js";
-import { processSlackRequest, type ProcessorDependencies, type ThreadServiceApi, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { limitMessage } from "../../packages/slack-service/src/messages.js";
+import { NEW_WORKSPACE_MESSAGE, PREPARATION_SLOW_MESSAGE, STILL_PREPARING_MESSAGE, WORKSPACE_UNCONFIRMED_MESSAGE } from "../../packages/slack-service/src/slack-texts.js";
+import { processSlackRequest, type ProcessorDependencies, type ThreadServiceApi, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { escapeText, slackReplyText } from "../../packages/slack-service/src/slack-format.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
@@ -43,7 +39,7 @@ function lazyHarness(
     return prepare;
   });
   const waitForOperation = vi.fn<ThreadServiceApi["waitForOperation"]>(options.wait ?? (async () => ({ status: waited })));
-  const worker = createLazyWorker({
+  const worker = createLazyWorker({ format: SLACK_FORMAT,
     api: { prepareWorkspace, waitForOperation },
     post: async (text) => {
       posts.push(text);
@@ -227,7 +223,7 @@ describe("the lazy worker", () => {
   it("logs and refuses when this Slack service cannot prepare workspaces", async () => {
     const posts: string[] = [];
     const logs: string[] = [];
-    const worker = createLazyWorker({
+    const worker = createLazyWorker({ format: SLACK_FORMAT,
       api: { waitForOperation: vi.fn() },
       post: async (text) => {
         posts.push(text);
@@ -383,8 +379,8 @@ describe("Slack formatting of the lazy worker's thread notices (spec 014 FR-022)
   });
 
   it("posts the limit notices unchanged when their dynamic parts are Slack-safe", () => {
-    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread, otherThread] })).toBe(MEMBER_LIMIT);
-    expect(limitMessage({ limit: "ORGANIZATION", maximum: 20, starterThreads: [] })).toBe(
+    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread, otherThread] }, SLACK_FORMAT)).toBe(MEMBER_LIMIT);
+    expect(limitMessage({ limit: "ORGANIZATION", maximum: 20, starterThreads: [] }, SLACK_FORMAT)).toBe(
       "This organization already has 20 AgentX workspaces, the most allowed, so I can't start a new one. " +
         "Continue in an existing thread, or ask an administrator to raise the limit.",
     );

@@ -1,5 +1,5 @@
 import { modelCheckClassSentence, type ModelRef, type ProjectModelOptions } from "@agentx/contracts";
-import { escapeText } from "./slack-format.js";
+import type { ConversationFormat } from "./conversation-format.js";
 
 export type ModelCommand = { kind: "list" } | { kind: "use"; selector: string };
 
@@ -18,16 +18,18 @@ export function matchApprovedModel(selector: string, approved: readonly ModelRef
   return approved.filter((model) => modelNames(model).some((name) => name.toLocaleLowerCase("en-US").includes(sought)));
 }
 
-export function modelOptionsMessage(options: ProjectModelOptions, introduction = "Approved coding models for this project:"): string {
+export function modelOptionsMessage(options: ProjectModelOptions, introduction: string | undefined, format: ConversationFormat): string {
+  const intro = introduction ?? "Approved coding models for this project:";
+  const escapeText = format.escape;
   const currentKey = `${options.current.provider}\0${options.current.modelId}`;
   return [
-    introduction,
+    intro,
     ...options.approved.map((model) => {
       const selected = `${model.provider}\0${model.modelId}` === currentKey ? " _(current)_" : "";
       const thinking = model.thinkingLevel === undefined ? "" : ` (thinking: ${model.thinkingLevel})`;
       return `• ${escapeText(modelName(model))}${thinking} — \`${escapeText(model.provider)}/${escapeText(model.modelId)}\`${selected}`;
     }),
-    "Choose one with `@agentx use <name>`.",
+    format.kind === "slack" ? "Choose one with `@agentx use <name>`." : "Choose one with `use <name>`.",
   ].join("\n");
 }
 
@@ -40,7 +42,8 @@ function modelNames(model: ModelRef): string[] {
 }
 
 /** MODEL1: what `@agentx use` adds when the last stored check of the chosen pair failed: the class sentence, never provider text. Empty when the check passed or never ran. */
-export function modelCheckWarning(model: ModelRef): string {
+export function modelCheckWarning(model: ModelRef, format: ConversationFormat): string {
+  const escapeText = format.escape;
   const check = model.lastCheck;
   if (check === undefined || check.status !== "failed" || check.class === undefined) return "";
   return ` The last check of this model failed: ${escapeText(modelCheckClassSentence({ provider: model.provider, modelId: model.modelId, class: check.class }))} Its next turn may fail; ask a project admin to run agentx doctor.`;

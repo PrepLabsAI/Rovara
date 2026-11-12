@@ -3,8 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, chmodSyn
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { ESLint } from "eslint";
-import tseslint from "typescript-eslint";
+import { ESLint, type Linter } from "eslint";
 import type * as TypeScript from "typescript";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -34,13 +33,31 @@ const shards = planShards();
 const scratch = mkdtempSync(join(tmpdir(), "lint-shards-test-"));
 afterAll(() => { rmSync(scratch, { recursive: true, force: true }); });
 
+// A parser that reads every file as an empty program. Enumeration needs no syntax tree: which files ESLint lints is decided by the config's
+// `files` patterns and `ignores` before any file is parsed. Parsing and linting all ~3,800 files with the real parser and rules, twice (once
+// for the whole repository, once for the shards), took about 30 s on a fast laptop and 150 to 270 s on a loaded CI runner, which put this
+// file's setup within seconds of its 280 s cap and made it time out a few times a day. With this parser and every rule off it takes under a second.
+const emptyProgram = { type: "Program", body: [], comments: [], tokens: [], range: [0, 0], loc: { start: { line: 1, column: 0 }, end: { line: 1, column: 0 } }, sourceType: "module" };
+const enumerationParser = { meta: { name: "enumeration-only" }, parseForESLint: () => ({ ast: emptyProgram }) } as unknown as Linter.Parser;
+let rulesOff: Promise<Record<string, "off">> | undefined;
+/** Every rule the config turns on, set to "off": ESLint still enumerates the same files, and runs nothing on them. */
+function allRulesOff(): Promise<Record<string, "off">> {
+  rulesOff ??= new ESLint({ cwd: root }).calculateConfigForFile("tests/contract/lint-shards.test.ts").then((config: { rules?: Record<string, unknown> } | undefined) => Object.fromEntries(Object.keys(config?.rules ?? {}).map((rule) => [rule, "off" as const])));
+  return rulesOff;
+}
+
 /**
  * The files ESLint itself would lint for these command-line arguments: its own enumeration (config `files` patterns and `ignores`, read
- * from eslint.config.js), through the same API the command line uses. Type information is switched off, so this only parses; which files
- * are enumerated does not depend on it.
+ * from eslint.config.js), through the same API the command line uses. Nothing is parsed or checked (see above); which files are
+ * enumerated does not depend on that. The positive control in "lint, together, exactly the files that `eslint .` lints" fails if this finds nothing.
  */
 async function lintedBy(targets: readonly string[], ignorePatterns: readonly string[] = []): Promise<string[]> {
-  const eslint = new ESLint({ cwd: root, errorOnUnmatchedPattern: false, ignorePatterns: [...ignorePatterns], overrideConfig: [tseslint.configs.disableTypeChecked] });
+  const eslint = new ESLint({
+    cwd: root,
+    errorOnUnmatchedPattern: false,
+    ignorePatterns: [...ignorePatterns],
+    overrideConfig: [{ languageOptions: { parser: enumerationParser }, linterOptions: { reportUnusedDisableDirectives: "off" }, rules: await allRulesOff() }],
+  });
   const results = await eslint.lintFiles([...targets]);
   return results.map((result) => relative(root, result.filePath).replaceAll("\\", "/")).sort();
 }
@@ -50,7 +67,7 @@ const perShard = new Map<string, string[]>();
 beforeAll(async () => {
   wholeRepository = await lintedBy(["."]);
   for (const shard of shards) perShard.set(shard.name, await lintedBy(shard.targets, shard.ignore));
-}, 280_000);
+}, 60_000);
 
 describe("the lint shards: which files they lint", () => {
   it("name every letter of the alphabet for tests/unit, so a new test file of any name has a shard and none falls to the last one", () => {

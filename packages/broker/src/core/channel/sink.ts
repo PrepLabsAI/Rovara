@@ -18,6 +18,7 @@ import {
 import { readChannelBinding } from "./bindings.js";
 import { readApprovalCard, type ApprovalCard } from "./cards.js";
 import { issueChannelLinkCode, linkedPerson } from "./links.js";
+import { personIsServed, type ChannelCompanyOf, type ChannelMemberRule } from "./company.js";
 
 type Log = (entry: Record<string, unknown>) => void;
 
@@ -42,9 +43,14 @@ export interface ChannelSinkDeps {
   /** The company of an install that has one (Code): used when `companyOf` is not given. */
   orgId: OrgId;
   /** Which company a conversation's tenant belongs to; undefined: the tenant is nobody's here and the item runs nothing. Default: `orgId`, for every tenant. */
-  companyOf?: ((where: { channel: string; tenant: string }) => OrgId | undefined | Promise<OrgId | undefined>) | undefined;
+  companyOf?: ChannelCompanyOf | undefined;
   /** Which person a chat account is, in a company; undefined: nobody (the account is told how to link). Default: the link the owner made (`linkedPerson`). */
   personOf?: ((orgId: OrgId, actor: ActorRef) => Promise<string | undefined>) | undefined;
+  /**
+   * Owner decision 131: the host's explicit-member rule. A linked person is served only when this says they are a member of the company now; false (or a failure)
+   * runs nothing and says nothing, and no event claim is written. Absent: every linked person is served (Code's one company).
+   */
+  isMember?: ChannelMemberRule | undefined;
   now: () => number;
   work: ChannelWork;
   /** The words that tell a person how to finish linking their account, given the code (the surface that redeems it is the work seam's owner). */
@@ -127,6 +133,7 @@ export function createChannelSink(deps: ChannelSinkDeps): ChannelInboundSink {
       log({ event: "channel.link_required", kind });
       return undefined;
     }
+    if (!(await personIsServed(deps.isMember, orgId, personId, item.actor))) { log({ event: "channel.refused", reason: "not_member", kind }); return undefined; }
     if (!(await claim(orgId, `EVENT#${kind}/${item.eventId}`, EVENT_DEDUPE_SECONDS, scope))) { log({ event: "channel.duplicate", kind }); return undefined; }
     return { orgId, personId, projectName: binding.projectName };
   }

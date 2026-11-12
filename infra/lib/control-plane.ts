@@ -840,11 +840,27 @@ export class ControlPlaneStack extends Stack {
       resources: [`arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/v1/service/*`],
     }));
 
+    // Spec 062: the channel API. Every deployment has the built-in Slack adapter, off until SlackViaChannel is enabled
+    // (Phase 7d); named environments may also register other adapters, off until ChannelAdapters is enabled.
+    const channelAdapters = new ChannelAdapters(this, "ChannelApi", {
+      naming, env: naming.env ?? "production", api, state, broker, orchestratorRole: slackOrchestratorRole, notifyOperator,
+      slack: { ingress: slackIngress, integration: slackIntegration, threads: slackThreads, appPostedMessages: appPostedMessages.valueAsString, threadTurnsPerMinute: threadTurnsPerMinute.valueAsString },
+      registry: naming.env !== undefined, sharedTasks: naming.env !== undefined,
+      turnRecords: { table: turnRecords, detailsAttributes: TURN_DETAILS_READ_ATTRIBUTES },
+    });
+    new CfnOutput(this, "SlackAdapterCommandsUrl", { value: `${api.attrApiEndpoint}/v1/slack/channel-commands` });
+    new CfnOutput(this, "SlackAdapterSecretName", { value: `agentx/${naming.env ?? "production"}/channel-adapter/slack` });
+    new CfnOutput(this, "ChannelRequestQueueUrl", { value: channelAdapters.requests.queueUrl });
+    new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
     // Spec 025 phase 25a: developer sign-in, named environments only (R3).
     if (naming.env !== undefined && signInParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
         naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
+      // Spec 063 FR-005: the admin client's own rule for who is an administrator, read at company sign-in.
+      developerSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
+      developerSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
+      developerSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
       if (naming.env === "agentxlivetest123" && taskPersonProofEnabled !== undefined) {
         new TaskPersonProof(this, "TaskPersonProof", {
           naming,
@@ -888,9 +904,18 @@ export class ControlPlaneStack extends Stack {
         actions: ["cloudwatch:DescribeAlarms"],
         resources: [`arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:${alarmPrefix}*`],
       }));
-      // Spec 062: channel adapters, off until the ChannelAdapters parameter is enabled.
-      const channelAdapters = new ChannelAdapters(this, "ChannelApi", { naming, env: naming.env, api, state, broker, notifyOperator });
-      const deadLetterQueues = { dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures, "channel-events": channelAdapters.eventDeadLetters };
+      channelAdapters.connectSlackPoster(notifier.function, signInParameters.slackTeamId.valueAsString);
+      // Phase 7c1b: sign-in's Slack directory reads (task access, channel names, the health check).
+      channelAdapters.connectSlackPoster(developerSignIn.function, signInParameters.slackTeamId.valueAsString);
+      // Phase 7c2: the channel API's Slack router posts through the adapter too.
+      channelAdapters.connectSlackPoster(channelAdapters.ingress, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
+
+      // The channel request dead-letter queue is reported by its alarm only: one more queue ARN here pushes the broker
+      // role's policy past IAM's inline size limit.
+      const deadLetterQueues = {
+        dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures,
+        "channel-events": channelAdapters.eventDeadLetters,
+      };
       broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
       broker.addToRolePolicy(new iam.PolicyStatement({
         actions: ["sqs:GetQueueAttributes"],
@@ -903,8 +928,9 @@ export class ControlPlaneStack extends Stack {
         resources: [state.tableArn],
         conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
       }));
-      // Slack plan buttons read only the task owner, share binding, and saved workflow policy by key.
-      slackIngress.addToRolePolicy(new iam.PolicyStatement({
+      // Slack plan buttons read only the task owner, share binding, and saved workflow policy by key. Spec 062 Phase
+      // 7c3: so does the channel API, which runs those buttons for the built-in Slack adapter.
+      const taskButtonRead = () => new iam.PolicyStatement({
         actions: ["dynamodb:GetItem"],
         resources: [state.tableArn],
         conditions: {
@@ -913,7 +939,9 @@ export class ControlPlaneStack extends Stack {
           StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
           Null: { "dynamodb:Attributes": "false" },
         },
-      }));
+      });
+      slackIngress.addToRolePolicy(taskButtonRead());
+      channelAdapters.ingress.addToRolePolicy(taskButtonRead());
       // Task 19 (gap 10h): a Quick or Full button takes the choice while Slack waits, then starts the task in an
       // asynchronous invoke of this same Lambda. A policy of its own, so the function does not wait on it (no cycle).
       new iam.Policy(this, "SlackIngressSelfInvoke", {
@@ -943,6 +971,10 @@ export class ControlPlaneStack extends Stack {
       }).addAlarmAction(notifyOperator);
       // Spec 025 E14 (C14): the interactivity route hands Slack Confirm and Cancel presses to the broker.
       slackIngress.addEnvironment("ADMIN_CHANGES", "enabled");
+      // Spec 062 Phase 7c3b: the channel API takes Slack's presses and forms for the built-in adapter: admin change
+      // presses, the Details view (the same field-limited read of one turn record) and a ChatGPT connection finished in
+      // an asynchronous invoke of itself (a policy of its own, so the function does not wait on it).
+      channelAdapters.ingress.addEnvironment("ADMIN_CHANGES", "enabled");
       // Spec 025 E14, FR-052: the interactivity route logs a press with its change's trace ID; it may
       // read only that attribute and the keys, by key.
       slackIngress.addToRolePolicy(new iam.PolicyStatement({
@@ -976,6 +1008,7 @@ export class ControlPlaneStack extends Stack {
     // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
     // legacy template is unchanged.
     if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKey.valueAsString);
+    if (naming.env !== undefined && signInParameters !== undefined) channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
     grantProviderKeySecrets(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);

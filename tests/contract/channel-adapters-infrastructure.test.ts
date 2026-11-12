@@ -41,27 +41,42 @@ describe("channel adapters infrastructure", () => {
     expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTERS).toEqual({ Ref: "ChannelAdapters" });
   });
 
-  it("is absent from the legacy stack", () => {
+  it("gives the legacy stack the built-in Slack adapter only: no registry, nothing on the broker (Phase 7d)", () => {
     expect(legacy.Parameters.ChannelAdapters).toBeUndefined();
-    expect(functionNamed(legacy, "ChannelApiIngress")).toBeUndefined();
+    expect(legacy.Parameters.SlackViaChannel).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
+    const variables = (prefix: string) => (functionNamed(legacy, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(variables("ChannelApiIngress")).toMatchObject({ CHANNEL_ADAPTERS: "disabled", BUILT_IN_ADAPTER: { Ref: "SlackViaChannel" }, SHARED_TASKS: "disabled",
+      BUILT_IN_ADAPTER_SECRET_NAME: "agentx/production/channel-adapter/slack" });
+    const broker = ofType(legacy, "AWS::Lambda::Function").find(([id]) => withoutHash(id).startsWith("Broker"))![1];
+    expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTERS).toBeUndefined();
+    const brokerRole = (broker.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    expect(JSON.stringify(statementsOf(legacy, brokerRole))).not.toContain("channel-adapter");
+    // No shared tasks in the legacy deployment, so nothing reads them.
+    expect(JSON.stringify(statementsOf(legacy, roleOf(legacy, "ChannelApiIngress")))).not.toContain("SHARED_TASK#");
+    // The event sender never takes more than two of the account's concurrent Lambdas.
+    const mapping = ofType(legacy, "AWS::Lambda::EventSourceMapping").map(([, entry]) => entry.Properties).find((entry) => JSON.stringify(entry.FunctionName).includes("ChannelApiEventSender"));
+    expect(mapping).toMatchObject({ ScalingConfig: { MaximumConcurrency: 2 } });
   });
 
-  it("routes only the two signed POSTs to the channel API, with no API Gateway authorizer", () => {
+  it("routes only the three signed POSTs to the channel API, with no API Gateway authorizer", () => {
     const routes = ofType(named, "AWS::ApiGatewayV2::Route").map(([, route]) => route.Properties).filter((route) => String(route.RouteKey).includes("/v1/channels/"));
-    expect(routes.map((route) => route.RouteKey).sort()).toEqual(["POST /v1/channels/{channel}/decisions", "POST /v1/channels/{channel}/messages"]);
+    expect(routes.map((route) => route.RouteKey).sort()).toEqual(["POST /v1/channels/{channel}/actions", "POST /v1/channels/{channel}/decisions", "POST /v1/channels/{channel}/messages"]);
     for (const route of routes) expect(route.AuthorizationType).toBe("NONE");
   });
 
-  it("lets the channel API read only adapters, bindings and links from the state table, by key", () => {
+  it("lets the channel API read only adapters, bindings (Slack's too, for the built-in adapter), links and shared task threads from the state table, by key", () => {
     const statements = statementsOf(named, roleOf(named, "ChannelApiIngress"));
     const onState = statements.filter((statement) => JSON.stringify(statement.Resource).includes("State") && !JSON.stringify(statement.Resource).includes("ChannelApiState"));
     expect(onState.map((statement) => [actions(statement), statement.Condition?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]])).toEqual([
-      [["dynamodb:GetItem"], ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*"]],
+      [["dynamodb:GetItem"], ["CHANNEL_ADAPTERS", "BINDING#*", "CHANNEL_LINK#*", "SLACK_BINDING#*", "SHARED_TASK#*"]],
       [["dynamodb:PutItem"], ["CHANNEL_LINK_CODE#*"]],
+      // Phase 7c3: Slack's plan buttons read a task's owner, share and workflow, by key and those fields only.
+      [["dynamodb:GetItem"], ["DEVTASK#*"]],
     ]);
-    // No Slack binding, no query, no scan, no write to the state table.
-    expect(JSON.stringify(statements)).not.toContain("SLACK_BINDING");
-    for (const statement of statements) {
+    const taskRead = onState.find((statement) => JSON.stringify(statement.Condition).includes("DEVTASK#*"))!;
+    expect(taskRead.Condition).toMatchObject({ "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "slackUserId", "share", "workflow"] }, Null: { "dynamodb:Attributes": "false" } });
+    // No query, no scan, no other write to the state table. (Slack's threads table is the Slack router's own, Phase 7c2.)
+    for (const statement of statements.filter((entry) => JSON.stringify(entry.Resource).includes("State"))) {
       for (const action of actions(statement)) expect(["dynamodb:Query", "dynamodb:Scan"]).not.toContain(action);
     }
   });
@@ -91,6 +106,70 @@ describe("channel adapters infrastructure", () => {
     expect(events.RedrivePolicy).toMatchObject({ maxReceiveCount: 8 });
     const requests = queues.find(([id]) => withoutHash(id) === "ChannelApiRequests")![1].Properties;
     expect(requests.FifoQueue).toBe(true);
+    // Phase 7b: a conversation's events arrive in order.
+    expect(events.FifoQueue).toBe(true);
+    expect(queues.find(([id]) => withoutHash(id) === "ChannelApiEventDeadLetters")![1].Properties.FifoQueue).toBe(true);
+  });
+
+  it("registers the built-in Slack adapter at deploy, off until SlackViaChannel is enabled (FR-073, FR-074)", () => {
+    expect(named.Parameters.SlackViaChannel).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
+    // Phase 7d: the legacy stack has it too (see above).
+    const secrets = ofType(named, "AWS::SecretsManager::Secret").filter(([id]) => withoutHash(id) === "ChannelApiSlackAdapterSecret");
+    expect(secrets).toHaveLength(1);
+    expect(secrets[0]![1].Properties).toMatchObject({
+      Name: "agentx/staging/channel-adapter/slack",
+      GenerateSecretString: { PasswordLength: 64, ExcludePunctuation: true, IncludeSpace: false },
+    });
+    const variables = (prefix: string) => (functionNamed(named, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    for (const prefix of ["ChannelApiIngress", "ChannelApiEventSender"]) {
+      expect(variables(prefix)).toMatchObject({ BUILT_IN_ADAPTER: { Ref: "SlackViaChannel" }, BUILT_IN_ADAPTER_CHANNEL: "slack", BUILT_IN_ADAPTER_SECRET_NAME: "agentx/staging/channel-adapter/slack" });
+      expect(JSON.stringify(variables(prefix).BUILT_IN_ADAPTER_CALLBACK_URL)).toContain("/v1/slack/channel-events");
+    }
+    expect(variables("SlackIngress")).toMatchObject({ SLACK_VIA_CHANNEL: { Ref: "SlackViaChannel" }, SLACK_ADAPTER_SECRET_NAME: "agentx/staging/channel-adapter/slack" });
+    // Slack's ingress may read the adapter's secret, and nothing else under the adapter prefix.
+    const reads = statementsOf(named, roleOf(named, "SlackIngress")).filter((statement) => actions(statement).includes("secretsmanager:GetSecretValue"));
+    expect(reads.map((statement) => JSON.stringify(statement.Resource)).join()).toContain("ChannelApiSlackAdapterSecret");
+    expect(JSON.stringify(reads)).not.toContain("channel-adapter/*");
+    const route = ofType(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => resource.Properties).find((properties) => properties.RouteKey === "POST /v1/slack/channel-events");
+    expect(route).toMatchObject({ AuthorizationType: "NONE" });
+    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-events")).toBe(true);
+  });
+
+  it("takes the core's commands for Slack, and lets the notifier, reconciler and sign-in sign them (Phase 7c)", () => {
+    const route = ofType(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => resource.Properties).find((properties) => properties.RouteKey === "POST /v1/slack/channel-commands");
+    expect(route).toMatchObject({ AuthorizationType: "NONE" });
+    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "POST /v1/slack/channel-commands")).toBe(true);
+    const variables = (prefix: string) => (functionNamed(named, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    // Phase 7c1b: sign-in's Slack directory reads too.
+    for (const prefix of ["DeveloperTaskNotifierFunction", "SessionsReconciler", "DeveloperSignInFunction"]) {
+      expect(variables(prefix), prefix).toMatchObject({ SLACK_VIA_CHANNEL: { Ref: "SlackViaChannel" }, SLACK_ADAPTER_TEAM_ID: { Ref: "SlackTeamId" }, BUILT_IN_ADAPTER_SECRET_NAME: "agentx/staging/channel-adapter/slack" });
+      expect(JSON.stringify(variables(prefix).BUILT_IN_ADAPTER_COMMANDS_URL)).toContain("/v1/slack/channel-commands");
+      const reads = statementsOf(named, roleOf(named, prefix)).filter((statement) => actions(statement).includes("secretsmanager:GetSecretValue"));
+      expect(reads.map((statement) => JSON.stringify(statement.Resource)).join(), prefix).toContain("ChannelApiSlackAdapterSecret");
+    }
+    // Phase 7c2: the channel API runs Slack's router: the neutral ingress and the router, with Slack's threads table and
+    // the broker; the orchestrator signs the commands for a routing card.
+    const ingress = functionNamed(named, "ChannelApiIngress")![1].Properties;
+    expect(ingress.Timeout).toBe(30);
+    expect((ingress.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ SHARED_TASKS: "enabled", SLACK_VIA_CHANNEL: { Ref: "SlackViaChannel" } });
+    const ingressStatements = JSON.stringify(statementsOf(named, roleOf(named, "ChannelApiIngress")));
+    expect(ingressStatements).toContain("SlackThreads");
+    expect(ingressStatements).toContain("lambda:InvokeFunction");
+    const orchestratorRole = ofType(named, "AWS::IAM::Role").find(([id]) => withoutHash(id).startsWith("SlackOrchestratorTaskRole"))![0];
+    expect(JSON.stringify(statementsOf(named, orchestratorRole))).toContain("ChannelApiSlackAdapterSecret");
+    // Phase 7c3b: Slack's forms. Admin change presses, the Details view's field-limited turn read, and a ChatGPT
+    // connection finished in an asynchronous invoke of the channel API itself.
+    expect((ingress.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ ADMIN_CHANGES: "enabled" });
+    expect(ingressStatements).toContain("TurnRecords");
+    for (const template of [named, legacy]) {
+      for (const name of ["ChannelApiSelfInvoke", "ChannelApiSlackAdapterSelfInvoke"]) {
+        const selfInvoke = ofType(template, "AWS::IAM::Policy").find(([id]) => withoutHash(id).startsWith(name));
+        expect(JSON.stringify(selfInvoke?.[1].Properties), name).toContain("lambda:InvokeFunction");
+      }
+    }
+    // A Canvas takes three Slack calls.
+    expect(functionNamed(named, "SlackIngress")![1].Properties.Timeout).toBe(30);
+    expect(functionNamed(legacy, "SlackIngress")![1].Properties.Timeout).toBe(30);
   });
 
   it("expires short-lived channel state by expiresAt", () => {

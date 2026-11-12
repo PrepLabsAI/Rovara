@@ -1,36 +1,25 @@
 import {
-  EvalBatchSlackStartRequestSchema,
-  EvalBatchSlackStartResultSchema,
-  EvalBatchThreadResultSchema,
-  EvalBatchWatchDropRequestSchema,
-  EvalBatchWatchDropResultSchema,
-  EvalBatchWatchListSchema,
-  EvalBatchWatchUpdateRequestSchema,
-  EvalBatchWatchUpdateResultSchema,
-  type SlackThread,
-  SlackCommentAnsweredRequestSchema,
-  SlackThreadNoteAnsweredRequestSchema,
-  SlackThreadNoteAnsweredResultSchema,
-  SlackThreadPrepareResultSchema,
-  SlackThreadWorkspaceResultSchema,
-  SlackWorkspaceCloseCompleteResultSchema,
-  SlackWorkspaceCloseStartResultSchema,
+  CommentAnsweredRequestSchema,
+  ThreadNoteAnsweredRequestSchema,
+  ThreadNoteAnsweredResultSchema,
+  ThreadPrepareResultSchema,
+  ThreadWorkspaceResultSchema,
+  WorkspaceCloseCompleteResultSchema,
+  WorkspaceCloseStartResultSchema,
   ProjectModelOptionsSchema,
   ProjectModelSelectionRequestSchema,
-  SwebenchRunSchema,
-  SwebenchStartRequestSchema,
-  SwebenchStartResultSchema,
+  QuickAutoStartRequestSchema,
+  QuickAutoStartResultSchema,
   taskResultChecks,
 } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { pollOperation } from "@agentx/orchestrator/event-client";
 import type { ThreadServiceApi } from "./processor.js";
-import type { EvalBatchWatchApi } from "./eval-batch-watcher.js";
 import { threadWorkspaceRequest } from "./thread-workspace-request.js";
 
-/** The Slack service's thread-level control-plane client, moved out of main.ts so tests can drive it. */
+/** The orchestrator service's conversation-level control-plane client; Slack's extra routes are in slack-thread-api.ts. */
 /** One request to a /v1/service route; an error answer throws with its code and message. */
-async function serviceRequestWith(signedFetch: typeof fetch, url: string, method: string, body: unknown, failure: string): Promise<Record<string, unknown>> {
+export async function serviceRequestWith(signedFetch: typeof fetch, url: string, method: string, body: unknown, failure: string): Promise<Record<string, unknown>> {
   const response = await signedFetch(url, {
     method,
     ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
@@ -58,28 +47,32 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
 
   return {
     async ensureWorkspace(requestId) {
-      return SlackThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", threadWorkspaceRequest(requestId), "thread workspace request failed"));
+      return ThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", threadWorkspaceRequest(requestId), "thread workspace request failed"));
     },
     async taskAnswerWorkspace(requestId, taskId, commentId) {
       const taskAnswer = commentId === undefined ? { taskId } : { taskId, commentId };
-      return SlackThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", { ...threadWorkspaceRequest(requestId), taskAnswer }, "task answer workspace request failed"));
+      return ThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", { ...threadWorkspaceRequest(requestId), taskAnswer }, "task answer workspace request failed"));
     },
     async markCommentAnswered(input) {
-      const body = SlackCommentAnsweredRequestSchema.parse(input);
+      const body = CommentAnsweredRequestSchema.parse(input);
       await servicePost("/v1/tasks/comments/answered", body, "writing the comment answer failed");
     },
+    async startQuickFromIntake(input) {
+      const body = QuickAutoStartRequestSchema.parse(input);
+      return QuickAutoStartResultSchema.parse(await servicePost("/v1/workflows/quick-start", body, "starting the quick change failed"));
+    },
     async markThreadNoteAnswered(input) {
-      const body = SlackThreadNoteAnsweredRequestSchema.parse(input);
-      SlackThreadNoteAnsweredResultSchema.parse(await servicePost("/v1/tasks/thread-notes/answered", body, "marking the thread note answered failed"));
+      const body = ThreadNoteAnsweredRequestSchema.parse(input);
+      ThreadNoteAnsweredResultSchema.parse(await servicePost("/v1/tasks/thread-notes/answered", body, "marking the thread note answered failed"));
     },
     async prepareWorkspace(requestId) {
-      return SlackThreadPrepareResultSchema.parse(await servicePost("/v1/threads/workspace/prepare", { requestId, includeOpenTaskCount: true, includeSharedTask: true }, "thread workspace preparation failed"));
+      return ThreadPrepareResultSchema.parse(await servicePost("/v1/threads/workspace/prepare", { requestId, includeOpenTaskCount: true, includeSharedTask: true }, "thread workspace preparation failed"));
     },
     async startClose(requestId, discardUnpublished = false) {
-      return SlackWorkspaceCloseStartResultSchema.parse(await servicePost("/v1/threads/workspace/close", { requestId, includeSharedTask: true, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, "workspace close request failed"));
+      return WorkspaceCloseStartResultSchema.parse(await servicePost("/v1/threads/workspace/close", { requestId, includeSharedTask: true, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, "workspace close request failed"));
     },
     async completeClose(requestId, operationId) {
-      return SlackWorkspaceCloseCompleteResultSchema.parse(
+      return WorkspaceCloseCompleteResultSchema.parse(
         await servicePost("/v1/threads/workspace/close/complete", { requestId, operationId }, "workspace close completion failed"),
       );
     },
@@ -121,54 +114,6 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
     async selectProjectModel(model) {
       const body = ProjectModelSelectionRequestSchema.parse(model);
       return ProjectModelOptionsSchema.parse(await serviceRequest("PUT", "/v1/project/model", body, "project model selection failed"));
-    },
-    async startSwebenchRun(request) {
-      const body = SwebenchStartRequestSchema.parse(request);
-      return SwebenchStartResultSchema.parse(await servicePost("/v1/evals/swebench", body, "SWE-bench run request failed"));
-    },
-    async getSwebenchRun(runId) {
-      const response = await serviceRequest("GET", `/v1/evals/swebench/${encodeURIComponent(runId)}`, undefined, "SWE-bench run lookup failed");
-      return SwebenchRunSchema.parse(response.run);
-    },
-    async startEvalBatch(request) {
-      const body = EvalBatchSlackStartRequestSchema.parse(request);
-      return EvalBatchSlackStartResultSchema.parse(await servicePost("/v1/evals/batches", body, "eval batch request failed"));
-    },
-    async updateEvalBatchWatch(batchId, revision, change) {
-      const body = EvalBatchWatchUpdateRequestSchema.parse({ revision, change });
-      return EvalBatchWatchUpdateResultSchema.parse(await servicePost(`/v1/evals/batches/${encodeURIComponent(batchId)}/watch`, body, "eval batch watch record failed"));
-    },
-  };
-}
-
-/**
- * Spec 052 Task 6: the batch watcher's client. The list is the Slack service's own; a batch's thread
- * and posts are recorded acting for the batch's thread (a CLI batch's placeholder until its thread
- * is opened) and its requester, so the broker can check the batch is that thread's.
- */
-export function createEvalBatchWatchApi(options: {
-  controlPlaneUrl: string;
-  signedFetchFor: (scope?: { thread: SlackThread; userId: string }) => typeof fetch;
-}): EvalBatchWatchApi {
-  const { controlPlaneUrl, signedFetchFor } = options;
-  const path = (batchId: string, action: string) => `${controlPlaneUrl}/v1/evals/batches/${encodeURIComponent(batchId)}/${action}`;
-  return {
-    async listBatches() {
-      return EvalBatchWatchListSchema.parse(await serviceRequestWith(signedFetchFor(), `${controlPlaneUrl}/v1/evals/batches/active`, "GET", undefined, "eval batch list failed"));
-    },
-    async dropWatch(batch, reason) {
-      const signed = signedFetchFor({ thread: batch.thread, userId: batch.createdBy.userId });
-      const body = EvalBatchWatchDropRequestSchema.parse({ reason });
-      return EvalBatchWatchDropResultSchema.parse(await serviceRequestWith(signed, path(batch.batchId, "drop"), "POST", body, "eval batch watch drop failed"));
-    },
-    async recordThread(batch, threadTs) {
-      const signed = signedFetchFor({ thread: batch.thread, userId: batch.createdBy.userId });
-      return EvalBatchThreadResultSchema.parse(await serviceRequestWith(signed, path(batch.batchId, "thread"), "POST", { threadTs }, "eval batch thread record failed"));
-    },
-    async updateWatch(batch, revision, change) {
-      const signed = signedFetchFor({ thread: batch.thread, userId: batch.createdBy.userId });
-      const body = EvalBatchWatchUpdateRequestSchema.parse({ revision, change });
-      return EvalBatchWatchUpdateResultSchema.parse(await serviceRequestWith(signed, path(batch.batchId, "watch"), "POST", body, "eval batch watch record failed"));
     },
   };
 }

@@ -1,6 +1,7 @@
 // packages/broker/src/aws/admin-actions.ts
 // Spec 025 E8, E9, E19: the admin actions 25e's change tools apply that no admin command had. Each
 // is called only by a confirmed change (Task 7) or by the CLI's own change path (Tasks 14, 15).
+import type { SignInClientRegistry } from "./developer-routes.js";
 import { randomUUID } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { type DeveloperSignInMethod, SLACK_OIDC_ISSUER, SlackUserIdSchema, agentXError, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse } from "@agentx/contracts";
@@ -16,6 +17,8 @@ export interface AdminActionDependencies {
   slackTeamId?: string;
   limitDefaults: { member: number; organization: number };
   endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
+  /** Spec 063: the sign-in clients' registry; absent where developer sign-in is not set up. */
+  signInClients?: SignInClientRegistry;
   now(): number;
 }
 export interface ResolvedDeveloper {

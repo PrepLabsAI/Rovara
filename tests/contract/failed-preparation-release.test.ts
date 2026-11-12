@@ -2,6 +2,7 @@
 // and organization workspace limits at once, a new message in its Slack thread starts fresh, and a
 // later close never gives the slot back a second time.
 import { randomUUID } from "node:crypto";
+import { SLACK_FORMAT } from "../../packages/slack-service/src/slack-format.js";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { releaseFailedPreparation } from "../../packages/broker/src/aws/failed-preparation.js";
 import { failActiveOperation, failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
@@ -411,10 +412,10 @@ describe("a developer task whose setup failed (#213)", () => {
 
 describe("the thread's notice for a failed setup (#213)", () => {
   it("says plainly that the workspace was released and that a new message starts fresh", () => {
-    expect(preparationFailedMessage("FAILED")).toBe(
+    expect(preparationFailedMessage("FAILED", undefined, SLACK_FORMAT)).toBe(
       "AgentX could not set up this thread's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Mention me again in this thread to start fresh.",
     );
-    expect(preparationFailedMessage("FAILED", "setup step 1 (npm ci) exited 1")).toBe(
+    expect(preparationFailedMessage("FAILED", "setup step 1 (npm ci) exited 1", SLACK_FORMAT)).toBe(
       "AgentX could not set up this thread's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Ask an administrator to fix the project's setup commands, then mention me again in this thread to start fresh.\nReason: setup step 1 (npm ci) exited 1",
     );
   });

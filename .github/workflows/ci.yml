@@ -290,6 +290,9 @@ jobs:
             # The guard reads the boundary data (Cloud-only package names, the four public AWS adapters) from beside itself, never from the checkout.
             # No fallback: if code/next has no such file this step fails, so a pull request's own copy of the data is never what judges it.
             git show origin/code/next:scripts/boundary-allowlist.json > "$RUNNER_TEMP/boundary-allowlist.json"
+            # The accepted findings, also from code/next and never from the pull request (a pull request cannot accept its own findings). Without the file
+            # nothing is accepted, which is only stricter.
+            if git cat-file -e origin/code/next:scripts/port-guard-accepted.json 2>/dev/null; then git show origin/code/next:scripts/port-guard-accepted.json > "$RUNNER_TEMP/port-guard-accepted.json"; fi
             node "$RUNNER_TEMP/port-guard.ts" --range origin/mainline..HEAD --allow-guard-edits
           else
             npm run port:guard -- --range origin/mainline..HEAD --allow-guard-edits

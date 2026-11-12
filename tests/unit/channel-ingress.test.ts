@@ -60,7 +60,7 @@ describe("an accepted message", () => {
   it("is queued with the bound project and linked developer, and acknowledged", async () => {
     const { post, queued, events } = harness();
     expect(status(await post(MESSAGES, message))).toEqual({ statusCode: 202, status: "accepted" });
-    expect(queued).toEqual([{ kind: "message", message, projectName: "web", developerId: "dev-1" }]);
+    expect(queued).toEqual([{ kind: "message", message, projectName: "web", developerId: "dev-1", stepUp: ["plan_approval", "admin"] }]);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: "ack", channel: "whatsapp", conversation, data: { inReplyTo: "wamid.HBgL1" } });
   });
@@ -68,7 +68,7 @@ describe("an accepted message", () => {
   it("queues a decision without an ack", async () => {
     const { post, queued, events } = harness();
     expect((await post(DECISIONS, decision)).statusCode).toBe(202);
-    expect(queued).toEqual([{ kind: "decision", decision, projectName: "web", developerId: "dev-1" }]);
+    expect(queued).toEqual([{ kind: "decision", decision, projectName: "web", developerId: "dev-1", stepUp: ["plan_approval", "admin"] }]);
     expect(events).toEqual([]);
   });
 
@@ -76,6 +76,28 @@ describe("an accepted message", () => {
     const { post, queued } = harness({ sendEvent: async () => { throw new Error("queue down"); } });
     expect((await post(MESSAGES, message)).statusCode).toBe(202);
     expect(queued).toHaveLength(1);
+  });
+});
+
+describe("actions (FR-071)", () => {
+  const ACTIONS = "/v1/channels/whatsapp/actions";
+  const action = { version: 1, channel: "whatsapp", eventId: "wamid.HBgL3", conversation, actor, actionId: "workflow.changes", value: "42", form: { note: "keep the old menu" }, receivedAt: "2026-11-08T09:59:59.000Z" };
+
+  it("are queued with the bound project and linked developer, once, without an ack", async () => {
+    const { post, queued, events } = harness();
+    expect(status(await post(ACTIONS, action))).toEqual({ statusCode: 202, status: "accepted" });
+    expect(status(await post(ACTIONS, action))).toEqual({ statusCode: 200, status: "duplicate" });
+    expect(queued).toEqual([{ kind: "action", action, projectName: "web", developerId: "dev-1", stepUp: ["plan_approval", "admin"] }]);
+    expect(events).toEqual([]);
+  });
+
+  it("need a conversation until direct messages' actions arrive, and a bound space", async () => {
+    const { post, queued } = harness();
+    const direct: Record<string, unknown> = { ...action };
+    delete direct.conversation;
+    expect(status(await post(ACTIONS, direct))).toEqual({ statusCode: 400, error: "conversation_required" });
+    expect(status(await post(ACTIONS, { ...action, conversation: { ...conversation, space: "group=Other" } }))).toEqual({ statusCode: 403, error: "space_not_bound" });
+    expect(queued).toEqual([]);
   });
 });
 

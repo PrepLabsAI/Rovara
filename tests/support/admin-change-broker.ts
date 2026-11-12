@@ -3,6 +3,7 @@
 // linked Slack user for the admin, and the ingress's press event.
 import { randomUUID } from "node:crypto";
 import type { AdminChangeInput, EndDeveloperSessionsRequest, ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
+import type { SignInClientRegistry } from "../../packages/broker/src/aws/developer-routes.js";
 import { createAdminReadBroker } from "./admin-read-broker.js";
 import { SLACK_TEAM, issuer } from "./slack-broker.js";
 
@@ -38,6 +39,8 @@ export async function createAdminChangeBroker(options: {
   connectorTypes?: Record<string, unknown>;
   /** The admin's Slack link lookup answers that Slack could not be reached. */
   slackLookupDown?: boolean;
+  /** Spec 063: the sign-in client registry the broker changes through DeveloperIdentity. */
+  signInClients?: SignInClientRegistry;
 } = {}): Promise<AdminChangeHarness> {
   let now = Date.now();
   const clock = { now: () => now, advance: (ms: number) => { now += ms; } };
@@ -58,6 +61,7 @@ export async function createAdminChangeBroker(options: {
       slackUserByEmail,
       endDeveloperSessions: async (request: EndDeveloperSessionsRequest) => { endedSessions.push(request); return { ok: true }; },
       channelByName: async ({ name }) => (channelLookup.down ? { ok: false, error: "slack_unavailable" } : name === "ledger-dev" ? { ok: true, channel: { channelId: "C0LEDGER01", name } } : { ok: true }),
+      ...(options.signInClients === undefined ? {} : { signInClients: options.signInClients }),
     },
     brokerExtra: {
       ...(options.connectorTypes === undefined ? {} : { connectorTypes: options.connectorTypes }),

@@ -207,7 +207,7 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
       const items: TransactItem[] = [
         workflowUpdateItem(taskId, next, workflow.revision),
         ...await mergedMilestoneItems({ milestones, bindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) } }, task, workflow, next, at),
-        ...await mergedStateItems({ store, timeline, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }) }, task, workflow, next, at,
+        ...await mergedStateItems({ store, timeline, audit: flow.audit, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }) }, task, workflow, next, at,
           state === "MERGED" ? [{ repositoryId: pullRequest.repositoryId, number: pullRequest.number, ...(details.mergedBy === undefined ? {} : { mergedBy: details.mergedBy }), ...(details.mergeRevision === undefined ? {} : { mergeCommit: details.mergeRevision }) }] : []),
       ];
       const written = await store.transact(items);

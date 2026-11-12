@@ -27,6 +27,7 @@ import {
 import { serialWorkerCanResume } from "../work-breakdown/parallel-parts.js";
 import { CallbackCapabilities, type CallbackAction } from "../../callbacks.js";
 import { admit, releaseAdmission } from "./admission.js";
+import { runWatchItem } from "./run-watch-rows.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { operationKey, workspaceKey } from "./keys.js";
@@ -369,6 +370,8 @@ async function forgetMachine(deps: TaskFlowDeps, workspaceId: string, machineId:
 async function claimDispatch(deps: TaskFlowDeps, operation: OperationRecord, machineId: string, modelChoice?: OperationModelChoice): Promise<boolean> {
   const now = iso(deps);
   const claimed = await deps.store.transact([
+    // The operation is watched from the hand-over on (`sweepLostRuns`): the machine it runs on may be lost with no result ever coming back.
+    runWatchItem(deps, operation, machineId, now),
     { kind: "check", key: workspaceKey(operation.workspaceId), condition: when.and(when.eq("fence", operation.fence), when.eq("activeOperationId", operation.id), when.not(when.or(when.eq("status", "CLOSED"), when.eq("status", "CLOSING")))) },
     { kind: "update", key: operationKey(operation.workspaceId, operation.id), ops: [change.set("status", "DISPATCHING"), change.set("machineId", machineId), change.set("deliveredAt", now), change.set("updatedAt", now), ...(modelChoice === undefined ? [] : [change.set("modelChoice", modelChoice as unknown as JsonValue)])], condition: when.and(when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING")), ...(modelChoice === undefined ? [] : [when.notExists("modelChoice")])) },
   ]);

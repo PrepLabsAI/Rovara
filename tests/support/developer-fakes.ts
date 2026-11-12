@@ -277,7 +277,7 @@ export function authorizeQuery(overrides: Record<string, string> = {}): string {
 
 /** The sign-in server with fake Slack, fake OIDC, fake DynamoDB and the fake KMS signer. */
 export function identityHarness(options: {
-  slack?: boolean; teamId?: string | undefined; oidc?: { requiredClaim?: string; requiredValues?: string[] };
+  slack?: boolean; teamId?: string | undefined; oidc?: { requiredClaim?: string; requiredValues?: string[]; administrator?: { claim: string; values: string[] } };
   slackUsers?: FakeSlackUser[]; oidcUsers?: FakeOidcUser[]; channels?: Record<string, string[]>;
   channelInfo?: Record<string, { name: string; isPrivate?: boolean }>;
   slackCredentials?: { clientId?: string; clientSecret?: string };
@@ -298,6 +298,7 @@ export function identityHarness(options: {
         issuer: OIDC_ISSUER, clientId: OIDC_CLIENT_ID, clientSecret: async () => OIDC_CLIENT_SECRET,
         ...(options.oidc.requiredClaim === undefined ? {} : { requiredClaim: options.oidc.requiredClaim }),
         requiredValues: options.oidc.requiredValues ?? [], fetch, jwksFor: () => oidc.jwks, now,
+        ...(options.oidc.administrator === undefined ? {} : { administrator: options.oidc.administrator }),
       }),
     }),
   };

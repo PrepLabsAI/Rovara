@@ -1,7 +1,7 @@
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { agentXError, type SlackRequestMessage, type SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
 import { TurnRecordSchema, type TurnRecord } from "../../packages/contracts/src/turns.js";
-import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { DynamoTurnRecordWriter, TURN_ITEM_BYTE_BUDGET, fitTurnRecord } from "../../packages/slack-service/src/turn-records.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 

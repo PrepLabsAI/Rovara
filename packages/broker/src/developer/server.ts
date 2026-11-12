@@ -4,7 +4,7 @@
 // (channel members, channel names for R10, 25d's email lookup and bot token check, and 25e's
 // admin-ended sessions and channel by name).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   AGENTX_CLI_CLIENT_ID,
   ChannelInfoRequestSchema,
@@ -16,6 +16,11 @@ import {
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
   EndDeveloperSessionsRequestSchema,
+  ListSignInClientsRequestSchema,
+  PutSignInClientRequestSchema,
+  RemoveSignInClientRequestSchema,
+  SignInClientIdSchema,
+  signInClientView,
   SlackAuthCheckRequestSchema,
   SlackUserByEmailRequestSchema,
   isLoopbackRedirectUri,
@@ -34,6 +39,11 @@ import {
   type TaskPeopleDisplayReadResponse,
   type DeveloperSignInMethod,
   type EndDeveloperSessionsRequest,
+  type ListSignInClientsRequest,
+  type PutSignInClientRequest,
+  type RemoveSignInClientRequest,
+  type SignInClientRecord,
+  type SignInClientsResponse,
   type EndDeveloperSessionsResponse,
   type SlackAuthCheckRequest,
   type SlackAuthCheckResponse,
@@ -122,6 +132,33 @@ function toClient(redirectUri: string, params: Record<string, string>): HttpResu
   return redirect(url.toString());
 }
 
+/** The CLI is public ("none"); a confidential registered client sends its secret either way (spec 063). */
+const CLIENT_AUTH_METHODS = ["none", "client_secret_basic", "client_secret_post"];
+
+/** RFC 6749 2.3.1: HTTP Basic with the form-encoded client ID and secret; undefined without the header. */
+function basicCredentials(authorization: string | undefined): { clientId: string; secret: string } | "malformed" | undefined {
+  if (authorization === undefined) return undefined;
+  const match = /^Basic ([A-Za-z0-9+/=]+)$/i.exec(authorization.trim());
+  if (match === null) return "malformed";
+  const decoded = Buffer.from(match[1]!, "base64").toString("utf8");
+  const colon = decoded.indexOf(":");
+  if (colon < 1) return "malformed";
+  try {
+    const formDecode = (text: string) => decodeURIComponent(text.replace(/\+/g, " "));
+    return { clientId: formDecode(decoded.slice(0, colon)), secret: formDecode(decoded.slice(colon + 1)) };
+  } catch {
+    return "malformed";
+  }
+}
+
+/** Compares a presented secret with the kept SHA-256, in constant time. */
+function secretMatches(secret: string, secretHash: string): boolean {
+  if (secret === "") return false;
+  const given = createHash("sha256").update(secret).digest();
+  const kept = Buffer.from(secretHash, "hex");
+  return kept.length === given.length && timingSafeEqual(given, kept);
+}
+
 const expired = () => page(400, "This sign-in link has expired", ["Run agentx login again."]);
 /** One answer for every code failure (unknown, used, expired, wrong verifier, wrong redirect URI). */
 const INVALID_CODE = ["invalid_grant", "the sign-in code is invalid, used or expired; run agentx login again"] as const;
@@ -137,8 +174,39 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return found;
   };
 
-  const accessToken = (session: SessionRecord) =>
-    issueAccessToken(deps.signer, { issuer: config.issuer, subject: session.developerId, amr: session.amr, env: config.env, sessionId: session.sessionId, now: deps.now() });
+  /** Spec 063 FR-002: a registered client's session gets tokens addressed to that client, which Rovara's API refuses. */
+  const accessToken = (session: SessionRecord, client?: SignInClientRecord) =>
+    issueAccessToken(deps.signer, {
+      issuer: config.issuer, subject: session.developerId, amr: session.amr, env: config.env, sessionId: session.sessionId, now: deps.now(),
+      ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience } }),
+    });
+
+  /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
+  const registeredClient = async (clientId: string): Promise<SignInClientRecord | undefined> =>
+    SignInClientIdSchema.safeParse(clientId).success ? store.getClient(clientId) : undefined;
+
+  type ClientCheck = { ok: true; client?: SignInClientRecord } | { ok: false; result: HttpResult };
+  /**
+   * Spec 063 FR-002: who is calling the token or revoke endpoint. The CLI is a public client, as before. A registered
+   * client is named by client_id or HTTP Basic; a confidential one must present its secret, which is compared by hash.
+   */
+  async function authenticateClient(form: URLSearchParams, authorization: string | undefined, optional: boolean): Promise<ClientCheck> {
+    const refuse = (description: string): ClientCheck => ({ ok: false, result: oauthError(401, "invalid_client", description) });
+    const basic = basicCredentials(authorization);
+    if (basic === "malformed") return refuse("the Authorization header is not HTTP Basic client credentials");
+    const formId = form.get("client_id");
+    if (basic !== undefined && formId !== null && formId !== basic.clientId) return refuse("client_id does not match the Authorization header");
+    const clientId = basic?.clientId ?? formId;
+    if (clientId === null) return optional ? { ok: true } : refuse("unknown client; use the AgentX CLI");
+    if (clientId === AGENTX_CLI_CLIENT_ID) return { ok: true };
+    const client = await registeredClient(clientId);
+    if (client === undefined) return refuse("unknown client; use the AgentX CLI, or ask a Rovara administrator to register this service");
+    if (client.secretHash !== undefined) {
+      const secret = basic?.secret ?? form.get("client_secret") ?? "";
+      if (!secretMatches(secret, client.secretHash)) return refuse("the client secret is missing or wrong");
+    }
+    return { ok: true, client };
+  }
   const tokens = (access: { token: string; expiresIn: number }, refreshToken: string): HttpResult =>
     jsonResult(200, { access_token: access.token, token_type: "Bearer", expires_in: access.expiresIn, refresh_token: refreshToken });
 
@@ -162,7 +230,19 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       }
     }
     const redirectUri = query.get("redirect_uri") ?? "";
-    if (query.get("client_id") !== AGENTX_CLI_CLIENT_ID || !isLoopbackRedirectUri(redirectUri)) {
+    const requestedClient = query.get("client_id") ?? "";
+    // Spec 063 FR-002: a registered client returns only to one of its exact redirect URLs, or to loopback if allowed.
+    let client: SignInClientRecord | undefined;
+    if (requestedClient !== AGENTX_CLI_CLIENT_ID) {
+      try {
+        client = await registeredClient(requestedClient);
+      } catch (error) {
+        deps.log({ event: "signin.error", path: "/v1/auth/authorize", error: errorName(error) });
+        return page(503, "Sign-in is unavailable", ["Try again in a moment."]);
+      }
+      const allowed = client !== undefined && (client.redirectUris.includes(redirectUri) || (client.loopback && isLoopbackRedirectUri(redirectUri)));
+      if (!allowed) return page(400, "This sign-in link is not from a service registered with Rovara", ["Start signing in again from the service. If it keeps happening, ask a Rovara administrator to check how the service is registered.", "Signing in to the AgentX CLI? Start from your terminal with agentx login <url>."]);
+    } else if (!isLoopbackRedirectUri(redirectUri)) {
       return page(400, "This sign-in link is not from the AgentX CLI", ["Start signing in from your terminal with agentx login <url>."]);
     }
     const clientState = query.get("state") ?? "";
@@ -176,7 +256,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     let request: AuthRequestRecord;
     try {
-      request = await store.createAuthRequest({ clientRedirectUri: redirectUri, clientState, codeChallenge: challenge, nonce: randomBytes(32).toString("base64url") });
+      request = await store.createAuthRequest({
+        clientRedirectUri: redirectUri, clientState, codeChallenge: challenge, nonce: randomBytes(32).toString("base64url"),
+        ...(client === undefined ? {} : { clientId: client.clientId }),
+      });
       if (methods.length === 1) {
         const method = methods[0]!;
         if (await store.chooseMethod(request.id, method) === undefined) return expired();
@@ -334,23 +417,30 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       deps.log({ event: "signin.browser_succeeded", method, developerId });
       return browserReturn(request.browserReturnTo, true, session.sessionId);
     }
-    const agentxCode = await store.issueCode({ developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri });
-    deps.log({ event: "signin.succeeded", method, developerId, linkedToSlack: slackUserId !== undefined });
+    const agentxCode = await store.issueCode({
+      developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri,
+      ...(request.clientId === undefined ? {} : { clientId: request.clientId }),
+      // FR-005: only a company sign-in can make an administrator.
+      ...(method === "oidc" && identity.administrator === true ? { administrator: true as const } : {}),
+    });
+    deps.log({ event: "signin.succeeded", method, developerId, linkedToSlack: slackUserId !== undefined, ...(request.clientId === undefined ? {} : { clientId: request.clientId }) });
     return client({ code: agentxCode });
   }
 
-  async function authorizationCodeGrant(form: URLSearchParams, methods: DeveloperSignInMethod[]): Promise<HttpResult> {
+  async function authorizationCodeGrant(form: URLSearchParams, methods: DeveloperSignInMethod[], client: SignInClientRecord | undefined): Promise<HttpResult> {
     const redeemed = await store.redeemCode({ code: form.get("code") ?? "", verifier: form.get("code_verifier") ?? "", redirectUri: form.get("redirect_uri") ?? "" });
     if (redeemed === undefined) return oauthError(400, ...INVALID_CODE);
+    // A code is redeemed only by the client it was issued to (it is burned either way).
+    if (redeemed.clientId !== client?.clientId) return oauthError(400, ...INVALID_CODE);
     if (!methods.includes(redeemed.amr)) return oauthError(400, "invalid_grant", `${methodLabel(redeemed.amr)} sign-in was turned off in this environment; run agentx login again`);
     const developer = await store.getDeveloper(redeemed.developerId);
     if (developer === undefined || developer.revoked) return oauthError(400, "invalid_grant", "your AgentX sign-in was turned off by an admin; contact an admin");
     const { session, refreshToken } = await store.createSession(redeemed);
-    deps.log({ event: "signin.session_started", method: redeemed.amr, developerId: redeemed.developerId, sessionId: session.sessionId });
-    return tokens(await accessToken(session), refreshToken);
+    deps.log({ event: "signin.session_started", method: redeemed.amr, developerId: redeemed.developerId, sessionId: session.sessionId, ...(client === undefined ? {} : { clientId: client.clientId }) });
+    return tokens(await accessToken(session, client), refreshToken);
   }
 
-  async function refreshTokenGrant(form: URLSearchParams, methods: DeveloperSignInMethod[]): Promise<HttpResult> {
+  async function refreshTokenGrant(form: URLSearchParams, methods: DeveloperSignInMethod[], client: SignInClientRecord | undefined): Promise<HttpResult> {
     const lookup = await store.lookupRefresh(form.get("refresh_token") ?? "");
     const ended = oauthError(400, ...SIGN_IN_ENDED);
     if (lookup.kind === "unknown" || lookup.kind === "ended") return ended;
@@ -360,6 +450,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     // "active", or "recently_rotated": the same token presented again inside the grace window.
     const { session } = lookup;
+    // Spec 063: a refresh token works only for the client it was issued to, and not across a removal and re-registration.
+    if (session.clientId !== client?.clientId) return ended;
+    if (client !== undefined && Date.parse(session.startedAt) < Date.parse(client.createdAt)) {
+      await revoke(session.sessionId, "client_removed");
+      return ended;
+    }
     if (!methods.includes(session.amr)) {
       await revoke(session.sessionId, "method_disabled");
       return oauthError(400, "invalid_grant", `${methodLabel(session.amr)} sign-in was turned off in this environment; sign in another way with agentx login`);
@@ -386,7 +482,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       }
     }
     // Signed before the rotation: a signing failure then leaves the presented token untouched.
-    const access = await accessToken(session);
+    const access = await accessToken(session, client);
     const rotated = lookup.kind === "active" ? await store.rotateRefresh(lookup) : await store.rotateRecentlyUsed(lookup);
     if ("reused" in rotated) {
       await revoke(session.sessionId, "refresh_token_reused");
@@ -397,13 +493,24 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return tokens(access, rotated.refreshToken);
   }
 
-  async function token(form: URLSearchParams): Promise<HttpResult> {
-    if (form.get("client_id") !== AGENTX_CLI_CLIENT_ID) return oauthError(401, "invalid_client", "unknown client; use the AgentX CLI");
+  async function token(form: URLSearchParams, authorization: string | undefined): Promise<HttpResult> {
+    const caller = await retryableCheck("token", () => authenticateClient(form, authorization, false));
+    if (!caller.ok) return caller.result;
     const methods = enabledMethods(deps);
     const grant = form.get("grant_type");
-    if (grant === "authorization_code") return authorizationCodeGrant(form, methods);
-    if (grant === "refresh_token") return retryable("token", () => refreshTokenGrant(form, methods));
+    if (grant === "authorization_code") return authorizationCodeGrant(form, methods, caller.client);
+    if (grant === "refresh_token") return retryable("token", () => refreshTokenGrant(form, methods, caller.client));
     return oauthError(400, "unsupported_grant_type", "use authorization_code or refresh_token");
+  }
+
+  /** A client check that could not read the registry answers 503, as `retryable` does. */
+  async function retryableCheck(operation: string, fn: () => Promise<ClientCheck>): Promise<ClientCheck> {
+    let result: ClientCheck | undefined;
+    const answered = await retryable(operation, async () => {
+      result = await fn();
+      return jsonResult(200, {});
+    });
+    return result ?? { ok: false, result: answered };
   }
 
   /** A retryable AWS error anywhere in fn answers 503 and changes nothing more; others propagate. */
@@ -417,14 +524,16 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
   }
 
-  /** RFC 7009. A public client, so no client authentication; a known refresh token ends its session. */
-  async function revokeToken(form: URLSearchParams): Promise<HttpResult> {
-    const clientId = form.get("client_id");
-    if (clientId !== null && clientId !== AGENTX_CLI_CLIENT_ID) return oauthError(401, "invalid_client", "unknown client; use the AgentX CLI");
+  /** RFC 7009. The CLI is a public client; a confidential registered client authenticates. A known refresh token of
+   * the calling client ends its session; another client's token is left alone, with the same answer. */
+  async function revokeToken(form: URLSearchParams, authorization: string | undefined): Promise<HttpResult> {
+    const caller = await retryableCheck("revoke", () => authenticateClient(form, authorization, true));
+    if (!caller.ok) return caller.result;
     const presented = form.get("token");
     if (presented === null || presented === "") return oauthError(400, "invalid_request", "token is required");
     return retryable("revoke", async () => {
       const lookup = await store.lookupRefresh(presented);
+      if ((lookup.kind === "active" || lookup.kind === "recently_rotated") && lookup.session.clientId !== caller.client?.clientId) return jsonResult(200, {});
       if (lookup.kind === "active" || lookup.kind === "recently_rotated") await revoke(lookup.session.sessionId, "signed_out");
       if (lookup.kind === "reused") await revoke(lookup.sessionId, "signed_out");
       return jsonResult(200, {});
@@ -452,7 +561,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   const discovery = () => ({
     issuer: config.issuer, authorization_endpoint: endpoint("/authorize"), token_endpoint: endpoint("/token"), revocation_endpoint: endpoint("/revoke"),
     jwks_uri: endpoint("/.well-known/jwks.json"), response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
-    code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"], revocation_endpoint_auth_methods_supported: ["none"],
+    code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS, revocation_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS,
     subject_types_supported: ["public"], id_token_signing_alg_values_supported: ["RS256"], scopes_supported: ["openid"],
   });
 
@@ -475,17 +584,37 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           return callback("oidc", url.searchParams, headers);
       }
     }
-    if (method === "POST" && pathname === "/v1/auth/token") return token(new URLSearchParams(body ?? ""));
-    if (method === "POST" && pathname === "/v1/auth/revoke") return revokeToken(new URLSearchParams(body ?? ""));
+    if (method === "POST" && pathname === "/v1/auth/token") return token(new URLSearchParams(body ?? ""), headers.authorization);
+    if (method === "POST" && pathname === "/v1/auth/revoke") return revokeToken(new URLSearchParams(body ?? ""), headers.authorization);
     return jsonResult(404, { error: "not_found" });
   }
 
   const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/");
 
   return async (
-    event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
-  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse> => {
+    event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
+      | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest,
+  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse> => {
     if ("kind" in event) {
+      // Spec 063 (FR-001): the registry of sign-in clients, changed only by the broker's applied admin changes.
+      if (event.kind === "put-sign-in-client") {
+        const parsed = PutSignInClientRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        await store.putClient(parsed.data.client);
+        deps.log({ event: "signin.client_registered", clientId: parsed.data.client.clientId });
+        return { ok: true };
+      }
+      if (event.kind === "remove-sign-in-client") {
+        const parsed = RemoveSignInClientRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        const removed = await store.removeClient(parsed.data.clientId);
+        deps.log({ event: "signin.client_removed", clientId: parsed.data.clientId, removed });
+        return { ok: true, removed };
+      }
+      if (event.kind === "list-sign-in-clients") {
+        if (!ListSignInClientsRequestSchema.safeParse(event).success) return { ok: false, error: "invalid_request" };
+        return { ok: true, clients: (await store.listClients()).map(signInClientView) };
+      }
       if (event.kind === "end-developer-sessions") {
         const parsed = EndDeveloperSessionsRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };

@@ -6,22 +6,16 @@
 // a task started in Slack.
 import {
   AgentXError, CHATGPT_CALLBACK_URL, CHATGPT_CONNECT_STATE_SECONDS, ChatGptConnectionViewSchema, SlackMessageTimestampSchema,
-  SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema, agentXError, type ChatGptConnectionView,
+  SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema, agentXError, parseChatGptCommand, type ChatGptCommand, type ChatGptConnectionView,
 } from "@agentx/contracts";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import { parseChatGptCallback } from "../chatgpt/oauth.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 
-export type ChatGptSlackCommand = "connect" | "status" | "disconnect";
+export type ChatGptSlackCommand = ChatGptCommand;
 
-/** The three ChatGPT commands, typed after the mention; anything else is an ordinary request. */
-export function chatGptSlackCommand(text: string): ChatGptSlackCommand | undefined {
-  const words = text.trim().toLowerCase().replace(/\s+/gu, " ").replace(/[.!]+$/u, "");
-  if (/^(?:connect|link) (?:my )?chatgpt$/u.test(words)) return "connect";
-  if (/^(?:disconnect|unlink) (?:my )?chatgpt$/u.test(words)) return "disconnect";
-  if (/^chatgpt status$/u.test(words)) return "status";
-  return undefined;
-}
+/** The three ChatGPT commands, typed after the mention (spec 062: the core's parser). */
+export const chatGptSlackCommand = parseChatGptCommand;
 
 /** The Sign in with ChatGPT link button: a link, so its press needs nothing but an answer. */
 export const CHATGPT_OPEN_ACTION = "rovara_chatgpt_open";
