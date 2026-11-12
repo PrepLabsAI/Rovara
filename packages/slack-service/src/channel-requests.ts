@@ -14,9 +14,10 @@ import {
   type PendingConfirmation,
 } from "@agentx/contracts";
 import { confirmationApprovalKind, confirmationDigest, type ConfirmationAnswer } from "./confirmations.js";
+import { checkReportEvents, doneFields, pullRequestEvents } from "./channel-task-events.js";
 import { PLAIN_FORMAT } from "./conversation-format.js";
 import type { RequestContext, RequestHandler } from "./consumer.js";
-import { processConversationRequest, type ProcessorDependencies, type ProcessorMessage, type ServiceLog, type SurfaceCommand } from "./processor.js";
+import { processConversationRequest, type FinishedTurn, type ProcessorDependencies, type ProcessorMessage, type ServiceLog, type SurfaceCommand } from "./processor.js";
 
 /**
  * Spec 062 Phase 4: runs what the channel API queued, through the same processor as a Slack thread. The conversation's
@@ -143,10 +144,13 @@ export function channelRequestHandler(deps: ChannelRequestDependencies): Request
     const postConfirmation = async (_thread: ConversationRef, confirmation: PendingConfirmation, text: string) => {
       await deps.send(event("approval_request", approvalRequestData(confirmation, text)));
     };
+    // Issue #438: what the turn did, sent as typed events once it finished.
+    let finishedTurn: FinishedTurn<ConversationRef> | undefined;
     await processConversationRequest(message, {
       ...deps.processor,
       post,
       postConfirmation,
+      onFinished: async (turn) => { finishedTurn = turn; },
       subjectOf: conversationSubject,
       plainReplies: true,
       format: PLAIN_FORMAT,
@@ -162,9 +166,19 @@ export function channelRequestHandler(deps: ChannelRequestDependencies): Request
       ...(context.onHeartbeat === undefined ? {} : { onHeartbeat: context.onHeartbeat }),
       ...(answer === undefined ? {} : { answer }),
     });
+    // The typed facts follow what was said, so an adapter that only shows text sees nothing new before them.
+    const turn = finishedTurn;
+    if (turn !== undefined) {
+      try {
+        for (const data of pullRequestEvents(turn.recorder.pullRequests())) await deps.send(event("pr", data));
+        for (const data of checkReportEvents(turn)) await deps.send(event("check_report", data));
+      } catch (error) {
+        deps.log("channel.task_events_failed", { eventId: message.eventId, errorName: error instanceof Error ? error.name : "unknown" });
+      }
+    }
     // The request finished. The marker only tells the adapter so; losing it loses nothing said.
     try {
-      await deps.send(event("done", { inReplyTo: message.eventId }));
+      await deps.send(event("done", { inReplyTo: message.eventId, ...(turn === undefined ? {} : doneFields(turn)) }));
     } catch (error) {
       deps.log("channel.done_failed", { eventId: message.eventId, errorName: error instanceof Error ? error.name : "unknown" });
     }

@@ -22,6 +22,27 @@ import {
 } from "@agentx/contracts";
 
 interface RecordedArguments { text: string; fingerprint: string }
+
+/**
+ * Issue #438: a pull request this turn opened or changed, as its publish operation answered. `checks` are the
+ * project checks the publication ran on `headSha`. Kept in memory for the conversation's events, never in the record.
+ */
+export interface TurnPullRequest {
+  taskId?: string;
+  action: "opened" | "updated" | "replaced" | "closed" | "reopened";
+  /** owner/name, read from the pull request's GitHub URL. */
+  repository: string;
+  number: number;
+  url: string;
+  title?: string;
+  headSha: string;
+  baseBranch: string;
+  draft?: boolean;
+  checks: Array<{ name: string; status: "passed" | "failed" | "timed_out" }>;
+}
+
+/** A worker task's check report, with the task it came from when the result named it. */
+export interface TurnCheckReport { taskId?: string; report: CheckReport }
 interface PendingCall { name: string; startedAt: number; rawArguments: unknown; recorded?: RecordedArguments; call?: TurnCall }
 
 const OUTCOMES: Readonly<Record<string, TurnOutcome>> = {
@@ -56,8 +77,12 @@ export class TurnRecorder {
   private readonly gates = new Map<string, TurnGate>();
   /** Spec 051: each worker task's check report, by operation id (or by call when it has none), in the order seen. */
   private readonly reports = new Map<string, CheckReport>();
+  /** The task each report came from, by the same key; absent when the result named no operation. */
+  private readonly reportTasks = new Map<string, string>();
   /** Spec 051 Ruling Z: a pull request this turn opened came back as a draft. */
   private openedDraft = false;
+  /** Issue #438: the pull requests this turn opened or changed, in order. */
+  private readonly changedPullRequests: TurnPullRequest[] = [];
   private stopReason: string | undefined;
   private emptyResponse = false;
   private usage: TaskUsageTelemetry | undefined;
@@ -150,6 +175,26 @@ export class TurnRecorder {
     pending.call = this.classify(event.toolCallId, pending, event);
     this.guarded("check_report", () => { this.keepReport(event.toolCallId, pending, event); });
     this.guarded("draft_pull_request", () => { this.keepDraft(pending, event); });
+    this.guarded("pull_request", () => { this.keepPullRequest(pending, event); });
+  }
+
+  private keepPullRequest(pending: PendingCall, event: { result: unknown; isError: boolean }): void {
+    if (event.isError || !pending.name.startsWith("agentx_") || !pending.name.endsWith("_pull_request")) return;
+    const fact = pullRequestOf(parseObject(resultText(event.result)), pending.rawArguments);
+    if (fact !== undefined) this.changedPullRequests.push(fact);
+  }
+
+  /** Issue #438: the pull requests this turn opened or changed, for the conversation's `pr` events. */
+  pullRequests(): TurnPullRequest[] {
+    return [...this.changedPullRequests];
+  }
+
+  /** Issue #438: each worker task's check report with its task, for the conversation's `check_report` events. */
+  taskCheckReports(): TurnCheckReport[] {
+    return [...this.reports.entries()].map(([key, report]) => {
+      const taskId = this.reportTasks.get(key);
+      return taskId === undefined ? { report } : { taskId, report };
+    });
   }
 
   private keepDraft(pending: PendingCall, event: { result: unknown; isError: boolean }): void {
@@ -171,6 +216,7 @@ export class TurnRecorder {
     if (checks === undefined) return;
     const key = typeof parsed.operationId === "string" ? parsed.operationId : toolCallId;
     this.reports.set(key, checks);
+    if (typeof parsed.operationId === "string" && parsed.operationId.length <= 100) this.reportTasks.set(key, parsed.operationId);
   }
 
   /** Spec 051 FR-009: the check reports of the worker tasks this turn ran, each once, for the Slack reply. */
@@ -338,6 +384,43 @@ function resultText(result: unknown): string {
 
 function assistantText(content: unknown): string {
   return resultText({ content }).replace(/<thinking>[\s\S]*?<\/thinking>\s*/giu, "").trim();
+}
+
+const LIFECYCLE_ACTIONS: Readonly<Record<string, TurnPullRequest["action"]>> = {
+  append: "updated", sync: "updated", edit: "updated", revert: "updated", replace: "replaced", close: "closed", reopen: "reopened",
+};
+const SHA = /^[a-f0-9]{40,64}$/;
+const GITHUB_PULL = /^https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9_.-]{1,100})\/pull\/(\d{1,12})$/;
+
+/**
+ * A succeeded publish or pull request change, from its tool result (`{ operationId, status, result }`); undefined for
+ * anything else. Only the fields the conversation's events need, each checked; the repository comes from the URL.
+ */
+function pullRequestOf(parsed: Record<string, unknown>, rawArguments: unknown): TurnPullRequest | undefined {
+  if (parsed.status !== "SUCCEEDED" || parsed.result === null || typeof parsed.result !== "object") return undefined;
+  const result = parsed.result as Record<string, unknown>;
+  const url = typeof result.url === "string" ? result.url : "";
+  const match = GITHUB_PULL.exec(url);
+  if (match === null || Number(match[3]) !== result.number) return undefined;
+  if (typeof result.commit !== "string" || !SHA.test(result.commit) || typeof result.baseBranch !== "string" || result.baseBranch.length === 0 || result.baseBranch.length > 255) return undefined;
+  const action = result.action === undefined ? "opened" : typeof result.action === "string" ? LIFECYCLE_ACTIONS[result.action] : undefined;
+  if (action === undefined) return undefined;
+  const title = (rawArguments as { title?: unknown } | null | undefined)?.title;
+  const checks: TurnPullRequest["checks"] = Array.isArray(result.checks) ? result.checks.flatMap((check: unknown): TurnPullRequest["checks"] => {
+    const entry = check as { index?: unknown; executable?: unknown; outcome?: unknown } | null;
+    const outcome = entry?.outcome;
+    if (outcome !== "passed" && outcome !== "failed" && outcome !== "timed_out") return [];
+    const executable = typeof entry?.executable === "string" ? entry.executable.slice(0, 150) : "check";
+    return [{ name: typeof entry?.index === "number" ? `${entry.index + 1}: ${executable}` : executable, status: outcome }];
+  }).slice(0, 64) : [];
+  return {
+    ...(typeof parsed.operationId === "string" && parsed.operationId.length <= 100 ? { taskId: parsed.operationId } : {}),
+    action, repository: `${match[1]}/${match[2]}`, number: Number(match[3]), url,
+    ...(typeof title === "string" && title.trim().length > 0 ? { title: title.trim().slice(0, 300) } : {}),
+    headSha: result.commit, baseBranch: result.baseBranch,
+    ...(typeof result.draft === "boolean" ? { draft: result.draft } : {}),
+    checks,
+  };
 }
 
 function parseObject(text: string): Record<string, unknown> {
