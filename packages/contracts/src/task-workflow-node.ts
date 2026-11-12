@@ -1856,6 +1856,16 @@ export function startWorkflowPlanAfterUnderstand(currentInput: unknown, now: str
 }
 
 /**
+ * A version 1.0.0 task (Understand off: the start named the path and the request went straight to planning): the plan step runs again after the owner asked for changes, PLAN/READY becomes RUNNING.
+ * There is no assessment to plan from; the planner is given the request and the owner's words instead.
+ */
+export function startWorkflowPlanWithoutUnderstand(currentInput: unknown, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  if (current.definitionVersion !== "1.0.0" || current.stage !== "PLAN" || current.state !== "READY") throw new WorkflowTransitionError("the workflow is not ready to plan");
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, state: "RUNNING", updatedAt: now });
+}
+
+/**
  * What Understand found, recorded (`assessment` is the broker's checked, redacted copy of the model's answer; it is checked here once more):
  * - `ready` goes to PLAN/READY, with the path (a path the request gave wins; a Full path asks for requirements first);
  * - `questions` wait for a person at UNDERSTAND/WAITING while fewer than UNDERSTAND_ROUNDS_MAX rounds were asked; a round after that is treated as `ready`, each question
