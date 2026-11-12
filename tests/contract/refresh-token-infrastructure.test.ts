@@ -46,7 +46,11 @@ function secretsWrites(template: Template): Statement[] {
 describe("refresh-token write-back grant (phase 7)", () => {
   it("lets the broker replace only connector secrets tagged agentx-writable: refresh-token, and nothing else", { timeout: 30_000 }, () => {
     const template = Template.fromStack(new ControlPlaneStack(new App(), "RefreshTokenControlPlane"));
-    const writes = secretsWrites(template);
+    // Spec 062/064: the broker also creates channel adapter secrets, under the deployment's own adapter prefix only.
+    const all = secretsWrites(template);
+    const adapterSecrets = all.filter((statement) => JSON.stringify(statement.Resource).includes("secret:agentx/production/channel-adapter/*"));
+    expect(adapterSecrets.map((statement) => [statement.Action].flat())).toEqual([["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue"]]);
+    const writes = all.filter((statement) => !adapterSecrets.includes(statement));
     expect(writes).toHaveLength(1);
     expect([writes[0]!.Action].flat()).toEqual(["secretsmanager:PutSecretValue"]);
     expect(JSON.stringify(writes[0]!.Resource)).toContain("secret:agentx/connectors/*");

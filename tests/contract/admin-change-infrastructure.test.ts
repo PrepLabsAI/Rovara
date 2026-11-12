@@ -55,7 +55,8 @@ describe("admin change infrastructure", () => {
   it("changes nothing in the legacy template", () => {
     expect(legacy.toJSON().Parameters).not.toHaveProperty("McpConfirmElicitation");
     expect(JSON.stringify(legacy.toJSON())).not.toContain("ADMIN_CHANGE");
-    for (const absent of ["MCP_CONFIRM_ELICITATION", "CHANGE#*", "EMAIL#*"]) expect(JSON.stringify(legacy.toJSON())).not.toContain(absent);
+    // Spec 064: the legacy deployment's sign-in reads EMAIL# (it is the sign-in table's index), but it has no admin changes.
+    for (const absent of ["MCP_CONFIRM_ELICITATION", "CHANGE#*"]) expect(JSON.stringify(legacy.toJSON())).not.toContain(absent);
   });
 
   // Task 10 additions: the exact shape of each new statement, and where each variable goes.

@@ -360,7 +360,7 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
@@ -583,6 +583,11 @@ interface AwsBrokerDependencies {
   channelAdapters?: ChannelAdapterConfiguration;
   /** Spec 025 developer sign-in; absent when the deployment has none, and /v1/dev/* answers NOT_FOUND. */
   developer?: DeveloperApiConfiguration;
+  /**
+   * Spec 064: the legacy deployment's sign-in, for account linking only. Set instead of `developer`, so developer
+   * tasks, sharing and admin changes stay off; /v1/dev/* and /review/* serve linking alone (routeLinkingRequest).
+   */
+  linking?: DeveloperApiConfiguration;
   /** Sign in with ChatGPT (#338): each developer's ChatGPT connection; absent without its key. */
   chatgpt?: ChatGptConnections;
   githubMcp?: GitHubMcpDependencies;
@@ -1060,6 +1065,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // The browser page uses its own opaque revocable session cookie and reauthorizes each
       // request. Only API Gateway's exact public review route may reach this branch.
       if (event.routeKey === FEEDBACK_REVIEW_ROUTE_KEY) {
+        if (url.pathname.startsWith("/review/") && !dependencies.developer && dependencies.linking) {
+          return await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url) as { statusCode: number; headers: Record<string, string>; body: string };
+        }
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
         return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
@@ -1237,6 +1245,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // Spec 025: the developer API. /v1/dev/* has no API Gateway authorizer (D17): the broker
       // verifies the developer token, then checks the method and session (FR-009).
       if (url.pathname.startsWith("/v1/dev/")) {
+        if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
@@ -3794,7 +3803,7 @@ function threadCharging(dependencies: AwsBrokerDependencies, identity: Authentic
   }
   const channel = identity.channel;
   if (!channel) throw agentXError("FORBIDDEN", "a conversation identity is required");
-  const charge = channelCharge(channel, dependencies.developer?.slackTeamId);
+  const charge = channelCharge(channel, (dependencies.developer ?? dependencies.linking)?.slackTeamId);
   const limitsOf = (effective: SlackServiceConfiguration) => ({ member: effective.memberWorkspaceLimit, organization: effective.organizationWorkspaceLimit });
   return {
     heal: (effective) => healMemberSlots(dependencies, charge.member, effective),
@@ -13933,6 +13942,11 @@ async function publicationProject(
 }
 
 /** Spec 062: the link store the developer routes use, when the deployment has channel adapters. */
+/** Spec 064: what the legacy deployment's linking routes need: sign-in and the links, never developer tasks. */
+function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: DeveloperApiConfiguration) {
+  return { documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: linking, now: Date.now, ...channelLinkRouteDependencies(dependencies) };
+}
+
 function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): { channelLinks?: ChannelLinkDependencies } {
   const channelAdapters = dependencies.channelAdapters;
   return channelAdapters === undefined ? {} : { channelLinks: { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now } };
@@ -13945,7 +13959,7 @@ function channelConversationDependencies(dependencies: AwsBrokerDependencies): C
     getBinding: (ref) => getChannelBinding(dependencies, ref),
     linkedDeveloper: (actor) => linkedDeveloper({ documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now }, actor),
     getDeveloper: async (developerId) => {
-      const signInTableName = dependencies.developer?.signInTableName;
+      const signInTableName = (dependencies.developer ?? dependencies.linking)?.signInTableName;
       if (signInTableName === undefined) return undefined;
       const response = await dependencies.documentClient.send(new GetCommand({ TableName: signInTableName, Key: { pk: `DEVELOPER#${developerId}`, sk: "META" }, ConsistentRead: true }));
       const item = response.Item as Partial<DeveloperRecord> | undefined;
@@ -14708,7 +14722,11 @@ function slackRequestQueue(queueUrl: string): SlackRequestQueue {
     },
   };
 }
-const developer = developerConfiguration();
+// Spec 064: the legacy deployment's sign-in is for account linking only (DEVELOPER_API_SCOPE=linking, set by infra).
+const signIn = developerConfiguration();
+const linkingOnly = process.env.DEVELOPER_API_SCOPE === "linking";
+const developer = linkingOnly ? undefined : signIn;
+const linking = linkingOnly ? signIn : undefined;
 
 // Sign in with ChatGPT (#338): set only where the control plane has the connection key.
 const chatGptKeyArn = process.env.CHATGPT_CONNECTION_KEY_ARN;
@@ -14760,6 +14778,7 @@ export const handler = createAwsBrokerHandler({
       } }
     : {}),
   ...(developer ? { developer } : {}),
+  ...(linking ? { linking } : {}),
   ...(chatgpt ? { chatgpt } : {}),
   // Spec 062: channel adapters, only where the deployment turns them on (infra/lib/channel-adapters.ts).
   ...(process.env.CHANNEL_ADAPTERS === "enabled"
