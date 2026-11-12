@@ -512,14 +512,16 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }), oneShot);
 
   // Sessions: facts over the task records, the cost ledger over the metering seam.
+  const canNotify = (): boolean => registry.names("channel").length > 0 || registry.names("email").some((name) => registry.get("email", name)?.capabilities.available === true);
   const summaryDeps: SummaryDependencies = {
     store,
     facts: createTaskFactsSource(flow.deps),
     cost: { async costUsd(company, taskId) { return costUsdOf(await ledger.taskCost(company, taskId)) ?? 0; } },
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
-    // A person is told what needs them through the chat adapters the registry holds (`core/notify`); with none, nothing is queued. The row is only a queue entry: it is checked again before anything is sent.
-    onChange: [async (change) => { if (registry.names("channel").length > 0) await queueAttention({ store, now: clock, log }, change); }, (change) => intake.onSessionChange(change)],
+    // A person is told what needs them through the chat adapters the registry holds, or an email plug-in that can send (`core/notify`; Code's default sends no email); with neither, nothing is queued. The row is only a
+    // queue entry: it is checked again before anything is sent. The install's own pages hear that it changed (ids only).
+    onChange: [async (change) => { if (canNotify()) await queueAttention({ store, now: clock, log, realtime: registry.get("realtime", registry.names("realtime")[0] ?? "") }, change); }, (change) => intake.onSessionChange(change)],
     // A step that read a message's note settles the message `delivered`; a session that ended closes the ones no step took.
     afterRefresh: (orgId, sessionId) => settleSteerDeliveriesFor({ store, ...(options.now === undefined ? {} : { now: options.now }), log }, orgId, sessionId),
   };
@@ -688,7 +690,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await automation.tick().catch(logFailure("local_app.automation_failed"));
     await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
     // What needs the owner reaches them in their chat, batched (one message at most every few minutes). The sweep of the sessions above is what queues it.
-    if (registry.names("channel").length > 0) {
+    if (canNotify()) {
       await deliverAttention({ store, registry, now: () => clock().getTime(), thread: (org, sessionId) => readTaskThread(store, org, sessionId), footer: ATTENTION_FOOTER, log }, { deadlineMs: clock().getTime() + 4_000 }).catch(logFailure("local_app.attention_failed"));
     }
   };

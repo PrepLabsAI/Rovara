@@ -217,6 +217,27 @@ describe("chat on rovara up", () => {
     expect(other.headers["location"]).toContain("n=missing");
   });
 
+  it("sets quiet hours, the time zone and a daily digest on the page, shows them to the API token read-only, and refuses half a span", async () => {
+    const h = await launch();
+    const where = await h.browse("/chat", true);
+    const saved = await h.submit(where, "/chat/schedule", { quietStart: "22:00", quietEnd: "07:00", timeZone: "Europe/Berlin", digestAt: "09:00" });
+    expect(saved.headers["location"]).toContain("n=scheduled");
+    const shown = (await h.api("/v1/app/me/notifications")).body;
+    expect(shown).toMatchObject({ quietHours: { start: "22:00", end: "07:00" }, timeZone: "Europe/Berlin", digestAt: "09:00", channel: null, emailAvailable: false });
+    // The page shows what is set.
+    expect((await h.page(where, "/chat")).body).toContain("value=\"22:00\"");
+    expect((await h.submit(where, "/chat/schedule", { quietStart: "22:00", quietEnd: "", timeZone: "", digestAt: "" })).headers["location"]).toContain("n=invalid");
+    expect((await h.submit(where, "/chat/schedule", { quietStart: "22:00", quietEnd: "07:00", timeZone: "Mars/Olympus", digestAt: "" })).headers["location"]).toContain("n=invalid");
+    // Empty fields switch it off; an empty time zone keeps this computer's by name.
+    expect((await h.submit(where, "/chat/schedule", { quietStart: "", quietEnd: "", timeZone: "", digestAt: "" })).headers["location"]).toContain("n=scheduled");
+    const cleared = await readNotifyPrefs(h.store, ORG, developerIdOf(localOwnerPrincipal()));
+    expect(cleared.quietHours).toBeUndefined();
+    expect(cleared.digestAt).toBeUndefined();
+    expect(cleared.timeZone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    // The API token cannot change it.
+    expect((await h.api("/v1/app/me/notifications", { method: "PUT", body: { digestAt: "08:00" } })).status).not.toBe(200);
+  });
+
   it("shows the read of what is set up with no code and no full account id", async () => {
     const h = await launch();
     const where = await h.browse("/chat", true);

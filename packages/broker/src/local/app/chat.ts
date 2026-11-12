@@ -16,7 +16,7 @@ import { recordTaskThread } from "../../core/channel/threads.js";
 import type { DecisionGate, DecisionOutcome } from "../../core/decisions/approval-gate.js";
 import { CHAT_METHOD_PREFIX } from "../../core/decisions/strong-methods.js";
 import type { ChatPageView, LocalActionResult, LocalPageActions } from "../../core/local-pages/index.js";
-import { NOTIFY_TARGETS_MAX, readNotifyPrefs, writeNotifyPrefs, type NotifyTarget } from "../../core/notify/index.js";
+import { NOTIFY_TARGETS_MAX, NotifyPrefsBodySchema, readNotifyPrefs, writeNotifyPrefs, type NotifyTarget } from "../../core/notify/index.js";
 import { developerIdOf, taskSessionId } from "../../core/sessions/create.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
@@ -58,7 +58,7 @@ export interface LocalChat {
   view(): Promise<ChatPageView | undefined>;
   preview(code: string): Promise<{ channel: string; tenant: string; userId: string } | undefined>;
   /** The page's write side: the owner's own acts. */
-  actions: Required<Pick<LocalPageActions, "linkChatAccount" | "unlinkChatAccount" | "bindChatSpace" | "unbindChatSpace" | "addNoticeTarget" | "removeNoticeTarget" | "muteNotices">>;
+  actions: Required<Pick<LocalPageActions, "linkChatAccount" | "unlinkChatAccount" | "bindChatSpace" | "unbindChatSpace" | "addNoticeTarget" | "removeNoticeTarget" | "muteNotices" | "setNoticeSchedule">>;
   /** What the adapters hand the core once the sink has checked it. */
   work(channel: string): ChannelWork;
   /** The read routes (`GET /v1/app/me/notifications`, `GET /v1/app/channel`). Nothing here changes anything. */
@@ -84,7 +84,10 @@ export function createLocalChat(deps: LocalChatDeps): LocalChat {
       links: (await listChannelLinks(links, ownerId)).map((link) => ({ channel: link.actor.channel, tenant: link.actor.tenant, userId: link.actor.userId, maskedUserId: maskChannelUserId(link.actor.userId), linkedAt: link.linkedAt })),
       bindings: (await listAllChannelBindings({ store, orgId })).map((binding) => ({ channel: binding.channel, tenant: binding.tenant, space: binding.space, project: binding.projectName })),
       projects: (await listProjects(store, orgId)).map((project) => project.name),
-      notify: { muted: prefs.muted, targets: prefs.targets.map((target) => ({ channel: target.channel, tenant: target.conversation.tenant, space: target.conversation.space, thread: target.conversation.thread })) },
+      notify: {
+        muted: prefs.muted, targets: prefs.targets.map((target) => ({ channel: target.channel, tenant: target.conversation.tenant, space: target.conversation.space, thread: target.conversation.thread })),
+        ...(prefs.quietHours === undefined ? {} : { quietHours: prefs.quietHours }), ...(prefs.timeZone === undefined ? {} : { timeZone: prefs.timeZone }), ...(prefs.digestAt === undefined ? {} : { digestAt: prefs.digestAt }),
+      },
     };
   };
 
@@ -148,6 +151,15 @@ export function createLocalChat(deps: LocalChatDeps): LocalChat {
     async muteNotices({ muted }) {
       return changeTargets((targets) => targets, muted);
     },
+    async setNoticeSchedule({ quietStart, quietEnd, timeZone, digestAt }) {
+      // Both quiet-hours ends or neither; an empty time zone is this computer's (kept as its name, so the hours do not move if the computer's setting changes later).
+      if ((quietStart === "") !== (quietEnd === "")) return { ok: false, reason: "invalid", message: "Give both ends of the quiet hours, or neither." };
+      const zone = timeZone === "" ? Intl.DateTimeFormat().resolvedOptions().timeZone : timeZone;
+      const body = { quietHours: quietStart === "" ? null : { start: quietStart, end: quietEnd }, timeZone: zone === "" || zone === undefined ? null : zone, digestAt: digestAt === "" ? null : digestAt };
+      if (!NotifyPrefsBodySchema.safeParse(body).success) return { ok: false, reason: "invalid", message: "Use times like 22:00, two different quiet-hours ends, and a time zone such as Europe/Berlin." };
+      await writeNotifyPrefs({ store, now: () => new Date(deps.now()) }, orgId, ownerId, body);
+      return { ok: true };
+    },
   };
 
   const work = (channel: string): ChannelWork => ({
@@ -179,6 +191,9 @@ export function createLocalChat(deps: LocalChatDeps): LocalChat {
         const prefs = await readNotifyPrefs(store, orgId, ownerId);
         return json(200, {
           targets: prefs.targets, muted: prefs.muted,
+          quietHours: prefs.quietHours ?? null, timeZone: prefs.timeZone ?? null, digestAt: prefs.digestAt ?? null, channel: prefs.channel ?? null,
+          // Code sends no email (decision 101): an email choice falls back to the chats unless an email plug-in that can send is configured.
+          emailAvailable: deps.registry.names("email").some((name) => deps.registry.get("email", name)?.capabilities.available === true),
           channels: deps.registry.names("channel").flatMap((name) => { const adapter = adapterOf(name); return adapter === undefined ? [] : [{ channel: name, proactive: adapter.capabilities.proactive }]; }),
           changeOn: "the chat page: run `rovara chat`",
         });
