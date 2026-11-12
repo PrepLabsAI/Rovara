@@ -5293,12 +5293,15 @@ describe("rovara up: what a task costs, and the model each step uses", () => {
     const first = await h.nextJob(workspaceId, seen);
     expect(first.payload).toMatchObject({ workflowMode: "PLAN_CRITIQUE" });
     await h.callback(first, "result", { status: "FAILED", error: "the model call failed: key-rejected ModelNotEnabled" });
-    // The next try finds no model left (the one model failed) and ends without reaching a worker; the plan goes to the owner unchecked.
+    // The check ran on the install's one model: there is no next model, so the plan goes to the owner unchecked at once.
     for (let tick = 0; tick < 4; tick += 1) await h.runtime.tick();
     const workflow = (await taskRecord(h, taskId)).workflow as unknown as { stage: string; state: string; critique?: { status: string; critiques: unknown[] } };
     expect(workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", critique: { status: "done", critiques: [] } });
     const delivered = h.machines.delivered(((await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }))!["machine"] as { machineId: string }).machineId);
     expect(delivered.filter((job) => (job.payload as { workflowMode?: string }).workflowMode === "PLAN_CRITIQUE")).toHaveLength(1);
+    // It closes on the first refused check: no second check operation is made (one that could only fail for want of a model).
+    const checks = (await operationsOfTask(h, taskId)).filter((operation) => operation.workflowMode === "PLAN_CRITIQUE");
+    expect(checks.map((operation) => [operation.status, operation.modelChoice?.reason])).toEqual([["FAILED", "INSTALL_MODEL"]]);
   });
 
   it("a form the page did not sign is refused, a form is good once, and a copy of the page drawn before another change cannot write over it", async () => {

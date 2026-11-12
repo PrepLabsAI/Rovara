@@ -3,7 +3,8 @@
 // the last try may take the planner's own model (it answered this account a moment ago). With no model left the check closes as "not checked": the plan goes to the person, never held back. A failed try
 // costs nothing: the model refuses before it answers, and the retry starts no machine until its model is chosen.
 //
-// Only an install with a per-step model rule can name another model; an install that runs every step on its one model has no next model to ask, so its check closes at the first such failure, as before.
+// Only a check whose model the rule chose for it can be made on another model; a check on the install's one model (no step setting, the laptop default) has no next model to ask, so it closes at the
+// first such failure, as before.
 import { ModelSelectionSchema, type ModelIdentifier } from "@agentx/contracts";
 import { criticModelUnusable } from "../../rovara-code/critic.js";
 import type { OperationRecord } from "../task-flow/records.js";
@@ -38,9 +39,10 @@ export function planCheckFailures(operations: readonly OperationRecord[]): { mod
 
 /**
  * Whether a plan check that just ended FAILED is made again on the next model: its error says the model could not serve this account, the model it ran on was chosen by the install's rule (so the next
- * choice can leave it out), and fewer than `CRITIC_MODEL_ATTEMPTS_MAX` tries were made since the latest planning run, counting this one. `earlier` is the workspace's other operations.
+ * choice can leave it out, and it is not the install's one model, which leaves nothing else to ask), and fewer than `CRITIC_MODEL_ATTEMPTS_MAX` tries were made since the latest planning run, counting this one. `earlier` is the workspace's other operations.
  */
 export function retriesPlanCheck(ended: Pick<OperationRecord, "modelChoice">, error: string | undefined, earlier: readonly OperationRecord[]): boolean {
-  if (!criticModelUnusable(error) || ended.modelChoice === undefined) return false;
+  // The install's one model (the rule chose no model of the check's own) has no next model to ask: the check closes at once, with no try that could only fail.
+  if (!criticModelUnusable(error) || ended.modelChoice === undefined || ended.modelChoice.reason === "INSTALL_MODEL") return false;
   return planCheckFailures(earlier).sinceLatestPlan + 1 < CRITIC_MODEL_ATTEMPTS_MAX;
 }
