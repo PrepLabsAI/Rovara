@@ -141,6 +141,10 @@ export async function runDetectors(reader: RepositoryReader, cwd: string, option
   merged.services = dedupe(merged.services, (item) => `${item.value.kind}:${item.value.target}`);
   // Dependency candidates (test services D1-D7): present only when a detector found one, so a repository with none gives today's detection byte for byte.
   if (candidates.length > 0) merged.dependencies = mergeCandidates(candidates);
+  // An AWS service no seed handler creates resources for still gets a candidate: its emulator starts empty and the tests create their resources. One fixed sentence names them, in a full detection only (a run that asks
+  // for named detectors, the seed's reading of one file, treats any note as a refusal).
+  const empty = options.only !== undefined ? [] : (merged.dependencies ?? []).filter((item) => item.hints.startsEmpty === true).map((item) => item.family.slice(4));
+  if (empty.length > 0) merged.notes.push(`Some AWS services start empty in the test services, and the tests create their resources: ${empty.slice(0, 12).join(", ")}${empty.length > 12 ? `, and ${String(empty.length - 12)} more` : ""}.`);
   if (reader.budgetExhausted?.() === true) merged.notes.push("Some files were not read: the read budget ran out.");
   if (cutChecks) merged.notes.push(`More than ${String(ENV_DETECT_MAX_CHECKS)} checks were found; the first ${String(ENV_DETECT_MAX_CHECKS)} are proposed.`);
   if (merged.setupCommands.length > ENV_DETECT_MAX_SETUP_COMMANDS) { merged.setupCommands = merged.setupCommands.slice(0, ENV_DETECT_MAX_SETUP_COMMANDS); merged.notes.push(`More than ${String(ENV_DETECT_MAX_SETUP_COMMANDS)} setup commands were found; the first ${String(ENV_DETECT_MAX_SETUP_COMMANDS)} are proposed.`); }

@@ -339,7 +339,7 @@ function javaArtifactFamily(key: string): string | undefined {
   const v1 = /^com\.amazonaws:aws-java-sdk-([a-z0-9-]+)$/u.exec(key)?.[1];
   const raw = (v2 ?? v1)?.replace(AWS_SDK_SUFFIX, "");
   if (raw === undefined || (v2 !== undefined && AWS_SDK_NON_SERVICE.has(raw)) || (v1 !== undefined && AWS_V1_NON_SERVICE.has(raw))) return undefined;
-  const id = normalizeAwsService(raw);
+  const id = normalizeAwsService(raw, "java");
   return id === undefined || isOwnedElsewhere(`aws:${id}`) ? undefined : `aws:${id}`;
 }
 
@@ -381,9 +381,9 @@ export function javaCodeCandidates(path: string, text: string): DependencyCandid
   const found = scanDrivers(path, text, JAVA_DRIVERS);
   const builders = [...text.matchAll(/\b([A-Za-z0-9]+?)(?:Async)?Client\.builder\s{0,120}\(\s{0,120}\)([\s\S]{0,800}?)\.build\s{0,120}\(/gu)].map((match) => ({ name: match[1]!.toLowerCase(), explicit: /endpointOverride\s{0,120}\(\s{0,120}URI\.create\s{0,120}\(\s{0,120}"|EndpointConfiguration\s{0,120}\(\s{0,120}"/u.test(match[2]!) }));
   for (const match of text.matchAll(/^[ \t]*import\s{1,40}(?:software\.amazon\.awssdk\.services|com\.amazonaws\.services)\.([a-z0-9]+)\./gmu)) {
-    const id = normalizeAwsService(match[1]!);
+    const id = normalizeAwsService(match[1]!, "java");
     const explicit = id !== undefined && builders.some((builder) => builder.explicit && builder.name === id.replace(/-/gu, ""));
-    const item = awsClientCandidate(path, text, match.index, match[1]!, explicit);
+    const item = awsClientCandidate(path, text, match.index, match[1]!, explicit, "java");
     if (item !== undefined) found.push(item);
   }
   return found;

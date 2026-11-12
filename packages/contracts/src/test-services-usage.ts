@@ -53,11 +53,15 @@ export type TestServicesDependencyUsage = z.infer<typeof TestServicesDependencyU
 export const AwsServiceKeySchema = z.string().regex(/^[a-z][a-z0-9-]{1,39}$/u);
 /** An AWS operation name (`PutObject`, `SendMessage`): an upper camel case word. A path, a method or any other text the program chose is not one. */
 export const AwsOperationNameSchema = z.string().regex(/^[A-Z][A-Za-z0-9]{2,63}$/u).refine((name) => !looksLikeSecretValue(name) && !looksLikeSecretValue(name.toUpperCase()), { message: "an operation name, not a secret" });
-export const TEST_SERVICES_AWS_USAGE_LIMITS = { services: 64, unsupportedOperations: 30 } as const;
+/**
+ * `services` is the most a record lists. `narrowServices` and no `outOfPlan` are what a record keeps when its plan did NOT use `TEST_SERVICES_AWS_ALL_SERVICES_FEATURE` (the worker's `reduceAwsUsage`): a broker from before
+ * that feature parses a usage record strictly (at most 24 services, no `outOfPlan`), and such a plan only ever goes to workers its broker could read the record of.
+ */
+export const TEST_SERVICES_AWS_USAGE_LIMITS = { services: 64, narrowServices: 24, unsupportedOperations: 30 } as const;
 
 /**
  * One service of the ledger. `outOfPlan` is how many of its `calls` were to a service the plan did not name (the emulator serves every service, so the code can call one the plan left out): all of them or none.
- * Absent on a record made before the field existed (the same as 0 when the service is in the plan; the verdict also compares the plan itself).
+ * Absent on a record made before the field existed, and on every record of a plan that did not use the all-services feature (the same as 0 when the service is in the plan; the verdict also compares the plan itself).
  */
 export const AwsServiceUsageSchema = z
   .object({ service: AwsServiceKeySchema, calls: z.number().int().min(1).max(TEST_SERVICES_USAGE_LIMITS.count), unsupported: Count, outOfPlan: Count.optional() })

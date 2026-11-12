@@ -126,7 +126,7 @@ const AWS_SDK_EXTRA: Readonly<Record<string, string>> = { "@aws-sdk/lib-storage"
 function awsPackageService(name: string): string | undefined {
   const raw = AWS_SDK_EXTRA[name] ?? AWS_SDK_V3.exec(name)?.[1];
   if (raw === undefined) return undefined;
-  const id = normalizeAwsService(raw);
+  const id = normalizeAwsService(raw, "js");
   return id === undefined || ["crypto", "types", "retry", "utils"].includes(id) || isOwnedElsewhere(`aws:${id}`) ? undefined : id;
 }
 
@@ -171,14 +171,14 @@ export function nodeCodeCandidates(path: string, text: string): DependencyCandid
   const found = scanDrivers(path, text, NODE_DRIVERS);
   const clients = [...text.matchAll(/\bnew\s{1,40}([A-Za-z0-9]+)Client\s{0,120}\(/gu)].map((match) => ({ name: match[1]!.toLowerCase(), explicit: hardcodedEndpoint(callArguments(text, text.indexOf("(", match.index + match[0].length - 1))) }));
   for (const match of text.matchAll(/(?:from\s{1,40}|require\(\s{0,120}|import\(\s{0,120})["']@aws-sdk\/(?:client|lib)-([a-z0-9-]+)["']/gu)) {
-    const id = normalizeAwsService(match[1]!);
+    const id = normalizeAwsService(match[1]!, "js");
     const explicit = id !== undefined && clients.some((client) => client.explicit && (client.name === id.replace(/-/gu, "") || client.name.startsWith(id.replace(/-/gu, ""))));
-    const item = awsClientCandidate(path, text, match.index, match[1]!, explicit);
+    const item = awsClientCandidate(path, text, match.index, match[1]!, explicit, "js");
     if (item !== undefined) found.push(item);
   }
   if (/\baws-sdk\b/u.test(text)) {
     for (const match of text.matchAll(/\bnew\s{1,40}AWS\.([A-Za-z0-9]+)\s{0,120}\(/gu)) {
-      const item = awsClientCandidate(path, text, match.index, match[1]!, hardcodedEndpoint(callArguments(text, text.indexOf("(", match.index))));
+      const item = awsClientCandidate(path, text, match.index, match[1]!, hardcodedEndpoint(callArguments(text, text.indexOf("(", match.index))), "cfn");
       if (item !== undefined) found.push(item);
     }
   }
