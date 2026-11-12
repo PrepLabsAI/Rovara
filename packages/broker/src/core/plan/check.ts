@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import {
   BUDGET_EXHAUSTED_FAILURE_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, blockWorkflow, closePlanCritique, readPlanCritique, redactText,
-  submitPlanCritique, workflowIsDesignReviewing, workflowRequestId, when, WorkflowTransitionError,
+  retryPlanCritique, submitPlanCritique, workflowIsDesignReviewing, workflowRequestId, when, WorkflowTransitionError,
   type ModelIdentifier, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
@@ -16,11 +16,12 @@ import { locate, settled, type RowRef } from "../build-step/start.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import { conversationKey } from "../task-flow/keys.js";
-import { readTask } from "../task-flow/reads.js";
+import { readTask, workspaceOperations } from "../task-flow/reads.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
 import { acceptStep, blockTaskWorkflow, commitWorkflow, planFeedbackOf, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { DEFAULT_PROMPTS, iso, log } from "../task-flow/support.js";
 import { planDocumentKindOf } from "./answer.js";
+import { retriesPlanCheck } from "./check-retry.js";
 import { earlierPlans, structuredPlanContextOf } from "./context.js";
 
 /** The file the critic's answer is saved as. */
@@ -159,7 +160,13 @@ export async function recordCritiqued(
       if (ended.error === BUDGET_EXHAUSTED_FAILURE_MESSAGE) { await move(closePlanCritique(workflow, { expectedRevision: workflow.revision, status: "stopped_at_limit", limit: "other", now })); return; }
       if (ended.error?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true) { await move(blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.stepRuleFilesUnverified, now)); return; }
       if (ended.error?.includes(WORKFLOW_LEFTOVER_PROCESSES_MESSAGE) === true) { await move(blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.leftoverProcesses, now)); return; }
-      // A model this install cannot use is not retried on another one (a laptop has one model, so `criticModelUnusable` has no next-ranked model to ask): the check closes as unavailable.
+      // The model could not serve this account: the check is made again on the next model the install's rule ranks, by a row of its own, while tries are left (`check-retry.ts`). An install that runs every
+      // step on its one model recorded no choice, has no next model to ask, and closes the check as unavailable.
+      if (ended.status === "FAILED" && retriesPlanCheck(operation, ended.error, (await workspaceOperations(deps, operation.workspaceId)).filter((other) => other.id !== operation.id))) {
+        const next = retryPlanCritique(workflow, { expectedRevision: workflow.revision, now });
+        if (await move(next, [dispatchRowItem(deps, task.taskId, next.revision, "CRITIQUE", now)])) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "CRITIQUE" });
+        return;
+      }
       await move(closePlanCritique(workflow, { expectedRevision: workflow.revision, status: "done", now }));
       return;
     }

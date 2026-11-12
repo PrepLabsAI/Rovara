@@ -226,6 +226,25 @@ async function answerCritique(h: Awaited<ReturnType<typeof launch>>, workspaceId
   return job;
 }
 
+/** Registers the project, starts a task and answers its preparation, Understand and Plan, so its plan check is next. */
+async function toPlan(h: Awaited<ReturnType<typeof launch>>, requestId = "11111111-1111-4111-8111-111111111111", instructions = "Add a /health endpoint") {
+  await h.api("/v1/admin/projects", { method: "POST", body: h.project });
+  const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId, project: "payments", instructions, workflow: true } });
+  expect(started.status, JSON.stringify(started.body)).toBe(201);
+  const taskId = started.body.task.taskId;
+  const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+  const seen = new Set<string>();
+  const prepare = await h.nextJob(workspaceId, seen);
+  await h.callback(prepare, "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: h.base }] } });
+  const understand = await h.nextJob(workspaceId, seen);
+  await h.callback(understand, "artifacts", { name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify({ kind: "ready", path: "QUICK", restatement: "Add a /health endpoint that answers 200.", assumptions: [] }) });
+  await h.callback(understand, "result", { status: "SUCCEEDED" });
+  const plan = await h.nextJob(workspaceId, seen);
+  await h.callback(plan, "artifacts", { name: "plan.md", mediaType: "text/markdown", content: PLAN_TEXT });
+  await h.callback(plan, "result", { status: "SUCCEEDED" });
+  return { taskId, workspaceId, seen, prepare, understand, plan };
+}
+
 /** Registers the project, starts a task and answers its preparation, Understand and Plan, so it waits for the owner's approval. */
 async function toPlanReview(h: Awaited<ReturnType<typeof launch>>, requestId = "11111111-1111-4111-8111-111111111111", instructions = "Add a /health endpoint") {
   await h.api("/v1/admin/projects", { method: "POST", body: h.project });
@@ -5243,6 +5262,43 @@ describe("rovara up: what a task costs, and the model each step uses", () => {
     // The owner's change is audited and kept in the hosted layout.
     const policy = await h.runtime.registry.require("storage").get(orgSettingsKey(IMPLICIT_COMPANY_ID, "MODEL_SELECTION_POLICY"));
     expect(policy).toMatchObject({ revision: 2, reviewDefault: "different-company" });
+  });
+
+  it("a plan check whose model this account cannot use is made again on another model, never the one that failed, and its answer is the plan's critique", async () => {
+    const h = await launch({ environment: SECOND_KEYS });
+    expect(await changeModels(h, "set", "understand", { model: `openai::${GPT_ID}`, fallback: "", thinking: "", different: "" })).toContain("n=saved");
+    expect(await changeModels(h, "review-default", "", { value: "different-company" })).toContain("n=saved");
+    const { taskId, workspaceId, seen } = await toPlan(h);
+    const first = await h.nextJob(workspaceId, seen);
+    expect(first.payload).toMatchObject({ workflowMode: "PLAN_CRITIQUE" });
+    expect((await h.callback(first, "result", { status: "FAILED", error: "the model call failed: key-rejected ModelNotEnabled" })).status).toBe(200);
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "PLAN_CRITIQUE" });
+    const second = await h.nextJob(workspaceId, seen);
+    expect(second.payload).toMatchObject({ workflowMode: "PLAN_CRITIQUE" });
+    const alias = (job: WorkerInvocation): string => (job.payload as { modelRoute?: { alias?: string } }).modelRoute?.alias ?? "";
+    expect(alias(second)).not.toBe("");
+    expect(alias(second)).not.toBe(alias(first));
+    await h.callback(second, "artifacts", { name: "plan-critique.md", mediaType: "text/markdown", content: critiqueAnswer("ok") });
+    expect((await h.callback(second, "result", { status: "SUCCEEDED" })).status).toBe(200);
+    const workflow = (await taskRecord(h, taskId)).workflow as unknown as { stage: string; state: string; critique?: { critiques: unknown[] } };
+    expect(workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(workflow.critique?.critiques).toHaveLength(1);
+    const checks = (await operationsOfTask(h, taskId)).filter((operation) => operation.workflowMode === "PLAN_CRITIQUE");
+    expect(checks.map((operation) => operation.status)).toEqual(["FAILED", "SUCCEEDED"]);
+  });
+
+  it("on an install that runs every step on its one model, a plan check whose model cannot be used closes as not checked, with no model tried twice", async () => {
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: ["sk", "ant", "f".repeat(24)].join("-") } });
+    const { taskId, workspaceId, seen } = await toPlan(h);
+    const first = await h.nextJob(workspaceId, seen);
+    expect(first.payload).toMatchObject({ workflowMode: "PLAN_CRITIQUE" });
+    await h.callback(first, "result", { status: "FAILED", error: "the model call failed: key-rejected ModelNotEnabled" });
+    // The next try finds no model left (the one model failed) and ends without reaching a worker; the plan goes to the owner unchecked.
+    for (let tick = 0; tick < 4; tick += 1) await h.runtime.tick();
+    const workflow = (await taskRecord(h, taskId)).workflow as unknown as { stage: string; state: string; critique?: { status: string; critiques: unknown[] } };
+    expect(workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", critique: { status: "done", critiques: [] } });
+    const delivered = h.machines.delivered(((await h.runtime.registry.require("storage").get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" }))!["machine"] as { machineId: string }).machineId);
+    expect(delivered.filter((job) => (job.payload as { workflowMode?: string }).workflowMode === "PLAN_CRITIQUE")).toHaveLength(1);
   });
 
   it("a form the page did not sign is refused, a form is good once, and a copy of the page drawn before another change cannot write over it", async () => {

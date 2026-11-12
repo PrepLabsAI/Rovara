@@ -67,7 +67,15 @@ export type ChangeFailure = "reauth_required" | "stale" | "invalid" | "model_una
 export type ChangeResult = { ok: true; revision: number; lessSafe: string[] } | { ok: false; code: ChangeFailure; words: string };
 
 export interface ModelSelectionService {
-  choose(input: { stage: StageId; /** The model of the step this one checks (a checking step only). Absent: it is worked out from the setting now. */ reference?: ModelIdentifier | undefined }): Promise<StepChoice>;
+  choose(input: {
+    stage: StageId;
+    /** The model of the step this one checks (a checking step only). Absent: it is worked out from the setting now. */
+    reference?: ModelIdentifier | undefined;
+    /** Models this task's earlier tries of the step found the account could not use: none of them is chosen, whoever set it. */
+    denied?: readonly ModelIdentifier[] | undefined;
+    /** This is the step's last try: a checking step nobody set may take the model of the step it checks, which answered this account a moment ago. */
+    lastAttempt?: boolean | undefined;
+  }): Promise<StepChoice>;
   state(): Promise<ModelSelectionState>;
   apply(owner: Principal, body: unknown, context: { fresh: boolean }): Promise<ChangeResult>;
   /** What the installed prices say for a model (the picker and a page show it). */
@@ -156,7 +164,8 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
     return { ok: true, step: { ...found, model, route } };
   }
 
-  async function choose(ctx: Context, stage: StageId, reference?: ModelIdentifier, depth = 0): Promise<StepChoice> {
+  async function choose(ctx: Context, stage: StageId, reference?: ModelIdentifier, depth = 0, tries: { denied?: readonly ModelIdentifier[] | undefined; lastAttempt?: boolean | undefined } = {}): Promise<StepChoice> {
+    const denied = tries.denied ?? [];
     const setting = settingOf(ctx.policy, stage);
     const checking = CHECKING.has(stage);
     // Nothing set for this step and the install has no model at all (no key): there is no model to choose.
@@ -169,6 +178,8 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
     const installOnly = (): Promise<StepChoice> => {
       if (ctx.install === undefined) return Promise.resolve({ ok: false, code: "NO_MODEL", words: WORDS.NO_MODEL });
       const candidate = ctx.candidates.find((entry) => same(entry.model, ctx.install!));
+      // The install's one model already failed this step for this account: there is no other model to try.
+      if (candidate !== undefined && denied.some((model) => same(model, candidate.model))) return Promise.resolve({ ok: false, code: "NO_VERIFIED_CANDIDATE", words: WORDS.NO_VERIFIED_CANDIDATE });
       if (candidate === undefined || !candidate.enabled) return Promise.resolve({ ok: false, code: "MODEL_NOT_VERIFIED", words: WORDS.MODEL_NOT_VERIFIED });
       return routed(candidate.model, { thinkingLevel: null, reason: "INSTALL_MODEL", sameModelAsChecked: referenceModel !== undefined && same(candidate.model, referenceModel) });
     };
@@ -182,6 +193,8 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
       reviewDefaultDifferentCompany: ctx.policy.reviewDefault === "different-company",
       // Where nothing else than the reference's own model is left, the step runs on it and says so, as the hosted product's default does.
       allowLegacyDefaultFallback: true,
+      ...(denied.length === 0 ? {} : { deniedModels: denied }),
+      ...(tries.lastAttempt === true ? { defaultLastAttempt: true } : {}),
     };
     const result = resolveStageModel(input);
     if (result.kind === "refusal") return { ok: false, code: result.code, words: refusalWords(result.code, ctx) };
@@ -316,7 +329,7 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
     async choose(input) {
       let ctx: Context;
       try { ctx = await context(false); } catch { return { ok: false, code: "MODEL_STALE", words: WORDS.MODEL_STALE }; }
-      return choose(ctx, input.stage, input.reference);
+      return choose(ctx, input.stage, input.reference, 0, { denied: input.denied, lastAttempt: input.lastAttempt });
     },
     state,
     apply,

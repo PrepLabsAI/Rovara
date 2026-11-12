@@ -7,6 +7,8 @@ import type { OperationRecord } from "../../packages/broker/src/core/task-flow/r
 import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { StepChoice } from "../../packages/broker/src/core/model-selection/service.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { CRITIC_MODEL_ATTEMPTS_MAX, PLAN_CHECK_NO_MODEL_LEFT, planCheckFailures, retriesPlanCheck } from "../../packages/broker/src/core/plan/check-retry.js";
+import { criticModelUnusable } from "../../packages/broker/src/rovara-code/critic.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const m = (provider: string, modelId: string): ModelIdentifier => ({ provider, modelId });
@@ -85,6 +87,55 @@ describe("the model a step is handed to a worker with", () => {
     // A step that checks nothing is told no reference.
     await chooseStepModel(w.deps, operation({ workflowMode: "UNDERSTAND" }));
     expect(w.choose).toHaveBeenLastCalledWith({ stage: "understand", reference: undefined });
+  });
+
+  it("a plan check after tries whose model the account refused leaves those models out, counts its tries from the latest plan, takes the last try, and with none left ends with its own words", async () => {
+    const w = world(step(SONNET));
+    const choice = (model: ModelIdentifier) => ({ stage: "plan_check" as const, model, route: { alias: "a", api: "anthropic-messages" as const, catalog: "m" }, reason: "x" });
+    const put = async (earlier: OperationRecord) => w.store.put({ item: { ...operationKey(WORKSPACE, earlier.id), ...(earlier as unknown as Record<string, never>) } });
+    const refused = "the model call failed: key-rejected ModelNotEnabled";
+    // Before the latest plan: one refused check (its model stays left out, its try does not count).
+    await put(operation({ workflowMode: "PLAN_CRITIQUE", status: "FAILED", error: refused, modelChoice: choice(m("anthropic", "old")) } as never));
+    await put(operation({ workflowMode: "PLAN", modelChoice: { ...choice(GPT), stage: "plan" } }));
+    // No try since the latest plan: the denied model is still passed, and it is not the last try.
+    await chooseStepModel(w.deps, operation({ workflowMode: "PLAN_CRITIQUE" }));
+    expect(w.choose).toHaveBeenLastCalledWith({ stage: "plan_check", reference: GPT, denied: [m("anthropic", "old")], lastAttempt: false });
+    // A failure for another reason, a design-review round and a check that succeeded are not refused tries.
+    await put(operation({ workflowMode: "PLAN_CRITIQUE", status: "FAILED", error: "the model did not answer", modelChoice: choice(m("x", "timeout")) } as never));
+    await put(operation({ workflowMode: "PLAN_CRITIQUE", status: "FAILED", error: refused, designReview: {} as never, modelChoice: choice(m("x", "round")) } as never));
+    for (let at = 1; at <= 4; at += 1) await put(operation({ workflowMode: "PLAN_CRITIQUE", status: "FAILED", error: refused, modelChoice: choice(m("anthropic", `m${String(at)}`)) } as never));
+    await chooseStepModel(w.deps, operation({ workflowMode: "PLAN_CRITIQUE" }));
+    expect(w.choose).toHaveBeenLastCalledWith({ stage: "plan_check", reference: GPT, denied: [m("anthropic", "old"), ...[1, 2, 3, 4].map((at) => m("anthropic", `m${String(at)}`))], lastAttempt: false });
+    // The fifth refused try since the plan: the next is the last.
+    await put(operation({ workflowMode: "PLAN_CRITIQUE", status: "FAILED", error: refused } as never));
+    await chooseStepModel(w.deps, operation({ workflowMode: "PLAN_CRITIQUE" }));
+    expect(w.choose).toHaveBeenLastCalledWith(expect.objectContaining({ lastAttempt: true }));
+    // The sixth: nothing is chosen, and the words are never a model failure's (so the check closes instead of trying again).
+    await put(operation({ workflowMode: "PLAN_CRITIQUE", status: "FAILED", error: refused } as never));
+    const calls = w.choose.mock.calls.length;
+    const none = await chooseStepModel(w.deps, operation({ workflowMode: "PLAN_CRITIQUE" }));
+    expect(none).toEqual({ ok: false, sentence: PLAN_CHECK_NO_MODEL_LEFT });
+    expect(w.choose.mock.calls.length).toBe(calls);
+    expect(criticModelUnusable(PLAN_CHECK_NO_MODEL_LEFT)).toBe(false);
+    // The review is not a plan check: it is told no tries.
+    await chooseStepModel(w.deps, operation({ workflowMode: "REVIEW" }));
+    expect(w.choose).toHaveBeenLastCalledWith({ stage: "code_review", reference: undefined });
+  });
+
+  it("a plan check that ended refused is made again only when its model was the rule's choice and tries are left", () => {
+    const refused = "the model call failed: key-rejected ModelNotEnabled";
+    const chosen = { modelChoice: { stage: "plan_check", model: SONNET, route: { alias: "a", api: "anthropic-messages", catalog: "m" }, reason: "x" } } as never;
+    const tries = (count: number) => Array.from({ length: count }, () => operation({ workflowMode: "PLAN_CRITIQUE", status: "FAILED", error: refused } as never));
+    expect(retriesPlanCheck(chosen, refused, [])).toBe(true);
+    expect(retriesPlanCheck(chosen, refused, tries(CRITIC_MODEL_ATTEMPTS_MAX - 2))).toBe(true);
+    expect(retriesPlanCheck(chosen, refused, tries(CRITIC_MODEL_ATTEMPTS_MAX - 1))).toBe(false);
+    // The install's one model (no choice recorded) has no next model; another failure is not a refused model.
+    expect(retriesPlanCheck({}, refused, [])).toBe(false);
+    expect(retriesPlanCheck(chosen, "the model did not answer", [])).toBe(false);
+    expect(retriesPlanCheck(chosen, undefined, [])).toBe(false);
+    // Tries made before the latest plan do not count.
+    expect(retriesPlanCheck(chosen, refused, [...tries(CRITIC_MODEL_ATTEMPTS_MAX), operation({ workflowMode: "PLAN" })])).toBe(true);
+    expect(planCheckFailures([...tries(2), operation({ workflowMode: "PLAN" }), ...tries(1)])).toEqual({ models: [], sinceLatestPlan: 1 });
   });
 
   it("no model at all leaves the step to the install's one model, and any other refusal ends the step with its reason in words", async () => {

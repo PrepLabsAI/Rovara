@@ -183,6 +183,31 @@ describe("the model each step uses: what a refused call teaches, and the price r
     expect(canonicalModelName((await modelOf(w.stage("plan_check")))!.model)).toBe(canonicalModelName(first.model));
   });
 
+  it("a step's own earlier tries that the account refused leave their models out of its next choice; the last try may take the checked step's model; the one model of a laptop, once refused, leaves nothing", async () => {
+    const w = world();
+    await w.apply({ action: "review-default", value: "different-company", expectedRevision: 0 });
+    const first = (await modelOf(w.stage("plan_check")))!;
+    const retried = await w.selection.choose({ stage: "plan_check", denied: [first.model] });
+    expect(retried.ok).toBe(true);
+    const second = (retried as { step: { model: ModelIdentifier } }).step.model;
+    expect(canonicalModelName(second)).not.toBe(canonicalModelName(first.model));
+    // Every other company's model refused: another model runs the check (never one that failed), and on the last try it may be the planner's own (it answered a moment ago).
+    const others = [GPT, GEMINI, first.model, second];
+    const last = await w.selection.choose({ stage: "plan_check", denied: others, lastAttempt: true });
+    expect(last.ok).toBe(true);
+    const lastModel = (last as { step: { model: ModelIdentifier; sameModelAsChecked: boolean } }).step;
+    expect(others.some((model) => canonicalModelName(model) === canonicalModelName(lastModel.model))).toBe(false);
+    // A model the owner set explicitly that already failed is not chosen again either: the step has no model.
+    expect((await w.apply({ action: "set", stage: "plan_check", choice: { model: ref(GPT) }, expectedRevision: 1 })).ok).toBe(true);
+    expect((await w.selection.choose({ stage: "plan_check", denied: [GPT] })).ok).toBe(false);
+    // On a laptop's default (the install's one model for every step) a refused model leaves nothing to try, and the words are never a model failure's.
+    const laptop = world();
+    expect(await modelOf(laptop.stage("plan_check"))).toMatchObject({ model: SONNET, reason: "INSTALL_MODEL" });
+    const none = await laptop.selection.choose({ stage: "plan_check", denied: [SONNET] });
+    expect(none).toMatchObject({ ok: false, code: "NO_VERIFIED_CANDIDATE" });
+    expect((none as { words: string }).words).not.toMatch(/the model call failed|is not available on this install/u);
+  });
+
   it("with a limit held a model with no price is not used, and one that has a price is", async () => {
     const free = world({ install: UNPRICED, servable: [UNPRICED] });
     expect((await modelOf(free.stage("build")))?.model).toEqual(UNPRICED);

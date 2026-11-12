@@ -1,6 +1,6 @@
 // The plan check of a coding plan (the plan critic): a second step reads each plan before a person sees it. What the critic writes is untrusted advice: it reaches a planner only inside a labelled block, bounded
 // and redacted, and it can never approve a plan. This module holds what the critic is told, what a planner is told of it, how a stored critique names its model and which failures say a model cannot serve the
-// account. Choosing the critic's model by rank (the capability tiers, the recommendation) is not here: Code runs every step on its one model, and the ranking lives in one place, `core/second-review/model-ranking.ts`.
+// account. Choosing the critic's model is not here: the install's model rule chooses it (`core/model-selection`, with the ranking in `core/second-review/model-ranking.ts`), and a check whose model failed this way is made again on the next model (`core/plan/check-retry.ts`).
 import { PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, modelCompany, redactText, type ModelIdentifier, type PlanCritique } from "@agentx/contracts";
 
 /**
