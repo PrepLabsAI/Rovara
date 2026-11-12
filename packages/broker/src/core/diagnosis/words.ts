@@ -1,6 +1,6 @@
 // Fix with agent on a laptop: the fixed words a person reads. The shared contract's sentences (`DIAGNOSIS_REFUSALS`, `DIAGNOSIS_FAILURE_WORDS`) point at a hosted product's Settings and Admin screens, which do not exist here, so
 // the sentences a laptop says are these. Fixed text only: no refusal repeats anything of the error, the task or the model's answer.
-import { DIAGNOSIS_REFUSALS, type DiagnosisFailureReason } from "@agentx/contracts";
+import { DIAGNOSIS_REFUSALS, agentXError, type DiagnosisFailureReason } from "@agentx/contracts";
 
 export const DIAGNOSIS_LAPTOP_REFUSALS = {
   ...DIAGNOSIS_REFUSALS,
@@ -28,3 +28,35 @@ export const DIAGNOSIS_LAPTOP_INSTRUCTIONS = "You diagnose one error for the per
 
 /** The most output one diagnosis may ask for (its answer is at most 12,000 characters). */
 export const DIAGNOSIS_MAX_OUTPUT_TOKENS = 4_000;
+
+/** The refusals a diagnosis can say, one sentence each (the keys of the shared contract's, plus the laptop's own). */
+export type DiagnosisRefusalWords = { readonly [Name in keyof typeof DIAGNOSIS_LAPTOP_REFUSALS]: string };
+
+/**
+ * Every sentence a diagnosis says to a person: its refusals and, for a light diagnosis that could not run, why. A host (a laptop, or a cloud worker with its own screens) passes its own whole set to `createDiagnosis`, so no
+ * next step in the words (a command, a screen) is one the host does not have. The words are complete on purpose: a missing sentence would fall back to another host's, so `diagnosisWordsChecked` refuses a set with a gap.
+ */
+export interface DiagnosisWords {
+  refusals: DiagnosisRefusalWords;
+  failure: Readonly<Record<DiagnosisFailureReason, string>>;
+}
+
+/** What a laptop says (`rovara up`): the default of `createDiagnosis`. */
+export const DIAGNOSIS_LAPTOP_WORDS: DiagnosisWords = { refusals: DIAGNOSIS_LAPTOP_REFUSALS, failure: DIAGNOSIS_LAPTOP_FAILURE_WORDS };
+
+/** The longest a failure sentence may be (the status's `failure`). */
+const FAILURE_WORDS_MAX = 200;
+
+/** The words as given, once each sentence is known to be there (text, not empty; a failure sentence within its limit); otherwise a CONFIG_INVALID naming the first gap, so the host finds it when it starts and a person never reads a missing sentence. */
+export function diagnosisWordsChecked(words: DiagnosisWords): DiagnosisWords {
+  const gap = (group: string, name: string) => agentXError("CONFIG_INVALID", `the diagnosis words have no usable ${group} sentence ${name}`);
+  for (const name of Object.keys(DIAGNOSIS_LAPTOP_REFUSALS)) {
+    const sentence = (words.refusals as Record<string, unknown> | undefined)?.[name];
+    if (typeof sentence !== "string" || sentence.trim() === "") throw gap("refusal", name);
+  }
+  for (const name of Object.keys(DIAGNOSIS_LAPTOP_FAILURE_WORDS)) {
+    const sentence = (words.failure as Record<string, unknown> | undefined)?.[name];
+    if (typeof sentence !== "string" || sentence.trim() === "" || sentence.length > FAILURE_WORDS_MAX) throw gap("failure", name);
+  }
+  return words;
+}

@@ -123,6 +123,8 @@ export interface DiagnosisAdmission {
   context?: string | undefined;
   /** Steps that commit with the admission (the audit record of the start). */
   extraItems?: readonly TransactItem[] | undefined;
+  /** What a person is told when a counter is full (the host's own sentence). Absent: the shared contract's. */
+  rateLimitedWords?: string | undefined;
 }
 
 /**
@@ -147,7 +149,7 @@ export async function admitDiagnosis(deps: DiagnosisStoreDependencies, input: Di
       await rateStep(deps, diagnosisRateKey(orgId, "light_person", input.developerId), orgId, DIAGNOSIS_RATE.lightPerPersonPerHour, HOUR_MS),
       await rateStep(deps, diagnosisRateKey(orgId, "light_project", input.project), orgId, DIAGNOSIS_RATE.lightPerProjectPerDay, DAY_MS),
     ];
-    if (steps.some((step) => !step.room)) throw agentXError("TOO_MANY_REQUESTS", DIAGNOSIS_REFUSALS.rateLimited);
+    if (steps.some((step) => !step.room)) throw agentXError("TOO_MANY_REQUESTS", input.rateLimitedWords ?? DIAGNOSIS_REFUSALS.rateLimited);
     const waitingUntil = Math.floor(nowMs / 1000) + REQUEST_WAITING_SECONDS;
     const keep = Math.floor(nowMs / 1000) + DIAGNOSIS_RETENTION_DAYS * 86_400;
     const result = await deps.store.transact([

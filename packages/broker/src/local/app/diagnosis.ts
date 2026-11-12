@@ -2,10 +2,10 @@
 // (called THROUGH the local model proxy, `diagnosis-model.ts`). The core knows no provider; this is the one place that joins it to the install. It also draws the task page's part and answers the page's one form.
 import { createHmac, randomUUID } from "node:crypto";
 import { diagnosisProposalLine, errorRefKey, type AdapterRegistry, type OrgId, type Principal } from "@agentx/contracts";
+import type { DiagnosisWords } from "../../core/diagnosis/words.js";
 import { createDiagnosis, type Diagnosis, type DiagnosisAnswerer, type DiagnosisCaller } from "../../core/diagnosis/service.js";
 import { taskViewErrorRef } from "../../core/diagnosis/error-ref.js";
 import type { DiagnosisContextPorts, DiagnosisTaskView } from "../../core/diagnosis/context.js";
-import { DIAGNOSIS_LAPTOP_REFUSALS } from "../../core/diagnosis/words.js";
 import { CODE_LOCAL_SETTINGS } from "../../core/merge/defaults.js";
 import type { LocalActionResult, PlanDiagnosisView } from "../../core/local-pages/views.js";
 import { readSessionEvents } from "../../core/sessions/read.js";
@@ -27,6 +27,8 @@ export interface LocalDiagnosisOptions {
   tagKey: Buffer;
   answerer: DiagnosisAnswerer;
   enabled: boolean;
+  /** Other words than a laptop's (see `DiagnosisWords`). Absent: the laptop's. */
+  words?: DiagnosisWords | undefined;
   now?: (() => Date) | undefined;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -78,7 +80,7 @@ export function createLocalDiagnosis(options: LocalDiagnosisOptions): LocalDiagn
 
   const core = createDiagnosis({
     store: flow.store, audit: options.registry.require("audit-sink"), companyId, enabled: options.enabled, admission: options.registry.require("admission"),
-    answerer: options.answerer, context, taskOf, ...(options.now === undefined ? {} : { now: () => options.now!().getTime() }), log,
+    answerer: options.answerer, context, taskOf, ...(options.words === undefined ? {} : { words: options.words }), ...(options.now === undefined ? {} : { now: () => options.now!().getTime() }), log,
   });
 
   return {
@@ -105,7 +107,7 @@ export function createLocalDiagnosis(options: LocalDiagnosisOptions): LocalDiagn
         return { ok: true, message: "Fix with agent is looking into this error." };
       } catch (error) {
         const code = error instanceof Error && "code" in error ? String((error as { code: unknown }).code) : "";
-        const message = error instanceof Error ? error.message.replace(/^[A-Z_]+: /u, "") : DIAGNOSIS_LAPTOP_REFUSALS.couldNot;
+        const message = error instanceof Error ? error.message.replace(/^[A-Z_]+: /u, "") : core.words.refusals.couldNot;
         return { ok: false, reason: code === "CONFIG_INVALID" ? "stale" : code === "NOT_FOUND" ? "not_found" : "refused", message };
       }
     },
