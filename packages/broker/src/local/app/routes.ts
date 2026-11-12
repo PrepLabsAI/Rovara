@@ -21,7 +21,6 @@ import { developerTaskListItem, developerTaskView } from "./task-view.js";
 import type { SecondReview } from "../../core/second-review/index.js";
 import type { ModelSelectionService } from "../../core/model-selection/service.js";
 import { designReviewStateOf } from "../../core/design-review/state-view.js";
-import { DIAGNOSIS_LAPTOP_REFUSALS } from "../../core/diagnosis/words.js";
 import type { LocalDiagnosis } from "./diagnosis.js";
 
 export const OPENS_PER_MINUTE = 5;
@@ -134,9 +133,9 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         const [, id, tail] = diagnoses;
         if (id !== undefined && tail === undefined && request.method === "GET") return json(200, await deps.diagnosis.core.status(caller.principal, id));
         // The deeper look reads the repositories with a worker, and "Apply this change" needs a settings route to raise it into: neither is on this install.
-        if (id !== undefined && tail !== undefined && request.method === "POST") throw agentXError("NOT_AVAILABLE_HERE", tail === "propose" ? DIAGNOSIS_LAPTOP_REFUSALS.noPath : DIAGNOSIS_LAPTOP_REFUSALS.notAvailableHere);
+        if (id !== undefined && tail !== undefined && request.method === "POST") throw agentXError("NOT_AVAILABLE_HERE", tail === "propose" ? deps.diagnosis.core.words.refusals.noPath : deps.diagnosis.core.words.refusals.notAvailableHere);
         // A diagnosis spends the owner's own model key: it is started by the owner on the task's page, never by a tool.
-        if (id === undefined && request.method === "POST") throw agentXError("FORBIDDEN", DIAGNOSIS_LAPTOP_REFUSALS.startOnThePage);
+        if (id === undefined && request.method === "POST") throw agentXError("FORBIDDEN", deps.diagnosis.core.words.refusals.startOnThePage);
         throw agentXError("NOT_FOUND", "route not found");
       }
       if (path === "/v1/dev/projects" && request.method === "GET") {

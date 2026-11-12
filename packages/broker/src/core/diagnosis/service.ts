@@ -18,7 +18,7 @@ import { diagnosisProposedEvent, diagnosisStartedEvent } from "./audit.js";
 import { currentFacts, nonceFor, renderDiagnosisContext, type DiagnosisContextPorts } from "./context.js";
 import { proposalCounts, sanitizeDiagnosis } from "./sanitize.js";
 import { REQUEST_STALE_MS, admitDiagnosis, diagnosisIdFor, latestDiagnosisFor, openDiagnosisFor, readDiagnosisRecord, readDiagnosisRequest, readDiagnosisRequester, settleDiagnosis, type DiagnosisRequest } from "./store.js";
-import { DIAGNOSIS_LAPTOP_FAILURE_WORDS, DIAGNOSIS_LAPTOP_INSTRUCTIONS, DIAGNOSIS_LAPTOP_REFUSALS, DIAGNOSIS_MAX_OUTPUT_TOKENS } from "./words.js";
+import { DIAGNOSIS_LAPTOP_INSTRUCTIONS, DIAGNOSIS_LAPTOP_WORDS, DIAGNOSIS_MAX_OUTPUT_TOKENS, diagnosisWordsChecked, type DiagnosisWords } from "./words.js";
 
 /** The error kinds a diagnosis is offered for: the ones whose current state this install can read again. */
 export const DIAGNOSABLE_KINDS: ReadonlySet<string> = new Set(["workflow_block", "operation_failed"]);
@@ -65,6 +65,8 @@ export interface DiagnosisDependencies {
   context: DiagnosisContextPorts;
   /** The task the person may drive, or undefined (a task of someone else, or one that is not there, reads the same: nothing). */
   taskOf(principal: Principal, taskId: string): Promise<TaskRecord | undefined>;
+  /** What a person is told when a diagnosis is refused or cannot run (every refusal and next step). Absent: a laptop's words (`DIAGNOSIS_LAPTOP_WORDS`). A host with other screens and commands passes its own whole set. */
+  words?: DiagnosisWords | undefined;
   now?: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -82,8 +84,6 @@ export interface TaskDiagnosisView {
 }
 
 const notFound = () => agentXError("NOT_FOUND", "route not found");
-const whyNot = (reason: "no_model" | "not_priced" | "too_dear"): string => (reason === "not_priced" ? DIAGNOSIS_LAPTOP_REFUSALS.notPriced : reason === "too_dear" ? DIAGNOSIS_LAPTOP_REFUSALS.tooDear : DIAGNOSIS_LAPTOP_REFUSALS.noProvider);
-const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", DIAGNOSIS_LAPTOP_REFUSALS.couldNot);
 
 /** A fixed reason from a failed turn: what the model problem says, else the generic words (a failure's own text is never kept). */
 const reasonOf = (error: unknown): DiagnosisFailureReason | undefined => {
@@ -92,6 +92,10 @@ const reasonOf = (error: unknown): DiagnosisFailureReason | undefined => {
 };
 
 export function createDiagnosis(deps: DiagnosisDependencies) {
+  const words = diagnosisWordsChecked(deps.words ?? DIAGNOSIS_LAPTOP_WORDS);
+  const refusals = words.refusals;
+  const whyNot = (reason: "no_model" | "not_priced" | "too_dear"): string => (reason === "not_priced" ? refusals.notPriced : reason === "too_dear" ? refusals.tooDear : refusals.noProvider);
+  const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", refusals.couldNot);
   const now = deps.now ?? Date.now;
   const log = deps.log ?? (() => undefined);
   const store = { store: deps.store, now, log };
@@ -123,14 +127,14 @@ export function createDiagnosis(deps: DiagnosisDependencies) {
     // A request nobody answered in time reads as failed, never as waiting for ever; the open place is freed so the error can be asked about again.
     if (request.state === "queued" && now() - Date.parse(request.createdAt) > REQUEST_STALE_MS) {
       await settleDiagnosis(store, orgId, request, { state: "failed" }).catch(() => undefined);
-      return DiagnosisStatusSchema.parse({ ...base, state: "failed", failure: DIAGNOSIS_LAPTOP_REFUSALS.couldNot });
+      return DiagnosisStatusSchema.parse({ ...base, state: "failed", failure: refusals.couldNot });
     }
     if (request.state === "ready") {
       const record = await readDiagnosisRecord(store, orgId, request.diagnosisId);
       if (record !== undefined) return DiagnosisStatusSchema.parse({ ...base, state: "ready", proposals: record.proposals, droppedProposals: record.droppedProposals, needsCode: record.needsCode });
-      return DiagnosisStatusSchema.parse({ ...base, state: "failed", failure: DIAGNOSIS_LAPTOP_REFUSALS.couldNot });
+      return DiagnosisStatusSchema.parse({ ...base, state: "failed", failure: refusals.couldNot });
     }
-    if (request.state === "failed") return DiagnosisStatusSchema.parse({ ...base, state: "failed", failure: request.failureReason === undefined ? DIAGNOSIS_LAPTOP_REFUSALS.couldNot : DIAGNOSIS_LAPTOP_FAILURE_WORDS[request.failureReason] });
+    if (request.state === "failed") return DiagnosisStatusSchema.parse({ ...base, state: "failed", failure: request.failureReason === undefined ? refusals.couldNot : words.failure[request.failureReason] });
     return DiagnosisStatusSchema.parse({ ...base, state: "queued" });
   }
 
@@ -181,10 +185,10 @@ export function createDiagnosis(deps: DiagnosisDependencies) {
     const body = DiagnosisStartBodySchema.safeParse(value);
     if (!body.success) throw agentXError("CONFIG_INVALID", "a diagnosis needs a request ID and the error reference the page showed");
     const { errorRef } = body.data;
-    if (!DIAGNOSABLE_KINDS.has(errorRef.kind)) throw agentXError("NOT_FOUND", DIAGNOSIS_LAPTOP_REFUSALS.notAvailable);
-    if (principal.companyId !== orgId) throw agentXError("FORBIDDEN", DIAGNOSIS_LAPTOP_REFUSALS.notAllowed);
+    if (!DIAGNOSABLE_KINDS.has(errorRef.kind)) throw agentXError("NOT_FOUND", refusals.notAvailable);
+    if (principal.companyId !== orgId) throw agentXError("FORBIDDEN", refusals.notAllowed);
     const subject = await subjectFor(principal, errorRef);
-    if (subject === undefined) throw agentXError("FORBIDDEN", DIAGNOSIS_LAPTOP_REFUSALS.notAllowed);
+    if (subject === undefined) throw agentXError("FORBIDDEN", refusals.notAllowed);
     const developerId = developerIdOf(principal);
     const tier = "light" as const;
 
@@ -202,7 +206,7 @@ export function createDiagnosis(deps: DiagnosisDependencies) {
     const first = answerer === undefined ? { ok: false as const, reason: "no_model" as const } : await answerer.prepare().catch(() => { throw unavailable(); });
     if (answerer === undefined || !first.ok) throw agentXError("MODEL_NOT_ALLOWED", whyNot(first.ok ? "no_model" : first.reason));
     const facts = await currentFacts(deps.context, { orgId, developerId }, errorRef, subject);
-    if (facts === undefined) throw agentXError("CONFIG_INVALID", DIAGNOSIS_LAPTOP_REFUSALS.notCurrent);
+    if (facts === undefined) throw agentXError("CONFIG_INVALID", refusals.notCurrent);
     const diagnosisId = diagnosisIdFor(orgId, developerId, body.data.requestId, tier);
     const rendered = renderDiagnosisContext(facts, nonceFor(deps.context.tagKey, diagnosisId));
     const context = `${DIAGNOSIS_LAPTOP_INSTRUCTIONS}\n\n${rendered.text}`;
@@ -225,7 +229,7 @@ export function createDiagnosis(deps: DiagnosisDependencies) {
     let admitted: { diagnosisId: string; created: boolean };
     try {
       admitted = await admitDiagnosis(store, {
-        orgId, developerId, requestId: body.data.requestId, tier, errorRef: facts.errorRef, project: subject.project, context,
+        orgId, developerId, requestId: body.data.requestId, tier, errorRef: facts.errorRef, project: subject.project, context, rateLimitedWords: refusals.rateLimited,
         extraItems: deps.audit.stage(diagnosisStartedEvent({ companyId: orgId, developerId, at: new Date(now()).toISOString(), diagnosisId, errorKind: facts.errorRef.kind, errorCode: facts.errorRef.code, tier })),
       });
     } catch (error) {
@@ -242,6 +246,8 @@ export function createDiagnosis(deps: DiagnosisDependencies) {
   }
 
   return {
+    /** What this diagnosis says to a person (the host's own words, or a laptop's): a host's routes and pages say the same sentences. */
+    words,
     /** Whether the diagnosis routes are served at all (the flip-back setting). */
     enabled,
 
@@ -269,7 +275,7 @@ export function createDiagnosis(deps: DiagnosisDependencies) {
       const diagnosis = request === undefined ? null : await statusOf(request);
       // A diagnosis that failed leaves the error free to be asked about again; one that is waiting or answered is the answer.
       const ready = deps.answerer === undefined ? { ok: false as const, reason: "no_model" as const } : await deps.answerer.prepare().catch(() => undefined);
-      if (ready === undefined) return { errorRef, offered: false, why: DIAGNOSIS_LAPTOP_REFUSALS.couldNot, diagnosis };
+      if (ready === undefined) return { errorRef, offered: false, why: refusals.couldNot, diagnosis };
       if (!ready.ok) return { errorRef, offered: false, why: whyNot(ready.reason), diagnosis };
       // A button that could only be refused is not drawn: with the context this error would send, the most the call could cost is checked against the diagnosis's spending limit.
       if (diagnosis === null || diagnosis.state === "failed") {
@@ -287,11 +293,11 @@ export function createDiagnosis(deps: DiagnosisDependencies) {
     /** The page's "Fix with agent": the error the page showed is named by its key, and must still be the one the task shows. */
     async startForTask(principal: Principal, taskId: string, input: { requestId: string; errorKey: string }): Promise<DiagnosisStatus> {
       if (!enabled()) throw notFound();
-      if (principal.companyId !== orgId) throw agentXError("FORBIDDEN", DIAGNOSIS_LAPTOP_REFUSALS.notAllowed);
+      if (principal.companyId !== orgId) throw agentXError("FORBIDDEN", refusals.notAllowed);
       const task = await deps.taskOf(principal, taskId);
-      if (task === undefined) throw agentXError("FORBIDDEN", DIAGNOSIS_LAPTOP_REFUSALS.notAllowed);
+      if (task === undefined) throw agentXError("FORBIDDEN", refusals.notAllowed);
       const errorRef = (await deps.context.taskView(task)).errorRef;
-      if (errorRef === undefined || errorRefKey(errorRef) !== input.errorKey) throw agentXError("CONFIG_INVALID", DIAGNOSIS_LAPTOP_REFUSALS.notCurrent);
+      if (errorRef === undefined || errorRefKey(errorRef) !== input.errorKey) throw agentXError("CONFIG_INVALID", refusals.notCurrent);
       return startFor(principal, { requestId: input.requestId, errorRef });
     },
 
