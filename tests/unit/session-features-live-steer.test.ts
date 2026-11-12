@@ -1,6 +1,6 @@
 // a message to a running step reaches the worker through the machines port, with a capability that opens nothing, only to a worker that is up and lists the feature; anything else is a note.
  
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LIVE_STEER_FEATURE, LIVE_STEER_REAPPROVAL_REASON, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE, WorkerInvocationSchema, liveSteerOperationId } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { LIVE_STEER_ATTEMPTS, livePersonLabel, sendLiveSteer, type LiveSteerDeps } from "../../packages/broker/src/core/sessions/live-steer.js";
@@ -134,14 +134,51 @@ describe("a message to a running step", () => {
 });
 
 describe("the time a send may take", () => {
+  // The clock and the timer are both the test's own: nothing here waits for real time, so a slow or busy machine cannot change what is checked.
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+
   it("is bounded: a worker that never answers leaves the message a note after the budget, and a later attempt is not started", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let clock = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
     const w = await world();
     let calls = 0;
     w.machines.deliver = () => { calls += 1; return new Promise(() => undefined); };
-    const started = Date.now();
-    expect(await send({ ...w.deps, budgetMs: 40 })).toBe("not_ready");
-    expect(Date.now() - started).toBeLessThan(2_000);
+    const result = send({ ...w.deps, budgetMs: 40 });
+    await vi.advanceTimersByTimeAsync(0);
     expect(calls).toBe(1);
+    clock += 40;
+    await vi.advanceTimersByTimeAsync(40);
+    expect(await result).toBe("not_ready");
+    expect(calls).toBe(1);
+    expect(w.sleeps).toHaveLength(0);
+  });
+
+  it("ends at the timer even when the timer fires a millisecond before the clock says the budget is up (a real timer sometimes does), and starts no later attempt", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let clock = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const w = await world();
+    let calls = 0;
+    w.machines.deliver = () => { calls += 1; return new Promise(() => undefined); };
+    const result = send({ ...w.deps, budgetMs: 40 });
+    await vi.advanceTimersByTimeAsync(0);
+    clock += 39;
+    await vi.advanceTimersByTimeAsync(40);
+    expect(await result).toBe("not_ready");
+    expect(calls).toBe(1);
+    expect(w.sleeps).toHaveLength(0);
+  });
+
+  it("never waits past the budget between attempts, and starts no attempt once it is spent", async () => {
+    let clock = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const w = await world({ answers: Array.from({ length: LIVE_STEER_ATTEMPTS }, () => ({ accepted: true, outcome: "not_ready" })) });
+    const waited: number[] = [];
+    const sleep = async (ms: number): Promise<void> => { waited.push(ms); clock += ms; };
+    expect(await send({ ...w.deps, sleep, budgetMs: 300 })).toBe("not_ready");
+    expect(waited).toEqual([300]);
+    expect(w.machines.answered).toHaveLength(1);
   });
 });
 

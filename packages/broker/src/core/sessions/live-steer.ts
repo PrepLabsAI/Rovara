@@ -109,13 +109,20 @@ export async function sendLiveSteer(deps: LiveSteerDeps, input: LiveSteerInput):
       const left = deadline - Date.now();
       if (left <= 0) return "not_ready";
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const outcome = await Promise.race([deliverOnce(deps, running.machineId, invocation.data), new Promise<"not_ready">((resolve) => { timer = setTimeout(() => resolve("not_ready"), left); })]);
+      const outcome = await Promise.race([deliverOnce(deps, running.machineId, invocation.data), new Promise<"out_of_time">((resolve) => { timer = setTimeout(() => resolve("out_of_time"), left); })]);
       clearTimeout(timer);
       if (outcome === "steered") return "steered";
       if (outcome === "not_running") return "no_step";
       if (outcome === "failed") return "failed";
-      // `not_ready`: the step has not opened its session yet. Asked again a few times, then it is a note.
-      if (attempt < LIVE_STEER_ATTEMPTS) await sleep(LIVE_STEER_RETRY_MS);
+      // The budget ran out while the worker was being asked: this is the end of the send. The clock is not asked again, because a timer may fire a millisecond before `Date.now()` says the time is up, and a
+      // later attempt would then start after the budget.
+      if (outcome === "out_of_time") return "not_ready";
+      // `not_ready`: the step has not opened its session yet. Asked again a few times, then it is a note. The wait never runs past the budget, and no attempt starts without time left.
+      if (attempt < LIVE_STEER_ATTEMPTS) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return "not_ready";
+        await sleep(Math.min(LIVE_STEER_RETRY_MS, remaining));
+      }
     }
     return "not_ready";
   } catch (error) {
