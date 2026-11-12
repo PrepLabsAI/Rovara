@@ -2,7 +2,6 @@
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { executorSmokeDockerArgs, explainExecutorSmokeFailure } from "./executor-smoke.js";
 
 const DEFAULT_REGION = "us-east-1";
 const DEFAULT_REPOSITORY = "agentx-worker-production";
@@ -316,12 +315,16 @@ export async function buildAndPushImage(
   return pushed;
 }
 
+// Loaded on use, not at the top: it reads the built @agentx/contracts, and the production release loads this file before it builds.
+const executorSmoke = () => import("./executor-smoke.js");
+
 /**
  * The executor image's own smoke check (the one CI runs, through the same definition in scripts/executor-smoke.ts): its smoke module, run as the worker's
  * Docker host runs the executor (pinned seccomp profile, no capability, read-only, no network). Chromium's sandbox is never skipped; when it cannot start the
  * error says how to fix the Docker VM.
  */
 export async function smokeTestExecutor(runner: Runner, image: string): Promise<void> {
+  const { executorSmokeDockerArgs, explainExecutorSmokeFailure } = await executorSmoke();
   const result = runner.capture("docker", executorSmokeDockerArgs(image), true);
   if (result.status !== 0) {
     process.stderr.write(result.stderr);
