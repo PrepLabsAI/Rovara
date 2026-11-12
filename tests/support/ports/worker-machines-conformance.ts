@@ -16,6 +16,12 @@ export interface WorkerMachinesUnderTest {
    * least one cannot be expected. The fake keeps a job until `finish`; a real worker does not.
    */
   jobsMayFinishAtOnce?: boolean;
+  /**
+   * The same backend as a second company starts machines on it. An adapter that serves several companies passes it, so the suite checks that
+   * one company's machine key never reaches another company's machine. When `machines` is a separate object (an adapter made for one
+   * company), the suite also checks that the other company cannot ask about, stop, end or hand a job to this company's machine by its id.
+   */
+  otherCompany?: { machines: WorkerMachines; spec(machineKey: string): MachineSpec };
 }
 export interface WorkerMachinesHarness {
   create(): Promise<WorkerMachinesUnderTest>;
@@ -114,6 +120,26 @@ export function runWorkerMachinesConformance(name: string, harness: WorkerMachin
       expect(woken.machineKey).toBe("ws-4");
       await ready(under, woken.machineId);
       await under.machines.terminate(woken.machineId);
+    }));
+
+    it("keeps another company's machine with the same key apart, and never lets that company reach this one", () => withMachines(async (under) => {
+      const other = under.otherCompany;
+      if (other === undefined) return;
+      const mine = await under.machines.start(under.spec("ws-6"));
+      const theirs = await other.machines.start(other.spec("ws-6"));
+      expect(theirs.machineId).not.toBe(mine.machineId);
+      await ready(under, mine.machineId);
+      await other.machines.terminate(theirs.machineId);
+      if (other.machines !== under.machines) {
+        // An adapter made for one company: this company's machine is, to the other company, a machine that does not exist.
+        expect((await other.machines.health(mine.machineId)).state).toBe("terminated");
+        await other.machines.stop(mine.machineId);
+        await other.machines.terminate(mine.machineId);
+        await expect(other.machines.deliver(mine.machineId, under.invocation(OP1))).rejects.toMatchObject({ name: "MachineError", code: "not_found" });
+        await under.settle?.();
+      }
+      expect(["ready", "busy"]).toContain((await under.machines.health(mine.machineId)).state);
+      await under.machines.terminate(mine.machineId);
     }));
 
     it("terminates a machine for good, as often as asked, and answers health for one that is gone", () => withMachines(async (under) => {
