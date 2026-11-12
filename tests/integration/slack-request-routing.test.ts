@@ -22,6 +22,7 @@ import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
+import { MAYA } from "../support/developer-task-broker.js";
 
 /** The coding plan the planner writes for the auto-started README typo fix. */
 const PLAN = planAnswer(planDocument({
@@ -366,7 +367,7 @@ describe("decision 134: a clear small change starts Quick on its own, with a Sto
   afterEach(() => { log.mockRestore(); });
   const tasks = (e2e: Awaited<ReturnType<typeof createWorkflowE2E>>) => e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#") && item.sk === "META");
 
-  it("starts \"fix the typo in README\" on Quick, says what started and how to stop it, and Stop cancels before any code changes", async () => {
+  it("starts \"fix the typo in README\" on Quick, says what started and how to stop it, and Stop after the plan closes it with no code", async () => {
     const e2e = await createWorkflowE2E({ route: () => ({ kind: "small_change", outcome: "ok" }), autoStartQuick: true, model: { plan: PLAN, edits: [] } });
     expect(await e2e.mention("fix the typo in README")).toBe(200);
     const started = e2e.slack.lastPostWithAction(WORKFLOW_STOP_ACTION);
@@ -377,15 +378,12 @@ describe("decision 134: a clear small change starts Quick on its own, with a Sto
     expect(tasks(e2e)).toHaveLength(1);
     expect(e2e.workflow().path).toBe("QUICK");
     expect(e2e.routeLogs.map((entry) => entry.event)).toContain("route.auto_started");
-    // While the workspace is still setting up, Stop is refused as busy (nothing has changed) and can be pressed again.
-    await e2e.click(WORKFLOW_STOP_ACTION);
-    expect(tasks(e2e)[0]!.closedAt).toBeUndefined();
     // The plan step runs and waits for its approval: no code has changed. Only the requester may stop it.
     await e2e.settle();
     expect(e2e.slack.lastPostWithAction("agentx_workflow_approve").text).toContain("coding plan");
     await e2e.click(WORKFLOW_STOP_ACTION, { user: "U0TEAMMATE1" });
     expect(e2e.slack.responses.at(-1)?.text).toBe("Only the task owner can stop this task.");
-    // Stop: the task closes, and no code was written or published.
+    // Stop with nothing running: the task closes at once, and no code was written or published.
     await e2e.click(WORKFLOW_STOP_ACTION);
     expect(e2e.slack.responses.at(-1)?.text).toBe("Stopping this task. Nothing it planned or wrote will be kept, and no pull request will open.");
     await e2e.settle();
@@ -393,6 +391,47 @@ describe("decision 134: a clear small change starts Quick on its own, with a Sto
     expect(e2e.workflow().candidate).toBeUndefined();
     expect(e2e.github.pullRequests).toEqual([]);
     expect(e2e.db.find((item) => item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")).toEqual([]);
+  }, 120_000);
+
+  it("remembers a Stop pressed during setup: one press is enough, a second changes nothing, a teammate's is refused, and setup ends in a close with nothing planned", async () => {
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "small_change", outcome: "ok" }), autoStartQuick: true, model: { plan: PLAN, edits: [] } });
+    expect(await e2e.mention("fix the typo in README")).toBe(200);
+    expect(tasks(e2e)).toHaveLength(1);
+    await e2e.click(WORKFLOW_STOP_ACTION, { user: "U0TEAMMATE1" });
+    expect(e2e.slack.responses.at(-1)?.text).toBe("Only the task owner can stop this task.");
+    expect(tasks(e2e)[0]!.stopRequest).toBeUndefined();
+    // The owner's press during setup is remembered.
+    await e2e.click(WORKFLOW_STOP_ACTION);
+    const mark = tasks(e2e)[0]!.stopRequest as { userId: string; requestId: string };
+    expect(mark).toMatchObject({ userId: MAYA.slackUserId, requestId: expect.any(String) as unknown });
+    // A second press changes nothing.
+    await e2e.click(WORKFLOW_STOP_ACTION);
+    expect(tasks(e2e)[0]!.stopRequest).toEqual(mark);
+    // Setup finishes: the task closes before any planning step, and the thread hears why.
+    await e2e.settle();
+    expect(tasks(e2e)[0]!.closedAt).toEqual(expect.any(String));
+    expect(e2e.db.find((item) => item.entityType === "OPERATION" && item.kind === "task")).toEqual([]);
+    expect(e2e.slack.posts.some((post) => post.text.startsWith("Stopped as you asked."))).toBe(true);
+    expect(e2e.slack.posts.map((post) => post.text)).not.toContain("The workspace is ready, and the task is running.");
+    expect(e2e.slack.posts.some((post) => JSON.stringify(post.blocks ?? []).includes("agentx_workflow_approve"))).toBe(false);
+    expect(e2e.github.pullRequests).toEqual([]);
+  }, 120_000);
+
+  it("cancels a running step first, then closes the task, when Stop is pressed while the plan is being written", async () => {
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "small_change", outcome: "ok" }), autoStartQuick: true, model: { plan: PLAN, edits: [] } });
+    expect(await e2e.mention("fix the typo in README")).toBe(200);
+    // Setup runs; the planning step is queued and running when Stop is pressed.
+    await e2e.settle(1).catch(() => undefined);
+    const planning = () => e2e.db.find((item) => item.entityType === "OPERATION" && item.kind === "task");
+    expect(planning()).toHaveLength(1);
+    expect(["ACCEPTED", "QUEUED", "DISPATCHED", "RUNNING"]).toContain(planning()[0]!.status);
+    await e2e.click(WORKFLOW_STOP_ACTION);
+    expect(e2e.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toHaveLength(1);
+    await e2e.settle();
+    expect(planning()[0]!.status).toBe("CANCELLED");
+    expect(tasks(e2e)[0]!.closedAt).toEqual(expect.any(String));
+    expect(e2e.slack.posts.some((post) => JSON.stringify(post.blocks ?? []).includes("agentx_workflow_approve"))).toBe(false);
+    expect(e2e.github.pullRequests).toEqual([]);
   }, 120_000);
 
   it("never starts on its own a high-risk change, a large change, an unclear message, an injection, or when the classifier fails", async () => {

@@ -44,9 +44,15 @@ the Slack service's existing signed route family, acting for the thread and requ
 Anything else (`unusual_text`, `high_risk`, `too_long`, `thread_busy`, `start_refused`, or the call failing) posts the
 card with Start, as before. Unclear, large, and every classifier failure never auto-start.
 
-**Stop.** The started message has a Stop button (requester only). It closes that task and discards whatever it
-planned or wrote: a running step is cancelled first, then the task closes; no pull request opens. While the workspace
-is still setting up (nothing has changed yet) the press is refused as busy and can be pressed again.
+**Stop.** The started message has a Stop button (requester only; a teammate's press is refused). One press is enough
+and a second changes nothing. The press is remembered on the task (`stopRequest`), then:
+
+- setup still running: the first instructions are taken back (as a cancel before they run does), so finished setup
+  queues no planning step; when setup finishes the task closes and the thread hears "Stopped as you asked";
+- a step running (planning, say): it is cancelled first, and the task closes once it has stopped;
+- nothing running (a plan waiting for approval): the task closes at once.
+
+The close discards whatever the task planned or wrote; no pull request opens.
 
 **Small talk in a task's thread.** "thanks", "great", "ok" (and other bare acknowledgements) in a Slack-started task's
 thread get the fixed reply ("I didn't add that to the task"), with no model call, and are not saved as task notes. A
@@ -77,6 +83,9 @@ before its own classifier step.
 ## Owner decisions (decision 134)
 
 - A clear small change starts Quick on its own, with a visible Stop button.
-- Small talk in a task's thread gets the fixed reply and is never saved as a task note.
+- Small talk in a task's thread gets the fixed reply and is never saved as a task note; a plain (non-mention) "ok"
+  gets it privately.
+- The high-risk word list stays strict.
+- A Stop pressed during setup is remembered: one press is enough.
 - The unclear picker recommends Just answer.
 - No per-project forced path.
