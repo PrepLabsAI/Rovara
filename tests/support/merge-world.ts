@@ -8,8 +8,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
 import {
   fixedCodeSettings, plain, prepareMerge, soleOwnerPeople, storeLinkedChangeRequests, taskRecordKey,
   type CodeMergeHost, type CodeMilestones, type MergeDependencies, type MergeTask, type MergeTrackingDependencies, type PreparedMerge, type SessionTimeline,

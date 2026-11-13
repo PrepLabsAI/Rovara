@@ -5,7 +5,7 @@
 // One model feeds both this server and the FakeCodeHost, so the same contract suite can be run through the GitHub adapter and through the fake.
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { GitHubAppCredentialProvider } from "../../../packages/broker/src/plugins/code-host/github/client.js";
-import type { FakeChangeRequest, FakeHostModel } from "../../../packages/broker/src/plugins/fake/model.js";
+import type { FakeChangeRequest, FakeHostModel } from "@agentx/broker/fakes";
 
 /** The fake model speaks Rovara's words; this fixture speaks GitHub's. */
 export const githubMergeableState = (state: string): string => (state === "conflicted" ? "dirty" : state);

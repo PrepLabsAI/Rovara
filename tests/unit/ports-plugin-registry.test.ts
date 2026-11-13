@@ -14,10 +14,7 @@ import { SECRET_FILE_MAX_BYTES, SecretSourceSchema, secretReader } from "../../p
 import { codeBuildPlugin } from "../../packages/broker/src/plugins/check-runner/codebuild/plugin.js";
 import { githubActionsPlugin } from "../../packages/broker/src/plugins/check-runner/github-actions/plugin.js";
 import { githubCodeHostPlugin } from "../../packages/broker/src/plugins/code-host/github/plugin.js";
-import { fakePlugins } from "../../packages/broker/src/plugins/fake/plugins.js";
-import { FakeCheckRunner } from "../../packages/broker/src/plugins/fake/check-runner.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { fakePlugins, FakeCheckRunner, FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
 import { linearTrackerPlugin } from "../../packages/broker/src/plugins/tracker/linear/plugin.js";
 import { GITHUB_REPO_URL, GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
 

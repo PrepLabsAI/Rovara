@@ -6,7 +6,7 @@ import { codeBuildCheckRunner } from "../../packages/broker/src/plugins/check-ru
 import { githubActionsCheckRunner } from "../../packages/broker/src/plugins/check-runner/github-actions/index.js";
 import { githubCodeHost, GITHUB_CODE_HOST_CAPABILITIES } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { replyTargetOf } from "../../packages/broker/src/plugins/code-host/github/mapping.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { FakeHostModel } from "@agentx/broker/fakes";
 import type { CodeBuildGateway } from "../../packages/broker/src/codebuild.js";
 import { CodeHostCapabilitiesSchema, type CodeBuildCheckResult } from "../../packages/contracts/src/index.js";
 import { checkRunnerChecks, type CheckRunnerWorld } from "../support/ports/check-runner-conformance.js";

@@ -7,7 +7,7 @@ import { codeHostRepositoryKey } from "../../packages/broker/src/core/proof/reve
 import { pressMerge, prepareMerge, readMergeTracking, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
 import { providerOf } from "../../packages/broker/src/plugins/routing.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
+import { FakeCodeHost } from "@agentx/broker/fakes";
 import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
 
 /** The fake host as a GitHub connection under another name: `github-main`, of provider `github`. */
