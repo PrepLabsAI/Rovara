@@ -282,9 +282,10 @@ export interface TaskSandboxOptions {
   network?: { name: string; ip: string };
   /**
    * TE-F1b: the model block of this sandbox and, when a model helper was started for it, how to join its network and how to take it down. The helper is started BEFORE the sandbox (model-helper-network.ts `startModelHelper`), so
-   * this exists only after it is ready. A sandbox that cannot join the helper's network is removed and its start fails: it never runs with a block that points nowhere. `dispose()` takes the helper down after the sandbox.
+   * this exists only after it is ready. This class is the WORKING sandbox: a block for a round's check sandbox (`role: "check"`) is refused at construction. The CALLER must `dispose()` the sandbox after a failed `start()`
+   * (it takes the helper down). A sandbox that cannot join the helper's network is removed and its start fails: it never runs with a block that points nowhere. `dispose()` takes the helper down after the sandbox.
    */
-  modelBlock?: { block: ModelHostBlock; attach?(container: string): Promise<void>; teardown?(): Promise<void> };
+  modelBlock?: { block: ModelHostBlock; role?: "working" | "check"; attach?(container: string): Promise<void>; teardown?(): Promise<void> };
   /** Where the sandbox reports what it does not fail on; default: one JSON line on the worker's log. */
   log?: (event: Record<string, unknown>) => void;
 }
@@ -303,6 +304,7 @@ export class TaskSandbox {
   private wrappedExec: ContainerExec | undefined;
 
   constructor(private readonly options: TaskSandboxOptions) {
+    if (options.modelBlock?.role !== undefined && options.modelBlock.role !== "working") throw agentXError("CONFIG_INVALID", "a task sandbox is the working sandbox: it cannot take a model block made for a round's check sandbox");
     this.docker = options.docker ?? createDockerCli();
     this.name = `agentx-task-${options.taskId.replace(/[^a-zA-Z0-9_.-]/gu, "-")}-${randomUUID().slice(0, 8)}`;
     const exec = taskContainerExec(this.docker, this.name);

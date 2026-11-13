@@ -2,7 +2,8 @@
 // running `node dist/model-helper.js` (TE-F2's program; this lane builds only the network, the launch and the 443/80 recorder), like the sealed DNS helper and the fake helper.
 //
 // What the helper is allowed, and what it is not (each rule is checked twice: when the arguments are built, and by `modelHelperArgProblems`, which reads them back):
-//   - ONE network, the run's own (`rvi` bridge, internal: nothing leaves it, other `rvi` bridges are unreachable, the host is dropped for IPv4 and IPv6 by the boot walls). No egress network, no DNS upstream, no published port, no `--add-host`.
+//   - ONE network, the run's own (`rvi` bridge, internal: nothing leaves it, other `rvi` bridges are unreachable, the host is dropped for IPv4 and IPv6 by the boot walls). No egress network, no published port, no `--add-host`, and
+//     no DNS upstream: `--dns 127.0.0.1` gives Docker's embedded resolver (127.0.0.11) only the helper's own loopback to forward to, where nothing listens.
 //   - no capability (`--cap-drop ALL`, no `--cap-add`), `no-new-privileges`, a non-root user, a READ-ONLY root.
 //   - ONE bind mount, read-only: a directory of the worker's that holds only the helper's own files (the rows, the replies, the bridge's Unix socket), and ONE tmpfs for the ledger (TE-F2/R1 need a place to write that is not the
 //     worker's). `MODEL_HELPER_RUN_DIR` and `MODEL_HELPER_LEDGER_DIR` are the paths TE-F2's program reads (`model-helper-args.ts`).
@@ -21,6 +22,8 @@ export const MODEL_HELPER_LEDGER_DIR = "/rovara/ledger";
 export const MODEL_HELPER_ENTRY = "/opt/agentx/packages/worker/dist/model-helper.js";
 const NODE = "/usr/local/bin/node";
 const HELPER_USER = "1000:1000";
+/** The one DNS server the helper is given: its own loopback, so the embedded resolver has no upstream to forward to. */
+const NO_UPSTREAM_DNS = "127.0.0.1";
 /** The helper binds 443 and 80 (the recorder) as a non-root user: nothing below 80. */
 const PORT_SYSCTL = "net.ipv4.ip_unprivileged_port_start=80";
 const MEMORY = "128m";
@@ -71,7 +74,7 @@ export function modelHelperRunArgs(input: ModelHelperLaunchInput): string[] {
   const { net } = input;
   const args = [
     "run", "--detach", "--pull=never", "--name", modelHelperContainerName(net), "--stop-timeout", "1", ...net.labelArgs(),
-    "--network", net.name, "--ip", runNetworkModelHelperIp(net.slot),
+    "--network", net.name, "--ip", runNetworkModelHelperIp(net.slot), "--dns", NO_UPSTREAM_DNS,
     "--user", HELPER_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
     "--sysctl", PORT_SYSCTL,
     "--memory", MEMORY, "--memory-swap", MEMORY, "--cpus", CPUS, "--pids-limit", PIDS, "--log-driver", "none",
@@ -85,7 +88,7 @@ export function modelHelperRunArgs(input: ModelHelperLaunchInput): string[] {
   return args;
 }
 
-const VALUE_FLAGS: ReadonlySet<string> = new Set(["--name", "--label", "--network", "--ip", "--user", "--cap-drop", "--security-opt", "--sysctl", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--log-driver", "--volume", "--tmpfs", "--entrypoint", "--stop-timeout"]);
+const VALUE_FLAGS: ReadonlySet<string> = new Set(["--name", "--label", "--network", "--ip", "--dns", "--user", "--cap-drop", "--security-opt", "--sysctl", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--log-driver", "--volume", "--tmpfs", "--entrypoint", "--stop-timeout"]);
 const SINGLE_FLAGS: ReadonlySet<string> = new Set(["--detach", "--pull=never", "--read-only"]);
 
 /**
@@ -117,6 +120,7 @@ export function modelHelperArgProblems(args: readonly string[], net: ModelHelper
   const only = (flag: string, wanted: string): boolean => (flags.get(flag) ?? []).length === 1 && flags.get(flag)![0] === wanted;
   if (image === undefined) problems.push("there is no image");
   if ((flags.get("--network") ?? []).length !== 1 || flags.get("--network")![0] !== net.name) problems.push("the helper must be on the run network and on no other network");
+  if (!only("--dns", NO_UPSTREAM_DNS)) problems.push("the helper's only DNS server must be its own loopback (no upstream)");
   if (!only("--ip", runNetworkModelHelperIp(net.slot))) problems.push("the helper must have the run's model helper address");
   if (!only("--cap-drop", "ALL") || (flags.get("--cap-drop") ?? []).length !== 1) problems.push("the helper must drop every capability");
   if (!flags.has("--read-only")) problems.push("the helper's root must be read-only");

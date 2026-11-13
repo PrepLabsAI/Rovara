@@ -12,7 +12,7 @@ import {
 } from "@agentx/contracts";
 import { installNetworkTripwire } from "../../packages/testing/src/ports/no-network.js";
 import {
-  GOOGLE_TOKEN_HOSTS, MODEL_BLACKHOLE_ADDRESS, MODEL_HOST_BLOCK_GATE_NAME, blockModeForRound, modelBlockEvidenceInput, modelBlockHosts, modelHostAddHostArgs, planModelHostBlock, resolveWithBlock, sealedModelHostPairs,
+  GOOGLE_TOKEN_HOSTS, MODEL_BLACKHOLE_ADDRESS, MODEL_HOST_BLOCK_GATE_NAME, AZURE_OPENAI_NOT_BLOCKED_SENTENCE, blockModeForRound, modelBlockEvidenceInput, sealedModelBlockEvidenceInput, modelBlockHosts, modelHostAddHostArgs, planModelHostBlock, resolveWithBlock, sealedModelHostPairs,
 } from "../../packages/worker/src/model-helper-block.js";
 import { ModelHostRecorder } from "../../packages/worker/src/model-helper-recorder.js";
 import { MODEL_HELPER_ALIAS } from "../../packages/worker/src/run-network.js";
@@ -99,7 +99,7 @@ describe("where the names point", () => {
   it("a project with no model row, behind the company gate: the same names at 10.255.255.1, no helper name", () => {
     expect(MODEL_BLACKHOLE_ADDRESS).toBe("10.255.255.1");
     expect(MODEL_HOST_BLOCK_GATE_NAME).toBe("modelHostBlockNonAi");
-    const block = planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: false, nonAiGate: true });
+    const block = planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: false, nonAiGate: true, wallsOffered: true });
     expect(block).toMatchObject({ mode: "by_name", target: "blackhole", address: "10.255.255.1", helperAlias: false });
     const pairs = addHostPairs(modelHostAddHostArgs(block));
     expect(pairs.every(([, address]) => address === "10.255.255.1")).toBe(true);
@@ -129,7 +129,7 @@ describe("where the names point", () => {
     const block = planModelHostBlock({ rows: rows(), gatewayRows: GATEWAYS, hasModelRow: true, helperIp: HELPER_IP });
     const pairs = sealedModelHostPairs(block);
     expect(pairs.every((pair) => /^[a-z0-9.-]+=172\.30\.7\.9$/u.test(pair))).toBe(true);
-    expect(sealedModelHostPairs(planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: false, nonAiGate: true }))).toEqual([]);
+    expect(sealedModelHostPairs(planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: false, nonAiGate: true, wallsOffered: true }))).toEqual([]);
   });
   it("resolveWithBlock answers the block's address for a blocked name (any case, trailing dot) and undefined for any other", () => {
     const block = planModelHostBlock({ rows: rows(), gatewayRows: GATEWAYS, hasModelRow: true, helperIp: HELPER_IP });
@@ -141,12 +141,12 @@ describe("where the names point", () => {
   });
 });
 
-describe("the block mode of a round: by name, never sealed unless the round is the sealed one", () => {
-  it("the working round and the unsealed check round are by_name; only the sealed check round is sealed; anything unknown is read as unsealed", () => {
+describe("the block mode of a round: by name, and sealed only from a sealed plan", () => {
+  it("the working round and the unsealed check round are by_name; anything unknown is read as unsealed; check_sealed is never read from a free string", () => {
     expect(blockModeForRound("working")).toBe("by_name");
     expect(blockModeForRound("check_unsealed")).toBe("by_name");
-    expect(blockModeForRound("check_sealed")).toBe("sealed");
     for (const odd of [undefined, null, "", "sealed", "SEALED", "check_sealed ", "check-sealed", 1, {}, ["check_sealed"], "__proto__"]) expect(blockModeForRound(odd), typeof odd).toBe("by_name");
+    expect(() => blockModeForRound("check_sealed")).toThrow();
   });
   it("the evidence input of an unsealed round carries blockMode by_name, the block list and the suffixes, and its lines say 'not sealed; model hosts blocked by name only'", () => {
     const block = planModelHostBlock({ rows: rows(), gatewayRows: GATEWAYS, hasModelRow: true, helperIp: HELPER_IP });
@@ -164,11 +164,79 @@ describe("the block mode of a round: by name, never sealed unless the round is t
   it("a project with no block at all reports mode none, never by_name or sealed", () => {
     const none = planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: false });
     expect(modelBlockEvidenceInput("working", none).blockMode).toBe("none");
-    expect(modelBlockEvidenceInput("check_sealed", none).blockMode).toBe("sealed");
   });
-  it("no input to the lane's functions makes an unsealed round read as sealed", () => {
-    const blocks = [planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: true, helperIp: HELPER_IP }), planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: false, nonAiGate: true }), planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: false })];
+  it("refuses a by-name block with check_sealed: a sealed round's evidence is not made from a by-name block", () => {
+    const blocks = [planModelHostBlock({ gatewayRows: [], hasModelRow: true, helperIp: HELPER_IP }), planModelHostBlock({ gatewayRows: [], hasModelRow: false, nonAiGate: true, wallsOffered: true }), planModelHostBlock({ gatewayRows: [], hasModelRow: false })];
+    for (const block of blocks) expect(() => modelBlockEvidenceInput("check_sealed", block)).toThrow();
+  });
+  it("sealed is derived from the sealed plan: its DNS helper arguments must carry every model host at the helper's address, and the working sandbox must be detached", () => {
+    const block = planModelHostBlock({ gatewayRows: GATEWAYS, hasModelRow: true, helperIp: HELPER_IP });
+    const plan = (over: Partial<{ mustDetachWorking: boolean; dnsHelperRunArgs: string[] }> = {}) => ({ mustDetachWorking: true as const, dnsHelperRunArgs: ["run", ...sealedModelHostPairs(block).flatMap((pair) => ["--host", pair])], ...over }) as Parameters<typeof sealedModelBlockEvidenceInput>[0];
+    const input = sealedModelBlockEvidenceInput(plan(), block);
+    expect(input).toEqual({ blockMode: "sealed", blockList: [...block.hosts], hostSuffixes: [], azureOpenAiNotBlocked: false });
+    // The plan 9d builds today carries no model host: nothing can claim sealed yet.
+    expect(() => sealedModelBlockEvidenceInput(plan({ dnsHelperRunArgs: ["run"] }), block)).toThrow();
+    expect(() => sealedModelBlockEvidenceInput(plan({ dnsHelperRunArgs: plan().dnsHelperRunArgs.slice(0, -2) }), block)).toThrow();
+    expect(() => sealedModelBlockEvidenceInput(plan({ mustDetachWorking: false }), block)).toThrow();
+    expect(() => sealedModelBlockEvidenceInput(plan(), planModelHostBlock({ gatewayRows: [], hasModelRow: false, nonAiGate: true, wallsOffered: true }))).toThrow();
+    expect(() => sealedModelBlockEvidenceInput({} as never, block)).toThrow();
+  });
+  it("no input to the by-name functions makes an unsealed round read as sealed", () => {
+    const blocks = [planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: true, helperIp: HELPER_IP }), planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: false, nonAiGate: true, wallsOffered: true }), planModelHostBlock({ rows: rows(), gatewayRows: [], hasModelRow: false })];
     for (const block of blocks) for (const kind of ["working", "check_unsealed", undefined, "x", 3] as const) expect(modelBlockEvidenceInput(kind as never, block).blockMode).not.toBe("sealed");
+  });
+});
+
+describe("the catalog is never replaced (a partial `rows` still blocks every built-in host)", () => {
+  it("passing one OpenAI row still blocks every built-in name (about 107) at the helper", () => {
+    const full = modelBlockHosts(rows(), []);
+    expect(full.length).toBeGreaterThan(100);
+    const one = planModelHostBlock({ rows: [rows().find((row) => row.id === "openai")!], hasModelRow: true, helperIp: HELPER_IP });
+    expect(one.hosts).toEqual(full);
+    expect(one.suffixesNotBlockedByName).toEqual(modelHostSuffixBlockList(rows()));
+    expect(addHostPairs(modelHostAddHostArgs(one)).length).toBe(full.length + 1);
+    const none = planModelHostBlock({ rows: [], hasModelRow: false, nonAiGate: true, wallsOffered: true });
+    expect(none.hosts).toEqual(full);
+  });
+});
+
+describe("Azure OpenAI (a host suffix a hosts file cannot hold)", () => {
+  it("blocks the project's own concrete resource host by name when it is known, at the helper's address", () => {
+    const block = planModelHostBlock({ hasModelRow: true, helperIp: HELPER_IP, azureResourceHosts: ["myco-eastus.openai.azure.com"] });
+    expect(block.hosts).toContain("myco-eastus.openai.azure.com");
+    expect(addHostPairs(modelHostAddHostArgs(block))).toContainEqual(["myco-eastus.openai.azure.com", HELPER_IP]);
+    expect(sealedModelHostPairs(block)).toContain(`myco-eastus.openai.azure.com=${HELPER_IP}`);
+    const dropped = planModelHostBlock({ hasModelRow: false, nonAiGate: true, wallsOffered: true, azureResourceHosts: ["myco-eastus.openai.azure.com"] });
+    expect(dropped.hosts).toContain("myco-eastus.openai.azure.com");
+  });
+  it("refuses a resource host that is not exactly one label under a catalog suffix", () => {
+    for (const bad of ["openai.azure.com", "evil.example.com", "a.b.openai.azure.com", "*.openai.azure.com", "https://x.openai.azure.com", "X.openai.azure.com", "x.openai.azure.com.evil.example", "", "10.0.0.1"]) {
+      expect(() => planModelHostBlock({ hasModelRow: true, helperIp: HELPER_IP, azureResourceHosts: [bad] }), bad).toThrow();
+    }
+  });
+  it("the evidence input says Azure OpenAI is not blocked in the round whenever the suffix list is not empty, and the sentence is fixed", () => {
+    expect(AZURE_OPENAI_NOT_BLOCKED_SENTENCE).toBe("Azure OpenAI is not blocked in this round: a client that calls an Azure OpenAI resource host reaches it directly");
+    const block = planModelHostBlock({ hasModelRow: true, helperIp: HELPER_IP, azureResourceHosts: ["myco.openai.azure.com"] });
+    for (const kind of ["working", "check_unsealed"] as const) {
+      const input = modelBlockEvidenceInput(kind, block);
+      expect(input.hostSuffixes).toContain("openai.azure.com");
+      expect(input.azureOpenAiNotBlocked).toBe(true);
+    }
+    expect(modelBlockEvidenceInput("working", planModelHostBlock({ hasModelRow: false })).azureOpenAiNotBlocked).toBe(false);
+  });
+});
+
+describe("the non-AI blackhole needs the walls", () => {
+  it("is applied only when the worker offers the walls; without them there is no block and the reason is recorded", () => {
+    const withWalls = planModelHostBlock({ hasModelRow: false, nonAiGate: true, wallsOffered: true });
+    expect(withWalls).toMatchObject({ mode: "by_name", target: "blackhole" });
+    expect(withWalls.noBlockReason).toBeUndefined();
+    for (const wallsOffered of [false, undefined]) {
+      const block = planModelHostBlock({ hasModelRow: false, nonAiGate: true, ...(wallsOffered === undefined ? {} : { wallsOffered }) });
+      expect(block).toMatchObject({ mode: "none", target: "none", hosts: [], noBlockReason: "walls_not_offered" });
+      expect(modelHostAddHostArgs(block)).toEqual([]);
+    }
+    expect(planModelHostBlock({ hasModelRow: false, wallsOffered: true })).toMatchObject({ mode: "none", noBlockReason: "gate_off" });
   });
 });
 

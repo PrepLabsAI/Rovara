@@ -14,7 +14,7 @@ import {
   MODEL_HELPER_ENTRY, MODEL_HELPER_LEDGER_DIR, MODEL_HELPER_RUN_DIR, modelHelperArgProblems, modelHelperRunArgs,
 } from "../../packages/worker/src/model-helper-launch.js";
 import {
-  MODEL_HELPER_FEATURE, MODEL_HELPER_FAILURE_SENTENCE, modelHelperAdvertisedFeatures, modelHelperOffer, modelHelperRunId, startModelHelper, sweepModelHelperNetworksAtWorkerStart,
+  MODEL_HELPER_FEATURE, MODEL_HELPER_FAILURE_SENTENCE, modelHelperAdvertisedFeatures, modelHelperOffer, modelHelperRunId, planNonAiModelHostBlock, startModelHelper, sweepModelHelperNetworksAtWorkerStart,
 } from "../../packages/worker/src/model-helper-network.js";
 import { planModelHostBlock } from "../../packages/worker/src/model-helper-block.js";
 import { TASK_SANDBOX_NETWORK, TaskSandbox, taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
@@ -207,10 +207,12 @@ describe("the helper's docker arguments", () => {
     expect(valuesOf(list, "--network")).toEqual([net.name]);
     expect(valuesOf(list, "--ip")).toEqual(["172.30.153.9"]);
     expect(valuesOf(list, "--cap-drop")).toEqual(["ALL"]);
+    // Docker's embedded resolver (127.0.0.11) would forward a lookup to the daemon's upstream: the helper's only upstream is its own loopback, where nothing listens.
+    expect(valuesOf(list, "--dns")).toEqual(["127.0.0.1"]);
     expect(list).toContain("--read-only");
     expect(valuesOf(list, "--security-opt")).toEqual(["no-new-privileges"]);
     expect(valuesOf(list, "--user")).toEqual(["1000:1000"]);
-    for (const flag of ["--add-host", "--dns", "--dns-search", "--publish", "-p", "--privileged", "--cap-add", "--pid", "--ipc", "--net", "--link", "--device", "--userns"]) expect(list, flag).not.toContain(flag);
+    for (const flag of ["--add-host", "--dns-search", "--publish", "-p", "--privileged", "--cap-add", "--pid", "--ipc", "--net", "--link", "--device", "--userns"]) expect(list, flag).not.toContain(flag);
     expect(list).toContain("--pull=never");
     expect(valuesOf(list, "--entrypoint")).toEqual(["/usr/local/bin/node"]);
   });
@@ -266,9 +268,15 @@ describe("the helper's docker arguments", () => {
       expect(problems(withExtra(["--network", TASK_SANDBOX_NETWORK])).join(";")).toMatch(/network/u);
     });
     it("an --add-host, a --dns, a published port, a capability, a privileged helper, a second mount, a host network", () => {
-      for (const extra of [["--add-host", "api.openai.com:1.1.1.1"], ["--dns", "8.8.8.8"], ["--publish", "8080:8080"], ["--cap-add", "NET_ADMIN"], ["--privileged"], ["--volume", "/:/host"], ["--tmpfs", "/tmp"], ["--net", "host"], ["--pid", "host"], ["--device", "/dev/kmsg"], ["--security-opt", "seccomp=unconfined"]]) {
+      for (const extra of [["--add-host", "api.openai.com:1.1.1.1"], ["--dns", "8.8.8.8"], ["--dns-option", "ndots:0"], ["--publish", "8080:8080"], ["--cap-add", "NET_ADMIN"], ["--privileged"], ["--volume", "/:/host"], ["--tmpfs", "/tmp"], ["--net", "host"], ["--pid", "host"], ["--device", "/dev/kmsg"], ["--security-opt", "seccomp=unconfined"]]) {
         expect(problems(withExtra(extra)).length, extra.join(" ")).toBeGreaterThan(0);
       }
+    });
+    it("a missing --dns 127.0.0.1, or another DNS server", () => {
+      const without = args();
+      without.splice(without.indexOf("--dns"), 2);
+      expect(problems(without).join(";")).toMatch(/DNS/u);
+      expect(problems(args().map((arg) => (arg === "127.0.0.1" ? "8.8.8.8" : arg))).join(";")).toMatch(/DNS/u);
     });
     it("a missing label, a missing read-only root, a missing --cap-drop ALL, a writable run directory, a root user", () => {
       const without = (flag: string, count: number) => { const list = args(); list.splice(list.indexOf(flag), count); return list; };
@@ -399,7 +407,7 @@ describe("the working sandbox is dual-homed; the fresh check sandbox is on a new
   });
   it("a sandbox block with the dropped address (a non-AI project) adds the names and joins nothing", async () => {
     const daemon = fakeDaemon();
-    const block = planModelHostBlock({ gatewayRows: [], hasModelRow: false, nonAiGate: true });
+    const block = planModelHostBlock({ gatewayRows: [], hasModelRow: false, nonAiGate: true, wallsOffered: true });
     await new TaskSandbox({ rootPath: await root(), taskId: TASK, docker: daemon.docker, image: IMAGE, environment: {}, modelBlock: { block } }).start();
     const run = daemon.calls.find((call) => call[0] === "run")!;
     const pairs = run.flatMap((arg, index) => (run[index - 1] === "--add-host" ? [arg] : []));
@@ -436,6 +444,34 @@ describe("the working sandbox is dual-homed; the fresh check sandbox is on a new
     expect(daemon.calls).toContainEqual(["network", "connect", "--ip", round.network.checkSandboxIp, round.network.name, "check-sandbox"]);
     expect(daemon.calls.some((call) => call[0] === "network" && call[1] === "connect" && call.at(-2) === round.network.name && call.at(-1) === "working-sandbox")).toBe(false);
   });
+  it("a round's network refuses a container that is already on another run network (the working sandbox is never on a round's network, whoever calls)", async () => {
+    const daemon = fakeDaemon();
+    const task = await startModelHelper(daemon.docker, startInput());
+    const round = await startModelHelper(daemon.docker, startInput({ kind: "round", round: 1 }));
+    daemon.containers.push({ id: "w2", name: "working-two", labels: {}, networks: new Map([[TASK_SANDBOX_NETWORK, ""]]), args: [], running: true });
+    await task.attachSandbox("working-two", "working");
+    const before = daemon.calls.filter((call) => call[0] === "network" && call[1] === "connect").length;
+    await expect(round.attachSandbox("working-two", "check")).rejects.toThrow();
+    expect(daemon.calls.filter((call) => call[0] === "network" && call[1] === "connect").length).toBe(before);
+    expect([...daemon.containers.find((c) => c.name === "working-two")!.networks.keys()]).not.toContain(round.network.name);
+    // The same container again on its OWN network is fine (a repeat of the join).
+    await expect(task.attachSandbox("working-two", "working")).resolves.toBeUndefined();
+  });
+  it("refuses when the container's networks cannot be read, before any connect", async () => {
+    const daemon = fakeDaemon();
+    const round = await startModelHelper(daemon.docker, startInput({ kind: "round", round: 1 }));
+    await expect(round.attachSandbox("no-such-container", "check")).rejects.toThrow();
+    expect(daemon.calls.some((call) => call[0] === "network" && call[1] === "connect")).toBe(false);
+  });
+  it("a round's sandbox block cannot be given to the working sandbox (TaskSandbox is the working sandbox)", async () => {
+    const daemon = fakeDaemon();
+    const round = await startModelHelper(daemon.docker, startInput({ kind: "round", round: 1 }));
+    expect(round.sandboxBlock({}).role).toBe("check");
+    expect(() => new TaskSandbox({ rootPath: "/mnt/workspace", taskId: TASK, docker: daemon.docker, image: IMAGE, environment: {}, modelBlock: round.sandboxBlock({}) })).toThrow();
+    const task = await startModelHelper(daemon.docker, startInput());
+    expect(task.sandboxBlock({}).role).toBe("working");
+    expect(() => new TaskSandbox({ rootPath: "/mnt/workspace", taskId: TASK, docker: daemon.docker, image: IMAGE, environment: {}, modelBlock: task.sandboxBlock({}) })).not.toThrow();
+  });
   it("attachSandbox checks with an inspect that the sandbox is on the network: a connect that 'worked' on a container that is not there fails", async () => {
     const daemon = fakeDaemon();
     const task = await startModelHelper(daemon.docker, startInput());
@@ -447,6 +483,17 @@ describe("the working sandbox is dual-homed; the fresh check sandbox is on a new
     for (const bad of ["--privileged", "-x", "a b", ""]) await expect(task.attachSandbox(bad, "working"), bad).rejects.toThrow();
     // Nothing reached docker: a name like that would be read as an option.
     expect(daemon.calls.some((call) => call[0] === "network" && call[1] === "connect")).toBe(false);
+  });
+});
+
+describe("the non-AI blackhole is applied only when the worker offers the walls", () => {
+  it("with the walls and the gate: the dropped address; without the walls: no block at all, with the reason", () => {
+    expect(planNonAiModelHostBlock({ nonAiGate: true, environment: OFFERED })).toMatchObject({ mode: "by_name", target: "blackhole", address: "10.255.255.1" });
+    for (const environment of [{}, { AGENTX_TEST_SERVICES_BOOT_FACTS: JSON.stringify({ ...JSON.parse(FACTS) as Record<string, unknown>, runWalls: false }) }, { ...OFFERED, AGENTX_TEST_SERVICES_NOT_PULLED: "all" }]) {
+      const block = planNonAiModelHostBlock({ nonAiGate: true, environment });
+      expect(block).toMatchObject({ mode: "none", target: "none", hosts: [], noBlockReason: "walls_not_offered" });
+    }
+    expect(planNonAiModelHostBlock({ nonAiGate: false, environment: OFFERED })).toMatchObject({ mode: "none", noBlockReason: "gate_off" });
   });
 });
 

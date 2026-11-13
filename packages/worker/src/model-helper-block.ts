@@ -7,8 +7,9 @@
 // would take in Cloud Storage; an address; a scheme; a path) is refused wherever it comes from.
 //
 // RESIDUAL, said plainly (and carried by the evidence input below): a hosts file is a name block, not a wall. Code that dials an IP address, or uses DNS over HTTPS, still gets out of an UNSEALED round, because `agentx-task` has
-// NAT. The evidence says "not sealed; model hosts blocked by name only". A host SUFFIX row (Azure OpenAI: every `<resource>.openai.azure.com`) cannot be held by a hosts file at all; it is listed in `suffixesNotBlockedByName`
-// and the finder reports a call to any subdomain. Only the sealed round, which has no route out, closes both.
+// NAT. The evidence says "not sealed; model hosts blocked by name only". A host SUFFIX row (Azure OpenAI: every `<resource>.openai.azure.com`) cannot be held by a hosts file at all. The project's own
+// concrete resource host is blocked by name when it is known (`azureResourceHosts`, from the connected source or readiness); any OTHER resource host is neither blocked nor recorded in an unsealed round (the call goes straight out, so
+// the finder never sees it). The suffix is listed in `suffixesNotBlockedByName` and the evidence input carries `azureOpenAiNotBlocked`, so the evidence says so. Only the sealed round, which has no route out, closes both.
 //
 // This module changes no wall, no boot script and no DNS firewall rule. Pure: no I/O.
 import { agentXError, builtinModelCatalog, checkModelHost, modelHostBlockList, modelHostSuffixBlockList, type CompanyGatewayRow, type ModelCatalogRow } from "@agentx/contracts";
@@ -52,15 +53,19 @@ export interface ModelHostBlock {
   readonly address: string | undefined;
   /** The names, sorted. */
   readonly hosts: readonly string[];
-  /** The host suffixes (Azure OpenAI) a hosts file cannot hold: not blocked by name; the finder reports a call to any subdomain. */
+  /** The host suffixes (Azure OpenAI) a hosts file cannot hold: a resource host that is not listed by name is NOT blocked and NOT recorded in an unsealed round (it reaches the real host). */
   readonly suffixesNotBlockedByName: readonly string[];
+  /** Why there is no block (mode `none`): the company gate is off, or the worker does not offer the walls. */
+  readonly noBlockReason?: "gate_off" | "walls_not_offered" | undefined;
   /** Whether the helper's own name (`rovara-models`) is added: only when a helper is started. */
   readonly helperAlias: boolean;
 }
 
 export interface PlanModelHostBlockInput {
-  /** The catalog's rows; default: the built-in catalog. */
+  /** Extra catalog rows (a newer release's). They are ADDED to the built-in catalog, never in place of it: a partial list can never shrink the block. */
   rows?: readonly ModelCatalogRow[];
+  /** The project's own Azure OpenAI resource hosts (`<resource>.openai.azure.com`, one label under a catalog suffix), when known from the connected source or readiness: blocked by name like any other host. */
+  azureResourceHosts?: readonly string[];
   /** The project's company gateway rows. */
   gatewayRows?: readonly CompanyGatewayRow[];
   /** Whether the project has a model row (a connected product source, or a detected model client): it then gets the helper. */
@@ -69,20 +74,33 @@ export interface PlanModelHostBlockInput {
   helperIp?: string;
   /** The company gate for a project with no model row (`MODEL_HOST_BLOCK_GATE_NAME`); absent is off. */
   nonAiGate?: boolean;
+  /** Whether this worker offers the walls (`modelHelperOffer().offered`): the dropped address is a wall's job (the `rvb` wall drops 10.0.0.0/8), so without them there is no blackhole. Absent is false. */
+  wallsOffered?: boolean;
+}
+
+function azureHostsOf(rows: readonly Pick<ModelCatalogRow, "hostSuffixes">[], candidates: readonly string[]): string[] {
+  const suffixes = modelHostSuffixBlockList(rows);
+  return candidates.map((host) => {
+    const checked = checkModelHost(host);
+    const matching = checked.ok ? suffixes.find((suffix) => host.endsWith(`.${suffix}`)) : undefined;
+    // Exactly one label under the suffix: `myco.openai.azure.com`, never the suffix itself or a deeper name.
+    if (!checked.ok || matching === undefined || host.slice(0, -(matching.length + 1)).includes(".")) return refuse("an Azure OpenAI resource host");
+    return host;
+  });
 }
 
 /** Plans the block. Throws CONFIG_INVALID for a name that is not a plain model host, a helper address that is not .9 of a run network, or a model-row project with no helper address. */
 export function planModelHostBlock(input: PlanModelHostBlockInput): ModelHostBlock {
-  const rows = input.rows ?? builtinModelCatalog().rows;
+  const rows = [...builtinModelCatalog().rows, ...(input.rows ?? [])];
   const gatewayRows = input.gatewayRows ?? [];
-  const hosts = modelBlockHosts(rows, gatewayRows);
+  const hosts = [...new Set([...modelBlockHosts(rows, gatewayRows), ...azureHostsOf(rows, input.azureResourceHosts ?? [])])].sort();
   const suffixes = modelHostSuffixBlockList(rows);
   if (input.hasModelRow) {
     if (!isModelHelperAddress(input.helperIp)) return refuse("the model helper's address");
     return { mode: "by_name", target: "helper", address: input.helperIp, hosts, suffixesNotBlockedByName: suffixes, helperAlias: true };
   }
-  if (input.nonAiGate === true) return { mode: "by_name", target: "blackhole", address: MODEL_BLACKHOLE_ADDRESS, hosts, suffixesNotBlockedByName: suffixes, helperAlias: false };
-  return { mode: "none", target: "none", address: undefined, hosts: [], suffixesNotBlockedByName: [], helperAlias: false };
+  if (input.nonAiGate === true && input.wallsOffered === true) return { mode: "by_name", target: "blackhole", address: MODEL_BLACKHOLE_ADDRESS, hosts, suffixesNotBlockedByName: suffixes, helperAlias: false };
+  return { mode: "none", target: "none", address: undefined, hosts: [], suffixesNotBlockedByName: [], helperAlias: false, noBlockReason: input.nonAiGate === true ? "walls_not_offered" : "gate_off" };
 }
 
 /** Checks a block that may have been built by hand: the one place the address and every name are judged before they become a docker argument or a DNS table line. Returns the pairs (name, address). */
@@ -121,12 +139,16 @@ export function resolveWithBlock(block: ModelHostBlock, host: string): string | 
 export const MODEL_BLOCK_MODES = ["by_name", "sealed", "none"] as const;
 export type ModelBlockMode = (typeof MODEL_BLOCK_MODES)[number];
 
+/** Shown whenever the suffix list is not empty: an Azure OpenAI resource host that is not blocked by name goes straight out and is not recorded. */
+export const AZURE_OPENAI_NOT_BLOCKED_SENTENCE = "Azure OpenAI is not blocked in this round: a client that calls an Azure OpenAI resource host reaches it directly";
+
 /**
- * The block mode of a round. Only the sealed check round is `sealed` (no route out exists); the working round, the unsealed check round and anything this function does not know are `by_name`. There is no other way to
- * "sealed": F1-c's evidence says "not sealed; model hosts blocked by name only" for every round that is not exactly `check_sealed`, and never implies sealed.
+ * The block mode of an UNSEALED round: always `by_name` (the working round, the unsealed check round and anything this function does not know). It never answers `sealed`, and it refuses `check_sealed`: a sealed round's mode
+ * comes only from its sealed plan (`sealedModelBlockEvidenceInput`), never from a name a caller passes.
  */
 export function blockModeForRound(roundKind: unknown): ModelBlockMode {
-  return roundKind === "check_sealed" ? "sealed" : "by_name";
+  if (roundKind === "check_sealed") throw agentXError("CONFIG_INVALID", "a sealed round's block mode comes from its sealed plan");
+  return "by_name";
 }
 
 export interface ModelBlockEvidenceInput {
@@ -135,10 +157,31 @@ export interface ModelBlockEvidenceInput {
   readonly blockList: readonly string[];
   /** F0a's finder input: the suffixes whose every subdomain is blocked at DNS only. */
   readonly hostSuffixes: readonly string[];
+  /** True whenever `hostSuffixes` is not empty: the evidence must show `AZURE_OPENAI_NOT_BLOCKED_SENTENCE`. */
+  readonly azureOpenAiNotBlocked: boolean;
 }
 
-/** The round's block facts for F1-c's evidence: the mode, the block list and the suffix list (the ledger inputs F1-a's evidence lines read, and F0a's redirect-escape finder). A project with no block reports `none`, never `by_name`. */
+/** The unsealed round's block facts for F1-c's evidence: the mode, the block list, the suffix list and the Azure flag (the ledger inputs F1-a's evidence lines read, and F0a's redirect-escape finder). A project with no block reports `none`, never `by_name`. `check_sealed` is refused. */
 export function modelBlockEvidenceInput(roundKind: unknown, block: ModelHostBlock): ModelBlockEvidenceInput {
-  const blockMode = blockModeForRound(roundKind) === "sealed" ? "sealed" : block.mode === "none" ? "none" : "by_name";
-  return { blockMode, blockList: [...block.hosts], hostSuffixes: [...block.suffixesNotBlockedByName] };
+  blockModeForRound(roundKind);
+  return { blockMode: block.mode === "none" ? "none" : "by_name", blockList: [...block.hosts], hostSuffixes: [...block.suffixesNotBlockedByName], azureOpenAiNotBlocked: block.suffixesNotBlockedByName.length > 0 };
+}
+
+/** The parts of a sealed check plan (check-sandbox.ts `CheckSandboxPlan`) a sealed claim is read from. */
+export interface SealedPlanFacts {
+  readonly mustDetachWorking: true;
+  /** The sealed DNS helper's `docker run` arguments: its `--host name=address` table. */
+  readonly dnsHelperRunArgs: readonly string[];
+}
+
+/**
+ * The only way to `sealed`: a sealed plan whose working sandbox is detached and whose DNS table (`--host`) carries EVERY model name of the helper's block at the helper's address. A plan that does not (the one 9d builds today
+ * has no model host in it) or a block that has no helper is refused, so nothing can say "sealed" for a round whose table does not hold the names.
+ */
+export function sealedModelBlockEvidenceInput(plan: SealedPlanFacts, block: ModelHostBlock): ModelBlockEvidenceInput {
+  const pairs = sealedModelHostPairs(block);
+  const args = Array.isArray(plan?.dnsHelperRunArgs) ? (plan.dnsHelperRunArgs as readonly unknown[]) : [];
+  const table = new Set(args.flatMap((arg, index) => (args[index - 1] === "--host" && typeof arg === "string" ? [arg] : [])));
+  if (plan?.mustDetachWorking !== true || pairs.length === 0 || !pairs.every((pair) => table.has(pair))) throw agentXError("CONFIG_INVALID", "not a sealed plan that holds the model hosts");
+  return { blockMode: "sealed", blockList: [...block.hosts], hostSuffixes: [], azureOpenAiNotBlocked: false };
 }

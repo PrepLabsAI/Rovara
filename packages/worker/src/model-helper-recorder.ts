@@ -19,6 +19,8 @@ export const MODEL_HOST_READ_MAX_BYTES = 16 * 1024;
 export const MODEL_HOST_READ_TIMEOUT_MS = 3_000;
 /** The most distinct names kept; further new names are counted as `overflow`. */
 export const MODEL_HOST_RECORDER_MAX_HOSTS = 256;
+/** The most distinct names remembered ONLY to count each overflow name once; past this every further new name counts as one more overflow (memory stays bounded however many names a client invents). */
+export const MODEL_HOST_RECORDER_MAX_OVERFLOW_TRACKED = 1024;
 /** The most connections open at once; a further one is closed unread. */
 const MAX_OPEN_CONNECTIONS = 64;
 const HOST_MAX_CHARS = 253;
@@ -272,13 +274,23 @@ export class ModelHostRecorder {
     });
   }
 
-  private record(port: ModelEscapePort, host: string | undefined): void {
+  /** Records one observation as a connection would (the sockets call this; so can a test or a helper loop that read the name itself). */
+  record(port: ModelEscapePort, host: string | undefined): void {
     this.connections += 1;
     if (host === undefined) this.unreadable += 1;
     else if (this.hosts.has(host)) { /* counted as a connection only */ }
     else if (this.hosts.size < (this.options.maxHosts ?? MODEL_HOST_RECORDER_MAX_HOSTS)) this.hosts.add(host);
-    else if (!this.overflowed.has(host)) { this.overflowed.add(host); this.overflow += 1; }
+    else if (this.overflowed.has(host)) { /* counted once already */ }
+    else {
+      this.overflow += 1;
+      if (this.overflowed.size < MODEL_HOST_RECORDER_MAX_OVERFLOW_TRACKED) this.overflowed.add(host);
+    }
     try { this.options.onRecord?.({ host, port }); } catch { /* a callback that throws never stops the recorder */ }
+  }
+
+  /** How many names are held in memory (the kept list plus the names remembered to count an overflow once): never more than `maxHosts` plus `MODEL_HOST_RECORDER_MAX_OVERFLOW_TRACKED`. */
+  trackedNames(): number {
+    return this.hosts.size + this.overflowed.size;
   }
 
   snapshot(): ModelHostRecorderSnapshot {

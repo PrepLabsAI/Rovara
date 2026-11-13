@@ -32,6 +32,7 @@ const READY_ATTEMPTS = 20;
 const READY_DELAY_MS = 250;
 const CONTAINER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u;
 const WORKSPACE_KEY = /^[0-9a-f]{16}$/u;
+const RUN_NETWORK_NAME = /^rovara-svc-[0-9a-f]{12}$/u;
 
 // ---- the gate
 
@@ -66,6 +67,8 @@ export function modelHelperRunId(kind: "task" | "round", id: string, round?: num
 /** What a sandbox needs to take a model block (task-sandbox.ts `TaskSandboxOptions.modelBlock`). */
 export interface SandboxModelBlock {
   readonly block: ModelHostBlock;
+  /** Which sandbox this block is for: the working sandbox (a task's helper network) or a round's fresh check sandbox. `TaskSandbox` is the working sandbox and refuses a `check` block. */
+  readonly role?: "working" | "check";
   /** Joins the started sandbox to the helper's network at its fixed address. Absent when the block has no helper (the dropped address). */
   attach?(container: string): Promise<void>;
   /** Removes the helper and its network, after the sandbox is gone. Never throws. */
@@ -80,8 +83,8 @@ export interface StartedModelHelper {
   /** Which sandbox this network serves: the working sandbox (.3) of a task, or the fresh check sandbox (.4) of a round. */
   readonly sandboxRole: "working" | "check";
   readonly sandboxIp: string;
-  /** The sandbox's model block (the names at .9 and the join), from the catalog and the project's gateway rows. */
-  sandboxBlock(input: { rows?: readonly ModelCatalogRow[]; gatewayRows?: readonly CompanyGatewayRow[] }): SandboxModelBlock;
+  /** The sandbox's model block (the names at .9 and the join): the built-in catalog (`rows` only ADDS rows), the project's gateway rows and its own Azure OpenAI resource hosts when known. */
+  sandboxBlock(input: { rows?: readonly ModelCatalogRow[]; gatewayRows?: readonly CompanyGatewayRow[]; azureResourceHosts?: readonly string[] }): SandboxModelBlock;
   /** `docker network connect --ip <sandbox address> <network> <container>`, then an inspect that shows the container on it. Only the role this network serves may join: the working sandbox is never on a round's network. */
   attachSandbox(container: string, role: "working" | "check"): Promise<void>;
   stop(): Promise<void>;
@@ -96,7 +99,7 @@ export interface StartModelHelperInput {
   round?: number;
   /** `setupWorkspaceKey(root)`. */
   workspace: string;
-  /** This network's own budget in milliseconds (a task's, or a round's): its objects count as left behind from creation + this + 15 minutes. */
+  /** This network's own budget in milliseconds: its objects count as left behind from creation + this + 15 minutes, and an allocation's sweep of another run may then remove them. The CALLER must pass the task's (or round's) MAXIMUM lifetime here, or a longer task loses its helper to a later sweep. */
   roundBudgetMs: number;
   /** The worker's own image. */
   image: string;
@@ -160,6 +163,9 @@ export async function startModelHelper(docker: DockerCli, input: StartModelHelpe
   const attachSandbox = async (container: string, role: "working" | "check"): Promise<void> => {
     if (role !== sandboxRole) throw agentXError("CONFIG_INVALID", `the ${role} sandbox is not served by this model helper network`);
     if (!CONTAINER_NAME.test(container)) throw agentXError("CONFIG_INVALID", "not a sandbox name for the model helper network");
+    // Before the connect: a container that is already on ANOTHER run network (the working sandbox on its task's network) is never joined to this one, whoever asks. A look that cannot be read refuses too.
+    const before = await networksOf(call, container);
+    if (before === undefined || [...before.keys()].some((name) => RUN_NETWORK_NAME.test(name) && name !== net.name)) throw agentXError("CONFIG_INVALID", "the sandbox is already on another run network or its networks could not be read");
     await call(["network", "connect", "--ip", sandboxIp, net.name, container]);
     // The connect's own exit code does not decide: a look at the container's networks does (a refusal because it is already there passes, a connect that did nothing fails).
     const networks = await networksOf(call, container);
@@ -168,7 +174,8 @@ export async function startModelHelper(docker: DockerCli, input: StartModelHelpe
   return {
     kind: input.kind, network: net, helperName, helperIp, sandboxRole, sandboxIp,
     sandboxBlock: (blockInput) => ({
-      block: planModelHostBlock({ ...(blockInput.rows === undefined ? {} : { rows: blockInput.rows }), ...(blockInput.gatewayRows === undefined ? {} : { gatewayRows: blockInput.gatewayRows }), hasModelRow: true, helperIp }),
+      role: sandboxRole,
+      block: planModelHostBlock({ ...(blockInput.rows === undefined ? {} : { rows: blockInput.rows }), ...(blockInput.gatewayRows === undefined ? {} : { gatewayRows: blockInput.gatewayRows }), ...(blockInput.azureResourceHosts === undefined ? {} : { azureResourceHosts: blockInput.azureResourceHosts }), hasModelRow: true, helperIp }),
       attach: (container) => attachSandbox(container, sandboxRole),
       teardown: () => net.stop(),
     }),
@@ -192,6 +199,17 @@ async function waitForHelper(call: Call, helperName: string, net: ServicesNetwor
     await sleep(READY_DELAY_MS);
   }
   throw new Error("not running");
+}
+
+/**
+ * The non-AI block (a project with no model row): the names at the dropped address, only when the company gate is on AND this worker offers the walls (`modelHelperOffer`; the dropped address is the `rvb` wall's job). Without the walls
+ * there is no block, and the block says why (`noBlockReason: "walls_not_offered"`).
+ */
+export function planNonAiModelHostBlock(input: { nonAiGate: boolean; rows?: readonly ModelCatalogRow[]; gatewayRows?: readonly CompanyGatewayRow[]; azureResourceHosts?: readonly string[]; environment?: NodeJS.ProcessEnv }): ModelHostBlock {
+  return planModelHostBlock({
+    hasModelRow: false, nonAiGate: input.nonAiGate, wallsOffered: modelHelperOffer(input.environment ?? process.env).offered,
+    ...(input.rows === undefined ? {} : { rows: input.rows }), ...(input.gatewayRows === undefined ? {} : { gatewayRows: input.gatewayRows }), ...(input.azureResourceHosts === undefined ? {} : { azureResourceHosts: input.azureResourceHosts }),
+  });
 }
 
 /** The worker-start sweep (run-network.ts rule 3): removes every run-network container and network of this workspace, whatever its expiry (a restarted worker's own earlier runs are all dead). Run once at startup. */

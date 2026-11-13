@@ -5,7 +5,7 @@ import tls from "node:tls";
 import { afterEach, describe, expect, it } from "vitest";
 import { installNetworkTripwire } from "../../packages/testing/src/ports/no-network.js";
 import {
-  MODEL_HOST_RECORDER, ModelHostRecorder, readHttpHost, readTlsServerName, MODEL_HOST_READ_MAX_BYTES,
+  MODEL_HOST_RECORDER, MODEL_HOST_RECORDER_MAX_OVERFLOW_TRACKED, MODEL_HOST_RECORDER_MAX_HOSTS, ModelHostRecorder, readHttpHost, readTlsServerName, MODEL_HOST_READ_MAX_BYTES,
 } from "../../packages/worker/src/model-helper-recorder.js";
 
 /** The first bytes Node's TLS client sends for `servername` (a real ClientHello), caught by a plain TCP server. */
@@ -191,6 +191,16 @@ describe("ModelHostRecorder: real sockets on loopback", () => {
     const snapshot = recorder.snapshot();
     expect(snapshot.hosts).toEqual(["a.example.com", "b.example.com"]);
     expect(snapshot.overflow).toBe(1);
+  });
+  it("memory stays bounded when a client invents 100,000 distinct names: the kept list and the overflow memory are capped and every further name is counted", () => {
+    const recorder = new ModelHostRecorder({ listenAddress: "127.0.0.1", allowedSources: ["127.0.0.1"] });
+    for (let index = 0; index < 100_000; index += 1) recorder.record(443, `host-${String(index)}-${"x".repeat(40)}.example.com`);
+    const snapshot = recorder.snapshot();
+    expect(snapshot.hosts).toHaveLength(MODEL_HOST_RECORDER_MAX_HOSTS);
+    expect(snapshot.overflow).toBe(100_000 - MODEL_HOST_RECORDER_MAX_HOSTS);
+    expect(snapshot.connections).toBe(100_000);
+    expect(recorder.trackedNames()).toBeLessThanOrEqual(MODEL_HOST_RECORDER_MAX_HOSTS + MODEL_HOST_RECORDER_MAX_OVERFLOW_TRACKED);
+    // The memory bound is the count of names held (heapUsed would count the loop's own garbage and flake): at most 256 + 1024 of the 100,000.
   });
   it("calls the onRecord callback with the name and the port, once per connection", async () => {
     const seen: Array<{ host: string | undefined; port: number }> = [];
