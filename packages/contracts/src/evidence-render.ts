@@ -1,5 +1,5 @@
 // The one renderer of an evidence pack (TE-A2a, design testing-build-plan section 3.1): the first line and the body block of the pull request, the Check Run summary, the task page model and Code's local report all
-// come from here, so both editions say the same thing in the same words. It is PURE (a pack in, text out; no clock, no network, no storage) and it has NO CALLERS yet: the broker still writes and prints v1 (TE-A2b/TE-A2-cl switch it).
+// come from here, so both editions say the same thing in the same words. It is PURE (a pack in, text out; no clock, no network, no storage) and its callers are the broker's pull request description (TE-A2b, only for a v2 pack and a v2 writer) and, in Cloud, the TE-A2-cl mirror; the writer is v1 unless a caller says v2.
 // Every word that a repository, a person or an agent wrote (a check label, a dependency name, a not-tested reason) is made inert here (no hidden characters, mention, link, image, issue reference, closing key or HTML), and every
 // list and line is bounded, with the rest counted ("and 52 more checks"), so the block stays inside a pull request description however large the pack is. Browser-safe: nothing here imports a Node module.
 import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, PROOF_BASES, SCRIPTED_AI_PROOF_WORDS, checkKindWords, trustLabelWords, type ProofBasis, type EvidenceTrustClass } from "./check-kinds.js";
@@ -8,6 +8,9 @@ import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
 import { hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
 import { weakeningLines } from "./evidence-weakening.js";
 import { NEWER_EVIDENCE_WORDS } from "./forward-reader.js";
+
+/** The last line of the compact form: where the checks, the dependencies and the not-tested list are. */
+export const EVIDENCE_COMPACT_POINTER = "Checks, dependencies and what was not tested: open in Rovara";
 
 export const EVIDENCE_RENDER_LIMITS = { lineMax: 300, bulletMax: 200, textMax: 9_000, checksListed: 12, dependenciesListed: 8, notTestedListed: 10, measuresListed: 3 } as const;
 
@@ -46,6 +49,11 @@ export interface EvidenceRenderOptions {
   rovaraProblemLine?: string | undefined;
   /** What `readEvidencePack` reported, for the "newer evidence" line. */
   newer?: NewerEvidence | undefined;
+  /**
+   * The short form a pull request description falls back to when it has no room (TE-A2b): the first line, where the checks ran, the flags and the "tests may be weaker" lines, and a pointer to Rovara for the rest. The
+   * words that warn a reviewer are never left out, and the form is bounded by those lists, not by the pack.
+   */
+  compact?: boolean | undefined;
 }
 export interface EvidenceRendering {
   /** The line a pull request or a check summary leads with. */
@@ -191,6 +199,10 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const newer = options.newer ?? noNewerEvidence();
   const notTested = pack.notTested;
   const flagged = weakeningPart(pack);
+  if (options.compact === true) {
+    const short = [producerLine, ...flagged.flags, ...slot(options.rovaraProblemLine), ...flagged.weakening, ...(hasNewerEvidence(newer) ? [NEWER_EVIDENCE_WORDS] : []), EVIDENCE_COMPACT_POINTER];
+    return { firstLine, producerLine, body: short, text: [firstLine, ...short].join("\n") };
+  }
   const body = [
     producerLine,
     ...flagged.flags,

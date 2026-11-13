@@ -8,14 +8,14 @@
 // Informational: a fault anywhere only means there is no pack for this code, and the pull request and the page say what they always said. Nothing here can change a verdict, block a publication or hold a callback
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
-  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor,
-  type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening,
+  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor, evidencePackV2ToV1, readEvidencePackText,
+  type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidencePackRead, type EvidencePackV2, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
 import { storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-artifacts.js";
 import type { EvidenceBlobStore } from "./evidence-blob-store.js";
 import type { PinnedDependency } from "./dependency-evidence.js";
-import { buildEvidencePack, type EvidenceProblem } from "./evidence-pack.js";
+import { buildEvidencePack, evidencePackV2Of, type EvidenceProblem, type EvidenceWriter } from "./evidence-pack.js";
 import { NO_PROD_DENY, dataGuardScanWorks, guardPack, guardRaw, type DataGuardScan } from "./evidence-guard.js";
 import { kindOfRawCheck } from "./evidence-risk.js";
 
@@ -49,6 +49,8 @@ export interface KeepEvidenceInput {
   environmentNote?: EvidenceNotTested | undefined;
   /** Test services: the dependencies the broker pinned for the run (see `PinnedDependency`). */
   dependencies?: readonly PinnedDependency[] | undefined;
+  /** TE-A2b: which version of the pack to write. Absent: version 1, which is what every strict reader of today reads. Version 2 is chosen by the caller (in Cloud, by the TE-A1 company gate; never here). */
+  writer?: EvidenceWriter | undefined;
 }
 
 export interface KeepEvidenceDeps {
@@ -170,9 +172,12 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     }) };
     const checked = EvidencePackSchema.safeParse(pack);
     if (!checked.success) return { kept: false, reason: "invalid" };
+    // TE-A2b: a version 2 writer keeps the same pack as a v2 pack (every v1 part kept); a pack the strict v2 schema refuses is not kept at all.
+    const toKeep = input.writer?.version === 2 ? evidencePackV2Of(checked.data, input.writer) : checked.data;
+    if (toKeep === undefined) return { kept: false, reason: "invalid" };
     if (deps.late?.() === true) return { kept: false, reason: "fault" };
     // The stored pack is kept like the tails (`evidence-std`): it expires with them and is deleted with them on erasure.
-    await deps.store.blobs.put(evidencePackKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(checked.data), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" },
+    await deps.store.blobs.put(evidencePackKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(toKeep), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" },
       // One pack per task and candidate digest: re-keeping the same candidate (a re-check, a retried keep) writes the pack again, so this caller overwrites on purpose.
       { overwrite: true });
     return { kept: true, problems: built.problems, guardedParts: guarded };
@@ -182,17 +187,37 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
   }
 }
 
-/** The pack kept for exactly this code of this task; undefined when there is none, it does not parse or is for other code. Never throws. */
-export async function loadEvidencePack(blobs: Pick<EvidenceBlobStore, "get">, task: EvidenceTask, candidateDigest: string | undefined): Promise<EvidencePack | undefined> {
+/**
+ * The pack kept for exactly this code of this task, as a reader reads it: version 1 as it was, version 2 with what the reader did not know reported (`readEvidencePack`). Undefined when there is none, it is for other code,
+ * or it cannot be read (a version 1 pack that does not parse, a core that is not a v2 core, a later version: the caller then shows no evidence for it). Never throws.
+ */
+export async function loadEvidenceRead(blobs: Pick<EvidenceBlobStore, "get">, task: EvidenceTask, candidateDigest: string | undefined): Promise<EvidencePackRead | undefined> {
   if (candidateDigest === undefined || !DIGEST.test(candidateDigest) || !TASK_ID.test(task.taskId)) return undefined;
   try {
     const bytes = await blobs.get(evidencePackKey(task, candidateDigest), PACK_READ_BYTES);
     if (bytes === undefined) return undefined;
-    const parsed = EvidencePackReadSchema.safeParse(JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown);
-    return parsed.success && evidenceIsFor(parsed.data, candidateDigest) ? parsed.data : undefined;
+    const read = readEvidencePackText(Buffer.from(bytes).toString("utf8"));
+    if (read.status === "v1") return evidenceIsFor(read.pack, candidateDigest) ? read : undefined;
+    if (read.status === "v2") return read.pack.candidate.digest === candidateDigest ? read : undefined;
+    return undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The pack kept for exactly this code of this task in its version 1 form, whichever version was written (readers accept both): a version 2 pack is read tolerantly and its v1 parts handed back, which is every v1 part the
+ * writer kept. Undefined when there is none, it is for other code, it does not parse, or a v2 pack has no honest v1 form. Never throws.
+ */
+export async function loadEvidencePack(blobs: Pick<EvidenceBlobStore, "get">, task: EvidenceTask, candidateDigest: string | undefined): Promise<EvidencePack | undefined> {
+  const read = await loadEvidenceRead(blobs, task, candidateDigest);
+  if (read === undefined) return undefined;
+  if (read.status === "v1") return read.pack;
+  if (read.status !== "v2") return undefined;
+  // `evidencePackV2ToV1` picks only the fields v1 has (an unknown part or kind is left behind, a kind v1 lacks is `other`), and the result must still parse as a v1 pack: a value this build does not know ("newer") does not.
+  const v1 = evidencePackV2ToV1(read.pack as unknown as EvidencePackV2);
+  const parsed = v1 === undefined ? undefined : EvidencePackSchema.safeParse(v1);
+  return parsed?.success === true ? parsed.data : undefined;
 }
 
 /** The kinds the approved check policy names, by the id the worker reports (`readiness:<index>`, in selected order). */

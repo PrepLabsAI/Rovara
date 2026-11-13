@@ -305,8 +305,8 @@ describe("inert text", () => {
   });
 });
 
-describe("no callers", () => {
-  it("nothing outside packages/contracts uses any export the evidence pack v2 lane added yet", () => {
+describe("callers", () => {
+  it("only the broker's evidence writer, reader and pull request description (TE-A2b) use an export the evidence pack v2 lane added", () => {
     const root = fileURLToPath(new URL("../..", import.meta.url));
     const source = (file: string) => readFileSync(`${root}/packages/contracts/src/${file}`, "utf8");
     const exported = (text: string) => [...text.matchAll(/^export (?:declare )?(?:const|function|type|interface|class) ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]!);
@@ -320,6 +320,12 @@ describe("no callers", () => {
     const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
     expect([0, 1]).toContain(found.status);
     const hits = found.stdout.split("\n").filter((entry) => entry !== "");
-    expect(hits.filter((file) => !file.startsWith("packages/contracts/"))).toEqual([]);
+    // TE-A2b is the first caller (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
+    expect(hits.filter((file) => !file.startsWith("packages/contracts/")).sort()).toEqual([
+      "packages/broker/src/core/proof/evidence-keep.ts",
+      "packages/broker/src/core/proof/evidence-lines.ts",
+      "packages/broker/src/core/proof/evidence-pack.ts",
+      "packages/broker/src/core/proof/evidence-v2-lines.ts",
+    ]);
   });
 });

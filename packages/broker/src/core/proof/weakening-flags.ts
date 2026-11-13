@@ -75,6 +75,9 @@ export function notComparedReason(proof: TestProof | undefined, candidateDigest:
   return first === undefined ? "no test report to compare" : NOT_COMPARED_WORDS[first];
 }
 
+/** The one line a proof that could not compare adds (fixed words from `notComparedReason`); the v1 flags block and the v2 Evidence block say it the same way. */
+export const notComparedLine = (reason: string): string => `Test weakening: could not compare (${reason})`;
+
 /**
  * The block at the top of the Rovara status section: the heading and one bullet per flag, then a blank line; nothing at all (an empty list) when there is no flag, so a description without flags reads exactly as it did.
  * Each line is made inert and cut by `weakeningLines`; the heading and the list markers are Rovara's. `proof` is given when the description has a Proof context (the test proof's reading for this code): then a proof that
@@ -84,6 +87,6 @@ export function weakeningBlock(files: readonly ChangedFileEntry[], pack: Evidenc
   const lines = weakeningLines(weakeningFactsOf(files, pack));
   const reason = proof === undefined ? undefined : notComparedReason(proof.testProof, proof.candidateDigest);
   // Facts from the pack are real even when the proof of this run could not compare (an earlier round's pack for the same code): the line is only added where nothing was compared and nothing was found.
-  const all = [...lines.flags, ...lines.weakening, ...(reason === undefined ? [] : [`Test weakening: could not compare (${reason})`])];
+  const all = [...lines.flags, ...lines.weakening, ...(reason === undefined ? [] : [notComparedLine(reason)])];
   return all.length === 0 ? [] : [WEAKENING_HEADING, ...all.map((line) => `- ${line}`), ""];
 }
