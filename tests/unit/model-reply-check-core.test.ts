@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { checkReplySetAgainstReal, ReplyCheckReportSchema, type ReplyProbe } from "../../packages/contracts/src/model-reply-check.js";
+import { checkReplySetAgainstReal, ReplyCheckReportSchema, type ReplyProbe, type ReplyProbeSource } from "../../packages/contracts/src/model-reply-check.js";
 import { modelReplyEntrySha256, type ModelReplySet, type ModelReplyResponse } from "../../packages/contracts/src/model-reply-set.js";
 import { createFakeEgress, createFakeProvider, fakeScope, type FakeBehaviour } from "../../packages/testing/src/ports/model-egress-fake.js";
 import { fixtureEgressRows, fixtureKey, FIXTURE_VERTEX_CONNECTION } from "../../packages/testing/src/ports/model-egress-fixtures.js";
@@ -16,6 +16,7 @@ const cases: { family: Family; row: "openai" | "anthropic" | "gemini" | "cohere"
   { family: "cohere", row: "cohere", path: "/v2/chat", body: { model: "fixture-small", messages: [{ role: "user", content: "hello" }] }, answer: { message: { content: [{ type: "text", text: "answer" }] }, finish_reason: "COMPLETE" } },
   { family: "vertex", row: "vertex", path: "/v1/projects/fixture-project-1/locations/us-central1/publishers/google/models/fixture-small:generateContent", body: { contents: [{ parts: [{ text: "hello" }] }] }, answer: { candidates: [{ content: { parts: [{ text: "answer" }] }, finishReason: "STOP" }] } },
 ];
+export const probeSource = (probes: readonly ReplyProbe[], companyId = "a"): ReplyProbeSource => ({ async readProbes() { return { ok: true, companyId, probes }; } });
 export function checkWorld(index = 0, response: ModelReplyResponse = { text: "scripted", finish: "stop" }) {
   const c = cases[index]!;
   const row = fixtureEgressRows()[c.row];
@@ -25,8 +26,9 @@ export function checkWorld(index = 0, response: ModelReplyResponse = { text: "sc
   const provider = createFakeProvider([row]);
   const fake = createFakeEgress({ rows: [row], sources: [{ company: "a", id: "source", row, connection: FIXTURE_VERTEX_CONNECTION, key: fixtureKey("check"), capMicros: 1_000_000 }], provider });
   // The fake package imports the built contracts; source tests use the same opaque port brand from src.
-  const args = { set, probes: [probe], egress: fake.adapter as unknown as ModelEgress, scope: fakeScope("a", "source") as unknown as ModelEgressScope, today };
-  return { c, row, set, probe, provider, fake, args, answer: c.answer };
+  const held = { probes: [probe] };
+  const args = { set, probes: { async readProbes() { return { ok: true as const, companyId: "a", probes: held.probes }; } }, egress: fake.adapter as unknown as ModelEgress, scope: { companyId: "a", egressScope: fakeScope("a", "source") as unknown as ModelEgressScope }, today };
+  return Object.assign(held, { c, row, set, probe, provider, fake, args, answer: c.answer });
 }
 let tripwire: ReturnType<typeof installNetworkTripwire>;
 beforeEach(() => { tripwire = installNetworkTripwire(); });
@@ -69,7 +71,7 @@ describe("reply health through the real egress core and fake transport", () => {
   it("no probe, stale hash, wrong reply, wrong family and wrong prompt never call", async () => {
     for (const edit of ["missing", "hash", "id", "family", "prompt", "sequence", "row"] as const) {
       const w = checkWorld();
-      if (edit === "missing") w.args.probes = [];
+      if (edit === "missing") w.probes = [];
       if (edit === "hash") w.probe.entrySha256 = "0".repeat(64);
       if (edit === "id") w.probe.replyId = "reply-other";
       if (edit === "family") w.probe.family = "cohere";
@@ -94,7 +96,7 @@ describe("reply health through the real egress core and fake transport", () => {
   it("maxProbes and overrun stop before another forward, even if adapter could answer", async () => {
     for (const overrun of [false, true]) {
       const w = checkWorld(); w.set.replies.push({ ...w.set.replies[0]!, id: "reply-b" });
-      w.args.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
+      w.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
       let forwards = 0;
       const egress: ModelEgress = { capabilities: { schemes: [] }, async *forward() { forwards++; yield { kind: "head", status: 200, headers: [] }; yield { kind: "chunk", bytes: enc(JSON.stringify(w.answer)) }; yield { kind: "settle", status: 200, class: "ok", costMicros: 0, estimated: false, overrun }; } };
       const report = await checkReplySetAgainstReal({ ...w.args, egress, limits: { maxProbes: overrun ? 50 : 1 } });
@@ -105,8 +107,8 @@ describe("reply health through the real egress core and fake transport", () => {
   it("default cap is 50 and invalid caps fail closed", async () => {
     const w = checkWorld();
     w.set.replies = Array.from({ length: 51 }, (_, i) => ({ ...w.set.replies[0]!, id: `reply-${String(i).padStart(2, "0")}` }));
-    w.args.probes = w.set.replies.map((r) => ({ ...w.probe, replyId: r.id, entrySha256: modelReplyEntrySha256(r) }));
-    w.provider.script(...w.args.probes.map(() => ({ body: JSON.stringify(w.answer) })));
+    w.probes = w.set.replies.map((r) => ({ ...w.probe, replyId: r.id, entrySha256: modelReplyEntrySha256(r) }));
+    w.provider.script(...w.probes.map(() => ({ body: JSON.stringify(w.answer) })));
     expect((await checkReplySetAgainstReal(w.args)).counts).toEqual({ still_fits: 50, drifted: 0, not_run: 1 });
     expect(w.provider.calls).toHaveLength(50);
     for (const maxProbes of [-1, Infinity, NaN, 1.5, 0]) {
@@ -118,19 +120,19 @@ describe("reply health through the real egress core and fake transport", () => {
     for (const model of ["fixture-small", "bad <model>"]) {
       const w = checkWorld(); w.probe.frame.body = enc(JSON.stringify({ ...w.c.body, model }));
       w.provider.script({ body: JSON.stringify(w.answer) });
-      expect((await checkReplySetAgainstReal(w.args)).label).toBe(`scripted replies checked against real ${model === "fixture-small" ? model : "the model"} on ${today}`);
+      expect((await checkReplySetAgainstReal(w.args)).label).toBe(`scripted replies checked against real the model on ${today}`);
     }
   });
   it("shuffled probes and set order have the same report; duplicates are refused", async () => {
     const run = async (reverse: boolean) => {
       const w = checkWorld(); w.set.replies.push({ ...w.set.replies[0]!, id: "reply-b" });
-      w.args.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
-      if (reverse) { w.args.probes.reverse(); w.set.replies.reverse(); }
+      w.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
+      if (reverse) { w.probes.reverse(); w.set.replies.reverse(); }
       w.provider.script({ body: JSON.stringify(w.answer) }, { body: JSON.stringify(w.answer) });
       return checkReplySetAgainstReal(w.args);
     };
     expect(await run(false)).toEqual(await run(true));
-    const w = checkWorld(); w.args.probes.push(w.probe);
+    const w = checkWorld(); w.probes.push(w.probe);
     expect((await checkReplySetAgainstReal(w.args)).items[0]?.reasons).toEqual(["probe_does_not_match_reply"]);
   });
   it("proto keys and depth above 16 are unreadable", async () => {
@@ -159,7 +161,7 @@ describe("reply health through the real egress core and fake transport", () => {
     expect(JSON.stringify(await checkReplySetAgainstReal({ ...w.args, egress }))).not.toContain(canary);
   });
   it("strict report parsing refuses extra text, inconsistent counts and mixed reasons", async () => {
-    const w = checkWorld(); const r = await checkReplySetAgainstReal({ ...w.args, probes: [] });
+    const w = checkWorld(); const r = await checkReplySetAgainstReal({ ...w.args, probes: probeSource([]) });
     expect(ReplyCheckReportSchema.safeParse({ ...r, prompt: "leak" }).success).toBe(false);
     expect(ReplyCheckReportSchema.safeParse({ ...r, counts: { still_fits: 1, drifted: 0, not_run: 0 } }).success).toBe(false);
     expect(ReplyCheckReportSchema.safeParse({ ...r, items: [{ ...r.items[0], verdict: "drifted" }] }).success).toBe(false);
@@ -302,10 +304,169 @@ describe("probe selection facts", () => {
 describe("fault accounting", () => {
   it("halts on an unsettled transport fault without claiming the run cap was reached", async () => {
     const w = checkWorld(); w.set.replies.push({ ...w.set.replies[0]!, id: "reply-b" });
-    w.args.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
+    w.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
     let forwards = 0;
     const egress: ModelEgress = { capabilities: { schemes: [] }, forward() { forwards++; throw new Error("fault"); } };
-    expect((await checkReplySetAgainstReal({ ...w.args, egress })).items.map((i) => i.reasons)).toEqual([["provider_error"], ["provider_error"]]);
+    expect((await checkReplySetAgainstReal({ ...w.args, egress })).items.map((i) => i.reasons)).toEqual([["provider_error"], ["run_halted"]]);
     expect(forwards).toBe(1);
+  });
+});
+
+
+describe("review outcome regressions", () => {
+  it("reports checked only after an answer, with spend and a strict status contract", async () => {
+    const w = checkWorld(); w.provider.script({ body: JSON.stringify(w.answer) });
+    const report = await checkReplySetAgainstReal(w.args);
+    expect(report.status).toBe("checked"); expect(report.spend.attempted).toBe(1);
+    expect(report.spend.costMicros).toBeGreaterThan(0); expect(report.spend.complete).toBe(true);
+    expect(ReplyCheckReportSchema.safeParse({ ...report, status: "not_checked" }).success).toBe(false);
+    expect(ReplyCheckReportSchema.safeParse({ ...report, spend: { ...report.spend, costMicros: Infinity } }).success).toBe(false);
+    for (const mode of ["no_probe", "refused", "empty"] as const) {
+      const x = checkWorld();
+      if (mode === "no_probe") x.probes = [];
+      if (mode === "empty") x.set.replies = [];
+      if (mode === "refused") x.provider.script({ status: 401 });
+      const r = await checkReplySetAgainstReal(x.args);
+      expect(r.status).toBe("not_checked"); expect(r.label).toBe("not checked: no answers");
+      expect(ReplyCheckReportSchema.safeParse(r).success).toBe(true);
+      expect(ReplyCheckReportSchema.safeParse({ ...r, status: "checked" }).success).toBe(false);
+    }
+  });
+  it("invalid inputs and exceptions never claim a fictitious checked date", async () => {
+    const w = checkWorld();
+    for (const args of [{ ...w.args, today: "2026-13-01" }, { ...w.args, set: null }, Object.defineProperty({}, "set", { get() { throw new Error("private"); } })]) {
+      const r = await checkReplySetAgainstReal(args as never);
+      expect(r).toMatchObject({ status: "invalid_input", label: "not checked: invalid input", spend: { attempted: 0, costMicros: 0, complete: true } });
+      expect(ReplyCheckReportSchema.safeParse(r).success).toBe(true);
+    }
+    expect(w.provider.calls).toHaveLength(0);
+  });
+  it("preserves settled spend when a later input throws", async () => {
+    const w = checkWorld(); w.set.replies.push({ ...w.set.replies[0]!, id: "reply-b" });
+    const later = { ...w.probe, replyId: "reply-b" }; w.probes.push(later);
+    const egress: ModelEgress = { capabilities: { schemes: [] }, async *forward() {
+      yield { kind: "head", status: 200, headers: [] }; yield { kind: "chunk", bytes: enc(JSON.stringify(w.answer)) };
+      yield { kind: "settle", status: 200, class: "ok", costMicros: 17, estimated: false };
+      Object.defineProperty(later, "replyId", { get() { throw new Error("private"); } });
+    } };
+    const report = await checkReplySetAgainstReal({ ...w.args, egress });
+    expect(report).toMatchObject({ status: "invalid_input", label: "not checked: invalid input", spend: { attempted: 1, costMicros: 17, complete: true } });
+    expect(ReplyCheckReportSchema.safeParse(report).success).toBe(true);
+  });
+  it("retains settle costs after transport throws and marks unknown spend incomplete", async () => {
+    for (const settled of [true, false]) {
+      const w = checkWorld();
+      const egress: ModelEgress = { capabilities: { schemes: [] }, async *forward() {
+        yield { kind: "head", status: 200, headers: [] };
+        if (settled) yield { kind: "settle", status: 200, class: "ok", costMicros: 19, estimated: false };
+        throw new Error("private");
+      } };
+      expect(await checkReplySetAgainstReal({ ...w.args, egress })).toMatchObject({ status: "invalid_input", spend: { attempted: 1, costMicros: settled ? 19 : 0, complete: settled } });
+    }
+  });
+  it("uses the route model instead of an untrusted body model in the label", async () => {
+    const canary = ["canary", String(Math.random()).slice(2)].join("-");
+    for (const index of [0, 2]) {
+      const w = checkWorld(index); w.probe.frame.body = enc(JSON.stringify({ ...w.c.body, model: canary }));
+      w.provider.script({ body: JSON.stringify(w.answer) });
+      const r = await checkReplySetAgainstReal(w.args);
+      expect(r.status).toBe("checked");
+      expect(r.label).toBe(`scripted replies checked against real ${index === 2 ? "fixture-small" : "the model"} on ${today}`);
+      expect(JSON.stringify(r)).not.toContain(canary);
+    }
+  });
+  for (const [reason, behaviour] of Object.entries({ key_refused: { status: 401 }, quota: { status: 429, body: '{"error":{"code":"insufficient_quota"}}' }, rate_limit: { status: 429 } } satisfies Record<string, FakeBehaviour>)) {
+    it(`halts on ${reason} and distinguishes skipped probes from missing ones`, async () => {
+      const w = checkWorld();
+      for (const id of ["reply-b", "reply-c"]) w.set.replies.push({ ...w.set.replies[0]!, id });
+      w.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
+      w.provider.script(behaviour, behaviour);
+      const report = await checkReplySetAgainstReal(w.args);
+      expect(report.items.map((i) => i.reasons)).toEqual([[reason], ["run_halted"], ["no_probe"]]);
+      expect(w.provider.calls).toHaveLength(1);
+    });
+  }
+  it("missing probes remain no_probe after the run cap", async () => {
+    const w = checkWorld(); w.set.replies.push({ ...w.set.replies[0]!, id: "reply-b" });
+    expect((await checkReplySetAgainstReal({ ...w.args, limits: { maxProbes: 0 } })).items.map((i) => i.reasons)).toEqual([["run_cap_reached"], ["no_probe"]]);
+  });
+});
+
+
+describe("safe spend accounting", () => {
+  it("refuses non-finite, negative or fractional settle costs without printing them", async () => {
+    for (const costMicros of [NaN, Infinity, -1, 0.5]) {
+      const w = checkWorld();
+      const egress: ModelEgress = { capabilities: { schemes: [] }, async *forward() { yield { kind: "head", status: 200, headers: [] }; yield { kind: "settle", status: 200, class: "ok", costMicros, estimated: false }; } };
+      const r = await checkReplySetAgainstReal({ ...w.args, egress });
+      expect(r.spend).toEqual({ attempted: 1, costMicros: 0, complete: false });
+      expect(ReplyCheckReportSchema.safeParse(r).success).toBe(true);
+    }
+  });
+  it("does not emit an unsafe integer when settled costs overflow", async () => {
+    const w = checkWorld(); w.set.replies.push({ ...w.set.replies[0]!, id: "reply-b" });
+    w.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
+    const egress: ModelEgress = { capabilities: { schemes: [] }, async *forward() { yield { kind: "head", status: 200, headers: [] }; yield { kind: "chunk", bytes: enc(JSON.stringify(w.answer)) }; yield { kind: "settle", status: 200, class: "ok", costMicros: Number.MAX_SAFE_INTEGER, estimated: false }; } };
+    const r = await checkReplySetAgainstReal({ ...w.args, egress });
+    expect(r.spend).toEqual({ attempted: 2, costMicros: Number.MAX_SAFE_INTEGER, complete: false });
+    expect(ReplyCheckReportSchema.safeParse(r).success).toBe(true);
+  });
+});
+
+
+describe("source and report boundary contracts", () => {
+  it("refuses an oversized source even when its adapter claims success", async () => {
+    const w = checkWorld();
+    expect(await checkReplySetAgainstReal({ ...w.args, probes: probeSource(Array.from({ length: 2001 }, () => w.probe)) })).toMatchObject({ status: "not_checked", label: "not checked: store unavailable" });
+    expect(w.provider.calls).toHaveLength(0);
+  });
+  it("rejects invalid company bindings and never echoes source exceptions", async () => {
+    const w = checkWorld(); const canary = ["canary", String(Math.random()).slice(2)].join("-");
+    const r = await checkReplySetAgainstReal({ ...w.args, scope: { ...w.args.scope, companyId: "bad/company" }, probes: probeSource([w.probe], "bad/company") });
+    expect(r.status).toBe("invalid_input");
+    const probes: ReplyProbeSource = { readProbes() { throw new Error(canary); } };
+    const report = await checkReplySetAgainstReal({ ...w.args, probes });
+    expect(report.status).toBe("invalid_input"); expect(JSON.stringify(report)).not.toContain(canary);
+    expect(w.provider.calls).toHaveLength(0);
+  });
+  it("cap refusal stops later probes with run_cap_reached", async () => {
+    const w = checkWorld(); w.set.replies.push({ ...w.set.replies[0]!, id: "reply-b" });
+    w.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
+    let forwards = 0;
+    const egress: ModelEgress = { capabilities: { schemes: [] }, async *forward() { forwards++; yield { kind: "head", status: 429, headers: [] }; yield { kind: "settle", status: 429, class: "cap", costMicros: 0, estimated: false }; } };
+    expect((await checkReplySetAgainstReal({ ...w.args, egress })).items.map((i) => i.reasons)).toEqual([["cap"], ["run_cap_reached"]]);
+    expect(forwards).toBe(1);
+  });
+});
+
+
+describe("partial-run exceptions", () => {
+  it("does not claim checked when a later forward throws after an answered probe", async () => {
+    const w = checkWorld(); w.set.replies.push({ ...w.set.replies[0]!, id: "reply-b" });
+    w.probes.push({ ...w.probe, replyId: "reply-b", entrySha256: modelReplyEntrySha256(w.set.replies[1]!) });
+    let calls = 0;
+    const egress: ModelEgress = { capabilities: { schemes: [] }, async *forward() {
+      if (++calls === 2) throw new Error("private");
+      yield { kind: "head", status: 200, headers: [] }; yield { kind: "chunk", bytes: enc(JSON.stringify(w.answer)) };
+      yield { kind: "settle", status: 200, class: "ok", costMicros: 23, estimated: false };
+    } };
+    const r = await checkReplySetAgainstReal({ ...w.args, egress });
+    expect(r).toMatchObject({ status: "invalid_input", label: "not checked: invalid input", counts: { still_fits: 1, not_run: 1 }, spend: { attempted: 2, costMicros: 23, complete: false } });
+    expect(ReplyCheckReportSchema.safeParse(r).success).toBe(true);
+  });
+});
+
+
+describe("date label boundary", () => {
+  it("labels with the validated date snapshot even if the caller changes it during the forward", async () => {
+    const w = checkWorld(); const canary = ["canary", String(Math.random()).slice(2)].join("-");
+    let reads = 0;
+    const args = Object.defineProperty({ ...w.args }, "today", { get() { return ++reads === 1 ? today : canary; } });
+    w.provider.script({ body: JSON.stringify(w.answer) });
+    const report = await checkReplySetAgainstReal(args);
+    expect(w.provider.calls).toHaveLength(1);
+    expect(report.label).toBe(`scripted replies checked against real the model on ${today}`);
+    expect(JSON.stringify(report)).not.toContain(canary);
+    expect(ReplyCheckReportSchema.safeParse(report).success).toBe(true);
   });
 });

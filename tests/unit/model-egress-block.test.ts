@@ -177,7 +177,7 @@ describe("no callers yet", () => {
       for (const file of walk(root)) {
         // TE-F2 part A stacks on this lane: exactly these files are allowed to import F0a's modules (its own pure contracts and its tests); its guard (model-replies-contracts-guard.test.ts) proves nothing else calls them.
         // TE-F1a (the first caller, by design: it is built on F0a) lives in `packages/contracts/src/model-egress/`, `packages/testing/` and its own tests.
-        if (own.has(file) || file === "packages/contracts/src/index.ts" || file === "packages/contracts/src/model-reply-check.ts" || F2A_FILES.has(file) || file.startsWith("packages/contracts/src/model-egress/") || file.startsWith("packages/testing/src/ports/model-egress-") || /tests\/unit\/model-egress-/u.test(file) || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
+        if (own.has(file) || file === "packages/contracts/src/index.ts" || file === "packages/contracts/src/model-reply-check.ts" || file === "packages/contracts/src/model-reply-check-store.ts" || F2A_FILES.has(file) || file.startsWith("packages/contracts/src/model-egress/") || file.startsWith("packages/testing/src/ports/model-egress-") || /tests\/unit\/model-egress-/u.test(file) || /tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
         const text = readFileSync(file, "utf8");
         if (NEW_MODULES.some((name) => new RegExp(`(?:from|import\\()\\s*["'][^"']*\\/${name}\\.js["']`, "u").test(text))) importers.push(file);
       }
