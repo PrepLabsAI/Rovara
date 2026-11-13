@@ -1046,7 +1046,7 @@ function reviewsOf(job: WorkerInvocation, tree: string, verdict: "pass" | "findi
 /** A page of the local review server, fetched as the browser the owner was sent to. */
 const raw_ = (h: Awaited<ReturnType<typeof launch>>, link: URL) => raw(h.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
 const taskRecord = async (h: Awaited<ReturnType<typeof launch>>, taskId: string) =>
-  (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" })) as unknown as { workflow: { stage: string; state: string; revision: number; blockReason?: string; reviewBase?: unknown[]; verification?: { reviewOnly?: boolean }; decisions: Array<{ source?: string; actorRole?: string }> }; autofixAsk?: { reason: string } };
+  (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" })) as unknown as { workflow: { stage: string; state: string; revision: number; blockReason?: string; reviewBase?: unknown[]; verification?: { reviewOnly?: boolean; results: Array<{ checkId: string; status: string }> }; candidate?: { digest: string }; flakyOnChange?: { candidateDigest: string; count: number; ids: string[] }; decisions: Array<{ source?: string; actorRole?: string }> }; autofixAsk?: { reason: string } };
 
 describe("rovara up: from the approved plan to the checked code and its reviews, against a fake worker", () => {
   it("builds the approved plan, records the checked code, runs both reviews and makes the pull request due", async () => {
@@ -2222,7 +2222,7 @@ describe("rovara up: the reviews and checks are read against the code and the ru
 
     it("flaky only: VERIFY is passed, the reviews are due, and the workflow carries the fact B5's hold reads", async () => {
       const r = await run({ environment: ON, entries: [failedEntry(0)], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
-      expect(r.workflow).toMatchObject({ stage: "REVIEW", verification: { results: [{ checkId: expect.any(String), status: "PASS" }] }, flakyOnChange: { count: 1, ids: [ID] } });
+      expect(r.workflow).toMatchObject({ stage: "REVIEW", verification: { results: [{ status: "PASS" }] }, flakyOnChange: { count: 1, ids: [ID] } });
       expect(r.workflow.flakyOnChange?.candidateDigest).toBe(r.workflow.candidate?.digest);
       expect(flakyOnChangeHoldInput(r.workflow)).toEqual([ID]);
       expect(await r.h.nextJob(r.workspaceId, r.seen)).toMatchObject({ payload: { workflowMode: "REVIEW" } });
@@ -2258,6 +2258,15 @@ describe("rovara up: the reviews and checks are read against the code and the ru
       const r = await run({ environment: ON, entries: [failedEntry(0)], file: flakyFile([{ checkId: "readiness:0", flaky: [`tests/t.py::leak ${secret}`] }]) });
       expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
       expect(JSON.stringify(r.workflow)).not.toContain(secret);
+    });
+
+    it("a file over the broker's bound (64 KiB) is refused whole, even though every part of it is valid", async () => {
+      const ids = (letter: string) => Array.from({ length: 50 }, (_, index) => `tests/${letter}${String(index).padStart(3, "0")}.py::${"x".repeat(470)}`);
+      const big = flakyFile([{ checkId: "readiness:0", flaky: ids("a") }, { checkId: "readiness:1", flaky: ids("b") }, { checkId: "readiness:2", flaky: ids("c") }]);
+      expect(Buffer.byteLength(big)).toBeGreaterThan(64 * 1024);
+      const r = await run({ environment: ON, entries: [failedEntry(0)], file: big });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(r.workflow).not.toHaveProperty("flakyOnChange");
     });
 
     it("a check that is not a regression (already failing) stays FAILED", async () => {

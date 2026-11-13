@@ -851,7 +851,7 @@ export function recordWorkflowVerification(
  * TE-C6 -> B5: the tests the workflow's current code has as flaky on the change (they failed once and passed on the rerun, and the base was not already flaky on them), as `ProofHoldFacts.flakyOnChange` takes them.
  * Undefined when there are none or the fact is for other code. B5's host adds this one call to its `ProofHoldSource.facts`: `flakyOnChange: flakyOnChangeHoldInput(task.workflow)`.
  */
-export function flakyOnChangeHoldInput(workflow: Pick<WorkflowSnapshot, "candidate" | "flakyOnChange"> | undefined): string[] | undefined {
+export function flakyOnChangeHoldInput(workflow: { candidate?: { digest: string } | undefined; flakyOnChange?: { candidateDigest: string; ids: readonly string[] } | undefined } | undefined): string[] | undefined {
   const fact = workflow?.flakyOnChange;
   if (workflow === undefined || fact === undefined || workflow.candidate === undefined || fact.candidateDigest !== workflow.candidate.digest || fact.ids.length === 0) return undefined;
   return [...fact.ids];
