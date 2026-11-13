@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -255,7 +254,7 @@ describe("F-4: one-time sign-in URL parameters are credentials", () => {
     const missed: string[] = [];
     const overMasked: string[] = [];
     for (let index = 0; index < 10_000; index += 1) {
-      const bytes = [24, 32, 48][index % 3];
+      const bytes = [24, 32, 48][index % 3]!;
       const token = seededBytes(11_300_000 + index, bytes).toString("base64url");
       if (/[0-9]/.test(token) && /[A-Za-z]/.test(token) && !masked(token)) missed.push(token);
       const hex = seededBytes(0xface + index, bytes).toString("hex");
