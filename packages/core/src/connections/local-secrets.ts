@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 import { readdir, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { agentXError, type SecretStore } from "@rovara-code/contracts";
-import { ensurePrivateDirectory, writeOwnerFile } from "../local/state-directory.js";
+import { ensurePrivateDirectory, writeOwnerFile } from "./owner-files.js";
 import { admitSecretName, type ConnectionSecrets } from "./org-secrets.js";
 
 const VERSION = /^\d{13}-[0-9a-f]{8}$/;

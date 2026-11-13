@@ -4,7 +4,7 @@
 // install this replaces the install-wide registry for the org's workspaces and tasks.
 import { staticSecretProvider, CredentialUnavailable, type Access, type CredentialProvider, type SecretSource } from "@agentx/gateway";
 import { OrgIdSchema, connectionTakesSecret, type CredentialRecord, type CredentialType, type OrgId } from "@rovara-code/contracts";
-import { hostPinProblem, type ConnectorCredentials, type HostPin } from "../aws/credentials.js";
+import { hostPinProblem, type ConnectorCredentials, type HostPin } from "../connectors/native/keys.js";
 import { orgConnectorSecretName } from "./org-secrets.js";
 import { vendorHostOf } from "./vendor-hosts.js";
 import { connectionOf, readConnection, readConnectionSecret, readConnectionToken, type OrgConnectionDeps, type OrgConnectionRecord } from "./store.js";

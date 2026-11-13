@@ -1,8 +1,8 @@
 import { agentXError, redactText, type PlanDocument, type WorkflowArtifact } from "@rovara-code/contracts";
-import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
-import { planCheckSummary, type PlanCheckSummary } from "../developer/plan-check-summary.js";
-import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck } from "../developer/plan-self-check.js";
-import type { DeveloperTaskRecord } from "../developer/task-records.js";
+import { planCheckSummary, type PlanCheckSummary } from "./plan-check-summary.js";
+import { loadWorkflowDocument } from "./plan-document-reader.js";
+import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck } from "./plan-self-check.js";
+import type { DeveloperTaskRecord } from "./task-records.js";
 
 /** PLANFULLDOC: the answer of `GET /v1/dev/tasks/:id/plan`. */
 export interface TaskPlanDocumentView {

@@ -6,7 +6,26 @@ import {
   type Check, type CheckRunner, type CheckRunnerCapabilities, type CheckRunRef, type CheckStartRequest, type CheckTarget, type HostScope, type ReadBudget, type UntrustedText,
 } from "@rovara-code/contracts";
 import type { CodeBuildCheckResult } from "@rovara-code/contracts";
-import type { CodeBuildGateway } from "../../../codebuild.js";
+
+/**
+ * How the runner reaches CodeBuild: start one build, read one build. It is declared here, with the plug-in that uses it, so the plug-in imports no AWS SDK; the
+ * hosted gateway (`codebuild.ts`, `AwsCodeBuildGateway`) implements it and re-exports it.
+ */
+export interface CodeBuildGateway {
+  start(input: {
+    gate: string;
+    projectName: string;
+    commit: string;
+    timeoutMinutes: number;
+    idempotencyToken: string;
+  }): Promise<CodeBuildCheckResult>;
+  status(input: {
+    gate: string;
+    projectName: string;
+    commit: string;
+    buildId: string;
+  }): Promise<CodeBuildCheckResult>;
+}
 
 export const CODEBUILD_RUNNER_KIND = "codebuild";
 

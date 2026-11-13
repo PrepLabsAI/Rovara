@@ -13,7 +13,7 @@ import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
-import { readTaskPlanDocument } from "../../aws/task-plan-document.js";
+import { readTaskPlanDocument } from "../../developer/task-plan-document.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { createLocalSessionControl, createSessionControlHost } from "./host.js";
 import { listProjects, registerProject } from "./projects.js";

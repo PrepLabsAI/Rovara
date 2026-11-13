@@ -2,9 +2,8 @@
 // says how to build one. A runner serves only the repositories the caller's project registered.
 import { z } from "zod";
 import { PluginRegistryError, type PluginContext, type PluginModule } from "@rovara-code/contracts";
-import type { CodeBuildGateway } from "../../../codebuild.js";
 import { readPluginSettings } from "../../module-support.js";
-import { codeBuildCheckRunner, CODEBUILD_RUNNER_KIND } from "./index.js";
+import { codeBuildCheckRunner, CODEBUILD_RUNNER_KIND, type CodeBuildGateway } from "./index.js";
 
 export interface CodeBuildPluginOptions {
   createGateway(context: PluginContext): CodeBuildGateway | Promise<CodeBuildGateway>;

@@ -8,9 +8,7 @@ import {
   type CredentialListEntry,
   type CredentialRecord,
   type CredentialRegistration,
-  type ConnectionSecret,
   type CredentialType,
-  type OrgConnection,
 } from "@rovara-code/contracts";
 import {
   CredentialUnavailable,
@@ -26,6 +24,9 @@ import {
   type TokenCache,
 } from "@agentx/gateway";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { hostPinProblem, type HostPin } from "../connectors/native/keys.js";
+
+export { hostPinProblem, type ConnectorCredentials, type HostPin } from "../connectors/native/keys.js";
 
 /**
  * How a deployment reads connector secrets, and the built-in GitHub App entry it lists first. A
@@ -193,23 +194,6 @@ export class DynamoRefreshLease implements RefreshLease {
   }
 }
 
-/** The host a connector's credential must be pinned to (spec 055 FR-009). */
-export interface HostPin {
-  /** The endpoint's host. */
-  host: string;
-  /** True for a generic `mcp` connector: an unpinned credential is refused too. */
-  required: boolean;
-}
-
-/** Why a credential's pinned host does not allow sending it to this connector, or undefined. */
-export function hostPinProblem(ref: string, recordHost: string | undefined, pin: HostPin | undefined): string | undefined {
-  if (pin === undefined) return undefined;
-  if (recordHost === undefined) {
-    return pin.required ? `credential ${ref} is not pinned to a host; register it again with --host ${pin.host}` : undefined;
-  }
-  return recordHost === pin.host ? undefined : `credential ${ref} is pinned to ${recordHost}, not ${pin.host}, so AgentX does not send it there`;
-}
-
 /**
  * Why a credential registered for one token URL cannot serve a connector type that names another,
  * or undefined. Either side may be absent.
@@ -228,23 +212,6 @@ export function credentialSetupCommand(accepts: readonly CredentialType[] | unde
   const signIn = accepts !== undefined && accepts.length > 0 && accepts.every((type) => type === "oauth-refresh-token");
   return signIn ? "agentx admin credential authorize" : "agentx admin credential register";
 }
-
-/**
- * What a connector type reads of a credential registry: the install-wide one below, or, on a cloud install, one org's
- * connections (connections/registry.ts). It can say what is registered and hand out a provider; it cannot register.
- */
-export type ConnectorCredentials = Pick<CredentialRegistry, "has" | "registration" | "typeOf" | "provider"> & {
-  /**
-   * The settings (never the secret) of the org connection `ref` names, for a native connector that needs its region, site or organization. Only
-   * a cloud install's per-org registry has it; the install-wide one does not.
-   */
-  connection?(ref: string): Promise<OrgConnection | undefined>;
-  /**
-   * The whole secret of the org connection `ref` names, in its type's shape, for a connector whose credential is more than one value (Datadog's
-   * API and application keys). Read by the version the connection's own save wrote. Only the per-org registry has it; the connector must not log or echo it.
-   */
-  connectionSecret?(ref: string): Promise<ConnectionSecret | undefined>;
-};
 
 /** Registered connector credentials: records name a secret, never hold one. */
 export class CredentialRegistry {

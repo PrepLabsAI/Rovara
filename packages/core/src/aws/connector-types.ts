@@ -1,7 +1,6 @@
-import { GitHubConnectorSchema, githubConnectorOf, type CredentialType, type ProjectDefinition, type RepositoryDefinition } from "@rovara-code/contracts";
-import { githubConnector, type ConnectorDefinition, type ConnectorPolicy, type PresentationApproval, type connectMcp } from "@agentx/gateway";
-import type { McpEndpointGuard } from "../connections/pinned-endpoint.js";
-import type { GitHubMcpDependencies } from "../github-mcp.js";
+import { GitHubConnectorSchema, githubConnectorOf, type ProjectDefinition, type RepositoryDefinition } from "@rovara-code/contracts";
+import { githubConnector } from "@agentx/gateway";
+import type { ConnectorType, ResolvedConnector, StoredConnectorConfig, ConnectorTypeContext } from "../connectors/native/keys.js";
 import { GITHUB_LEDGER } from "./connector-ledger.js";
 import { asanaConnectorType } from "./asana-connector-type.js";
 import { mcpConnectorType } from "./connector-presets.js";
@@ -10,62 +9,10 @@ import { grafanaConnectorType } from "../connectors/native/grafana-connector-typ
 import { pagerdutyConnectorType } from "../connectors/native/pagerduty-connector-type.js";
 import { sentryConnectorType } from "../connectors/native/sentry-connector-type.js";
 import { vercelConnectorType } from "../connectors/native/vercel-connector-type.js";
-import type { ConnectorCredentials, HostPin } from "./credentials.js";
 import { jiraConnectorType } from "./jira-connector-type.js";
 import { linearConnectorType } from "./linear-connector-type.js";
 
-export interface ConnectorScope<Scope> { alias: string; scope: Scope }
-
-export interface ResolvedConnector<Scope = unknown> {
-  name: string;
-  type: string;
-  /** Thread and manifest label, for example "GitHub issues". */
-  label: string;
-  /** Vendor name in presented descriptions, for example "GitHub". */
-  vendor: string;
-  scopeNoun: string;
-  scopes: ReadonlyArray<ConnectorScope<Scope>>;
-  policy: ConnectorPolicy;
-  approvals: readonly PresentationApproval[];
-  attribution: boolean;
-  ledger: { prefix: string; entityType: string };
-  /**
-   * The registry credential this connector reads, the provider types it accepts and the host it must
-   * be pinned to (spec 055); absent for github.
-   */
-  credential?: { ref: string; accepts: readonly CredentialType[]; pin?: HostPin };
-  /** Whether this deployment can reach the connector at all; cheap, used at thread setup. */
-  configured(): Promise<boolean>;
-  /** The engine definition, or why the connector is not connected in this deployment. */
-  definition(): Promise<ConnectorDefinition<Scope> | { notConnected: string }>;
-  connect?: typeof connectMcp;
-}
-
-export interface ConnectorTypeContext {
-  githubMcp?: GitHubMcpDependencies;
-  credentialRegistry?: ConnectorCredentials;
-  /** A vendor connection override, for a connector type with no deployment connect of its own. Only test types use this today. */
-  connect?: typeof connectMcp;
-  /**
-   * Checks a company's MCP endpoint before every request and pins the connection to the addresses it checked (`mcpEndpointGuard`). Only
-   * the types whose address a person typed (`HOST_TYPED_CONNECTOR_TYPES`: `mcp`, and Grafana's runtime connector) go through it; a vendor's own endpoint (Linear, Jira, Asana, GitHub) does not.
-   */
-  endpointGuard?: McpEndpointGuard;
-  /**
-   * The fetch under every native connector's vendor requests, which hold it to the vendor's one host and refuse a redirect
-   * (`connectors/native/vendor-fetch.ts`). Absent, the connectors use the lookup-checked fetch that refuses a non-public address at connect time; a test passes a fake.
-   */
-  nativeFetch?: typeof fetch;
-}
-
-/** A stored connectors entry. Only its name and type are known before its type validates the rest. */
-export type StoredConnectorConfig = { name: string; type: string } & Record<string, unknown>;
-
-export interface ConnectorType {
-  type: string;
-  /** Returns `{ unusable }`, with a reason, when the configuration cannot be served by this type. */
-  resolve(config: StoredConnectorConfig, project: ProjectDefinition, context: ConnectorTypeContext): ResolvedConnector | { unusable: string };
-}
+export type { ConnectorScope, ConnectorType, ConnectorTypeContext, ResolvedConnector, StoredConnectorConfig } from "../connectors/native/keys.js";
 
 const GITHUB_NOT_CONFIGURED = "GitHub MCP is not configured in this deployment";
 

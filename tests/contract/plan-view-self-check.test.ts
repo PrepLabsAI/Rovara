@@ -9,7 +9,7 @@ import { NOT_TRIED_SENTENCES } from "../../packages/core/src/developer/plan-chec
 import { planCheckSummary } from "../../packages/core/src/developer/plan-check-summary.js";
 import { structuredExtraLines, workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
 import { renderPlanDocument } from "../../packages/core/src/aws/plan-page/render-plan.js";
-import { readTaskPlanDocument } from "../../packages/core/src/aws/task-plan-document.js";
+import { readTaskPlanDocument } from "../../packages/core/src/developer/task-plan-document.js";
 import { getTaskDocumentView } from "../../packages/core/src/aws/developer-tasks.js";
 import { createTaskWeb, type TaskDocumentView } from "../../packages/core/src/aws/task-web.js";
 import { PRIYA, pageTask } from "../support/page-tasks.js";

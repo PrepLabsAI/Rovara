@@ -215,7 +215,7 @@ import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "
 import { documentSummaryLines, isFeedbackReviewFailure, workflowDocumentName } from "../developer/workflow-messages.js";
 import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-web.js";
 import type { PageCommentInput, PageDecisionInput, PageRetryInput, PageSuggestionInput, TaskPageState } from "./task-web-api.js";
-import { readTaskPlanDocument, type TaskPlanDocumentView } from "./task-plan-document.js";
+import { readTaskPlanDocument, type TaskPlanDocumentView } from "../developer/task-plan-document.js";
 import { pageCommentViews, type CommentViewContext, type PageCommentView } from "./plan-page/comments.js";
 import { loadPlanSelfCheck } from "../developer/plan-self-check.js";
 import type { PlanAnchor } from "./plan-page/render-plan.js";

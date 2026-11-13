@@ -6,9 +6,7 @@
 import { agentXError, connectionSecretToken, type ConnectionSecret, type ConnectionType, type ObservabilityConnectionType, type OrgConnection, type SecretConnectionType } from "@rovara-code/contracts";
 import { CredentialUnavailable, ToolRefusal, type Binder, type ConnectorDefinition, type CredentialProvider, type IssuedCredential, type McpConnection, type McpToolResult, type ToolApproval, type connectMcp } from "@agentx/gateway";
 import type { z } from "zod";
-import { connectorLedgerKeys } from "../../aws/connector-ledger.js";
-import type { ConnectorScope, ConnectorType } from "../../aws/connector-types.js";
-import { hostPinProblem, type HostPin } from "../../aws/credentials.js";
+import { connectorLedgerKeys, hostPinProblem, type ConnectorScope, type ConnectorType, type HostPin } from "./keys.js";
 import type { CheckResult, ConnectionCheckInput } from "../../connections/store.js";
 import { VendorFetchError, vendorFetcher, safeVendorFetch, type VendorFetch } from "./vendor-fetch.js";
 

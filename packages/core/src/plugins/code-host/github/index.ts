@@ -13,7 +13,7 @@ import {
   type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
   type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef,
 } from "@rovara-code/contracts";
-import { parseGitHubRepository } from "../../../github-app.js";
+import { parseGitHubRepository } from "../github-repository.js";
 import { githubCodeHostEvents } from "./events.js";
 import { readCodeOwnersFile } from "../code-owners-file.js";
 import { accountKindOf, detailsOf, feedbackOf, fileOf, mergeResultOf, pullRequestNumber, refOf, replyTargetOf, statusOf } from "./mapping.js";

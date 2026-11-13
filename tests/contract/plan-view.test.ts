@@ -9,7 +9,7 @@ import { shortenMarkdown } from "../../packages/core/src/developer/plan-artifact
 import { PLAN_UNREADABLE_CATEGORIES, PLAN_UNREADABLE_SENTENCES, planCheckSummary, planUnreadableCategory } from "../../packages/core/src/developer/plan-check-summary.js";
 import { plainBlockReason, structuredExtraLines, workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
 import { renderPlanDocument } from "../../packages/core/src/aws/plan-page/render-plan.js";
-import { readTaskPlanDocument } from "../../packages/core/src/aws/task-plan-document.js";
+import { readTaskPlanDocument } from "../../packages/core/src/developer/task-plan-document.js";
 import { routeDeveloperTaskRequest } from "../../packages/core/src/aws/developer-tasks.js";
 import { OMAR, PRIYA, pageTask } from "../support/page-tasks.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";

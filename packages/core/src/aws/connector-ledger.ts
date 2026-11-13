@@ -1,12 +1,10 @@
 import { GetCommand, PutCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { Invocation, Ledger } from "@agentx/gateway";
 
+export { connectorLedgerKeys } from "../connectors/native/keys.js";
+
 /** GitHub keeps its feature 007 key, so records written before and during the release stay one record. */
 export const GITHUB_LEDGER = { prefix: "GITHUB_MCP#", entityType: "GITHUB_MCP_INVOCATION" } as const;
-
-export function connectorLedgerKeys(connector: string): { prefix: string; entityType: string } {
-  return { prefix: `CONNECTOR#${connector}#`, entityType: "CONNECTOR_INVOCATION" };
-}
 
 export class DynamoConnectorLedger implements Ledger {
   constructor(

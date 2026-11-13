@@ -9,22 +9,9 @@ import {
   agentXError,
   type CodeBuildCheckResult,
 } from "@rovara-code/contracts";
+import type { CodeBuildGateway } from "./plugins/check-runner/codebuild/index.js";
 
-export interface CodeBuildGateway {
-  start(input: {
-    gate: string;
-    projectName: string;
-    commit: string;
-    timeoutMinutes: number;
-    idempotencyToken: string;
-  }): Promise<CodeBuildCheckResult>;
-  status(input: {
-    gate: string;
-    projectName: string;
-    commit: string;
-    buildId: string;
-  }): Promise<CodeBuildCheckResult>;
-}
+export type { CodeBuildGateway } from "./plugins/check-runner/codebuild/index.js";
 
 type CodeBuildClientLike = Pick<CodeBuildClient, "send">;
 
