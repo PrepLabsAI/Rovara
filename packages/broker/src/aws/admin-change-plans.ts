@@ -425,9 +425,12 @@ const planRegisterSignInClient: Planner = async (deps, identity, input) => {
   ].join(" and ");
   const secret = registration.secretHash === undefined ? "" : " It is confidential: it signs in with its own secret, which AgentX keeps only as a hash.";
   const replaced = current === undefined ? "" : " Its people stay signed in until they next refresh, which then follows these settings.";
+  // Spec 065: what it may then do as the signed-in person, beyond reading who they are.
+  const scopes = registration.scopes ?? [];
+  const actions = scopes.length === 0 ? "" : ` As the signed-in person, and within their own rights, it may: ${scopes.join(", ")}.`;
   return {
-    effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}, which AgentX's own API never accepts.${secret}${replaced}`,
-    details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential: registration.secretHash !== undefined },
+    effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}, which AgentX's own API never accepts.${secret}${replaced}${actions}`,
+    details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential: registration.secretHash !== undefined, scopes },
     snapshot: { client: current ?? null },
     apply: async (applier) => {
       const at = new Date(deps.actions.now()).toISOString();
