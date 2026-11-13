@@ -69,7 +69,7 @@ describe("the claim is used only for a commit this task's plan offered", () => {
     const w = await world(raw({ sha: sha(1), commitsBack: 3 }));
     await w.keep([sha(1)]);
     const words = (await kept(w))!;
-    const ask = (over: Record<string, unknown> = {}) => alreadyFailingFromBaseline({ store: w.documents, now: () => NOW }, { orgId: ORG as never, project: PROJECT, envRevision: 1, branch: "main", words, ...over } as never);
+    const ask = (over: Record<string, unknown> = {}) => alreadyFailingFromBaseline({ store: w.documents, now: () => NOW }, { orgId: ORG, project: PROJECT, envRevision: 1, branch: "main", words, ...over });
     expect(await ask()).toEqual(["a::x", "a::y"]);
     // Another revision, branch, company, or a commit count out of range finds nothing: the caller keeps today's rule.
     expect(await ask({ envRevision: 2 })).toBeUndefined();

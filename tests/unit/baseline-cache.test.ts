@@ -241,7 +241,7 @@ describe("the candidates a task plan offers", () => {
     // 130 rows; the newest five have the commits that sort LAST, so a single page of the first 100 rows by key would pick older ones.
     for (let n = 1; n <= 130; n += 1) await keep(deps, row({ headSha: sha(1000 - n), finishedAt: new Date(NOW - (n <= 5 ? n : 100 + n) * HOUR).toISOString(), recordedAt: new Date(NOW - HOUR).toISOString() }));
     expect((await store.query({ pk: projectPk(ORG as never, PROJECT), sk: { op: "beginsWith", prefix: "TESTENV#BASELINE#SHA#" }, limit: 100 })).cursor).toBeDefined();
-    expect(await baselineCandidatesOf(deps, { orgId: ORG as never, project: PROJECT, envRevision: 1, branch: "main" })).toEqual([999, 998, 997, 996, 995].map((n) => sha(n)));
+    expect(await baselineCandidatesOf(deps, { orgId: ORG, project: PROJECT, envRevision: 1, branch: "main" })).toEqual([999, 998, 997, 996, 995].map((n) => sha(n)));
   });
 
   it("a row at the stated list limits (500 failing and 500 flaky tests, 200 characters each) is stored and found", async () => {
