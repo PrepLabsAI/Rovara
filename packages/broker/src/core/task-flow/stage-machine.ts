@@ -28,6 +28,7 @@ import {
   type DocumentKey,
   type JsonValue,
   type Operation,
+  type PlanDocument,
   type RunEstimate,
   type TransactItem,
   type WorkflowDependencyInvocation,
@@ -36,6 +37,8 @@ import {
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { workflowDocumentType } from "../../developer/workflow-messages.js";
 import { estimatePathOf, estimateRun } from "../cost/estimate.js";
+import { estimateTier, recordTier } from "../decisions/change-tier.js";
+import { planFiles } from "../decisions/plan-facts.js";
 import { isReapprovalStop, settleLiveSteerReapproval } from "../sessions/live-steer-reapproval.js";
 import { clearLiveDeliveredSince } from "../sessions/steer.js";
 import { notesFedUpdate, stepNotes, type NotesForStep } from "../sessions/notes.js";
@@ -540,11 +543,13 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
       return;
     }
     if (operation.workflowMode === "PLAN" && outcome?.kind === "planned") {
-      const next = submitWorkflowArtifact(workflow, {
+      const submitted = submitWorkflowArtifact(workflow, {
         expectedRevision: workflow.revision, artifact: outcome.artifact, now: iso(deps),
         ...(outcome.proposal === undefined ? {} : { proposal: outcome.proposal }),
         ...(outcome.noChangeNeeded === true ? { noChangeNeeded: true } : {}),
       });
+      // The change tier's ESTIMATE, before any code exists: from the files the plan names and the words of the request. It picks nothing yet and is replaced by the diff's tier after the build.
+      const next = withTierEstimate(submitted, outcome.cites?.plan, task.requestText, iso(deps));
       // A version 2 coding plan is read by a second step before a person sees it: the check is a row like every automatic step, written with the plan.
       const toCheck = next.stage === "PLAN_CRITIQUE" && next.state === "READY";
       // What the run is expected to cost, from the cost of the project's earlier runs (or the default for the path), kept on the task beside the plan: the plan page, the decision card's risk, the session and the tools read it.
@@ -581,6 +586,15 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
   if (operation.workflowMode === "UNDERSTAND" || operation.workflowMode === "PLAN") {
     await blockTaskWorkflow(deps, task.taskId, workflow.revision, "Rovara could not read the result of this step; retry it.");
   }
+}
+
+/** The workflow with the change tier's estimate written, for a coding plan; a task whose tier already comes from a diff keeps it (the estimate never replaces a real tier). */
+function withTierEstimate(workflow: WorkflowSnapshot, plan: PlanDocument | undefined, requestText: string | undefined, at: string): WorkflowSnapshot {
+  if (workflowDocumentType(workflow) !== "plan") return workflow;
+  const kept = workflow.flow?.tier;
+  if (kept !== undefined && kept.source !== "estimate") return workflow;
+  const estimate = estimateTier({ plannedPaths: plan === undefined ? undefined : planFiles(plan), requestText }, { at });
+  return { ...workflow, flow: recordTier(workflow.flow, estimate).flow };
 }
 
 /**
