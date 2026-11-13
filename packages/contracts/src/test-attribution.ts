@@ -12,24 +12,34 @@
 //
 // Per test only when ALL hold; else per check with the first reason that applies (this order):
 //   too_many           more tests than `TEST_ANSWER_RECORDS_MAX`, more calls than `ATTRIBUTION_CALLS_MAX`, or one test with more distinct answers than a record carries (`TEST_ANSWER_USES_MAX`): nothing is cut short
-//   bad_input          a guard that is not a positive number, ids or dependency names the record contract refuses, an unknown source, a recording without a day, two tests with one id, anything not a list or object
+//   bad_input          a guard that is not a number or is below `ATTRIBUTION_GUARD_MIN_MS`, ids or dependency names the record contract refuses, an unknown source, a recording without a day, a missing or malformed
+//                      `untimedFakeDependencies`, anything not a list or object, or an input that throws when read (a getter): this function never throws
+//   duplicate_ids      two tests share one id: a record could not say which of them it is
 //   ledger_incomplete  the caller could not show that the call ledger slice is whole (a gap in its sequence, or its ring dropped entries): only exactly `true` passes
-//   no_call_times      a faked or recorded answer with no call time (every in-process fake today)
+//   no_call_times      a faked or recorded answer with no call time, or the caller names any in-process fake or fake-usage dependency (`untimedFakeDependencies`): those keep no per-call times
 //   no_times           no test, or a test that ran without a finite start and end (end before start included)
 //   parallel           two windows overlap (touching is fine): the tests did not run one after another
-//   ambiguous_timing   a call is outside every window, or closer than `guardMs` to its window's edge
-// Tests that were not run (`not_run`) call nothing: they need no window and are carried through with the reason the caller gave.
+//   ambiguous_timing   a call is outside every window, inside a window of a test that was not run, or closer than `guardMs` to its window's edge (a window shorter than two guards can hold no call)
+// Tests that were not run (`not_run`) are carried through with the reason the caller gave and need no window. If one does carry a usable window it still counts: for overlap (it may have run beside
+// another test, and a call during it cannot be told apart) and for calls (a call inside it is ambiguous). Without a usable window it takes no part in the join.
 // Bounded: at most 5,000 tests and 10,000 calls; sorts once and sweeps. Nothing here imports a Node module.
 import { TEST_ANSWER_RECORDS_MAX, TEST_ANSWER_USES_MAX, TestAnswerRecordSchema, TestAnswerUseSchema, type TestAnswerRecord, type TestAnswerUse, type TestNotRun } from "./test-answer-labels.js";
 
 export const ATTRIBUTION_CALLS_MAX = 10_000;
+/**
+ * The smallest guard accepted, in milliseconds. A call is only tied to a test when it lies this far inside the test's window, and the guard is what absorbs the gap between the clock that stamps the test
+ * report and the clock that stamps the ledger entry (clock offset, report rounding to the millisecond, the time a request spends in the front before it is stamped). A guard below the floor would let any
+ * small skew pass as a clean per-test attribution, so it is refused rather than trusted. 50 ms is the brief's default; Part B must still show the two clocks agree within the guard before per-test turns on.
+ */
+export const ATTRIBUTION_GUARD_MIN_MS = 50;
 
-export const PER_CHECK_REASONS = ["too_many", "bad_input", "ledger_incomplete", "no_call_times", "no_times", "parallel", "ambiguous_timing"] as const;
+export const PER_CHECK_REASONS = ["too_many", "bad_input", "duplicate_ids", "ledger_incomplete", "no_call_times", "no_times", "parallel", "ambiguous_timing"] as const;
 export type PerCheckReason = (typeof PER_CHECK_REASONS)[number];
 /** The words after "per check:" in a line such as "Recorded 38 · Simulated 251 (per check: tests ran in parallel)". */
 export const PER_CHECK_REASON_WORDS: Record<PerCheckReason, string> = {
   too_many: "too many tests or answers to tell apart",
   bad_input: "the test report could not be used",
+  duplicate_ids: "two tests share one id",
   ledger_incomplete: "the call log was not whole",
   no_call_times: "some answers carry no call time",
   no_times: "the tests carry no run times",
@@ -59,6 +69,11 @@ export interface AttributionCall {
 export interface AttributionInput {
   tests: readonly AttributionTest[];
   calls: readonly AttributionCall[];
+  /**
+   * REQUIRED. The in-process fakes and fake-usage dependencies the check used: they keep no per-call times, so any entry here makes the whole check per check (`no_call_times`). Pass `[]` only when the
+   * caller has looked and the check used none; a missing or malformed value is `bad_input`, never "none".
+   */
+  untimedFakeDependencies: readonly string[];
   /** True only when the ledger slice for this check is whole: no gap in its sequence and no dropped entries. */
   ledgerComplete: boolean;
   /** How far, in milliseconds, a call must be from a window's edge to count for that test. Data, not a constant. */
@@ -74,27 +89,41 @@ export type TestAttribution =
     }
   | { mode: "per_check"; reason: PerCheckReason };
 
+const MAX_NAME = 80;
 const perCheck = (reason: PerCheckReason): TestAttribution => ({ mode: "per_check", reason });
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
 interface Window { index: number; start: number; end: number }
 
-/** Joins one check's timed calls to its timed tests. See the header for the rules and the fixed reasons. Never throws. */
+/** Joins one check's timed calls to its timed tests. See the header for the rules and the fixed reasons. Never throws: an input that throws when read (a getter, a proxy) is `bad_input`. */
 export function attributeTests(input: AttributionInput): TestAttribution {
+  try {
+    return join(input);
+  } catch {
+    return perCheck("bad_input");
+  }
+}
+
+function join(input: AttributionInput): TestAttribution {
   if (!isRecord(input) || !Array.isArray(input.tests) || !Array.isArray(input.calls)) return perCheck("bad_input");
   const tests: readonly AttributionTest[] = input.tests as readonly AttributionTest[];
   const calls: readonly AttributionCall[] = input.calls as readonly AttributionCall[];
   if (tests.length > TEST_ANSWER_RECORDS_MAX || calls.length > ATTRIBUTION_CALLS_MAX) return perCheck("too_many");
-  if (!finite(input.guardMs) || input.guardMs <= 0) return perCheck("bad_input");
+  if (!finite(input.guardMs) || input.guardMs < ATTRIBUTION_GUARD_MIN_MS) return perCheck("bad_input");
+  const untimed: unknown = input.untimedFakeDependencies;
+  if (!Array.isArray(untimed)) return perCheck("bad_input");
+  if (untimed.length > ATTRIBUTION_CALLS_MAX) return perCheck("too_many");
+  for (const name of untimed as readonly unknown[]) if (typeof name !== "string" || name === "" || name.length > MAX_NAME || /[\p{Cc}\p{Cf}]/u.test(name)) return perCheck("bad_input");
 
   // Shape: every test and every call is read once, through the record contract's own rules, before anything is joined.
   const seenIds = new Set<string>();
   for (const entry of tests as readonly unknown[]) {
-    if (!isRecord(entry) || typeof entry.id !== "string" || seenIds.has(entry.id)) return perCheck("bad_input");
-    seenIds.add(entry.id);
+    if (!isRecord(entry) || typeof entry.id !== "string") return perCheck("bad_input");
     const shape = TestAnswerRecordSchema.safeParse({ testId: entry.id, status: entry.status, uses: [], ...(entry.notRun === undefined ? {} : { notRun: entry.notRun }) });
     if (!shape.success) return perCheck("bad_input");
+    if (seenIds.has(entry.id)) return perCheck("duplicate_ids");
+    seenIds.add(entry.id);
   }
   const uses: (TestAnswerUse | undefined)[] = [];
   for (const entry of calls as readonly unknown[]) {
@@ -105,12 +134,16 @@ export function attributeTests(input: AttributionInput): TestAttribution {
   }
 
   if (input.ledgerComplete !== true) return perCheck("ledger_incomplete");
-  if (calls.some((call) => !finite(call.atMs))) return perCheck("no_call_times");
+  if (untimed.length > 0 || calls.some((call) => !finite(call.atMs))) return perCheck("no_call_times");
   if (tests.length === 0) return perCheck("no_times");
 
   const windows: Window[] = [];
   for (const [index, test] of tests.entries()) {
-    if (test.status === "not_run") continue;
+    if (test.status === "not_run") {
+      // A test that was not run needs no window, but one that carries a usable window may have run alongside another test: it takes part in the overlap check and in the sweep.
+      if (finite(test.startMs) && finite(test.endMs) && test.endMs >= test.startMs) windows.push({ index, start: test.startMs, end: test.endMs });
+      continue;
+    }
     if (!finite(test.startMs) || !finite(test.endMs) || test.endMs < test.startMs) return perCheck("no_times");
     windows.push({ index, start: test.startMs, end: test.endMs });
   }
@@ -129,7 +162,8 @@ export function attributeTests(input: AttributionInput): TestAttribution {
     const at = calls[callIndex]!.atMs as number;
     while (current + 1 < windows.length && windows[current + 1]!.start <= at) current += 1;
     const window = windows[current];
-    if (window === undefined || at < window.start + input.guardMs || at > window.end - input.guardMs) return perCheck("ambiguous_timing");
+    // Written as the negation of "inside" so a value that is not a number can never pass for inside.
+    if (window === undefined || tests[window.index]!.status === "not_run" || !(at >= window.start + input.guardMs && at <= window.end - input.guardMs)) return perCheck("ambiguous_timing");
     const use = uses[callIndex]!;
     const key = `${use.source}\u0000${use.dependency}\u0000${use.source === "recorded" ? use.recordedOn : ""}`;
     const own = byTest.get(window.index) ?? new Map<string, TestAnswerUse>();

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
-  ATTRIBUTION_CALLS_MAX, PER_CHECK_REASONS, PER_CHECK_REASON_WORDS, TEST_ANSWER_RECORDS_MAX, TEST_ANSWER_USES_MAX, TestAnswerRecordsSchema, attributeTests, testResultState,
+  ATTRIBUTION_CALLS_MAX, ATTRIBUTION_GUARD_MIN_MS, PER_CHECK_REASONS, PER_CHECK_REASON_WORDS, TEST_ANSWER_RECORDS_MAX, TEST_ANSWER_USES_MAX, TestAnswerRecordsSchema, attributeTests, testResultState,
   type AttributionCall, type AttributionInput, type AttributionTest,
 } from "../../packages/contracts/src/index.js";
 
@@ -12,7 +12,7 @@ const GUARD = 50;
 const test = (id: string, startMs: number, endMs: number, status: AttributionTest["status"] = "passed"): AttributionTest => ({ id, status, startMs, endMs });
 const faked = (atMs: number, dependency = "bucket-a"): AttributionCall => ({ atMs, dependency, source: "faked" });
 const recorded = (atMs: number, dependency = "model-a", recordedOn = "2026-11-12"): AttributionCall => ({ atMs, dependency, source: "recorded", recordedOn });
-const input = (tests: AttributionTest[], calls: AttributionCall[], extra: Partial<AttributionInput> = {}): AttributionInput => ({ tests, calls, ledgerComplete: true, guardMs: GUARD, ...extra });
+const input = (tests: AttributionTest[], calls: AttributionCall[], extra: Partial<AttributionInput> = {}): AttributionInput => ({ tests, calls, ledgerComplete: true, guardMs: GUARD, untimedFakeDependencies: [], ...extra });
 const reasonOf = (value: AttributionInput): string => {
   const result = attributeTests(value);
   expect(result.mode).toBe("per_check");
@@ -109,13 +109,33 @@ describe("falls back to per check, with one fixed reason, and never guesses", ()
     expect(reasonOf(input([test("a", 0, 1000), test("b", 0, 1000)], []))).toBe("parallel");
     expect(reasonOf(input([test("b", 500, 1500), test("a", 0, 1000)], []))).toBe("parallel");
   });
+  it("parallel: a later window that overlaps the second window but not the first is found (the latest end, not the first, is what counts)", () => {
+    expect(reasonOf(input([test("a", 0, 100), test("b", 100, 5000), test("c", 2000, 3000)], []))).toBe("parallel");
+    expect(reasonOf(input([test("c", 2000, 3000), test("a", 0, 100), test("b", 100, 5000)], []))).toBe("parallel");
+  });
+  it("two zero-length windows at the same instant leave a later call to the one test that really contains it (reviewer probe 7)", () => {
+    const result = attributeTests(input([test("z1", 100, 100), test("z2", 100, 100), test("b", 100, 1000)], [faked(500)]));
+    if (result.mode !== "per_test") throw new Error("expected per test");
+    expect(result.records.map((record) => record.testId)).toEqual(["b"]);
+  });
   it("windows that only touch are serial (the guard band decides about calls at the shared edge)", () => {
     const result = attributeTests(input([test("a", 0, 1000), test("b", 1000, 2000)], [faked(500), recorded(1500)]));
     expect(result.mode).toBe("per_test");
   });
-  it("a test that was not run does not make the run parallel, whatever window it carries", () => {
+  it("a test that was not run but carries a window still counts for overlap: it may have run alongside a passing test, and calls cannot be told apart (reviewer probe 1)", () => {
     const notRun: AttributionTest = { id: "n", status: "not_run", startMs: 0, endMs: 5000, notRun: { dependency: "model-a", reason: "no_recording" } };
-    expect(attributeTests(input([notRun, test("a", 100, 1000)], [faked(500)])).mode).toBe("per_test");
+    expect(reasonOf(input([notRun, test("a", 100, 1000)], [recorded(500, "bucket", "2026-11-01")]))).toBe("parallel");
+    expect(reasonOf(input([test("a", 100, 1000), { ...notRun, startMs: 500, endMs: 1500 }], []))).toBe("parallel");
+  });
+  it("a call inside a not-run test's window is ambiguous: that test called nothing, so the call belongs to something Rovara cannot name", () => {
+    const notRun: AttributionTest = { id: "n", status: "not_run", startMs: 2000, endMs: 3000, notRun: { dependency: "model-a", reason: "no_recording" } };
+    expect(reasonOf(input([test("a", 0, 1000), notRun], [faked(2500)]))).toBe("ambiguous_timing");
+    const ok = attributeTests(input([test("a", 0, 1000), notRun], [faked(500)]));
+    expect(ok.mode).toBe("per_test");
+  });
+  it("a test that was not run with no usable window (none, one end, not finite, backwards) takes no part in the join", () => {
+    const base = { id: "n", status: "not_run" as const, notRun: { dependency: "model-a", reason: "no_recording" as const } };
+    for (const times of [{}, { startMs: 0 }, { startMs: Number.NaN, endMs: 5000 }, { startMs: 5000, endMs: 0 }]) expect(attributeTests(input([{ ...base, ...times }, test("a", 100, 1000)], [faked(500)])).mode).toBe("per_test");
   });
 
   it("ambiguous_timing: a call within the guard band of a window edge, either edge, and exactly at the band is attributed", () => {
@@ -125,6 +145,11 @@ describe("falls back to per check, with one fixed reason, and never guesses", ()
     expect(reasonOf(input([test("a", 1000, 2000)], [faked(2000)]))).toBe("ambiguous_timing");
     expect(attributeTests(input([test("a", 1000, 2000)], [faked(1000 + GUARD)])).mode).toBe("per_test");
     expect(attributeTests(input([test("a", 1000, 2000)], [faked(2000 - GUARD)])).mode).toBe("per_test");
+  });
+  it("ambiguous_timing: a window shorter than two guard bands has no call far enough inside it, even at its midpoint (the guard is never shrunk to fit)", () => {
+    expect(reasonOf(input([test("a", 0, 60)], [faked(30)]))).toBe("ambiguous_timing");
+    expect(reasonOf(input([test("a", 0, 99)], [faked(49)]))).toBe("ambiguous_timing");
+    expect(attributeTests(input([test("a", 0, 100)], [faked(50)])).mode).toBe("per_test");
   });
   it("ambiguous_timing: the guard band is data, not a constant", () => {
     expect(attributeTests(input([test("a", 1000, 2000)], [faked(1100)], { guardMs: 100 })).mode).toBe("per_test");
@@ -157,16 +182,30 @@ describe("falls back to per check, with one fixed reason, and never guesses", ()
     expect(reasonOf(input(serial(), [{ ...faked(500), atMs: "500" as unknown as number }]))).toBe("no_call_times");
   });
 
+  it("no_call_times: an in-process fake or a fake's usage count has no per-call times, so a check that used any is per check (the caller must say)", () => {
+    expect(reasonOf(input(serial(), [faked(500)], { untimedFakeDependencies: ["queue-a"] }))).toBe("no_call_times");
+    expect(reasonOf(input(serial(), [], { untimedFakeDependencies: ["queue-a", "queue-b"] }))).toBe("no_call_times");
+    expect(attributeTests(input(serial(), [faked(500)], { untimedFakeDependencies: [] })).mode).toBe("per_test");
+  });
+  it("bad_input: the list of untimed fakes is required, and must be a list of names (a missing value fails closed, never reads as none)", () => {
+    for (const untimedFakeDependencies of [undefined, null, "queue-a", { length: 0 }, [42], [""], ["bad\nname"]]) expect(reasonOf(input(serial(), [faked(500)], { untimedFakeDependencies: untimedFakeDependencies as unknown as string[] }))).toBe("bad_input");
+    const missing: Partial<AttributionInput> = { tests: serial(), calls: [faked(500)], ledgerComplete: true, guardMs: GUARD };
+    expect(reasonOf(missing as AttributionInput)).toBe("bad_input");
+  });
+
   it("uses the same reason word for the same cause every time, from the fixed list, with plain words for each", () => {
-    expect([...PER_CHECK_REASONS].sort()).toEqual(["ambiguous_timing", "bad_input", "ledger_incomplete", "no_call_times", "no_times", "parallel", "too_many"]);
+    expect([...PER_CHECK_REASONS].sort()).toEqual(["ambiguous_timing", "bad_input", "duplicate_ids", "ledger_incomplete", "no_call_times", "no_times", "parallel", "too_many"]);
     expect(PER_CHECK_REASON_WORDS.parallel).toBe("tests ran in parallel");
+    expect(PER_CHECK_REASON_WORDS.duplicate_ids).toBe("two tests share one id");
     for (const reason of PER_CHECK_REASONS) expect(PER_CHECK_REASON_WORDS[reason]).toMatch(/^[a-z][a-z ,'-]{5,60}$/u);
   });
 });
 
 describe("input it cannot trust fails to per check, never to a guess and never with a throw", () => {
-  it("bad_input: a guard that is not a positive finite number", () => {
-    for (const guardMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "50" as unknown as number, undefined as unknown as number]) expect(reasonOf(input(serial(), [faked(500)], { guardMs }))).toBe("bad_input");
+  it("bad_input: a guard that is not a finite number, or is below the floor (a tiny guard would pass any clock skew as a clean attribution; reviewer probe 3)", () => {
+    expect(ATTRIBUTION_GUARD_MIN_MS).toBe(50);
+    for (const guardMs of [0, -1, 1e-9, 1, ATTRIBUTION_GUARD_MIN_MS - 1, Number.NaN, Number.POSITIVE_INFINITY, "50" as unknown as number, undefined as unknown as number]) expect(reasonOf(input(serial(), [faked(500)], { guardMs }))).toBe("bad_input");
+    expect(attributeTests(input(serial(), [faked(500)], { guardMs: ATTRIBUTION_GUARD_MIN_MS })).mode).toBe("per_test");
   });
   it("bad_input: a test id or dependency the record contract refuses (hidden characters, empty, too long), a source that is not faked or recorded, a recording with no date", () => {
     expect(reasonOf(input([test("bad\nid", 0, 1000)], [faked(500)]))).toBe("bad_input");
@@ -179,17 +218,34 @@ describe("input it cannot trust fails to per check, never to a guess and never w
     expect(reasonOf(input(serial(), [{ atMs: 500, dependency: "x", source: "recorded" }]))).toBe("bad_input");
     expect(reasonOf(input(serial(), [recorded(500, "x", "yesterday")]))).toBe("bad_input");
   });
-  it("bad_input: two tests with the same id (a record could not say which one it is), a status that is not one of the three, a not-run test with no reason", () => {
-    expect(reasonOf(input([test("a", 0, 1000), test("a", 2000, 3000)], [faked(500)]))).toBe("bad_input");
+  it("duplicate_ids: two tests with the same id (a record could not say which one it is) have their own reason, not bad_input", () => {
+    expect(reasonOf(input([test("a", 0, 1000), test("a", 2000, 3000)], [faked(500)]))).toBe("duplicate_ids");
+    expect(reasonOf(input([test("a", 0, 1000), { id: "a", status: "not_run", notRun: { dependency: "m", reason: "no_recording" } }], []))).toBe("duplicate_ids");
+  });
+  it("bad_input: a status that is not one of the three, a not-run test with no reason", () => {
     expect(reasonOf(input([{ ...test("a", 0, 1000), status: "skipped" as unknown as "passed" }], []))).toBe("bad_input");
     expect(reasonOf(input([{ id: "a", status: "not_run" }], []))).toBe("bad_input");
     expect(reasonOf(input([{ ...test("a", 0, 1000), notRun: { dependency: "x", reason: "no_recording" } }], []))).toBe("bad_input");
   });
   it("bad_input: lists that are not lists, entries that are not objects", () => {
-    expect(reasonOf({ tests: "abc" as unknown as AttributionTest[], calls: [], ledgerComplete: true, guardMs: GUARD })).toBe("bad_input");
-    expect(reasonOf({ tests: serial(), calls: null as unknown as AttributionCall[], ledgerComplete: true, guardMs: GUARD })).toBe("bad_input");
+    expect(reasonOf({ tests: "abc" as unknown as AttributionTest[], calls: [], ledgerComplete: true, guardMs: GUARD, untimedFakeDependencies: [] })).toBe("bad_input");
+    expect(reasonOf({ tests: serial(), calls: null as unknown as AttributionCall[], ledgerComplete: true, guardMs: GUARD, untimedFakeDependencies: [] })).toBe("bad_input");
     expect(reasonOf(input([null as unknown as AttributionTest], []))).toBe("bad_input");
     expect(reasonOf(input(serial(), [42 as unknown as AttributionCall]))).toBe("bad_input");
+  });
+  it("never throws: a getter that throws anywhere in the input is bad_input (reviewer probe 4)", () => {
+    const boom = (target: object, key: string): object => Object.defineProperty(target, key, { get() { throw new Error("boom"); }, enumerable: true });
+    expect(reasonOf(input([boom({ status: "passed", startMs: 0, endMs: 10 }, "id") as AttributionTest], []))).toBe("bad_input");
+    expect(reasonOf(input([test("a", 0, 1000)], [boom({ dependency: "d", source: "faked" }, "atMs") as AttributionCall]))).toBe("bad_input");
+    expect(reasonOf(boom({ tests: serial(), calls: [], untimedFakeDependencies: [], guardMs: GUARD }, "ledgerComplete") as AttributionInput)).toBe("bad_input");
+    expect(reasonOf(boom({ tests: [], calls: [], untimedFakeDependencies: [], ledgerComplete: true }, "guardMs") as AttributionInput)).toBe("bad_input");
+    expect(reasonOf(input([test("a", 0, 1000)], [], { untimedFakeDependencies: new Proxy([], { get() { throw new Error("boom"); } }) }))).toBe("bad_input");
+  });
+  it("reads only the object's own keys: a __proto__ key in parsed JSON does not supply a missing ledger flag or change a status (reviewer probe 5)", () => {
+    const parsed = JSON.parse('{"tests":[{"id":"a","status":"passed","startMs":0,"endMs":1000,"__proto__":{"status":"failed"}}],"calls":[{"atMs":500,"dependency":"d","source":"faked","__proto__":{"atMs":1}}],"untimedFakeDependencies":[],"guardMs":50,"__proto__":{"ledgerComplete":true}}') as AttributionInput;
+    expect(reasonOf(parsed)).toBe("ledger_incomplete");
+    const withFlag = JSON.parse('{"tests":[{"id":"a","status":"passed","startMs":0,"endMs":1000,"__proto__":{"status":"failed"}}],"calls":[{"atMs":500,"dependency":"d","source":"faked","__proto__":{"atMs":1}}],"untimedFakeDependencies":[],"guardMs":50,"ledgerComplete":true}') as AttributionInput;
+    expect(attributeTests(withFlag)).toEqual({ mode: "per_test", records: [{ testId: "a", status: "passed", uses: [{ source: "faked", dependency: "d" }] }], leftPerCheck: [] });
   });
   it("is safe with ids like __proto__ and constructor, which are only ever plain strings here", () => {
     const result = attributeTests(input([test("__proto__", 0, 1000), test("constructor", 2000, 3000)], [faked(500, "__proto__"), faked(2500, "constructor")]));
