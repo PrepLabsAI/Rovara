@@ -10,13 +10,20 @@ export const MODEL_EGRESS_RESPONSE_HEADERS = ["content-type", "cache-control", "
 
 const BAD_VALUE = /[^\x20-\x7e]/u;
 
-/** The allow-listed response headers, lower-cased, each once; a value with a control character or non-ASCII is dropped. Anything named `x-rovara-*` is dropped: only our own answers carry it, and they add it AFTER this. */
-export function sanitizeResponseHeaders(headers: ReadonlyArray<readonly [string, string]>): Array<[string, string]> {
+/**
+ * The allow-listed response headers, lower-cased, each once; a value with a control character or non-ASCII is dropped. Anything named `x-rovara-*` is dropped: only our own answers carry it, and they add it AFTER this.
+ * With `key` (the adapter's own credential for the call), a header whose value holds any spelling of the key (the body's needles: raw, JSON-escaped, percent-encoded, base64, hex, and the key's first and last four characters,
+ * compared without regard to case) is dropped too: an allow-listed name is no promise about what a provider puts in the value (`x-request-id: echo-<key>`). A key too short to scan for throws, as `keyEchoNeedles` does.
+ */
+export function sanitizeResponseHeaders(headers: ReadonlyArray<readonly [string, string]>, options: { readonly key?: string } = {}): Array<[string, string]> {
   const allowed = new Set<string>(MODEL_EGRESS_RESPONSE_HEADERS);
+  const needles = options.key === undefined ? [] : keyEchoNeedles(options.key).map((needle) => needle.toLowerCase());
   const kept = new Map<string, string>();
   for (const [name, value] of headers) {
     const lower = name.toLowerCase();
     if (!allowed.has(lower) || lower.startsWith("x-rovara-") || kept.has(lower) || BAD_VALUE.test(value) || value.length > 1024) continue;
+    const folded = value.toLowerCase();
+    if (needles.some((needle) => folded.includes(needle))) continue;
     kept.set(lower, value);
   }
   return [...kept.entries()];
