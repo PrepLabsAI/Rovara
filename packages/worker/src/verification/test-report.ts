@@ -355,22 +355,47 @@ export function skipRise(before: ParsedTestReport | undefined, after: ParsedTest
   return { rose: now > was, before: was, after: now };
 }
 
-/** A test id whose name holds a memory address (`<Thing object at 0x7f3a2c1b>`, a parametrize id made from an object's repr): it differs from one run to the next, so it never proves a test went missing. */
-const UNSTABLE_ID = /0x[0-9a-f]{6,}/iu;
+/**
+ * A test id that differs from one run to the next, so it never proves a test went missing: a memory address (`<Thing object at 0x7f3a2c1b>`), or a pytest temporary directory (`pytest-of-user`, `/tmp/...`,
+ * `/var/folders/...`) that a `tmp_path` parametrization puts in the id.
+ */
+const UNSTABLE_ID = /0x[0-9a-f]{6,}|pytest-of-|\/(?:private\/)?(?:tmp|var\/folders)\//iu;
+
+/** How many tests of a report are not in a changed test file: the tests this comparison is about. */
+export function untouchedCount(report: ParsedTestReport, changedTestPaths: readonly string[]): number {
+  return report.tests.filter((test) => changedPathOf(test, changedTestPaths) === undefined).length;
+}
+
+/** A command argument that stops a run at its first failure (pytest `-x` and `--maxfail`, vitest and jest `--bail`): the run on the original code then ends early on the tests it was told to keep failing. */
+const STOP_EARLY_ARGUMENT = /^(?:--exitfirst|--maxfail(?:=.*)?|--bail(?:=.*)?|-bail|-x|-[a-wyzA-Z]*x[a-zA-Z]*)$/u;
 
 /**
- * TE-B3: tests that RAN (passed, failed or errored) on `before`, the run on the original code, and are not in `after` at all, by test id (give both reports in id form, `withTestIds`). A test that is in `after` as skipped is
- * not absent (`skipRise` counts it). `ids` are at most `ABSENT_ON_NEW_MAX`, in the order of the before report, each a valid id or a plain cut line; `count` is how many there are in all. Without both reports there is nothing to
- * compare and no claim is made. The before run shows the candidate's own test files, so a test file the change deleted is absent on both sides and is not named here (the changed-files reader says it was removed). One pass over each report.
+ * TE-B3: whether the run on the original code looks CUT SHORT, so that a skip count or a missing test would only be the cut: the command stops at the first failure (`-x`, `--maxfail`, `--bail`), the report holds an
+ * error outside the changed test files that this code's report does not (a collection or load error in a file the change did not touch: pytest then runs nothing), or the original run has far fewer untouched tests
+ * (under 90%) than this code's run. In the usual test-first case the NEW test fails to load on the original code and pytest runs nothing at all: that is this rule's third line, never a claim.
  */
-export function absentOnNew(before: ParsedTestReport | undefined, after: ParsedTestReport | undefined): { ids: string[]; count: number } | undefined {
+export function originalRunLooksCut(before: ParsedTestReport, after: ParsedTestReport, changedTestPaths: readonly string[], args: readonly string[] = []): boolean {
+  if (args.some((argument) => STOP_EARLY_ARGUMENT.test(argument))) return true;
+  const now = new Set(after.tests.map((test) => testIdOf(test)));
+  if (before.tests.some((test) => test.status === "errored" && changedPathOf(test, changedTestPaths) === undefined && !now.has(testIdOf(test)))) return true;
+  return untouchedCount(before, changedTestPaths) * 10 < untouchedCount(after, changedTestPaths) * 9;
+}
+
+/**
+ * TE-B3: tests that RAN (passed or failed) on `before`, the run on the original code, and are not in `after` at all, by test id (give both reports in id form, `withTestIds`). A test of a changed test file is not
+ * compared (the original run shows the change's own test files, and a new test that fails to load there is not a test that went missing); an error entry is not a test that ran (a load or collection error has no test
+ * name); a test that is in `after` as skipped is not absent (`skipRise` counts it). `ids` are at most `ABSENT_ON_NEW_MAX`, in the order of the before report, each a valid id or a plain cut line; `count` is how many there
+ * are in all. Without both reports there is nothing to compare and no claim is made. One pass over each report.
+ */
+export function absentOnNew(before: ParsedTestReport | undefined, after: ParsedTestReport | undefined, changedTestPaths: readonly string[] = []): { ids: string[]; count: number } | undefined {
   if (before === undefined || after === undefined) return undefined;
   const now = new Set(after.tests.map((test) => testIdOf(test)));
   const seen = new Set<string>();
   const ids: string[] = [];
   let count = 0;
   for (const test of before.tests) {
-    if (test.status === "skipped") continue;
+    if (test.status !== "passed" && test.status !== "failed") continue;
+    if (changedPathOf(test, changedTestPaths) !== undefined) continue;
     const id = testIdOf(test);
     if (now.has(id) || seen.has(id) || UNSTABLE_ID.test(id)) continue;
     seen.add(id);

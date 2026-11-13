@@ -8,7 +8,7 @@
 // Informational: a fault anywhere only means there is no pack for this code, and the pull request and the page say what they always said. Nothing here can change a verdict, block a publication or hold a callback
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
-  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor,
+  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor,
   type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
@@ -102,9 +102,10 @@ function withWeakeningFacts(raw: EvidenceRaw, facts: ReadonlyMap<string, TestPro
     const fact = facts.get(check.checkId);
     if (check.tests === undefined || fact === undefined) return check;
     const tests = { ...check.tests };
-    // Both counts or neither; the skips among untouched tests are some of the skips.
-    if (tests.skippedBefore === undefined && tests.skippedAfter === undefined && fact.skippedAfter <= tests.skipped) { tests.skippedBefore = fact.skippedBefore; tests.skippedAfter = fact.skippedAfter; }
-    if (tests.absentOnNew === undefined && tests.absentOnNewCount === undefined) { tests.absentOnNew = [...fact.absentOnNew]; tests.absentOnNewCount = fact.absentOnNewCount; }
+    // Written only when there is something to say (a skip count that really rose, at least one test that ran before and is gone): a pack with nothing to flag has none of these keys, so a reader built before them still reads it.
+    // Both skip counts or neither; the skips among untouched tests are some of the skips.
+    if (tests.skippedBefore === undefined && tests.skippedAfter === undefined && fact.skippedAfter > fact.skippedBefore && fact.skippedAfter <= tests.skipped) { tests.skippedBefore = fact.skippedBefore; tests.skippedAfter = fact.skippedAfter; }
+    if (tests.absentOnNew === undefined && tests.absentOnNewCount === undefined && fact.absentOnNewCount > 0) { tests.absentOnNew = [...fact.absentOnNew]; tests.absentOnNewCount = fact.absentOnNewCount; }
     return { ...check, tests };
   });
   const merged = EvidenceRawSchema.safeParse({ ...raw, checks });
@@ -187,7 +188,7 @@ export async function loadEvidencePack(blobs: Pick<EvidenceBlobStore, "get">, ta
   try {
     const bytes = await blobs.get(evidencePackKey(task, candidateDigest), PACK_READ_BYTES);
     if (bytes === undefined) return undefined;
-    const parsed = EvidencePackSchema.safeParse(JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown);
+    const parsed = EvidencePackReadSchema.safeParse(JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown);
     return parsed.success && evidenceIsFor(parsed.data, candidateDigest) ? parsed.data : undefined;
   } catch {
     return undefined;

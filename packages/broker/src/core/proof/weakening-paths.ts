@@ -7,7 +7,8 @@
  * `.rovara/playbook.*`). A task that changes them changes what every later task is told, so a person should read the change.
  */
 const INSTRUCTION_PATH_PATTERNS: readonly RegExp[] = [
-  /(^|\/)(agents|claude)\.md$/,
+  /(^|\/)(agents(\.override)?|claude)\.md$/,
+  /(^|\/)\.github\/copilot-instructions\.md$/,
   /(^|\/)\.rovara\/rules(\/|$)/,
   /(^|\/)\.rovara\/(playbook|project)(\.[\w-]+)?$/,
 ];
@@ -26,20 +27,23 @@ export const TEST_CONFIG_PATH_PATTERNS: readonly RegExp[] = [
   /^(makefile|turbo\.json)$/,
 ];
 
+/** A folder that holds tests: a test, tests, __tests__, spec, e2e or test-data folder, somewhere above the file. `snapshots/`, `golden/` and `fixtures/` mean snapshots and fixtures only under one (an app's `fixtures/seed.json`, a docs `snapshots/` page or an asset `golden/` image are not tests'). */
+const TEST_ANCESTOR = String.raw`(?:^|\/)(?:tests?|__tests__|specs?|e2e|testdata|test-data|test_data)\/(?:[^/]+\/)*`;
+
 /** Snapshot files (jest, vitest, syrupy, Verify, approval tests, Go golden files): the expected output a test compares with, so a change to one can make a failing test pass. */
 const SNAPSHOT_PATH_PATTERNS: readonly RegExp[] = [
   /\.snap$/,
   /\.ambr$/,
   /(^|\/)__snapshots__(\/|$)/,
-  /(^|\/)snapshots?\/[^/]+$/,
+  new RegExp(`${TEST_ANCESTOR}(?:snapshots?|golden)\\/.+$`),
   /\.(approved|received|verified)\.[\w.-]+$/,
   /\.golden(\.[\w-]+)?$/,
-  /(^|\/)golden\/[^/]+$/,
 ];
 
-/** Fixture and recorded-answer files that tests read: test data folders, mocks and recorded HTTP cassettes. */
+/** Fixture and recorded-answer files that tests read: test data folders, mocks and recorded HTTP cassettes, and a `fixtures/` folder under a test folder. */
 const FIXTURE_PATH_PATTERNS: readonly RegExp[] = [
-  /(^|\/)(__fixtures__|fixtures?|testdata|test-data|test_data|__mocks__|cassettes)(\/|$)/,
+  /(^|\/)(__fixtures__|testdata|test-data|test_data|__mocks__|cassettes)(\/|$)/,
+  new RegExp(`${TEST_ANCESTOR}fixtures?\\/.+$`),
   /\.cassette\.[\w]+$/,
 ];
 

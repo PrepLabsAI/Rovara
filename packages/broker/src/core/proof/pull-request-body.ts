@@ -239,7 +239,9 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
   const proof = proofSection(workflow, context.proof, context.testing === undefined ? undefined : TESTING_RESULT_LABELS[context.testing.result]);
   const testing = context.testing;
   // TE-B3: the flags a reviewer reads first (instruction files, files CI runs, tests that ran before and not now, more skips, changed snapshots). Words only; nothing when there is none, so a description without flags is what it was.
-  const flags = weakeningBlock(context.changedFiles?.files ?? [], boundEvidence(context.proof?.evidence, workflow.candidate?.digest));
+  const flags = weakeningBlock(context.changedFiles?.files ?? [], boundEvidence(context.proof?.evidence, workflow.candidate?.digest),
+    // Only when the description has a proof to speak of (a test proof or an approved plan with claims): a task with neither reads as it did.
+    context.proof === undefined || (context.proof.testProof === undefined && (context.proof.plan?.claims?.length ?? 0) === 0) ? undefined : { testProof: context.proof.testProof, candidateDigest: workflow.candidate?.digest });
   // The Proof section shrinks with the lists: its evidence text first, then its proven and passed rows, never a failed row or a not-tested item. One more step after the lists are empty shortens it again.
   const steps = [...LIST_LIMITS.map((limit, index) => ({ limit, proofLevel: Math.min(index, 3) })), { limit: 0, proofLevel: PROOF_LEVEL_LAST }];
   for (const [level, { limit, proofLevel }] of steps.entries()) {

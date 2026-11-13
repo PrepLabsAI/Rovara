@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { isValidTestId } from "@agentx/contracts";
 import { EvidencePackSchema } from "../../packages/contracts/src/evidence.js";
-import { absentOnNew, evidenceTests, parseGoTestJson, parseJsonReport, parseJunit, parseTestReport, plainName, skipRise, counted, skippedOutsideChanged, TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS } from "../../packages/worker/src/verification/test-report.js";
+import { absentOnNew, evidenceTests, originalRunLooksCut, untouchedCount, parseGoTestJson, parseJsonReport, parseJunit, parseTestReport, plainName, skipRise, counted, skippedOutsideChanged, TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS } from "../../packages/worker/src/verification/test-report.js";
 
 // A pytest --junitxml file, as pytest 8 writes it.
 const PYTEST = `<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="5" time="0.30">
@@ -338,5 +338,35 @@ describe("tests that ran before and not now (absentOnNew)", () => {
     const started = Date.now();
     expect(absentOnNew(big, report())?.count).toBe(50_000);
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
+// TE-B3, review H2 and L2: what is NOT "ran before and not now".
+describe("absentOnNew and originalRunLooksCut: the test-first case and cut runs", () => {
+  const rep = (...tests: Array<[string, string, "passed" | "failed" | "skipped" | "errored"]>) => counted("json", tests.map(([file, name, status]) => ({ file, name, status })));
+  it("does not compare a test of a changed test file, and an error entry is not a test that ran", () => {
+    const before = rep(["tests/test_new.py", "old_name", "passed"], ["tests/test_old.py", "gone", "passed"], ["tests/test_new.py", "tests.test_new", "errored"], ["tests/test_old.py", "broken", "errored"]);
+    expect(absentOnNew(before, rep(["tests/test_new.py", "new_name", "passed"]), ["tests/test_new.py"])).toEqual({ ids: ["tests/test_old.py::gone"], count: 1 });
+  });
+  it("treats a pytest tmp_path id and a temporary directory as unstable", () => {
+    const before = rep(["t.py", "test_x[/tmp/pytest-of-ci/pytest-3/test_x0]", "passed"], ["t.py", "test_y[/private/var/folders/ab/T/pytest-of-me/x]", "passed"], ["t.py", "test_z[/var/folders/ab/c]", "passed"], ["t.py", "test_ok[1]", "passed"]);
+    expect(absentOnNew(before, rep(), [])).toEqual({ ids: ["t.py::test_ok[1]"], count: 1 });
+  });
+  const many = (n: number, file = "t.py") => rep(...Array.from({ length: n }, (_unused, i): [string, string, "passed"] => [file, `t${String(i)}`, "passed"]));
+  it("looks cut when the command stops at the first failure, whatever the reports say", () => {
+    for (const flag of ["-x", "--exitfirst", "--maxfail=2", "--maxfail", "--bail", "--bail=1", "-bail", "-xq"]) expect(originalRunLooksCut(many(10), many(10), [], ["run", flag]), flag).toBe(true);
+    for (const flag of ["-q", "--exclude", "--verbose", "tests/x.py"]) expect(originalRunLooksCut(many(10), many(10), [], ["run", flag]), flag).toBe(false);
+  });
+  it("looks cut when the original run has an error outside the changed files that this code's run does not, or far fewer untouched tests", () => {
+    expect(originalRunLooksCut(rep(["tests/test_old.py", "tests.test_old", "errored"], ["t.py", "a", "passed"]), many(1), ["tests/test_new.py"])).toBe(true);
+    // An error in a changed test file does not cut the run by itself (jest keeps going): the count decides.
+    expect(originalRunLooksCut(rep(["tests/test_new.py", "tests.test_new", "errored"], ["t.py", "a", "passed"]), many(1), ["tests/test_new.py"])).toBe(false);
+    expect(originalRunLooksCut(rep(["tests/test_new.py", "tests.test_new", "errored"]), many(10), ["tests/test_new.py"])).toBe(true);
+    expect(originalRunLooksCut(many(8), many(10), [])).toBe(true);
+    expect(originalRunLooksCut(many(9), many(10), [])).toBe(false);
+    expect(originalRunLooksCut(many(12), many(10), [])).toBe(false);
+  });
+  it("counts the untouched tests only", () => {
+    expect(untouchedCount(rep(["tests/test_new.py", "a", "passed"], ["t.py", "b", "skipped"]), ["tests/test_new.py"])).toBe(1);
   });
 });

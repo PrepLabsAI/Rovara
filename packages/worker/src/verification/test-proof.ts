@@ -17,11 +17,11 @@
 // (--outputFile, --junitxml): then it is per test, for the tests in the changed files. AgentX never alters a customer's command.
 import { lstat, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict, type TestProofWeakening } from "@agentx/contracts";
+import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict, type TestProofNotComparedReason, type TestProofWeakening } from "@agentx/contracts";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
 import { testIdResolver, withTestIds, type TestIdContext } from "./test-ids.js";
-import { absentOnNew, displayLine, parseTestReport, skipRise } from "./test-report.js";
+import { absentOnNew, displayLine, originalRunLooksCut, parseTestReport, skipRise } from "./test-report.js";
 import { AgentFilesRestoreError, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
 
 /** The whole run on the original code gets this long, inside what is left of the check round's budget. */
@@ -97,8 +97,9 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   const now = options.now ?? Date.now;
   const started = now();
   const empty = { added: 0, changed: 0, deleted: 0 };
-  const result = (status: TestProof["status"], note: TestProof["note"], changedTests = empty, items: TestProofItem[] = [], weakening: TestProofWeakening[] = []): TestProof => ({
-    schemaVersion: 1, candidateDigest: options.candidateDigest, status, note, changedTests, items, ...(weakening.length === 0 ? {} : { weakening: weakening.slice(0, 64) }), durationMs: Math.max(0, Math.round(now() - started)),
+  const result = (status: TestProof["status"], note: TestProof["note"], changedTests = empty, items: TestProofItem[] = [], weakening: Weakened = { compared: [], notCompared: [] }): TestProof => ({
+    schemaVersion: 1, candidateDigest: options.candidateDigest, status, note, changedTests, items,
+    ...(weakening.compared.length === 0 ? {} : { weakening: weakening.compared.slice(0, 64) }), ...(weakening.notCompared.length === 0 ? {} : { weakeningNotCompared: weakening.notCompared.slice(0, 64) }), durationMs: Math.max(0, Math.round(now() - started)),
   });
 
   // Showing the original code in only some repositories would mix two states: every repository needs a usable start commit (as defaultOriginalCode requires).
@@ -193,10 +194,11 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
     if (tests !== undefined) perTest.set(base.checkId, tests);
   }
   // TE-B3: what the run on the original code shows about the tests the change did not touch (skips that rose, tests that ran before and are gone now), from the same two reports.
-  const weakening: TestProofWeakening[] = [];
+  const weakening: Weakened = { compared: [], notCompared: [] };
   for (const { index, base, entry } of pending) {
-    const found = await weakeningOf(base.checkId, entry, reports.get(index), ran.oldReports.get(index), changedPresent, { root: options.rootPath, cwd: commands[index]!.cwd });
-    if (found !== undefined) weakening.push(found);
+    const found = await weakeningOf(base.checkId, entry, reports.get(index), ran.oldReports.get(index), changedPresent, { root: options.rootPath, cwd: commands[index]!.cwd }, commands[index]!.args);
+    if ("reason" in found) weakening.notCompared.push({ checkId: base.checkId, reason: found.reason });
+    else weakening.compared.push(found);
   }
   // Per test where a report allows it; past the item limit, one summary item per check instead (never dropped).
   const testCount = [...perTest.values()].reduce((total, tests) => total + tests.length, 0);
@@ -210,20 +212,25 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   return result(status, note, changedTests, final.slice(0, ITEMS_MAX), weakening);
 }
 
+interface Weakened { compared: TestProofWeakening[]; notCompared: Array<{ checkId: string; reason: TestProofNotComparedReason }> }
+
 /**
- * TE-B3: one check's skips among untouched tests (the original code's run, this code's run) and the tests that ran on the original code and are not in this code's report. Only from two real reports: the run on the original
- * code must have ended (passed or failed: a timed-out run leaves a partial report, which would name every test it did not reach) and written a report of its own (not the very bytes the candidate's run wrote).
+ * TE-B3: one check's skips among untouched tests (the original code's run, this code's run) and the tests that ran on the original code and are not in this code's report; or why they could not be compared. Only from two
+ * real reports: the run on the original code must have ended (a timed-out run leaves a partial report, which would name every test it did not reach), written a report of its own (not the very bytes the candidate's run
+ * wrote), and not look cut short (`originalRunLooksCut`: collection errors, a stop-at-first-failure option, far fewer untouched tests), because then a skip count or a missing test would only be the cut. Tests of the
+ * change's own test files are not compared: the original run shows them as the change wrote them, and in the usual test-first case the new test fails to load there.
  */
-async function weakeningOf(checkId: string, oldEntry: CheckEntry, report: ReportFile | undefined, old: ReadResult | undefined, changedPaths: readonly string[], context: TestIdContext): Promise<TestProofWeakening | undefined> {
-  if (report === undefined || report.before.state !== "ok" || old === undefined || old.state !== "ok" || old.bytes.equals(report.before.bytes)) return undefined;
-  if (oldEntry.after !== "passed" && oldEntry.after !== "failed") return undefined;
+async function weakeningOf(checkId: string, oldEntry: CheckEntry, report: ReportFile | undefined, old: ReadResult | undefined, changedPaths: readonly string[], context: TestIdContext, args: readonly string[]): Promise<TestProofWeakening | { reason: TestProofNotComparedReason }> {
+  if (report === undefined || report.before.state !== "ok" || old === undefined || old.state !== "ok" || old.bytes.equals(report.before.bytes)) return { reason: "no_report" };
+  if (oldEntry.after !== "passed" && oldEntry.after !== "failed") return { reason: "original_run_incomplete" };
   const was = parseTestReport(old.bytes.toString("utf8"), report.spec.kind);
   const now = parseTestReport(report.before.bytes.toString("utf8"), report.spec.kind);
-  if (was === undefined || now === undefined) return undefined;
+  if (was === undefined || now === undefined) return { reason: "no_report" };
   const [before, after] = [await withTestIds(was, context), await withTestIds(now, context)];
+  if (originalRunLooksCut(before, after, changedPaths, args)) return { reason: "original_run_truncated" };
   const rise = skipRise(before, after, changedPaths);
-  const absent = absentOnNew(before, after);
-  if (rise === undefined || absent === undefined) return undefined;
+  const absent = absentOnNew(before, after, changedPaths);
+  if (rise === undefined || absent === undefined) return { reason: "no_report" };
   return { checkId, skippedBefore: rise.before, skippedAfter: rise.after, absentOnNew: absent.ids, absentOnNewCount: absent.count };
 }
 

@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 import { EvidencePackSchema, type EvidencePack, type VerificationReport } from "../../packages/contracts/src/index.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { parseChangedFiles } from "../../packages/broker/src/core/proof/changed-files.js";
-import { assessRisk, type RiskFile } from "../../packages/broker/src/core/proof/risk.js";
-import { WEAKENING_HEADING, weakeningBlock, weakeningFactsOf } from "../../packages/broker/src/core/proof/weakening-flags.js";
+import { assessRisk, isCiExecutedPath, type RiskFile } from "../../packages/broker/src/core/proof/risk.js";
+import { WEAKENING_HEADING, notComparedReason, weakeningBlock, weakeningFactsOf } from "../../packages/broker/src/core/proof/weakening-flags.js";
 import { isFixturePath, isInstructionFilePath, isSnapshotPath, isTestConfigPath } from "../../packages/broker/src/core/proof/weakening-paths.js";
 import { rovaraStatusLines } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import type { ChangedFileEntry } from "../../packages/broker/src/core/proof/verification-report.js";
@@ -50,7 +50,9 @@ describe("the changed-files reader flags weakening", () => {
   });
   it("flags a file Git does not track yet, from its path alone", () => {
     const text = ["## app", "", "### status", "?? AGENTS.md", "?? tests/__snapshots__/new.snap", "### diff"].join("\n");
-    expect(parseChangedFiles(text).files.map((file) => [file.path, file.snapshotChanged])).toEqual([["AGENTS.md", undefined], ["tests/__snapshots__/new.snap", true]]);
+    // A new snapshot adds an expectation, it does not change one: not flagged. (A new conftest.py is, below.)
+    expect(parseChangedFiles(text).files.map((file) => [file.path, file.snapshotChanged])).toEqual([["AGENTS.md", undefined], ["tests/__snapshots__/new.snap", undefined]]);
+    expect(parseChangedFiles(["## app", "", "### status", "?? tests/conftest.py", "### diff"].join("\n")).files[0]?.testConfigChanged).toBe(true);
   });
   it.each([
     ["pytest.skip in a test", "tests/test_a.py", "    pytest.skip('flaky')"], ["xfail", "tests/test_a.py", "@pytest.mark.xfail"], ["skipif", "tests/test_a.py", "@pytest.mark.skipif(True, reason='x')"],
@@ -74,7 +76,13 @@ describe("the changed-files reader flags weakening", () => {
     expect(flagsOf(".coveragerc", ["[report]"], ["omit = a.py"]).testsExcluded).toBeUndefined();
   });
   it("flags a change to the scripts CI runs in package.json, and only there", () => {
-    for (const script of ['"test": "vitest"', '"pretest": "x"', '"test:unit": "x"', '"ci": "x"', '"coverage": "x"', '"verify": "x"', '"check": "x"']) expect(flagsOf("package.json", [`    ${script},`]).testCommandChanged, script).toBe(true);
+    for (const script of ['"test": "vitest"', '"test:unit": "x"']) expect(flagsOf("package.json", [`    ${script},`]).testCommandChanged, script).toBe(true);
+    // Every other script CI runs is a flag of its own, never the `test` rule (the fix-mode high rule reads only that one).
+    for (const script of ['"pretest": "x"', '"posttest": "x"', '"ci": "x"', '"coverage": "x"', '"verify": "x"', '"check": "x"', '"check:types": "x"']) {
+      const entry = flagsOf("package.json", [`    ${script},`]);
+      expect(entry.ciScriptChanged, script).toBe(true);
+      expect(entry.testCommandChanged, script).toBeUndefined();
+    }
     expect(flagsOf("package.json", ['    "build": "tsc",']).testCommandChanged).toBeUndefined();
     expect(flagsOf("src/a.json", ['    "test": "x",']).testCommandChanged).toBeUndefined();
   });
@@ -132,7 +140,7 @@ describe("the risk reads the flags (medium at most, words only)", () => {
     expect(riskOf([f("package.json", { testCommandChanged: true })], true).reasons.join("\n")).not.toMatch(/Changes the scripts that CI runs/u);
   });
   it("names the other files CI runs as CI configuration, as it always named the workflows", () => {
-    for (const path of ["Makefile", "tests/conftest.py", "pytest.ini", ".coveragerc", "jest.config.ts"]) expect(riskOf([f(path)]).reasons.join("\n"), path).toMatch(/^Changes CI configuration/mu);
+    for (const path of ["Makefile", "tests/conftest.py", "pytest.ini", "jest.config.ts"]) expect(riskOf([f(path)]).reasons.join("\n"), path).toMatch(/^Changes CI configuration/mu);
   });
   it("does not raise a plain change, and keeps a sensitive instruction path high without repeating it as a flag", () => {
     expect(riskOf([f("src/a.ts")]).level).toBe("low");
@@ -248,5 +256,103 @@ describe("the description carries the flags at the top of Rovara's block", () =>
     const proof = { evidence: { pack: { ...pack, candidateDigest: candidate.digest }, mode: "summary" as const } };
     expect(lines([], { proof }).join("\n")).toContain("- 1 test ran before and not now: t.py::gone");
     expect(lines([], { proof: { evidence: { pack, mode: "summary" as const } } }).join("\n")).not.toContain("ran before and not now");
+  });
+});
+
+// ---- Opus review of TE-B3 (2026-11-13)
+describe("H1: only the old CI patterns make a change high; the rest is a flag", () => {
+  const digest = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]).digest;
+  const clean: VerificationReport = { reviewOnly: false, passed: [{ label: "Unit tests" }], failed: [], notChecked: [], testsAdded: [] };
+  const riskOf = (files: RiskFile[], fix = false) => assessRisk({ changedFiles: files, changedFilesComplete: true, report: clean, acceptedFindings: [], securityFindings: 0, candidateDigest: digest, ...(fix ? { fix: true } : {}) });
+  const f = (path: string, extra: Partial<RiskFile> = {}): RiskFile => ({ repository: "app", path, added: 2, removed: 1, ...extra });
+  it.each(["src/setupTests.ts", "jest.setup.ts", ".coveragerc", "codecov.yml", "noxfile.py", ".rspec", "phpunit.xml", "vitest.config.e2e.ts"])("%s is not high, in an ordinary change or in a fix, and is still a file CI runs", (path) => {
+    for (const fix of [false, true]) expect(riskOf([f(path)], fix).level, `${path} fix=${String(fix)}`).not.toBe("high");
+    expect(isCiExecutedPath(path), path).toBe(true);
+  });
+  it.each(["Makefile", "pytest.ini", "tests/conftest.py", "vitest.config.ts", "jest.config.js", ".github/workflows/ci.yml"])("%s stays high, as before", (path) => {
+    expect(riskOf([f(path)]).level, path).toBe("high");
+    expect(isCiExecutedPath(path), path).toBe(true);
+  });
+  it("in a fix only the `test` script is a high test-command change; check, ci, coverage, verify and pretest are flags at medium at most", () => {
+    expect(riskOf([f("package.json", { testCommandChanged: true })], true).level).toBe("high");
+    for (const key of ["check", "ci", "coverage", "verify", "pretest"]) {
+      const result = riskOf([f("package.json", { ciScriptChanged: true })], true);
+      expect(result.level, key).not.toBe("high");
+      expect(result.reasons.join("\n")).toMatch(/Changes the scripts that CI runs/u);
+    }
+    // End to end: the line in package.json decides which flag is set.
+    const entry = (line: string) => parseChangedFiles(section(hunk("package.json", [line]))).files[0]!;
+    expect(riskOf([entry('    "check": "tsc",')], true).level).not.toBe("high");
+    expect(riskOf([entry('    "test": "echo",')], true).level).toBe("high");
+  });
+});
+
+describe("M2: snapshots and fixtures are flagged when changed, not when added, and only where a test folder is above them", () => {
+  const entry = (header: string[]) => parseChangedFiles(section(header)).files[0]!;
+  const withMode = (path: string, mode: string): string[] => [`diff --git a/${path} b/${path}`, mode, `--- a/${path}`, `+++ b/${path}`, "@@ -1 +1 @@", "-a", "+b"];
+  it("a new snapshot or fixture is not flagged; a modified, deleted or renamed one is", () => {
+    expect(entry(withMode("tests/__snapshots__/a.snap", "new file mode 100644")).snapshotChanged).toBeUndefined();
+    expect(entry(withMode("tests/fixtures/a.json", "new file mode 100644")).fixtureChanged).toBeUndefined();
+    expect(entry(hunk("tests/__snapshots__/a.snap")).snapshotChanged).toBe(true);
+    expect(entry(withMode("tests/fixtures/a.json", "deleted file mode 100644")).fixtureChanged).toBe(true);
+    const renamed = entry(["diff --git a/tests/fixtures/a.json b/tests/data/a.json", "similarity index 90%", "rename from tests/fixtures/a.json", "rename to tests/data/a.json", "--- a/tests/fixtures/a.json", "+++ b/tests/data/a.json", "@@ -1 +1 @@", "-a", "+b"]);
+    expect(renamed.fixtureChanged).toBe(true);
+  });
+  it.each([["app/fixtures/seed.json", false], ["docs/snapshots/release.md", false], ["assets/golden/logo.png", false], ["tests/fixtures/seed.json", true], ["tests/unit/fixtures/a/b.json", true], ["tests/snapshots/home.txt", true],
+    ["src/test/resources/golden/out.txt", true], ["spec/golden/a.json", true], ["testdata/x.golden", true]])("%s -> flagged %s", (path, flagged) => {
+    expect(isFixturePath(path) || isSnapshotPath(path), path).toBe(flagged);
+  });
+  it("an option is an ignore option only when it ends there: --ignore-path, --ignore-scripts and --ignore-unknown are not", () => {
+    for (const line of ["\teslint --ignore-path .gitignore .", "\tnpm ci --ignore-scripts", "\tprettier --ignore-unknown --check ."]) expect(flagsOf("Makefile", [line]).testsExcluded, line).toBeUndefined();
+    for (const line of ["\tpytest --ignore tests/slow", "\tpytest --ignore=tests/slow", "\tvitest --exclude src/a", "\tpytest --deselect=a::b", "\tjest --ignore-glob=*.x"]) expect(flagsOf("Makefile", [line]).testsExcluded, line).toBe(true);
+  });
+  it("the host's list marks an added file as added (a new snapshot from the host is not flagged either)", async () => {
+    const { hostChangedFiles } = await import("../../packages/broker/src/core/build-step/changed-files.js");
+    const file = (path: string, status: string) => ({ path, status, additions: 1, deletions: 0, patch: "@@ -0,0 +1 @@\n+x" });
+    const host = { changedFiles: async () => ({ files: [file("tests/__snapshots__/new.snap", "added"), file("tests/__snapshots__/old.snap", "modified")] }) };
+    const read = await hostChangedFiles(host as never, { repositoryId: "app", repositoryUrl: "https://github.com/o/r", number: 1, scope: { orgId: "o" } });
+    expect(read.files.map((entry) => [entry.path, entry.snapshotChanged])).toEqual([["tests/__snapshots__/new.snap", undefined], ["tests/__snapshots__/old.snap", true]]);
+  });
+});
+
+describe("L1: more instruction files", () => {
+  it.each(["AGENTS.override.md", "sub/AGENTS.override.md", ".github/copilot-instructions.md"])("%s", (path) => expect(isInstructionFilePath(path)).toBe(true));
+  it.each(["docs/copilot-instructions.md", ".github/copilot-instructions.txt", "AGENTS.override.md.bak"])("%s is not", (path) => expect(isInstructionFilePath(path)).toBe(false));
+});
+
+describe("M3: a proof that could not compare says so", () => {
+  const proofOf = (over: Record<string, unknown> = {}) => ({ schemaVersion: 1 as const, candidateDigest: DIGEST, status: "checked" as const, note: "completed" as const, changedTests: { added: 1, changed: 0, deleted: 0 }, items: [], durationMs: 1, ...over }) as never;
+  const compared = { checkId: "readiness:0", skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 };
+  it("is silent only when at least one check was compared", () => {
+    expect(notComparedReason(proofOf({ weakening: [compared] }), DIGEST)).toBeUndefined();
+    expect(weakeningBlock([], undefined, { testProof: proofOf({ weakening: [compared] }), candidateDigest: DIGEST })).toEqual([]);
+  });
+  it.each([
+    [undefined, "the test proof did not run for this code"],
+    [proofOf({ candidateDigest: "e".repeat(64) }), "the test proof did not run for this code"],
+    [proofOf({ status: "no_changed_tests", note: "no_changed_tests" }), "no test was added or changed, so the original code was not run"],
+    [proofOf({ status: "not_checked", note: "budget" }), "there was no time left to run the original code"],
+    [proofOf({ status: "not_checked", note: "original_code_unavailable" }), "the original code could not be shown"],
+    [proofOf({ status: "not_checked", note: "timed_out" }), "the run on the original code timed out"],
+    [proofOf({ weakeningNotCompared: [{ checkId: "readiness:0", reason: "original_run_truncated" }] }), "the run on the original code looks cut short"],
+    [proofOf({ weakeningNotCompared: [{ checkId: "readiness:0", reason: "no_report" }] }), "a test report was not available from both runs"],
+    [proofOf(), "no test report to compare"],
+  ])("says why: %#", (proof, words) => {
+    expect(notComparedReason(proof, DIGEST)).toBe(words);
+    expect(weakeningBlock([], undefined, { testProof: proof, candidateDigest: DIGEST })).toEqual([WEAKENING_HEADING, `- Test weakening: could not compare (${words})`, ""]);
+  });
+  it("the description shows the line when a proof or a plan with claims is in play, and nothing when neither is", () => {
+    const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
+    const wf = WorkflowSnapshotSchema.parse({
+      ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), stage: "PULL_REQUEST", state: "READY", candidate,
+      checkPolicy: { required: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/app", executable: "npm", args: ["test"], timeoutSeconds: 30 } }], optional: [], selectedOptionalIds: [], proposed: [] },
+      verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-11-13T12:00:00.000Z", results: [{ checkId: "unit", status: "PASS" }] },
+      reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-11-13T12:00:00.000Z" })),
+    });
+    const lines = (proof: Record<string, unknown> | undefined) => rovaraStatusLines(wf, { changedFiles: { files: [], complete: true }, ...(proof === undefined ? {} : { proof }) }, () => []).join("\n");
+    expect(lines(undefined)).not.toContain("Test weakening");
+    expect(lines({ plan: undefined })).not.toContain("Test weakening");
+    expect(lines({ testProof: { ...proofOf({ weakening: [compared] }), candidateDigest: candidate.digest } })).not.toContain("Test weakening");
+    expect(lines({ testProof: { ...proofOf({ status: "not_checked", note: "stopped" }), candidateDigest: candidate.digest } })).toContain("- Test weakening: could not compare (the run was stopped)");
   });
 });

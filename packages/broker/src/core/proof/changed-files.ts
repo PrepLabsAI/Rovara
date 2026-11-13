@@ -18,11 +18,13 @@ const SKIP_MARKER = /(?:\b(?:it|test|describe|context|specify)(?:\.concurrent)?\
 /** An added line that takes code out of the coverage numbers wherever it is written: a `# pragma: no cover` or an `istanbul`, `c8` or `v8` ignore comment. */
 const COVERAGE_PRAGMA = /(?:\bpragma:\s*no\s+cover\b|\/[*/]\s*(?:istanbul|c8|v8)\s+ignore\b)/iu;
 /** An added line of a test or coverage configuration file that takes tests or code out of a run: an ignore, deselect or exclude option. Only read in the files `isConfigFile` names, because `--ignore` means little elsewhere. */
-const CONFIG_EXCLUDE = /(?:\b(?:testPathIgnorePatterns|testIgnore|modulePathIgnorePatterns|coveragePathIgnorePatterns|collect_ignore(?:_glob)?|norecursedirs|exclude_lines|omit|deselect)\b|--(?:ignore|ignore-glob|deselect|exclude)\b)/iu;
+const CONFIG_EXCLUDE = /(?:\b(?:testPathIgnorePatterns|testIgnore|modulePathIgnorePatterns|coveragePathIgnorePatterns|collect_ignore(?:_glob)?|norecursedirs|exclude_lines|omit|deselect)\b|--(?:ignore|ignore-glob|deselect|exclude)(?=[\s=]|$))/iu;
 /** The files whose added lines `CONFIG_EXCLUDE` is read in: test and coverage configuration, Makefiles, conftest, and the project files that hold a runner's settings. */
 const isConfigFile = (path: string): boolean => isTestConfigPath(path) || /(?:^|\/)(?:package\.json|pyproject\.toml|setup\.cfg)$/iu.test(path);
-/** A line of package.json that sets a script CI runs (`test`, `test:unit`, `pretest`, `posttest`, `ci`, `coverage`, `verify`, `check`, ...), added or removed. */
-const TEST_SCRIPT_LINE = /^[+-]\s*"(?:(?:pre|post)?test|ci|coverage|verify|check)(?::[\w:.-]+)?"\s*:/u;
+/** A line of package.json that sets a `test` script (`test`, `test:unit`, ...), added or removed. */
+const TEST_SCRIPT_LINE = /^[+-]\s*"test(?::[\w:.-]+)?"\s*:/u;
+/** TE-B3: a line of package.json that sets another script CI runs (`pretest`, `posttest`, `ci`, `coverage`, `verify`, `check`, ...), added or removed: a flag, never the fix-mode high rule of the `test` script. */
+const CI_SCRIPT_LINE = /^[+-]\s*"(?:(?:pre|post)test|ci|coverage|verify|check)(?::[\w:.-]+)?"\s*:/u;
 
 /**
  * An added or removed line that declares a route or a response model: a decorator or registration in the common web frameworks (FastAPI and Flask, Express and its kin, Nest, Spring, Go's routers).
@@ -104,8 +106,10 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
   const deleted = new Set<ChangedFileEntry>();
   const skipped = new Set<ChangedFileEntry>();
   const testCommand = new Set<ChangedFileEntry>();
+  const ciScript = new Set<ChangedFileEntry>();
   const apiRoute = new Set<ChangedFileEntry>();
   const excluded = new Set<ChangedFileEntry>();
+  const created = new Set<ChangedFileEntry>();
   for (const line of text.split("\n")) {
     const heading = /^## (\S+)$/u.exec(line);
     if (heading !== null) {
@@ -133,6 +137,7 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
     }
     if (current === undefined) continue;
     if (!inHunk && line.startsWith("deleted file mode")) deleted.add(current);
+    if (!inHunk && line.startsWith("new file mode")) created.add(current);
     if (line.startsWith("@@")) {
       inHunk = true;
       current.added ??= 0;
@@ -146,11 +151,13 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
       if (COVERAGE_PRAGMA.test(line) || (CONFIG_EXCLUDE.test(line) && isConfigFile(current.path))) excluded.add(current);
     } else if (line.startsWith("-")) current.removed = (current.removed ?? 0) + 1;
     if (TEST_SCRIPT_LINE.test(line) && (current.path === "package.json" || current.path.endsWith("/package.json"))) testCommand.add(current);
+    if (CI_SCRIPT_LINE.test(line) && (current.path === "package.json" || current.path.endsWith("/package.json"))) ciScript.add(current);
     if ((line.startsWith("+") || line.startsWith("-")) && API_ROUTE_LINE.test(line)) apiRoute.add(current);
   }
   // What a change does to the tests it touches (Plan 6 Task 16): a test file deleted, moved out of the test paths, or losing more lines than it gains; a line added that skips or focuses a test; the test command changed.
   for (const file of tracked) {
     if (testCommand.has(file)) file.testCommandChanged = true;
+    if (ciScript.has(file)) file.ciScriptChanged = true;
     if (excluded.has(file)) file.testsExcluded = true;
     // The public API (task P, blind test 02): a route or response model line changed, or a schema file did (not a test of one). A file in a schema folder with no changed line is only moved or re-moded.
     if (!isTestPath(file.path) && (apiRoute.has(file) || (API_SCHEMA_PATH.test(file.path.toLowerCase()) && ((file.added ?? 0) + (file.removed ?? 0) > 0)))) file.apiShapeChanged = true;
@@ -162,11 +169,14 @@ export function parseChangedFiles(text: string): { files: ChangedFileEntry[]; co
   const known = new Set(tracked.map((file) => `${file.repository}\u0000${file.path}`));
   const all = [...tracked, ...untracked.filter((file) => !known.has(`${file.repository}\u0000${file.path}`))];
   // TE-B3: what a reviewer looks at first because it can make a test pass without fixing anything, from the path alone (so a new file Git does not track yet is flagged too). Either name of a renamed file counts.
+  // A test configuration file is flagged when it is added too (a new conftest.py changes what runs); a snapshot or a fixture only when it was modified, deleted or renamed: a new one adds an expectation, it does not change one.
+  const untrackedOnly = new Set(untracked.filter((file) => !known.has(`${file.repository}\u0000${file.path}`)));
   for (const file of all) {
     const names = [file.path, ...(file.renamedFrom === undefined ? [] : [file.renamedFrom])];
+    const added = (created.has(file) || untrackedOnly.has(file)) && file.renamedFrom === undefined;
     if (names.some(isTestConfigPath)) file.testConfigChanged = true;
-    if (names.some(isSnapshotPath)) file.snapshotChanged = true;
-    if (names.some(isFixturePath)) file.fixtureChanged = true;
+    if (!added && names.some(isSnapshotPath)) file.snapshotChanged = true;
+    if (!added && names.some(isFixturePath)) file.fixtureChanged = true;
   }
   const files = all.slice(0, CHANGED_FILES_MAX).map((file) => ({
     ...file, repository: redactText(file.repository), path: redactText(file.path),

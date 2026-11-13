@@ -1,6 +1,7 @@
 // TE-B3: the facts from the worker's run on the original code (test-proof.json) reach the evidence pack: skips among untouched tests before and now, and the tests that ran before and are gone. The worker is untrusted: the
 // facts join the raw file before the data guard and the builder, are bound to this code's digest and the operation's own prefix, and a name is redacted again. Old packs without the facts keep parsing and rendering.
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { EvidencePackSchema, readEvidencePack, renderEvidenceRead, type CheckEntry } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
@@ -124,5 +125,44 @@ describe("old packs keep working", () => {
     // Both or neither; the count is at least the names.
     expect(EvidencePackSchema.safeParse({ ...base, checks: [check({ absentOnNew: ["t.py::a"] })] }).success).toBe(false);
     expect(EvidencePackSchema.safeParse({ ...base, checks: [check({ absentOnNew: ["a", "b"], absentOnNewCount: 1 })] }).success).toBe(false);
+  });
+});
+
+// ---- Opus review M1: a pack with nothing to flag has none of the new keys
+describe("M1: the new keys are written only when there is something to say", () => {
+  it("a compared check with nothing found adds no key to the pack and no not-tested row", async () => {
+    const { pack } = await kept({ raw: raw(), proof: proof([fact({ skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 })]) });
+    const tests = pack?.checks[0]?.tests ?? {};
+    for (const key of ["absentOnNew", "absentOnNewCount", "skippedBefore", "skippedAfter"]) expect(tests, key).not.toHaveProperty(key);
+    expect(pack?.notTested.some((item) => item.id.startsWith("absent:") || item.reason.includes("skipped"))).toBe(false);
+  });
+  it("a fall in skips adds nothing; a real rise adds both skip counts and no absent keys; absent tests add only the absent keys", async () => {
+    const fall = await kept({ raw: raw(tests({ skipped: 3, passed: 1 })), proof: proof([fact({ skippedBefore: 3, skippedAfter: 1, absentOnNew: [], absentOnNewCount: 0 })]) });
+    expect(fall.pack?.checks[0]?.tests).not.toHaveProperty("skippedAfter");
+    const rise = await kept({ raw: raw(), proof: proof([fact({ absentOnNew: [], absentOnNewCount: 0 })]) });
+    expect(rise.pack?.checks[0]?.tests).toMatchObject({ skippedBefore: 0, skippedAfter: 1 });
+    expect(rise.pack?.checks[0]?.tests).not.toHaveProperty("absentOnNew");
+    const gone = await kept({ raw: raw(), proof: proof([fact({ skippedBefore: 0, skippedAfter: 0 })]) });
+    expect(gone.pack?.checks[0]?.tests).toMatchObject({ absentOnNew: ["t.py::gone"], absentOnNewCount: 1 });
+    expect(gone.pack?.checks[0]?.tests).not.toHaveProperty("skippedAfter");
+  });
+  it("an old-shape reader (the tests part as it was before TE-B3, strict) still reads a new pack that has nothing to flag", async () => {
+    const OldTests = z.object({ total: z.number(), passed: z.number(), failed: z.number(), skipped: z.number(), errored: z.number(), skippedBefore: z.number().optional(), skippedAfter: z.number().optional(), names: z.array(z.unknown()), newTests: z.array(z.string()) }).strict();
+    const { pack } = await kept({ raw: raw(), proof: proof([fact({ skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 })]) });
+    expect(OldTests.safeParse(pack?.checks[0]?.tests).success).toBe(true);
+    // And a pack that does flag something is refused by that old reader: the reason the reader ships first.
+    const flagged = await kept({ raw: raw(), proof: proof([fact()]) });
+    expect(OldTests.safeParse(flagged.pack?.checks[0]?.tests).success).toBe(false);
+  });
+  it("loadEvidencePack reads a kept pack whose tests part has a key a newer writer added (the key is dropped)", async () => {
+    const w = world({ raw: raw() });
+    await keepEvidence(w.deps, input());
+    const key = evidencePackKey(TASK, DIGEST);
+    const stored = JSON.parse(Buffer.from((await w.blobs.get(key, 10_000_000))!).toString("utf8")) as { checks: Array<{ tests: Record<string, unknown> }> };
+    stored.checks[0]!.tests["newerPart"] = [1];
+    await w.blobs.put(key, Buffer.from(JSON.stringify(stored), "utf8"), { contentType: "application/json", metadata: {}, retention: "evidence-std" }, { overwrite: true });
+    const read = await loadEvidencePack(w.blobs, TASK, DIGEST);
+    expect(read?.checks[0]?.tests?.total).toBe(4);
+    expect(read?.checks[0]?.tests).not.toHaveProperty("newerPart");
   });
 });

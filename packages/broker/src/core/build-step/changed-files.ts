@@ -87,7 +87,7 @@ export async function hostChangedFiles(host: CodeHost, input: { repositoryId: st
   const usable = files.filter((file) => plainPath(file.path) && (file.previousPath === undefined || plainPath(file.previousPath)));
   const text = [`## ${input.repositoryId}`, "### status", "### diff", ...usable.map((file) => {
     const from = file.previousPath ?? file.path;
-    return [`diff --git a/${from} b/${file.path}`, ...(file.status === "removed" ? ["deleted file mode 100644"] : []), `--- a/${from}`, `+++ b/${file.path}`, ...(file.patch === undefined ? [] : [file.patch.startsWith("@@") ? file.patch : `@@ -0,0 +0,0 @@\n${file.patch}`])].join("\n");
+    return [`diff --git a/${from} b/${file.path}`, ...(file.status === "removed" ? ["deleted file mode 100644"] : []), ...(file.status === "added" ? ["new file mode 100644"] : []), `--- a/${from}`, `+++ b/${file.path}`, ...(file.patch === undefined ? [] : [file.patch.startsWith("@@") ? file.patch : `@@ -0,0 +0,0 @@\n${file.patch}`])].join("\n");
   })].join("\n");
   const parsed = parseChangedFiles(text);
   const counts = new Map(usable.map((file) => [`${file.previousPath ?? ""}\u0000${file.path}`, file]));

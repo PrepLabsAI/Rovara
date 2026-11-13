@@ -1,7 +1,7 @@
 // TE-B3: the words for weakened tests and for the flag at the top (instruction files, files CI runs), in the one renderer and in the pack v2 shape; the test proof's weakening facts; old data keeps working.
 import { describe, expect, it } from "vitest";
 import {
-  EvidencePackV2Schema, TestProofSchema, WEAKENING_LIMITS, evidencePackV1ToV2, evidencePackV2ToV1, readEvidencePack, renderEvidence, weakeningLines,
+  EvidencePackV2Schema, TestProofWriteSchema, WEAKENING_LIMITS, evidencePackV1ToV2, evidencePackV2ToV1, readEvidencePack, renderEvidence, weakeningLines,
 } from "../../packages/contracts/src/index.js";
 import { DIGEST, v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
 
@@ -92,13 +92,13 @@ describe("the pack v2 shape", () => {
 describe("the test proof's weakening facts", () => {
   const proof = (weakeningPart: unknown) => ({ schemaVersion: 1, candidateDigest: DIGEST, status: "checked", note: "completed", changedTests: { added: 1, changed: 0, deleted: 0 }, items: [], durationMs: 5, ...(weakeningPart === undefined ? {} : { weakening: weakeningPart }) });
   it("an old proof without them parses; one with them parses; the schema is strict and bounded", () => {
-    expect(TestProofSchema.safeParse(proof(undefined)).success).toBe(true);
+    expect(TestProofWriteSchema.safeParse(proof(undefined)).success).toBe(true);
     const fact = { checkId: "readiness:0", skippedBefore: 0, skippedAfter: 2, absentOnNew: ["a::t"], absentOnNewCount: 1 };
-    expect(TestProofSchema.safeParse(proof([fact])).success).toBe(true);
-    expect(TestProofSchema.safeParse(proof([{ ...fact, extra: 1 }])).success).toBe(false);
-    expect(TestProofSchema.safeParse(proof([{ ...fact, absentOnNewCount: 0 }])).success).toBe(false);
-    expect(TestProofSchema.safeParse(proof([{ ...fact, absentOnNew: Array.from({ length: 101 }, () => "a"), absentOnNewCount: 101 }])).success).toBe(false);
-    expect(TestProofSchema.safeParse(proof([{ ...fact, skippedAfter: -1 }])).success).toBe(false);
-    expect(TestProofSchema.safeParse(proof(Array.from({ length: 65 }, (_unused, n) => ({ ...fact, checkId: `readiness:${String(n)}` })))).success).toBe(false);
+    expect(TestProofWriteSchema.safeParse(proof([fact])).success).toBe(true);
+    expect(TestProofWriteSchema.safeParse(proof([{ ...fact, extra: 1 }])).success).toBe(false);
+    expect(TestProofWriteSchema.safeParse(proof([{ ...fact, absentOnNewCount: 0 }])).success).toBe(false);
+    expect(TestProofWriteSchema.safeParse(proof([{ ...fact, absentOnNew: Array.from({ length: 101 }, () => "a"), absentOnNewCount: 101 }])).success).toBe(false);
+    expect(TestProofWriteSchema.safeParse(proof([{ ...fact, skippedAfter: -1 }])).success).toBe(false);
+    expect(TestProofWriteSchema.safeParse(proof(Array.from({ length: 65 }, (_unused, n) => ({ ...fact, checkId: `readiness:${String(n)}` })))).success).toBe(false);
   });
 });

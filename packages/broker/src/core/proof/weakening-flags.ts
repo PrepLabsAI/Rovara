@@ -2,7 +2,7 @@
 // changed snapshots, fixtures and test configuration. They are FLAGS and words only (until TE-B5 makes them gating): nothing here changes a verdict, a risk level or a merge. The facts come from two places the broker
 // already trusts: the changed files (read from the code host, never from the worker) and the evidence pack's test parts (the worker's report, checked by `buildEvidencePack`). Every name reaches the page through `weakeningLines`
 // (contracts), which makes it inert (no link, mention, image, issue reference, closing key, heading or hidden character) and bounded.
-import { weakeningLines, type EvidencePack, type WeakeningFacts } from "@agentx/contracts";
+import { weakeningLines, type EvidencePack, type TestProof, type WeakeningFacts } from "@agentx/contracts";
 import { isCiExecutedPath } from "./risk.js";
 import { isInstructionFilePath } from "./weakening-paths.js";
 import type { ChangedFileEntry } from "./verification-report.js";
@@ -20,7 +20,7 @@ const namesOf = (file: ChangedFileEntry): string[] => [file.path, ...(file.renam
  */
 export function weakeningFactsOf(files: readonly ChangedFileEntry[], pack: EvidencePack | undefined): WeakeningFacts {
   const instruction = files.filter((file) => namesOf(file).some(isInstructionFilePath)).map((file) => file.path);
-  const ciExecuted = files.filter((file) => file.testCommandChanged === true || file.testConfigChanged === true || namesOf(file).some(isCiExecutedPath)).map((file) => file.path);
+  const ciExecuted = files.filter((file) => file.testCommandChanged === true || file.ciScriptChanged === true || file.testConfigChanged === true || namesOf(file).some(isCiExecutedPath)).map((file) => file.path);
   let rise: { before: number; after: number } | undefined;
   const absent: string[] = [];
   let absentCount = 0;
@@ -50,12 +50,40 @@ export function weakeningFactsOf(files: readonly ChangedFileEntry[], pack: Evide
 /** The heading of the flags block. */
 export const WEAKENING_HEADING = "## Flags for the reviewer";
 
+const NOT_COMPARED_WORDS = {
+  no_report: "a test report was not available from both runs",
+  original_run_incomplete: "the run on the original code did not finish",
+  original_run_truncated: "the run on the original code looks cut short",
+} as const;
+const NOT_CHECKED_WORDS = {
+  budget: "there was no time left to run the original code",
+  timed_out: "the run on the original code timed out",
+  stopped: "the run was stopped",
+  original_code_unavailable: "the original code could not be shown",
+} as const;
+
+/**
+ * Why the test proof could not compare the untouched tests before and after, in fixed words; undefined when it compared at least one check. A proof that did not run, was for other code, ran nothing, or compared nothing
+ * is never silence: the description says it could not compare, so "no flag" never reads as "no weakening".
+ */
+export function notComparedReason(proof: TestProof | undefined, candidateDigest: string | undefined): string | undefined {
+  if (proof === undefined || candidateDigest === undefined || proof.candidateDigest !== candidateDigest) return "the test proof did not run for this code";
+  if (proof.status === "no_changed_tests") return "no test was added or changed, so the original code was not run";
+  if (proof.status === "not_checked") return Object.hasOwn(NOT_CHECKED_WORDS, proof.note) ? NOT_CHECKED_WORDS[proof.note as keyof typeof NOT_CHECKED_WORDS] : "the original code was not run";
+  if ((proof.weakening ?? []).length > 0) return undefined;
+  const first = proof.weakeningNotCompared?.[0]?.reason;
+  return first === undefined ? "no test report to compare" : NOT_COMPARED_WORDS[first];
+}
+
 /**
  * The block at the top of the Rovara status section: the heading and one bullet per flag, then a blank line; nothing at all (an empty list) when there is no flag, so a description without flags reads exactly as it did.
- * Each line is made inert and cut by `weakeningLines`; the heading and the list markers are Rovara's.
+ * Each line is made inert and cut by `weakeningLines`; the heading and the list markers are Rovara's. `proof` is given when the description has a Proof context (the test proof's reading for this code): then a proof that
+ * could not compare adds the one line "Test weakening: could not compare (<reason>)" (fixed words), so a missing flag never reads as "nothing was weakened".
  */
-export function weakeningBlock(files: readonly ChangedFileEntry[], pack: EvidencePack | undefined): string[] {
+export function weakeningBlock(files: readonly ChangedFileEntry[], pack: EvidencePack | undefined, proof?: { testProof: TestProof | undefined; candidateDigest: string | undefined }): string[] {
   const lines = weakeningLines(weakeningFactsOf(files, pack));
-  const all = [...lines.flags, ...lines.weakening];
+  const reason = proof === undefined ? undefined : notComparedReason(proof.testProof, proof.candidateDigest);
+  // Facts from the pack are real even when the proof of this run could not compare (an earlier round's pack for the same code): the line is only added where nothing was compared and nothing was found.
+  const all = [...lines.flags, ...lines.weakening, ...(reason === undefined ? [] : [`Test weakening: could not compare (${reason})`])];
   return all.length === 0 ? [] : [WEAKENING_HEADING, ...all.map((line) => `- ${line}`), ""];
 }

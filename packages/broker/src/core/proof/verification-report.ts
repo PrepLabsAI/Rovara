@@ -65,6 +65,8 @@ export interface ChangedFileEntry {
   testsSkipped?: true | undefined;
   /** package.json: a line of the `test` scripts was added or removed (Plan 6 Task 16): what a fix looks like that makes the tests not run. */
   testCommandChanged?: true | undefined;
+  /** TE-B3: package.json: a line of another script CI runs (`pretest`, `posttest`, `ci`, `coverage`, `verify`, `check`) was added or removed. */
+  ciScriptChanged?: true | undefined;
   /** TE-B3: a line the change adds takes tests or coverage out of a run (an ignore, deselect or exclude option in a test or coverage configuration, a `pragma: no cover` or an istanbul, c8 or v8 ignore comment). */
   testsExcluded?: true | undefined;
   /** TE-B3: the file is a test runner's or coverage tool's configuration, a Makefile or a `conftest.py` (under either name, for a rename). */
