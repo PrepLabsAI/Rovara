@@ -1047,7 +1047,7 @@ describe("publication checks in a devcontainer (#183)", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(1_000 + TIMEOUT_KILL_GRACE_MS);
   }, 30_000);
 
-  it("says in a timed-out check's stored output when the container refused to stop it", async () => {
+  it("fails a timed-out check, with the fixed unconfirmed-stop text, when the container refused to stop it (FIX-RUNNER-ABORT-JOIN)", async () => {
     const fixture = await createFixture(true, "remote.git", { devcontainer: true });
     const { cli } = stoppableCli({ kill: async () => ({ exitCode: 1, stdout: "bash: kill: (4242) - Operation not permitted\n", stderr: "" }) });
     const [check] = await runReadinessChecks(
@@ -1056,8 +1056,9 @@ describe("publication checks in a devcontainer (#183)", () => {
       await manifestOf(fixture),
       { devcontainerCli: cli },
     );
-    expect(check!.outcome).toBe("timed_out");
-    expect(check!.stderr).toContain("AgentX could not stop the command in the container (TERM): bash: kill: (4242) - Operation not permitted");
+    // Not "timed out": the command may still be running, so the gate fails closed and says so, in words that carry nothing from the command.
+    expect(check!.outcome).toBe("failed");
+    expect(check!.stderr).toContain("AgentX could not confirm that the command stopped");
   }, 30_000);
 
   it("stores a devcontainer check's output redacted and cut to its last lines, as on the host (#170)", async () => {

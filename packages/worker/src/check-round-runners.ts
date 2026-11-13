@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { agentXError } from "@agentx/contracts";
-import { containerBashOperations, runContainerCommand, type ContainerExec } from "./devcontainer.js";
+import { containerBashOperations, runContainerCommand, type ContainerCommandOptions, type ContainerExec } from "./devcontainer.js";
 import { withDetachedWorking, type CheckSandboxPlan, type WorkingPhaseNetwork } from "./check-sandbox.js";
 import { withServiceEnvFile, type ServiceEnvironment, type ServiceRedactor } from "./service-env.js";
 import type { HelperFiles } from "./service-helpers.js";
@@ -43,7 +43,7 @@ interface SealedSeam {
  * The agent's replay gets the AgentX git identity only: the worker's own environment is not copied into the sealed sandbox, and the run's variables come from the seam's env file, which wins over any `env` of the command.
  */
 function createSealedCheckRunners(rootPath: string, seam: SealedSeam): CheckRunners {
-  const commandOptions = sandboxCommandOptions(rootPath);
+  const commandOptions: ContainerCommandOptions = { ...sandboxCommandOptions(rootPath), target: "sealed" };
   const operations = containerBashOperations(seam.exec, commandOptions);
   const canonicalRoot = realpath(resolve(rootPath));
   canonicalRoot.catch(() => undefined);

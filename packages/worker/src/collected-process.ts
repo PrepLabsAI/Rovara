@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { redactText } from "@agentx/contracts";
+import { markWorkspaceUnsafe, type UnconfirmedStop } from "./workspace-safety.js";
 
 /** How much of each output stream a command keeps: its last 1 MiB, where errors usually are (#154). */
 export const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
@@ -21,9 +22,14 @@ export const KILL_CONFIRM_MS = 5_000;
  * command is in it.
  */
 export class RunnerKillUnconfirmedError extends Error {
-  constructor() {
+  /**
+   * Making one is what sets the task's WorkspaceSafety latch (workspace-safety.ts), so that no producer can forget it and no catch between here and the
+   * run's ending can turn the fact into an ordinary failure. `stop` says where the command ran (the default: a command on a container, which a devcontainer may be).
+   */
+  constructor(stop: UnconfirmedStop = { kind: "devcontainer" }) {
     super("AgentX could not confirm that the command stopped, so it did not touch the workspace afterwards");
     this.name = "RunnerKillUnconfirmedError";
+    markWorkspaceUnsafe(stop, this);
   }
 }
 
@@ -52,6 +58,8 @@ export interface CollectedProcess {
    * the caller must treat the run as failed and must not touch the working tree (see RunnerKillUnconfirmedError).
    */
   killUnconfirmed?: true;
+  /** With `killUnconfirmed`: the process group the command led, which may still be running. */
+  pgid?: number;
 }
 
 export interface CollectedProcessOptions {
@@ -120,6 +128,7 @@ export function runCollected(executable: string, args: readonly string[], option
     };
     let stopping = false;
     let boundTimer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
     let pollTimer: NodeJS.Timeout | undefined;
     let ended: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     const result = (unconfirmed: boolean): CollectedProcess => ({
@@ -129,7 +138,7 @@ export function runCollected(executable: string, args: readonly string[], option
       stderr: stderr.text(),
       ...(!aborted && ended !== undefined && ended.signal !== null ? { signal: ended.signal } : {}),
       ...(timedOut && !aborted ? { timedOut: true } : {}),
-      ...(unconfirmed ? { killUnconfirmed: true as const } : {}),
+      ...(unconfirmed ? { killUnconfirmed: true as const, ...(child.pid === undefined ? {} : { pgid: child.pid }) } : {}),
     });
     // SIGTERM to the group now, SIGKILL after the grace period. The SIGKILL is sent even when the
     // result has already come back, for a group member that ignores SIGTERM but does not hold the
@@ -140,13 +149,15 @@ export function runCollected(executable: string, args: readonly string[], option
       stopping = true;
       const graceMs = options.killGraceMs ?? TIMEOUT_KILL_GRACE_MS;
       control.signalGroup(child, "SIGTERM");
-      setTimeout(() => {
+      // Cleared when the result settles: a stop that is confirmed has nothing left to kill, and a SIGKILL sent after it would go to a group id that may by then belong to another process.
+      killTimer = setTimeout(() => {
         control.signalGroup(child, "SIGKILL");
         if (settled) return;
         // A process that left the group (setsid) may still hold the output open.
         if (exited) stopReading();
         else child.once("exit", stopReading);
-      }, graceMs).unref();
+      }, graceMs);
+      killTimer.unref();
       // The bound: a group still alive when it ends is reported, not waited for. It is not unref'd: the result is owed.
       boundTimer = setTimeout(() => settle(() => resolvePromise(result(true))), graceMs + (options.killConfirmMs ?? KILL_CONFIRM_MS));
     };
@@ -184,6 +195,7 @@ export function runCollected(executable: string, args: readonly string[], option
       if (timer !== undefined) clearTimeout(timer);
       if (boundTimer !== undefined) clearTimeout(boundTimer);
       if (pollTimer !== undefined) clearTimeout(pollTimer);
+      if (killTimer !== undefined) clearTimeout(killTimer);
       options.signal?.removeEventListener("abort", onAbort);
       finish();
     };
@@ -203,26 +215,35 @@ export function runCollected(executable: string, args: readonly string[], option
 /** How often a stopped process group is looked at to see whether it is gone. */
 const GROUP_POLL_MS = 25;
 
-const realProcessControl: ProcessControl = { signalGroup, groupAlive };
+const realProcessControl: ProcessControl = { signalGroup, groupAlive: (pgid) => groupAlive(pgid) };
 
 /**
  * Whether any live process is left in the process group `pgid` (the group a detached child leads). `kill(-pgid, 0)` finds the group
  * while any member exists, zombies included; on Linux a group of zombies (which a process manager that does not reap, as a bare
  * Node PID 1 does not, leaves behind) counts as gone. A group that cannot be examined counts as alive: the stop is then not confirmed.
  */
-function groupAlive(pgid: number): boolean {
+export function groupAlive(pgid: number, probe: GroupProbe = realGroupProbe): boolean {
   try {
-    process.kill(-pgid, 0);
+    probe.kill(-pgid, 0);
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
-  return process.platform === "linux" ? liveMemberOnLinux(pgid) : true;
+  return probe.platform === "linux" ? liveMemberOnLinux(pgid, probe.procRoot) : true;
 }
 
-function liveMemberOnLinux(pgid: number): boolean {
+/** What groupAlive asks of the system; tests replace it (a fake /proc with a zombie in it, for one). */
+export interface GroupProbe {
+  kill(pid: number, signal: 0): void;
+  platform: string;
+  /** The directory of per-process folders ("/proc"). */
+  procRoot: string;
+}
+const realGroupProbe: GroupProbe = { kill: (pid, signal) => { process.kill(pid, signal); }, platform: process.platform, procRoot: "/proc" };
+
+function liveMemberOnLinux(pgid: number, procRoot: string): boolean {
   let names: string[];
   try {
-    names = readdirSync("/proc");
+    names = readdirSync(procRoot);
   } catch {
     return true;
   }
@@ -230,7 +251,7 @@ function liveMemberOnLinux(pgid: number): boolean {
     if (!/^[0-9]+$/u.test(name)) continue;
     let stat: string;
     try {
-      stat = readFileSync(`/proc/${name}/stat`, "utf8");
+      stat = readFileSync(`${procRoot}/${name}/stat`, "utf8");
     } catch (error) {
       // It exited meanwhile; anything else (a hidden /proc entry) means this member cannot be judged.
       if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ESRCH") continue;

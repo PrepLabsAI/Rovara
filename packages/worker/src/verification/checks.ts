@@ -16,7 +16,7 @@ import {
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { MAX_COMMAND_OUTPUT_BYTES, RunnerKillUnconfirmedError, redactedTail, tailCollector } from "../collected-process.js";
-import { devcontainerBashOperations, runDevcontainerCommand, type DevcontainerCli, type DevcontainerTarget } from "../devcontainer.js";
+import { CONTAINER_STOP_BOUND_MS, devcontainerBashOperations, runDevcontainerCommand, type DevcontainerCli, type DevcontainerTarget } from "../devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../git.js";
 import { runProjectCommand } from "../prepare.js";
 import { SANDBOX_TARGET, executionFor } from "../execution-target.js";
@@ -35,11 +35,12 @@ const MAX_CHECKS = 64;
 /** Less budget than this left, and a check is not started: it could not finish. */
 const MIN_CHECK_START_MS = 1_000;
 /**
- * After an abort, how long runChecks waits for the runner it stopped to say that it has (FIX-RUNNER-ABORT-JOIN). A local command's
- * stop is bounded by about 10 s (SIGTERM, the grace period, SIGKILL, the confirmation) and a container's by about 25 s (two execs of
- * at most 10 s and the grace period), so this is longer than both. A runner that has not answered by then is not confirmed stopped.
+ * After an abort, how long runChecks waits for the runner it stopped to say that it has (FIX-RUNNER-ABORT-JOIN). A local command's stop is bounded by
+ * about 10 s (SIGTERM, the grace period, SIGKILL, the confirmation); a container command's by CONTAINER_STOP_BOUND_MS (the TERM exec, the grace period, the KILL exec
+ * and the local client's end: about 37 s). This is longer than both, so a runner that is still working inside its own bound is never given up on. A runner that has not
+ * reported by then is not confirmed stopped.
  */
-export const ABORT_JOIN_MS = 30_000;
+export const ABORT_JOIN_MS = CONTAINER_STOP_BOUND_MS + 10_000;
 
 export interface CheckRunners {
   /**

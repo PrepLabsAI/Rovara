@@ -52,11 +52,25 @@ const NO_BASH_MESSAGE = "the container has no bash, which AgentX needs to run co
  * wrapper writes only once the command has started, and keeps the group ID in "$1.stop": the wrapper
  * removes the group file as soon as the group leader exits, and the KILL step still needs the ID.
  * Only "No such process" counts as a group already gone; any other kill error (such as "Operation
- * not permitted" for a group running as root) is printed and fails the exec.
+ * not permitted" for a group running as root) is printed and fails the exec. No group file at all is
+ * NOT "gone": it exits 3 ("no process group"), and runInContainerGroup counts that as a confirmed stop only when it saw the
+ * command's own exec return first (the wrapper removes the file when the command ends); a command that had not started yet is not stopped.
  */
-const TERM_SCRIPT = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; case "$p" in ""|*[!0-9]*) exit 0;; esac; echo "$p" > "$1.stop"; out=$(kill -TERM -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
-/** Sends SIGKILL to what is left of the process group, if anything, and removes both files. */
-const KILL_SCRIPT = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; case "$p" in ""|*[!0-9]*) exit 0;; esac; out=$(kill -KILL -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
+export const CONTAINER_TERM_SCRIPT = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null); case "$p" in ""|*[!0-9]*) echo "no process group"; exit 3;; esac; echo "$p" > "$1.stop"; out=$(kill -TERM -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
+/**
+ * Sends SIGKILL to what is left of the process group, removes both files, and then looks again, for up to 5 s, until no live member is left (kill -0, and
+ * on Linux /proc, so a killed member that a PID 1 that does not reap leaves as a zombie does not count). A member still alive then, or no group ID at all, is not a confirmed stop (exit 1 or 3).
+ */
+export const CONTAINER_KILL_SCRIPT = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; case "$p" in ""|*[!0-9]*) echo "no process group"; exit 3;; esac; out=$(kill -KILL -- "-$p" 2>&1) || { case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1; }; live() { kill -0 -- "-$p" 2>/dev/null || return 1; [ -d /proc/self ] || return 0; local f r; for f in /proc/[0-9]*/stat; do r=$(cat "$f" 2>/dev/null) || continue; r=${r##*) }; set -- $r; [ "$3" = "$p" ] && [ "$1" != Z ] && [ "$1" != X ] && return 0; done; return 1; }; for _ in {1..50}; do live || exit 0; sleep 0.1; done; echo "still running after KILL"; exit 1';
+/** The exit status of the two scripts for "there was no process group to signal". */
+const NO_PROCESS_GROUP_EXIT = 3;
+/** How long the local exec client may take to end, once the stop sequence has run and aborted it (a client that ignores that is not confirmed ended). */
+const CLIENT_END_BOUND_MS = 12_000;
+/**
+ * The longest runInContainerGroup takes after an abort or a timeout: the TERM exec, the grace period, the KILL exec (each exec bounded at KILL_EXEC_TIMEOUT_MS), then the local client's end.
+ * runChecks' join bound (checks.ts ABORT_JOIN_MS) is longer than this.
+ */
+export const CONTAINER_STOP_BOUND_MS = KILL_EXEC_TIMEOUT_MS + TIMEOUT_KILL_GRACE_MS + KILL_EXEC_TIMEOUT_MS + CLIENT_END_BOUND_MS;
 
 /**
  * Where a project's devcontainer runs (#121). The whole workspace is mounted into the container at
@@ -565,7 +579,7 @@ export async function runContainerCommand(
   });
   const { result } = run;
   // An abort whose stop could not be confirmed: the command may still be running in the container, which mounts the workspace.
-  if (run.killUnconfirmed) throw new RunnerKillUnconfirmedError();
+  if (run.killUnconfirmed) throw new RunnerKillUnconfirmedError({ kind: options.target ?? "devcontainer" });
   return {
     exitCode: result.exitCode ?? -1,
     stdout: result.stdout,
@@ -580,6 +594,11 @@ export async function runContainerCommand(
  * image, whose ENV is the project's; the task sandbox is the worker's image, whose ENV is the worker's (Bug F).
  */
 export interface ContainerCommandOptions {
+  /**
+   * What the container is. "sandbox": the task sandbox, which the worker can remove, so a stop it could not confirm is
+   * quarantined by removing it (TaskSandbox.quarantine). "sealed": a sealed check round's sandbox, removed by the round's own teardown. Absent: a devcontainer, which persists and the worker cannot remove: the workspace is marked unsafe until it is reset.
+   */
+  target?: "sandbox" | "sealed" | "devcontainer";
   /**
    * Variables removed from the command's environment before it starts, unless the command sets them itself (a project
    * command's `env`, #54). The agent's shell sets none of them: the project's `env` belongs to its setup and readiness commands.
@@ -652,7 +671,7 @@ export function containerBashOperations(exec: ContainerExec, options: ContainerC
         onStdout: onData,
         onStderr: onData,
       });
-      if (run.killUnconfirmed) throw new RunnerKillUnconfirmedError();
+      if (run.killUnconfirmed) throw new RunnerKillUnconfirmedError({ kind: options.target ?? "devcontainer" });
       if (run.aborted) throw new Error("aborted");
       for (const failure of run.stopFailures) onData(Buffer.from(`\n${failure}\n`));
       if (run.timedOut) throw new Error(`timeout:${String(timeout)}`);
@@ -696,15 +715,18 @@ function unsetStatement(command: ContainerGroupCommand): string {
  * Runs a command in a container in its own process group, whose ID goes to a file in the container's
  * /tmp. A timeout or an abort stops the group there, not just the local exec client (#174): one exec
  * sends the group SIGTERM, and TIMEOUT_KILL_GRACE_MS after it answers another sends SIGKILL to any
- * member still running (one that ignores SIGTERM, even once the group leader has exited) and removes
- * the files. Then the local client is aborted, if it is still running. Each kill exec may take
- * KILL_EXEC_TIMEOUT_MS. A timeout waits for the whole sequence and reports each step that failed in
- * `stopFailures`. An abort is joined the same way: it reports back only after the whole sequence, so a caller
- * that touches the workspace (the container mounts it) afterwards never races the command; the grace period
- * is cut short once the group leader has exited, because what is left of the group is then killed at once.
- * A step that failed is a stop that is not confirmed: `killUnconfirmed`, which the caller must treat as a failure
+ * member still running (one that ignores SIGTERM, even once the group leader has exited), looks again until
+ * none is left alive, and removes the files. Then the local client is aborted, if it is still running. Each kill exec may take
+ * KILL_EXEC_TIMEOUT_MS, and the client is given CLIENT_END_BOUND_MS to end (CONTAINER_STOP_BOUND_MS in all). A timeout and an abort are joined the same way: the result
+ * comes back only after the whole sequence, so a caller that touches the workspace (the container mounts it) afterwards never races the command; the grace period
+ * is cut short once the group leader has exited on an abort, because what is left of the group is then killed at once.
+ * A step that failed, a group that was still alive after KILL, no process group to signal while the command's own exec had not returned (it may not have started yet),
+ * or a local client that did not end: that stop is not confirmed, `killUnconfirmed`, which the caller must treat as a failure
  * and must not touch the workspace after (RunnerKillUnconfirmedError). bash, not sh: dash's kill
  * does not take a negative process group ID, so a container without bash fails with an error that says so.
+ *
+ * Limit: a process that left the group (setsid, a double fork into another session) or a command started with `docker exec -d` is not in the group
+ * and is not signalled, whatever the group's state; the sandbox's quarantine (removing its container) is what ends such a process, and a devcontainer has none.
  */
 async function runInContainerGroup(
   exec: ContainerExec,
@@ -713,11 +735,18 @@ async function runInContainerGroup(
   const groupFile = `/tmp/${command.groupFilePrefix}-${randomUUID()}.pgid`;
   const controller = new AbortController();
   const stopFailures: string[] = [];
+  let noProcessGroup = false;
   const signalGroup = async (step: "TERM" | "KILL", script: string): Promise<void> => {
     let timer: NodeJS.Timeout | undefined;
     const failure = await Promise.race([
       exec(["bash", "-c", script, "bash", groupFile], { timeoutMs: KILL_EXEC_TIMEOUT_MS }).then(
-        (result) => result.exitCode === 0 ? undefined : stopFailureReason(result),
+        (result) => {
+          if (result.exitCode === NO_PROCESS_GROUP_EXIT) {
+            noProcessGroup = true;
+            return undefined;
+          }
+          return result.exitCode === 0 ? undefined : stopFailureReason(result);
+        },
         (error: unknown) => error instanceof Error ? error.message : "the exec could not run",
       ),
       new Promise<string>((resolveTimer) => {
@@ -728,14 +757,19 @@ async function runInContainerGroup(
     if (failure !== undefined) stopFailures.push(`AgentX could not stop the command in the container (${step}): ${failure}`);
   };
   let stopping: Promise<void> | undefined;
+  let stopStarted: () => void = () => undefined;
+  const stopBegan = new Promise<void>((resolveStart) => { stopStarted = resolveStart; });
   // Resolved when the command's own exec has returned: the wrapper's `wait` ended, so the group leader is gone.
   let leaderGone: () => void = () => undefined;
   const leaderExited = new Promise<void>((resolveLeader) => { leaderGone = resolveLeader; });
+  // Whether that exec returned on its own, rather than because the stop sequence aborted the local client at its end.
+  let clientAbortedByStop = false;
+  let leaderReturnedOnItsOwn = false;
   let timedOut = false;
   let aborted = false;
   const stop = () => {
     stopping ??= (async () => {
-      await signalGroup("TERM", TERM_SCRIPT);
+      await signalGroup("TERM", CONTAINER_TERM_SCRIPT);
       let graceTimer: NodeJS.Timeout | undefined;
       // An abort does not wait out the grace period once the leader has exited: the KILL then follows at once. Not unref'd:
       // the sequence is awaited, and the caller must not touch the workspace before it ends.
@@ -744,9 +778,11 @@ async function runInContainerGroup(
         ...(aborted ? [leaderExited] : []),
       ]);
       clearTimeout(graceTimer);
-      await signalGroup("KILL", KILL_SCRIPT);
+      await signalGroup("KILL", CONTAINER_KILL_SCRIPT);
+      clientAbortedByStop = true;
       controller.abort();
     })();
+    stopStarted();
   };
   const timer = command.timeoutMs !== undefined
     ? setTimeout(() => { timedOut = true; stop(); }, command.timeoutMs)
@@ -754,8 +790,9 @@ async function runInContainerGroup(
   // Not `controller.abort()` here: the local client ends when the stop sequence has run (or the leader has exited), so the result is joined.
   const onAbort = () => { aborted = true; stop(); };
   command.signal?.addEventListener("abort", onAbort, { once: true });
+  let clientNeverEnded = false;
   try {
-    const result = await exec([
+    const main = exec([
       "bash", "-c",
       // Job control only while starting the command, which puts it in its own process group; left
       // on, bash would also print a "Done" line into the output. C67: the folders after PATH (the task's Python user site, M2) apply inside the command's own
@@ -768,15 +805,32 @@ async function runInContainerGroup(
       signal: controller.signal,
       ...(command.onStdout !== undefined ? { onStdout: command.onStdout } : {}),
       ...(command.onStderr !== undefined ? { onStderr: command.onStderr } : {}),
-    }).finally(() => leaderGone());
+    }).finally(() => {
+      if (!clientAbortedByStop) leaderReturnedOnItsOwn = true;
+      leaderGone();
+    });
+    main.catch(() => undefined);
+    // The client is given CLIENT_END_BOUND_MS after the stop sequence to end; one that ignores its abort does not hold the caller for ever.
+    let boundTimer: NodeJS.Timeout | undefined;
+    const bound = stopBegan.then(() => stopping).then(() => new Promise<undefined>((resolveBound) => {
+      boundTimer = setTimeout(() => resolveBound(undefined), CLIENT_END_BOUND_MS);
+    }));
+    const outcome = await Promise.race([main, bound]).finally(() => clearTimeout(boundTimer));
     const wasAborted = aborted || command.signal?.aborted === true;
     // A timeout or an abort waits for the stop sequence, so the result says whether it worked.
     if (stopping !== undefined) await stopping;
+    if (outcome === undefined) {
+      clientNeverEnded = true;
+      stopFailures.push("AgentX could not stop the command in the container: its exec client did not end");
+    }
+    const result: DevcontainerProcess = outcome ?? { exitCode: null, stdout: "", stderr: "" };
+    // No process group to signal, and the command's own exec had not come back on its own: the command may not have started yet, and may start after this.
+    if (noProcessGroup && !leaderReturnedOnItsOwn) stopFailures.push("AgentX could not stop the command in the container: it found no process group to stop");
     // bash never started when the container has none, so there is no output.
-    if (!timedOut && !wasAborted && result.exitCode !== 0 && result.stdout === "" && NO_BASH.test(result.stderr)) {
+    if (!timedOut && !wasAborted && !clientNeverEnded && result.exitCode !== 0 && result.stdout === "" && NO_BASH.test(result.stderr)) {
       throw new Error(NO_BASH_MESSAGE);
     }
-    return { result, timedOut, aborted: wasAborted, stopFailures: [...stopFailures], killUnconfirmed: wasAborted && stopFailures.length > 0 };
+    return { result, timedOut, aborted: wasAborted, stopFailures: [...stopFailures], killUnconfirmed: (wasAborted || timedOut) && stopFailures.length > 0 };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     command.signal?.removeEventListener("abort", onAbort);

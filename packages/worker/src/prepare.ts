@@ -29,6 +29,7 @@ import {
   runDevcontainerCommand,
   type DevcontainerCli,
 } from "./devcontainer.js";
+import { assertWorkspaceReset } from "./workspace-quarantine.js";
 import { RunnerKillUnconfirmedError, runCollected, type CollectedProcess } from "./collected-process.js";
 import { describeCommandFailure } from "./command-failure.js";
 import { DOCKER_DATA_DIRECTORY, RUNTIME_BACKING_DIRECTORY } from "./devcontainer-policy.js";
@@ -255,6 +256,8 @@ function credentialSession(options: PrepareWorkspaceOptions, repository: { name:
  * the failed step is reported (`onFallback("checkout" | "setup")`), and the preparation runs once more WITHOUT the saved environment, as it always did. A failure of that second run is the real one.
  */
 export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promise<PreparationManifest> {
+  // A command of an earlier task that could not be confirmed stopped may still be writing this workspace: nothing is prepared in it until it is reset (workspace-quarantine.ts).
+  await assertWorkspaceReset(options.rootPath);
   if (options.savedEnv === undefined) return prepareWorkspaceOnce(options);
   try {
     return await prepareWorkspaceOnce(options);
@@ -774,7 +777,7 @@ export async function runProjectCommand(
   }
   // A stop (an abort or a timeout) that could not be confirmed: the command, or something it started, may still be running and writing the workspace.
   // That is a failure the caller must not step past (never an exit code), and it must not touch the workspace afterwards (FIX-RUNNER-ABORT-JOIN).
-  if (result.killUnconfirmed === true) throw new RunnerKillUnconfirmedError();
+  if (result.killUnconfirmed === true) throw new RunnerKillUnconfirmedError({ kind: "local", ...(result.pgid === undefined ? {} : { pgid: result.pgid }) });
   return {
     exitCode: result.exitCode ?? -1,
     stdout: result.stdout,

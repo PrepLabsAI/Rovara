@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 import { ProjectDefinitionSchema, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CONTAINER_KILL_SCRIPT,
+  CONTAINER_TERM_SCRIPT,
   containerBashOperations,
   createDevcontainerCli,
   devcontainerBashOperations,
@@ -22,7 +24,7 @@ import {
   type DevcontainerProcess,
 } from "../../packages/worker/src/devcontainer.js";
 import type { ContainerInspection } from "../../packages/worker/src/devcontainer-policy.js";
-import { TIMEOUT_KILL_GRACE_MS, runCollected, tailCollector } from "../../packages/worker/src/collected-process.js";
+import { RunnerKillUnconfirmedError, TIMEOUT_KILL_GRACE_MS, runCollected, tailCollector } from "../../packages/worker/src/collected-process.js";
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
@@ -39,8 +41,8 @@ const COMMAND_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && exec "$@") & child=$!
 const SHELL_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && eval "$1") & child=$!; set +m; echo "$child" > "$2"; wait "$child"; status=$?; command -p rm -f "$2" 2>/dev/null || :; exit "$status"';
 // TERM waits up to 5 s for the group file, then keeps the group ID in "$1.stop": the wrapper removes
 // the group file once the group leader exits, and KILL still needs the ID (#174 review).
-const KILL_TERM = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; case "$p" in ""|*[!0-9]*) exit 0;; esac; echo "$p" > "$1.stop"; out=$(kill -TERM -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
-const KILL_KILL = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; case "$p" in ""|*[!0-9]*) exit 0;; esac; out=$(kill -KILL -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
+const KILL_TERM = CONTAINER_TERM_SCRIPT;
+const KILL_KILL = CONTAINER_KILL_SCRIPT;
 const NO_BASH = 'OCI runtime exec failed: exec failed: unable to start container process: exec: "bash": executable file not found in $PATH: unknown';
 
 /**
@@ -565,23 +567,18 @@ describe("the devcontainer CLI seam", () => {
     }
   });
 
-  it("ends a timed-out project command whose kill execs never return, waiting at most 10 s for each, and says the stop failed (#174)", async () => {
+  it("ends a timed-out project command whose kill execs never return, waiting at most 10 s for each, and says the stop could not be confirmed (#174)", async () => {
     vi.useFakeTimers();
     try {
       const { cli, options, kills } = stoppableCli({ kill: () => new Promise(() => undefined) });
       const running = runDevcontainerCommand(cli, target, { cwd: "repo/sample", executable: "sleep", args: ["300"], timeoutSeconds: 2 });
       let settled = false;
-      void running.then(() => { settled = true; });
+      void running.then(() => { settled = true; }, () => { settled = true; });
       await vi.advanceTimersByTimeAsync(2_000 + 10_000 + TIMEOUT_KILL_GRACE_MS + 10_000 - 1);
       expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
-      await expect(running).resolves.toEqual({
-        exitCode: -1, timedOut: true, stdout: "",
-        stderr: [
-          "AgentX could not stop the command in the container (TERM): no answer within 10 s",
-          "AgentX could not stop the command in the container (KILL): no answer within 10 s",
-        ].join("\n"),
-      });
+      // A timeout whose stop did not work is not "timed out": the command may still be running (FIX-RUNNER-ABORT-JOIN).
+      await expect(running).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
       expect(kills()).toHaveLength(2);
       // Each kill exec has a timeout of its own, so a hung one does not stay running.
       for (const [index, args] of options.entries()) {
@@ -594,21 +591,16 @@ describe("the devcontainer CLI seam", () => {
     }
   });
 
-  it("says in a timed-out project command's output when a kill exec failed (#174 review)", async () => {
+  it("a timed-out project command whose kill exec failed is an unconfirmed stop, not a timeout (#174 review)", async () => {
     vi.useFakeTimers();
     try {
       const { cli } = stoppableCli({
         kill: () => Promise.resolve({ exitCode: 1, stdout: "bash: line 1: kill: (4242) - Operation not permitted\n", stderr: "" }),
       });
       const running = runDevcontainerCommand(cli, target, { cwd: "repo/sample", executable: "sleep", args: ["300"], timeoutSeconds: 1 });
+      const failed = expect(running).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
       await vi.advanceTimersByTimeAsync(1_000 + TIMEOUT_KILL_GRACE_MS);
-      await expect(running).resolves.toEqual({
-        exitCode: -1, timedOut: true, stdout: "",
-        stderr: [
-          "AgentX could not stop the command in the container (TERM): bash: line 1: kill: (4242) - Operation not permitted",
-          "AgentX could not stop the command in the container (KILL): bash: line 1: kill: (4242) - Operation not permitted",
-        ].join("\n"),
-      });
+      await failed;
     } finally {
       vi.useRealTimers();
     }
@@ -707,19 +699,16 @@ describe("the devcontainer CLI seam", () => {
     }
   });
 
-  it("tells the agent when its timed-out command could not be stopped in the container (#174 review)", async () => {
+  it("a timed-out agent's shell command that could not be stopped in the container is an unconfirmed stop (#174 review)", async () => {
     vi.useFakeTimers();
     try {
       const { cli } = stoppableCli({ kill: () => Promise.resolve({ exitCode: 1, stdout: "kill: Operation not permitted\n", stderr: "" }) });
       const output: string[] = [];
       const running = devcontainerBashOperations(cli, target).exec("sleep 60", "/mnt/workspace", { onData: (data) => output.push(data.toString()), timeout: 1 });
-      const failed = expect(running).rejects.toThrow("timeout:1");
+      const failed = expect(running).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
       await vi.advanceTimersByTimeAsync(1_000 + TIMEOUT_KILL_GRACE_MS);
       await failed;
-      expect(output).toEqual([
-        "\nAgentX could not stop the command in the container (TERM): kill: Operation not permitted\n",
-        "\nAgentX could not stop the command in the container (KILL): kill: Operation not permitted\n",
-      ]);
+      expect(output).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
@@ -768,7 +757,7 @@ describe("the devcontainer CLI seam", () => {
     await expectGone(Number.parseInt(output.join("").trim(), 10));
   }, 30_000);
 
-  it("reports a stop that kill refused, with real bash, rather than calling the group gone (#174 review)", async () => {
+  it("reports a stop that kill refused, with real bash, as an unconfirmed stop rather than calling the group gone (#174 review)", async () => {
     // BASH_ENV, read by the kill execs' bash only, makes kill refuse every signal as a group owned by
     // root would: "Operation not permitted" is not "No such process".
     const directory = await mkdtemp(join(tmpdir(), "agentx-174-"));
@@ -778,12 +767,8 @@ describe("the devcontainer CLI seam", () => {
       ...options,
       ...(command.some((arg) => arg.includes("kill -TERM") || arg.includes("kill -KILL")) ? { env: { PATH: process.env.PATH, BASH_ENV: refusing } } : {}),
     });
-    const output: string[] = [];
-    await expect(containerBashOperations(exec).exec("exec sleep 2", tmpdir(), { onData: (data) => output.push(data.toString()), timeout: 0.5 }))
-      .rejects.toThrow("timeout:0.5");
-    const text = output.join("");
-    expect(text).toMatch(/AgentX could not stop the command in the container \(TERM\): bash: kill: \(\d+\) - Operation not permitted/);
-    expect(text).toMatch(/AgentX could not stop the command in the container \(KILL\): bash: kill: \(\d+\) - Operation not permitted/);
+    await expect(containerBashOperations(exec).exec("exec sleep 2", tmpdir(), { onData: () => undefined, timeout: 0.5 }))
+      .rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
   }, 30_000);
 
   it("fails the agent's shell command with a clear error when the devcontainer has no bash (#174)", async () => {

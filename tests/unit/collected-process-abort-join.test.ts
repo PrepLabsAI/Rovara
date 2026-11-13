@@ -145,4 +145,20 @@ describe("runCollected joins an abort", () => {
     await delay(1_500);
     await expect(readFile(target, "utf8")).rejects.toThrow(/ENOENT/);
   });
+
+  it("L1: a stop that settled as confirmed sends no SIGKILL afterwards (the grace timer is cleared)", async () => {
+    const signals: Array<{ signal: string; at: number }> = [];
+    const startedAt = Date.now();
+    const control: ProcessControl = {
+      signalGroup: (child, signal) => { signals.push({ signal, at: Date.now() - startedAt }); try { process.kill(-child.pid!, signal); } catch { child.kill(signal); } },
+      groupAlive: (pgid) => { try { process.kill(-pgid, 0); return true; } catch { return false; } },
+    };
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+    const result = await runCollected("sleep", ["30"], { signal: controller.signal, killGraceMs: 400, control });
+    expect(result.killUnconfirmed).toBeUndefined();
+    // Past the grace period: the SIGKILL that used to be sent here, to a group that no longer exists, is not.
+    await delay(700);
+    expect(signals.map((entry) => entry.signal)).toEqual(["SIGTERM"]);
+  });
 });
