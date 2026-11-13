@@ -49,10 +49,13 @@ describe("turn record and alarm infrastructure", () => {
     expect(entries[0]!.DeletionPolicy).toBe("Retain");
   });
 
-  it("lets the Slack service only put turn records and the broker only read them", () => {
+  it("lets the Slack service only put turn records, and the broker read them and write only admin change audit records", () => {
     expect(actions(statementsForRole(template, "SlackOrchestratorTaskRole"))).toEqual(["dynamodb:PutItem"]);
     const broker = actions(statementsForRole(template, "BrokerServiceRole"));
-    expect(broker).toEqual(["dynamodb:Query"]);
+    // Spec 064: the sign-in client admin changes are audited under CHANGE#, and the broker writes nothing else here.
+    expect(broker).toEqual(["dynamodb:Query", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"]);
+    const writes = statementsForRole(template, "BrokerServiceRole").filter((statement) => JSON.stringify(statement.Action).includes("PutItem") && JSON.stringify(statement.Resource).includes("TurnRecords"));
+    expect(writes.map((statement) => JSON.stringify(statement.Condition))).toEqual([JSON.stringify({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } })]);
     expect(JSON.stringify(template.toJSON())).toContain("TURN_RECORDS_TABLE_NAME");
   });
 

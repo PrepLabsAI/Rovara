@@ -731,16 +731,18 @@ export function createPlanDependencies(input: AwsBrokerInput): PlanDependencies 
 
 function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies {
   const developer = dependencies.developer;
+  // Spec 064: the legacy deployment's linking sign-in serves the sign-in client changes, its only kinds.
+  const signIn = developer ?? dependencies.linking;
   const registry = dependencies.credentialRegistry;
   return {
     reads: adminReadDependencies(dependencies),
     actions: {
       documentClient: dependencies.documentClient, tableName: dependencies.tableName,
-      ...(developer === undefined ? {} : { signInTableName: developer.signInTableName }),
+      ...(signIn === undefined ? {} : { signInTableName: signIn.signInTableName }),
       ...(developer?.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
       limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
       ...(developer?.endDeveloperSessions === undefined ? {} : { endDeveloperSessions: developer.endDeveloperSessions }),
-      ...(developer?.signInClients === undefined ? {} : { signInClients: developer.signInClients }),
+      ...(signIn?.signInClients === undefined ? {} : { signInClients: signIn.signInClients }),
       now: Date.now,
     },
     handlers: adminChangeHandlers(dependencies),
@@ -751,9 +753,16 @@ function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies
   };
 }
 
-/** Spec 025 phase 25e: admin changes exist only with developer sign-in and a TurnRecords table (D14). */
+/** Sign-in client changes: the only admin changes the legacy deployment takes (spec 064), confirmed in the CLI. */
+const LINKING_CHANGE_KINDS: ReadonlySet<string> = new Set(["register_sign_in_client", "remove_sign_in_client"]);
+
+/**
+ * Spec 025 phase 25e: admin changes exist only with developer sign-in and a TurnRecords table (D14). Spec 064: the
+ * legacy deployment's linking sign-in serves them too, for the sign-in client kinds alone.
+ */
 function adminChangeDependencies(dependencies: AwsBrokerDependencies, reads: AdminReadDependencies): AdminChangeDependencies | undefined {
-  const developer = dependencies.developer;
+  const linkingOnly = dependencies.developer === undefined && dependencies.linking !== undefined;
+  const developer = dependencies.developer ?? dependencies.linking;
   if (developer === undefined || dependencies.turnRecordsTableName === undefined) return undefined;
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...entry }));
   const reader = adminReader(reads);
@@ -770,7 +779,9 @@ function adminChangeDependencies(dependencies: AwsBrokerDependencies, reads: Adm
     ...(developer.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
     // E16: the environment's pop-up switch. R5: Slack is a method wherever a Slack team is set up,
     // whatever Slack sign-in says; each change still needs the admin's own linked Slack user (FR-041).
-    confirm: dependencies.adminChanges?.confirm ?? { elicitation: process.env.MCP_CONFIRM_ELICITATION !== "disabled", slack: developer.slackTeamId !== undefined },
+    // The legacy deployment has no AI-tool pop-up (no MCP server there): the CLI, or Slack where a team is set.
+    confirm: dependencies.adminChanges?.confirm ?? { elicitation: !linkingOnly && process.env.MCP_CONFIRM_ELICITATION !== "disabled", slack: developer.slackTeamId !== undefined },
+    ...(linkingOnly ? { kinds: LINKING_CHANGE_KINDS } : {}),
     now,
     newId: randomUUID,
     log,
