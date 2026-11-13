@@ -14,7 +14,7 @@ import { type FlowTier, type FlowTierKind, type FlowTierLevel, type WorkflowFlow
 import { CHANGED_FILES_MAX } from "../proof/changed-files.js";
 import { isTestPath } from "../proof/verification-report.js";
 import {
-  BIDI_CONTROL, fileTypeOf, hasConfusableLetter, hasMixedScriptWord, hasNonAsciiLetter, isApiShapePath, isCheckConfigPath, isCiFilePath, isDocsAllowlistPath, isDocsBuildConfigPath, isHookPath, isInfraPath, isInstructionPath, isScannerIgnorePath,
+  BIDI_CONTROL, fileTypeOf, hasConfusableLetter, hasMixedScriptWord, hasNonAsciiLetter, isApiShapePath, isCheckConfigPath, isCiFilePath, isDocsAllowlistPath, isDocsBuildConfigPath, isHookPath, isInfraPath, isInstructionPath, isPromptHintPath, isScannerIgnorePath,
   isTierSensitivePath, normalizedTierPath,
 } from "./sensitive-list.js";
 
@@ -48,7 +48,7 @@ export const TIER_REASON_CODES = [
   // risky
   "incomplete_diff", "no_diff_files", "too_many_files", "unreadable_content", "binary_content", "mode_or_type_change", "symlink_suspected", "submodule", "lfs_pointer",
   "sensitive_path", "instruction_file", "hook_file", "git_settings_file", "env_file", "package_source_setting", "registry_source_changed", "dependency_source", "install_script",
-  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security", "docs_executes", "bidi_control", "line_break_character", "path_control_character", "ci_fetch_and_run", "ci_net_send", "ci_check_removed", "invisible_character", "confusable_text", "reviewer_injection_text", "docs_build_hook",
+  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security", "docs_executes", "bidi_control", "eval_hint", "line_break_character", "path_control_character", "ci_fetch_and_run", "ci_net_send", "ci_check_removed", "invisible_character", "confusable_text", "reviewer_injection_text", "docs_build_hook",
   // standard
   "more_than_lines", "more_than_files", "two_or_more_modules", "api_change", "new_dependency", "lockfile_not_understood", "code_file_deleted", "test_file_deleted", "no_files_named", "request_mentions_sensitive_area",
   "unrecognised_file_type", "long_lines", "package_alias", "lock_package_changed", "script_changed", "text_data_file", "vendored_code", "check_weakened", "docs_include", "docs_not_plain", "docs_unread", "docs_site_build", "docs_large", "scanner_ignore_file", "docs_build_config",
@@ -148,7 +148,7 @@ export interface HeadFacts {
 
 /** A document on the docs route: README*, CHANGELOG*, CONTRIBUTING* and `docs/**` in Markdown, reStructuredText or AsciiDoc, in no instruction, skill, prompt, agent, infrastructure or sensitive area. */
 function isDocsPath(path: string): boolean {
-  return isDocsAllowlistPath(path) && !NOT_DOCS_NAME.test(nameOf(path)) && !isTierSensitivePath(path) && !isInstructionPath(path) && !isHookPath(path) && !isInfraPath(path) && !isCiFilePath(path)
+  return isDocsAllowlistPath(path) && !NOT_DOCS_NAME.test(nameOf(path)) && !isTierSensitivePath(path) && !isInstructionPath(path) && !isPromptHintPath(path) && !isHookPath(path) && !isInfraPath(path) && !isCiFilePath(path)
     && !hasConfusableLetter(path) && !hasNonAsciiLetter(path);
 }
 
@@ -612,6 +612,8 @@ function movingActions(added: readonly string[], removed: readonly string[]): bo
 interface FileReading {
   risky: TierReason[];
   standard: TierReason[];
+  /** Notes that do not raise the tier (an `eval_hint` for a product prompt file). */
+  hints: TierReason[];
   kinds: Set<TierKind>;
   /** Lines of code the change adds and removes in this file (a document, a lock file and dependency pins are none). */
   codeLines: number;
@@ -657,7 +659,7 @@ const URL_ANYWHERE = /[a-z][a-z0-9+.-]*:\/\/[^\s"')]+/giu;
 const PATH_CHARS_MAX = 4_096;
 
 function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
-  const reading: FileReading = { risky: [], standard: [], kinds: new Set(), codeLines: 0, countsAsFile: true, isCode: true, isTest: false };
+  const reading: FileReading = { risky: [], standard: [], hints: [], kinds: new Set(), codeLines: 0, countsAsFile: true, isCode: true, isTest: false };
   const here = (code: string): TierReason => ({ code, path: file.path.slice(0, FLOW_REASON_PATH_MAX) });
   const names = [file.path, ...(file.previousPath === undefined ? [] : [file.previousPath])];
   const removed = file.status === "removed";
@@ -673,6 +675,7 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name)) reading.risky.push(reasonFor("path_control_character"));
     if (isHookPath(name)) reading.risky.push(reasonFor("hook_file"));
     if (isInstructionPath(name)) reading.risky.push(reasonFor("instruction_file"));
+    else if (isPromptHintPath(name)) reading.hints.push(reasonFor("eval_hint"));
     if (isTierSensitivePath(name)) reading.risky.push(reasonFor("sensitive_path"));
     if (isInfraPath(name)) reading.risky.push(reasonFor("infra_file"));
     if (GIT_SETTINGS_FILES.test(normal)) reading.risky.push(reasonFor("git_settings_file"));
@@ -890,6 +893,7 @@ export function tierFromDiff(input: DiffInput, context: TierContext): ChangeTier
   const limits = context.thresholds ?? DEFAULT_TIER_THRESHOLDS;
   const risky: TierReason[] = [];
   const standard: TierReason[] = [];
+  const hints: TierReason[] = [];
   const kinds = new Set<TierKind>();
   if (!input.complete) risky.push(withoutPath("incomplete_diff"));
   if (input.files.length === 0) risky.push(withoutPath("no_diff_files"));
@@ -904,6 +908,7 @@ export function tierFromDiff(input: DiffInput, context: TierContext): ChangeTier
     const reading = readFile(file, context.head);
     risky.push(...reading.risky);
     standard.push(...reading.standard);
+    hints.push(...reading.hints);
     for (const kind of reading.kinds) kinds.add(kind);
     lines += reading.codeLines;
     bytes += reading.addedBytes ?? 0;
@@ -924,7 +929,7 @@ export function tierFromDiff(input: DiffInput, context: TierContext): ChangeTier
   if (api !== undefined) standard.push({ code: "api_change", path: api.slice(0, FLOW_REASON_PATH_MAX) });
   const level: TierLevel = risky.length > 0 ? "risky" : standard.length > 0 ? "standard" : "small";
   return {
-    level, kinds: [...kinds].sort(), source: "diff", reasons: collect([...risky, ...standard]),
+    level, kinds: [...kinds].sort(), source: "diff", reasons: collect([...risky, ...standard, ...hints]),
     ...(context.headSha === undefined ? {} : { headSha: context.headSha }), ...(context.mergeBase === undefined ? {} : { mergeBase: context.mergeBase }), at: context.at,
   };
 }
@@ -949,6 +954,7 @@ export function estimateTier(input: EstimateInput, context: TierContext): Change
   const paths = [...new Set((input.plannedPaths ?? []).map((path) => path.trim()).filter((path) => path.length > 0))];
   const risky: TierReason[] = [];
   const standard: TierReason[] = [];
+  const hints: TierReason[] = [];
   const kinds = new Set<TierKind>();
   if (paths.length === 0) standard.push(withoutPath("no_files_named"));
   let files = 0;
@@ -960,6 +966,7 @@ export function estimateTier(input: EstimateInput, context: TierContext): Change
     if (hasConfusableLetter(path)) risky.push(reasonFor("confusable_path"));
     if (isHookPath(path)) risky.push(reasonFor("hook_file"));
     if (isInstructionPath(path)) risky.push(reasonFor("instruction_file"));
+    else if (isPromptHintPath(path)) hints.push(reasonFor("eval_hint"));
     if (isTierSensitivePath(path)) risky.push(reasonFor("sensitive_path"));
     if (isInfraPath(path)) risky.push(reasonFor("infra_file"));
     if (GIT_SETTINGS_FILES.test(normal)) risky.push(reasonFor("git_settings_file"));
@@ -980,7 +987,7 @@ export function estimateTier(input: EstimateInput, context: TierContext): Change
   if ((modules.size > 0 ? modules : testModules).size >= 2) standard.push(withoutPath("two_or_more_modules"));
   if (input.requestText !== undefined && SENSITIVE_REQUEST_HINT.test(input.requestText)) standard.push(withoutPath("request_mentions_sensitive_area"));
   const level: TierLevel = risky.length > 0 ? "risky" : standard.length > 0 ? "standard" : "small";
-  return { level, kinds: [...kinds].sort(), source: "estimate", reasons: collect([...risky, ...standard]), ...(context.headSha === undefined ? {} : { headSha: context.headSha }), at: context.at };
+  return { level, kinds: [...kinds].sort(), source: "estimate", reasons: collect([...risky, ...standard, ...hints]), ...(context.headSha === undefined ? {} : { headSha: context.headSha }), at: context.at };
 }
 
 // ---- only up
@@ -1045,7 +1052,7 @@ const REASON_PHRASES: Readonly<Record<string, string>> = {
   registry_source_changed: "a package source", dependency_source: "a package source", install_script: "an install script", ci_privileged: "a privileged CI setting", package_source_setting: "a package source setting",
   confusable_path: "a path with a look-alike letter", infra_file: "an infrastructure file", instruction_import: "a file an instruction file reads", ci_unpinned_action: "a CI action that is not pinned to a commit",
   path_too_long: "a path too long to list", link_kind_unknown: "a path whose kind Rovara did not check", ignore_file: "an ignore file", secret_like_text: "text that looks like a credential", script_command: "a script that runs a command", check_weakened_security: "a security check weakened",
-  line_break_character: "a line-ending character that reads differently by reader", path_control_character: "a control character in a file name",
+  eval_hint: "a prompt file that needs the evaluation check", line_break_character: "a line-ending character that reads differently by reader", path_control_character: "a control character in a file name",
   ci_fetch_and_run: "a CI step that fetches code and runs it", ci_net_send: "a CI step that sends data out", ci_check_removed: "a CI step that no longer runs the tests", invisible_character: "invisible text",
   docs_executes: "a document line that runs something", bidi_control: "text that reorders what is shown", confusable_text: "a word that mixes look-alike letters", reviewer_injection_text: "a line written for the reviewer", docs_build_hook: "a hook of a documentation build",
   docs_not_plain: "a document line that is not plain prose", docs_unread: "a document Rovara could not read in full", docs_site_build: "a document of a site that is built", docs_large: "more than 300 changed document lines", scanner_ignore_file: "a file that tells a scanner what to skip", docs_build_config: "the setup of a documentation build",
