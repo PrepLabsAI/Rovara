@@ -21,7 +21,7 @@ export const recoveryRowKey = (taskId: string): { pk: "WORKFLOW_MERGE_RECOVERY";
 // ---- the tracking items
 
 const TRACKING_FIELDS = [
-  "orgId", "taskId", "repositoryId", "number", "version", "headSha", "draft", "state", "baseBranch", "ci", "ciBasis", "checksEverSeen", "failingChecks", "review", "approval",
+  "orgId", "taskId", "repositoryId", "number", "version", "headSha", "draft", "state", "baseBranch", "ci", "ciBasis", "ciUnreadableSince", "checksEverSeen", "failingChecks", "review", "approval",
   "branch", "headByRovara", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "nudges", "syncs", "mergeClaim", "decisionDigest", "observedAt",
 ] as const;
 
@@ -60,7 +60,7 @@ export function publicTrackingItem(item: MergeTrackingItem): Omit<MergeTrackingI
   return rest;
 }
 
-const OPTIONAL_FIELDS = ["approval", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt"] as const;
+const OPTIONAL_FIELDS = ["approval", "lastRovaraPushAt", "readyAt", "reviewersRequestedAt", "ciUnreadableSince"] as const;
 
 /** The write of the next tracking item: a create when there is no readable prior one, else an update conditioned on the version read. It never removes `mergeClaim`. */
 export function trackingWriteItem(prior: MergeTrackingItem | undefined, next: MergeTrackingItem): TransactItem {
