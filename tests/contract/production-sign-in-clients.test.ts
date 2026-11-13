@@ -6,6 +6,7 @@ import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
 import { signInClientsThroughLambda } from "../../packages/broker/src/aws/developer-routes.js";
 import { createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { identityHarness } from "../support/developer-fakes.js";
+import { OMAR } from "../support/developer-task-broker.js";
 
 const registration = { name: "Rovara Cloud", audience: "rovara-cloud", redirectUris: ["https://cloud.example.com/auth/callback"], loopback: true };
 
@@ -33,6 +34,17 @@ describe("admin changes in the legacy deployment (spec 064)", () => {
     const removal = await harness.propose({ kind: "remove_sign_in_client", clientId: "rovara-cloud" }, ["cli"]);
     await harness.apply((removal.body.change as { changeId: string }).changeId, "cli");
     expect(rows()).toEqual([]);
+  });
+
+  it("grants and revokes a signed-in person's access to a project, so the access check lists it", async () => {
+    const { harness } = await production();
+    const grant = await harness.propose({ kind: "grant_project_access", project: "payments", developer: OMAR.developerId }, ["cli"]);
+    expect(grant.status).toBe(201);
+    expect((await harness.apply((grant.body.change as { changeId: string }).changeId, "cli")).status).toBe(200);
+    expect(harness.db.get(`MEMBER#${OMAR.developerId}`, "PROJECT#payments")).toMatchObject({ role: "developer" });
+    const revoke = await harness.propose({ kind: "revoke_project_access", project: "payments", developer: OMAR.developerId }, ["cli"]);
+    await harness.apply((revoke.body.change as { changeId: string }).changeId, "cli");
+    expect(harness.db.get(`MEMBER#${OMAR.developerId}`, "PROJECT#payments")).toBeUndefined();
   });
 
   it("refuses every other kind of change before planning it, and stores nothing", async () => {
