@@ -60,7 +60,10 @@ function worldRunners(world: World) {
       calls.push(command);
       world.before?.(index);
       const step = world.runs[Math.min(index, world.runs.length - 1)]!;
-      if (step === "hang") await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+      if (step === "hang") {
+        await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+        return { exitCode: null, timedOut: false, stdout: "", stderr: "" };
+      }
       if (step === "timeout") return { exitCode: null, timedOut: true, stdout: "", stderr: "" };
       const path = join(root, command.args.some((arg) => arg.includes("out.json")) ? "out.json" : "report.xml");
       if (step === "unreadable") await writeFile(path, "<testsuite><testcase name=");
@@ -261,9 +264,14 @@ describe("splitFailures is the nightly's own", () => {
 
 // ---- the extension: the extra turn and what the agent reads
 
+/** Loads the extension into the fake Pi (an inline extension is a name and a factory). */
+function install(extension: unknown, pi: unknown): void {
+  (extension as { factory: (pi: unknown) => void }).factory(pi);
+}
+
 function fakePi() {
-  const handlers = new Map<string, (event: unknown, context: unknown) => Promise<unknown> | unknown>();
-  return { pi: { on: (name: string, handler: (event: unknown, context: unknown) => unknown) => { handlers.set(name, handler as never); } }, settle: () => handlers.get("agent_before_settle")!({ outcome: "completed", entries: [] }, { signal: new AbortController().signal }) as Promise<{ continue?: boolean; entries?: Array<{ customType?: string; content?: string }> }> };
+  const handlers = new Map<string, (event: unknown, context: unknown) => unknown>();
+  return { pi: { on: (name: string, handler: (event: unknown, context: unknown) => unknown) => { handlers.set(name, handler); } }, settle: () => handlers.get("agent_before_settle")!({ outcome: "completed", entries: [] }, { signal: new AbortController().signal }) as Promise<{ continue?: boolean; entries?: Array<{ customType?: string; content?: string }> }> };
 }
 
 async function settle(world: World, options: { flaky?: boolean; commands?: ProjectCommand[]; checks?: Array<{ kind: string; selectArgs?: readonly string[] }>; second?: boolean; budgetMs?: number } = {}) {
@@ -278,7 +286,7 @@ async function settle(world: World, options: { flaky?: boolean; commands?: Proje
     ...(options.flaky === false ? {} : { flakyRerun: { rootPath: root, checks: options.checks ?? [TESTS] } }),
   });
   const pi = fakePi();
-  extension.factory(pi.pi as never);
+  install(extension, pi.pi);
   const first = await pi.settle();
   const secondResult = options.second === true ? await pi.settle() : undefined;
   return { first, second: secondResult, reports, calls };
@@ -344,7 +352,7 @@ describe("the extra turn", () => {
       onReport: () => undefined, flakyRerun: { rootPath: root, checks: [TESTS, TESTS] },
     });
     const pi = fakePi();
-    extension.factory(pi.pi as never);
+    install(extension, pi.pi);
     const result = await pi.settle();
     expect(result.continue).toBe(true);
     const text = result.entries?.at(-1)?.content ?? "";

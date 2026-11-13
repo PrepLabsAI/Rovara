@@ -1202,7 +1202,7 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
 
   describe("TE-C6: a failing test that passes on its one rerun (the plan's flakyRerun)", () => {
     const pytestCheck: ProjectCommand = { cwd: "app", executable: "pytest", args: ["--junitxml=../report.xml"], timeoutSeconds: 60 };
-    const plan = (_flakyRerun: true) => ({
+    const plan = () => ({
       revision: 1, digest: "d".repeat(64), roundBudgetMin: 30, selection: { method: "full" as const, alwaysRun: [], fullSuiteOn: [] },
       checks: [{ id: "unit", kind: "test" as const, selectArgs: ["{tests}"] }], flakyRerun: true as const,
     });
@@ -1225,7 +1225,7 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
     it("flaky: no extra turn, the model is never told, and the report still says regression", async () => {
       const rootPath = await gitWorkspaceRoot([pytestCheck]);
       const fake = runnersFor(rootPath, "passed");
-      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`)], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT", testEnvironment: plan(true) });
+      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`)], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT", testEnvironment: plan() });
       expect(run.failure).toBeUndefined();
       expect(run.report).toMatchObject({ status: "regression", extraTry: "not_needed" });
       expect(run.report!.checks).toEqual([expect.objectContaining({ id: "readiness:0", before: "passed", after: "failed", class: "regression" })]);
@@ -1237,7 +1237,7 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
     it("a verification run that asked for evidence reruns once and names the flaky test in evidence-raw.json; the report is untouched and the raw file reads the round's own report", async () => {
       const rootPath = await gitWorkspaceRoot([pytestCheck]);
       const fake = runnersFor(rootPath, "passed");
-      const run = await runTask({ steps: [], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "CHECKS", testEnvironment: plan(true), evidenceCapture: true });
+      const run = await runTask({ steps: [], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "CHECKS", testEnvironment: plan(), evidenceCapture: true });
       expect(run.failure).toBeUndefined();
       expect(run.report).toMatchObject({ status: "regression" });
       expect(run.report!.checks[0]).toMatchObject({ class: "regression", after: "failed" });
@@ -1258,7 +1258,7 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
     it("control run: a test that fails again still gives the extra turn, with the failure in what the model reads", async () => {
       const rootPath = await gitWorkspaceRoot([pytestCheck]);
       const fake = runnersFor(rootPath, "failed");
-      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("I could not fix it.\nAgentX result: not done")], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT", testEnvironment: plan(true) });
+      const run = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("I could not fix it.\nAgentX result: not done")], readiness: [pytestCheck], runners: fake.runners, rootPath, workflowMode: "IMPLEMENT", testEnvironment: plan() });
       expect(run.report).toMatchObject({ status: "regression", extraTry: "given" });
       expect(run.requests.flatMap(checksMessages)).toHaveLength(1);
     });
