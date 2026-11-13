@@ -11,7 +11,7 @@ const AT = "2026-11-09T10:00:00.000Z";
 
 type Mode = { patches: boolean; failing: boolean; calls: number };
 
-/** A host that calls itself github and lists each changed file with the text of its change (as GitHub does), unless told not to or to fail. */
+/** A host that calls itself github. The fake lists each file with the text of its change, as GitHub does; this one can be told to leave the text out, or to fail. */
 function patchingHost(model: FakeHostModel, mode: Mode): CodeHost {
   const fake = new FakeCodeHost(model);
   return Object.create(fake, {
@@ -21,15 +21,7 @@ function patchingHost(model: FakeHostModel, mode: Mode): CodeHost {
         mode.calls += 1;
         if (mode.failing) throw new Error("the host is down");
         const read = await fake.changedFiles(ref, page, scope);
-        const head = model.revision(model.headRevisionOf(model.getChangeRequest(ref.id))).files;
-        return {
-          ...read,
-          files: read.files.map((file) => {
-            if (!mode.patches || file.status === "removed") return file;
-            const lines = (head.get(file.path) ?? "").split("\n").filter((line, index, all) => !(index === all.length - 1 && line === ""));
-            return { ...file, patch: `@@ -0,0 +1,${lines.length} @@\n${lines.map((line) => `+${line}`).join("\n")}` };
-          }),
-        };
+        return mode.patches ? read : { ...read, files: read.files.map(({ patch: _patch, ...file }) => file) }; // eslint-disable-line @typescript-eslint/no-unused-vars -- left out on purpose
       },
     },
   }) as CodeHost;
@@ -45,7 +37,7 @@ const rejects = async (run: () => Promise<unknown>): Promise<{ code?: string; me
 };
 
 async function worldAt(level: "small" | "standard" | "risky", mode: Mode = { patches: true, failing: false, calls: 0 }) {
-  const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode) });
+  const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode), withoutTier: true });
   await world.seedTracking();
   const flow = { rulesVersion: 1, tier: { level, kinds: ["code_config"], source: "diff", reasons: [], at: AT } };
   await world.setWorkflow({ flow });
@@ -143,15 +135,48 @@ describe("the merge recomputes the change tier from the host", () => {
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
   });
 
-  it("a task with no recorded tier merges as it always did, and the host's files are not read for a tier", async () => {
+  it("a task with no recorded tier is judged too, as if approved at the lowest tier: a small change merges and the tier is recorded", async () => {
     const mode: Mode = { patches: true, failing: false, calls: 0 };
-    const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode) });
+    const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode), withoutTier: true });
     await world.seedTracking();
     const { run, prepared } = await press(world);
     expect(prepared.tier).toBeUndefined();
     expect((await run()).status).toBe("MERGED");
-    expect(mode.calls).toBe(0);
-    expect((await world.task()).workflow.flow).toBeUndefined();
+    expect(mode.calls).toBeGreaterThan(0);
+    expect(await tierOf(world)).toMatchObject({ level: "small", source: "merge" });
+  });
+
+  it("a task with no recorded tier whose change is above small is refused once, then goes through at the tier it was shown", async () => {
+    const mode: Mode = { patches: true, failing: false, calls: 0 };
+    const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode), withoutTier: true });
+    await world.seedTracking();
+    await pushed(world, { "src/auth/session.ts": "export const session = 1;\n" });
+    const refusal = await rejects((await press(world)).run);
+    expect(refusal.message).toBe("This change now touches a sensitive path (src/auth/session.ts), so it needs risky checks.");
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
+    const again = await press(world);
+    expect(again.prepared.tier).toBe("risky");
+    expect((await again.run()).status).toBe("MERGED");
+  });
+
+  it("the merge also compares with the tier the planning steps were chosen at: steps skipped at small, a change that is standard now is refused every time", async () => {
+    const mode: Mode = { patches: true, failing: false, calls: 0 };
+    const world = await mergeWorld({ codeHost: (model) => patchingHost(model, mode), withoutTier: true });
+    await world.seedTracking();
+    await pushed(world, { "src/big.ts": `${Array.from({ length: 150 }, (_, index) => `export const v${index} = ${index};`).join("\n")}\n` });
+    const flow = {
+      rulesVersion: 1, tier: { level: "standard", kinds: ["code_config"], source: "diff", reasons: [{ code: "more_than_lines" }], at: AT },
+      tierHistory: [{ level: "small", kinds: ["code_config"], source: "estimate", reasons: [], at: AT }], skippedSteps: ["plan_check", "design_review"],
+    };
+    await world.setWorkflow({ flow });
+    // The approval is at standard (the recorded tier), yet the planning steps were skipped at small.
+    const first = await press(world);
+    expect(first.prepared.tier).toBe("standard");
+    expect((await rejects(first.run)).message).toBe("This change now touches more than 100 lines of code, so it needs standard checks.");
+    expect((await rejects((await press(world)).run)).message).toContain("needs standard checks");
+    // With no step skipped the whole plan ran, and the same change merges.
+    await world.setWorkflow({ flow: { ...flow, skippedSteps: [] } });
+    expect((await (await press(world)).run()).status).toBe("MERGED");
   });
 
   it("the approval digest names the tier, so an approval given at one tier is not valid at another", async () => {

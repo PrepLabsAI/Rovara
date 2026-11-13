@@ -12,7 +12,9 @@
 import { type FlowTier, type FlowTierKind, type FlowTierLevel, type WorkflowFlow, FLOW_CATCH_COUNTERS_MAX, FLOW_MAX_BYTES, FLOW_REASON_PATH_MAX, FLOW_TIER_HISTORY_MAX, FLOW_TIER_REASONS_MAX, flowRecordBytes } from "@agentx/contracts";
 import { CHANGED_FILES_MAX } from "../proof/changed-files.js";
 import { isTestPath } from "../proof/verification-report.js";
-import { isCiFilePath, isHookPath, isInstructionPath, isTierSensitivePath, normalizedTierPath } from "./sensitive-list.js";
+import {
+  fileTypeOf, hasConfusableLetter, isApiShapePath, isCheckConfigPath, isCiFilePath, isHookPath, isInfraPath, isInstructionPath, isTierSensitivePath, normalizedTierPath,
+} from "./sensitive-list.js";
 
 /** The version of these rules, written with every tier (`flow.rulesVersion`), so a stored tier says which rules made it. */
 export const TIER_RULES_VERSION = 1;
@@ -44,9 +46,10 @@ export const TIER_REASON_CODES = [
   // risky
   "incomplete_diff", "no_diff_files", "too_many_files", "unreadable_content", "binary_content", "mode_or_type_change", "symlink_suspected", "submodule", "lfs_pointer",
   "sensitive_path", "instruction_file", "hook_file", "git_settings_file", "env_file", "package_source_setting", "registry_source_changed", "dependency_source", "install_script",
-  "ci_privileged", "large_change",
+  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted",
   // standard
-  "more_than_lines", "more_than_files", "two_or_more_modules", "api_change", "new_dependency", "lockfile_not_understood", "code_file_deleted", "no_files_named", "request_mentions_sensitive_area",
+  "more_than_lines", "more_than_files", "two_or_more_modules", "api_change", "new_dependency", "lockfile_not_understood", "code_file_deleted", "test_file_deleted", "no_files_named", "request_mentions_sensitive_area",
+  "unrecognised_file_type", "long_lines", "package_alias", "lock_package_changed",
 ] as const;
 
 // ---- input
@@ -79,6 +82,8 @@ export interface TierContext {
   /** ISO time of the computation. */
   at: string;
   thresholds?: TierThresholds | undefined;
+  /** What is known of the code at the head, beyond the diff. */
+  head?: HeadFacts | undefined;
 }
 
 // ---- reading a patch
@@ -109,7 +114,6 @@ const BINARY_NOTE = /^(?:Binary files .* differ|GIT binary patch)\s*$/mu;
 
 // ---- classes of file
 
-const PROSE_EXTENSION = /\.(md|markdown|rst|adoc|txt)$/u;
 const baseName = (path: string): string => path.split("/").at(-1) ?? "";
 /** The file name of a path as the rules read it (normalized, so `README.MD` and `SECURITY.md` are read like their lower-case names). */
 const nameOf = (path: string): string => baseName(normalizedTierPath(path));
@@ -117,10 +121,30 @@ const nameOf = (path: string): string => baseName(normalizedTierPath(path));
 const NOT_DOCS_NAME = /^(?:[^/]*(?:requirements|constraints)[^/]*\.txt|cmakelists\.txt|robots\.txt|ads\.txt|[^/]*\.lock|codeowners|license[^/]*|\.env[^/]*|security[^/]*)$/u;
 /** Dependency pins kept in a folder of their own (`requirements/base.txt`). */
 const PINS_FOLDER = /(?:^|\/)(?:requirements|constraints)\/[^/]*\.txt$/u;
+const PROSE_EXTENSION = /\.(md|markdown|rst|adoc|txt)$/u;
 
-function isProsePath(path: string): boolean {
+/** Where a fact about a file is kept: by repository and path as the host listed it. */
+export const factKey = (repository: string | undefined, path: string): string => `${repository ?? ""}\u0000${path}`;
+
+/**
+ * What is known of the code at the head commit, beyond the diff. All of it is optional; what is not given is not known, and the rules then fall back to what the diff alone shows (never to a lower tier).
+ */
+export interface HeadFacts {
+  /** The text of files at the head (keyed by `factKey`), so the heading and fence a changed line sits in is known even when the hunk does not show it. */
+  text?: ReadonlyMap<string, string> | undefined;
+  /** Paths (normalized, keyed by `factKey`) that an instruction file at the head imports or links: a document an instruction file reads is an instruction. */
+  instructionImports?: ReadonlySet<string> | undefined;
+  /** False when the instruction files could not be read: no document can then be cleared as plain docs. */
+  importsKnown?: boolean | undefined;
+  /** Paths (keyed by `factKey`) the host says are a symbolic link or a submodule at the head. */
+  links?: ReadonlySet<string> | undefined;
+}
+
+/** A document on the allowlist: prose by extension, with a name that is not a pin, lock, licence or security file, in no instruction, skill, prompt, agent, infrastructure or sensitive area. */
+function isDocsPath(path: string): boolean {
   const name = nameOf(path);
-  return PROSE_EXTENSION.test(name) && !NOT_DOCS_NAME.test(name) && !PINS_FOLDER.test(normalizedTierPath(path)) && !isTierSensitivePath(path) && !isInstructionPath(path) && !isHookPath(path);
+  return fileTypeOf(path) === "prose" && PROSE_EXTENSION.test(name) && !NOT_DOCS_NAME.test(name) && !PINS_FOLDER.test(normalizedTierPath(path))
+    && !isTierSensitivePath(path) && !isInstructionPath(path) && !isHookPath(path) && !isInfraPath(path) && !hasConfusableLetter(path);
 }
 
 const LOCKFILE_NAMES = new Set([
@@ -135,75 +159,141 @@ const isRequirementsFile = (path: string): boolean => /^[^/]*(?:requirements|con
 const isManifest = (path: string): boolean => MANIFEST_NAMES.has(baseName(path)) || /\.csproj$/u.test(baseName(path)) || isRequirementsFile(path);
 
 /** Files that say where packages come from. A change to one is risky whatever it says. */
-const PACKAGE_SOURCE_FILES = /(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.ya?ml)?|\.pnpmfile\.c?js|pip\.(?:conf|ini)|\.pypirc|nuget\.config|bunfig\.toml|\.condarc|\.gemrc|\.bundle\/config|\.cargo\/config(?:\.toml)?|\.mvn\/settings\.xml|settings\.xml|\.npmignore-registry)$/u;
+const PACKAGE_SOURCE_FILES = /(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.ya?ml)?|\.pnpmfile\.c?js|pip\.(?:conf|ini)|\.pypirc|nuget\.config|bunfig\.toml|\.condarc|\.gemrc|\.bundle\/config|\.cargo\/config(?:\.toml)?|\.mvn\/settings\.xml|settings\.xml|uv\.toml|\.uv\/|poetry\.toml|\.terraformrc|\.netrc)$/u;
 /** Git's own settings files. */
 const GIT_SETTINGS_FILES = /(?:^|\/)(?:\.gitmodules|\.gitattributes)$/u;
-/** The words in a changed line that point a package manager at another source. */
-const SOURCE_WORD_ANYWHERE = /(?:--?index-url|--extra-index-url|extra-index-url|index-url|--find-links|find-links|--trusted-host|trusted-host|--registry\b|npmRegistryServer)/iu;
+/**
+ * The words in a changed line that point a package manager at another source: index and registry settings with `-` or `_`, and the environment variables that do the same (`PIP_INDEX_URL`, `NPM_CONFIG_REGISTRY`, `UV_INDEX`, `GOPROXY`).
+ * In real source code only the command-line forms count (a variable called `index_url` in a program is not a setting).
+ */
+const SOURCE_WORD = /(?:index[-_]url|find[-_]links|trusted[-_]host|--registry\b|npmRegistryServer|\bnpm_config_[a-z_]+|\bpip_[a-z_]*(?:index|find|trusted|proxy)[a-z_]*|\buv_(?:default_)?index[a-z_]*|\bgoproxy\b|\bgonosumdb\b|\bgoprivate\b|\bgoinsecure\b|\bcargo_registries[a-z_]*|\byarn_npm_registry[a-z_]*|\bbundle_mirror[a-z_]*)/iu;
+const SOURCE_WORD_IN_CODE = /(?:--(?:extra-)?index-url|--find-links|--trusted-host|--registry\b)/iu;
 const SOURCE_WORD_IN_CONFIG = /(?:^|[\s"'@:])(?:[\w-]+:)?registry\s*[=:]/iu;
 const CONFIG_FILE = /\.(?:toml|cfg|ini|conf|ya?ml|json|xml|properties)$|(?:^|\/)\.[\w-]*rc$/u;
+/** Settings that let install scripts run, or turn the guards against them off. */
+const INSTALL_GUARD_WORDS = /(?:onlyBuiltDependencies|neverBuiltDependencies|trustedDependencies|dangerouslyAllowAllBuilds|ignore-scripts|ignoreScripts|enable-pre-post-scripts|enablePrePostScripts)/u;
+/** The scripts an install runs, matched anywhere in a line (a one-line `"scripts": { "postinstall": ... }` too). */
+const LIFECYCLE_SCRIPT = /"(?:(?:pre|post)?(?:install|prepare)|prepublish|prepack|postpack)"\s*:/u;
 
 const INSTALL_SCRIPT_NAME = /^(?:install|setup|bootstrap|uninstall|get[-_][\w.-]*|install[-_][\w.-]*)(?:\.(?:sh|bash|zsh|ps1|bat|cmd|py))?$/u;
 const isInstallScript = (path: string): boolean => INSTALL_SCRIPT_NAME.test(nameOf(path)) && !PROSE_EXTENSION.test(nameOf(path));
+const SHELL_LIKE = /\.(?:sh|bash|zsh|fish|ps1|bat|cmd)$/u;
 
 // ---- install links in documents
 
 const URL_IN_LINE = /(?:[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\bgit@[\w.-]+:|\]\(|\bhref\s*=|\bsrc\s*=|^\s*\[[^\]]+\]:\s*\S)/iu;
-const COMMAND_WORDS = /(?:^\s*(?:[-*>]\s+)?|[$`>(|;&]\s*)(?:sudo|curl|wget|npm|npx|yarn|pnpm|pip3?|pipx|uv|poetry|brew|apt(?:-get)?|apk|dnf|yum|snap|choco|winget|scoop|docker|podman|go\s+(?:install|get)|cargo\s+install|gem\s+install|git\s+clone|bash|sh|zsh|powershell|iex|irm|make\s+install|chmod)\s/iu;
-const FENCE = /^\s{0,3}(```|~~~)/u;
-const INSTALL_HEADING = /^\s{0,3}#{1,6}\s+.*\b(?:install\w*|set\s?up|getting started|quick\s?start|download\w*|upgrad\w*|build from source|usage)\b/iu;
-const ANY_HEADING = /^\s{0,3}#{1,6}\s/u;
+/** A package manager, build tool or shell command with a verb, wherever it stands in a line (backticks or not). */
+const TOOL_COMMAND = /\b(?:npm|npx|yarn|pnpm|bun|bunx|pip3?|pipx|uvx?|poetry|brew|apt(?:-get)?|apk|dnf|yum|snap|choco|winget|scoop|gem|cargo|go|composer|dotnet|nix|conda|mamba|helm|kubectl|terraform|docker|podman|git|make|gh|aws|gcloud|az|dpkg|rpm|zypper|pacman|flatpak|asdf|nvm|rustup|sdk)\s+(?:install|add|i|get|run|exec|dlx|x|tool|global|upgrade|update|remove|clone|pull|build|create|init|apply|deploy|pip|-g|--global|-[a-z])\b/iu;
+const SHELL_COMMAND = /(?:^|[\s`$>(|;&])(?:sudo|curl|wget|iex|irm|chmod|chown|eval|source)\s/iu;
+const INTERPRETER_COMMAND = /\b(?:node|python3?|deno|bun|ruby|perl|php|java|sh|bash|zsh|pwsh|powershell|tsx|ts-node)\s+(?:-{1,2}\w|\.{0,2}\/|~\/|[\w./-]+\.(?:js|mjs|cjs|ts|py|sh|rb|pl|php|jar|ps1))/iu;
+const PIPE_TO_SHELL = /\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/iu;
+/** A line that reads as something to run, whether or not it is in a block. */
+const isCommandLine = (text: string): boolean => TOOL_COMMAND.test(text) || SHELL_COMMAND.test(` ${text}`) || INTERPRETER_COMMAND.test(text) || PIPE_TO_SHELL.test(text);
+/** Used only where the section a line sits in is unknown: anything that is not plain prose. */
+const LOOKS_TECHNICAL = /(?:^|\s)-{1,2}[a-z]|\.\/|~\/|^\s*\$ |&&|\|\s*\w|=\s*\S|\bhttps?\b|[\\/][\w.-]+\.\w{1,4}\b/iu;
 
-/**
- * Whether a document's patch changes a command or a link that a reader would run or follow: any changed line that has a URL or reads as a command, any changed line inside a fenced block or an install section, and any change in a
- * hunk whose fence state cannot be known (the patch does not start at the top of the file and its first fence marker has no language, so the lines before it may be inside a block). A host that gave no patch is handled by the caller.
- */
-function documentChangesLink(patch: string): boolean {
-  const read = readPatchWithContext(patch);
-  let fenced = read.startFenced;
-  let inInstall = false;
-  for (const entry of read.lines) {
-    const text = entry.text;
-    if (FENCE.test(text)) { fenced = !fenced; if (entry.changed) return true; continue; }
-    if (ANY_HEADING.test(text)) inInstall = INSTALL_HEADING.test(text);
-    if (!entry.changed) continue;
-    if (fenced || inInstall || URL_IN_LINE.test(text) || COMMAND_WORDS.test(`${text} `)) return true;
-    if (entry.beforeAmbiguousFence) return true;
-  }
-  return false;
+const FENCE = /^\s*(```|~~~)/u;
+const PRE_OPEN = /<pre\b/iu;
+const PRE_CLOSE = /<\/pre\s*>/iu;
+const INSTALL_WORDS = /\b(?:install\w*|set\s?up|getting started|quick\s?start|download\w*|upgrad\w*|build(?:ing)?(?: from source)?|usage|requirements?|prerequisites?|run(?:ning)?|deploy\w*|bootstrap\w*|commands?)\b/iu;
+const ATX_HEADING = /^\s{0,3}#{1,6}\s+(.*)$/u;
+const SETEXT_UNDERLINE = /^\s{0,3}(?:=+|-{2,})\s*$/u;
+
+interface LineState { fenced: boolean; install: boolean; pre: boolean; marker: boolean }
+
+/** The state each line of a whole document is in: inside a fenced block or an HTML `pre`, under an install heading (`#` or underlined), or a block marker itself. */
+function statesOfDocument(lines: readonly string[]): LineState[] {
+  const states: LineState[] = [];
+  let fenced = false;
+  let pre = false;
+  let install = false;
+  lines.forEach((line, index) => {
+    let marker = false;
+    if (FENCE.test(line)) { fenced = !fenced; marker = true; }
+    else if (!fenced) {
+      if (PRE_OPEN.test(line)) { pre = true; marker = true; }
+      const heading = ATX_HEADING.exec(line);
+      if (heading !== null) install = INSTALL_WORDS.test(heading[1]!);
+      else if (SETEXT_UNDERLINE.test(line) && index > 0 && lines[index - 1]!.trim() !== "") install = INSTALL_WORDS.test(lines[index - 1]!);
+    }
+    states.push({ fenced, install, pre, marker });
+    if (!fenced && PRE_CLOSE.test(line)) pre = false;
+  });
+  return states;
 }
 
-interface ContextLine { text: string; changed: boolean; beforeAmbiguousFence: boolean }
-function readPatchWithContext(patch: string): { lines: ContextLine[]; startFenced: boolean } {
-  const lines: ContextLine[] = [];
-  let inHunk = false;
-  const hunks: Array<{ from: number; fromTop: boolean }> = [];
+interface PatchLine { text: string; changed: boolean; newLine: number }
+interface Hunk { startsAtTop: boolean; lines: PatchLine[] }
+function hunksOf(patch: string): Hunk[] {
+  const hunks: Hunk[] = [];
+  let current: Hunk | undefined;
+  let cursor = 1;
   for (const line of patch.split("\n")) {
-    if (line.startsWith("@@")) { inHunk = true; hunks.push({ from: lines.length, fromTop: /^@@ -(?:0,0|1)(?:,\d+)? /u.test(line) }); continue; }
-    if (!inHunk || line.startsWith("\\")) continue;
+    const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
+    if (header !== null) { current = { startsAtTop: Number(header[1]) <= 1, lines: [] }; hunks.push(current); cursor = Number(header[2]); continue; }
+    if (current === undefined || line.startsWith("\\")) continue;
     const mark = line[0];
-    if (mark === "+" || mark === "-") lines.push({ text: line.slice(1), changed: true, beforeAmbiguousFence: false });
-    else lines.push({ text: line.startsWith(" ") ? line.slice(1) : line, changed: false, beforeAmbiguousFence: false });
+    if (mark === "+") { current.lines.push({ text: line.slice(1), changed: true, newLine: cursor }); cursor += 1; }
+    else if (mark === "-") current.lines.push({ text: line.slice(1), changed: true, newLine: cursor });
+    else { current.lines.push({ text: line.startsWith(" ") ? line.slice(1) : line, changed: false, newLine: cursor }); cursor += 1; }
   }
-  // Within each hunk that does not start at the top of the file, lines before its first fence marker may be inside a block when that marker has no language (it may be a closing one).
-  hunks.forEach((hunk, index) => {
-    if (hunk.fromTop) return;
-    const end = index + 1 < hunks.length ? hunks[index + 1]!.from : lines.length;
-    const firstFence = lines.slice(hunk.from, end).findIndex((entry) => FENCE.test(entry.text));
-    if (firstFence < 0) return;
-    const marker = lines[hunk.from + firstFence]!.text.trim();
-    if (marker !== "```" && marker !== "~~~") return;
-    for (let at = hunk.from; at < hunk.from + firstFence; at += 1) lines[at]!.beforeAmbiguousFence = true;
-  });
-  return { lines, startFenced: false };
+  return hunks;
+}
+
+/**
+ * Whether a document's patch changes a command or a link that a reader would run or follow: any changed line that has a URL or reads as a command (in any form, with or without backticks), any changed line inside a fenced block,
+ * an HTML `pre` or an install section, and a block marker itself. With the text of the file at the head the section a line sits in is exact, even when the hunk does not show the heading. Without it, a hunk that does not
+ * start at the top has an unknown state before its first marker: its changed lines count when they are anything but plain prose.
+ */
+function documentChangesLink(patch: string, headText: string | undefined): boolean {
+  const hunks = hunksOf(patch);
+  const known = headText === undefined ? undefined : statesOfDocument(headText.split("\n"));
+  for (const hunk of hunks) {
+    let fenced = false;
+    let pre = false;
+    let install = false;
+    let unknownBefore = !hunk.startsAtTop && known === undefined;
+    // Before a closing-looking fence (no language) the lines may be inside a block that began above the hunk.
+    const bareFenceAt = unknownBefore ? hunk.lines.findIndex((entry) => /^\s*(?:```|~~~)\s*$/u.test(entry.text)) : -1;
+    for (const [position, entry] of hunk.lines.entries()) {
+      const text = entry.text;
+      if (entry.changed && bareFenceAt > 0 && position < bareFenceAt) return true;
+      let state: LineState | undefined = known?.[entry.newLine - 1];
+      if (known === undefined) {
+        if (FENCE.test(text)) { fenced = !fenced; unknownBefore = false; state = { fenced, install, pre, marker: true }; }
+        else {
+          if (PRE_OPEN.test(text)) { pre = true; state = { fenced, install, pre, marker: true }; } else if (PRE_CLOSE.test(text)) pre = false;
+          const heading = ATX_HEADING.exec(text);
+          if (heading !== null) { install = INSTALL_WORDS.test(heading[1]!); unknownBefore = false; }
+          state = state ?? { fenced, install, pre, marker: false };
+        }
+      }
+      if (!entry.changed) continue;
+      if (state?.marker === true || state?.fenced === true || state?.pre === true || state?.install === true) return true;
+      if (URL_IN_LINE.test(text) || isCommandLine(text)) return true;
+      if (unknownBefore && LOOKS_TECHNICAL.test(text)) return true;
+      // A changed line right under a setext heading in the hunk.
+    }
+    // Setext headings inside the hunk when no file text is known: the underline and the line above it.
+    if (known === undefined) {
+      const lines = hunk.lines;
+      for (let index = 1; index < lines.length; index += 1) {
+        if (SETEXT_UNDERLINE.test(lines[index]!.text) && lines[index - 1]!.text.trim() !== "" && INSTALL_WORDS.test(lines[index - 1]!.text)) {
+          for (let after = index + 1; after < lines.length && !ATX_HEADING.test(lines[after]!.text) && !SETEXT_UNDERLINE.test(lines[after + 1]?.text ?? ""); after += 1) if (lines[after]!.changed) return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 // ---- dependencies in manifests and lock files
 
 const NOT_A_DEPENDENCY_KEY = new Set(["name", "version", "edition", "description", "license", "readme", "authors", "requires-python", "python", "rust-version", "homepage", "repository", "documentation", "keywords", "categories", "publish", "resolver", "build", "include", "exclude", "default-run", "channel", "main", "module", "types", "type", "private", "author", "packagemanager", "source"]);
-const VERSIONISH = /^(?:[~^<>=v*]|\d|latest$|next$|workspace:|npm:|file:|link:|portal:|patch:|git(?:\+|:|@)|github:|gitlab:|bitbucket:|https?:|[\w.-]+\/[\w.-]+(?:#|$))/iu;
+const VERSIONISH = /^(?:[~^<>=v*]|\d|latest$|next$|workspace:|npm:|jsr:|file:|link:|portal:|patch:|git(?:\+|:|@)|github:|gitlab:|bitbucket:|https?:|[\w.-]+\/[\w.-]+(?:#|$))/iu;
+/** The package registries each ecosystem uses by default. A host that is not one of these, and that no removed line had, is a new source: GitHub and its tarball host are NOT registries. */
 const DEFAULT_REGISTRY_HOSTS = new Set([
-  "registry.npmjs.org", "registry.yarnpkg.com", "registry.npmjs.com", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "rubygems.org", "proxy.golang.org", "repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org", "api.nuget.org", "packagist.org", "repo.packagist.org", "github.com", "codeload.github.com",
+  "registry.npmjs.org", "registry.yarnpkg.com", "registry.npmjs.com", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "rubygems.org", "proxy.golang.org", "repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org", "api.nuget.org", "packagist.org", "repo.packagist.org",
 ]);
 const hostsIn = (lines: readonly string[]): Set<string> => {
   const hosts = new Set<string>();
@@ -212,6 +302,10 @@ const hostsIn = (lines: readonly string[]): Set<string> => {
 };
 /** A source other than a registry: a git, file or link dependency, or a URL for a tarball. */
 const NON_REGISTRY_SOURCE = /(?:git\+(?:https?|ssh)|git:\/\/|ssh:\/\/|github:|gitlab:|bitbucket:|\bgit\s*=|\bpath\s*=|\bfile:|\blink:|\bportal:|-e\s+git|@\s*(?:https?|git\+))/iu;
+/** A dependency value that names a GitHub repository by shorthand (`owner/repo`, `owner/repo#ref`). */
+const SHORTHAND_SOURCE = /^[\w.-]+\/[\w.-]+(?:#.*)?$/u;
+/** The package a registry address names (`.../name/-/name-1.0.0.tgz`). */
+const RESOLVED_PACKAGE = /\/((?:@[^/"']+\/)?[^/"']+)\/-\/[^/"']+\.tgz/u;
 
 /** The name of the dependency a manifest line declares, or undefined when the line is not one. */
 function dependencyName(path: string, line: string): string | undefined {
@@ -242,6 +336,9 @@ function dependencyName(path: string, line: string): string | undefined {
   }
   return undefined;
 }
+
+/** The version or source a package.json dependency line gives. */
+const dependencyValue = (line: string): string | undefined => /^\s*"[@\w][\w@./-]*"\s*:\s*"([^"]*)"\s*,?\s*$/u.exec(line)?.[1];
 
 /** The name an entry of a lock file carries (the header of one package), or undefined for any other line. */
 function lockEntryName(path: string, line: string): string | undefined {
@@ -282,6 +379,7 @@ interface DependencyReading {
   newDependencies: string[];
   lockNotUnderstood: boolean;
   risky: TierReason[];
+  standard: TierReason[];
   /** Lines of the change that are dependency pinning, not code. */
   dependencyLines: number;
 }
@@ -290,7 +388,8 @@ interface DependencyReading {
 function readDependencies(file: TierFile, patch: PatchLines): DependencyReading {
   const path = normalizedTierPath(file.path);
   const lock = isLockfile(path);
-  const out: DependencyReading = { kind: false, newDependencies: [], lockNotUnderstood: false, risky: [], dependencyLines: 0 };
+  const name = baseName(path);
+  const out: DependencyReading = { kind: false, newDependencies: [], lockNotUnderstood: false, risky: [], standard: [], dependencyLines: 0 };
   const reason = (code: string): TierReason => ({ code, path: file.path.slice(0, FLOW_REASON_PATH_MAX) });
   const addedNames = new Set<string>();
   const removedNames = new Set<string>();
@@ -305,17 +404,33 @@ function readDependencies(file: TierFile, patch: PatchLines): DependencyReading 
   }
   // A lock file that changed at all is a dependency change; a manifest only when a dependency line did.
   if (touched || (lock && patch.added.length + patch.removed.length > 0)) out.kind = true;
-  out.newDependencies = [...addedNames].filter((name) => !removedNames.has(name));
+  out.newDependencies = [...addedNames].filter((entry) => !removedNames.has(entry));
   // A lock file in a format this reader does not know cannot say which packages are new: standard.
-  if (lock && patch.added.length + patch.removed.length > 0 && !LOCK_FORMATS_READ.has(baseName(path))) { out.lockNotUnderstood = true; out.kind = true; }
-  // Where packages come from. An address on an added line that no removed line already had, and that is not a default registry, is a new source.
+  if (lock && patch.added.length + patch.removed.length > 0 && !LOCK_FORMATS_READ.has(name)) { out.lockNotUnderstood = true; out.kind = true; }
+  // Where packages come from. An address on an added line that no removed line already had, and that is not a default registry, is a new source (GitHub and its tarball host are not registries).
   const removedHosts = hostsIn(patch.removed);
   for (const host of hostsIn(patch.added)) {
     if (!DEFAULT_REGISTRY_HOSTS.has(host) && !removedHosts.has(host)) out.risky.push(reason("registry_source_changed"));
   }
-  const removedSource = patch.removed.filter((line) => NON_REGISTRY_SOURCE.test(line)).map((line) => line.trim());
-  if (patch.added.some((line) => NON_REGISTRY_SOURCE.test(line) && !removedSource.includes(line.trim()))) out.risky.push(reason("dependency_source"));
-  if (baseName(path) === "package.json" && patch.added.some((line) => /^\s*"(?:preinstall|install|postinstall|prepare)"\s*:/u.test(line))) out.risky.push(reason("install_script"));
+  const removedTrimmed = new Set(patch.removed.map((line) => line.trim()));
+  if (patch.added.some((line) => NON_REGISTRY_SOURCE.test(line) && !removedTrimmed.has(line.trim()))) out.risky.push(reason("dependency_source"));
+  if (name === "package.json" || name === "composer.json") {
+    for (const line of patch.added) {
+      const value = dependencyValue(line);
+      if (value === undefined || removedTrimmed.has(line.trim())) continue;
+      // A dependency that now names a GitHub repository by shorthand, or another package under an alias.
+      if (SHORTHAND_SOURCE.test(value) && !value.startsWith("@") && !/^(?:workspace|file|link|npm|jsr|patch|catalog):/u.test(value)) out.risky.push(reason("dependency_source"));
+      else if (/^(?:npm|jsr|patch):/u.test(value)) out.standard.push(reason("package_alias"));
+    }
+  }
+  if (name === "go.mod" && patch.added.some((line) => /^\s*(?:replace\s+)?\S+(?:\s+v\S+)?\s*=>\s*\S+/u.test(line) && !removedTrimmed.has(line.trim()))) out.risky.push(reason("dependency_source"));
+  // A lock entry that now resolves to another package than before (same registry, other name).
+  if (lock) {
+    const before = new Set(patch.removed.flatMap((line) => RESOLVED_PACKAGE.exec(line)?.[1] ?? []));
+    if (patch.added.some((line) => { const target = RESOLVED_PACKAGE.exec(line)?.[1]; return target !== undefined && !before.has(target); })) out.standard.push(reason("lock_package_changed"));
+  }
+  if (patch.added.some((line) => LIFECYCLE_SCRIPT.test(line)) && (name === "package.json" || name === "composer.json")) out.risky.push(reason("install_script"));
+  if (patch.added.some((line) => INSTALL_GUARD_WORDS.test(line))) out.risky.push(reason("install_script"));
   if (lock && patch.added.some((line) => /^\s*"hasInstallScript"\s*:\s*true/u.test(line))) out.risky.push(reason("install_script"));
   return out;
 }
@@ -323,6 +438,17 @@ function readDependencies(file: TierFile, patch: PatchLines): DependencyReading 
 // ---- continuous integration files
 
 const CI_PRIVILEGED = /(?:pull_request_target|workflow_run|\bsecrets\s*\.|\bsecrets\s*:\s*inherit|\$\{\{\s*secrets\b|id-token|\bGITHUB_TOKEN\b|permissions\s*:\s*write-all|:\s*write\s*$|runs-on\s*:.*self-hosted|\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b)/iu;
+/** A step that uses an action from someone else, pinned to a branch or a tag (both can be moved) instead of a commit. The owner `actions` and `github` are the platform's own. */
+function movingActions(added: readonly string[], removed: readonly string[]): boolean {
+  const removedTrimmed = new Set(removed.map((line) => line.trim()));
+  return added.some((line) => {
+    const spec = /^\s*(?:-\s*)?uses\s*:\s*['"]?([^\s'"#]+)/u.exec(line)?.[1];
+    if (spec === undefined || removedTrimmed.has(line.trim()) || spec.startsWith("./") || spec.startsWith("docker://")) return false;
+    const owner = spec.split("/")[0]!.toLowerCase();
+    if (owner === "actions" || owner === "github") return false;
+    return !/@[0-9a-f]{40}$/u.test(spec);
+  });
+}
 
 // ---- one file
 
@@ -338,26 +464,37 @@ interface FileReading {
   isTest: boolean;
 }
 
-function readFile(file: TierFile): FileReading {
+/** Added lines longer than this, or more added bytes than the limit in one file, make a change at least standard (a minified file or a blob hides in few lines). */
+export const LONG_LINE_CHARS = 500;
+export const ADDED_BYTES_MAX = 20_000;
+
+function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
   const reading: FileReading = { risky: [], standard: [], kinds: new Set(), codeLines: 0, countsAsFile: true, isCode: true, isTest: false };
   const here = (code: string): TierReason => ({ code, path: file.path.slice(0, FLOW_REASON_PATH_MAX) });
   const names = [file.path, ...(file.previousPath === undefined ? [] : [file.previousPath])];
   const removed = file.status === "removed";
 
-  // Both names of a renamed file count: a file moved out of, or into, a sensitive folder is a change to it.
+  // Both names of a renamed file count: a file moved out of, or into, a sensitive folder is a change to it. A path with a look-alike letter is never matched on the look-alike: it is risky itself.
   for (const name of names) {
     const normal = normalizedTierPath(name);
     const reasonFor = (code: string): TierReason => ({ code, path: name.slice(0, FLOW_REASON_PATH_MAX) });
+    if (hasConfusableLetter(name)) reading.risky.push(reasonFor("confusable_path"));
     if (isHookPath(name)) reading.risky.push(reasonFor("hook_file"));
     if (isInstructionPath(name)) reading.risky.push(reasonFor("instruction_file"));
     if (isTierSensitivePath(name)) reading.risky.push(reasonFor("sensitive_path"));
+    if (isInfraPath(name)) reading.risky.push(reasonFor("infra_file"));
     if (GIT_SETTINGS_FILES.test(normal)) reading.risky.push(reasonFor("git_settings_file"));
     if (PACKAGE_SOURCE_FILES.test(normal)) reading.risky.push(reasonFor("package_source_setting"));
     if (/(?:^|\/)\.env[^/]*$/u.test(normal)) reading.risky.push(reasonFor("env_file"));
+    const key = factKey(file.repository, name);
+    if (head?.instructionImports?.has(factKey(file.repository, normal)) === true) reading.risky.push(reasonFor("instruction_import"));
+    if (head?.links?.has(key) === true) reading.risky.push(reasonFor("symlink_suspected"));
   }
 
   const normalPath = normalizedTierPath(file.path);
-  const prose = isProsePath(file.path) && (file.previousPath === undefined || isProsePath(file.previousPath));
+  // A document is plain docs only when every name of it is, and when it is known that no instruction file reads it.
+  const prose = isDocsPath(file.path) && (file.previousPath === undefined || isDocsPath(file.previousPath)) && head?.importsKnown !== false;
+  const proseFile = fileTypeOf(file.path) === "prose";
   const ci = isCiFilePath(file.path) || (file.previousPath !== undefined && isCiFilePath(file.previousPath));
   const lock = isLockfile(normalPath);
   const manifest = isManifest(normalPath);
@@ -377,20 +514,23 @@ function readFile(file: TierFile): FileReading {
       if (SUBMODULE.test(whole)) reading.risky.push(here("submodule"));
       if (LFS_POINTER.test(whole)) reading.risky.push(here("lfs_pointer"));
       if (GIT_TYPE_HEADERS.test(patch.header.join("\n"))) reading.risky.push(here("mode_or_type_change"));
-      // A symlink's content is its target, one line with no final newline. A host's patch does not say the mode, so this is read from the shape: every content line of the patch is followed by the no-newline mark.
-      if (patch.contentLines > 0 && patch.contentLines <= 2 && patch.noEolMarkers >= patch.contentLines && patch.added.every((line) => !/\s/u.test(line)) && patch.removed.every((line) => !/\s/u.test(line))) reading.risky.push(here("symlink_suspected"));
+      // A symlink's content is its target: one or two lines, each a path (a slash, or no spaces), with no final newline. A host's patch does not say the mode, so this is read from the shape; `links` is what the host says.
+      const looksLikePath = (line: string): boolean => line.includes("/") || line.startsWith(".") || !/\s/u.test(line);
+      if (patch.contentLines > 0 && patch.contentLines <= 2 && patch.noEolMarkers >= patch.contentLines && [...patch.added, ...patch.removed].every(looksLikePath)) reading.risky.push(here("symlink_suspected"));
     }
   }
   const hostLines = file.additions + file.deletions;
 
   if (removed) {
-    // A deleted file is a loss, never a gain: a deleted document stays a document change, a deleted code file is at least standard.
-    if (prose) reading.kinds.add("docs");
-    else if (!ci) { reading.standard.push(here("code_file_deleted")); reading.kinds.add("code_config"); }
-    reading.codeLines = prose || lock ? 0 : hostLines;
-    reading.countsAsFile = !prose && !lock;
-    reading.isCode = !prose && !lock;
-    if (ci) { reading.kinds.add("ci_file"); reading.codeLines = hostLines; }
+    // A deleted file is a loss, never a gain. A deleted CI file, or a test runner's or scanner's configuration, changes what is checked (risky). A deleted test or code file is at least standard. A deleted document stays a document change.
+    if (ci) { reading.kinds.add("ci_file"); reading.risky.push(here("ci_file_deleted")); reading.codeLines = hostLines; return reading; }
+    if (isCheckConfigPath(file.path)) { reading.kinds.add("code_config"); reading.risky.push(here("check_config_deleted")); reading.codeLines = hostLines; return reading; }
+    if (prose || proseFile) { reading.kinds.add(prose ? "docs" : "code_config"); reading.codeLines = prose ? 0 : hostLines; reading.countsAsFile = !prose; reading.isCode = !prose; return reading; }
+    reading.standard.push(here(reading.isTest ? "test_file_deleted" : "code_file_deleted"));
+    reading.kinds.add("code_config");
+    reading.codeLines = lock ? 0 : hostLines;
+    reading.countsAsFile = !lock;
+    reading.isCode = !lock;
     return reading;
   }
 
@@ -401,7 +541,7 @@ function readFile(file: TierFile): FileReading {
     if (patch === undefined) {
       // A document whose text cannot be read cannot be cleared of a changed link or command: at least install_link (and it is already risky unless it is a pure rename).
       if (!pureRename) reading.kinds.add("install_link");
-    } else if (documentChangesLink(file.patch!)) reading.kinds.add("install_link");
+    } else if (documentChangesLink(file.patch!, head?.text?.get(factKey(file.repository, file.path)))) reading.kinds.add("install_link");
     return reading;
   }
 
@@ -413,21 +553,30 @@ function readFile(file: TierFile): FileReading {
     reading.codeLines = 0;
   }
 
+  // A file type the rules do not know (an unknown extension or dot file) is never small: nobody has said what it does.
+  if (fileTypeOf(file.path) === "unknown" && !ci) reading.standard.push(here("unrecognised_file_type"));
+
   if (patch !== undefined) {
     if (manifest || lock) {
       const deps = readDependencies(file, patch);
       if (deps.kind) reading.kinds.add("dependency");
       reading.risky.push(...deps.risky);
+      reading.standard.push(...deps.standard);
       if (deps.newDependencies.length > 0) reading.standard.push(here("new_dependency"));
       if (deps.lockNotUnderstood) reading.standard.push(here("lockfile_not_understood"));
       reading.codeLines = lock ? 0 : Math.max(0, reading.codeLines - deps.dependencyLines);
       if (manifest && reading.codeLines > 0) reading.kinds.add("code_config");
     }
-    // A package manager pointed at another source, in any non-document file.
+    // A package manager pointed at another source. In real source code only the command-line forms count.
     const changed = [...patch.added, ...patch.removed];
     const inConfig = CONFIG_FILE.test(normalPath) || manifest || lock || isRequirementsFile(normalPath);
-    if (changed.some((line) => SOURCE_WORD_ANYWHERE.test(line)) || (inConfig && changed.some((line) => SOURCE_WORD_IN_CONFIG.test(line)))) reading.risky.push(here("package_source_setting"));
+    const sourceWord = fileTypeOf(file.path) === "code" && !SHELL_LIKE.test(normalPath) ? SOURCE_WORD_IN_CODE : SOURCE_WORD;
+    if (changed.some((line) => sourceWord.test(line)) || (inConfig && changed.some((line) => SOURCE_WORD_IN_CONFIG.test(line)))) reading.risky.push(here("package_source_setting"));
+    if (!manifest && !lock && patch.added.some((line) => INSTALL_GUARD_WORDS.test(line)) && inConfig) reading.risky.push(here("install_script"));
     if (ci && patch.added.some((line) => CI_PRIVILEGED.test(line))) reading.risky.push(here("ci_privileged"));
+    if (ci && movingActions(patch.added, patch.removed)) reading.risky.push(here("ci_unpinned_action"));
+    // Size by bytes as well as lines: a long line or a large added blob hides in a few lines. Lock files are generated and documents are prose.
+    if (!lock && (patch.added.some((line) => line.length > LONG_LINE_CHARS) || patch.added.reduce((total, line) => total + Buffer.byteLength(line) + 1, 0) > ADDED_BYTES_MAX)) reading.standard.push(here("long_lines"));
   }
 
   if (ci) reading.kinds.add("ci_file");
@@ -486,7 +635,7 @@ export function tierFromDiff(input: DiffInput, context: TierContext): ChangeTier
   const modules = new Set<string>();
   const testModules = new Set<string>();
   for (const file of input.files) {
-    const reading = readFile(file);
+    const reading = readFile(file, context.head);
     risky.push(...reading.risky);
     standard.push(...reading.standard);
     for (const kind of reading.kinds) kinds.add(kind);
@@ -496,7 +645,7 @@ export function tierFromDiff(input: DiffInput, context: TierContext): ChangeTier
       const key = `${file.repository ?? ""}:${moduleOf(file.path)}`;
       (reading.isTest ? testModules : modules).add(key);
     }
-    if (file.apiShapeChanged === true && api === undefined) api = file.path;
+    if ((file.apiShapeChanged === true || (isApiShapePath(file.path) && file.additions + file.deletions > 0 && file.status !== "renamed")) && api === undefined) api = file.path;
   }
   if (lines > limits.riskyLines) risky.push(withoutPath("large_change"));
   if (lines > limits.standardLines) standard.push(withoutPath("more_than_lines"));
@@ -540,15 +689,19 @@ export function estimateTier(input: EstimateInput, context: TierContext): Change
   for (const path of paths) {
     const normal = normalizedTierPath(path);
     const reasonFor = (code: string): TierReason => ({ code, path: path.slice(0, FLOW_REASON_PATH_MAX) });
+    if (hasConfusableLetter(path)) risky.push(reasonFor("confusable_path"));
     if (isHookPath(path)) risky.push(reasonFor("hook_file"));
     if (isInstructionPath(path)) risky.push(reasonFor("instruction_file"));
     if (isTierSensitivePath(path)) risky.push(reasonFor("sensitive_path"));
+    if (isInfraPath(path)) risky.push(reasonFor("infra_file"));
     if (GIT_SETTINGS_FILES.test(normal)) risky.push(reasonFor("git_settings_file"));
     if (PACKAGE_SOURCE_FILES.test(normal)) risky.push(reasonFor("package_source_setting"));
     if (/(?:^|\/)\.env[^/]*$/u.test(normal)) risky.push(reasonFor("env_file"));
-    if (isProsePath(path)) { kinds.add("docs"); continue; }
+    if (isDocsPath(path)) { kinds.add("docs"); continue; }
     if (isLockfile(normal)) { kinds.add("dependency"); continue; }
     files += 1;
+    if (fileTypeOf(path) === "unknown" && !isCiFilePath(path)) standard.push(reasonFor("unrecognised_file_type"));
+    if (isApiShapePath(path)) standard.push(reasonFor("api_change"));
     if (isCiFilePath(path)) kinds.add("ci_file");
     else if (isManifest(normal)) kinds.add("dependency");
     else kinds.add("code_config");
@@ -577,21 +730,32 @@ export function raiseTier(previous: ChangeTier | undefined, next: ChangeTier): C
     : { ...next, level: previous.level, kinds, reasons: collect([...previous.reasons, ...next.reasons]) };
 }
 
+/**
+ * The tier the planning steps were chosen at, when some were skipped: the first estimate on the record (or the level skipped steps are only ever skipped at, small, when none is kept). Undefined when no planning step was skipped:
+ * the whole plan ran, so nothing was chosen at a lower tier than the change has now.
+ */
+export function planningLevelOf(flow: WorkflowFlow | undefined): TierLevel | undefined {
+  if (flow === undefined || flow.skippedSteps === undefined || flow.skippedSteps.length === 0) return undefined;
+  const estimate = [...(flow.tierHistory ?? []), ...(flow.tier === undefined ? [] : [flow.tier])].find((tier) => tier.source === "estimate");
+  return estimate?.level ?? "small";
+}
+
 /** Whether `fresh` is a higher level than the level an approval was given at. */
 export const tierGrew = (approvedAt: TierLevel, fresh: Pick<ChangeTier, "level">): boolean => RANK[fresh.level] > RANK[approvedAt];
 
 // ---- the planned-path limit
 
-/** The paths a change touches that the plan did not name. A planned entry ending in `/` covers everything under it. A lock file is covered when its manifest's folder has a planned manifest. */
+/** A path as the plan limit compares it: exactly (case matters on the systems code runs on), with `\\` read as `/` and no leading `./`. */
+const planPath = (path: string): string => path.replaceAll("\\", "/").replace(/^(?:\.\/)+/u, "");
+
+/** The paths a change touches that the plan did not name. A planned entry ending in `/` covers everything under it. A lock file is covered when its manifest's folder has a planned manifest. Case-sensitive. */
 export function plannedPathsExceeded(planned: readonly string[], changed: ReadonlyArray<string | { path: string; previousPath?: string | undefined }>): string[] {
-  const plan = planned.map(normalizedTierPath);
+  const plan = planned.map(planPath);
+  const folderOf = (path: string): string => (path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "");
   const covered = (path: string): boolean => {
-    const normal = normalizedTierPath(path);
-    if (plan.some((entry) => entry === normal || (entry.endsWith("/") && normal.startsWith(entry)))) return true;
-    if (isLockfile(normal)) {
-      const folder = normal.includes("/") ? normal.slice(0, normal.lastIndexOf("/") + 1) : "";
-      return plan.some((entry) => isManifest(entry) && (entry.includes("/") ? entry.slice(0, entry.lastIndexOf("/") + 1) : "") === folder);
-    }
+    const exact = planPath(path);
+    if (plan.some((entry) => entry === exact || (entry.endsWith("/") && exact.startsWith(entry)))) return true;
+    if (isLockfile(exact.toLowerCase())) return plan.some((entry) => isManifest(entry.toLowerCase()) && folderOf(entry) === folderOf(exact));
     return false;
   };
   const exceeded: string[] = [];
@@ -610,6 +774,9 @@ const REASON_PHRASES: Readonly<Record<string, string>> = {
   large_change: "more than 400 lines of code", more_than_lines: "more than 100 lines of code", more_than_files: "more than 3 files", two_or_more_modules: "more than one module", api_change: "a public API",
   new_dependency: "a new dependency", lockfile_not_understood: "a lock file Rovara cannot read", code_file_deleted: "a deleted code file", no_files_named: "files the plan did not name", request_mentions_sensitive_area: "a sensitive area",
   registry_source_changed: "a package source", dependency_source: "a package source", install_script: "an install script", ci_privileged: "a privileged CI setting", package_source_setting: "a package source setting",
+  confusable_path: "a path with a look-alike letter", infra_file: "an infrastructure file", instruction_import: "a file an instruction file reads", ci_unpinned_action: "a CI action that is not pinned to a commit",
+  ci_file_deleted: "a deleted CI file", check_config_deleted: "a deleted test or scanner setting", test_file_deleted: "a deleted test", unrecognised_file_type: "a kind of file Rovara does not know", long_lines: "very long lines or a large amount of text",
+  package_alias: "a package under another name", lock_package_changed: "a different package in a lock file",
   hook_file: "a git hook", instruction_file: "an instruction file", sensitive_path: "a sensitive path", git_settings_file: "a git settings file", env_file: "an environment file",
 };
 

@@ -207,13 +207,13 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
           kind: "stuck", orgId: companyId, taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at, text: state === "MERGED" ? MERGED_OUTSIDE : CLOSED_OUTSIDE,
           pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
         }, outside.revision, { definitionVersion: workflow.definitionVersion });
-        const recorded = await store.transact([workflowUpdateItem(taskId, outside, workflow.revision), ...stuck]);
+        const recorded = await store.transact([workflowUpdateItem(taskId, outside, workflow.revision, workflow), ...stuck]);
         if (recorded.applied) await milestones.deliver(taskId).catch(() => undefined);
         return recorded.applied ? { kind: "TERMINAL", release: "confirmed" } : { kind: "OBSERVED" };
       }
       const next = observeWorkflowPullRequest(workflow, { repositoryId: pullRequest.repositoryId, number: pullRequest.number, candidateDigest: pullRequest.candidateDigest, state, source: "CODE_HOST", observedAt: at }, at);
       const items: TransactItem[] = [
-        workflowUpdateItem(taskId, next, workflow.revision),
+        workflowUpdateItem(taskId, next, workflow.revision, workflow),
         ...await mergedMilestoneItems({ milestones, bindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) } }, task, workflow, next, at),
         ...await mergedStateItems({ store, timeline, audit: flow.audit, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }) }, task, workflow, next, at,
           state === "MERGED" ? [{ repositoryId: pullRequest.repositoryId, number: pullRequest.number, ...(details.mergedBy === undefined ? {} : { mergedBy: details.mergedBy }), ...(details.mergeRevision === undefined ? {} : { mergeCommit: details.mergeRevision }) }] : []),
