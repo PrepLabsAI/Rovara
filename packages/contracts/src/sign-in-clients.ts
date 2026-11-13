@@ -82,7 +82,8 @@ export interface AccessCheckResponse {
   developerId: string;
   displayName: string;
   administrator: boolean;
-  projects: Array<{ name: string; access: "granted" | "channel" }>;
+  /** `administrator` (spec 065): a project the person administers, which task access alone does not list. */
+  projects: Array<{ name: string; access: "granted" | "channel" | "administrator" }>;
   notices: string[];
 }
 
