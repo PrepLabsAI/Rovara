@@ -889,7 +889,7 @@ The Rovara-side home of a project's scripted model replies (DECISIONS 166a, 161)
 decisions 42 and 63 are not triggered. Its shapes and key layout are in `packages/contracts/src/model-reply-store.ts` (`ORG#<company>#MOCKSET#<project>`; sort keys `HEAD#model#<sha256(branch)>#<family>`, `ENTRY#<entrySha256>`,
 `TASK#<taskId>#<family>`, `JOIN#<taskId>#<family>`, and the durable `MADE#<entrySha256>` record of every content the coding agent wrote, which an import never turns into `before_task`), its pure rules in `model-reply-store-rules.ts`, and its conformance suite and two-company kit in `@agentx/testing` (`runReplySetStoreConformance`); Cloud keeps the same keys in its
 state table and runs the same suite. A reply's provenance is written once and never changes; the store never promotes a reply because it now sits on a base commit. TE-G7 extends the layout with its own sort-key prefixes
-and must not reuse `ENTRY#`, `MADE#`, `TASK#`, `JOIN#` or `HEAD#model#`. Part A has no callers: the worker and the post-merge join are part B.
+and must not reuse `ENTRY#`, `MADE#`, `TASK#`, `JOIN#`, `ERASED#` or `HEAD#model#`. `eraseProject` deletes the project's rows and, when it deleted something, leaves a content-free `ERASED#project` tombstone: because the `MADE#` record is gone, no import is accepted into that project (the fixed word `erased`) until a maintainer calls `clearErasure`; overlays and joins are not blocked. A project may hold at most 20,000 `MADE#` rows (two per reply written by the coding agent); at the cap putOverlay and imports are refused (`made_full`). Part A has no callers: the worker and the post-merge join are part B.
 
 ## Realtime (lane K1, a new interface: the owner decides it alone, decision 63)
 

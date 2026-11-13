@@ -11,10 +11,13 @@
 //   TASK#<taskId>#<family>                 the task's overlay: replies made in this task, not yet joined (expires)
 //   JOIN#<taskId>#<family>                 the idempotency marker of a join (expires)
 //   MADE#<entrySha256>                     the DURABLE record that the coding agent wrote this content in some task (never expires; only `eraseProject` removes it). An import never turns a hash listed here into
-//                                          `before_task`, whatever became of the overlay (expiry, delete, a join that failed). `MADE#version` is the project's counter, bumped in the same transaction as every MADE write, so an import can
-//                                          check it and cannot race an overlay write.
+//                                          `before_task`, whatever became of the overlay (expiry, delete, a join that failed, a refused late write). Each reply is recorded twice: `MADE#<entrySha256>` and `MADE#c#<contentSha256>` (a hash that
+//                                          ignores the id and treats an absent `toolCalls` like an empty one). `MADE#version` is the project's counter (a `version` bumped, and a `count` of rows added, in the same transaction as every MADE
+//                                          write), so an import can check it and cannot race an overlay write; at `REPLY_MADE_MAX_PER_PROJECT` rows a putOverlay and an import are refused with `made_full`.
+//   ERASED#project                         the content-free tombstone `eraseProject` leaves when it deleted something (only a time). Until a maintainer clears it (`clearErasure`) no import into the project is accepted (`erased`):
+//                                          the MADE record is gone, so nothing could tell agent-made replies from customer-written ones. It is not one of the prefixes erase deletes.
 // TE-G7 adds `HEAD#service#<name>...` and its own entry kinds under the same partition without migrating a row; this lane's reads and erase look only at the five prefixes above and ignore every other sort key.
-// TE-G7 MUST NOT reuse the prefixes `ENTRY#`, `MADE#`, `TASK#`, `JOIN#` or `HEAD#model#` (a row of its own under one of them would be read, parsed as this lane's kind, refused, and make an import fail closed).
+// TE-G7 MUST NOT reuse the prefixes `ENTRY#`, `MADE#`, `TASK#`, `JOIN#`, `ERASED#` or `HEAD#model#` (a row of its own under one of them would be read, parsed as this lane's kind, refused, and make an import fail closed).
 //
 // PURE: no I/O. The rules (`model-reply-store-rules.ts`) and the service (`packages/broker/src/core/test-env/reply-set-store.ts`) are built on these shapes.
 import { z } from "zod";
@@ -38,6 +41,8 @@ export const REAL_RECORDING_MAX_BYTES = 64 * 1_024;
 /** An overlay and a join marker are deleted this long after they were written (the TTL attribute is `INDEX_EXPIRY_ATTRIBUTE`, `indexExpiresAt`; set by the service, never by these shapes). */
 export const REPLY_OVERLAY_TTL_DAYS = 30;
 export const REPLY_OVERLAY_MAX_ENTRIES = REPLY_SET_HEAD_MAX_ENTRIES;
+/** MADE# rows (both kinds) one project may hold. Reached: putOverlay and imports are refused with `made_full` (fail closed). */
+export const REPLY_MADE_MAX_PER_PROJECT = 20_000;
 
 /** The fixed words of every refusal (code, never data). `not_found` is the one text for a missing set, another company's and another project's. */
 export const REPLY_STORE_WORDS = {
@@ -46,6 +51,8 @@ export const REPLY_STORE_WORDS = {
   too_many: "too many replies",
   conflict: "reply set changed, try again",
   id_clash: "reply id clash",
+  erased: "project was erased",
+  made_full: "too many recorded replies",
   not_allowed: "not allowed",
 } as const;
 export type ReplyStoreWord = keyof typeof REPLY_STORE_WORDS;
@@ -136,8 +143,11 @@ export type ReplyEntryRow = z.infer<typeof ReplyEntryRowSchema>;
 export const REPLY_MADE_KIND = "model_reply_made";
 export const ReplyMadeRowSchema = z.object({ kind: z.literal(REPLY_MADE_KIND), schemaVersion: z.literal(1), entrySha256: Sha256Hex }).strict();
 export type ReplyMadeRow = z.infer<typeof ReplyMadeRowSchema>;
+export const REPLY_MADE_CONTENT_KIND = "model_reply_made_content";
+export const ReplyMadeContentRowSchema = z.object({ kind: z.literal(REPLY_MADE_CONTENT_KIND), schemaVersion: z.literal(1), contentSha256: Sha256Hex }).strict();
+export type ReplyMadeContentRow = z.infer<typeof ReplyMadeContentRowSchema>;
 export const REPLY_MADE_VERSION_KIND = "model_reply_made_version";
-export const ReplyMadeVersionRowSchema = z.object({ kind: z.literal(REPLY_MADE_VERSION_KIND), schemaVersion: z.literal(1), version: z.number().int().min(0) }).strict();
+export const ReplyMadeVersionRowSchema = z.object({ kind: z.literal(REPLY_MADE_VERSION_KIND), schemaVersion: z.literal(1), version: z.number().int().min(0), count: z.number().int().min(0) }).strict();
 export type ReplyMadeVersionRow = z.infer<typeof ReplyMadeVersionRowSchema>;
 
 export const REPLY_JOIN_KIND = "model_reply_join";
@@ -176,6 +186,12 @@ export const replyEntrySortKey = (entrySha256: string): string => `${REPLY_ENTRY
 export const replyTaskSortKey = (taskId: string, family: ServedModelFamily): string => `${REPLY_TASK_PREFIX}${taskId}#${family}`;
 export const replyJoinSortKey = (taskId: string, family: ServedModelFamily): string => `${REPLY_JOIN_PREFIX}${taskId}#${family}`;
 export const replyMadeSortKey = (entrySha256: string): string => `${REPLY_MADE_PREFIX}${entrySha256}`;
+export const replyMadeContentSortKey = (contentSha256: string): string => `${REPLY_MADE_PREFIX}c#${contentSha256}`;
+/** The tombstone `eraseProject` leaves (see the layout comment). Not in `REPLY_STORE_OWN_PREFIXES`: erase never deletes it. */
+export const REPLY_ERASED_PREFIX = "ERASED#";
+export const REPLY_ERASED_SORT_KEY = "ERASED#project";
+export const REPLY_ERASED_KIND = "model_reply_erased";
+export const ReplyErasedRowSchema = z.object({ kind: z.literal(REPLY_ERASED_KIND), schemaVersion: z.literal(1), at: z.string().min(1).max(40) }).strict();
 
 // ---- what the service answers (the shapes the conformance suite and Cloud's implementation share)
 
@@ -231,6 +247,8 @@ export interface ReplySetStoreService {
   joinTask(scope: HostScope, input: { readonly project: string; readonly taskId: string; readonly family: ServedModelFamily; readonly branch: string; readonly defaultBranch?: string }): Promise<{ readonly ok: true; readonly status: JoinStatus; readonly added: number } | ReplyStoreFailure>;
   /** The intake for capped real recordings (`real_recording_capped`: at most 25 per project and family, 64 KiB each). NOT WIRED in M2: nothing calls it until TE-F8's recording channel exists. */
   importRecordings(scope: HostScope, input: ReplySetQuery & { readonly replies: readonly ModelReplyFileEntry[] }): Promise<{ readonly ok: true; readonly added: number; readonly skipped: number; readonly revision: number } | ReplyStoreFailure>;
+  /** A maintainer's action (the caller checks the role): removes the erase tombstone, so imports are accepted again. Whatever it lets in as `before_task` is then the maintainer's responsibility. */
+  clearErasure(scope: HostScope, input: { readonly project: string }): Promise<{ readonly ok: true } | ReplyStoreFailure>;
   deleteOverlay(scope: HostScope, input: { readonly project: string; readonly taskId: string; readonly family: ServedModelFamily }): Promise<{ readonly ok: true } | ReplyStoreFailure>;
   /** Deletes every row of this lane's four kinds under one project of the caller's company (idempotent; TE-G7's rows are not touched). */
   eraseProject(scope: HostScope, input: { readonly project: string }): Promise<{ readonly ok: true; readonly deleted: number } | ReplyStoreFailure>;

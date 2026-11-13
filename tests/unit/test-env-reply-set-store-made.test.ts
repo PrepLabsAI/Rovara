@@ -43,45 +43,8 @@ const idsAndProvenance = async (service: World) => {
   return read.ok ? read.set.replies.map((entry) => `${entry.id}:${entry.provenance}`) : [];
 };
 
-describe("H1: a reply the coding agent wrote is never imported as before_task (the durable MADE# record)", () => {
-  it("expiry: 31 days after putOverlay the overlay is gone, and an import of the same content leaves it out", async () => {
-    const { service, advance } = world();
-    await importFile(service, [reply("base")]);
-    await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("hand", "agent wrote this")] });
-    advance(31 * DAY);
-    expect(await service.readRoundSet(A, { ...q, taskId: "task-1" })).toMatchObject({ ok: true }); // the head still reads; the overlay is gone
-    expect(await importFile(service, [reply("base"), reply("hand", "agent wrote this")])).toMatchObject({ ok: true, added: 0, skipped: 2 });
-    expect(await idsAndProvenance(service)).toEqual(["base:before_task"]);
-  });
-  it("deleteOverlay: after the overlay is deleted an import of the same content leaves it out", async () => {
-    const { service } = world();
-    await importFile(service, [reply("base")]);
-    await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("hand", "agent wrote this")] });
-    await service.deleteOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY });
-    expect(await importFile(service, [reply("hand", "agent wrote this")])).toMatchObject({ ok: true, added: 0, skipped: 1 });
-    expect(await idsAndProvenance(service)).toEqual(["base:before_task"]);
-  });
-  it("a forced join failure (an id clash the agent builds from public hashes): the overlay never joins, and an import still leaves the reply out", async () => {
-    const { service } = world();
-    await importFile(service, [reply("a", "original")]);
-    const x = reply("a", "agent edit");
-    const y = reply(`a.edit-${sha(x).slice(0, 8)}`, "agent's decoy");
-    await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [y, x] });
-    expect(await service.joinTask(A, { project: PROJECT, taskId: "task-1", family: FAMILY, branch: BRANCH })).toEqual({ ok: false, word: "id_clash" });
-    await service.deleteOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY });
-    expect(await importFile(service, [x, y])).toMatchObject({ ok: true, added: 0, skipped: 2 });
-    expect(await idsAndProvenance(service)).toEqual(["a:before_task"]);
-  });
-  it("a forced join failure by a full head (1,000 entries): the overlay never joins, and an import still leaves the reply out", async () => {
-    const { service } = world();
-    await importFile(service, Array.from({ length: 999 }, (_, index) => reply(`r${index}`)));
-    await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("e1", "agent"), reply("e2", "agent")] });
-    expect(await service.joinTask(A, { project: PROJECT, taskId: "task-1", family: FAMILY, branch: BRANCH })).toEqual({ ok: false, word: "too_many" });
-    await service.deleteOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY });
-    expect(await importFile(service, [reply("e1", "agent")])).toMatchObject({ ok: true, added: 0, skipped: 1 });
-    const read = await service.readSet(A, q);
-    expect(read.ok && read.set.replies.some((entry) => entry.id === "e1")).toBe(false);
-  });
+// The four H1 probes (expiry, deleteOverlay, a failed join by id clash, a full head) live in the shared conformance suite, so Cloud must pass them too.
+describe("H1: the durable MADE# record (Code-only parts)", () => {
   it("keeps the record through a join and a second task: the joined reply is task_made and an import of it adds nothing", async () => {
     const { service, store, pk } = world();
     await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("hand")] });
@@ -90,15 +53,21 @@ describe("H1: a reply the coding agent wrote is never imported as before_task (t
     expect(await idsAndProvenance(service)).toEqual(["hand:task_made"]);
     expect((await queryAll(store, { pk, sk: { op: "beginsWith", prefix: "MADE#" } })).length).toBeGreaterThan(0);
   });
-  it("only eraseProject removes the record, and MADE# is one of this lane's four-now-five prefixes", async () => {
+  it("only eraseProject removes the record, and it leaves a content-free tombstone that stops imports until cleared", async () => {
     const { service, store, pk } = world();
     await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("hand")] });
     await service.deleteOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY });
     expect((await queryAll(store, { pk, sk: { op: "beginsWith", prefix: "MADE#" } })).some((row) => row.sk.endsWith(sha(reply("hand"))))).toBe(true);
     expect(REPLY_STORE_OWN_PREFIXES).toContain("MADE#");
     await service.eraseProject(A, { project: PROJECT });
+    const left = await queryAll(store, { pk });
+    expect(left.map((row) => row.sk)).toEqual(["ERASED#project"]);
+    expect(Object.keys(left[0]!).sort()).toEqual(["at", "kind", "pk", "schemaVersion", "sk"]); // content-free: a time and a kind
+    expect(REPLY_STORE_OWN_PREFIXES.some((prefix) => "ERASED#project".startsWith(prefix))).toBe(false); // erase never deletes its own tombstone
+    expect(await importFile(service, [reply("hand")])).toEqual({ ok: false, word: "erased" });
+    expect(await service.clearErasure(A, { project: PROJECT })).toEqual({ ok: true });
     expect(await queryAll(store, { pk })).toEqual([]);
-    await importFile(service, [reply("hand")]); // after an erase the project is new: the import may count it
+    await importFile(service, [reply("hand")]); // the maintainer accepted: the project is new
     expect(await idsAndProvenance(service)).toEqual(["hand:before_task"]);
   });
   it("does not record independent replies (they are not the coding agent's)", async () => {
@@ -145,7 +114,7 @@ describe("L1 and L2: fixed words", () => {
     expect(await service.putIndependentOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, entries: [entry(one), entry(two)] })).toEqual({ ok: true, stored: 0, skipped: [{ id: "one", reason: "already_in_overlay" }, { id: "two", reason: "already_in_overlay" }] });
   });
   it("an id clash has its own fixed word, not conflict", () => {
-    expect(Object.keys(REPLY_STORE_WORDS).sort()).toEqual(["conflict", "id_clash", "not_allowed", "not_found", "too_large", "too_many"]);
+    expect(Object.keys(REPLY_STORE_WORDS).sort()).toEqual(["conflict", "erased", "id_clash", "made_full", "not_allowed", "not_found", "too_large", "too_many"]);
     expect(REPLY_STORE_WORDS.id_clash).not.toBe(REPLY_STORE_WORDS.conflict);
   });
 });
@@ -186,5 +155,54 @@ describe("L4: an invalid head row stops an import (fail closed)", () => {
     await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("hand")] });
     await store.put({ item: { pk, sk: `MADE#${sha(reply("junk"))}`, kind: "model_reply_made", schemaVersion: 1, entrySha256: sha(reply("junk")), extra: 1 } });
     expect(await importFile(service, [reply("more")])).toEqual({ ok: false, word: "not_found" });
+  });
+});
+
+describe("record before refusing (item 2) and content-equal variants (item 3): the rows", () => {
+  it("records the entry hash and the content hash of a reply even when the write is refused", async () => {
+    const { service, store, pk } = world();
+    await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("one")] });
+    await service.joinTask(A, { project: PROJECT, taskId: "task-1", family: FAMILY, branch: BRANCH });
+    expect(await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("late")] })).toEqual({ ok: false, word: "not_allowed" });
+    const keys = (await queryAll(store, { pk, sk: { op: "beginsWith", prefix: "MADE#" } })).map((row) => row.sk);
+    expect(keys).toContain(`MADE#${sha(reply("late"))}`);
+    expect(keys.filter((key) => key.startsWith("MADE#c#"))).toHaveLength(2);
+  });
+  it("does not mind the id or an empty toolCalls: the same answer under another id is skipped", async () => {
+    const { service } = world();
+    await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("one", "same answer")] });
+    const variant = { id: "two", match: {}, response: { text: "same answer", finish: "stop", toolCalls: [] } } as ModelReplyFileEntry;
+    expect(await importFile(service, [variant])).toMatchObject({ ok: true, added: 0, skipped: 1 });
+  });
+});
+
+describe("item 5: the MADE growth cap", () => {
+  it("refuses a putOverlay that would pass the per-project cap with made_full, changing nothing, and also stops imports (the record may be incomplete)", async () => {
+    const store = new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE });
+    const service = createReplySetStore({ store, now: () => new Date("2026-11-13T12:00:00Z"), madeLimit: 6 });
+    const pk = replyStorePartition(COMPANY_A.orgId, PROJECT);
+    expect(await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("a"), reply("b")] })).toMatchObject({ ok: true }); // 4 rows
+    const before = await queryAll(store, { pk });
+    expect(await service.putOverlay(A, { project: PROJECT, taskId: "task-2", family: FAMILY, replies: [reply("c"), reply("d")] })).toEqual({ ok: false, word: "made_full" });
+    expect(await queryAll(store, { pk })).toEqual(before);
+    expect(await service.putOverlay(A, { project: PROJECT, taskId: "task-2", family: FAMILY, replies: [reply("a")] })).toMatchObject({ ok: true }); // nothing new to record
+    expect(await service.putOverlay(A, { project: PROJECT, taskId: "task-3", family: FAMILY, replies: [reply("e")] })).toMatchObject({ ok: true }); // 6 rows: at the cap
+    expect(await service.putOverlay(A, { project: PROJECT, taskId: "task-4", family: FAMILY, replies: [reply("f")] })).toEqual({ ok: false, word: "made_full" });
+    expect(await service.importFromRepoFile(A, { ...q, baseCommitSha: "e".repeat(40), bytes: bytes([reply("z")]), origin: "customer_written" })).toEqual({ ok: false, word: "made_full" });
+  });
+  it("reads the record in pages (no unbounded query) and still finds every hash", async () => {
+    const memory = new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE });
+    const limits: (number | undefined)[] = [];
+    const store = Object.assign(Object.create(memory) as DocumentStore, {
+      get: (k: Parameters<DocumentStore["get"]>[0]) => memory.get(k), getMany: (k: Parameters<DocumentStore["getMany"]>[0]) => memory.getMany(k), put: (r: Parameters<DocumentStore["put"]>[0]) => memory.put(r),
+      delete: (r: Parameters<DocumentStore["delete"]>[0]) => memory.delete(r), transact: (i: readonly TransactItem[]) => memory.transact(i), indexes: memory.indexes,
+      query: (r: Parameters<DocumentStore["query"]>[0]) => { if (r.sk?.op === "beginsWith" && r.sk.prefix === "MADE#") limits.push(r.limit); return memory.query(r); },
+    });
+    const service = createReplySetStore({ store, now: () => new Date("2026-11-13T12:00:00Z") });
+    const many = Array.from({ length: 30 }, (_, index) => reply(`r${index}`, `text ${index}`));
+    await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: many });
+    expect(await service.importFromRepoFile(A, { ...q, baseCommitSha: "e".repeat(40), bytes: bytes(many), origin: "customer_written" })).toMatchObject({ ok: true, added: 0, skipped: 30 });
+    expect(limits.length).toBeGreaterThan(0);
+    expect(limits.every((limit) => typeof limit === "number" && limit <= 1_000)).toBe(true);
   });
 });

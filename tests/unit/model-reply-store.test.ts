@@ -181,7 +181,7 @@ describe("the key layout (TE-G7 extends it; it does not replace it)", () => {
 
 describe("the fixed words", () => {
   it("are fixed text with no variable part", () => {
-    expect(Object.keys(REPLY_STORE_WORDS).sort()).toEqual(["conflict", "id_clash", "not_allowed", "not_found", "too_large", "too_many"]);
+    expect(Object.keys(REPLY_STORE_WORDS).sort()).toEqual(["conflict", "erased", "id_clash", "made_full", "not_allowed", "not_found", "too_large", "too_many"]);
     for (const text of Object.values(REPLY_STORE_WORDS)) expect(text).toMatch(/^[a-z ,]+$/u);
   });
 });

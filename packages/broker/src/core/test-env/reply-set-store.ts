@@ -35,6 +35,13 @@ import {
   REPLY_MADE_VERSION_KIND,
   REPLY_MADE_VERSION_SORT_KEY,
   REPLY_MADE_KIND,
+  REPLY_MADE_CONTENT_KIND,
+  REPLY_MADE_MAX_PER_PROJECT,
+  REPLY_ERASED_KIND,
+  REPLY_ERASED_SORT_KEY,
+  ReplyMadeContentRowSchema,
+  replyMadeContentSortKey,
+  replyContentSha256,
   ReplyMadeRowSchema,
   ReplyMadeVersionRowSchema,
   replyMadeSortKey,
@@ -91,6 +98,8 @@ export interface ReplySetStoreOptions {
   readonly store: DocumentStore;
   /** Which company a call is for. Default: the scope's own `orgId` (a `system` scope has none and is refused). A laptop gives `() => IMPLICIT_COMPANY_ID`. */
   readonly resolveCompany?: ReplyStoreCompanyResolver;
+  /** Most MADE# rows (both kinds) one project may hold; reached, putOverlay and imports are refused with `made_full`. Default `REPLY_MADE_MAX_PER_PROJECT`. */
+  readonly madeLimit?: number;
   /** The clock, for the expiry of overlays and join markers. */
   readonly now?: () => Date;
   /** Told a fixed code when a stored row or a rule's integrity check fails (never text from a row). The caller may audit it; the answer to the caller stays `not_found`. */
@@ -98,10 +107,12 @@ export interface ReplySetStoreOptions {
 }
 
 const NOT_FOUND: ReplyStoreFailure = Object.freeze({ ok: false, word: "not_found" });
+const MADE_FULL: ReplyStoreFailure = Object.freeze({ ok: false, word: "made_full" });
 const NOT_ALLOWED: ReplyStoreFailure = Object.freeze({ ok: false, word: "not_allowed" });
 const CONFLICT: ReplyStoreFailure = Object.freeze({ ok: false, word: "conflict" });
 const DAY_SECONDS = 86_400;
 const BODY_WRITES_AT_ONCE = 20;
+const MADE_PAGE = 500;
 const COMMIT_SHA = /^[0-9a-f]{40}$/u;
 const IMPORT_ORIGINS: readonly string[] = ["customer_written", "setup_agent_from_fakes", "prompt_and_expected_shape"];
 const defaultResolver: ReplyStoreCompanyResolver = (scope) => {
@@ -129,6 +140,7 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
   const { store } = options;
   const resolve = options.resolveCompany ?? defaultResolver;
   const now = options.now ?? (() => new Date());
+  const madeLimit = options.madeLimit ?? REPLY_MADE_MAX_PER_PROJECT;
   const problem = (code: RuleReason | "row_invalid"): void => {
     try {
       options.onProblem?.(code);
@@ -249,10 +261,11 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
   }
 
   /**
-   * What an import must not turn into `before_task`: every `task_made` entry of any head of the project and every hash in the durable MADE# record (a reply the coding agent ever wrote, whatever became of its overlay), plus the MADE
-   * counter's value as read BEFORE the hashes (the import's write checks it). A row that does not parse stops the import (fail closed): `undefined`.
+   * What an import must not turn into `before_task`: every `task_made` entry of any head of the project and every hash in the durable MADE# record (entry hashes and content hashes of every reply the coding agent ever wrote,
+   * whatever became of its overlay), plus the MADE counter's value as read BEFORE the hashes (the import's write checks it). The record is read in pages. A row that does not parse stops the import (fail closed:
+   * `undefined`); a record at its cap may be incomplete, so that refuses too (`made_full`).
    */
-  async function notImportedShas(pk: string): Promise<{ shas: Set<string>; version: number | undefined } | undefined> {
+  async function notImportedShas(pk: string): Promise<{ shas: Set<string>; contentShas: Set<string>; version: number | undefined } | ReplyStoreFailure | undefined> {
     let version: number | undefined;
     const versionRow = await store.get({ pk, sk: REPLY_MADE_VERSION_SORT_KEY });
     if (versionRow !== undefined) {
@@ -262,17 +275,33 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
         return undefined;
       }
       version = parsed.data.version;
+      if (parsed.data.count >= madeLimit) return MADE_FULL;
     }
     const shas = new Set<string>();
-    for (const row of await queryAll(store, { pk, sk: { op: "beginsWith", prefix: REPLY_MADE_PREFIX } })) {
-      if (row.sk === REPLY_MADE_VERSION_SORT_KEY) continue;
-      const parsed = ReplyMadeRowSchema.safeParse(strip(row));
-      if (!parsed.success || row.sk !== replyMadeSortKey(parsed.data.entrySha256)) {
+    const contentShas = new Set<string>();
+    let rows = 0;
+    let cursor: string | undefined;
+    do {
+      const page = await store.query({ pk, sk: { op: "beginsWith", prefix: REPLY_MADE_PREFIX }, limit: MADE_PAGE, ...(cursor === undefined ? {} : { cursor }) });
+      for (const row of page.items) {
+        if (row.sk === REPLY_MADE_VERSION_SORT_KEY) continue;
+        rows += 1;
+        if (rows > madeLimit) return MADE_FULL;
+        const entry = ReplyMadeRowSchema.safeParse(strip(row));
+        if (entry.success && row.sk === replyMadeSortKey(entry.data.entrySha256)) {
+          shas.add(entry.data.entrySha256);
+          continue;
+        }
+        const content = ReplyMadeContentRowSchema.safeParse(strip(row));
+        if (content.success && row.sk === replyMadeContentSortKey(content.data.contentSha256)) {
+          contentShas.add(content.data.contentSha256);
+          continue;
+        }
         problem("row_invalid");
         return undefined;
       }
-      shas.add(parsed.data.entrySha256);
-    }
+      cursor = page.cursor;
+    } while (cursor !== undefined);
     for (const row of await queryAll(store, { pk, sk: { op: "beginsWith", prefix: REPLY_HEAD_PREFIX } })) {
       const parsed = ReplySetHeadSchema.safeParse(strip(row));
       if (!parsed.success) {
@@ -281,18 +310,49 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
       }
       for (const entry of parsed.data.entries) if (entry.provenance === "task_made") shas.add(entry.entrySha256);
     }
-    return { shas, version };
+    return { shas, contentShas, version };
   }
-  /** Records the contents the coding agent wrote: MADE# rows (idempotent) and one bump of the counter in the SAME transaction, in chunks (a transaction holds at most 100 items). */
-  async function recordMade(pk: string, shas: readonly string[]): Promise<void> {
-    const distinct = [...new Set(shas)];
-    const per = DOCUMENT_STORE_LIMITS.maxTransactItems - 2;
-    for (let from = 0; from < distinct.length; from += per) {
-      const items: TransactItem[] = distinct.slice(from, from + per).map((sha): TransactItem => ({ kind: "put", item: asDocument({ pk, sk: replyMadeSortKey(sha) }, { kind: REPLY_MADE_KIND, schemaVersion: 1, entrySha256: sha }) }));
-      items.push({ kind: "update", key: { pk, sk: REPLY_MADE_VERSION_SORT_KEY }, ops: [change.setIfAbsent("kind", REPLY_MADE_VERSION_KIND), change.setIfAbsent("schemaVersion", 1), change.add("version", 1)] });
+  /**
+   * Records the replies the coding agent wrote: for each, a MADE# row for its entry hash and one for its content hash (idempotent puts), and one bump of the counter (`version`, and `count` of the rows that were new) in the SAME
+   * transaction, in chunks (a transaction holds at most 100 items). Refuses with `made_full`, writing nothing, when the project would pass its cap.
+   */
+  async function recordMade(pk: string, replies: readonly ModelReplyFileEntry[]): Promise<ReplyStoreFailure | undefined> {
+    const rows = new Map<string, { sk: string; body: object }>();
+    for (const reply of replies) {
+      const entrySha = modelReplyEntrySha256(reply);
+      const contentSha = replyContentSha256(reply);
+      rows.set(replyMadeSortKey(entrySha), { sk: replyMadeSortKey(entrySha), body: { kind: REPLY_MADE_KIND, schemaVersion: 1, entrySha256: entrySha } });
+      rows.set(replyMadeContentSortKey(contentSha), { sk: replyMadeContentSortKey(contentSha), body: { kind: REPLY_MADE_CONTENT_KIND, schemaVersion: 1, contentSha256: contentSha } });
+    }
+    if (rows.size === 0) return undefined;
+    const all = [...rows.values()];
+    const fresh = new Set<string>();
+    for (let from = 0; from < all.length; from += DOCUMENT_STORE_LIMITS.maxGetMany) {
+      const chunk = all.slice(from, from + DOCUMENT_STORE_LIMITS.maxGetMany);
+      const found = await store.getMany(chunk.map((row) => ({ pk, sk: row.sk })));
+      found.forEach((row, index) => { if (row === undefined) fresh.add(chunk[index]!.sk); });
+    }
+    const counter = await store.get({ pk, sk: REPLY_MADE_VERSION_SORT_KEY });
+    let count = 0;
+    if (counter !== undefined) {
+      const parsed = ReplyMadeVersionRowSchema.safeParse(strip(counter));
+      if (!parsed.success) {
+        problem("row_invalid");
+        return NOT_ALLOWED;
+      }
+      count = parsed.data.count;
+    }
+    if (count + fresh.size > madeLimit) return MADE_FULL;
+    const per = DOCUMENT_STORE_LIMITS.maxTransactItems - 1;
+    for (let from = 0; from < all.length; from += per) {
+      const chunk = all.slice(from, from + per);
+      const items: TransactItem[] = chunk.map((row): TransactItem => ({ kind: "put", item: asDocument({ pk, sk: row.sk }, row.body) }));
+      const added = chunk.filter((row) => fresh.has(row.sk)).length;
+      items.push({ kind: "update", key: { pk, sk: REPLY_MADE_VERSION_SORT_KEY }, ops: [change.setIfAbsent("kind", REPLY_MADE_VERSION_KIND), change.setIfAbsent("schemaVersion", 1), change.add("version", 1), change.add("count", added)] });
       const outcome = await store.transact(items);
       if (!outcome.applied) throw new DocumentStoreError("conflict", "made record");
     }
+    return undefined;
   }
   async function recordingCount(pk: string, family: ServedModelFamily): Promise<number> {
     const shas = new Set<string>();
@@ -310,15 +370,18 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
   ) {
     const pk = replyStorePartition(await companyOf(scope), input.project);
     return twice(async () => {
+      if ((await store.get({ pk, sk: REPLY_ERASED_SORT_KEY })) !== undefined) return { ok: false, word: "erased" } satisfies ReplyStoreFailure;
       const { head, own } = await writableHead(pk, input);
       const bodies = await readBodies(pk, head.entries.map((entry) => entry.entrySha256));
       const made = await notImportedShas(pk);
       if (made === undefined) return NOT_FOUND;
+      if ("ok" in made) return made;
       const planned = planImport(head, { version: 1, family: input.family, replies: input.replies }, {
         origin: input.origin,
         source: input.source,
         commit: input.commit,
         notImportedShas: made.shas,
+        notImportedContentShas: made.contentShas,
         bodies,
         existingRecordings: input.origin === "real_recording_capped" ? await recordingCount(pk, input.family) : undefined,
       });
@@ -332,6 +395,7 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
       const written = await store.transact([
         { kind: "put", item: headDocument(pk, planned.head), condition: headCondition(own, head.revision) },
         { kind: "check", key: { pk, sk: REPLY_MADE_VERSION_SORT_KEY }, condition: made.version === undefined ? when.absent() : when.eq("version", made.version) },
+        { kind: "check", key: { pk, sk: REPLY_ERASED_SORT_KEY }, condition: when.absent() },
       ]);
       return written.applied ? { ok: true as const, added: planned.added, skipped: planned.skipped, revision: planned.head.revision } : RETRY;
     });
@@ -341,17 +405,18 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
   async function writeOverlay(
     scope: HostScope,
     input: { project: string; taskId: string; family: ServedModelFamily },
-    change: (existing: readonly ReplyOverlayEntry[]) => { entries: ReplyOverlayEntry[]; bodies: ReplySetEntryBody[]; made?: string[]; skipped?: { id: string; reason: ReplySkipReason }[] } | ReplyStoreFailure,
+    change: (existing: readonly ReplyOverlayEntry[]) => { entries: ReplyOverlayEntry[]; bodies: ReplySetEntryBody[]; made?: readonly ModelReplyFileEntry[]; skipped?: { id: string; reason: ReplySkipReason }[] } | ReplyStoreFailure,
   ) {
     const pk = replyStorePartition(await companyOf(scope), input.project);
     return twice(async () => {
-      if ((await joinRow(pk, input.taskId, input.family)) !== undefined) return NOT_ALLOWED;
       const existing = await overlayRow(pk, input.taskId, input.family);
       const changed = change(existing?.entries ?? []);
       if ("ok" in changed) return changed;
+      // The durable record FIRST (with its counter bump, one transaction per chunk), before any refusal below: whatever happens to the overlay after this, a refused late write included, the hashes stay listed.
+      const refused = await recordMade(pk, changed.made ?? []);
+      if (refused !== undefined) return refused;
+      if ((await joinRow(pk, input.taskId, input.family)) !== undefined) return NOT_ALLOWED;
       if (changed.entries.length > REPLY_OVERLAY_MAX_ENTRIES) return { ok: false, word: "too_many" } satisfies ReplyStoreFailure;
-      // The durable record first (with its counter bump, one transaction per chunk): whatever happens to the overlay after this, the hashes stay listed.
-      await recordMade(pk, changed.made ?? []);
       await writeBodies(pk, changed.bodies);
       const next: ReplyOverlay = { kind: REPLY_OVERLAY_KIND, schemaVersion: 1, family: input.family, taskId: input.taskId, revision: (existing?.revision ?? 0) + 1, entries: changed.entries };
       const key = { pk, sk: replyTaskSortKey(input.taskId, input.family) };
@@ -431,7 +496,7 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
           entries.push({ id: reply.id, entrySha256: sha, provenance: "task_made", addedBy: { taskId: input.taskId, source: "task_join" } });
           bodies.push({ id: reply.id, match: reply.match, response: reply.response });
         }
-        return { entries, bodies, made: storable.map((reply) => modelReplyEntrySha256(reply)) };
+        return { entries, bodies, made: storable };
       });
       return "ok" in written && written.ok === true ? { ok: true, stored: storable.length, tooLarge } : written;
     },
@@ -538,7 +603,16 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
           deleted += chunk.length;
         }
       }
+      // The record that told agent-made replies from customer-written ones is gone: leave a content-free tombstone (a time), so no import is accepted until a maintainer clears it (`clearErasure`).
+      if (deleted > 0) await store.put({ item: asDocument({ pk, sk: REPLY_ERASED_SORT_KEY }, { kind: REPLY_ERASED_KIND, schemaVersion: 1, at: now().toISOString() }) });
       return { ok: true, deleted };
+    },
+
+    async clearErasure(scope, input) {
+      const company = await companyOf(scope);
+      if (!ReplyStoreProjectSchema.safeParse(input.project).success) return NOT_FOUND;
+      await store.delete({ key: { pk: replyStorePartition(company, input.project), sk: REPLY_ERASED_SORT_KEY } });
+      return { ok: true };
     },
   };
   return service;

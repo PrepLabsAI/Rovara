@@ -29,6 +29,7 @@ import {
   planImport,
   reconcileBaseDecisions,
   replyEditId,
+  replyContentSha256,
   replyHeadCounts,
   resolveHead,
   resolveRoundSet,
@@ -435,5 +436,29 @@ describe("speed: 1,000 replies near 4 MiB", () => {
     const elapsed = performance.now() - started;
     expect(resolved.ok && joined.ok).toBe(true);
     expect(elapsed).toBeLessThan(1_500);
+  });
+});
+
+describe("replyContentSha256 (what MADE# also records)", () => {
+  const base = reply("a", "same answer", { promptContains: "p" });
+  it("ignores the id and treats an absent toolCalls like an empty one", () => {
+    expect(replyContentSha256({ ...base, id: "another" })).toBe(replyContentSha256(base));
+    expect(replyContentSha256({ ...base, response: { ...base.response, toolCalls: [] } })).toBe(replyContentSha256(base));
+    expect(sha({ ...base, id: "another" })).not.toBe(sha(base)); // the entry hash does not
+  });
+  it("still tells different content apart: text, match, finish, a real tool call, usage", () => {
+    const seen = new Set([
+      replyContentSha256(base),
+      replyContentSha256({ ...base, response: { ...base.response, text: "other" } }),
+      replyContentSha256({ ...base, match: { promptContains: "q" } }),
+      replyContentSha256({ ...base, response: { ...base.response, finish: "length" } }),
+      replyContentSha256({ ...base, response: { ...base.response, toolCalls: [{ name: "t", args: {} }] } }),
+      replyContentSha256({ ...base, response: { ...base.response, usage: { inputTokens: 1, outputTokens: 1 } } }),
+    ]);
+    expect(seen.size).toBe(6);
+  });
+  it("is skipped by planImport when the set names it", () => {
+    const planned = planImport(emptyReplyHead("gemini", "main"), file([{ ...base, id: "renamed" }]), { origin: "customer_written", source: "repo_import", notImportedShas: new Set(), notImportedContentShas: new Set([replyContentSha256(base)]), bodies: new Map() });
+    expect(planned).toMatchObject({ ok: true, added: 0, skipped: 1 });
   });
 });
