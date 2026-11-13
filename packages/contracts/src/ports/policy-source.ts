@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PolicyResolveRequestSchema, PolicyRowsSchema, policyDataObject, resolvePolicy, type PolicyResolveRequest, type ResolvedPolicy } from "../policy.js";
+import { PolicyResolveRequestSchema, PolicyRowsSchema, policyDataObject, resolvePolicy, type PolicyOperatorOptions, type PolicyResolveRequest, type ResolvedPolicy } from "../policy.js";
 
 /** An opaque, adapter-issued scope. Only the adapter maps it to a company/project/branch.
  * It is not an authorization credential: authenticate the caller before issuing this key.
@@ -15,7 +15,8 @@ export type PolicyRowsReader = (scope: PolicyScope) => Promise<PolicyRowsRead | 
 const scopeSchema = z.unknown().refine(policyDataObject).pipe(z.object({ key: z.string().min(1).max(256).regex(/^[a-zA-Z0-9_:/.-]+$/u) }).strict());
 const readSchema = z.unknown().refine(policyDataObject).pipe(z.object({ scope: scopeSchema, rows: PolicyRowsSchema }).strict());
 
-export function createRowsPolicySource(read: PolicyRowsReader): PolicySource {
+/** Operator options come from installation configuration, never the row reader or resolve request. */
+export function createRowsPolicySource(read: PolicyRowsReader, operator: PolicyOperatorOptions = {}): PolicySource {
   return {
     async resolve(scope, request) {
       try {
@@ -25,7 +26,7 @@ export function createRowsPolicySource(read: PolicyRowsReader): PolicySource {
         const key = checkedScope.key;
         const found = readSchema.parse(await read(Object.freeze({ key })));
         if (found.scope.key !== key) throw new Error("policy_unavailable");
-        const result = resolvePolicy({ ...found.rows, ...checkedRequest });
+        const result = resolvePolicy({ ...found.rows, ...checkedRequest }, operator);
         if (result.status === "refused") throw new Error("policy_unavailable");
         return result;
       } catch {
@@ -37,6 +38,6 @@ export function createRowsPolicySource(read: PolicyRowsReader): PolicySource {
 }
 
 /** Code laptop compatibility: no stored rows, no preset implicitly selected. */
-export function createDefaultPolicySource(): PolicySource {
-  return createRowsPolicySource(async (scope) => ({ scope, rows: {} }));
+export function createDefaultPolicySource(operator: PolicyOperatorOptions = {}): PolicySource {
+  return createRowsPolicySource(async (scope) => ({ scope, rows: {} }), operator);
 }

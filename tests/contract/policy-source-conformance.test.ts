@@ -28,6 +28,18 @@ function rowsWorld(): PolicySourceWorld {
 runContract("PolicySource laptop default", policySourceChecks, () => ({ source: createDefaultPolicySource(), scope: scopeFor(COMPANY_B) }));
 runContract("PolicySource rows fake", policySourceChecks, rowsWorld);
 
+it("operator disablement is separate from rows and returns only null values", async () => {
+  const source = createRowsPolicySource(async (scope) => ({ scope, rows: { companyLocks: { preset_level: "careful" } } }), { installOff: true });
+  for (const candidate of [source, createDefaultPolicySource({ installOff: true })]) {
+    const got = await candidate.resolve(scopeFor(COMPANY_A), { taskRaises: { extra_review: true } });
+    expect(got.status).toBe("disabled");
+    expect(Object.keys(got.values)).toHaveLength(10);
+    for (const row of Object.values(got.values)) expect(row).toEqual({ value: null, origin: "install_off" });
+  }
+  await expect(createRowsPolicySource(async (scope) => ({ scope, rows: { installOff: true } })).resolve(scopeFor(COMPANY_A), {})).rejects.toThrow("policy_unavailable");
+  await expect(createDefaultPolicySource().resolve(scopeFor(COMPANY_A), { installOff: true } as never)).rejects.toThrow("policy_unavailable");
+});
+
 it("two-company scoping rejects a reader returning another scope like a missing scope", async () => {
   const a = scopeFor(COMPANY_A); const b = scopeFor(COMPANY_B);
   const missing = await attempt(() => createRowsPolicySource(async () => undefined).resolve(b, {}));
