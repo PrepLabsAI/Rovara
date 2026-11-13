@@ -2033,6 +2033,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Description": "The EC2 workers' launch template",
       "Type": "String",
     },
+    "Ec2WorkerSubnets": {
+      "Description": "The EC2 workers' availabilityZone=subnetId pairs",
+      "Type": "String",
+    },
     "GitHubAppCredentialRef": {
       "Default": "github-agentx-sdlc",
       "Type": "String",
@@ -2392,6 +2396,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   "/v1/auth",
                 ],
               ],
+            },
+            "EC2_WORKER_LAUNCH_TEMPLATE_ID": {
+              "Ref": "Ec2WorkerLaunchTemplateId",
+            },
+            "EC2_WORKER_SUBNETS": {
+              "Ref": "Ec2WorkerSubnets",
             },
             "GITHUB_APP_CREDENTIAL_REF": {
               "Ref": "GitHubAppCredentialRef",

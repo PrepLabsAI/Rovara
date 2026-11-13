@@ -199,20 +199,20 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "named",
         template: named,
-        withRoute: "111b71babfd7a2d21dbc6e06baccbb6a2a0e0c8032894708633e693a59110634",
-        withoutRoute: "1680784bef52a9585dcbfb9cdd653f9a223043037d3c0903702271204d3cd3f6",
+        withRoute: "242846cb5016daf21cfb436cd37fc047a9d528662c4345ff82006cba134d598f",
+        withoutRoute: "009ceb886e74022827ae8954be5096b64831554b49ae5f51f9528b9bf1e1bfc7",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "6297b26013f04dee5ad50ebd1f2e80685c7604b650f70eb4a4fdfb7f74aaffda",
-        withoutRoute: "3aec785419e54498fa5401e3f4e67ccb9878270ca5f51fe102791f883489da68",
+        withRoute: "dcf588142a9bac3e3675d60c1643632fd64ef67bd698926551501eb251504b33",
+        withoutRoute: "2604b6713cd7103c77615754f17fe391085305778f3c83cd968e0ee9646dae27",
       },
       {
         label: "legacy",
         template: legacy,
-        withRoute: "df3207ab490d8d95b7c0042a2b0bd7ee06e516ffa33430d943706ac27c18af92",
-        withoutRoute: "812249877bed59642c62294e5ebe0b835087c031908ff008d73a6422e0fb4c33",
+        withRoute: "e0ec4d2d7acd8e4776b8f2ec3e1dc408aada6f7cb8eca067837dded962b531e9",
+        withoutRoute: "976b5e91de5a9e2e767057f9cd6e00f1bd61f0ef6db1ab973f7d0b8f44f5e9e5",
       },
     ] as const;
     for (const { label, template, withRoute, withoutRoute } of digestCases) {

@@ -110,6 +110,34 @@ export type SignInClientsResponse =
 
 // ---- Spec 065: a sign-in client's routes, /v1/dev/client/*, each acting as the signed-in person ----
 
+/**
+ * Spec 065b: `GET /v1/dev/client/repositories` (projects:create): the accounts the deployment's GitHub App is installed
+ * on, and the repositories each lets it reach (the first 100 of each), to choose one for a new project.
+ */
+export interface ClientRepositoriesResponse {
+  installations: Array<{
+    installationId: number;
+    accountLogin: string;
+    accountType: "User" | "Organization";
+    repositorySelection: "all" | "selected";
+    status: "active" | "suspended";
+    repositories: Array<{ fullName: string; githubRepositoryId: number; private: boolean; defaultBranch: string }>;
+  }>;
+}
+
+/**
+ * Spec 065b: `POST /v1/dev/client/projects` (projects:create): a project from one GitHub repository the deployment's
+ * GitHub App can reach. Rovara builds the rest (the App's credential, the repository's default branch, the worker
+ * settings); the commands run in the repository, one argument list each.
+ */
+export const CreateClientProjectRequestSchema = z.object({
+  repository: z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/, "must be owner/name"),
+  name: z.string().regex(/^[a-z][a-z0-9-]{1,62}$/).optional(),
+  setupCommands: z.array(z.string().trim().min(1).max(1_000)).max(16).optional(),
+  testCommands: z.array(z.string().trim().min(1).max(1_000)).max(16).optional(),
+}).strict();
+export type CreateClientProjectRequest = z.infer<typeof CreateClientProjectRequestSchema>;
+
 /** `GET /v1/dev/client/projects/{project}`: a project the signed-in person may use; needs no scope. */
 export interface ClientProjectResponse {
   name: string;

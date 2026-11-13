@@ -118,6 +118,8 @@ import {
   PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   ProjectDefinitionSchema,
+  type ClientRepositoriesResponse,
+  type Ec2RuntimeBinding,
   ProjectModelOptionsSchema,
   OPERATION_PROMPT_MAX_BYTES,
   ProjectModelSelectionRequestSchema,
@@ -355,12 +357,13 @@ import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, unt
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
 import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification, type VerifiedAgentTrace } from "../e2e/application-evidence.js";
-import { developerIdForSlackUser } from "./admin-actions.js";
+import { developerIdForSlackUser, projectMemberKey } from "./admin-actions.js";
+import { workerBindingFromPairs } from "./worker-binding.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
@@ -583,6 +586,17 @@ interface AwsBrokerDependencies {
   channelAdapters?: ChannelAdapterConfiguration;
   /** Spec 025 developer sign-in; absent when the deployment has none, and /v1/dev/* answers NOT_FOUND. */
   developer?: DeveloperApiConfiguration;
+  /**
+   * Spec 065b: what a project a sign-in client creates is built from: the GitHub App's credential and its view of a
+   * repository, and the foundation's worker binding. Absent, POST /v1/dev/client/projects answers NOT_FOUND.
+   */
+  clientProjects?: {
+    credentialRef: string;
+    repositoryDefaults(url: string): Promise<{ owner: string; name: string; defaultBranch: string }>;
+    /** The repositories the GitHub App can reach, for GET /v1/dev/client/repositories. */
+    repositories(): Promise<ClientRepositoriesResponse["installations"]>;
+    workerBinding(): Promise<Ec2RuntimeBinding>;
+  };
   /**
    * Spec 064: the legacy deployment's sign-in, for account linking only. Set instead of `developer`, so developer
    * tasks, sharing and admin changes stay off; /v1/dev/* and /review/* serve linking alone (routeLinkingRequest).
@@ -1085,6 +1099,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
         return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
+          ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           ...workflowApplicationRouteDependencies(dependencies) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
@@ -1263,6 +1278,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
+          ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           ...workflowApplicationRouteDependencies(dependencies) }, request, url), request.requestId);
       }
@@ -2091,7 +2107,9 @@ async function registerProject(
       ...(authority === "administrator"
         ? [{ ConditionCheck: { TableName: dependencies.tableName, Key: membershipKey, ConditionExpression: "#role = :administrator",
           ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":administrator": "administrator" } } }]
-        : [{ Put: { TableName: dependencies.tableName, Item: membership } }]),
+        : [{ Put: { TableName: dependencies.tableName, Item: membership } },
+          // Spec 065: the project's side of the membership, so its members can be listed.
+          { Put: { TableName: dependencies.tableName, Item: { ...projectMemberKey(definition.name, identity.ownerKey), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: now } } }]),
       ...(authority === "takeover" && takeover !== undefined ? [{ Put: { TableName: dependencies.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
         pk: `PROJECT_TAKEOVER#${definition.name}`, sk: `AT#${now}#${randomUUID()}`, entityType: "PROJECT_OWNERSHIP_TAKEOVER",
         projectName: definition.name, revision: definition.revision, takenBy: identity.ownerKey, subject: identity.subject, reason: takeover.reason, at: now,
@@ -13958,7 +13976,43 @@ async function publicationProject(
 /** Spec 062: the link store the developer routes use, when the deployment has channel adapters. */
 /** Spec 064: what the legacy deployment's linking routes need: sign-in and the links, never developer tasks. */
 function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: DeveloperApiConfiguration) {
-  return { documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: linking, now: Date.now, ...channelLinkRouteDependencies(dependencies) };
+  return { documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: linking, now: Date.now, ...channelLinkRouteDependencies(dependencies), ...clientProjectRouteDependencies(dependencies) };
+}
+
+/** What a chat agent is told about a project a sign-in client created; the project's administrators refine it later. */
+const CLIENT_PROJECT_INSTRUCTIONS = "Delegate every repository read, edit, shell command, build and test to the remote AgentX worker. Before reporting a change done, run the project's test commands.";
+
+/** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. */
+function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "clientRepositories"> {
+  const clientProjects = dependencies.clientProjects;
+  if (clientProjects === undefined) return {};
+  return {
+    clientRepositories: () => clientProjects.repositories(),
+    async createClientProject(developerId, input) {
+      const url = `https://github.com/${input.repository}.git`;
+      const found = await clientProjects.repositoryDefaults(url);
+      const repositoryName = found.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").replace(/^([^a-z])/, "r-$1").slice(0, 63) || "repository";
+      const name = input.name ?? repositoryName;
+      const existing = await dependencies.documentClient.send(new QueryCommand({
+        TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+        ExpressionAttributeValues: { ":pk": `PROJECT#${name}`, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
+      })) as { Items?: unknown[] };
+      if ((existing.Items ?? []).length > 0) throw agentXError("CONFIG_INVALID", `a project named ${name} already exists; choose another name`);
+      const cwd = `repo/${repositoryName}`;
+      // One argument list each, split on spaces: no shell, so quotes and pipes are not interpreted.
+      const command = (text: string) => { const [executable, ...args] = text.trim().split(/\s+/); return { cwd, executable: executable!, args, timeoutSeconds: 1_800 }; };
+      const definition = ProjectDefinitionSchema.parse({
+        name, revision: 1,
+        repositories: [{ name: repositoryName, url, path: cwd, defaultBranch: found.defaultBranch, credentialRef: clientProjects.credentialRef }],
+        setup: (input.setupCommands ?? []).map(command), readiness: (input.testCommands ?? []).map(command),
+        orchestratorInstructions: CLIENT_PROJECT_INSTRUCTIONS,
+      });
+      // As the person: their developer ID owns the project, so they administer it and it is listed for them.
+      const identity: AuthenticatedIdentity = { issuer: "sign-in-client", subject: developerId, ownerKey: developerId, isAdministrator: true, claims: {} };
+      await registerProject(dependencies, identity, { definition, runtimeBinding: await clientProjects.workerBinding(), preflight: false });
+      return { name, latestRevision: 1 };
+    },
+  };
 }
 
 function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): { channelLinks?: ChannelLinkDependencies } {
@@ -14766,6 +14820,13 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
+  // Spec 065b: where the foundation's worker settings are given, a sign-in client may create projects.
+  ...(process.env.EC2_WORKER_SUBNETS && process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID ? { clientProjects: {
+    credentialRef: githubCredentials.credentialRef,
+    repositoryDefaults: (url: string) => githubCredentials.repositoryDefaults(url),
+    repositories: () => githubCredentials.installedRepositories(),
+    workerBinding: async () => workerBindingFromPairs(process.env.EC2_WORKER_SUBNETS!, process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID!),
+  } } : {}),
   projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
   ...(process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID
     ? { projectSetupRuntimeCatalogId: process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID }

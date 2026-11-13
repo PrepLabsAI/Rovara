@@ -10,6 +10,9 @@ import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper,
 import {
   AgentXNameSchema,
   scopesOf,
+  CreateClientProjectRequestSchema,
+  type CreateClientProjectRequest,
+  type ClientRepositoriesResponse,
   type ClientProjectMemberChangeResponse,
   type ClientProjectMembersResponse,
   type ClientProjectResponse,
@@ -129,6 +132,10 @@ export interface DeveloperRouteDependencies {
   now: () => number;
   /** The developer task routes' broker actions; without them /v1/dev/tasks* answers NOT_FOUND. */
   tasks?: DeveloperTaskActions;
+  /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
+  createClientProject?: (developerId: string, input: CreateClientProjectRequest) => Promise<{ name: string; latestRevision: number }>;
+  /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
+  clientRepositories?: () => Promise<ClientRepositoriesResponse["installations"]>;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
   /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
@@ -758,6 +765,23 @@ const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]
  * project's members, which only the project's administrators or a Rovara administrator may see and change.
  */
 export async function routeClientRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
+  const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
+  if (creating || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
+    const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+    if (!creator.scopes.includes("projects:create")) throw agentXError("FORBIDDEN", `${creator.client.name} may not create projects; an administrator can allow it with the projects:create scope`);
+    if (!creator.administrator) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
+    if (!creating) {
+      if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+      return { installations: await deps.clientRepositories() } satisfies ClientRepositoriesResponse;
+    }
+    if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+    const parsed = CreateClientProjectRequestSchema.safeParse(jsonBody(request));
+    if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+    const created = await deps.createClientProject(creator.developerId, parsed.data);
+    console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
+    return readClientProject(deps, creator.developerId, created.name);
+  }
   const read = CLIENT_PROJECT.exec(url.pathname);
   if (read !== null && request.method === "GET") {
     const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));

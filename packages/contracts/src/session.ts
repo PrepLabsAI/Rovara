@@ -274,6 +274,8 @@ export const CONTROL_PLANE_FOUNDATION_PARAMETERS = [
   "WorkspaceKmsKeyArn",
   "Ec2WorkerInstanceRoleArn",
   "Ec2WorkerLaunchTemplateId",
+  // availabilityZone=subnetId pairs (spec 065b): the broker binds a project a sign-in client creates to the workers.
+  "Ec2WorkerSubnets",
 ] as const;
 
 /** The deleter execution for a workspace; a workspace is deleted once. */

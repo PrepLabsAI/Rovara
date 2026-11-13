@@ -171,3 +171,87 @@ describe("a project the signed-in person may use (spec 065)", () => {
     expect((await call("GET", "/v1/dev/client/projects/payments", await token({ aud: "agentx-developer", azp: undefined }))).status).toBe(401);
   });
 });
+
+describe("creating a project from a repository (spec 065b)", () => {
+  const binding = { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }], volumeSizeGiB: 20, volumeType: "gp3" };
+  async function creating() {
+    const looked: string[] = [];
+    const linking: DeveloperApiConfiguration = {
+      issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
+      verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
+    };
+    const clientProjects = {
+      credentialRef: "github-agentx",
+      repositoryDefaults: async (url: string) => { looked.push(url); return { owner: "acme", name: "Web-App", defaultBranch: "trunk" }; },
+      repositories: async () => [{ installationId: 7, accountLogin: "acme", accountType: "Organization" as const, repositorySelection: "selected" as const, status: "active" as const, repositories: [{ fullName: "acme/Web-App", githubRepositoryId: 101, private: true, defaultBranch: "trunk" }] }],
+      workerBinding: async () => binding,
+    };
+    ({ db, handler } = await createAdminBroker({ linking, channelAdapters: true, clientProjects }));
+    const at = new Date(T0 - 60_000).toISOString();
+    db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#rovara-cloud", entityType: "SIGN_IN_CLIENT", clientId: "rovara-cloud", name: "Rovara Cloud", audience: "rovara-cloud", redirectUris: ["https://cloud.example.com/callback"], loopback: false, scopes: ["projects:members", "projects:create"], createdAt: at, updatedAt: at, updatedBy: "admin" });
+    for (const [id, name] of [[ADA, "Ada"], [BO, "Bo"]] as const) db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, provider: "oidc", issuer: "https://idp.example.test", subject: name.toLowerCase(), displayName: name, firstSignInAt: "x", lastSignInAt: "x", revoked: false });
+    session("s-ada", ADA, { administrator: true });
+    session("s-bo", BO);
+    const create = async (body: unknown, authorization?: string) => {
+      const response = await handler({ rawPath: "/v1/dev/client/projects", routeKey: "ANY /v1/dev/{proxy+}", headers: { authorization: authorization ?? await token({ scope: "projects:create" }) }, body: JSON.stringify(body), requestContext: { requestId: "r", http: { method: "POST" } } });
+      return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    };
+    const repositories = async (authorization?: string) => {
+      const response = await handler({ rawPath: "/v1/dev/client/repositories", routeKey: "ANY /v1/dev/{proxy+}", headers: { authorization: authorization ?? await token({ scope: "projects:create" }) }, requestContext: { requestId: "r", http: { method: "GET" } } });
+      return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    };
+    return { create, looked, repositories };
+  }
+
+  it("lists the repositories the GitHub App can reach, with the same scope and rights as creating", async () => {
+    const { repositories } = await creating();
+    expect(await repositories()).toMatchObject({ status: 200, body: { installations: [{ installationId: 7, accountLogin: "acme", status: "active", repositories: [{ fullName: "acme/Web-App", githubRepositoryId: 101 }] }] } });
+    expect((await repositories(await token({ scope: "projects:members" }))).status).toBe(403);
+    expect((await repositories(await token({ sub: BO, sid: "s-bo", scope: "projects:create" }))).status).toBe(403);
+  });
+
+  it("builds the project from the repository with the GitHub App and the worker binding, and makes its creator its administrator", async () => {
+    const { create, looked } = await creating();
+    const created = await create({ repository: "acme/Web-App", setupCommands: ["npm ci"], testCommands: ["npm test", "npm run lint"] });
+    expect(created.status).toBe(200);
+    expect(created.body).toMatchObject({ name: "web-app", latestRevision: 1, access: "administrator", repositories: [{ name: "web-app", url: "https://github.com/acme/Web-App.git", defaultBranch: "trunk", fullName: "acme/Web-App" }] });
+    expect(looked).toEqual(["https://github.com/acme/Web-App.git"]);
+    expect(db.get("PROJECT#web-app", "REV#000000000001")).toMatchObject({
+      definition: {
+        repositories: [{ name: "web-app", path: "repo/web-app", defaultBranch: "trunk", credentialRef: "github-agentx" }],
+        setup: [{ cwd: "repo/web-app", executable: "npm", args: ["ci"] }],
+        readiness: [{ executable: "npm", args: ["test"] }, { executable: "npm", args: ["run", "lint"] }],
+      },
+      runtimeBinding: binding,
+    });
+    expect(db.get(`MEMBER#${ADA}`, "PROJECT#web-app")).toMatchObject({ role: "administrator" });
+    expect(db.get("PROJECT_MEMBERS#web-app", `DEVELOPER#${ADA}`)).toMatchObject({ role: "administrator" });
+  });
+
+  it("takes a name, and refuses one that is taken", async () => {
+    const { create } = await creating();
+    expect((await create({ repository: "acme/Web-App", name: "storefront" })).body).toMatchObject({ name: "storefront" });
+    const taken = await create({ repository: "acme/Web-App", name: "storefront" });
+    expect(taken.status).toBe(400);
+    expect(JSON.stringify(taken.body)).toContain("already exists");
+  });
+
+  it("refuses without the scope, for someone who is not a Rovara administrator, and an invalid request", async () => {
+    const { create } = await creating();
+    expect((await create({ repository: "acme/Web-App" }, await token({ scope: "projects:members" }))).status).toBe(403);
+    expect((await create({ repository: "acme/Web-App" }, await token({ sub: BO, sid: "s-bo", scope: "projects:create" }))).status).toBe(403);
+    expect((await create({ repository: "not a repository" })).status).toBe(400);
+    expect(db.find((item) => String(item.pk).startsWith("PROJECT#"))).toEqual([]);
+  });
+});
+
+describe("the foundation's worker binding from its zone=subnet pairs (spec 065b)", () => {
+  it("lists one subnet per zone, in order, and refuses a malformed pair", async () => {
+    const { workerBindingFromPairs } = await import("../../packages/broker/src/aws/worker-binding.js");
+    expect(workerBindingFromPairs("us-east-1a=subnet-0123456789abcdef0, us-east-1b=subnet-0fedcba9876543210", "lt-0123456789abcdef0")).toMatchObject({
+      deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0",
+      subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }, { availabilityZone: "us-east-1b", subnetId: "subnet-0fedcba9876543210" }],
+    });
+    expect(() => workerBindingFromPairs("subnet-0123456789abcdef0", "lt-0123456789abcdef0")).toThrow();
+  });
+});
