@@ -9,21 +9,18 @@
 // sandbox calls a model host). Until then the evidence says "model hosts not blocked on this machine".
 import { builtinModelCatalog, modelHostBlockList, modelHostSuffixBlockList, type CompanyGatewayRow, type ModelCatalogRow } from "@agentx/contracts";
 
-/** DECISIONS 174: never denied, whatever a catalog row lists as an auth host (F0a's list still carries them until Codex's change lands; once it does this is a no-op). */
-const NEVER_DENIED: ReadonlySet<string> = new Set(["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"]);
-
 type DenyRow = Pick<ModelCatalogRow, "hosts" | "hostSuffixes"> & { readonly authHosts?: readonly string[] | undefined };
 
 /**
  * The names a sandbox must not reach on a laptop: every host of the built-in catalog (ALWAYS the full catalog; `rows` are ADDED, a partial list never shrinks the block), the company's gateway hosts, and every
  * host suffix as a wildcard (`*.openai.azure.com`: a gateway can hold a wildcard, a hosts file cannot). Sorted, no duplicates. Google's token hosts (oauth2, sts, iamcredentials) are NEVER in it (DECISIONS 174): they are not model hosts, and
- * a Google service that runs a model inside it is part of the stated residual.
+ * a Google service that runs a model inside it is part of the stated residual. F0a's catalog no longer lists them (a30f3c492), so nothing here has to filter them out.
  */
 export function laptopSandboxDenyList(rows: readonly DenyRow[] = [], gatewayRows: readonly Pick<CompanyGatewayRow, "host">[] = []): string[] {
   const all = [...builtinModelCatalog().rows, ...rows].map((row) => ({ hosts: row.hosts, authHosts: row.authHosts ?? [], hostSuffixes: row.hostSuffixes }));
   const hosts = modelHostBlockList(all as never, gatewayRows);
   const suffixes = modelHostSuffixBlockList(all as never).map((suffix) => `*.${suffix}`);
-  return [...new Set([...hosts, ...suffixes])].filter((entry) => !NEVER_DENIED.has(entry)).sort();
+  return [...new Set([...hosts, ...suffixes])].sort();
 }
 
 export interface LaptopBlockEvidenceInput {

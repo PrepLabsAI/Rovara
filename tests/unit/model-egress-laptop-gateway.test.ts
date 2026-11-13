@@ -97,8 +97,9 @@ describe("the list itself", () => {
   it("holds every host of the FULL built-in catalog and the company's gateway hosts, and the Azure suffix as a wildcard", () => {
     const list = laptopSandboxDenyList();
     for (const row of builtinModelCatalog().rows) {
-      // (Google's token hosts are catalog auth hosts today and are never denied: DECISIONS 174, tested below.)
-      for (const host of [...row.hosts, ...row.authHosts].filter((entry) => !/^(?:oauth2|sts|iamcredentials)\.googleapis\.com$/u.test(entry))) expect(list, host).toContain(host);
+      // Only the catalog's model `hosts` are denied: a row's auth hosts (Google's token hosts among them) are not model hosts (F0a a30f3c492, DECISIONS 174).
+      for (const host of row.hosts) expect(list, host).toContain(host);
+      for (const host of row.authHosts) expect(list, host).not.toContain(host);
       for (const suffix of row.hostSuffixes) expect(list).toContain(`*.${suffix}`);
     }
     expect(list).toContain("*.openai.azure.com");
