@@ -225,7 +225,7 @@ describe("Azure OpenAI (a host suffix a hosts file cannot hold)", () => {
     }
   });
   it("the evidence input says Azure OpenAI is not blocked in the round whenever the suffix list is not empty, and the sentence is fixed", () => {
-    expect(AZURE_OPENAI_NOT_BLOCKED_SENTENCE).toBe("Azure OpenAI is not blocked in this round: a client that calls an Azure OpenAI resource host reaches it directly");
+    expect(AZURE_OPENAI_NOT_BLOCKED_SENTENCE).toBe("Azure resource hosts under openai.azure.com, cognitiveservices.azure.com, services.ai.azure.com and models.ai.azure.com are not blocked in this round unless listed by name: clients can reach other resource hosts directly");
     const block = planModelHostBlock({ hasModelRow: true, helperIp: HELPER_IP, azureResourceHosts: ["myco.openai.azure.com"] });
     for (const kind of ["working", "check_unsealed"] as const) {
       const input = modelBlockEvidenceInput(kind, block);

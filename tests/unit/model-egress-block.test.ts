@@ -47,6 +47,16 @@ const gateways = (): CompanyGatewayRow[] => {
 };
 
 describe("modelHostBlockList", () => {
+  it("blocks documented Azure AI inference hosts and finds serverless calls at DNS label boundaries", () => {
+    const block = modelHostBlockList(rows, []);
+    const hostSuffixes = modelHostSuffixBlockList(rows);
+    expect(block).toContain("models.inference.ai.azure.com");
+    expect(hostSuffixes).toContain("models.ai.azure.com");
+    for (const host of ["models.inference.ai.azure.com", "deployment.eastus2.models.ai.azure.com", "deployment.models.ai.azure.com"]) {
+      expect(findRedirectEscapes(block, [host], { hostSuffixes })).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+    expect(findRedirectEscapes(block, ["notmodels.ai.azure.com", "models.ai.azure.com.example.com", "models.inference.ai.azure.com.example.com", "login.microsoftonline.com"], { hostSuffixes })).toEqual([]);
+  });
   it.each([
     ["OpenAI residency", ["eu.api.openai.com", "us.api.openai.com"]],
     ["Codestral", ["codestral.mistral.ai"]],
@@ -110,7 +120,7 @@ describe("modelHostBlockList", () => {
     for (const host of ["api.openai.com", "api.anthropic.com", "api.cohere.com", "api.cohere.ai", "api.mistral.ai", "api.groq.com", "api.together.xyz", "europe-west10-aiplatform.googleapis.com", "asia-south2-aiplatform.googleapis.com", "northamerica-south1-aiplatform.googleapis.com", "europe-north2-aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", "us-central1-aiplatform.mtls.googleapis.com", "generativelanguage.mtls.googleapis.com"]) {
       expect(list, host).toContain(host);
     }
-    expect(modelHostSuffixBlockList(rows)).toEqual(["cognitiveservices.azure.com", "openai.azure.com", "services.ai.azure.com"]);
+    expect(modelHostSuffixBlockList(rows)).toEqual(["cognitiveservices.azure.com", "models.ai.azure.com", "openai.azure.com", "services.ai.azure.com"]);
     expect(list.some((host) => host.endsWith("openai.azure.com"))).toBe(false);
   });
   it("never lists a wildcard, so Cloud Storage's *.googleapis.com is not caught", () => {
@@ -220,7 +230,8 @@ describe("no callers yet", () => {
       return entry.isDirectory() ? walk(full) : /\.(ts|tsx|js|mjs)$/u.test(entry.name) ? [full] : [];
     });
   it("nothing outside the new files (and their tests and the contracts barrel) imports them", () => {
-    const own = new Set(NEW_MODULES.map((name) => `packages/contracts/src/${name}.ts`));
+    // FIX-0518: the test-account model-host check is the first caller (a test account is never for a model host), and it reads the catalog's rows, so it is allowed to import them.
+    const own = new Set([...NEW_MODULES.map((name) => `packages/contracts/src/${name}.ts`), "packages/contracts/src/test-account-model-hosts.ts"]);
     const importers: string[] = [];
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
@@ -238,7 +249,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ":!packages/worker/src/model-helper-*.ts", ":!packages/worker/src/model-sandbox-env.ts", ":!tests/unit/model-helper-*.test.ts", ":!tests/unit/model-sandbox-env.test.ts", ":!tests/unit/worker-model-helper-network.test.ts"], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ":!packages/testing/src/ports/model-egress-fixtures.ts", ":!tests/unit/model-egress-*.test.ts", ":!packages/worker/src/model-helper-*.ts", ":!packages/worker/src/model-sandbox-env.ts", ":!tests/unit/model-helper-*.test.ts", ":!tests/unit/model-sandbox-env.test.ts", ":!tests/unit/worker-model-helper-network.test.ts", ":!packages/broker/src/local/isolation/sandbox-model-deny.ts", ":!tests/unit/local-sandbox-model-deny.test.ts", ":!tests/contract/test-account-model-hosts.test.ts"], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;

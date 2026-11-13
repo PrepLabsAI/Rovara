@@ -7,7 +7,7 @@
 // would take in Cloud Storage; an address; a scheme; a path) is refused wherever it comes from.
 //
 // RESIDUAL, said plainly (and carried by the evidence input below): a hosts file is a name block, not a wall. Code that dials an IP address, or uses DNS over HTTPS, still gets out of an UNSEALED round, because `agentx-task` has
-// NAT. The evidence says "not sealed; model hosts blocked by name only". A host SUFFIX row (Azure OpenAI: every `<resource>.openai.azure.com`) cannot be held by a hosts file at all. The project's own
+// NAT. The evidence says "not sealed; model hosts blocked by name only". Azure host suffixes (openai.azure.com, cognitiveservices.azure.com, services.ai.azure.com and models.ai.azure.com) cannot be held by a hosts file. The project's own
 // concrete resource host is blocked by name when it is known (`azureResourceHosts`, from the connected source or readiness); any OTHER resource host is neither blocked nor recorded in an unsealed round (the call goes straight out, so
 // the finder never sees it). The suffix is listed in `suffixesNotBlockedByName` and the evidence input carries `azureOpenAiNotBlocked`, so the evidence says so. Only the sealed round, which has no route out, closes both.
 //
@@ -51,7 +51,7 @@ export interface ModelHostBlock {
   readonly address: string | undefined;
   /** The names, sorted. */
   readonly hosts: readonly string[];
-  /** The host suffixes (Azure OpenAI) a hosts file cannot hold: a resource host that is not listed by name is NOT blocked and NOT recorded in an unsealed round (it reaches the real host). */
+  /** The Azure host suffixes a hosts file cannot hold: a resource host that is not listed by name is NOT blocked and NOT recorded in an unsealed round (it reaches the real host). */
   readonly suffixesNotBlockedByName: readonly string[];
   /** Why there is no block (mode `none`): the company gate is off, or the worker does not offer the walls. */
   readonly noBlockReason?: "gate_off" | "walls_not_offered" | undefined;
@@ -137,8 +137,8 @@ export function resolveWithBlock(block: ModelHostBlock, host: string): string | 
 export const MODEL_BLOCK_MODES = ["by_name", "sealed", "none"] as const;
 export type ModelBlockMode = (typeof MODEL_BLOCK_MODES)[number];
 
-/** Shown whenever the suffix list is not empty: an Azure OpenAI resource host that is not blocked by name goes straight out and is not recorded. */
-export const AZURE_OPENAI_NOT_BLOCKED_SENTENCE = "Azure OpenAI is not blocked in this round: a client that calls an Azure OpenAI resource host reaches it directly";
+/** Shown whenever the suffix list is not empty: an Azure resource host that is not blocked by name goes straight out and is not recorded. */
+export const AZURE_OPENAI_NOT_BLOCKED_SENTENCE = "Azure resource hosts under openai.azure.com, cognitiveservices.azure.com, services.ai.azure.com and models.ai.azure.com are not blocked in this round unless listed by name: clients can reach other resource hosts directly";
 
 /**
  * The block mode of an UNSEALED round: always `by_name` (the working round, the unsealed check round and anything this function does not know). It never answers `sealed`, and it refuses `check_sealed`: a sealed round's mode
