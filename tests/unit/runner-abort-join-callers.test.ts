@@ -392,3 +392,85 @@ describe("a container's stop: timeouts, a missing process group, a client that w
     expect(ABORT_JOIN_MS).toBeGreaterThan(CONTAINER_STOP_BOUND_MS);
   });
 });
+
+// Lane CI 43501860672 (Linux): the e2e cancel of a sealed check and the real-bash KILL script.
+describe("a container's stop: an abort before the group starts, a client that rejects, the KILL script's cost (lane CI 43501860672)", () => {
+  /** A container whose stop steps answer as `steps` says, and whose command's client REJECTS on its abort (as a test seam may) unless `resolvesOnAbort`. */
+  function rejectingContainer(steps: { TERM: number; KILL: number }) {
+    const calls: string[] = [];
+    const exec: ContainerExec = (argv, options) => {
+      const script = argv[2] ?? "";
+      const step = script.includes("kill -TERM") ? "TERM" : script.includes("kill -KILL") ? "KILL" : "command";
+      calls.push(step);
+      if (step !== "command") return Promise.resolve({ exitCode: steps[step], stdout: steps[step] === 0 ? "" : "kill: Operation not permitted\n", stderr: "" });
+      return new Promise((_resolve, reject) => { options.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }); });
+    };
+    return { exec, calls };
+  }
+
+  it("an abort that lands after the caller's own check and before the group starts (a project command awaits first): nothing starts, and it is a confirmed stop at once", async () => {
+    vi.useFakeTimers();
+    try {
+      const { exec, calls } = rejectingContainer({ TERM: 0, KILL: 0 });
+      const controller = new AbortController();
+      controller.abort();
+      const outcome = outcomeOfRun(runContainerCommand(exec, "/w", { cwd: ".", executable: "sleep", args: ["60"], timeoutSeconds: 600 }, controller.signal));
+      await vi.advanceTimersByTimeAsync(0);
+      const settled = await Promise.race([outcome, Promise.resolve("pending")]);
+      expect(settled).not.toBe("pending");
+      expect(settled).not.toBeInstanceOf(RunnerKillUnconfirmedError);
+      // No command was started after the cancel, and so there was nothing to signal.
+      expect(calls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["TERM", "KILL"] as const)("a client that REJECTS once the stop sequence aborts it, after a failed %s step, is still an unconfirmed stop (the rejection does not hide it)", async (failStep) => {
+    vi.useFakeTimers();
+    try {
+      for (const mode of ["shell", "project"] as const) {
+        const { exec } = rejectingContainer({ TERM: failStep === "TERM" ? 1 : 0, KILL: failStep === "KILL" ? 1 : 0 });
+        const controller = new AbortController();
+        const running = mode === "shell"
+          ? containerBashOperations(exec).exec("sleep 60", "/w", { onData: () => undefined, signal: controller.signal })
+          : runContainerCommand(exec, "/w", { cwd: ".", executable: "sleep", args: ["60"], timeoutSeconds: 600 }, controller.signal);
+        const outcome = outcomeOfRun(running);
+        await vi.advanceTimersByTimeAsync(0);
+        controller.abort();
+        await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS + 1_000);
+        expect(await outcome, mode).toBeInstanceOf(RunnerKillUnconfirmedError);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a client that rejects once a stop sequence that WORKED aborts it is an ordinary abort, never an unconfirmed stop", async () => {
+    vi.useFakeTimers();
+    try {
+      const { exec, calls } = rejectingContainer({ TERM: 0, KILL: 0 });
+      const controller = new AbortController();
+      const outcome = outcomeOfRun(runContainerCommand(exec, "/w", { cwd: ".", executable: "sleep", args: ["60"], timeoutSeconds: 600 }, controller.signal));
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS + 1_000);
+      const settled = await outcome;
+      expect(settled).not.toBeInstanceOf(RunnerKillUnconfirmedError);
+      expect(calls).toEqual(["command", "TERM", "KILL"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the KILL script's look at /proc forks nothing per process (a `$(cat ...)` per entry took >20 s on a busy Linux runner, past the 10 s KILL exec bound)", () => {
+    const loop = /for f in \/proc\/\[0-9\]\*\/stat; do (.*?); done/u.exec(CONTAINER_KILL_SCRIPT)?.[1];
+    expect(loop).toBeDefined();
+    expect(loop).not.toMatch(/\$\(|`/u);
+    expect(loop).toMatch(/\bread -r r\b/u);
+  });
+});
+
+function outcomeOfRun(running: Promise<unknown>): Promise<unknown> {
+  return running.then(() => "returned", (error: unknown) => error);
+}

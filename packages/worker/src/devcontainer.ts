@@ -60,8 +60,9 @@ export const CONTAINER_TERM_SCRIPT = 'for _ in {1..50}; do [ -s "$1" ] && break;
 /**
  * Sends SIGKILL to what is left of the process group, removes both files, and then looks again, for up to 5 s, until no live member is left (kill -0, and
  * on Linux /proc, so a killed member that a PID 1 that does not reap leaves as a zombie does not count). A member still alive then, or no group ID at all, is not a confirmed stop (exit 1 or 3).
+ * Each /proc entry is read with the `read` builtin, never `$(cat ...)`: a fork per entry made one look take ~0.2 s with 300 processes, so the 50 looks ran past the 10 s KILL exec bound on a busy Linux host (lane CI 43501860672).
  */
-export const CONTAINER_KILL_SCRIPT = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; case "$p" in ""|*[!0-9]*) echo "no process group"; exit 3;; esac; out=$(kill -KILL -- "-$p" 2>&1) || { case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1; }; live() { kill -0 -- "-$p" 2>/dev/null || return 1; [ -d /proc/self ] || return 0; local f r; for f in /proc/[0-9]*/stat; do r=$(cat "$f" 2>/dev/null) || continue; r=${r##*) }; set -- $r; [ "$3" = "$p" ] && [ "$1" != Z ] && [ "$1" != X ] && return 0; done; return 1; }; for _ in {1..50}; do live || exit 0; sleep 0.1; done; echo "still running after KILL"; exit 1';
+export const CONTAINER_KILL_SCRIPT = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; case "$p" in ""|*[!0-9]*) echo "no process group"; exit 3;; esac; out=$(kill -KILL -- "-$p" 2>&1) || { case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1; }; live() { kill -0 -- "-$p" 2>/dev/null || return 1; [ -d /proc/self ] || return 0; local f r; for f in /proc/[0-9]*/stat; do read -r r 2>/dev/null < "$f" || continue; r=${r##*) }; set -- $r; [ "$3" = "$p" ] && [ "$1" != Z ] && [ "$1" != X ] && return 0; done; return 1; }; for _ in {1..50}; do live || exit 0; sleep 0.1; done; echo "still running after KILL"; exit 1';
 /** The exit status of the two scripts for "there was no process group to signal". */
 const NO_PROCESS_GROUP_EXIT = 3;
 /** How long the local exec client may take to end, once the stop sequence has run and aborted it (a client that ignores that is not confirmed ended). */
@@ -789,6 +790,12 @@ async function runInContainerGroup(
     : undefined;
   // Not `controller.abort()` here: the local client ends when the stop sequence has run (or the leader has exited), so the result is joined.
   const onAbort = () => { aborted = true; stop(); };
+  // An abort that came before this point (a caller that awaited something between its own check and this call) would never fire the listener, and the command would run on
+  // after the cancel. Nothing has started, so there is nothing to stop: a confirmed stop at once (lane CI 43501860672).
+  if (abortedAlready(command.signal)) {
+    if (timer !== undefined) clearTimeout(timer);
+    return { result: { exitCode: null, stdout: "", stderr: "" }, timedOut: false, aborted: true, stopFailures: [], killUnconfirmed: false };
+  }
   command.signal?.addEventListener("abort", onAbort, { once: true });
   let clientNeverEnded = false;
   try {
@@ -815,17 +822,23 @@ async function runInContainerGroup(
     const bound = stopBegan.then(() => stopping).then(() => new Promise<undefined>((resolveBound) => {
       boundTimer = setTimeout(() => resolveBound(undefined), CLIENT_END_BOUND_MS);
     }));
-    const outcome = await Promise.race([main, bound]).finally(() => clearTimeout(boundTimer));
+    // A client that rejects (rather than resolving) once the stop sequence aborts it must not hide that sequence's failures: the stop is judged below either way.
+    let clientError: unknown;
+    let clientRejected = false;
+    const outcome = await Promise.race([main, bound]).catch((error: unknown) => { clientRejected = true; clientError = error; return undefined; }).finally(() => clearTimeout(boundTimer));
     const wasAborted = aborted || command.signal?.aborted === true;
     // A timeout or an abort waits for the stop sequence, so the result says whether it worked.
     if (stopping !== undefined) await stopping;
-    if (outcome === undefined) {
+    // No process group to signal, and the command's own exec had not come back on its own: the command may not have started yet, and may start after this.
+    if (noProcessGroup && !leaderReturnedOnItsOwn) stopFailures.push("AgentX could not stop the command in the container: it found no process group to stop");
+    if (clientRejected) {
+      // Not a stop (or a stop that was confirmed): the client's own error, as before.
+      if (!((wasAborted || timedOut) && stopFailures.length > 0)) throw clientError;
+    } else if (outcome === undefined) {
       clientNeverEnded = true;
       stopFailures.push("AgentX could not stop the command in the container: its exec client did not end");
     }
     const result: DevcontainerProcess = outcome ?? { exitCode: null, stdout: "", stderr: "" };
-    // No process group to signal, and the command's own exec had not come back on its own: the command may not have started yet, and may start after this.
-    if (noProcessGroup && !leaderReturnedOnItsOwn) stopFailures.push("AgentX could not stop the command in the container: it found no process group to stop");
     // bash never started when the container has none, so there is no output.
     if (!timedOut && !wasAborted && !clientNeverEnded && result.exitCode !== 0 && result.stdout === "" && NO_BASH.test(result.stderr)) {
       throw new Error(NO_BASH_MESSAGE);
@@ -835,6 +848,11 @@ async function runInContainerGroup(
     if (timer !== undefined) clearTimeout(timer);
     command.signal?.removeEventListener("abort", onAbort);
   }
+}
+
+/** A function, not an inline test, so the compiler does not take the signal as still un-aborted after an await in the caller. */
+function abortedAlready(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /** Why a kill exec failed: the last line it printed, or its exit status. */
