@@ -353,3 +353,4 @@ export * from "./eval-gate-stats.js";
 export * from "./eval-gate-inputs.js";
 export * from "./eval-gate.js";
 export * from "./eval-holdout.js";
+export * from "./eval-gate-budget.js";

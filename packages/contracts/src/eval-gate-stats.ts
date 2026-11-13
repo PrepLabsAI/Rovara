@@ -28,7 +28,7 @@ export function normalCdf(x: number): number {
     sum += term;
     if (sum === previous) break;
   }
-  return Math.min(1, Math.max(0, 0.5 + sum * Math.exp(-0.5 * square - 0.918938533204672741780329736406)));
+  return Math.min(1, Math.max(0, 0.5 + sum * Math.exp(-0.5 * square - 0.9189385332046727)));
 }
 
 const A = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00] as const;

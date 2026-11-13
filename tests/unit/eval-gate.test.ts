@@ -1,7 +1,7 @@
 // TE-F3-b: the DECISIONS 170 gate, rule by rule. Every rule is a behaviour: data goes in, a label, a reason and words come out. The world (tests/support/eval-gate-world.ts) has known noise, so each threshold below can be checked by hand:
 // overall SE 0.005774 (band k x SE = +/-0.011547, smallest detectable drop 0.016406); a 10-question category has SE 0.011547 (band +/-0.023094, Holm threshold with 3 ordinary categories 0.025/3).
 import { describe, expect, it } from "vitest";
-import { evalGate, evalGateAgentFeedback, type EvalGateInput } from "../../packages/contracts/src/eval-gate.js";
+import { evalGate, evalGateAgentFeedback, evalGatePublicView, type EvalGateInput } from "../../packages/contracts/src/eval-gate.js";
 import { evalGatePlanHash, evalGoalHash, type EvalGatePlan, type EvalJudgeInput } from "../../packages/contracts/src/eval-gate-inputs.js";
 import { changeProofLabelCountsAsProven } from "../../packages/contracts/src/eval-gate-labels.js";
 import { evalFactsFromClasses } from "../../packages/contracts/src/eval-pacing.js";
@@ -11,7 +11,7 @@ const hex = (character: string) => character.repeat(64);
 const planned = (over: Partial<EvalGatePlan>): Pick<EvalGateInput, "plan" | "recordedPlanHash"> => { const plan = { ...PLAN, ...over }; return { plan, recordedPlanHash: evalGatePlanHash(plan) }; };
 const judge = (over: Record<string, unknown> = {}, outer: Record<string, unknown> = {}): EvalJudgeInput => ({
   kind: "model", pin: { model: "judge-model", version: "2026-09", family: "claude", scoringPromptSha256: hex("a"), pinnedAt: BEFORE_TASK, ...over }, expectedScoringPromptSha256: hex("a"), productModelFamily: "gemini", codingModelFamily: "openai", ...outer,
-} as EvalJudgeInput);
+});
 
 describe("no regression measured (eval)", () => {
   it("is given when every rule holds, says 'on the evaluated areas', never says Proven, and reports every run", () => {
@@ -26,8 +26,9 @@ describe("no regression measured (eval)", () => {
     expect(result.visible?.runs).toHaveLength(8);
     expect(result.holdout?.runs).toHaveLength(8);
     expect(result.summary).toMatch(/old 0\.55 0\.45 0\.55 0\.45 0\.5; new 0\.55 0\.45 0\.5/u);
-    expect(result.ownerDetail.filter((line) => line.includes("holdout base run"))).toHaveLength(5);
-    expect(result.ownerDetail.filter((line) => line.includes("holdout head run"))).toHaveLength(3);
+    expect(result.holdoutOwnerDetail.filter((line) => line.includes("holdout base run"))).toHaveLength(5);
+    expect(result.holdoutOwnerDetail.filter((line) => line.includes("holdout head run"))).toHaveLength(3);
+    expect(result.ownerDetail.some((line) => line.includes("holdout"))).toBe(false);
   });
   it("accepts a small drop inside the noise band on both sets, and blocks a drop just outside it", () => {
     const inside = evalGate(gateInput({ visibleOptions: { delta: () => -0.01 }, holdoutOptions: { delta: () => -0.01 } }));
@@ -234,6 +235,45 @@ describe("a few cases that did not run", () => {
   });
 });
 
+describe("hidden rounds leave no per-measure, per-count or per-case signal", () => {
+  const classes = (ok: number, refused: number) => evalFactsFromClasses([...Array.from({ length: ok }, () => "ok"), ...Array.from({ length: refused }, () => "refused")]);
+  it("has no tolerance in a hidden round: one case that did not run makes the whole holdout not run, while the visible set may leave a few out", () => {
+    const one = evalGate(gateInput({ holdoutFacts: classes(79, 1) }));
+    expect(one).toMatchObject({ qualified: false, detail: "provider_outage" });
+    expect(evalGate(gateInput({ holdoutFacts: { total: 80, run: 79, notRun: 1, byClass: { cap: 1 }, overrunStop: false } })).detail).toBe("cap_hit");
+    expect(evalGate(gateInput({ holdoutFacts: { total: 80, run: 80, notRun: 0, byClass: {}, overrunStop: true } })).detail).toBe("cap_hit");
+    expect(evalGate(gateInput({ holdoutFacts: classes(80, 0) })).qualified).toBe(true);
+    expect(evalGate(gateInput({ facts: classes(79, 1), visible: { ...questionSet(), head: questionSet().head.filter((row) => row.id !== "q-1-3") } })).qualified).toBe(true);
+  });
+  it("does not leave a holdout question out for not running: a missing holdout result is the whole round not run", () => {
+    const hold = questionSet({ prefix: "h" });
+    const result = evalGate(gateInput({ holdout: { ...hold, head: hold.head.filter((row) => row.id !== "h-1-3") }, facts: classes(79, 1) }));
+    expect(result).toMatchObject({ qualified: false, detail: "runs_incomplete" });
+  });
+  it("tells the agent the same thing for every way a hidden round can be absent or invalid: not run, with nothing that says which measure or why", () => {
+    const hold = questionSet({ prefix: "h" });
+    const bad = [
+      gateInput({ holdout: { ...hold, head: [] } }),
+      gateInput({ holdout: { ...hold, head: hold.head.map((row, index) => (index === 3 ? { ...row, score: Number.NaN } : row)) } }),
+      gateInput({ holdout: { ...hold, head: hold.head.map((row, index) => (index === 3 ? { ...row, score: 7 } : row)) } }),
+      gateInput({ holdout: { ...hold, head: hold.head.filter((row) => row.category !== "tone") } }),
+      gateInput({ holdout: { ...hold, headSeed: "other" } }),
+      gateInput({ holdoutFacts: classes(70, 10) }),
+    ];
+    const feedback = bad.map((input) => evalGateAgentFeedback(evalGate(input)));
+    for (const entry of feedback) expect(entry).toEqual({ result: "not_run" });
+    expect(new Set(feedback.map((entry) => JSON.stringify(entry))).size).toBe(1);
+  });
+  it("lets the agent's feedback take only three values, so one hidden check is at most 1.58 bits", () => {
+    const values = new Set([evalGate(gateInput()), evalGate(gateInput({ holdoutOptions: { delta: () => -0.05 } })), evalGate(gateInput({ holdout: undefined })), evalGate(gateInput({ plan: undefined }))].map((result) => evalGateAgentFeedback(result).result));
+    expect([...values].sort()).toEqual(["fail", "not_run", "pass"]);
+  });
+  it("keeps the holdout's run counts out of the public text, and any 'n of N run' wording", () => {
+    const result = evalGate(gateInput({ holdoutOptions: { delta: () => 0.0345 } }));
+    expect(result.summary).not.toMatch(/\d+ of \d+ run|holdout.*\d+ questions|could not be run/u);
+  });
+});
+
 describe("questions: independent, and not edited by the change", () => {
   it("uses questions and scoring from before the task, or from the independent agent, and nothing else", () => {
     const late = "2026-11-13T11:00:00Z";
@@ -335,8 +375,17 @@ describe("what is shown, and to whom", () => {
     expect(result.label).toBe("improved_eval");
     for (const word of ["zz-secret", "0.0345", "0.035", "0.034", "holdout questions", "zz-safety"]) expect(result.summary).not.toContain(word);
     expect(result.summary).toContain("Holdout: clearly better");
-    expect(result.ownerDetail.join("\n")).toContain("zz-secret-a");
-    expect(result.ownerDetail.join("\n")).toMatch(/holdout: 40 untouched questions; effect \+0\.03/u);
+    expect(result.ownerDetail.join("\n")).not.toContain("zz-secret");
+    expect(result.holdoutOwnerDetail.join("\n")).toContain("zz-secret-a");
+    expect(result.holdoutOwnerDetail.join("\n")).toMatch(/holdout: 40 untouched questions; effect \+0\.03/u);
+    // Nothing of the holdout in the public view until the task has ended.
+    const during = evalGatePublicView(result, { taskEnded: false });
+    expect(JSON.stringify(during)).not.toMatch(/zz-|0\.034|0\.035|holdout: 40|"holdout"/u);
+    expect(during.holdout).toBeUndefined();
+    expect(during.holdoutOwnerDetail).toBeUndefined();
+    const after = evalGatePublicView(result, { taskEnded: true });
+    expect(after.holdout?.questions).toBe(40);
+    expect(after.holdoutOwnerDetail?.join("\n")).toContain("zz-secret-a");
     const dropped = evalGate(gateInput({ holdoutOptions: { ...secret, delta: () => -0.03 } }));
     expect(dropped.summary).not.toContain("zz-");
     expect(dropped.summary).not.toMatch(/0\.03\b/u);
@@ -355,7 +404,7 @@ describe("what is shown, and to whom", () => {
   });
   it("never throws on garbage and is never a pass for it", () => {
     for (const garbage of [{ visible: { ...questionSet(), base: [{ id: "a", category: "b", run: 0, score: Number.NaN }] } }, { visible: { ...questionSet(), head: [{ id: "a", category: "b", run: 0, score: 2 }] } }, { facts: undefined as never }, { times: undefined as never }, { visible: undefined as never }, { holdout: { ...questionSet(), setCommittedAt: "yesterday" } }]) {
-      const result = evalGate(gateInput(garbage as Partial<EvalGateInput>));
+      const result = evalGate(gateInput(garbage));
       expect(result.qualified).toBe(false);
     }
   });

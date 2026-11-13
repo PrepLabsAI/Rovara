@@ -5,7 +5,7 @@
 //   3. the holdout questions ROTATE: each check scores a different, keyed subset of the pool (`rotateHoldout`), chosen from a secret Rovara keeps, so two checks of one task, and two tasks, do not score the same questions.
 // What is NOT here: a limit across tasks of one project (see the DEFERRED row).
 import { companyScoped } from "./ports/company-scope.js";
-import { type DocumentStore, type StoredDocument, when, change } from "./ports/document-store.js";
+import { type DocumentStore, when, change } from "./ports/document-store.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
 
 export const HOLDOUT_CHECKS_PER_TASK_DEFAULT = 3;
@@ -33,7 +33,7 @@ export function createDocumentHoldoutLedger(store: Pick<DocumentStore, "update">
           key: { pk, sk }, ops: [change.add(["used"], 1)], condition: when.or(when.notExists(["used"]), when.lt(["used"], limit)), return: "new",
         });
         if (!result.applied) return { status: "used_up" };
-        const used = (result.item as StoredDocument | undefined)?.["used"];
+        const used = result.item?.["used"];
         if (typeof used !== "number" || !Number.isSafeInteger(used) || used < 1 || used > limit) return { status: "used_up" };
         return { status: "allowed", checkIndex: used - 1, checksLeft: limit - used };
       } catch {

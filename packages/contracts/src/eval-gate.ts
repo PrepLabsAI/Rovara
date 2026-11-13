@@ -21,7 +21,7 @@ import type { EvalQuestionResult } from "./measures-file.js";
 /** Why a result is not qualified, finer than A3's reasons (each maps to one of A3's). */
 export const EVAL_GATE_DETAILS = [
   "plan_not_fixed", "cannot_detect_drop", "judge_not_pinned", "replies_not_independent", "questions_edited_by_change", "edits_unknown", "baseline_too_old", "no_holdout", "holdout_checks_used_up", "runs_incomplete",
-  "too_few_questions", "cap_hit", "provider_outage", "regression_found", "no_coverage_evidence", "inputs_unreadable",
+  "too_few_questions", "cap_hit", "provider_outage", "regression_found", "no_coverage_evidence", "inputs_unreadable", "base_round_unattested", "hidden_round_timed_out",
 ] as const;
 export type EvalGateDetail = (typeof EVAL_GATE_DETAILS)[number];
 
@@ -43,6 +43,8 @@ export const EVAL_GATE_DETAIL_ROWS: Readonly<Record<EvalGateDetail, { readonly r
   regression_found: { reason: "not_gated", words: "the eval shows a drop beyond the noise band" },
   no_coverage_evidence: { reason: "no_coverage_evidence", words: EVAL_NOT_QUALIFIED_REASON_WORDS.no_coverage_evidence },
   inputs_unreadable: { reason: "not_gated", words: "the gate could not read its inputs" },
+  hidden_round_timed_out: { reason: "not_gated", words: "the hidden round did not finish in its time slot" },
+  base_round_unattested: { reason: "baseline_too_old", words: "the old-code round was not confirmed to run alone on a clean checkout" },
 };
 
 export interface EvalGateSetData {
@@ -77,8 +79,10 @@ export interface EvalGateInput {
   readonly edits: EvalEdits | undefined;
   readonly coverage: EvalCoverage | undefined;
   readonly baseline: EvalBaselineFacts | undefined;
-  /** The facts of ALL the rounds behind this gate (base and head, visible and holdout), added up. */
+  /** The facts of the VISIBLE rounds behind this gate (base and head), added up. Up to 20% of the cases may have not run, and the questions that did not run are left out. */
   readonly facts: EvalRoundFacts;
+  /** The facts of the HIDDEN (holdout) rounds, base and head, added up. No tolerance: a case that did not run (a cap, an outage, a refused call) makes the whole holdout "not run". Run counts of a hidden round are a channel (a runner can refuse calls on purpose), so nothing of them is ever shown while the task runs. */
+  readonly holdoutFacts?: EvalRoundFacts | undefined;
   /** The holdout check limit for this task was already used up. */
   readonly holdoutChecks?: "ok" | "used_up" | undefined;
   /** Token cost and latency: shown, never counted. */
@@ -129,8 +133,10 @@ export interface EvalGateResult {
   readonly holdout?: EvalGateSetReport;
   /** The public text: fixed words and numbers; no holdout score, count, category or question id. */
   readonly summary: string;
-  /** Everything, for the owner's page. Never for the coding agent. */
+  /** The visible set's numbers and every visible run, for the owner's page. Never for the coding agent. */
   readonly ownerDetail: readonly string[];
+  /** The holdout's numbers, counts, categories and runs. Shown only AFTER the task ends (`evalGatePublicView`): while it runs they are a channel. */
+  readonly holdoutOwnerDetail: readonly string[];
 }
 
 /** Float residue: two numbers closer than this are equal (0.5 - 0.45 is 0.04999999999999999). */
@@ -150,7 +156,7 @@ function notQualified(detail: EvalGateDetail, coverage: { changed: number; evalu
     kind: "eval_gate", label: label.label, qualified: false, regression: extra.regression === true, reason: row.reason, detail, words: label.words, coverage,
     ...(extra.visible === undefined ? {} : { visible: extra.visible }), ...(extra.holdout === undefined ? {} : { holdout: extra.holdout }),
     summary: `${SUMMARY_PREFIX}not qualified: ${row.words}.${numbers}${extra.measuresOnly === undefined ? "" : ` ${extra.measuresOnly}`}`,
-    ownerDetail: [...(extra.owner ?? []), ...ownerLines(extra.visible, extra.holdout)],
+    ownerDetail: [...(extra.owner ?? []), ...ownerLines(extra.visible)], holdoutOwnerDetail: ownerLines(extra.holdout),
   };
 }
 
@@ -159,15 +165,13 @@ export function evalGateStopped(detail: EvalGateDetail): EvalGateResult {
   return notQualified(detail, { changed: 0, evaluated: 0 });
 }
 
-function ownerLines(visible: EvalGateSetReport | undefined, holdout: EvalGateSetReport | undefined): string[] {
+function ownerLines(report: EvalGateSetReport | undefined): string[] {
+  if (report === undefined) return [];
   const out: string[] = [];
-  for (const report of [visible, holdout]) {
-    if (report === undefined) continue;
-    out.push(`${report.set}: ${String(report.questions)} untouched questions; effect ${sign(report.effect)} (old ${two(report.baseMean)}, new ${two(report.headMean)}); ${report.steady ? "steady old-code score, judged against the agreed minimum drop; " : ""}noise range ${sign(report.noiseRange.low)} to ${sign(report.noiseRange.high)}; smallest detectable drop ${two(report.smallestDetectableDrop)}${report.detectable ? "" : " (too big)"}`);
-    out.push(`${report.set}: left out: ${String(report.excluded.edited)} edited, ${String(report.excluded.notIndependent)} not independent, ${String(report.excluded.notSelected)} not selected, ${String(report.excluded.added)} added, ${String(report.excluded.incomplete)} incomplete`);
-    for (const category of report.categories) out.push(`${report.set} category ${inert(category.category)}${category.strict ? " (strict)" : ""}: ${String(category.questions)} questions, effect ${sign(category.effect)}${category.clearDrop ? ", CLEAR DROP" : ""}`);
-    for (const run of report.runs) out.push(`${report.set} ${run.side} run ${String(run.index)}: mean ${two(run.mean)} over ${String(run.questions)} questions`);
-  }
+  out.push(`${report.set}: ${String(report.questions)} untouched questions; effect ${sign(report.effect)} (old ${two(report.baseMean)}, new ${two(report.headMean)}); ${report.steady ? "steady old-code score, judged against the agreed minimum drop; " : ""}noise range ${sign(report.noiseRange.low)} to ${sign(report.noiseRange.high)}; smallest detectable drop ${two(report.smallestDetectableDrop)}${report.detectable ? "" : " (too big)"}`);
+  out.push(`${report.set}: left out: ${String(report.excluded.edited)} edited, ${String(report.excluded.notIndependent)} not independent, ${String(report.excluded.notSelected)} not selected, ${String(report.excluded.added)} added, ${String(report.excluded.incomplete)} incomplete`);
+  for (const category of report.categories) out.push(`${report.set} category ${inert(category.category)}${category.strict ? " (strict)" : ""}: ${String(category.questions)} questions, effect ${sign(category.effect)}${category.clearDrop ? ", CLEAR DROP" : ""}`);
+  for (const run of report.runs) out.push(`${report.set} ${run.side} run ${String(run.index)}: mean ${two(run.mean)} over ${String(run.questions)} questions`);
   return out;
 }
 
@@ -187,9 +191,11 @@ function analyseSet(set: "visible" | "holdout", data: EvalGateSetData, args: { p
   const predates = data.setCommittedAt < args.taskStartedAt;
   const excluded = { edited: 0, notIndependent: 0, notSelected: 0, added: 0, incomplete: 0 };
   const keep = (row: EvalQuestionResult): boolean => selected === undefined || selected.has(row.id);
-  const baseRows = data.base.filter(keep);
-  const headRows = data.head.filter(keep);
-  excluded.notSelected = new Set([...data.base, ...data.head].filter((row) => !keep(row)).map((row) => row.id)).size;
+  const allBase: readonly EvalQuestionResult[] = data.base;
+  const allHead: readonly EvalQuestionResult[] = data.head;
+  const baseRows = allBase.filter(keep);
+  const headRows = allHead.filter(keep);
+  excluded.notSelected = new Set([...allBase, ...allHead].filter((row) => !keep(row)).map((row) => row.id)).size;
   const { paired, unpaired } = pairQuestionRuns(baseRows, headRows);
   const baseIds = new Set(baseRows.map((row) => row.id));
   for (const id of unpaired) {
@@ -291,6 +297,13 @@ export function evalGate(input: EvalGateInput): EvalGateResult {
     if (facts.overrunStop || (facts.byClass.cap ?? 0) > 0) return stop("cap_hit");
     // More than 20% of the cases not run: the whole eval is not run (DECISIONS 171). Fewer are left out, and the data must show which (`runs_incomplete` otherwise).
     if (facts.total > 0 && facts.notRun / facts.total > EVAL_NOT_RUN_FRACTION_MAX) return stop("provider_outage");
+    const hf = input.holdoutFacts;
+    if (hf !== undefined) {
+      if (!finite(hf.total) || !finite(hf.notRun)) return stop("inputs_unreadable");
+      if (hf.overrunStop || (hf.byClass.cap ?? 0) > 0) return stop("cap_hit");
+      // A hidden round has no tolerance: one case that did not run makes the whole holdout not run (no per-case, per-measure or per-count signal).
+      if (hf.notRun > 0) return stop("provider_outage");
+    }
     const times = input.times as Partial<EvalGateInput["times"]> | undefined;
     if (times === undefined || !isUtc(times.taskStartedAt) || !isUtc(times.firstCodeAt) || times.firstCodeAt < times.taskStartedAt) return stop("plan_not_fixed");
     const planOk = checkEvalGatePlan({ plan: input.plan, recordedHash: input.recordedPlanHash, taskStartedAt: times.taskStartedAt });
@@ -308,7 +321,7 @@ export function evalGate(input: EvalGateInput): EvalGateResult {
     const settings = { plan, edits, taskStartedAt: times.taskStartedAt, minQuestions: EVAL_MIN_QUESTIONS, tolerateIncomplete: facts.notRun > 0 };
     const visible = analyseSet("visible", input.visible, settings);
     if (!visible.ok) return stop(visible.detail);
-    const holdout = analyseSet("holdout", input.holdout, settings);
+    const holdout = analyseSet("holdout", input.holdout, { ...settings, tolerateIncomplete: false });
     if (!holdout.ok) return stop(holdout.detail, { visible: visible.report });
     const reports = { visible: visible.report, holdout: holdout.report };
     if (visible.report.clearDrop || holdout.report.clearDrop) return stop("regression_found", { ...reports, regression: true });
@@ -340,13 +353,13 @@ export function evalGate(input: EvalGateInput): EvalGateResult {
     const visibleNumbers = visible.report.steady
       ? `Visible set: effect ${sign(visible.report.effect)}; the old code scored the same on every run, so it is judged against the agreed minimum drop of ${two(plan.minDetectableDrop)}.`
       : `Visible set: effect ${sign(visible.report.effect)}, noise range ±${two(visible.report.noiseRange.high)} (smallest detectable drop ${two(visible.report.smallestDetectableDrop)}).`;
-    const leftOut = visible.report.excluded.incomplete > 0 || holdout.report.excluded.incomplete > 0 ? " Some questions could not be run and were left out." : "";
+    const leftOut = visible.report.excluded.incomplete > 0 ? " Some questions could not be run and were left out." : "";
     const holdoutWords = improved ? "Holdout: clearly better, beyond the noise band." : "Holdout: within the noise band.";
     const runsWords = `Visible runs: old ${visible.report.runs.filter((run) => run.side === "base").map((run) => two(run.mean)).join(" ")}; new ${visible.report.runs.filter((run) => run.side === "head").map((run) => two(run.mean)).join(" ")}.`;
     return {
       kind: "eval_gate", label: label.label, qualified: true, regression: false, words: label.words, coverage, ...(improvedNotClaimed === undefined ? {} : { improvedNotClaimed }), visible: visible.report, holdout: holdout.report,
       summary: `${SUMMARY_PREFIX}${label.words} ${area}. ${visibleNumbers} ${holdoutWords} ${runsWords}${leftOut}${measuresOnly === undefined ? "" : ` ${measuresOnly}`}`,
-      ownerDetail: ownerLines(visible.report, holdout.report),
+      ownerDetail: ownerLines(visible.report), holdoutOwnerDetail: ownerLines(holdout.report),
     };
   } catch {
     return stop("inputs_unreadable");
@@ -359,6 +372,14 @@ function holdoutCategory(data: EvalGateSetData, plan: EvalGatePlan, edits: Extra
   const sub = analyseSet("holdout", { ...data, base: rows(data.base), head: rows(data.head) }, { plan, edits, taskStartedAt, minQuestions: 1, tolerateIncomplete: false });
   if (!sub.ok || !sub.report.detectable) return undefined;
   return sub.report.beyondBandUp;
+}
+
+/**
+ * What may be shown while the task runs, and after. The holdout's report, counts and detail are left out until the task has ended (`taskEnded`); the coding agent never gets this view at all (it gets `evalGateAgentFeedback`).
+ */
+export function evalGatePublicView(result: EvalGateResult, options: { readonly taskEnded: boolean }): Omit<EvalGateResult, "holdout" | "holdoutOwnerDetail"> & Partial<Pick<EvalGateResult, "holdout" | "holdoutOwnerDetail">> {
+  const { holdout, holdoutOwnerDetail, ...rest } = result;
+  return options.taskEnded === true ? { ...rest, ...(holdout === undefined ? {} : { holdout }), holdoutOwnerDetail } : rest;
 }
 
 /** What the coding agent is told about the gated eval: pass, fail or not run. No score, no count, no reason, no category, and never which set failed. */

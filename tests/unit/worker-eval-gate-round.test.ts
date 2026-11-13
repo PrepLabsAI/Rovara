@@ -1,5 +1,5 @@
 // TE-F3-b part B: the gated worker round. Real path: files on disk read through A4's reader, the document-store cache and ledger, the gate. No model call: the round is handed the facts of the calls.
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -26,47 +26,53 @@ const HIDDEN_HASH = "d".repeat(64);
 const COMPANY = "org_aaaaaaaaaaaaaaaaaaaa";
 const rows = (list: readonly EvalQuestionResult[]) => list.map((row) => ({ id: row.id, category: row.category, score: row.score, run: row.run }));
 const fileText = (list: readonly EvalQuestionResult[], seed: string | undefined, over: Record<string, unknown> = {}) => JSON.stringify({ schemaVersion: 2, eval_set_hash: "f".repeat(64), ...(seed === undefined ? {} : { seed }), measures: [{ name: "accuracy", unit: "fraction", value: 0.5, direction: "up_good" }], questions: rows(list), ...over });
-const baseRead = (list: readonly EvalQuestionResult[], seed: string | undefined, over: Partial<Extract<GatedBaseRoundRead, { ok: true }>> = {}): GatedBaseRoundRead => ({ ok: true, measures: MeasuresFileSchema.parse(JSON.parse(fileText(list, seed))), caseCount: 40, facts: evalFactsAllRun(40), attested: true, ...over });
+const attestation = { checkout: "rovara_only", workingSandboxPaused: true, baseCommit: COMMIT } as const;
+const baseRead = (list: readonly EvalQuestionResult[], seed: string | undefined, hash: string, over: Partial<Extract<GatedBaseRoundRead, { ok: true }>> = {}): GatedBaseRoundRead => ({ ok: true, measures: MeasuresFileSchema.parse(JSON.parse(fileText(list, seed))), caseCount: 40, facts: evalFactsAllRun(40), evalSetHash: hash, attestation, ...over });
 
-interface Setup { input: GatedEvalRoundInput; counts: { baseVisible: number; baseHoldout: number; opened: number }; held: MemoryDocumentStore; root: string }
-async function setup(options: { visible?: SetOptions; holdout?: SetOptions; headVisibleText?: string; modelVersion?: string; held?: MemoryDocumentStore; company?: string; attested?: boolean; baseFacts?: ReturnType<typeof evalFactsFromClasses>; sealed?: boolean; trigger?: boolean; hidden?: boolean } = {}): Promise<Setup> {
+interface Setup { input: GatedEvalRoundInput; counts: { baseVisible: number; baseHoldout: number; opened: number }; held: MemoryDocumentStore; root: string; hiddenPath: string }
+async function setup(options: { visible?: SetOptions; holdout?: SetOptions; headVisibleText?: string; modelVersion?: string; held?: MemoryDocumentStore; company?: string; attestation?: Partial<typeof attestation>; headHash?: string; edits?: GatedEvalRoundInput["gate"]["edits"]; imageDigest?: string; budget?: GatedEvalRoundInput["budget"]; hashHiddenSet?: () => Promise<string>; baseFacts?: ReturnType<typeof evalFactsFromClasses>; sealed?: boolean; trigger?: boolean; hidden?: boolean } = {}): Promise<Setup> {
   const root = await mkdtemp(join(tmpdir(), "te-f3b-round-"));
   dirs.push(root);
   const visible = questionSet(options.visible);
   const holdout = questionSet({ prefix: "h", ...options.holdout });
   await writeFile(join(root, "visible.json"), options.headVisibleText ?? fileText(visible.head, visible.headSeed));
   await writeFile(join(root, "holdout.json"), fileText(holdout.head, holdout.headSeed));
+  await mkdir(join(root, "hidden"));
+  const hiddenPath = join(await realpath(root), "hidden");
   const held = options.held ?? new MemoryDocumentStore({ ttlAttribute: "expiresAtSeconds" });
   const company = options.company ?? COMPANY;
   const counts = { baseVisible: 0, baseHoldout: 0, opened: 0 };
   const location = (argument: string) => ({ root, cwd: ".", argument, notBeforeMs: Date.now() - 5_000 });
-  const attested = options.attested ?? true;
+  const proof = { ...attestation, ...(options.attestation ?? {}) };
   const input: GatedEvalRoundInput = {
     trigger: { needed: options.trigger ?? true, reason: "changes" }, roundKind: options.sealed === false ? "check_unsealed" : "check_sealed", project: "project-1", task: "task-1",
     key: { company, project: "project-1", baseCommit: COMMIT, commandFingerprint: evalCommandFingerprint("npm run eval"), catalogRowId: "gemini", model: "gemini-small", modelVersion: options.modelVersion ?? "gemini-small-2026-10-01" },
+    settings: { imageDigest: options.imageDigest ?? `runner@sha256:${"1".repeat(64)}`, route: "gemini-gateway" },
+    ...(options.budget === undefined ? {} : { budget: options.budget }),
+    ...(options.hashHiddenSet === undefined ? { hashHiddenSet: () => Promise.resolve(HIDDEN_HASH) } : { hashHiddenSet: options.hashHiddenSet }),
     cache: createDocumentBaseScoreCache(held, { companyId: company }), ledger: createDocumentHoldoutLedger(held, { companyId: company }),
-    ...(options.hidden === false ? {} : { hiddenSet: { exists: () => Promise.resolve(true), open: () => { counts.opened += 1; return Promise.resolve({ hostPath: "/rovara-hidden/set", hash: HIDDEN_HASH }); } } }),
-    visible: { report: location("visible.json"), evalSetHash: VISIBLE_HASH, setCommittedAt: BEFORE_TASK, runBaseRound: () => { counts.baseVisible += 1; return Promise.resolve(baseRead(visible.base, visible.baseSeed, { attested, ...(options.baseFacts === undefined ? {} : { facts: options.baseFacts }) })); } },
-    holdout: { report: location("holdout.json"), evalSetHash: HOLDOUT_HASH, setCommittedAt: BEFORE_TASK, sampleSize: 30, rotationSecret: "a-rovara-side-secret-value", runBaseRound: () => { counts.baseHoldout += 1; return Promise.resolve(baseRead(holdout.base, holdout.baseSeed, { attested, ...(options.baseFacts === undefined ? {} : { facts: options.baseFacts }) })); } },
+    ...(options.hidden === false ? {} : { hiddenSet: { exists: () => Promise.resolve(true), open: () => { counts.opened += 1; return Promise.resolve({ hostPath: hiddenPath, hash: HIDDEN_HASH }); } } }),
+    visible: { report: location("visible.json"), baseEvalSetHash: VISIBLE_HASH, headEvalSetHash: options.headHash ?? VISIBLE_HASH, setCommittedAt: BEFORE_TASK, runBaseRound: () => { counts.baseVisible += 1; return Promise.resolve(baseRead(visible.base, visible.baseSeed, VISIBLE_HASH, { attestation: proof, ...(options.baseFacts === undefined ? {} : { facts: options.baseFacts }) })); } },
+    holdout: { report: location("holdout.json"), baseEvalSetHash: HOLDOUT_HASH, headEvalSetHash: options.headHash === undefined ? HOLDOUT_HASH : "9".repeat(64), setCommittedAt: BEFORE_TASK, sampleSize: 30, rotationSecret: "a-rovara-side-secret-value", runBaseRound: () => { counts.baseHoldout += 1; return Promise.resolve(baseRead(holdout.base, holdout.baseSeed, HOLDOUT_HASH, { attestation: proof, ...(options.baseFacts === undefined ? {} : { facts: options.baseFacts }) })); } },
     gate: {
-      plan: PLAN, recordedPlanHash: evalGatePlanHash(PLAN), times: { taskStartedAt: TASK_STARTED, firstCodeAt: FIRST_CODE }, judge: { kind: "none" }, edits: { status: "known", editedQuestionIds: [], scoringEdited: false, thresholdsEdited: false },
+      plan: PLAN, recordedPlanHash: evalGatePlanHash(PLAN), times: { taskStartedAt: TASK_STARTED, firstCodeAt: FIRST_CODE }, judge: { kind: "none" }, edits: options.edits ?? { status: "known", editedQuestionIds: [], scoringEdited: false, thresholdsEdited: false },
       coverage: { changedItems: ["prompt:system"], exercised: [{ item: "prompt:system", questions: 12 }] },
     },
-    facts: evalFactsAllRun(80), today: () => "2026-11-13",
+    facts: evalFactsAllRun(80), holdoutFacts: evalFactsAllRun(80), today: () => "2026-11-13",
   };
-  return { input, counts, held, root };
+  return { input, counts, held, root, hiddenPath };
 }
 
 describe("the gated round", () => {
   it("measures the base on a miss, caches the clean attested rounds, and answers the agent pass or fail only", async () => {
-    const { input, counts } = await setup();
+    const { input, counts, hiddenPath } = await setup();
     const out = await runGatedEvalRound(input);
     expect(out.status).toBe("done");
     if (out.status !== "done") return;
     expect(out.gate).toMatchObject({ label: "no_regression_eval", qualified: true });
     expect(out.feedback).toEqual({ result: "pass" });
     expect(out.cache).toEqual({ visible: "filled", holdout: "filled" });
-    expect(out.hiddenMount).toEqual({ hostPath: "/rovara-hidden/set", containerPath: "/rovara/hidden-eval", readOnly: true });
+    expect(out.hiddenMount).toEqual({ hostPath: hiddenPath, containerPath: "/rovara/hidden-eval", readOnly: true });
     expect(counts).toMatchObject({ baseVisible: 1, baseHoldout: 1 });
     expect(out.gate.holdout?.questions).toBe(30);
     expect(JSON.stringify(out.feedback)).not.toMatch(/\d/u);
@@ -95,9 +101,9 @@ describe("the gated round", () => {
     expect(second.counts).toMatchObject({ baseVisible: 1, baseHoldout: 1 });
   });
   it("never caches a base round Rovara did not attest to, or one with cases left unrun", async () => {
-    const unattested = await setup({ attested: false });
-    expect(await runGatedEvalRound(unattested.input)).toMatchObject({ cache: { visible: "not_filled", holdout: "not_filled" }, gate: { qualified: true } });
-    const again = await setup({ held: unattested.held, attested: false });
+    const unattested = await setup({ attestation: { workingSandboxPaused: false as never } });
+    expect(await runGatedEvalRound(unattested.input)).toMatchObject({ cache: { visible: "not_filled", holdout: "not_filled" }, gate: { qualified: false, detail: "base_round_unattested" }, feedback: { result: "not_run" } });
+    const again = await setup({ held: unattested.held, attestation: { workingSandboxPaused: false as never } });
     await runGatedEvalRound({ ...again.input, task: "task-2" });
     expect(again.counts.baseVisible).toBe(1);
     const dirty = await setup({ baseFacts: evalFactsFromClasses([...Array.from({ length: 20 }, () => "ok"), ...Array.from({ length: 20 }, () => "rate_limit")]) });
@@ -113,12 +119,13 @@ describe("the gated round", () => {
   });
   it("uses the eval set hash Rovara computed, never the head file's own word", async () => {
     const { input } = await setup();
-    const out = await runGatedEvalRound({ ...input, visible: { ...input.visible, evalSetHash: "e".repeat(64) } });
+    const out = await runGatedEvalRound(input);
     expect(out).toMatchObject({ status: "done", gate: { qualified: true } });
     const keyed = await setup();
     await runGatedEvalRound(keyed.input);
     const other = await setup({ held: keyed.held });
-    await runGatedEvalRound({ ...other.input, task: "task-9", visible: { ...other.input.visible, evalSetHash: "e".repeat(64) } });
+    // The base checkout's eval files hash differently: another key, so the old code is run again (and its own hash must agree).
+    await runGatedEvalRound({ ...other.input, task: "task-9", visible: { ...other.input.visible, baseEvalSetHash: "e".repeat(64) } });
     expect(other.counts.baseVisible).toBe(1);
     expect(other.counts.baseHoldout).toBe(0);
   });
@@ -135,6 +142,57 @@ describe("the gated round", () => {
     const missing = await setup();
     await rm(join(missing.root, "visible.json"));
     expect(await runGatedEvalRound(missing.input)).toMatchObject({ gate: { detail: "inputs_unreadable" } });
+  });
+});
+
+describe("Rovara's own facts about the base and the head", () => {
+  it("refuses a base round with no valid attestation: not a Rovara-only checkout, working sandbox not paused, or another base commit", async () => {
+    for (const bad of [{ checkout: "agent_workspace" as never }, { workingSandboxPaused: false as never }, { baseCommit: "b".repeat(40) }]) {
+      const round = await setup({ attestation: bad });
+      expect(await runGatedEvalRound(round.input)).toMatchObject({ gate: { qualified: false, detail: "base_round_unattested" }, cache: { visible: "not_filled" }, feedback: { result: "not_run" } });
+    }
+  });
+  it("refuses a base round that hashed other eval files than the base checkout Rovara hashed", async () => {
+    const round = await setup();
+    const out = await runGatedEvalRound({ ...round.input, visible: { ...round.input.visible, baseEvalSetHash: "e".repeat(64) } });
+    expect(out).toMatchObject({ gate: { qualified: false, detail: "inputs_unreadable" } });
+  });
+  it("treats 'the change edited nothing' as unknown when Rovara's own hash of the head's eval files moved", async () => {
+    const moved = await setup({ headHash: "8".repeat(64) });
+    expect(await runGatedEvalRound(moved.input)).toMatchObject({ gate: { qualified: false, detail: "edits_unknown" }, feedback: { result: "not_run" } });
+    const said = await setup({ headHash: "8".repeat(64), edits: { status: "known", editedQuestionIds: ["q-0-0"], scoringEdited: false, thresholdsEdited: false } });
+    expect(await runGatedEvalRound(said.input)).toMatchObject({ gate: { qualified: true } });
+    const same = await setup();
+    expect(await runGatedEvalRound(same.input)).toMatchObject({ gate: { qualified: true } });
+  });
+  it("keys the baseline by the settings the eval ran under: another image digest runs the old code again", async () => {
+    const first = await setup();
+    await runGatedEvalRound(first.input);
+    const other = await setup({ held: first.held, imageDigest: `runner@sha256:${"2".repeat(64)}` });
+    await runGatedEvalRound({ ...other.input, task: "task-5" });
+    expect(other.counts).toMatchObject({ baseVisible: 1, baseHoldout: 1 });
+    const same = await setup({ held: first.held });
+    await runGatedEvalRound({ ...same.input, task: "task-6" });
+    expect(same.counts).toMatchObject({ baseVisible: 0, baseHoldout: 0 });
+  });
+  it("mounts the hidden set only when Rovara's own hash of the directory is the hash the source gave, and says what a hidden round needs", async () => {
+    const bad = await setup({ hashHiddenSet: () => Promise.resolve("0".repeat(64)) });
+    expect(await runGatedEvalRound(bad.input)).toMatchObject({ gate: { detail: "no_holdout" } });
+    const ok = await setup();
+    expect(await planGatedEvalRound(ok.input)).toMatchObject({ status: "ready", hiddenRound: { throwawayWorkspaceCopy: true, pauseWorkingSandbox: true, returnRunnerOutputToAgent: false } });
+  });
+});
+
+describe("the task's budget", () => {
+  it("starts nothing and counts no holdout check when no budget is left", async () => {
+    for (const budget of [{ calls: 0, micros: 1_000_000 }, { calls: 10, micros: 0 }, { calls: -1, micros: 5 }, { calls: Number.NaN, micros: 5 }]) {
+      const round = await setup({ budget });
+      expect(await runGatedEvalRound(round.input)).toMatchObject({ gate: { qualified: false, detail: "cap_hit" }, feedback: { result: "not_run" } });
+      expect(round.counts).toMatchObject({ baseVisible: 0, opened: 0 });
+      expect(await planGatedEvalRound({ ...round.input, budget: { calls: 5, micros: 5 } })).toMatchObject({ status: "ready", checkIndex: 0 });
+    }
+    const some = await setup({ budget: { calls: 5, micros: 5 } });
+    expect((await runGatedEvalRound(some.input)).status).toBe("done");
   });
 });
 

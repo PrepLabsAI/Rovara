@@ -159,10 +159,12 @@ export interface EvalCoverage {
 }
 export function evalCoverageCount(coverage: EvalCoverage | undefined): { readonly changed: number; readonly evaluated: number } {
   if (coverage === undefined || !Array.isArray(coverage.changedItems) || !Array.isArray(coverage.exercised)) return { changed: 0, evaluated: 0 };
-  const changed = new Set(coverage.changedItems.filter((item): item is string => typeof item === "string" && item !== ""));
+  const listed: readonly unknown[] = coverage.changedItems;
+  const exercised: EvalCoverage["exercised"] = coverage.exercised;
+  const changed = new Set(listed.filter((item): item is string => typeof item === "string" && item !== ""));
   let evaluated = 0;
   for (const item of changed) {
-    const best = coverage.exercised.reduce((most, row) => (row.item === item && Number.isSafeInteger(row.questions) && row.questions > most ? row.questions : most), 0);
+    const best = exercised.reduce((most, row) => (row.item === item && Number.isSafeInteger(row.questions) && row.questions > most ? row.questions : most), 0);
     if (best >= EVAL_COVERAGE_MIN_QUESTIONS) evaluated += 1;
   }
   return { changed: changed.size, evaluated };
