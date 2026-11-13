@@ -349,7 +349,7 @@ describe("absentOnNew and originalRunLooksCut: the test-first case and cut runs"
     expect(absentOnNew(before, rep(["tests/test_new.py", "new_name", "passed"]), ["tests/test_new.py"])).toEqual({ ids: ["tests/test_old.py::gone"], count: 1 });
   });
   it("treats a pytest tmp_path id and a temporary directory as unstable", () => {
-    const before = rep(["t.py", "test_x[/tmp/pytest-of-ci/pytest-3/test_x0]", "passed"], ["t.py", "test_y[/private/var/folders/ab/T/pytest-of-me/x]", "passed"], ["t.py", "test_z[/var/folders/ab/c]", "passed"], ["t.py", "test_ok[1]", "passed"]);
+    const before = rep(["t.py", "test_x[/tmp/pytest-of-ci/pytest-3/test_x0]", "passed"], ["t.py", "test_y[/private/var/folders/ab/T/pytest-of-me/x]", "passed"], ["t.py", "test_z[/var/folders/ab/c]", "passed"], ["t.py", "test_w[pytest-of-ci-3]", "passed"], ["t.py", "test_ok[1]", "passed"]);
     expect(absentOnNew(before, rep(), [])).toEqual({ ids: ["t.py::test_ok[1]"], count: 1 });
   });
   const many = (n: number, file = "t.py") => rep(...Array.from({ length: n }, (_unused, i): [string, string, "passed"] => [file, `t${String(i)}`, "passed"]));
@@ -363,10 +363,32 @@ describe("absentOnNew and originalRunLooksCut: the test-first case and cut runs"
     expect(originalRunLooksCut(rep(["tests/test_new.py", "tests.test_new", "errored"], ["t.py", "a", "passed"]), many(1), ["tests/test_new.py"])).toBe(false);
     expect(originalRunLooksCut(rep(["tests/test_new.py", "tests.test_new", "errored"]), many(10), ["tests/test_new.py"])).toBe(true);
     expect(originalRunLooksCut(many(8), many(10), [])).toBe(true);
-    expect(originalRunLooksCut(many(9), many(10), [])).toBe(false);
+    // 9 of 10 is cut only when they are the first nine in order (a run that stopped); nine different names are not.
+    expect(originalRunLooksCut(many(9), many(10), [])).toBe(true);
+    expect(originalRunLooksCut(counted("json", many(10).tests.slice(1)), many(10), [])).toBe(false);
     expect(originalRunLooksCut(many(12), many(10), [])).toBe(false);
   });
   it("counts the untouched tests only", () => {
     expect(untouchedCount(rep(["tests/test_new.py", "a", "passed"], ["t.py", "b", "skipped"]), ["tests/test_new.py"])).toBe(1);
+  });
+});
+
+// ---- re-check of TE-B3 (N2, N3)
+describe("originalRunLooksCut: option names", () => {
+  const same = (n: number) => counted("json", Array.from({ length: n }, (_unused, i) => ({ file: "t.py", name: `t${String(i)}`, status: "passed" as const })));
+  const cut = (...args: string[]) => originalRunLooksCut(same(10), same(10), [], ["test", ...args]);
+  it.each(["-x", "--exitfirst", "--maxfail=1", "--maxfail=5", "--bail", "--bail=1", "-bail", "-b", "-f", "--failfast", "-failfast", "--fail-fast", "--stepwise", "--sw", "--stepwise-skip", "--stop-on-failure", "--stop-on-error", "--stop-on-defect", "--max-failures=1", "-xv", "-vx", "-qx", "-sx", "-lx"])("%s stops the run early", (flag) => expect(cut(flag)).toBe(true));
+  it.each(["-rx", "-rsx", "-rxs", "-rfEsxXw", "-rA", "-v", "-vv", "-q", "-n", "-k", "-s", "-Xmx", "-Dxy", "-m", "-c", "-e", "-xyz", "-ex", "-lxk", "--no-fail-fast", "--maxfail=0", "--bail=0", "-bail=0"])("%s does not", (flag) => expect(cut(flag)).toBe(false));
+  it("--maxfail 0 as two arguments means no limit; --maxfail 3 is a limit", () => {
+    expect(cut("--maxfail", "0")).toBe(false);
+    expect(cut("--maxfail", "3")).toBe(true);
+  });
+  it("a bail the command line does not show: an original run that is only the first part of this code's run, in order, is cut", () => {
+    const before = same(95);
+    const after = counted("json", Array.from({ length: 100 }, (_unused, i) => ({ file: "t.py", name: `t${String(i)}`, status: i >= 95 ? "skipped" as const : "passed" as const })));
+    expect(originalRunLooksCut(before, after, [], ["test"])).toBe(true);
+    // The same tests in another order, or fewer tests that are not a prefix, are not (a vanished test is not a cut).
+    const hole = counted("json", [...same(100).tests.slice(0, 40), ...same(100).tests.slice(41)]);
+    expect(originalRunLooksCut(hole, same(100), [], ["test"])).toBe(false);
   });
 });

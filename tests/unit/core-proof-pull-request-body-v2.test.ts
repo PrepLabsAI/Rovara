@@ -169,9 +169,22 @@ describe("a proof that could not compare says so in the v2 block too (TE-B3)", (
     const ctx = { ...context({ evidenceWriter: 2 }), proof: { evidence: evidence({ read: v2Read() }), testProof: proof(compared) } } as PullRequestBodyContext;
     expect(status(ctx).join("\n")).not.toContain("Test weakening");
   });
+  it.each([false, true])("keeps every uncompared check in the v2 block when another check was compared: %s", (hasCompared) => {
+    const compared = { checkId: "readiness:0", skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 };
+    const ctx = { ...context({ evidenceWriter: 2 }), proof: { evidence: evidence({ read: v2Read() }), testProof: proof({
+      status: "checked", note: "completed", weakening: hasCompared ? [compared] : [],
+      items: [{ checkId: "readiness:1", label: "integration" }, { checkId: "readiness:2", label: "browser" }],
+      weakeningNotCompared: [{ checkId: "readiness:1", reason: "original_run_truncated" }, { checkId: "readiness:2", reason: "no_report" }],
+    }) } } as PullRequestBodyContext;
+    const text = status(ctx).join("\n");
+    expect(text.match(/Test weakening: could not compare/gu)).toHaveLength(2);
+    expect(text).toContain("Test weakening: could not compare integration (the run on the original code looks cut short)");
+    expect(text).toContain("Test weakening: could not compare browser (a test report was not available from both runs)");
+    expect(text).not.toContain("## Flags for the reviewer");
+  });
   it("the compact form keeps the line", () => {
     const ctx = { ...context({ evidenceWriter: 2 }), proof: { evidence: evidence({ read: v2Read() }), testProof: proof() } } as PullRequestBodyContext;
-    const block = evidenceV2Lines(ctx.proof!.evidence, DIGEST, ctx.changedFiles?.files, 3, "the run was stopped")!;
+    const block = evidenceV2Lines(ctx.proof!.evidence, DIGEST, ctx.changedFiles?.files, 3, [LINE])!;
     expect(block).toContain(LINE);
     expect(block).toContain(EVIDENCE_COMPACT_POINTER);
   });
