@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
-  ROVARA_PROBLEM_KINDS, ROVARA_PROBLEM_UNKNOWN, ROVARA_PROBLEM_WORDS, renderEvidence, renderEvidenceRead, readEvidencePack, rovaraProblem, type RovaraProblemFacts,
+  ROVARA_PROBLEM_KINDS, ROVARA_PROBLEM_UNKNOWN, ROVARA_PROBLEM_WORDS, renderEvidence, renderEvidenceRead, readEvidencePack, rovaraProblem, type RovaraProblemFacts, type RovaraProblemRow, type RovaraProblemUnknownRow,
 } from "../../packages/contracts/src/index.js";
 import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
 
@@ -15,10 +15,12 @@ describe("every kind has words, a next step and a button", () => {
   it("covers the eight kinds, in a table with no gaps", () => {
     expect([...ROVARA_PROBLEM_KINDS]).toEqual(["out_of_memory", "round_time_ran_out", "service_did_not_start", "machine_lost", "image_pull_failed", "code_host_unreachable", "model_provider_error", "budget_reached"]);
     for (const kind of [...ROVARA_PROBLEM_KINDS, "unknown" as const]) {
-      const row = kind === "unknown" ? ROVARA_PROBLEM_UNKNOWN : ROVARA_PROBLEM_WORDS[kind];
+      const row: RovaraProblemRow | RovaraProblemUnknownRow = kind === "unknown" ? ROVARA_PROBLEM_UNKNOWN : ROVARA_PROBLEM_WORDS[kind];
       expect(row, kind).toBeDefined();
       expect(row.cause({}).trim().length, `${kind} cause`).toBeGreaterThan(10);
-      for (const part of [row.nextBefore, row.next, row.buttonBefore, row.button]) expect(part.trim().length, `${kind} words`).toBeGreaterThan(2);
+      const parts: string[] = [row.nextBefore, row.buttonBefore];
+      if (kind !== "unknown") parts.push(ROVARA_PROBLEM_WORDS[kind].next, ROVARA_PROBLEM_WORDS[kind].button);
+      for (const part of parts) expect(part.trim().length, `${kind} words`).toBeGreaterThan(2);
       expect(typeof row.liveToday, kind).toBe("boolean");
       expect(Number.isInteger(row.autoRetries) && row.autoRetries >= 0, kind).toBe(true);
     }
@@ -38,8 +40,9 @@ describe("golden lines, by what is live today", () => {
     ["out_of_memory", facts("out_of_memory", { check: "the full suite", usedGb: 3.1, limitGb: 3 }), `${HEAD}the test machine ran out of memory in the full suite (3.1 of 3 GB). Retried once. Next: ask a maintainer to pick a larger machine.`, "Retry now"],
     ["round_time_ran_out", facts("round_time_ran_out", { check: "the browser round", minutes: 20 }), `${HEAD}the browser round did not finish in the 20-minute limit. Retried once. Next: re-run with a longer round.`, "Retry now"],
     ["service_did_not_start", facts("service_did_not_start", { service: "postgres", step: "health check" }), `${HEAD}postgres did not start (health check). Retried once. Next: ask a maintainer to check the service's setup.`, "Open setup"],
-    ["machine_lost", facts("machine_lost", { retries: 0 }), `${HEAD}the test machine stopped responding. Not retried yet. Next: retrying on a new machine.`, "Retry now"],
-    ["image_pull_failed", facts("image_pull_failed"), `${HEAD}the setup image could not be fetched. Retried once. Next: try again in a few minutes.`, "Retry now"],
+    ["machine_lost, a retry is pending", facts("machine_lost", { retries: 0, retryPending: true }), `${HEAD}the machine running this step stopped responding. Not retried yet. Next: retrying the step.`, "Retry now"],
+    ["machine_lost, nothing is pending", facts("machine_lost", { retries: 0 }), `${HEAD}the machine running this step stopped responding. Not retried yet. Next: it is waiting for you to retry it.`, "Retry now"],
+    ["image_pull_failed", facts("image_pull_failed"), `${HEAD}a dependency image is not on this worker (not pinned in its image or not pre-pulled at boot; the worker never pulls). Retried once. Next: ask a maintainer to pick an image the worker has, or to update the worker.`, "Open setup"],
     ["code_host_unreachable", facts("code_host_unreachable"), `${HEAD}the code host did not answer. Retried once. Next: try again in a few minutes.`, "Retry now"],
     ["model_provider_error", facts("model_provider_error", { code: "overloaded_error" }), `${HEAD}the model provider refused or failed (overloaded_error). Retried once. Next: try again in a few minutes.`, "Retry now"],
     ["budget_reached model", facts("budget_reached", { budget: "model", used: 4.8, cap: 5 }), `${HEAD}the task reached its model budget ($4.80 of $5.00). Retried once. Next: ask someone who sets budgets to raise it.`, "Raise budget"],
@@ -53,6 +56,19 @@ describe("golden lines, by what is live today", () => {
     for (const kind of [undefined, 42, null, {}, "__proto__", "constructor", "toString"]) expect(rovaraProblem({ kind, retries: 0 }).line).toMatch(/^Held back: Rovara problem, not your code: an unexpected Rovara fault \(/u);
   });
 
+  it("an id that would read as a link, a mention or an issue key is not printed", () => {
+    for (const kind of ["www.evil.com", "GH-12", "ENG-42", "http:", "Fix_ENG-42", "a.b"]) {
+      const line = rovaraProblem(facts(kind)).line;
+      expect(line, kind).toContain("an unexpected Rovara fault (unknown).");
+      expect(line, kind).not.toContain(kind);
+    }
+  });
+  it("an id that is a plain lowercase word is printed", () => {
+    expect(rovaraProblem(facts("tape_jam_7")).line).toContain("(tape_jam_7)");
+  });
+  it("an id is made inert as well as matched", () => {
+    expect(rovaraProblem(facts("a&b")).line).toContain("(unknown)");
+  });
   it("an id that is not a plain word is not printed", () => {
     expect(rovaraProblem(facts("a b\n# c <b>@x")).line).toContain("an unexpected Rovara fault (unknown).");
     expect(rovaraProblem(facts("x".repeat(500))).line).toContain("(unknown).");
@@ -63,13 +79,13 @@ describe("a row is flipped by its flag alone", () => {
   const flipped = { ...ROVARA_PROBLEM_WORDS, out_of_memory: { ...ROVARA_PROBLEM_WORDS.out_of_memory, liveToday: true } } as typeof ROVARA_PROBLEM_WORDS;
   it("worded as the later step once live, with a time when one is given", () => {
     const at = Date.UTC(2026, 10, 13, 14, 20, 59);
-    expect(rovaraProblem(facts("out_of_memory", { check: "the full suite", usedGb: 3.1, limitGb: 3, retries: 0, nextAtMs: at }), flipped).line).toBe(`${HEAD}the test machine ran out of memory in the full suite (3.1 of 3 GB). Not retried yet. Next: retrying once on the next machine size at 14:20 UTC.`);
-    expect(rovaraProblem(facts("out_of_memory", { retries: 0 }), flipped).line).toContain("Next: retrying once on the next machine size.");
+    expect(rovaraProblem(facts("out_of_memory", { check: "the full suite", usedGb: 3.1, limitGb: 3, retries: 0, nextAtMs: at, retryPending: true }), flipped).line).toBe(`${HEAD}the test machine ran out of memory in the full suite (3.1 of 3 GB). Not retried yet. Next: retrying once on the next machine size at 14:20 UTC.`);
+    expect(rovaraProblem(facts("out_of_memory", { retries: 0, retryPending: true }), flipped).line).toContain("Next: retrying once on the next machine size.");
   });
   it("is never worded as a step that already used up its retries", () => {
-    expect(rovaraProblem(facts("out_of_memory", { retries: 1, nextAtMs: 1 }), flipped).line).toMatch(/ Next: it is waiting for you to retry it\.$/u);
-    expect(rovaraProblem(facts("machine_lost", { retries: 1, nextAtMs: 1 })).line).toMatch(/ Next: it is waiting for you to retry it\.$/u);
-    expect(rovaraProblem(facts("machine_lost", { retries: 2 })).line).toMatch(/ Retried 2 times\. Next: it is waiting for you to retry it\.$/u);
+    expect(rovaraProblem(facts("out_of_memory", { retries: 1, nextAtMs: 1, retryPending: true }), flipped).line).toMatch(/ Next: it is waiting for you to retry it\.$/u);
+    expect(rovaraProblem(facts("machine_lost", { retries: 1, nextAtMs: 1, retryPending: true })).line).toMatch(/ Next: it is waiting for you to retry it\.$/u);
+    expect(rovaraProblem(facts("machine_lost", { retries: 2, retryPending: true })).line).toMatch(/ Retried 2 times\. Next: it is waiting for you to retry it\.$/u);
   });
   it("a row that is not live today never promises a retry or a time", () => {
     for (const kind of ROVARA_PROBLEM_KINDS) {
@@ -83,7 +99,43 @@ describe("a row is flipped by its flag alone", () => {
     expect(ROVARA_PROBLEM_KINDS.filter((kind) => ROVARA_PROBLEM_WORDS[kind].liveToday)).toEqual(["machine_lost"]);
   });
   it("machine_lost says the time only when it is known", () => {
-    expect(rovaraProblem(facts("machine_lost", { retries: 0, nextAtMs: Date.UTC(2026, 10, 13, 9, 5) })).line).toBe(`${HEAD}the test machine stopped responding. Not retried yet. Next: retrying on a new machine at 09:05 UTC.`);
+    expect(rovaraProblem(facts("machine_lost", { retries: 0, retryPending: true, nextAtMs: Date.UTC(2026, 10, 13, 9, 5) })).line).toBe(`${HEAD}the machine running this step stopped responding. Not retried yet. Next: retrying the step at 09:05 UTC.`);
+  });
+});
+
+describe("a live step is said only when a retry is pending (the caller sets it from a RETRY decision)", () => {
+  it("no retryPending, or false: waiting for a person, whatever the retries and the time say", () => {
+    for (const retryPending of [undefined, false, "yes" as unknown as boolean, 1 as unknown as boolean]) {
+      const line = rovaraProblem(facts("machine_lost", { retries: 0, retryPending, nextAtMs: Date.UTC(2026, 10, 13, 14, 20) })).line;
+      expect(line, String(retryPending)).toMatch(/Next: it is waiting for you to retry it\.$/u);
+      expect(line, String(retryPending)).not.toMatch(/retrying| at \d\d:\d\d UTC/u);
+    }
+  });
+  it("never says a new machine: the retry runs the step again and pins no other machine", () => {
+    for (const pending of [true, false]) expect(rovaraProblem(facts("machine_lost", { retries: 0, retryPending: pending })).line).not.toMatch(/new machine/u);
+  });
+  it("the machine's words are not about the test machine, because the fault can hit any step", () => {
+    expect(rovaraProblem(facts("machine_lost")).line).toContain("the machine running this step stopped responding");
+    expect(rovaraProblem(facts("machine_lost")).line).not.toContain("test machine");
+  });
+});
+
+describe("the image that is not on the worker", () => {
+  it("says what the worker says (not pinned or not pre-pulled, never pulled) and a concrete next step, with no waiting", () => {
+    const line = rovaraProblem(facts("image_pull_failed", { retries: 0 })).line;
+    expect(line).toContain("not pinned in its image or not pre-pulled at boot; the worker never pulls");
+    expect(line).not.toMatch(/few minutes|retrying/u);
+    expect(Array.from(line).length).toBeLessThanOrEqual(300);
+    expect(line).toMatch(/Next: ask a maintainer to pick an image the worker has, or to update the worker\.$/u);
+    expect(ROVARA_PROBLEM_WORDS.image_pull_failed.autoRetries).toBe(0);
+  });
+});
+
+describe("the unknown row promises nothing", () => {
+  it("has no later step to flip, and no line says anyone was alerted", () => {
+    expect(Object.hasOwn(ROVARA_PROBLEM_UNKNOWN, "next")).toBe(false);
+    expect(Object.hasOwn(ROVARA_PROBLEM_UNKNOWN, "button")).toBe(false);
+    expect(rovaraProblem(facts("tape_jam_7", { retryPending: true })).line).not.toMatch(/alert/u);
   });
 });
 
@@ -113,7 +165,7 @@ describe("numbers are checked before they are printed", () => {
     expect(rovaraProblem(facts("budget_reached", { budget: "machine", used: Number.NaN })).line).toContain("machine budget (? of ? machine minutes)");
   });
   it("a bad time is left out", () => {
-    for (const nextAtMs of [Number.NaN, -1, 1e20, Number.POSITIVE_INFINITY, "x" as unknown as number]) expect(rovaraProblem(facts("machine_lost", { retries: 0, nextAtMs })).line, String(nextAtMs)).toMatch(/Next: retrying on a new machine\.$/u);
+    for (const nextAtMs of [Number.NaN, -1, 1e20, Number.POSITIVE_INFINITY, "x" as unknown as number]) expect(rovaraProblem(facts("machine_lost", { retries: 0, retryPending: true, nextAtMs })).line, String(nextAtMs)).toMatch(/Next: retrying the step\.$/u);
   });
   it("a budget of no known kind is the task's budget", () => {
     expect(rovaraProblem(facts("budget_reached", { budget: "oops", used: 1, cap: 2 })).line).toContain("the task reached its budget (1 of 2).");

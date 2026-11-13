@@ -70,23 +70,26 @@ export const ROVARA_PROBLEM_WORDS: Record<RovaraProblemKind, RovaraProblemRow> =
     button: "Open setup",
   },
   machine_lost: {
-    cause: () => "the test machine stopped responding",
-    // The one infrastructure retry that exists today: a run lost to the machine is run again once on a new machine, then waits for a person (workflow-autofix: `run-lost`, `dispatch-exhausted`).
+    // Not "the test machine": the fault can hit any step (a review too).
+    cause: () => "the machine running this step stopped responding",
+    // The one infrastructure retry that exists today: a stage whose run was lost (`run-lost`) is run again once, then waits for a person. It re-dispatches the stage and pins no other machine, so the words say "the step". It depends on the
+    // autofix decision (enabled, no ASK limit), so the line says it only when the caller sets `retryPending` (Cloud sets it only from a RETRY decision).
     liveToday: true,
     autoRetries: 1,
     nextBefore: "ask a maintainer to retry it",
-    next: "retrying on a new machine",
+    next: "retrying the step",
     buttonBefore: "Retry now",
     button: "Retry now",
   },
   image_pull_failed: {
-    cause: () => "the setup image could not be fetched",
+    // What the worker says (`PULL_FAILED_SENTENCE`): the image is not one pinned inside the worker's image, or was not pre-pulled at boot; the worker never pulls. Waiting or retrying cannot help, so no automatic step.
+    cause: () => "a dependency image is not on this worker (not pinned in its image or not pre-pulled at boot; the worker never pulls)",
     liveToday: false,
-    autoRetries: 1,
-    nextBefore: "try again in a few minutes",
-    next: "retrying once, then starting from a fresh setup",
-    buttonBefore: "Retry now",
-    button: "Retry now",
+    autoRetries: 0,
+    nextBefore: "ask a maintainer to pick an image the worker has, or to update the worker",
+    next: "ask a maintainer to pick an image the worker has, or to update the worker",
+    buttonBefore: "Open setup",
+    button: "Open setup",
   },
   code_host_unreachable: {
     cause: () => "the code host did not answer",
@@ -118,14 +121,14 @@ export const ROVARA_PROBLEM_WORDS: Record<RovaraProblemKind, RovaraProblemRow> =
 };
 
 /** A kind this build does not know (a later writer's): said as what it is, with its id when the id is a plain word. */
-export const ROVARA_PROBLEM_UNKNOWN: RovaraProblemRow = {
+export type RovaraProblemUnknownRow = Omit<RovaraProblemRow, "next" | "button">;
+export const ROVARA_PROBLEM_UNKNOWN: RovaraProblemUnknownRow = {
   cause: (d) => `an unexpected Rovara fault (${named(d.id, "unknown")})`,
+  // Never live and with no later step: "we've been alerted" waits for an alert that exists (DEFERRED-CHECKS), then the row can gain `next` and `button`.
   liveToday: false,
   autoRetries: 0,
   nextBefore: "tell a maintainer, and try again",
-  next: "we've been alerted",
   buttonBefore: "Retry now",
-  button: "Retry now",
 };
 
 /** What the line is made from. Everything but `kind` is optional and untrusted: a name is made inert, a number is checked, and a value that is not usable prints "?" or is left out. */
@@ -148,6 +151,11 @@ export interface RovaraProblemFacts {
   budget?: unknown;
   used?: number | undefined;
   cap?: number | undefined;
+  /**
+   * True only when the retry the row's live step names is really going to run (Cloud sets it only from an autofix RETRY decision: enabled, no ASK limit). Anything else (absent, false, not a boolean) says the step is waiting for a person,
+   * whatever `retries` and `nextAtMs` say.
+   */
+  retryPending?: boolean | undefined;
   /** When the automatic retry is due, in epoch milliseconds. Said only for a live step that has retries left. */
   nextAtMs?: number | undefined;
 }
@@ -163,7 +171,8 @@ const LINE_MAX = 300;
 const NAME_MAX = 60;
 const BOUNDS = { gb: 4_096, minutes: 10_080, dollars: 10_000_000, machineMinutes: 10_000_000 } as const;
 const RETRIES_NAMED_MAX = 99;
-const PLAIN_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}$/u;
+// Lowercase words and underscores only: no `.`, `:`, `-` or capital, so an id can never read as a link, an issue key or a mention.
+const PLAIN_ID = /^[a-z][a-z0-9_]{0,39}$/u;
 
 /** A number for a line: a finite number from 0 up to `max`, with at most one decimal; anything else (NaN, negative, huge, not a number) is "?". */
 function bounded(value: unknown, max: number): string {
@@ -192,7 +201,7 @@ function triedWords(retries: unknown): string {
 export function rovaraProblem(facts: RovaraProblemFacts, table: Record<RovaraProblemKind, RovaraProblemRow> = ROVARA_PROBLEM_WORDS): RovaraProblemOutput {
   const kind = facts.kind;
   const known = typeof kind === "string" && Object.hasOwn(table, kind);
-  const row = known ? table[kind as RovaraProblemKind] : ROVARA_PROBLEM_UNKNOWN;
+  const row: RovaraProblemRow | RovaraProblemUnknownRow = known ? table[kind as RovaraProblemKind] : ROVARA_PROBLEM_UNKNOWN;
   const budgetKind = facts.budget === "model" || facts.budget === "machine" ? facts.budget : undefined;
   const budgetMoney = budgetKind === "model";
   const details: RovaraProblemDetails = {
@@ -205,14 +214,15 @@ export function rovaraProblem(facts: RovaraProblemFacts, table: Record<RovaraPro
     code: inert(facts.code, 30),
     budgetWords: budgetKind ?? "",
     unit: budgetKind === "machine" ? " machine minutes" : "",
-    id: typeof kind === "string" && PLAIN_ID.test(kind) ? kind : "unknown",
+    id: typeof kind === "string" && PLAIN_ID.test(kind) ? inertEvidenceText(kind, 40) : "unknown",
   };
   // A step that exists today and still has a retry left is said as the step, at its time when one is known; once its retries are used up, only a person can go on.
   const retries = typeof facts.retries === "number" && Number.isInteger(facts.retries) && facts.retries >= 0 ? facts.retries : undefined;
-  const live = row.liveToday;
-  const spent = live && retries !== undefined && retries >= row.autoRetries;
+  const live = "next" in row && row.liveToday;
+  // A live step is said only while a retry is pending and its retries are not used up; otherwise only a person can go on.
+  const spent = live && (facts.retryPending !== true || (retries !== undefined && retries >= row.autoRetries));
   const at = clock(facts.nextAtMs);
-  const next = !live ? row.nextBefore : spent ? "it is waiting for you to retry it" : `${row.next}${at === undefined ? "" : ` at ${at}`}`;
+  const next = !live ? row.nextBefore : spent ? "it is waiting for you to retry it" : `${(row as RovaraProblemRow).next}${at === undefined ? "" : ` at ${at}`}`;
   const line = `Held back: Rovara problem, not your code: ${row.cause(details)}. ${triedWords(facts.retries)} Next: ${next}.`;
-  return { line: Array.from(line).length <= LINE_MAX ? line : `${Array.from(line).slice(0, LINE_MAX - 1).join("")}…`, button: live ? row.button : row.buttonBefore };
+  return { line: Array.from(line).length <= LINE_MAX ? line : `${Array.from(line).slice(0, LINE_MAX - 1).join("")}…`, button: live ? (row as RovaraProblemRow).button : row.buttonBefore };
 }
