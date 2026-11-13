@@ -72,6 +72,8 @@ they can use now:
   "projects": [{ "name": "payments-api", "access": "channel" }], "notices": [] }
 ```
 
+`access` is `granted` (a grant), `channel` (through a Slack channel), or `administrator` (a project they administer).
+
 - With the person's token: `Authorization: Bearer <their access token for the service>` and no body.
 - By developer ID, for a confidential service only: HTTP Basic with the client ID and secret, and the body
   `{ "developerId": "…" }`. This form always answers `administrator: false`.
