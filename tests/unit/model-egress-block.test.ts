@@ -132,8 +132,9 @@ describe("no callers yet", () => {
     const search = (): string => {
       try {
         return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts"], { encoding: "utf8" });
-      } catch {
-        return ""; // git grep exits 1 when nothing matches
+      } catch (error) {
+        if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
+        throw error;
       }
     };
     expect(search().trim()).toBe("");
