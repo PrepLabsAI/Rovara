@@ -862,6 +862,9 @@ export class ControlPlaneStack extends Stack {
       linkingSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
       linkingSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
       linkingSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
+      // Spec 062 Phase 7d: the channel API's Slack router posts through the adapter while SlackViaChannel is on, as in
+      // named environments. The legacy deployment names no Slack team, so it posts as each message's own team.
+      channelAdapters.connectSlackPoster(channelAdapters.ingress, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
     }
     // Spec 025 phase 25a: developer sign-in, named environments only (R3).
     const taskParameters = signInParameters.tasks;

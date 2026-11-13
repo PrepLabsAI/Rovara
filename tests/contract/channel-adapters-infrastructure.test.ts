@@ -46,8 +46,9 @@ describe("channel adapters infrastructure", () => {
     expect(legacy.Parameters.ChannelAdapters).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
     expect(legacy.Parameters.SlackViaChannel).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
     const variables = (prefix: string) => (functionNamed(legacy, prefix)![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    // The channel API's Slack router posts through the adapter while SlackViaChannel is on, as each message's own team.
     expect(variables("ChannelApiIngress")).toMatchObject({ CHANNEL_ADAPTERS: { Ref: "ChannelAdapters" }, BUILT_IN_ADAPTER: { Ref: "SlackViaChannel" }, SHARED_TASKS: "disabled",
-      BUILT_IN_ADAPTER_SECRET_NAME: "agentx/production/channel-adapter/slack" });
+      BUILT_IN_ADAPTER_SECRET_NAME: "agentx/production/channel-adapter/slack", SLACK_VIA_CHANNEL: { Ref: "SlackViaChannel" }, SLACK_ADAPTER_TEAM_ID: { Ref: "SlackTeamId" } });
     const broker = ofType(legacy, "AWS::Lambda::Function").find(([id]) => withoutHash(id).startsWith("Broker"))![1];
     expect((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({
       CHANNEL_ADAPTERS: { Ref: "ChannelAdapters" }, CHANNEL_ADAPTER_SECRET_PREFIX: "agentx/production/" });

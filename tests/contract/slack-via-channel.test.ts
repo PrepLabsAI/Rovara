@@ -173,9 +173,13 @@ describe("a Slack conversation through the channel API", () => {
 describe("the forwarder", () => {
   const answering = (status: number, body: unknown) => createSlackChannelForwarder({ channelApiUrl: API, secret: async () => SECRET, now: () => NOW, fetch: async () => new Response(JSON.stringify(body), { status }) });
 
-  it("takes an accepted or duplicate answer, and nothing else", async () => {
+  it("takes an accepted, duplicate or router-handled answer, and nothing else", async () => {
     await expect(answering(202, { status: "accepted" })(request)).resolves.toBeUndefined();
     await expect(answering(200, { status: "duplicate" })(request)).resolves.toBeUndefined();
+    // Phase 7c2: the channel API's Slack router handled it, and answers as Slack's ingress does.
+    await expect(answering(200, { ok: true })(request)).resolves.toBeUndefined();
+    await expect(answering(200, { ok: false })(request)).rejects.toThrow();
+    await expect(answering(200, {})(request)).rejects.toThrow();
     await expect(answering(202, { status: "link_required" })(request)).rejects.toThrow();
     await expect(answering(500, { error: "try_again" })(request)).rejects.toThrow();
   });
