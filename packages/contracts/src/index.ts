@@ -293,6 +293,12 @@ export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
 // TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
 export * from "./model-egress/index.js";
+// TE-F10 (0.5.20): old vs new prompt outputs side by side, with an independent judge (additive; no callers).
+export * from "./side-by-side.js";
+export * from "./side-by-side-judge.js";
+export * from "./side-by-side-judge-pin.js";
+export * from "./side-by-side-run.js";
+export * from "./side-by-side-render.js";
 export * from "./model-serve.js";
 export * from "./test-account.js";
 export * from "./context-sources.js";
