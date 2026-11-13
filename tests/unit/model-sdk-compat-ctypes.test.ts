@@ -8,24 +8,26 @@ const preload = resolve("tests/fixtures/model-sdk-compat/sitecustomize.py");
 // Removing an exact allowance kills its positive control; broadening it kills
 // the refusal cases. The downstream audit hook prevents every native load,
 // including when a mutant removes the guard entirely.
-for (const [label, expression, expected] of [
-    ["Security exact path", "'/System/Library/Frameworks/Security.framework/Security'", "allowed"],
-    ["CoreFoundation exact path", "'/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation'", "allowed"],
+// macOS paths (including the bytes-name ctypes API case) belong to macOS;
+// the venv boundary and refusal rules below still run on Linux.
+for (const [label, expression, expected, macOnly = false] of [
+    ["Security exact path", "'/System/Library/Frameworks/Security.framework/Security'", "allowed", true],
+    ["CoreFoundation exact path", "'/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation'", "allowed", true],
     ["explicit venv library", "os.path.join(sys.prefix,'own-library')", "allowed"],
     ["process handle", "None", "refused"],
-    ["libSystem", "'/usr/lib/libSystem.B.dylib'", "refused"],
-    ["libc", "'/usr/lib/libc.dylib'", "refused"],
-    ["framework traversal", "'/System/Library/Frameworks/Security.framework/../../../usr/lib/libc.dylib'", "refused"],
-    ["Security suffix", "'/System/Library/Frameworks/Security.framework/Security-extra'", "refused"],
-    ["CoreFoundation suffix", "'/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation-extra'", "refused"],
-    ["other framework", "'/System/Library/Frameworks/Foundation.framework/Foundation'", "refused"],
+    ["libSystem", "'/usr/lib/libSystem.B.dylib'", "refused", true],
+    ["libc", "'/usr/lib/libc.dylib'", "refused", true],
+    ["framework traversal", "'/System/Library/Frameworks/Security.framework/../../../usr/lib/libc.dylib'", "refused", true],
+    ["Security suffix", "'/System/Library/Frameworks/Security.framework/Security-extra'", "refused", true],
+    ["CoreFoundation suffix", "'/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation-extra'", "refused", true],
+    ["other framework", "'/System/Library/Frameworks/Foundation.framework/Foundation'", "refused", true],
     ["relative name inside venv", "'own-library'", "refused"],
-    ["bytes framework name", "b'/System/Library/Frameworks/Security.framework/Security'", "refused"],
-    ["venv symlink to libSystem", "os.path.join(sys.prefix,'system-link')", "refused"],
+    ["bytes framework name", "b'/System/Library/Frameworks/Security.framework/Security'", "refused", true],
+    ["venv symlink escape", "os.path.join(sys.prefix,'system-link')", "refused"],
     ["venv traversal", "os.path.join(sys.prefix,'..','outside-library')", "refused"],
     ["venv prefix sibling", "sys.prefix + '-other/library'", "refused"],
 ] as const) {
-    it(`Python ctypes ${label} is ${expected} before native loading`, () => {
+    it.skipIf(macOnly && process.platform !== "darwin")(`Python ctypes ${label} is ${expected} before native loading`, () => {
         const dir = realpathSync(mkdtempSync(join(tmpdir(), "sdk-ctypes-")));
         const log = join(dir, "wire.jsonl");
         const program = `
@@ -33,7 +35,7 @@ import ctypes, os, runpy, socket, sys
 sys.prefix = ${JSON.stringify(join(dir, "venv"))}
 os.mkdir(sys.prefix)
 os.chdir(sys.prefix)
-os.symlink('/usr/lib/libSystem.B.dylib', 'system-link')
+os.symlink(os.path.join(sys.prefix, '..', 'outside-library'), 'system-link')
 def no_network(*args, **kwargs):
  raise AssertionError('unexpected native connect')
 socket.socket.connect = no_network
