@@ -189,7 +189,7 @@ describe("a steady eval (the old code scored the same on every run)", () => {
     const none = run({});
     expect(none).toMatchObject({ label: "no_regression_eval", qualified: true });
     expect(none.visible?.steady).toBe(true);
-    expect(none.summary).toContain("the old code scored the same on every run, so it is judged against the agreed minimum drop of 0.05");
+    expect(none.summary).toContain("the old code scored the same on every run, so it is judged against a minimum drop of 0.05 (the agreed 0.05, or 3 failed question-runs if that is larger)");
     expect(run({ delta: () => -0.049 }).qualified).toBe(true);
     expect(run({ delta: () => -0.05 })).toMatchObject({ regression: true, detail: "regression_found" });
     expect(run({ delta: () => -0.051 }).regression).toBe(true);
@@ -208,6 +208,17 @@ describe("a steady eval (the old code scored the same on every run)", () => {
     // An ordinary category whose old runs never varied has no noise estimate: p = 1, it can never alone be a clear drop (the steady rule is for the whole set).
     expect(run(only("billing", -0.05)).qualified).toBe(true);
     expect(run(only("billing", -0.19)).qualified).toBe(true);
+  });
+  it("a steady set whose flip floor is coarser than the agreed drop names the floor, not the finer agreed drop (re-check M1)", () => {
+    // 40 questions x 1 new-code run: the floor is 3 / 40 = 0.075, above an agreed drop of 0.05.
+    const fine = planned({ headRuns: 1, minDetectableDrop: 0.05 });
+    const result = run({ headRuns: 1, delta: () => -0.07 }, { headRuns: 1 }, fine);
+    expect(result.qualified).toBe(true);
+    expect(result.summary).toContain("No drop of 7.5 points or more measured.");
+    expect(result.summary).not.toContain("No drop of 5 points");
+    expect(run({ headRuns: 1, delta: () => -0.08 }, { headRuns: 1 }, fine)).toMatchObject({ regression: true });
+    // An agreed drop above the floor is the one named.
+    expect(run({ headRuns: 1 }, { headRuns: 1 }, planned({ headRuns: 1, minDetectableDrop: 0.1 })).summary).toContain("No drop of 10 points or more measured.");
   });
   it("needs the old code to have run 3 times: two identical runs are 'can't judge yet'", () => {
     expect(run({ baseRuns: 2 }, { baseRuns: 2 }, planned({ baseRuns: 2 }))).toMatchObject({ qualified: false, detail: "cannot_detect_drop" });

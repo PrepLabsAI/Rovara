@@ -349,14 +349,17 @@ export function evalGate(input: EvalGateInput): EvalGateResult {
     const outcome = improved ? "improved_eval" : "no_regression_eval";
     const label = evalProofLabel({ outcome });
     const area = `on the evaluated areas (${String(coverage.evaluated)} of ${String(coverage.changed)} changed items exercised; ${String(visible.report.questions)} untouched visible questions, ${String(plan.baseRuns)} old-code and ${String(plan.headRuns)} new-code runs)`;
+    // A steady set is judged against max(agreed drop, its flip floor) (re-check M1): the words name the drop that was really checked, never a finer one.
+    const promised = (report: typeof visible.report) => (report.steady ? Math.max(plan.minDetectableDrop, report.noiseRange.high) : plan.minDetectableDrop);
+    const checkedDrop = Math.max(promised(visible.report), promised(holdout.report));
     const visibleNumbers = visible.report.steady
-      ? `Visible set: effect ${sign(visible.report.effect)}; the old code scored the same on every run, so it is judged against the agreed minimum drop of ${two(plan.minDetectableDrop)}.`
+      ? `Visible set: effect ${sign(visible.report.effect)}; the old code scored the same on every run, so it is judged against a minimum drop of ${two(promised(visible.report))} (the agreed ${two(plan.minDetectableDrop)}, or 3 failed question-runs if that is larger).`
       : `Visible set: effect ${sign(visible.report.effect)}, noise range ±${two(visible.report.noiseRange.high)} (smallest detectable drop ${two(visible.report.smallestDetectableDrop)}).`;
     const leftOut = visible.report.excluded.incomplete > 0 ? " Some questions could not be run and were left out." : "";
     const holdoutWords = improved ? "Holdout: clearly better, beyond the noise band." : "Holdout: within the noise band.";
     const runsWords = `Visible runs: old ${visible.report.runs.filter((run) => run.side === "base").map((run) => two(run.mean)).join(" ")}; new ${visible.report.runs.filter((run) => run.side === "head").map((run) => two(run.mean)).join(" ")}.`;
-    const points = String(Number((plan.minDetectableDrop * 100).toFixed(1)));
-    const sizeWords = `No drop of ${points} points or more measured.`;
+    const points = Number((checkedDrop * 100).toFixed(1));
+    const sizeWords = `No drop of ${String(points)} points or more measured.`;
     return {
       kind: "eval_gate", label: label.label, qualified: true, regression: false, words: label.words, coverage, ...(improvedNotClaimed === undefined ? {} : { improvedNotClaimed }), visible: visible.report, holdout: holdout.report,
       summary: `${SUMMARY_PREFIX}${label.words} ${area}. ${sizeWords} ${visibleNumbers} ${holdoutWords} ${runsWords}${leftOut}${measuresOnly === undefined ? "" : ` ${measuresOnly}`}`,

@@ -1,4 +1,4 @@
-// TE-F3-b (review H1, re-check): seeded simulations at the OWNER'S DEFAULTS: the old code runs 3 times and the new code once, 20 visible + 20 hidden questions, a minimum detectable drop of 0.05, pass/fail questions at near-ceiling pass rates
+// TE-F3-b (review H1, re-check): seeded simulations at the OWNER'S DEFAULTS: the old code runs 3 times and the new code once, 20 visible + 20 hidden questions, a minimum detectable drop of 0.20 (DECISIONS 186) and the finer 0.05, pass/fail questions at near-ceiling pass rates
 // (0.95, 0.97, 0.98, 0.99 and U(0.8, 1)), with and without one strict category of 10 questions. The new code is exactly the old code (same pass rate per question): the gate must almost never call that a regression. And a real
 // drop of 0.2 on every question must still be caught most of the time. (Near-ceiling evals at 3 + 1 runs mostly say "cannot detect the agreed drop": that is the honest answer, and it is not counted as a regression.)
 // Questions that almost always pass make whole categories, even whole sets, whose old runs never varied; those are the cases that used to give 12 to 97% false regressions.
