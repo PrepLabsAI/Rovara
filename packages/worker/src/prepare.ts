@@ -29,7 +29,7 @@ import {
   runDevcontainerCommand,
   type DevcontainerCli,
 } from "./devcontainer.js";
-import { runCollected, type CollectedProcess } from "./collected-process.js";
+import { RunnerKillUnconfirmedError, runCollected, type CollectedProcess } from "./collected-process.js";
 import { describeCommandFailure } from "./command-failure.js";
 import { DOCKER_DATA_DIRECTORY, RUNTIME_BACKING_DIRECTORY } from "./devcontainer-policy.js";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
@@ -740,7 +740,10 @@ async function gitHead(directory: string): Promise<string> {
   return stdout.trim();
 }
 
-/** A project command (`setup` or `readiness`) as a child of the worker: tests and a developer's machine only. Spec 051: `signal` stops it, as a check rerun needs. */
+/**
+ * A project command (`setup` or `readiness`) as a child of the worker: tests and a developer's machine only. Spec 051: `signal` stops it, as a check rerun needs.
+ * An abort is joined: this returns only once the command and its process group are gone, and throws RunnerKillUnconfirmedError when that cannot be confirmed.
+ */
 export async function runProjectCommand(
   command: ProjectCommand,
   _index: number,
@@ -769,6 +772,9 @@ export async function runProjectCommand(
     // The command could not start (for example, its executable does not exist).
     return { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : "command could not start" };
   }
+  // A stop (an abort or a timeout) that could not be confirmed: the command, or something it started, may still be running and writing the workspace.
+  // That is a failure the caller must not step past (never an exit code), and it must not touch the workspace afterwards (FIX-RUNNER-ABORT-JOIN).
+  if (result.killUnconfirmed === true) throw new RunnerKillUnconfirmedError();
   return {
     exitCode: result.exitCode ?? -1,
     stdout: result.stdout,

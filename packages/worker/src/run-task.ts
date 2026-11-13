@@ -69,7 +69,7 @@ import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/re
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { RunFindings, type FindingsRecorder } from "./no-change-findings.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
-import { AgentFilesRestoreError, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
+import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { runTestProof, serializeTestProof } from "./verification/test-proof.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
 import { CommandRecorder } from "./verification/recorder.js";
@@ -1048,6 +1048,9 @@ async function runTask(
     let evidenceFailure: unknown;
     let evidenceAttempted = false;
     let diffAttempted = false;
+    // FIX-RUNNER-ABORT-JOIN: set when the run failed because a stopped command could not be confirmed stopped (or the agent's files could not be put back): it
+    // may still be writing the workspace, so the ending reads and writes nothing in it (no evidence read, no diff, no check-history restore).
+    let workspaceUnsafe = false;
     const reportUnsaved = async (name: string): Promise<void> => {
       await events.append("progress", { message: `AgentX could not save ${name} for this task.` }).catch(() => undefined);
     };
@@ -1770,6 +1773,7 @@ async function runTask(
       };
       }
     } catch (error) {
+      workspaceUnsafe = isWorkspaceUnsafe(error);
       if (loopStop === undefined && dependencies.cancellationController?.isCancelled(invocation.operationId)) {
         outcome = "CANCELLED";
         taskFailure = new WorkerOperationCancelledError(invocation.operationId);
@@ -1803,7 +1807,7 @@ async function runTask(
       }
       // Best effort, like usage: a failed task keeps what it did, for the member and for debugging.
       // A cancelled task does not wait for git to diff the workspace; its evidence is cheap.
-      if (!evidenceAttempted) {
+      if (!evidenceAttempted && !workspaceUnsafe) {
         try {
           await publishEvidence();
         } catch (artifactError) {
@@ -1819,7 +1823,7 @@ async function runTask(
           await reportUnsaved("checks.json");
         }
       }
-      if (!planning && !understanding && !diffAttempted && outcome !== "CANCELLED") {
+      if (!planning && !understanding && !diffAttempted && outcome !== "CANCELLED" && !workspaceUnsafe) {
         try {
           await publishWorkspaceDiff(dependencies.rootPath, artifactSink);
         } catch (artifactError) {
@@ -1829,7 +1833,7 @@ async function runTask(
       }
     }
 
-    if (!planning && !understanding) await restoreHistory();
+    if (!planning && !understanding && !workspaceUnsafe) await restoreHistory();
     await flushDiagnostics().catch(() => undefined);
 
     let telemetryFailure = evidenceFailure;
@@ -2074,7 +2078,7 @@ async function runTestProofStep(input: {
     }
     return proof;
   } catch (error) {
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) throw error;
     await input.events.append("progress", { message: "AgentX could not check the new tests against the original code." }).catch(() => undefined);
     return undefined;
   }

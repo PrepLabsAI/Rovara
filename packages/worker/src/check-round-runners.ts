@@ -259,6 +259,6 @@ async function sealedRound<T>(input: SealedCheckRoundInput, round: (runners: Che
  * One official check round, sealed: `runChecks` over `plan` with the runners of `withSealedCheckRound`. The normal round (`run-task.ts`) and the CHECKS retry call this when the task has test services, and the TESTPROOF
  * rerun on the original code calls it again: each call is its own round with a fresh check sandbox, and `freshServices` puts the helpers back first.
  */
-export function runSealedCheckRound(input: SealedCheckRoundInput, plan: CheckPlan, options: { budgetMs: number; signal: AbortSignal; now?: () => number }): Promise<CheckRound> {
+export function runSealedCheckRound(input: SealedCheckRoundInput, plan: CheckPlan, options: { budgetMs: number; signal: AbortSignal; now?: () => number; abortJoinMs?: number }): Promise<CheckRound> {
   return withSealedCheckRound({ ...input, signal: input.signal ?? options.signal }, (runners) => runChecks(plan, runners, options));
 }

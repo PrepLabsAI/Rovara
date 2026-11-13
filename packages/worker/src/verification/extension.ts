@@ -15,7 +15,7 @@ import {
 import type { CustomMessageEntryDraft, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { redactedTail } from "../collected-process.js";
 import { ownBefore, runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
-import { AgentFilesRestoreError, type OriginalCode } from "./original-code.js";
+import { isWorkspaceUnsafe, type OriginalCode } from "./original-code.js";
 import type { RecordedCommand } from "./recorder.js";
 import type { CommandRecorder } from "./recorder.js";
 
@@ -237,7 +237,7 @@ async function measureBefore(
       if (entry.after !== "not_run") measured.set(missing[index]!.replay, entry.after);
     });
   } catch (error) {
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) throw error;
     try {
       options.onDiagnostic?.(`AgentX could not run the agent's test commands on the original code, so they have no before result: ${error instanceof Error ? error.message : String(error)}`);
     } catch { /* Reporting must not break the settle. */ }

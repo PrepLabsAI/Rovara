@@ -680,20 +680,26 @@ describe("the devcontainer CLI seam", () => {
     }
   });
 
-  it("stops the agent's shell command at once on an abort: TERM in the container, then KILL after the grace period (#174)", async () => {
+  it("stops the agent's shell command on an abort: TERM in the container, then KILL after the grace period, and reports back only then (#174, FIX-RUNNER-ABORT-JOIN)", async () => {
     vi.useFakeTimers();
     try {
       const { cli, options, kills } = stoppableCli();
       const controller = new AbortController();
       const running = devcontainerBashOperations(cli, target).exec("sleep 60", "/mnt/workspace", { onData: () => undefined, signal: controller.signal });
-      const failed = expect(running).rejects.toThrow("aborted");
+      let settled = false;
+      const failed = expect(running).rejects.toThrow("aborted").then(() => { settled = true; });
       await vi.advanceTimersByTimeAsync(0);
       controller.abort();
-      await failed;
-      expect(options[0]!.signal!.aborted).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
       expect(kills()).toHaveLength(1);
       expect(kills()[0]).toContain(KILL_TERM);
-      await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS);
+      // The command ignores TERM: the abort is not reported while it may still be running (a caller would touch the workspace).
+      await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS - 1);
+      expect(settled).toBe(false);
+      expect(options[0]!.signal!.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await failed;
+      expect(options[0]!.signal!.aborted).toBe(true);
       expect(kills()).toHaveLength(2);
       expect(kills()[1]).toContain(KILL_KILL);
     } finally {
@@ -741,9 +747,9 @@ describe("the devcontainer CLI seam", () => {
       const failed = expect(running).rejects.toThrow("aborted");
       await vi.advanceTimersByTimeAsync(2_000);
       controller.abort();
-      await failed;
-      // One stop sequence, not a second one for the abort.
+      // One stop sequence, not a second one for the abort; the abort is joined with it.
       await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS);
+      await failed;
       expect(kills().map((args) => args.at(-3))).toEqual([KILL_TERM, KILL_KILL]);
     } finally {
       vi.useRealTimers();

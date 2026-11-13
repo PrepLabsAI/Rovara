@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
 import { redactText } from "@agentx/contracts";
 
 /** How much of each output stream a command keeps: its last 1 MiB, where errors usually are (#154). */
@@ -6,6 +7,33 @@ export const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
 
 /** How long a timed-out process group has to stop after SIGTERM before it gets SIGKILL (#170). */
 export const TIMEOUT_KILL_GRACE_MS = 5_000;
+
+/**
+ * How long after SIGKILL a stopped process group has to be gone before the stop is called "kill-unconfirmed". The whole stop
+ * (SIGTERM, the grace period, SIGKILL, this wait) is bounded by `killGraceMs + killConfirmMs`.
+ */
+export const KILL_CONFIRM_MS = 5_000;
+
+/**
+ * Raised by a caller of a stop that could not be confirmed (the process or something in its group, or a command in a
+ * container, may still be running). Whoever catches it must treat the run as failed and must NOT read or write the
+ * working tree afterwards: a command that is still running may still be writing it. The text is fixed: nothing from the
+ * command is in it.
+ */
+export class RunnerKillUnconfirmedError extends Error {
+  constructor() {
+    super("AgentX could not confirm that the command stopped, so it did not touch the workspace afterwards");
+    this.name = "RunnerKillUnconfirmedError";
+  }
+}
+
+/** The two operating-system calls a stop uses. Real by default; tests replace them to make a stop that cannot be confirmed. */
+export interface ProcessControl {
+  /** Sends the signal to the child's process group, falling back to the child alone. */
+  signalGroup(child: ChildProcess, signal: NodeJS.Signals): void;
+  /** Whether any live process is left in the group the child led. */
+  groupAlive(pid: number): boolean;
+}
 
 export interface CollectedProcess {
   /** null when a signal ended the process, or when it was aborted. */
@@ -19,6 +47,11 @@ export interface CollectedProcess {
    * SIGTERM, then SIGKILL after `killGraceMs` (#170).
    */
   timedOut?: boolean;
+  /**
+   * True when a stop (an abort or a timeout) could not be confirmed within the bound: the process group may still be running, so
+   * the caller must treat the run as failed and must not touch the working tree (see RunnerKillUnconfirmedError).
+   */
+  killUnconfirmed?: true;
 }
 
 export interface CollectedProcessOptions {
@@ -27,6 +60,10 @@ export interface CollectedProcessOptions {
   timeoutMs?: number;
   /** How long after SIGTERM a timed-out process group gets SIGKILL. Defaults to TIMEOUT_KILL_GRACE_MS. */
   killGraceMs?: number;
+  /** How long after SIGKILL the group has to be gone before the stop is reported as unconfirmed. Defaults to KILL_CONFIRM_MS. */
+  killConfirmMs?: number;
+  /** Tests only: replaces the signal and liveness calls. */
+  control?: ProcessControl;
   signal?: AbortSignal;
   onStdout?: (data: Buffer) => void;
   onStderr?: (data: Buffer) => void;
@@ -41,10 +78,18 @@ export const REDACTION_MARGIN_BYTES = 65_536;
 /**
  * Runs a process and collects the last MAX_COMMAND_OUTPUT_BYTES of each output stream. More
  * output than that never stops the process, and output that is cut is redacted before the cut
- * (#170); output that is not cut comes back unredacted, so a caller that stores it must redact it. An abort resolves with exitCode null; a process that cannot start rejects. The process
+ * (#170); output that is not cut comes back unredacted, so a caller that stores it must redact it. A process that cannot start rejects. The process
  * leads its own process group: a timeout or an abort sends SIGTERM to the group, then SIGKILL after
- * the grace period (#170). This stops local processes only; a command the process runs somewhere
- * else, such as in a devcontainer, is not signalled.
+ * the grace period (#170).
+ *
+ * A stop is joined: the result comes back only once the process has exited AND no live process is left in its group, so a caller
+ * that aborts and then reads or writes the working tree never races a command that is still writing. An abort resolves with
+ * exitCode null. The whole stop is bounded by `killGraceMs + killConfirmMs`: a group that is still alive then is not waited for any
+ * longer, and the result says `killUnconfirmed: true`, which the caller must treat as a failure and must not touch the working tree
+ * after (RunnerKillUnconfirmedError). Output stops reaching onStdout and onStderr as soon as an abort is made.
+ *
+ * This stops local processes only; a command the process runs somewhere else, such as in a devcontainer, is not signalled here:
+ * the container runners (devcontainer.ts runInContainerGroup) stop and confirm their own process group inside the container.
  */
 export function runCollected(executable: string, args: readonly string[], options: CollectedProcessOptions = {}): Promise<CollectedProcess> {
   return new Promise((resolvePromise, reject) => {
@@ -52,6 +97,7 @@ export function runCollected(executable: string, args: readonly string[], option
       resolvePromise({ exitCode: null, stdout: "", stderr: "" });
       return;
     }
+    const control = options.control ?? realProcessControl;
     const child = spawn(executable, [...args], {
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, whose ID is its PID, so a timeout can signal its children too.
@@ -62,6 +108,7 @@ export function runCollected(executable: string, args: readonly string[], option
     const stdout = tailCollector();
     const stderr = tailCollector();
     let timedOut = false;
+    let aborted = false;
     let settled = false;
     // "close" waits for every holder of the output pipes, which can include a child the process
     // left running; the timeout counts only while the process itself has not exited.
@@ -72,20 +119,45 @@ export function runCollected(executable: string, args: readonly string[], option
       child.stderr.destroy();
     };
     let stopping = false;
+    let boundTimer: NodeJS.Timeout | undefined;
+    let pollTimer: NodeJS.Timeout | undefined;
+    let ended: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    const result = (unconfirmed: boolean): CollectedProcess => ({
+      // An abort is reported as no exit code, whatever the process said as it died.
+      exitCode: aborted ? null : ended?.code ?? null,
+      stdout: stdout.text(),
+      stderr: stderr.text(),
+      ...(!aborted && ended !== undefined && ended.signal !== null ? { signal: ended.signal } : {}),
+      ...(timedOut && !aborted ? { timedOut: true } : {}),
+      ...(unconfirmed ? { killUnconfirmed: true as const } : {}),
+    });
     // SIGTERM to the group now, SIGKILL after the grace period. The SIGKILL is sent even when the
     // result has already come back, for a group member that ignores SIGTERM but does not hold the
-    // output open; it does not keep the worker running.
+    // output open; it does not keep the worker running. The result itself waits for the group to be
+    // gone (see `confirmGone`), up to the bound.
     const stop = () => {
       if (stopping) return;
       stopping = true;
-      signalGroup(child, "SIGTERM");
+      const graceMs = options.killGraceMs ?? TIMEOUT_KILL_GRACE_MS;
+      control.signalGroup(child, "SIGTERM");
       setTimeout(() => {
-        signalGroup(child, "SIGKILL");
+        control.signalGroup(child, "SIGKILL");
         if (settled) return;
         // A process that left the group (setsid) may still hold the output open.
         if (exited) stopReading();
         else child.once("exit", stopReading);
-      }, options.killGraceMs ?? TIMEOUT_KILL_GRACE_MS).unref();
+      }, graceMs).unref();
+      // The bound: a group still alive when it ends is reported, not waited for. It is not unref'd: the result is owed.
+      boundTimer = setTimeout(() => settle(() => resolvePromise(result(true))), graceMs + (options.killConfirmMs ?? KILL_CONFIRM_MS));
+    };
+    // The leader has exited: wait until nothing is left alive in its group (a grandchild may outlive it, and write).
+    const confirmGone = () => {
+      if (settled) return;
+      if (child.pid === undefined || !control.groupAlive(child.pid)) {
+        settle(() => resolvePromise(result(false)));
+        return;
+      }
+      pollTimer = setTimeout(confirmGone, GROUP_POLL_MS);
     };
     const timer = options.timeoutMs
       ? setTimeout(() => {
@@ -100,30 +172,75 @@ export function runCollected(executable: string, args: readonly string[], option
       }, options.timeoutMs)
       : undefined;
     const onAbort = () => {
+      aborted = true;
       stop();
-      // No output reaches onStdout or onStderr after the abort has returned.
+      // No output reaches onStdout or onStderr after the abort has been made.
       stopReading();
-      settle(() => resolvePromise({ exitCode: null, stdout: stdout.text(), stderr: stderr.text() }));
+      // The result is NOT returned here: it comes once the process has exited and its group is gone.
     };
     const settle = (finish: () => void) => {
       if (settled) return;
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
+      if (boundTimer !== undefined) clearTimeout(boundTimer);
+      if (pollTimer !== undefined) clearTimeout(pollTimer);
       options.signal?.removeEventListener("abort", onAbort);
       finish();
     };
     options.signal?.addEventListener("abort", onAbort, { once: true });
-    child.stdout.on("data", (data: Buffer) => { stdout.add(data); options.onStdout?.(data); });
-    child.stderr.on("data", (data: Buffer) => { stderr.add(data); options.onStderr?.(data); });
+    child.stdout.on("data", (data: Buffer) => { if (!aborted) { stdout.add(data); options.onStdout?.(data); } });
+    child.stderr.on("data", (data: Buffer) => { if (!aborted) { stderr.add(data); options.onStderr?.(data); } });
     child.on("error", (error) => settle(() => reject(error)));
-    child.on("close", (code, signal) => settle(() => resolvePromise({
-      exitCode: code,
-      stdout: stdout.text(),
-      stderr: stderr.text(),
-      ...(signal !== null ? { signal } : {}),
-      ...(timedOut ? { timedOut: true } : {}),
-    })));
+    child.on("close", (code, signal) => {
+      ended = { code, signal };
+      // A stop (an abort or a timeout) is joined: the group must be gone as well.
+      if (stopping) confirmGone();
+      else settle(() => resolvePromise(result(false)));
+    });
   });
+}
+
+/** How often a stopped process group is looked at to see whether it is gone. */
+const GROUP_POLL_MS = 25;
+
+const realProcessControl: ProcessControl = { signalGroup, groupAlive };
+
+/**
+ * Whether any live process is left in the process group `pgid` (the group a detached child leads). `kill(-pgid, 0)` finds the group
+ * while any member exists, zombies included; on Linux a group of zombies (which a process manager that does not reap, as a bare
+ * Node PID 1 does not, leaves behind) counts as gone. A group that cannot be examined counts as alive: the stop is then not confirmed.
+ */
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+  return process.platform === "linux" ? liveMemberOnLinux(pgid) : true;
+}
+
+function liveMemberOnLinux(pgid: number): boolean {
+  let names: string[];
+  try {
+    names = readdirSync("/proc");
+  } catch {
+    return true;
+  }
+  for (const name of names) {
+    if (!/^[0-9]+$/u.test(name)) continue;
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${name}/stat`, "utf8");
+    } catch (error) {
+      // It exited meanwhile; anything else (a hidden /proc entry) means this member cannot be judged.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ESRCH") continue;
+      return true;
+    }
+    // "pid (comm) state ppid pgrp ...": the name may hold spaces and parentheses, so read after its last ")".
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    if (Number(fields[2]) === pgid && fields[0] !== "Z" && fields[0] !== "X") return true;
+  }
+  return false;
 }
 
 /** Sends a signal to the child's process group, or to the child alone when that fails. */

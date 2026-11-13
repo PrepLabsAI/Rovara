@@ -12,7 +12,7 @@ import {
   type StoredProjectDefinition,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { runCollected, TIMEOUT_KILL_GRACE_MS } from "./collected-process.js";
+import { RunnerKillUnconfirmedError, runCollected, TIMEOUT_KILL_GRACE_MS } from "./collected-process.js";
 import {
   DOCKER_DATA_DIRECTORY,
   DEVCONTAINER_NETWORK_UNWALLED,
@@ -526,7 +526,8 @@ async function startDevcontainer(cli: DevcontainerCli, target: DevcontainerTarge
 /**
  * A project command (`setup` or `readiness`) run in the devcontainer, in its workspace directory. It
  * runs in its own process group in the container, so its timeout stops it there too (#174), and so
- * does `signal` (spec 051, a check rerun): the abort ends the local client at once.
+ * does `signal` (spec 051, a check rerun): the abort is joined, that is, it returns only after the stop sequence has run, and a stop that failed throws
+ * RunnerKillUnconfirmedError (see runInContainerGroup).
  */
 export async function runDevcontainerCommand(
   cli: DevcontainerCli,
@@ -563,6 +564,8 @@ export async function runContainerCommand(
     ...(signal !== undefined ? { signal } : {}),
   });
   const { result } = run;
+  // An abort whose stop could not be confirmed: the command may still be running in the container, which mounts the workspace.
+  if (run.killUnconfirmed) throw new RunnerKillUnconfirmedError();
   return {
     exitCode: result.exitCode ?? -1,
     stdout: result.stdout,
@@ -627,8 +630,9 @@ export type ContainerExec = (
 
 /**
  * The agent's shell in a container, each command in its own process group (see devcontainerBashOperations).
- * A timeout reports back after the stop sequence: the TERM exec, the 5 s grace period, then the KILL
- * exec (each exec bounded at 10 s); an abort reports back at once.
+ * A timeout or an abort reports back after the stop sequence: the TERM exec, the 5 s grace period (an abort skips what is left
+ * of it once the leader has exited), then the KILL exec (each exec bounded at 10 s). An abort whose stop failed throws
+ * RunnerKillUnconfirmedError, not "aborted".
  */
 export function containerBashOperations(exec: ContainerExec, options: ContainerCommandOptions = {}): BashOperations {
   return {
@@ -648,6 +652,7 @@ export function containerBashOperations(exec: ContainerExec, options: ContainerC
         onStdout: onData,
         onStderr: onData,
       });
+      if (run.killUnconfirmed) throw new RunnerKillUnconfirmedError();
       if (run.aborted) throw new Error("aborted");
       for (const failure of run.stopFailures) onData(Buffer.from(`\n${failure}\n`));
       if (run.timedOut) throw new Error(`timeout:${String(timeout)}`);
@@ -694,13 +699,17 @@ function unsetStatement(command: ContainerGroupCommand): string {
  * member still running (one that ignores SIGTERM, even once the group leader has exited) and removes
  * the files. Then the local client is aborted, if it is still running. Each kill exec may take
  * KILL_EXEC_TIMEOUT_MS. A timeout waits for the whole sequence and reports each step that failed in
- * `stopFailures`; an abort ends the local client at once and does not wait. bash, not sh: dash's kill
+ * `stopFailures`. An abort is joined the same way: it reports back only after the whole sequence, so a caller
+ * that touches the workspace (the container mounts it) afterwards never races the command; the grace period
+ * is cut short once the group leader has exited, because what is left of the group is then killed at once.
+ * A step that failed is a stop that is not confirmed: `killUnconfirmed`, which the caller must treat as a failure
+ * and must not touch the workspace after (RunnerKillUnconfirmedError). bash, not sh: dash's kill
  * does not take a negative process group ID, so a container without bash fails with an error that says so.
  */
 async function runInContainerGroup(
   exec: ContainerExec,
   command: ContainerGroupCommand,
-): Promise<{ result: DevcontainerProcess; timedOut: boolean; aborted: boolean; stopFailures: string[] }> {
+): Promise<{ result: DevcontainerProcess; timedOut: boolean; aborted: boolean; stopFailures: string[]; killUnconfirmed: boolean }> {
   const groupFile = `/tmp/${command.groupFilePrefix}-${randomUUID()}.pgid`;
   const controller = new AbortController();
   const stopFailures: string[] = [];
@@ -719,21 +728,31 @@ async function runInContainerGroup(
     if (failure !== undefined) stopFailures.push(`AgentX could not stop the command in the container (${step}): ${failure}`);
   };
   let stopping: Promise<void> | undefined;
+  // Resolved when the command's own exec has returned: the wrapper's `wait` ended, so the group leader is gone.
+  let leaderGone: () => void = () => undefined;
+  const leaderExited = new Promise<void>((resolveLeader) => { leaderGone = resolveLeader; });
+  let timedOut = false;
+  let aborted = false;
   const stop = () => {
     stopping ??= (async () => {
       await signalGroup("TERM", TERM_SCRIPT);
-      // unref'd: after an abort the sequence finishes in the background and does not keep the worker running.
-      await new Promise((resolveGrace) => setTimeout(resolveGrace, TIMEOUT_KILL_GRACE_MS).unref());
+      let graceTimer: NodeJS.Timeout | undefined;
+      // An abort does not wait out the grace period once the leader has exited: the KILL then follows at once. Not unref'd:
+      // the sequence is awaited, and the caller must not touch the workspace before it ends.
+      await Promise.race([
+        new Promise((resolveGrace) => { graceTimer = setTimeout(resolveGrace, TIMEOUT_KILL_GRACE_MS); }),
+        ...(aborted ? [leaderExited] : []),
+      ]);
+      clearTimeout(graceTimer);
       await signalGroup("KILL", KILL_SCRIPT);
       controller.abort();
     })();
   };
-  let timedOut = false;
-  let aborted = false;
   const timer = command.timeoutMs !== undefined
     ? setTimeout(() => { timedOut = true; stop(); }, command.timeoutMs)
     : undefined;
-  const onAbort = () => { aborted = true; stop(); controller.abort(); };
+  // Not `controller.abort()` here: the local client ends when the stop sequence has run (or the leader has exited), so the result is joined.
+  const onAbort = () => { aborted = true; stop(); };
   command.signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const result = await exec([
@@ -749,15 +768,15 @@ async function runInContainerGroup(
       signal: controller.signal,
       ...(command.onStdout !== undefined ? { onStdout: command.onStdout } : {}),
       ...(command.onStderr !== undefined ? { onStderr: command.onStderr } : {}),
-    });
+    }).finally(() => leaderGone());
     const wasAborted = aborted || command.signal?.aborted === true;
-    // A timeout waits for the stop sequence, so the result says whether it worked.
-    if (timedOut && !wasAborted) await stopping;
+    // A timeout or an abort waits for the stop sequence, so the result says whether it worked.
+    if (stopping !== undefined) await stopping;
     // bash never started when the container has none, so there is no output.
     if (!timedOut && !wasAborted && result.exitCode !== 0 && result.stdout === "" && NO_BASH.test(result.stderr)) {
       throw new Error(NO_BASH_MESSAGE);
     }
-    return { result, timedOut, aborted: wasAborted, stopFailures: [...stopFailures] };
+    return { result, timedOut, aborted: wasAborted, stopFailures: [...stopFailures], killUnconfirmed: wasAborted && stopFailures.length > 0 };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     command.signal?.removeEventListener("abort", onAbort);
