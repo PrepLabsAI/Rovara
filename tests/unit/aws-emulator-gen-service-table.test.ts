@@ -1,6 +1,7 @@
 // The generator of the AWS emulator service table (scripts/aws-emulator/gen-service-table.ts): the score formula, the rules it refuses on, determinism, and that the committed files are what its renderer writes.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
@@ -11,7 +12,7 @@ import { awsServiceKeyOrSelf, awsServicesForSigningName } from "../../packages/c
 
 const roots: string[] = [];
 afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
-const temp = (): string => { const root = mkdtempSync(join(process.env["TMPDIR"] ?? process.env["RUNNER_TEMP"] ?? "node_modules/.cache", "gen-service-table-")); roots.push(root); return root; };
+const temp = (): string => { const root = mkdtempSync(join(tmpdir(), "gen-service-table-")); roots.push(root); return root; };
 
 const SCRIPT = new URL("../../scripts/aws-emulator/gen-service-table.ts", import.meta.url).pathname;
 const SHA = "b".repeat(64);
