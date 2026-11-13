@@ -8,6 +8,7 @@ import { AgentXError, DEVELOPER_API_VERSION, agentXError, type Principal } from 
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import { loadOwnedTask, taskViewOf } from "../../core/task-flow/reads.js";
+import { createTaskActions, type TaskActions } from "../../core/task-flow/task-actions.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
@@ -43,6 +44,8 @@ export interface OwnerRoutesDeps {
   designReview?: { allowSkip(project: string): Promise<boolean>; unpricedNote(): string };
   /** Fix with agent. Absent: its routes are not there. */
   diagnosis?: Pick<LocalDiagnosis, "core">;
+  /** The owner's moves on a task already running (send back, review findings, continue). Absent: the flow's own, with no money cap held. */
+  taskActions?: TaskActions;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -60,7 +63,7 @@ export const MODEL_SELECTION_PATH = "/v1/dev/model-selection";
 export const SECOND_REVIEW_EVIDENCE_PATH = /^\/v1\/admin\/second-review\/(replay|verdict)$/u;
 export const ATTACH_ON_THE_PAGE = "Saying where a task's plan is posted is done on the task's page, in your browser (run `rovara open <task>`): it lets a comment there decide the plan, so a tool with the API token cannot do it.";
 export const DESIGN_REVIEW_ON_THE_PAGE = "A cost choice, the answers to the design review's questions, and picking a paused review up again are your own acts on the task's page, in your browser (run `rovara open <task>`): a tool with the API token can read the review but cannot make them.";
-const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|thread|workflow\/decision|workflow\/retry|continue|design-review|design-review\/(?:choice|answers|resume)|diagnosis))?$/u;
+const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|thread|workflow\/decision|workflow\/retry|workflow\/send-back|continue|design-review|design-review\/(?:choice|answers|resume)|diagnosis))?$/u;
 /** Fix with agent: `GET /v1/app/diagnoses/<id>` reads one (the hosted product's route). Starting one is the owner's act on the task's page, so a tool that holds the API token is told to open it; the deeper look and "Apply this change" are not on this install. */
 const DIAGNOSES = /^\/v1\/app\/diagnoses(?:\/(dgn_[0-9a-z]{20})(?:\/(deep|propose))?)?$/u;
 
@@ -68,7 +71,7 @@ const DIAGNOSES = /^\/v1\/app\/diagnoses(?:\/(dgn_[0-9a-z]{20})(?:\/(deep|propos
  * routes the MCP tools and the CLI call that have no core feature in Code yet (they wait on features not built yet: custom agents, approvals of connected systems, sharing and task people,
  * opening a pull request by hand, review of a candidate, PR feedback, parallel parts, a task's budget). Answered in plain words instead of the older handler's "route not found".
  */
-const NOT_ON_THIS_INSTALL = /^\/v1\/app\/(?:agents|approvals)(?:\/|$)|^\/v1\/dev\/tasks\/[0-9a-f-]{36}\/(?:share|people|pull-requests|continue|workflow\/(?:review|send-back|review-findings|publish-retry|keep-pull-requests|feedback|feedback-decision|feedback-retry))(?:\/|$)/u;
+const NOT_ON_THIS_INSTALL = /^\/v1\/app\/(?:agents|approvals)(?:\/|$)|^\/v1\/dev\/tasks\/[0-9a-f-]{36}\/(?:share|people|pull-requests|continue|workflow\/(?:review|review-findings|publish-retry|keep-pull-requests|feedback|feedback-decision|feedback-retry))(?:\/|$)/u;
 export const NOT_ON_THIS_INSTALL_MESSAGE = "That is not on this install yet: Rovara on this computer does not do it. It comes with a later release.";
 
 /** `GET /v1/auth/.well-known/agentx-configuration`: what a client asks before it signs in. Open, like `/healthz`. */
@@ -80,6 +83,7 @@ export function configurationAnswer(version: string): BrokerResponse {
 export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerRequest, caller: TaskCaller) => Promise<BrokerResponse | undefined> {
   const { flow } = deps;
   const companyId = flow.deps.companyId;
+  const taskActions = deps.taskActions ?? createTaskActions(flow.deps);
   const viewOf = async (caller: TaskCaller, taskId: string): Promise<Record<string, unknown>> => {
     const task = await loadOwnedTask(flow.deps, caller, taskId);
     return developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest));
@@ -248,6 +252,11 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         }
         if (action === "workflow/retry" && request.method === "POST") {
           await controlled(caller, taskId, "retry", bodyOf(request));
+          return json(200, { task: await viewOf(caller, taskId) });
+        }
+        if (action === "workflow/send-back" && request.method === "POST") {
+          // The owner sends the change back to coding with their words: the move re-checks who they are, the revision they saw and the task's money (`core/task-flow/send-back.ts`).
+          await taskActions.sendBack(caller, taskId, bodyOf(request));
           return json(200, { task: await viewOf(caller, taskId) });
         }
         if (action === "design-review" && request.method === "GET") {
