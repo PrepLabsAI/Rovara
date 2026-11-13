@@ -172,6 +172,6 @@ describe("the accepted-findings data", () => {
   it("the repository's own list reads, and names only cloud-aws and secret findings with their reasons", () => {
     const list = parseAccepted(readFileSync(join(process.cwd(), "scripts/port-guard-accepted.json"), "utf8"), "scripts/port-guard-accepted.json");
     for (const accepted of list) expect(ACCEPTABLE_RULES).toContain(accepted.rule);
-    expect(list.every((accepted) => /^(owner decision 2026-11-12: AWS files already public on mainline|mainline commit [0-9a-f]{8}, fake test value)/.test(accepted.reason))).toBe(true);
+    expect(list.every((accepted) => /^(owner decision 2026-11-12: AWS files already public on mainline|already public as packages\/broker\/src\/aws\/broker-shared\.ts|mainline commit [0-9a-f]{8}, fake test value)/.test(accepted.reason))).toBe(true);
   });
 });

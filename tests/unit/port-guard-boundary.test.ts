@@ -439,8 +439,9 @@ describe("history that is already public (A-H1)", () => {
     expect(() => parseBoundary(JSON.stringify({ ...boundary(), knownHistory: [{ commit: commit.slice(0, 8), rule, file: FILE, reason: "x" }] }), "x")).toThrow(GuardError);
   });
 
-  it("lists the one real exception, by full sha", () => {
-    expect(boundary().knownHistory.map((entry) => `${entry.commit.slice(0, 8)} ${entry.rule}`)).toEqual(["45eb9a7d private-name"]);
+  it("lists the real exceptions, by full sha", () => {
+    // df0d55d2: the sanctioned Bedrock credentials file at its pre-split broker path (the sanctioned folder now names packages/core).
+    expect(boundary().knownHistory.map((entry) => `${entry.commit.slice(0, 8)} ${entry.rule}`)).toEqual(["df0d55d2 cloud-aws", "45eb9a7d private-name"]);
   });
 });
 

@@ -6,7 +6,7 @@
       "path": "packages/core/src/aws/broker-shared.ts",
       "rule": "cloud-aws",
       "blob": "18e7dd762f68fab45502284ecddc18ccf7f8c676",
-      "reason": "already public on mainline as packages/broker/src/aws/broker-shared.ts; the modular split only moved it (git pairs it with developer/plan-instructions.ts, so a range from mainline reads it as new)"
+      "reason": "already public as packages/broker/src/aws/broker-shared.ts (mainline, and code/next as a short re-export); the modular split only moved it. Git pairs the old mainline file with developer/plan-instructions.ts, so a range from mainline reads this one as new"
     },
     {
       "path": "packages/core/src/aws/channel-api-lambda.ts",
