@@ -13,7 +13,8 @@ import { type FlowTier, type FlowTierKind, type FlowTierLevel, type WorkflowFlow
 import { CHANGED_FILES_MAX } from "../proof/changed-files.js";
 import { isTestPath } from "../proof/verification-report.js";
 import {
-  fileTypeOf, hasConfusableLetter, hasNonAsciiLetter, isApiShapePath, isCheckConfigPath, isCiFilePath, isDocsAllowlistPath, isHookPath, isInfraPath, isInstructionPath, isTierSensitivePath, normalizedTierPath,
+  BIDI_CONTROL, fileTypeOf, hasConfusableLetter, hasMixedScriptWord, hasNonAsciiLetter, isApiShapePath, isCheckConfigPath, isCiFilePath, isDocsAllowlistPath, isDocsBuildConfigPath, isHookPath, isInfraPath, isInstructionPath, isScannerIgnorePath,
+  isTierSensitivePath, normalizedTierPath,
 } from "./sensitive-list.js";
 
 /** The version of these rules, written with every tier (`flow.rulesVersion`), so a stored tier says which rules made it. */
@@ -46,10 +47,10 @@ export const TIER_REASON_CODES = [
   // risky
   "incomplete_diff", "no_diff_files", "too_many_files", "unreadable_content", "binary_content", "mode_or_type_change", "symlink_suspected", "submodule", "lfs_pointer",
   "sensitive_path", "instruction_file", "hook_file", "git_settings_file", "env_file", "package_source_setting", "registry_source_changed", "dependency_source", "install_script",
-  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security",
+  "ci_privileged", "large_change", "confusable_path", "infra_file", "instruction_import", "ci_unpinned_action", "ci_file_deleted", "check_config_deleted", "path_too_long", "link_kind_unknown", "ignore_file", "secret_like_text", "script_command", "check_weakened_security", "docs_executes", "bidi_control", "confusable_text", "reviewer_injection_text", "docs_build_hook",
   // standard
   "more_than_lines", "more_than_files", "two_or_more_modules", "api_change", "new_dependency", "lockfile_not_understood", "code_file_deleted", "test_file_deleted", "no_files_named", "request_mentions_sensitive_area",
-  "unrecognised_file_type", "long_lines", "package_alias", "lock_package_changed", "script_changed", "text_data_file", "vendored_code", "check_weakened", "docs_include",
+  "unrecognised_file_type", "long_lines", "package_alias", "lock_package_changed", "script_changed", "text_data_file", "vendored_code", "check_weakened", "docs_include", "docs_not_plain", "docs_unread", "docs_site_build", "docs_large", "scanner_ignore_file", "docs_build_config",
 ] as const;
 
 // ---- input
@@ -140,6 +141,8 @@ export interface HeadFacts {
   links?: ReadonlySet<string> | undefined;
   /** Paths (keyed by `factKey`) whose kind was NOT asked (past the read limit): unknown is risky. */
   unchecked?: ReadonlySet<string> | undefined;
+  /** True when the repository builds a documentation site (a docs build config exists at the head), or that could not be ruled out: a document may then be compiled or executed by the build. */
+  docsSite?: boolean | undefined;
 }
 
 /** A document on the docs route: README*, CHANGELOG*, CONTRIBUTING* and `docs/**` in Markdown, reStructuredText or AsciiDoc, in no instruction, skill, prompt, agent, infrastructure or sensitive area. */
@@ -148,15 +151,98 @@ function isDocsPath(path: string): boolean {
     && !hasConfusableLetter(path) && !hasNonAsciiLetter(path);
 }
 
-/** Markup that runs or pulls in something: any HTML tag (a comment is not one), an RST raw directive, a script link. `include` directives read another file into the built page. */
+// ---- the docs route is an allowlist on CONTENT
+
 const HTML_TAG = /<\/?[A-Za-z][\w:-]*(?:[\s/>]|$)|\bjavascript:|\bon[a-z]{3,}\s*=/u;
-const RAW_DIRECTIVE = /^\s*\.\.\s+raw::|^\s*\.\.\s+(?:only|ifconfig)::.*html|^\s*\.\.\s+code-block::\s+html\b/u;
-const INCLUDE_DIRECTIVE = /^\s*\.\.\s+(?:include|literalinclude|csv-table|figure|image)::|:file:|^\s*\{\{#include|^\s*\{%\s*include\b|^\s*!\[?include\b|<!--#include|^\s*include::/u;
-/** What a document's changed lines hold that keeps it off the docs route. `include` reaches other files, so it is standard; the others are small. */
-function docsPatchProblem(patch: PatchLines): "include" | "markup" | undefined {
-  const changed = [...patch.added, ...patch.removed];
-  if (changed.some((line) => INCLUDE_DIRECTIVE.test(line))) return "include";
-  return changed.some((line) => HTML_TAG.test(line) || RAW_DIRECTIVE.test(line)) ? "markup" : undefined;
+/** Domains written without a scheme: a download or a registry named in words. */
+const BARE_DOMAIN = /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|app|sh|co|ai|xyz|example|test|cloud|site|online|info|me|us|uk|de|ru|cn|tk|ml|ga|cf|gq|zip|mov|run|page|link|click|top|pw|cc|ws|to|ly|gl|so|fm|tv)\b/iu;
+const SCHEME_URL = /[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\]\(|^\s*\[[^\]]+\]:\s*\S/iu;
+/** Lines that a docs build, a template engine or a reader's tool treats as something other than prose. */
+const NOT_PLAIN_MARKUP = /[{}]|^\s*[<>]|<<<|>>>|--8<--|:::|\[\[\[|\$\(|\$\{|^\s*\.\.\s+\S|^\s*\{%|%\}|^\s*\{\{|\bimport\s+\S+\s+from\b|^\s*export\s/u;
+const KEY_VALUE = /(?:^|\s)[A-Za-z_][\w.-]*=\S/u;
+const CONTROL_CHAR = /[\p{Cc}\p{Cf}]/u;
+/** What a docs line holds that RUNS something when a build or a test reads it (risky, not merely standard). */
+const DOCS_EXECUTES = /\b(?:require|import)\s*\(|child_process|execSync|spawnSync|\beval\s*\(|new Function\(|os\.system|subprocess|__import__|program-output|__class__|__mro__|\[\[\[cog|^\s*>>>|^\s*export\s+(?:const|default|function|let|var)|<script|dangerouslySetInnerHTML|createElement\s*\(|<\?php|\bsystem\s*\(/u;
+const INLINE_CODE = /`([^`]*)`/gu;
+
+/**
+ * Whether a line is plain prose: no braces or template and directive syntax, no markup, no link or domain, no `KEY=value`, no control or direction-changing character, and no command in a code span (an odd backtick is a
+ * span split over lines: it cannot be read, so it is not plain).
+ */
+export function plainProseLine(line: string): boolean {
+  if (CONTROL_CHAR.test(line.replaceAll("\t", "")) || BIDI_CONTROL.test(line)) return false;
+  if (NOT_PLAIN_MARKUP.test(line) || HTML_TAG.test(line) || SCHEME_URL.test(line) || BARE_DOMAIN.test(line) || KEY_VALUE.test(line)) return false;
+  if ((line.match(/`/gu) ?? []).length % 2 === 1) return false;
+  for (const span of line.matchAll(INLINE_CODE)) if (/\s/u.test(span[1]!.trim()) || isCommandLine(span[1]!)) return false;
+  return !isCommandLine(line);
+}
+
+/** The block each line of a document sits in, or -1: fenced code, an indented code block, an HTML block (script, style, pre, iframe...) or a tag that runs over several lines, and a front-matter block. */
+function blocksOfDocument(lines: readonly string[]): { blockOf: number[]; ranges: Array<[number, number]> } {
+  const blockOf: number[] = lines.map(() => -1);
+  const ranges: Array<[number, number]> = [];
+  const open = (start: number, end: number): void => { ranges.push([start, end]); for (let at = start; at <= end; at += 1) blockOf[at] = ranges.length - 1; };
+  if (lines[0]?.trim() === "---") { const close = lines.findIndex((line, index) => index > 0 && line.trim() === "---"); if (close > 0) open(0, close); }
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index]!;
+    if (blockOf[index] !== -1) { index += 1; continue; }
+    if (FENCE.test(line)) {
+      let end = lines.findIndex((candidate, at) => at > index && FENCE.test(candidate));
+      if (end < 0) end = lines.length - 1;
+      open(index, end); index = end + 1; continue;
+    }
+    const block = /<(script|style|pre|iframe|svg|template|textarea|object|embed|math|details|noscript)\b/iu.exec(line);
+    if (block !== null) {
+      let end = lines.findIndex((candidate, at) => at >= index && new RegExp(`</${block[1]!}\\s*>`, "iu").test(candidate));
+      if (end < 0) end = lines.length - 1;
+      open(index, end); index = end + 1; continue;
+    }
+    // A tag that is opened and not closed on its line runs on to the line that has the `>`.
+    if (/<[A-Za-z][\w:-]*(?:\s[^>]*)?$/u.test(line) && !/>/u.test(line.slice(line.lastIndexOf("<")))) {
+      let end = lines.findIndex((candidate, at) => at > index && />/u.test(candidate));
+      if (end < 0) end = lines.length - 1;
+      open(index, end); index = end + 1; continue;
+    }
+    if (INDENTED.test(line) && (index === 0 || lines[index - 1]!.trim() === "")) {
+      let end = index;
+      while (end + 1 < lines.length && (lines[end + 1]!.trim() === "" || INDENTED.test(lines[end + 1]!))) end += 1;
+      while (end > index && lines[end]!.trim() === "") end -= 1;
+      open(index, end); index = end + 1; continue;
+    }
+    index += 1;
+  }
+  return { blockOf, ranges };
+}
+
+/** The most changed lines the docs route may carry: more is a rewrite, and a rewrite is not looked at as prose. */
+export const DOCS_ROUTE_LINES_MAX = 300;
+
+/**
+ * Whether a document's change is plain prose: every changed line is (`plainProseLine`), and so is every line of any block the change sits in. With the text of the file at the head the blocks are exact; without it nothing can
+ * be said of what surrounds a hunk, so the caller does not clear it (`headKnown`). `run` marks a line that RUNS something (risky).
+ */
+function docsContentProblem(patch: string, headText: string | undefined, headKnown: boolean): { problem: "unread" | "not_plain" | "executes" | "include"; } | undefined {
+  const hunks = hunksOf(patch);
+  const changed = hunks.flatMap((hunk) => hunk.lines.filter((line) => line.changed));
+  if (changed.some((line) => DOCS_EXECUTES.test(line.text))) return { problem: "executes" };
+  if (changed.some((line) => /^\s*\.\.\s+(?:include|literalinclude|csv-table|figure|image)::|:file:|^\s*\{\{#include|^\s*\{%\s*include\b|<!--#include|^\s*include::|--8<--|^\s*<<<|@include|:::\{?include/iu.test(line.text))) return { problem: "include" };
+  if (changed.some((line) => !plainProseLine(line.text))) return { problem: "not_plain" };
+  if (headText === undefined) return headKnown ? { problem: "unread" } : undefined;
+  const lines = headText.split("\n");
+  const { blockOf, ranges } = blocksOfDocument(lines);
+  for (const line of changed) {
+    const block = blockOf[Math.min(line.newLine - 1, lines.length - 1)] ?? -1;
+    if (block < 0) continue;
+    const [start, end] = ranges[block]!;
+    for (let at = start; at <= end; at += 1) {
+      const text = lines[at]!;
+      if (FENCE.test(text) || /^---\s*$/u.test(text)) continue;
+      if (DOCS_EXECUTES.test(text)) return { problem: "executes" };
+      if (!plainProseLine(text)) return { problem: "not_plain" };
+    }
+  }
+  return undefined;
 }
 
 const LOCKFILE_NAMES = new Set([
@@ -165,7 +251,7 @@ const LOCKFILE_NAMES = new Set([
 ]);
 const MANIFEST_NAMES = new Set([
   "package.json", "composer.json", "pyproject.toml", "cargo.toml", "go.mod", "go.work", "gemfile", "pipfile", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "libs.versions.toml", "mix.exs", "pubspec.yaml",
-  "directory.packages.props", "deno.json", "deno.jsonc", "import_map.json", "package.swift", "environment.yml", "environment.yaml", "conda.yml", "conda-lock.yml", "conanfile.txt", "conanfile.py", "vcpkg.json", "cartfile", "podfile", "brewfile", "setup.py", "setup.cfg",
+  "directory.packages.props", "directory.build.props", "directory.build.targets", "deno.json", "deno.jsonc", "import_map.json", "package.swift", "environment.yml", "environment.yaml", "conda.yml", "conda-lock.yml", "conanfile.txt", "conanfile.py", "vcpkg.json", "cartfile", "podfile", "brewfile", "setup.py", "setup.cfg",
 ]);
 const isLockfile = (path: string): boolean => LOCKFILE_NAMES.has(baseName(path)) || baseName(path).endsWith(".lock");
 /** A `.txt` that lists dependencies: by its name (requirements, constraints, reqs, deps, pins, conanfile, pip) or by living in a requirements folder. */
@@ -183,9 +269,10 @@ const GIT_SETTINGS_FILES = /(?:^|\/)(?:\.gitmodules|\.gitattributes)$/u;
  * In real source code only the command-line forms count (a variable called `index_url` in a program is not a setting).
  */
 const SOURCE_WORD = /(?:index[-_]url|find[-_]links|trusted[-_]host|--registry\b|npmRegistryServer|\bnpm_config_[a-z_]+|\bpip_[a-z_]*(?:index|find|trusted|proxy)[a-z_]*|\buv_(?:default_)?index[a-z_]*|\bgoproxy\b|\bgonosumdb\b|\bgoprivate\b|\bgoinsecure\b|\bcargo_registries[a-z_]*|\byarn_npm_registry[a-z_]*|\bbundle_mirror[a-z_]*)/iu;
-const SOURCE_WORD_IN_CODE = /(?:--(?:extra-)?index-url|--find-links|--trusted-host|--registry\b)/iu;
-const SOURCE_WORD_IN_CONFIG = /(?:^|[\s"'@:])(?:[\w-]+:)?registry\s*[=:]/iu;
-const CONFIG_FILE = /\.(?:toml|cfg|ini|conf|ya?ml|json|xml|properties)$|(?:^|\/)\.[\w-]*rc$/u;
+const SOURCE_WORD_IN_CODE = /(?:--(?:extra-)?index-url|--find-links|--trusted-host|--registry\b|\bnpm_config_[a-z_]+|\bPIP_[A-Z_]*(?:INDEX|FIND_LINKS|TRUSTED_HOST|PROXY)[A-Z_]*|\bUV_(?:DEFAULT_)?INDEX\w*|\bGOPROXY\b|\bGONOSUMDB\b|\bYARN_NPM_REGISTRY\w*)/iu;
+/** A registry or package source named as a key or setting: quoted JSON keys (`"registry":`), ini and yaml keys, NuGet restore sources in .props and .targets files. */
+const SOURCE_WORD_IN_CONFIG = /(?:^|[\s"'@:{,])(?:[\w-]+:)?["']?(?:registry|registries|npmRegistry\w*|publishConfig|packageSources?|restoreSources?|RestoreSources|RestoreAdditionalProjectSources|RestoreFallbackFolders|nugetSources?|mirror|mirrors|repositories|index[-_]url)["']?\s*[=:]|<add\s+key=[^>]*value=["']?https?:|RestoreAdditionalProjectSources|<RestoreSources>|<PackageSource\b/iu;
+const CONFIG_FILE = /\.(?:toml|cfg|ini|conf|ya?ml|json|xml|properties|props|targets|csproj|vbproj|fsproj|nuspec|gradle|kts|plist)$|(?:^|\/)\.[\w-]*rc$/u;
 /** Settings that let install scripts run, or turn the guards against them off. */
 const INSTALL_GUARD_WORDS = /(?:onlyBuiltDependencies|neverBuiltDependencies|trustedDependencies|dangerouslyAllowAllBuilds|ignore-scripts|ignoreScripts|enable-pre-post-scripts|enablePrePostScripts)/u;
 /** The scripts an install runs, matched anywhere in a line (a one-line `"scripts": { "postinstall": ... }` too). */
@@ -529,7 +616,7 @@ export const ADDED_BYTES_TOTAL_MAX = 20_000;
 /** Text that looks like a credential: a cloud key id, a platform token, a private key block. A fixture or a config that holds one is risky (a leaked credential, or a test of one that is wrongly real). */
 const SECRET_LIKE = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bgh[pousr]_[A-Za-z0-9]{30,}|\bsk-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{35}\b|\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}/u;
 /** A line that switches a check off: in a test runner's or scanner's configuration, an exclude, an ignore, a skip, an off, a lowered threshold. */
-const WEAKEN_CHECK_LINE = /\b(?:exclude|excludes|ignore|ignored|skip|skipped|disable|disabled|todo|allowFailure|allow_failures?|threshold|testPathIgnorePatterns|continue-on-error|coveragePathIgnorePatterns)\b|['"](?:off|0)['"]|:\s*(?:0|false)\b/iu;
+const WEAKEN_CHECK_LINE = /\b(?:exclude|excludes|ignore|ignored|skips?|skipped|disable|disabled|select|extend-ignore|per-file-ignores|todo|allowFailure|allow_failures?|threshold|testPathIgnorePatterns|continue-on-error|coveragePathIgnorePatterns)\b|['"](?:off|0)['"]|:\s*(?:0|false)\b/iu;
 /** A line that silences a linter or a type check, in any file. */
 const SILENCE_LINE = /['"]off['"]|\beslint-disable|@ts-(?:ignore|nocheck|expect-error)|#\s*(?:nosec|noqa|type:\s*ignore|pragma:\s*no cover)|\/\/\s*nolint|NOSONAR|#\s*pylint:\s*disable|\/\/\s*@suppress/u;
 /** An added line that skips or focuses a test. */
@@ -537,7 +624,14 @@ const SKIP_TEST_LINE = /(?:\b(?:it|test|describe|context|specify)(?:\.concurrent
 /** A line of a type-check setup that remaps modules or relaxes strictness. */
 const TSCONFIG_WEAKEN = /^\s*"[^"]+\/\*"\s*:\s*\[|"paths"\s*:|"strict"\s*:\s*false|"noImplicitAny"\s*:\s*false|"skipLibCheck"\s*:\s*true|"checkJs"\s*:\s*false/u;
 /** Words in a changed line that put it in a security rule or test: weakening one of those is risky, not standard. */
-const SECURITY_LINE = /\b(?:auth\w*|token\w*|secret\w*|password\w*|crypto\w*|security|redact\w*|permission\w*|csrf|xss|sanitiz\w*|inject\w*|escape\w*|sign(?:in|ature)\w*|session\w*|encrypt\w*|iam|rbac|acl|policy|policies)\b/iu;
+const SECURITY_LINE = /\b(?:auth\w*|token\w*|secret\w*|password\w*|crypto\w*|security|redact\w*|permission\w*|csrf|xss|sanitiz\w*|inject\w*|escape\w*|sign(?:in|ature)\w*|session\w*|encrypt\w*|iam|rbac|acl|policy|policies|gosec|bandit|semgrep|codeql|snyk|trivy|gitleaks|brakeman|detekt|hadolint|checkov|b60\d|shell injection)\b/iu;
+/** Settings files that hold the configuration of a test runner, a linter or a scanner in a section among other things. */
+const TOOL_SECTION = /\[(?:tool\.(?:bandit|ruff|pylint|flake8|mypy|semgrep|coverage|pytest|isort)|bandit|flake8|pylint|coverage|mypy|tool:pytest|testenv)\b/u;
+const TOOL_SETTINGS_FILE = /^(?:pyproject\.toml|setup\.cfg|tox\.ini|\.coveragerc)$/u;
+/** Words in an added line that address whoever (or whatever) reviews the change: a line written for the reviewer is not code. */
+const REVIEWER_INJECTION = /\b(?:note|attention|message|instructions?|hey|hi|dear)\s+(?:for|to)\s+(?:the\s+)?(?:automated\s+|ai\s+|llm\s+|code\s+)?(?:reviewers?|agents?|assistants?|models?|bots?|ai)\b|\b(?:ai|llm|automated)\s+(?:code\s+)?(?:reviewers?|agents?)\b|\bignore\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier)\s+(?:instructions?|rules?)|\banswer\s+(?:no|yes)\s+to\s+(?:every|all|each)\b|\bdo\s+not\s+(?:flag|report|mention)\s+this\b|\bsystem\s+prompt\b/iu;
+/** Lines of a .gitignore that keep secrets out: taking one away exposes them. */
+const SECRET_IGNORE = /\.env|secret|credential|\.pem|\.key\b|id_rsa|\.npmrc|token|\.aws|\.ssh|\.p12|\.pfx|\.kube/iu;
 const TSCONFIG_NAME = /^tsconfig[\w.-]*\.json$/u;
 const URL_ANYWHERE = /[a-z][a-z0-9+.-]*:\/\/[^\s"')]+/giu;
 
@@ -565,6 +659,8 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     if (PACKAGE_SOURCE_FILES.test(normal)) reading.risky.push(reasonFor("package_source_setting"));
     if (/(?:^|\/)\.env[^/]*$/u.test(normal)) reading.risky.push(reasonFor("env_file"));
     if (/(?:^|\/)\.(?:docker|npm|helm|cf|gcloud|vercel)ignore$/u.test(normal)) reading.risky.push(reasonFor("ignore_file"));
+    if (isScannerIgnorePath(name)) reading.standard.push(reasonFor("scanner_ignore_file"));
+    if (isDocsBuildConfigPath(name)) reading.standard.push(reasonFor("docs_build_config"));
     const key = factKey(file.repository, name);
     if (head?.instructionImports?.has(factKey(file.repository, normal)) === true) reading.risky.push(reasonFor("instruction_import"));
     if (head?.links?.has(key) === true) reading.risky.push(reasonFor("symlink_suspected"));
@@ -624,10 +720,19 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     return reading;
   }
 
-  // Markup that runs or reads other files keeps a document off the docs route.
-  const docsProblem = prose && patch !== undefined ? docsPatchProblem(patch) : undefined;
-  if (docsProblem === "include") reading.standard.push(here("docs_include"));
-  if (prose && docsProblem === undefined) {
+  // The docs route is an allowlist on content: plain prose only, in a repository that builds no documentation site, in a document no instruction file reads (`prose`), and not a rewrite. Anything else is not docs.
+  let routed = false;
+  if (prose && patch !== undefined) {
+    const problem = docsContentProblem(file.patch!, head?.text?.get(factKey(file.repository, file.path)), head !== undefined);
+    if (problem?.problem === "executes") reading.risky.push(here("docs_executes"));
+    else if (problem?.problem === "include") reading.standard.push(here("docs_include"));
+    else if (problem?.problem === "not_plain") reading.standard.push(here("docs_not_plain"));
+    else if (problem?.problem === "unread") reading.standard.push(here("docs_unread"));
+    if (head?.docsSite === true) reading.standard.push(here("docs_site_build"));
+    if (hostLines > DOCS_ROUTE_LINES_MAX) reading.standard.push(here("docs_large"));
+    routed = problem === undefined && head?.docsSite !== true && hostLines <= DOCS_ROUTE_LINES_MAX;
+  } else if (prose) routed = true;
+  if (routed) {
     reading.kinds.add("docs");
     reading.isCode = false;
     reading.countsAsFile = false;
@@ -637,9 +742,13 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     } else if (documentChangesLink(file.patch!, head?.text?.get(factKey(file.repository, file.path)))) reading.kinds.add("install_link");
     return reading;
   }
+  if (prose && patch !== undefined && documentChangesLink(file.patch!, head?.text?.get(factKey(file.repository, file.path)))) reading.kinds.add("install_link");
+  // A document that is not on the docs route is read as one (its size is the docs rule's, not a count of code).
+  const proseOffRoute = prose && patch !== undefined;
 
   // The host's own counts, and never fewer than the text shows.
   reading.codeLines = Math.max(hostLines, patch === undefined ? 0 : patch.added.length + patch.removed.length);
+  if (proseOffRoute) { reading.codeLines = 0; reading.isCode = false; reading.countsAsFile = false; }
   if (lock) {
     reading.isCode = false;
     reading.countsAsFile = false;
@@ -671,16 +780,26 @@ function readFile(file: TierFile, head: HeadFacts | undefined): FileReading {
     if (ci && patch.added.some((line) => CI_PRIVILEGED.test(line))) reading.risky.push(here("ci_privileged"));
     if (ci && movingActions(patch.added, patch.removed)) reading.risky.push(here("ci_unpinned_action"));
     // A check weakened without a deletion: an exclude or an off in a runner's or scanner's configuration, a silenced linter, a skipped test, a remapped module. Standard; risky when the line is about a security rule or test.
+    const toolSettings = TOOL_SETTINGS_FILE.test(baseName(normalPath)) && TOOL_SECTION.test(file.patch!);
+    const removedSecurity = isCheckConfigPath(file.path) ? patch.removed.filter((line) => SECURITY_LINE.test(line) && !patch.added.includes(line)) : [];
     const weakened = [
-      ...(isCheckConfigPath(file.path) ? patch.added.filter((line) => WEAKEN_CHECK_LINE.test(line)) : []),
+      ...(isCheckConfigPath(file.path) || toolSettings ? patch.added.filter((line) => WEAKEN_CHECK_LINE.test(line)) : []),
+      ...removedSecurity,
       ...(TSCONFIG_NAME.test(baseName(normalPath)) ? patch.added.filter((line) => TSCONFIG_WEAKEN.test(line)) : []),
       ...(reading.isTest ? patch.added.filter((line) => SKIP_TEST_LINE.test(line)) : []),
       ...patch.added.filter((line) => SILENCE_LINE.test(line)),
     ];
     if (weakened.length > 0) {
       reading.standard.push(here("check_weakened"));
-      if (weakened.some((line) => SECURITY_LINE.test(line)) || (reading.isTest && isTierSensitivePath(file.path))) reading.risky.push(here("check_weakened_security"));
+      if (weakened.some((line) => SECURITY_LINE.test(line)) || (reading.isTest && isTierSensitivePath(file.path)) || ((isCheckConfigPath(file.path) || toolSettings) && SECURITY_LINE.test(file.patch!))) reading.risky.push(here("check_weakened_security"));
     }
+    // Content that is not what it looks like: reordering controls, a word that mixes scripts, a line written for the reviewer. None has a place in code or configuration.
+    if (patch.added.some((line) => BIDI_CONTROL.test(line))) reading.risky.push(here("bidi_control"));
+    if (patch.added.some((line) => hasMixedScriptWord(line))) reading.risky.push(here("confusable_text"));
+    if (patch.added.some((line) => REVIEWER_INJECTION.test(line))) reading.risky.push(here("reviewer_injection_text"));
+    // A .gitignore that lets go of a secret pattern; a documentation build's hooks and plugins run code.
+    if (baseName(normalPath) === ".gitignore" && (patch.removed.some((line) => SECRET_IGNORE.test(line)) || patch.added.some((line) => /^\s*!/u.test(line) && SECRET_IGNORE.test(line)))) reading.standard.push(here("ignore_file"));
+    if (isDocsBuildConfigPath(file.path) && patch.added.some((line) => /\bhooks?\b|\bexec\b|subprocess|os\.system|\bplugins?\b|\beval\b/u.test(line))) reading.risky.push(here("docs_build_hook"));
     // Text that looks like a credential, in any file that is not a document.
     if (patch.added.some((line) => SECRET_LIKE.test(line))) reading.risky.push(here("secret_like_text"));
     // Size by bytes as well as lines: a long line or a large added blob hides in few lines, and the total counts per file. Lock files are generated.
@@ -840,7 +959,8 @@ export function estimateTier(input: EstimateInput, context: TierContext): Change
  * An ESTIMATE is only a forecast, so the first real diff replaces it, whatever its level; every tier after that only goes up.
  */
 export function raiseTier(previous: ChangeTier | undefined, next: ChangeTier): ChangeTier {
-  if (previous === undefined || previous.source === "estimate") return next;
+  // A forecast is replaced by the first real tier, unless a reviewer has already raised it: what the reviewer's questions found stays (the tier's source has no value for it, so its reasons say so).
+  if (previous === undefined || (previous.source === "estimate" && !previous.reasons.some((reason) => reason.code.startsWith("reviewer_")))) return next;
   const kinds = [...new Set([...previous.kinds, ...next.kinds])].sort();
   // The higher level keeps its own reasons first: they say why the tier is where it is.
   return RANK[next.level] >= RANK[previous.level]
@@ -894,6 +1014,8 @@ const REASON_PHRASES: Readonly<Record<string, string>> = {
   registry_source_changed: "a package source", dependency_source: "a package source", install_script: "an install script", ci_privileged: "a privileged CI setting", package_source_setting: "a package source setting",
   confusable_path: "a path with a look-alike letter", infra_file: "an infrastructure file", instruction_import: "a file an instruction file reads", ci_unpinned_action: "a CI action that is not pinned to a commit",
   path_too_long: "a path too long to list", link_kind_unknown: "a path whose kind Rovara did not check", ignore_file: "an ignore file", secret_like_text: "text that looks like a credential", script_command: "a script that runs a command", check_weakened_security: "a security check weakened",
+  docs_executes: "a document line that runs something", bidi_control: "text that reorders what is shown", confusable_text: "a word that mixes look-alike letters", reviewer_injection_text: "a line written for the reviewer", docs_build_hook: "a hook of a documentation build",
+  docs_not_plain: "a document line that is not plain prose", docs_unread: "a document Rovara could not read in full", docs_site_build: "a document of a site that is built", docs_large: "more than 300 changed document lines", scanner_ignore_file: "a file that tells a scanner what to skip", docs_build_config: "the setup of a documentation build",
   script_changed: "a changed script", text_data_file: "a text file a program may read", vendored_code: "vendored code", check_weakened: "a check switched off", docs_include: "a document that includes another file",
   ci_file_deleted: "a deleted CI file", check_config_deleted: "a deleted test or scanner setting", test_file_deleted: "a deleted test", unrecognised_file_type: "a kind of file Rovara does not know", long_lines: "very long lines or a large amount of text",
   package_alias: "a package under another name", lock_package_changed: "a different package in a lock file",
@@ -955,6 +1077,18 @@ export function tierReviewRecorded(flow: WorkflowFlow | undefined, level: TierLe
   const suffix = `_${(headSha ?? "unbound").slice(0, 10)}`;
   return (["small", "standard", "risky"] as const).some((candidate) => RANK[candidate] >= RANK[level] && (flow?.catchCounters ?? []).some((counter) => counter.step === `tier_review_${candidate}${suffix}`));
 }
+
+/** The catch-counter step that says the reviewer's questions were answered for the code at `headSha` (the head is part of the name: a push makes the record stale). */
+export const tierQuestionsStep = (headSha: string | undefined): string => `tier_questions_${(headSha ?? "unbound").slice(0, 10)}`;
+
+/** Whether the reviewer's questions were answered for the code at this head. */
+export const reviewerFloorRecorded = (flow: WorkflowFlow | undefined, headSha: string | undefined): boolean => (flow?.catchCounters ?? []).some((counter) => counter.step === tierQuestionsStep(headSha));
+
+/**
+ * Whether a tier still owes the reviewer's questions: a small change to code or documents. Every list of words and paths leaks, so a change that no list put higher is asked of the one strongest-available reviewer before it
+ * merges (the merge gate refuses it until the answers are on the record for the current head). Other small kinds (dependency, CI, install link) are already read by their own checks.
+ */
+export const needsReviewerFloor = (tier: Pick<ChangeTier, "level" | "kinds">): boolean => tier.level === "small" && (tier.kinds.includes("code_config") || tier.kinds.includes("docs"));
 
 /** The `flow` record with a new tier written. The previous tier moves into `tierHistory` (oldest first, at most 20) when it is a different tier. The level never goes down (`raiseTier`). */
 export function recordTier(flow: WorkflowFlow | undefined, next: ChangeTier): { flow: WorkflowFlow; tier: ChangeTier; grew: boolean } {

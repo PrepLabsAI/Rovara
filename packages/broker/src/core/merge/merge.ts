@@ -53,7 +53,9 @@ import {
   type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
-import { planningLevelOf, raiseTier, recordGrowth, recordTier, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel } from "../decisions/change-tier.js";
+import {
+  needsReviewerFloor, planningLevelOf, raiseTier, recordGrowth, recordTier, reviewerFloorRecorded, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel,
+} from "../decisions/change-tier.js";
 import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { inertLine } from "../proof/inert-text.js";
 import { flowIs } from "../task-flow/flow-guard.js";
@@ -235,6 +237,11 @@ export interface MergeDependencies {
   requirePresserAccount?: boolean;
   /** The words of a refusal while something outside the merge core holds the merge (a second review that did not run and waits for the owner). Absent: nothing waits. */
   mergeWait?(task: MergeTask): string | undefined;
+  /**
+   * The model-based floor of the change tier: `required` (the default) refuses a merge of a small change to code or documents until the one strongest-available reviewer's questions are on the record for the current head
+   * (`recordReviewerFloor`); `off` leaves the deterministic tier alone (an install that does not run that reviewer).
+   */
+  tierFloor?: "required" | "off";
   /** TE-B2: the project's real-check mode (see `ProjectCiMode`); `DEFAULT_CI_MODE` when absent. It decides whether an approval of the head before a clean sync carries over on "No CI". */
   ciMode?(task: MergeTask): Promise<ProjectCiMode> | ProjectCiMode;
 }
@@ -563,6 +570,7 @@ async function mergeableNow(
   return { plan: plan.filter((_, index) => facts[index]!.state !== "merged"), settings, alreadyMerged: false, mergedBefore, entries };
 }
 
+const FLOOR_OWED = "A reviewer has not yet answered the security questions for the current version of this change, so it can't be merged yet.";
 const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code host just now, so nothing was merged. Try again in a moment.";
 
 /**
@@ -570,7 +578,7 @@ const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code ho
  * in plain words naming what grew, when the result is higher than EITHER the tier the person approved at (`shown`; none recorded counts as small) OR the tier the planning steps were chosen at (the estimate, when steps were skipped).
  * A growth is STICKY: it is recorded (`grewAfterBuild`), and from then on the merge needs the review steps of the higher tier to have run on the CURRENT head (`tierReviewRecorded`); a second press does not clear it, and a push
  * makes the record stale. The record is written under `flowIs`, so a lost race is refused, and a whole-workflow writer that read the task earlier carries the stored record forward (flow-guard.ts). A host that cannot be read
- * refuses the merge too, and records nothing.
+ * refuses the merge too, and records nothing. A small change to code or documents also needs the reviewer's questions on the record for the current head (`tierFloor`).
  */
 async function tierGate(
   deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, shown: TierLevel | undefined,
@@ -584,29 +592,44 @@ async function tierGate(
     throw agentXError("MERGE_NOT_READY", TIER_UNREADABLE);
   }
   const at = new Date(deps.now()).toISOString();
-  const bases = task.workflow.reviewBase;
-  const bound = boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: bases?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha })));
+  const bound = boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: task.workflow.reviewBase?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha })));
   const fresh = tierFromDiff(input.diff, { ...bound, at, head: input.head });
-  const flow = task.workflow.flow;
-  const raised = raiseTier(flow?.tier, fresh);
   const approvedAt: TierLevel = shown ?? "small";
-  const planned = planningLevelOf(flow);
-  // The checks of the higher tier have run on this very head: nothing is owed.
-  const covered = tierReviewRecorded(flow, raised.level, bound.headSha);
-  const grew = !covered && (tierGrew(approvedAt, raised) || (planned !== undefined && tierGrew(planned, raised)));
-  const owed = !covered && !grew && flow?.grewAfterBuild !== undefined && !tierReviewRecorded(flow, flow.grewAfterBuild.to, bound.headSha);
-  const recorded = recordTier(flow, { ...fresh, source: "merge" });
-  const from: TierLevel = planned !== undefined && tierRank(planned) < tierRank(approvedAt) ? planned : approvedAt;
-  const next = grew ? recordGrowth(recorded.flow, from, recorded.tier.level, at) : recorded.flow;
-  // Recorded either way (best effort: a lost race or a store failure never changes the answer), under the revision and the record this tier was computed against. The revision does not move: a row of the step in flight waits for it.
-  const revision = task.workflow.revision;
-  await deps.store.update({
-    key: taskRecordKey(task.taskId),
-    ops: [change.set(["workflow", "flow"], plain(next) as never)],
-    condition: when.and(when.eq(["workflow", "revision"], revision), when.notExists("closedAt"), flowIs(flow)),
-  }).catch(() => undefined);
-  if (grew || owed) throw agentXError("MERGE_NOT_READY", tierGrowthSentence(raised, (path) => inertLine(path, 80)));
+  // What the record says is judged against the task as it is NOW: a growth is written until it is on the record, however often another writer got in first.
+  let current: WorkflowSnapshot = task.workflow;
+  let verdict: "ok" | "grew" | "owed" | "floor" = "ok";
+  let raised = raiseTier(current.flow?.tier, fresh);
+  for (let attempt = 0; attempt < GROWTH_WRITE_ATTEMPTS; attempt += 1) {
+    const flow = current.flow;
+    raised = raiseTier(flow?.tier, fresh);
+    const planned = planningLevelOf(flow);
+    // The checks of the higher tier have run on this very head: nothing is owed.
+    const covered = tierReviewRecorded(flow, raised.level, bound.headSha);
+    const grew = !covered && (tierGrew(approvedAt, raised) || (planned !== undefined && tierGrew(planned, raised)));
+    const owed = !covered && !grew && flow?.grewAfterBuild !== undefined && !tierReviewRecorded(flow, flow.grewAfterBuild.to, bound.headSha);
+    const floor = !grew && !owed && deps.tierFloor !== "off" && needsReviewerFloor(raised) && !reviewerFloorRecorded(flow, bound.headSha);
+    verdict = grew ? "grew" : owed ? "owed" : floor ? "floor" : "ok";
+    const recorded = recordTier(flow, { ...fresh, source: "merge" });
+    const from: TierLevel = planned !== undefined && tierRank(planned) < tierRank(approvedAt) ? planned : approvedAt;
+    const next = grew ? recordGrowth(recorded.flow, from, recorded.tier.level, at) : recorded.flow;
+    // Under the revision and the record this tier was computed against. The revision does not move: a row of the step in flight waits for it.
+    const written = await deps.store.update({
+      key: taskRecordKey(task.taskId),
+      ops: [change.set(["workflow", "flow"], plain(next) as never)],
+      condition: when.and(when.eq(["workflow", "revision"], current.revision), when.notExists("closedAt"), flowIs(flow)),
+    }).then((result) => result.applied).catch(() => false);
+    if (written || verdict !== "grew") break;
+    // The growth did not land (another writer got in first): read the task again and write it again.
+    const again = await deps.host.loadTask(task.taskId).catch(() => undefined);
+    if (again?.workflow === undefined) break;
+    current = again.workflow;
+  }
+  if (verdict === "grew" || verdict === "owed") throw agentXError("MERGE_NOT_READY", tierGrowthSentence(raised, (path) => inertLine(path, 80)));
+  if (verdict === "floor") throw agentXError("MERGE_NOT_READY", FLOOR_OWED);
 }
+
+/** How many times a growth is written before the refusal is given without it. */
+const GROWTH_WRITE_ATTEMPTS = 5;
 
 /**
  * Whether a code owner approved, for one pull request: nothing is asked of the host when it does not read code owners or the repository has no CODEOWNERS file. Anything unreadable fails closed.

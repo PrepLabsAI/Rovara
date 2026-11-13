@@ -2,7 +2,7 @@
 // A writer that holds a WHOLE workflow (every engine transition does) and read it before the record was written must not write it back over the record, and must not be refused for it either (a refusal strands the
 // row the same way). So such a writer sets only the keys it changed (`workflowWriteOps`), never `flow` unless it changed `flow` itself; the stored record is carried forward. A writer that does change `flow` is fenced
 // on the record it read (`flowIs`): a write that lost that race is refused like one that lost the revision, and the caller reads again.
-import { change, when, type UpdateOp as ChangeOp, type Condition, type JsonValue, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
+import { agentXError, change, when, type UpdateOp as ChangeOp, type Condition, type JsonValue, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
 
 /** The condition "the task's stored `flow` is the one I read" (absent when I read none). */
 export function flowIs(flow: WorkflowFlow | undefined): Condition {
@@ -21,7 +21,7 @@ export interface WorkflowWrite {
 
 /**
  * The updates that turn the stored workflow (which the writer read as `current`, at the revision its condition names) into `next`: a key set where it differs, a key removed where `next` has dropped it. `flow` is carried forward
- * (left alone) unless `next.flow` differs from `current.flow` and `ownsFlow` is true; then it is set, under a fence on the record read. Without `current` the whole workflow is written, as before.
+ * (left alone) unless `next.flow` differs from `current.flow` and `ownsFlow` is true; then it is set, under a fence on the record read. A writer that does not own `flow` and changed it throws. Without `current` the whole workflow is written, as before.
  */
 export function workflowWriteOps(current: Pick<WorkflowSnapshot, "revision"> & Record<string, unknown> | undefined, next: WorkflowSnapshot, options: { ownsFlow?: boolean } = {}): WorkflowWrite {
   const after = JSON.parse(JSON.stringify(next)) as Record<string, JsonValue>;
@@ -31,6 +31,8 @@ export function workflowWriteOps(current: Pick<WorkflowSnapshot, "revision"> & R
   const guard: Condition[] = [];
   for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
     if (key === "flow") {
+      // A writer that does not own `flow` and still carries a changed one would lose it silently: that is a bug in the writer, and it is refused, loudly.
+      if (options.ownsFlow !== true && stable(before[key]) !== stable(after[key])) throw agentXError("CONFIG_INVALID", "a workflow writer that does not own the flow record changed it");
       if (options.ownsFlow === true && stable(before[key]) !== stable(after[key])) {
         ops.push(after[key] === undefined ? change.remove(["workflow", "flow"]) : change.set(["workflow", "flow"], after[key]));
         guard.push(flowIs(current["flow"] as WorkflowFlow | undefined));
