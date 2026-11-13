@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_FILES_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, TEST_ENV_BASELINE_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -90,5 +90,7 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   EVAL_FILES_FEATURE,
   // The approved plan a coding run keeps in its conversation summaries (compaction.ts).
   "task.workflowApprovedPlan.v1",
+  // TE-C1: a verification run whose plan carries `baselineCandidates` finds the nearest one that is an ancestor of the task's base commit, before any check runs, and reports it in evidence-raw.json (verification/baseline-ancestry.ts).
+  TEST_ENV_BASELINE_FEATURE,
   // Test services (`task.testServices.v1`) is NOT listed here: it is advertised only by a worker that has a test-services configuration (test-services-run.ts `testServicesAdvertisedFeatures`, added in main.ts).
 ] as const satisfies readonly WorkerInvocationFeature[];

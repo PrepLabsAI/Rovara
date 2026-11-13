@@ -72,6 +72,7 @@ import { assistantText, checksArtifactContent, compactCheckReport, finalCheckRep
 import { AgentFilesRestoreError, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { runTestProof, serializeTestProof } from "./verification/test-proof.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
+import { findBaselineAncestor } from "./verification/baseline-ancestry.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
@@ -506,6 +507,11 @@ async function runTask(
     const plan = planChecks(testEnv?.readiness ?? readiness, recorder, checkHistory);
     const stop = new AbortController();
     const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
+    // TE-C1: when the plan carries baseline candidates (an asked-for field), the nearest one that is an ancestor of the task's base commit is found NOW, before any check runs, in the isolated git environment (it reads
+    // objects only: what the agent or a check leaves in `.git` cannot change it). One repository only (the nightly is single-repository); otherwise, or with no answer, the engine keeps today's behaviour.
+    const baselineCandidates = invocation.payload.testEnvironment?.baselineCandidates;
+    const baselineClaim = baselineCandidates === undefined || repositories.length !== 1 ? undefined
+      : await findBaselineAncestor({ directory: repositories[0]!.directory, baseCommit: repositories[0]!.baseCommitSha, candidates: baselineCandidates, signal: stop.signal });
     try {
       await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });
       // The broker authorizes the private admission read only after the operation is durably
@@ -575,7 +581,7 @@ async function runTask(
       if (invocation.payload.evidenceCapture === true && !stop.signal.aborted) {
         // Test services: the rounds' usage record rides in the raw file (the broker labels it; nothing of it was reaching the evidence). Read before the services stop.
         const servicesRecord = await testServices?.usageRecord().catch(() => undefined);
-        await saveEvidenceRaw({ sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
+        await saveEvidenceRaw({ sink: dependencies.artifactSink, rootPath: canonicalRoot, plan, entries: round.entries, repositories, candidateBefore, roundStartedAtMs: roundStarted, selection: testEnv?.selection, ...(servicesRecord === undefined ? {} : { testServices: servicesRecord }), ...(baselineClaim === undefined ? {} : { baselineClaim }), coveragePaths: invocation.payload.testEnvironment?.checks.map((check) => check.coveragePath),
           baseline: { runners, signal: stop.signal, budgetMs: roundBudgetMs - roundSpentMs, ...(dependencies.testProofOriginalCode === undefined ? {} : { originalCode: dependencies.testProofOriginalCode }) } });
       }
       const evidenceSpentMs = Date.now() - evidenceStarted;

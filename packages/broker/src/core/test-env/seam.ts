@@ -4,7 +4,7 @@
 //   - `prepareTestServices`: the dependencies a preparation (a candidate check) starts.
 // Nothing here is a second rule: the pin, the usable check and the plan are `usable.ts` and `task-plan.ts`. The seam only exists so `core/task-flow` and `core/build-step` do not import the environment's modules.
 import {
-  TEST_ENV_COVERAGE_PATH_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, awsPlanNeedsAllServices, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE,
+  TEST_ENV_BASELINE_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, awsPlanNeedsAllServices, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE,
   type OrgId, type ProjectCommand, type TaskDependencyPlan, type TestEnvTaskPlan, type TestEnvironmentBody, type TransactItem,
 } from "@agentx/contracts";
 import type { TestEnvDeps } from "./deps.js";
@@ -17,6 +17,8 @@ export function featuresForTestPlan(dependencies: readonly TaskDependencyPlan[] 
   const features = new Set<string>();
   if (plan !== undefined) features.add(TEST_ENV_PLAN_FEATURE);
   if (plan?.checks.some((check) => check.coveragePath !== undefined) === true) features.add(TEST_ENV_COVERAGE_PATH_FEATURE);
+  // TE-C1: candidates go only to a worker that checks them against the base commit; one that does not list it is refused the run, never sent a plan with a field it cannot read.
+  if (plan?.baselineCandidates !== undefined) features.add(TEST_ENV_BASELINE_FEATURE);
   const planned = dependencies ?? plan?.dependencies ?? [];
   if (planned.length > 0) features.add(TEST_SERVICES_PLAN_FEATURE);
   if (planned.some((dependency) => dependency.backing === "emulated")) features.add(TEST_SERVICES_AWS_PLAN_FEATURE);

@@ -10,6 +10,9 @@
 import { agentXError, testEnvDigest, type OrgId, type ProjectCommand, type TestEnvTaskPlan } from "@agentx/contracts";
 import { DEPENDENCY_PLAN_REFUSAL_WORDS, taskDependencyPlansOf, type ServiceCatalogSource } from "./dependency-plan.js";
 import { lastNightlyFailures } from "./nightly.js";
+import { baselineCandidatesOf } from "./baseline-cache.js";
+import { projectBaseBranch } from "./nightly-usable.js";
+import { baselineCacheEnabled } from "./switch.js";
 import type { TestEnvDeps } from "./deps.js";
 import { readApprovedSeedFiles } from "./environment.js";
 import { selectionFieldsAreSafe } from "./prove-from-setup-check.js";
@@ -78,11 +81,15 @@ async function planOf(
     dependencies = planned.dependencies;
   }
   const failures = readiness === undefined ? [] : await lastNightlyFailures(deps, input.orgId, input.project).catch(() => []);
+  // TE-C1 (switch `ROVARA_BASELINE_CACHE`): the newest trusted baseline commits on the task's base branch, for the worker to find the nearest ancestor of the task's base commit. Shas only; none (or off) leaves the plan as it was.
+  const baseBranch = readiness !== undefined && baselineCacheEnabled(env) ? await projectBaseBranch(deps, input.orgId, input.project) : undefined;
+  const candidates = baseBranch === undefined ? [] : await baselineCandidatesOf(deps, { orgId: input.orgId, project: input.project, envRevision: found.environment.revision, branch: baseBranch });
   return {
     revision: found.environment.revision, digest: pin.digest, roundBudgetMin: body.roundBudgetMin,
     selection: { method: body.selection.method, ...(body.selection.declared === undefined ? {} : { declared: body.selection.declared }), alwaysRun: body.selection.alwaysRun, fullSuiteOn: body.selection.fullSuiteOn },
     checks: checks.map((check) => ({ id: check.id, kind: check.kind, ...(check.coveragePath === undefined ? {} : { coveragePath: check.coveragePath }), ...(check.selectArgs === undefined ? {} : { selectArgs: check.selectArgs }) })),
     ...(failures.length === 0 ? {} : { lastNightlyFailures: failures.slice(0, 500) }),
     ...(dependencies === undefined ? {} : { dependencies }),
+    ...(candidates.length === 0 ? {} : { baselineCandidates: candidates.map((sha) => ({ sha })) }),
   };
 }
