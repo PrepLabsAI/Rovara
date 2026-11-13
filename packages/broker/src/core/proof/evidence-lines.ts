@@ -4,7 +4,7 @@
 //
 // What stays at every shrink level: the Environment line, the not-run line and the mocked or not-tested bullets (a reader must not miss what was not proved), and the link. The counts per kind and the
 // changed-line coverage go first, from level 2.
-import { evidenceIsFor, type EvidenceMode, type EvidencePack } from "@agentx/contracts";
+import { evidenceIsFor, flakyRerunLine, type EvidenceMode, type EvidencePack } from "@agentx/contracts";
 import { AWS_PERMISSIONS_ITEM_ID } from "./dependency-evidence.js";
 import { packDependencyLines } from "./dependency-lines.js";
 import { inertLine } from "./inert-text.js";
@@ -86,6 +86,12 @@ export function testsLine(pack: EvidencePack, proven?: ProvenTestNames): string 
   }
   if (pack.selection.selected < pack.selection.total) parts.push(`${number(pack.selection.selected)} of ${number(pack.selection.total)} tests selected (${SELECTION_WORDS[pack.selection.method]})`);
   return parts.length === 0 ? undefined : cutLine(`Checks by kind: ${parts.slice(0, 12).join(" · ")}${parts.length > 12 ? ` · and ${parts.length - 12} more` : ""}`);
+}
+
+/** TE-C6: the one line about tests that failed once and passed on the round's rerun: a count in fixed words, never a test's name (those are in the check's `tests` part). Undefined when none were. Kept at every shrink level: a reader must not miss a failure that was set aside. */
+export function flakyLine(pack: EvidencePack): string | undefined {
+  const count = pack.checks.reduce((sum, check) => sum + (check.tests?.flakyOnRerunCount ?? 0), 0);
+  return flakyRerunLine(count);
 }
 
 /**
@@ -174,6 +180,7 @@ export function evidenceLines(context: ProofEvidenceContext | undefined, candida
     ...(full ? [testsLine(pack, extra.proven), coverageLine(pack)] : []),
     environmentLine(pack, level),
     ...dependencies.lines,
+    flakyLine(pack),
     notRunLine(pack),
     evidenceLinkLine(context),
   ].filter((line): line is string => line !== undefined);

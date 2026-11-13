@@ -9,15 +9,21 @@
 //   ROVARA_PROJECT_IMAGES     a project may bring its own images. OFF unless exactly "1". Needs the services switch too.
 //   ROVARA_SAVED_ENVIRONMENTS a project's proven setup is built into an image, kept in the image registry and used by tasks. OFF unless exactly "1".
 //   ROVARA_NIGHTLY_HEALTH     the nightly run sets the project's health (the "Setup needs repair" state). OFF unless exactly "1". Does nothing without the test environment.
+//   ROVARA_FLAKY_RERUN        TE-C6: a failing test of a task round's test check that passed before is rerun once; one that passes on the rerun is flaky (not sent to the agent, named in the evidence). OFF unless exactly "1".
+//                             Needs the test environment. A worker that does not list `TASK_FLAKY_RERUN_FEATURE` is refused the run while this is on (never sent the flag without it).
 export const TEST_ENVIRONMENT_VARIABLE = "ROVARA_TEST_ENVIRONMENT";
 export const TEST_SERVICES_VARIABLE = "ROVARA_TEST_SERVICES";
 export const TEST_ACCOUNTS_VARIABLE = "ROVARA_TEST_ACCOUNTS";
 export const PROJECT_IMAGES_VARIABLE = "ROVARA_PROJECT_IMAGES";
 export const SAVED_ENVIRONMENTS_VARIABLE = "ROVARA_SAVED_ENVIRONMENTS";
 export const NIGHTLY_HEALTH_VARIABLE = "ROVARA_NIGHTLY_HEALTH";
+export const FLAKY_RERUN_VARIABLE = "ROVARA_FLAKY_RERUN";
 
 /** On only when exactly "1" (unset, empty, "true" and " 1" are off). */
 export const optIn = (env: NodeJS.ProcessEnv, variable: string): boolean => env[variable] === "1";
 
 /** Whether the project test environment exists in this install. Only exactly "0" turns it off. */
 export const testEnvironmentEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => env[TEST_ENVIRONMENT_VARIABLE] !== "0";
+
+/** TE-C6: whether a task round reruns a failing test once to tell a flaky one. Off unless exactly "1". */
+export const flakyRerunEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => optIn(env, FLAKY_RERUN_VARIABLE);

@@ -15,6 +15,7 @@ import {
 import type { CustomMessageEntryDraft, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { redactedTail } from "../collected-process.js";
 import { ownBefore, runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
+import { isFullyFlaky, rerunFlaky, type FlakyCheckSpec, type FlakyRerunResult } from "./flaky-rerun.js";
 import { AgentFilesRestoreError, type OriginalCode } from "./original-code.js";
 import type { RecordedCommand } from "./recorder.js";
 import type { CommandRecorder } from "./recorder.js";
@@ -54,6 +55,11 @@ export interface VerificationOptions {
    * also run there, so AgentX knows whether it passed before the change. Without it, such a command's before is unknown.
    */
   originalCode?: OriginalCode;
+  /**
+   * TE-C6 (the plan's `flakyRerun: true`): a regression of a test check that has an approved `{tests}` template has its failing tests rerun once before the extra turn is decided. A check whose every failing test passed on the
+   * rerun is flaky: it does not give the agent its extra turn and is left out of what the agent reads. The report is not changed: it keeps the regression. Absent = no rerun, today's behaviour.
+   */
+  flakyRerun?: { rootPath: string; checks: readonly FlakyCheckSpec[] };
 }
 
 /** The share of a round's budget the before runs may use, so the after runs always have time left. */
@@ -164,6 +170,14 @@ export function verificationExtension(options: VerificationOptions): InlineExten
             options.runners,
             { budgetMs: Math.max(0, budgetMs - (Date.now() - started)), signal: options.signal },
           );
+          // TE-C6: only the round that decides the extra turn needs the rerun (the second round reports whatever it finds), and only a stopped-free round with a project regression. The rerun is inside the round's budget and signal.
+          const flaky: FlakyRerunResult | undefined = options.flakyRerun === undefined || extraTry !== "not_needed" || plan.source !== "project" || round.stopped || options.signal.aborted
+            || !round.entries.some((entry) => entry.class === "regression")
+            ? undefined
+            : await rerunFlaky({
+              rootPath: options.flakyRerun.rootPath, commands: plan.readiness ?? [], checks: options.flakyRerun.checks, entries: round.entries, runners: options.runners,
+              roundStartedAtMs: started, budgetMs: Math.max(0, budgetMs - (Date.now() - started)), signal: options.signal,
+            });
           if (candidateBefore !== undefined && options.candidateIdentity !== undefined) {
             const candidateAfter = await options.candidateIdentity();
             if (candidateAfter !== candidateBefore) {
@@ -187,14 +201,17 @@ export function verificationExtension(options: VerificationOptions): InlineExten
             extraTry,
             agentClaim: claim,
           });
-          if (status === "regression" && extraTry === "not_needed") {
+          // A regression whose every failing test passed on the rerun gives the agent nothing to fix: no extra turn. The report below still says regression (a flaky failure is never a pass).
+          const flakyChecks = new Set(entries.filter((entry) => isFullyFlaky(flaky?.get(entry.id))).map((entry) => entry.id));
+          const agentRegression = entries.some((entry) => entry.class === "regression" && !flakyChecks.has(entry.id));
+          if (status === "regression" && extraTry === "not_needed" && agentRegression) {
             extraTry = "given";
             firstRound = { source: plan.source, entries };
             options.onExtraTry?.(roundReport());
             const message: CustomMessageEntryDraft = {
               type: "custom_message",
               customType: CHECKS_MESSAGE_TYPE,
-              content: checksFeedback(entries),
+              content: checksFeedback(entries, flakyChecks),
               display: false,
             };
             // A custom message reaches the model as a user message, so Pi can run the extra turn (canContinue).
@@ -260,8 +277,9 @@ const FEEDBACK_OUTPUT_BYTES = 8_192;
 const FEEDBACK_TOTAL_BYTES = 32_768;
 
 /** What the agent reads before its extra turn: the regressions first, then any other failing check, trimmed. */
-export function checksFeedback(entries: readonly CheckEntry[]): string {
-  const failing = entries.filter((entry) => entry.after === "failed" || entry.after === "timed_out");
+export function checksFeedback(entries: readonly CheckEntry[], leftOut: ReadonlySet<string> = new Set()): string {
+  // TE-C6: a check whose every failing test passed on the rerun (`leftOut`) is not the agent's to fix, so it is not sent.
+  const failing = entries.filter((entry) => (entry.after === "failed" || entry.after === "timed_out") && !leftOut.has(entry.id));
   const ordered = [...failing.filter((entry) => entry.class === "regression"), ...failing.filter((entry) => entry.class !== "regression")];
   const lines = [
     "AgentX reran the checks when you finished, and found a regression: a check that passed before your change fails now.",

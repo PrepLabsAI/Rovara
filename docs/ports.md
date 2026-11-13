@@ -885,7 +885,7 @@ Cloud can switch to this code with no data move.
 - **The task flow takes it through one seam** (`TaskFlowDeps.testEnvironment`, `core/test-env/seam.ts`): a starting workflow task pins the newest usable revision in its own start transaction (an environment the flow cannot carry out is
   recorded as not applied, with the reason); a coding or verification run is told the plan of the pinned revision and the worker features it needs (a worker that lacks one is refused the run, never sent it without).
 - **Switches** are environment variables read by leaf modules (`switch.ts`): `ROVARA_TEST_ENVIRONMENT` (on unless `0`), `ROVARA_TEST_SERVICES`, `ROVARA_TEST_ACCOUNTS`, `ROVARA_PROJECT_IMAGES`,
-  `ROVARA_SAVED_ENVIRONMENTS` and `ROVARA_NIGHTLY_HEALTH` (each on only when exactly `1`).
+  `ROVARA_SAVED_ENVIRONMENTS`, `ROVARA_NIGHTLY_HEALTH` and `ROVARA_FLAKY_RERUN` (each on only when exactly `1`; the last reruns a failing test of a task round once to tell a flaky one).
 
 ## Realtime (lane K1, a new interface: the owner decides it alone, decision 63)
 

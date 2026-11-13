@@ -21,6 +21,7 @@ import { nightlyCountsAndHealth, type NightlyRunFacts, type NightlyStepStatus } 
 import { proveEnvironment, type ProveCommandResult, type ProvePorts } from "./prove.js";
 import { commandWithSelection } from "./verification/selection.js";
 import { rerunCommandsOf } from "./verification/test-ids.js";
+import { splitFailures } from "./verification/test-states.js";
 import type { ParsedTestReport } from "./verification/test-report.js";
 
 /** The most failing and flaky ids a result lists (the contract's own bounds). More failing than this: the count stands, the list is cut, and the broker then excuses no failure. */
@@ -56,12 +57,8 @@ export interface NightlyRunOutput { result: NightlyResult; coverageMap?: Coverag
 /** The digest the result names its coverage map by: the sha256 of the map's canonical JSON, as the broker computes it. */
 export const coverageMapDigestOf = (map: CoverageMapData): string => createHash("sha256").update(canonicalJson(CoverageMapSchema.parse(map))).digest("hex");
 
-/** Failures once, then the rerun's: a test that failed again is failing, one that passed on the rerun is flaky (the same rule as the broker's `splitFailures`). */
-export function splitFailures(firstRunFailures: readonly string[], rerunFailures: readonly string[]): { failed: string[]; flaky: string[] } {
-  const again = new Set(rerunFailures);
-  const first = [...new Set(firstRunFailures)];
-  return { failed: first.filter((id) => again.has(id)).sort(), flaky: first.filter((id) => !again.has(id)).sort() };
-}
+/** Failures once, then the rerun's: a test that failed again is failing, one that passed on the rerun is flaky (the same rule as the broker's `splitFailures`). Now in `verification/test-states.ts`, which a task round shares (TE-C6). */
+export { splitFailures };
 
 type TestState = "passed" | "failed" | "errored" | "skipped";
 const WORSE: Record<TestState, number> = { skipped: 0, passed: 1, errored: 2, failed: 3 };
