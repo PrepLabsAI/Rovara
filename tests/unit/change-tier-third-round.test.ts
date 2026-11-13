@@ -240,7 +240,7 @@ describe("what the host says about the repository decides the docs route", () =>
   const edit = docEdit("docs/guide.md", ["# Guide", ""], ["Plain words only."]);
   const facts = async (repo: Record<string, string>, kinds: Record<string, "file" | "dir" | "none"> = {}): Promise<HeadFacts> => {
     const host = { fileAtRevision: async (_r: unknown, path: string) => repo[path], ...(Object.keys(kinds).length === 0 ? {} : { pathKind: async (_r: unknown, path: string) => kinds[path] ?? "none" }) } as unknown as CodeHost;
-    return readHeadFacts([{ host, repositoryId: R, repositoryUrl: "https://github.com/acme/app", number: 1, headSha: "a".repeat(40) }], [edit.file], { orgId: "org" } as never);
+    return readHeadFacts([{ host, repositoryId: R, repositoryUrl: "https://github.com/acme/app", number: 1, headSha: "a".repeat(40) }], [edit.file], { orgId: "org" });
   };
   const docsOnly = (head: HeadFacts): boolean => { const tier = tierFromDiff({ files: [edit.file], complete: true }, { ...ctx, head }); return tier.level === "small" && tier.kinds.join() === "docs"; };
 
@@ -265,7 +265,7 @@ describe("what the host says about the repository decides the docs route", () =>
   });
   it("an instruction file that cannot be read means the documents are not cleared", async () => {
     const host = { fileAtRevision: async (_r: unknown, path: string) => { if (path === "CLAUDE.md") throw new Error("denied"); return path === "docs/guide.md" ? edit.text[1] : undefined; } } as unknown as CodeHost;
-    const head = await readHeadFacts([{ host, repositoryId: R, repositoryUrl: "https://github.com/acme/app", number: 1, headSha: "a".repeat(40) }], [edit.file], { orgId: "org" } as never);
+    const head = await readHeadFacts([{ host, repositoryId: R, repositoryUrl: "https://github.com/acme/app", number: 1, headSha: "a".repeat(40) }], [edit.file], { orgId: "org" });
     expect(head.importsKnown).toBe(false);
     expect(docsOnly(head)).toBe(false);
   });
