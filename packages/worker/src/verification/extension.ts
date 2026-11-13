@@ -60,6 +60,11 @@ export interface VerificationOptions {
    * rerun is flaky: it does not give the agent its extra turn and is left out of what the agent reads. The report is not changed: it keeps the regression. Absent = no rerun, today's behaviour.
    */
   flakyRerun?: { rootPath: string; checks: readonly FlakyCheckSpec[] };
+  /**
+   * TE-C6: told with every report this extension makes from a settle round that decided the extra turn (the rerun's result, or undefined when there was none), so the worker can save what the broker needs (`flaky-rerun.json`).
+   * A later report replaces it: only the result of the round the final report came from counts.
+   */
+  onFlakyRerun?: (result: FlakyRerunResult | undefined) => void;
 }
 
 /** The share of a round's budget the before runs may use, so the after runs always have time left. */
@@ -217,6 +222,7 @@ export function verificationExtension(options: VerificationOptions): InlineExten
             // A custom message reaches the model as a user message, so Pi can run the extra turn (canContinue).
             return { entries: [...event.entries, message], continue: true };
           }
+          options.onFlakyRerun?.(flaky);
           return report(roundReport());
         } catch (error) {
           options.onCandidateDrift?.();

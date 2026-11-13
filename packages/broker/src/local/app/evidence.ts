@@ -7,6 +7,7 @@
 // It is informational: a fault or a slow store only means there is no evidence for this code. It never changes a verdict and never holds a callback longer than `EVIDENCE_KEEP_MAX_MS`.
 import { scanText } from "@agentx/verifier";
 import { workflowSelectedChecks, type CheckEntry, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
+import type { TestProofActions } from "../../developer/test-proof-lines.js";
 import { keepEvidence, loadEvidencePack, policyKindsOf, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import type { OperationRecord, TaskRecord } from "../../core/task-flow/records.js";
@@ -22,6 +23,36 @@ export interface LocalEvidence {
   packOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<EvidencePack | undefined>;
 }
 
+/**
+ * The run's own artifacts, offered to a reader under the names it reads them by (`private/<owner>/<workspace>/<operation>/<name>`): a reader checks an artifact is under the operation's own prefix. Only this operation's
+ * rows are listed, and an object is read only through its recorded digest (`readVerifiedText`).
+ */
+export function operationArtifactActions(flow: { store: TaskFlowDeps["store"]; blobs: ObjectStorage }, task: Pick<TaskRecord, "ownerKey" | "workspaceId">, operation: Pick<OperationRecord, "id">): Pick<TestProofActions, "artifacts" | "readArtifact"> {
+  const { store, blobs } = flow;
+  const rows = new Map<string, { name: string; sha256: string; objectKey: string }>();
+  const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
+  return {
+    async artifacts(workspaceId, operationId) {
+      if (workspaceId !== task.workspaceId || operationId !== operation.id) return [];
+      const found = await store.query({ pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: `ARTIFACT#${operationId}#` }, limit: 100 });
+      const listed: Array<{ name: string; objectKey: string }> = [];
+      for (const row of found.items) {
+        if (typeof row["name"] !== "string" || typeof row["objectKey"] !== "string" || typeof row["sha256"] !== "string") continue;
+        const virtual = `${prefix}${row["name"]}`;
+        rows.set(virtual, { name: row["name"], sha256: row["sha256"], objectKey: row["objectKey"] });
+        listed.push({ name: row["name"], objectKey: virtual });
+      }
+      return listed;
+    },
+    async readArtifact(objectKey, maxBytes) {
+      const row = rows.get(objectKey);
+      if (row === undefined) return "";
+      const read = await readVerifiedText(blobs, row, maxBytes);
+      return "text" in read ? read.text : "";
+    },
+  };
+}
+
 export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" | "companyId" | "log">; blobs: ObjectStorage }): LocalEvidence {
   const { flow, blobs } = options;
   const log = (event: string, fields: Record<string, unknown>): void => flow.log?.({ component: "evidence", event, ...fields });
@@ -29,31 +60,10 @@ export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" 
     async keepAfterChecks(input) {
       const { task, operation } = input;
       let late = false;
-      // The run's own artifacts, offered to the keeper under the names it reads them by (`private/<owner>/<workspace>/<operation>/<name>`): the keeper checks an artifact is under the operation's own prefix.
-      const rows = new Map<string, { name: string; sha256: string; objectKey: string }>();
-      const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
+      const actions = operationArtifactActions({ store: flow.store, blobs }, task, operation);
       const run = keepEvidence({
         scan: scanText, store: { blobs }, late: () => late, log,
-        actions: {
-          async artifacts(workspaceId, operationId) {
-            if (workspaceId !== task.workspaceId || operationId !== operation.id) return [];
-            const found = await flow.store.query({ pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: `ARTIFACT#${operationId}#` }, limit: 100 });
-            const listed: Array<{ name: string; objectKey: string }> = [];
-            for (const row of found.items) {
-              if (typeof row["name"] !== "string" || typeof row["objectKey"] !== "string" || typeof row["sha256"] !== "string") continue;
-              const virtual = `${prefix}${row["name"]}`;
-              rows.set(virtual, { name: row["name"], sha256: row["sha256"], objectKey: row["objectKey"] });
-              listed.push({ name: row["name"], objectKey: virtual });
-            }
-            return listed;
-          },
-          async readArtifact(objectKey, maxBytes) {
-            const row = rows.get(objectKey);
-            if (row === undefined) return "";
-            const read = await readVerifiedText(blobs, row, maxBytes);
-            return "text" in read ? read.text : "";
-          },
-        },
+        actions,
       }, {
         orgId: flow.companyId, task: { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, operationId: operation.id, candidateDigest: input.candidateDigest,
         checks: input.checks.filter((entry) => entry.source === "project"), policyKinds: policyKindsOf(workflowSelectedChecks(input.workflow.checkPolicy)),

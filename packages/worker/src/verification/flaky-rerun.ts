@@ -10,7 +10,7 @@
 // The rerun writes the check's own report file again (a narrower one), so the first report's bytes are put back afterwards; a file that cannot be put back drops the whole result (nothing is called flaky).
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { isRerunnableTestId, type CheckEntry, type ProjectCommand } from "@agentx/contracts";
+import { FLAKY_RERUN_ARTIFACT, FLAKY_ON_RERUN_MAX, FlakyRerunFileSchema, isRerunnableTestId, type CheckEntry, type FlakyRerunFile, type ProjectCommand } from "@agentx/contracts";
 import { runChecks, type CheckRunners } from "./checks.js";
 import { readCheckTests } from "./check-tests.js";
 import { containedReportPath } from "./report-file.js";
@@ -51,6 +51,18 @@ export type FlakyRerunResult = ReadonlyMap<string, FlakyCheckResult>;
 
 /** A check is fully flaky only when it had failing tests and EVERY one passed on the rerun. */
 export const isFullyFlaky = (result: FlakyCheckResult | undefined): boolean => result !== undefined && result.flaky.length > 0 && result.failing.length === 0;
+
+/**
+ * What the worker saves for the broker (`flaky-rerun.json`): only the checks that are FULLY flaky, each with the tests that passed on the rerun. Undefined when there is none (no file is saved, so the broker has nothing
+ * to excuse). A check whose flaky list is longer than the file's bound is left out: the broker then keeps its failure.
+ */
+export function flakyRerunFileOf(result: FlakyRerunResult | undefined): { name: typeof FLAKY_RERUN_ARTIFACT; content: string } | undefined {
+  if (result === undefined) return undefined;
+  const checks = [...result.values()].filter(isFullyFlaky).filter((check) => check.flaky.length <= FLAKY_ON_RERUN_MAX).map((check) => ({ checkId: check.checkId, flaky: check.flaky }));
+  if (checks.length === 0) return undefined;
+  const file: FlakyRerunFile = { schemaVersion: 1, checks };
+  return FlakyRerunFileSchema.safeParse(file).success ? { name: FLAKY_RERUN_ARTIFACT, content: JSON.stringify(file) } : undefined;
+}
 
 const READINESS_ID = /^readiness:(\d{1,3})$/u;
 

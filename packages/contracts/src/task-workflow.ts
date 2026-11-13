@@ -8,6 +8,8 @@ import { E2E_PROJECT_CHECK_ID, E2EWorkflowProgressSchema } from "./e2e.js";
 import { WorkflowDependencyApprovalSchema, WorkItemProgressV1Schema } from "./workflow-dependencies.js";
 import { NO_CODE_CHANGED_REASON, NoChangeFindingsSchema } from "./no-change-findings.js";
 import { CheckKindSchema } from "./evidence.js";
+import { FLAKY_ON_RERUN_MAX } from "./test-flaky.js";
+import { TestIdSchema } from "./test-id.js";
 import { WorkflowDesignReviewSchema } from "./design-review.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -865,6 +867,15 @@ export const WorkflowSnapshotShapeSchema = z.object({
    * and fail now. Kept through a send-back so the coder hears of them; the next block or verification replaces them.
    */
   regressedChecks: z.array(z.string().trim().min(1).max(WORKFLOW_REGRESSED_CHECK_MAX)).min(1).max(WORKFLOW_REGRESSED_CHECKS_MAX).optional(),
+  /**
+   * TE-C6: tests that failed once in the checks and passed on the rerun, and that the base was not already flaky on (count, and up to 50 ids, for the code in `candidateDigest`). Written only when the broker's
+   * flaky-rerun switch is on, with the verification that recorded the checks as passed because of them; B5's `flaky_on_change` hold reads it (`flakyOnChangeHoldInput`). Absent otherwise.
+   */
+  flakyOnChange: z.object({
+    candidateDigest: DigestSchema,
+    count: z.number().int().min(1).max(100_000_000),
+    ids: z.array(TestIdSchema).max(FLAKY_ON_RERUN_MAX),
+  }).strict().refine((fact) => fact.count >= fact.ids.length, "the count is at least the ids listed").optional(),
   /**
    * A coding run that ended with no code change: the commands the agent ran, what they printed and the agent's own conclusion, redacted and bounded (`NoChangeFindingsSchema`), kept while the step is
    * blocked with `noCodeChanged` and shown with it. Absent from an older worker's result and from every other block.

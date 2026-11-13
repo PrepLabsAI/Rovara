@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost, TaskDiagnosisView } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
-  ModelSelectionStateSchema, agentSessionKey, canonicalPlanJson, change, createCandidateManifest, orgSettingsKey, queryAll, runCostKey, projectMetaKey, secondReviewModelKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
+  ModelSelectionStateSchema, agentSessionKey, canonicalPlanJson, change, createCandidateManifest, orgSettingsKey, queryAll, runCostKey, projectMetaKey, secondReviewModelKey, flakyOnChangeHoldInput, projectPk, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 import { bindSessionSurface } from "../../packages/broker/src/core/sessions/bindings.js";
@@ -117,7 +117,7 @@ const planText = (extra: string[] = []): string => planAnswer(planDoc(extra), NO
 const PLAN_TEXT = planText();
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { planFormat?: "markdown" | "structured"; features?: readonly string[]; connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; provider?: string; model?: FakeHostModel; readiness?: boolean; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string }; connections?: { fetch?: typeof fetch; checkEndpoint?: (url: string) => Promise<void>; serverPort?: NonNullable<Parameters<typeof startLocalRuntime>[0]["connectionsServerPort"]> } } = {}) {
+async function launch(extra: { planFormat?: "markdown" | "structured"; features?: readonly string[]; connection?: string; storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; provider?: string; model?: FakeHostModel; readiness?: boolean | "two"; now?: () => Date; commentThreadsPerPoll?: number; config?: unknown; files?: Record<string, string>; modelProviderEndpoints?: { openrouter?: string; anthropic?: string; openai?: string }; connections?: { fetch?: typeof fetch; checkEndpoint?: (url: string) => Promise<void>; serverPort?: NonNullable<Parameters<typeof startLocalRuntime>[0]["connectionsServerPort"]> } } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -133,7 +133,7 @@ async function launch(extra: { planFormat?: "markdown" | "structured"; features?
   const fakeHost = Object.defineProperties(new FakeCodeHost(model), { kind: { value: connection }, ...(connection === "github" && extra.provider === undefined ? {} : { provider: { value: extra.provider ?? "github" } }) });
   // A project cannot yet name another code host at registration (51 gap: the project contract refuses `repositories[].host`), so a repository is on the code host registered as `github`; the
   // test's host is the fake one under that name.
-  const readiness = extra.readiness === true ? [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }] : [];
+  const readiness = extra.readiness === true || extra.readiness === "two" ? [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }, ...(extra.readiness === "two" ? [{ cwd: "repo/demo", executable: "npm", args: ["run", "lint"], timeoutSeconds: 60 }] : [])] : [];
   const project = extra.host === true ? { ...PROJECT, readiness, repositories: [{ ...PROJECT.repositories[0]!, url: hostedUrl, ...(connection === "github" ? {} : { host: { kind: connection } }) }] } : PROJECT;
   const base = extra.host === true ? model.headOf("main") : BASE_COMMIT;
   /** The addresses the server asked the browser to open: the only place a page address goes. */
@@ -2198,6 +2198,112 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await h.callback(rerun, "result", withCheck({ ...failedCheck, after: "passed", class: "passing", exitCode: 0, output: "" }, "verified"));
     const review = await h.nextJob(workspaceId, seen);
     expect(review).toMatchObject({ payload: { workflowMode: "REVIEW" } });
+  });
+
+  describe("TE-C6: a check whose only failures passed on the worker's one rerun (switch ROVARA_FLAKY_RERUN)", () => {
+    const ON = { ROVARA_FLAKY_RERUN: "1" } as NodeJS.ProcessEnv;
+    const ID = "tests/test_cart.py::test_total";
+    const failedEntry = (index: number, over: Record<string, unknown> = {}) => ({ id: `readiness:${String(index)}`, label: index === 0 ? "npm test" : "npm run lint", source: "project", before: "passed", after: "failed", class: "regression", output: "1 failing", durationMs: 5, exitCode: 1, ...over });
+    const passedEntry = (index: number) => ({ ...failedEntry(index), after: "passed", class: "passing", output: "", exitCode: 0 });
+    const flakyFile = (checks: Array<{ checkId: string; flaky: string[] }>) => JSON.stringify({ schemaVersion: 1, checks });
+
+    /** A coding run whose checks are these entries; the worker's flaky-rerun file (if any) arrives before the result, as the worker saves it. */
+    async function run(options: { environment?: NodeJS.ProcessEnv; readiness?: true | "two"; entries: object[]; file?: string; status?: string }) {
+      const h = await launch({ host: true, readiness: options.readiness ?? true, ...(options.environment === undefined ? {} : { environment: options.environment }) });
+      const { taskId, workspaceId, seen, coding } = await toCoding(h);
+      const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+      const tree = h.model.revision(commit).tree;
+      const result = builtResult(tree, h.base, commit);
+      (result.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status: options.status ?? "regression", source: "project", notVerifiedReason: undefined, checks: options.entries };
+      if (options.file !== undefined) expect((await h.callback(coding, "artifacts", { name: "flaky-rerun.json", mediaType: "application/json", content: options.file })).status).toBe(200);
+      await h.callback(coding, "result", result);
+      return { h, taskId, workspaceId, seen, tree, commit, workflow: (await taskRecord(h, taskId)).workflow };
+    }
+
+    it("flaky only: VERIFY is passed, the reviews are due, and the workflow carries the fact B5's hold reads", async () => {
+      const r = await run({ environment: ON, entries: [failedEntry(0)], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "REVIEW", verification: { results: [{ checkId: expect.any(String), status: "PASS" }] }, flakyOnChange: { count: 1, ids: [ID] } });
+      expect(r.workflow.flakyOnChange?.candidateDigest).toBe(r.workflow.candidate?.digest);
+      expect(flakyOnChangeHoldInput(r.workflow)).toEqual([ID]);
+      expect(await r.h.nextJob(r.workspaceId, r.seen)).toMatchObject({ payload: { workflowMode: "REVIEW" } });
+    });
+
+    it("flaky plus a real failure: the real failure stays FAILED, the task blocks, and no fact is kept", async () => {
+      const r = await run({ environment: ON, readiness: "two", entries: [failedEntry(0), failedEntry(1)], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(r.workflow).not.toHaveProperty("flakyOnChange");
+      // The flaky check is recorded as passed and the real failure as failed: the verification as a whole is not.
+      expect(r.workflow.verification?.results.map((result) => result.status)).toEqual(["PASS", "FAILED"]);
+    });
+
+    it("flaky in one check and the other passed: only the flaky one is excused", async () => {
+      const r = await run({ environment: ON, readiness: "two", entries: [failedEntry(0), passedEntry(1)], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "REVIEW", flakyOnChange: { count: 1 } });
+    });
+
+    it("a timeout stays FAILED, even when the file names the check", async () => {
+      const r = await run({ environment: ON, entries: [failedEntry(0, { after: "timed_out", exitCode: null })], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(r.workflow).not.toHaveProperty("flakyOnChange");
+    });
+
+    it("a check whose command could not run (program not found) stays FAILED, whatever the file says", async () => {
+      const r = await run({ environment: ON, entries: [failedEntry(0, { output: "spawn npm ENOENT", exitCode: null })], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(r.workflow).not.toHaveProperty("flakyOnChange");
+    });
+
+    it("ids the data guard would drop (a credential in a test name) excuse nothing, and no fact keeps them", async () => {
+      const secret = `ghp_${"Ab1Cd2Ef3Gh4".repeat(3)}`;
+      const r = await run({ environment: ON, entries: [failedEntry(0)], file: flakyFile([{ checkId: "readiness:0", flaky: [`tests/t.py::leak ${secret}`] }]) });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(JSON.stringify(r.workflow)).not.toContain(secret);
+    });
+
+    it("a check that is not a regression (already failing) stays FAILED", async () => {
+      const r = await run({ environment: ON, entries: [failedEntry(0, { before: "failed", class: "already_failing" })], file: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]), status: "verified" });
+      expect(r.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    });
+
+    it("no file, a file about another check, an unreadable file or one with an invalid id: nothing is excused", async () => {
+      for (const file of [undefined, flakyFile([{ checkId: "readiness:1", flaky: [ID] }]), "not json", flakyFile([{ checkId: "readiness:0", flaky: [" bad id"] }]), JSON.stringify({ schemaVersion: 1, checks: [{ checkId: "readiness:0", flaky: [ID] }], extra: true })]) {
+        const r = await run({ environment: ON, entries: [failedEntry(0)], ...(file === undefined ? {} : { file }) });
+        expect(r.workflow, String(file)).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+        expect(r.workflow).not.toHaveProperty("flakyOnChange");
+      }
+    });
+
+    it("flaky on the base too: passed without a hold (no fact); flaky only on the change: passed with the fact", async () => {
+      const baseline = (flaky: string[]) => ({ recordedAt: new Date().toISOString(), envRevision: 1, branch: "main", headSha: "a".repeat(40), finishedAt: new Date().toISOString(), tests: { total: 10, passed: 10, failed: 0, skipped: 0 }, failed: [], flaky });
+      const withBase = async (flaky: string[]) => {
+        const h = await launch({ host: true, readiness: true, environment: ON });
+        await h.runtime.registry.require("storage").put({ item: { pk: projectPk(IMPLICIT_COMPANY_ID, "payments"), sk: "TESTENV#BASELINE#LATEST", entityType: "TEST_ENV_BASELINE_LATEST", orgId: IMPLICIT_COMPANY_ID, project: "payments", baseline: baseline(flaky) } });
+        const { taskId, coding } = await toCoding(h);
+        const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+        const result = builtResult(h.model.revision(commit).tree, h.base, commit);
+        (result.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status: "regression", source: "project", notVerifiedReason: undefined, checks: [failedEntry(0)] };
+        await h.callback(coding, "artifacts", { name: "flaky-rerun.json", mediaType: "application/json", content: flakyFile([{ checkId: "readiness:0", flaky: [ID] }]) });
+        await h.callback(coding, "result", result);
+        return (await taskRecord(h, taskId)).workflow;
+      };
+      const both = await withBase([ID]);
+      expect(both).toMatchObject({ stage: "REVIEW", verification: { results: [{ status: "PASS" }] } });
+      expect(both).not.toHaveProperty("flakyOnChange");
+      expect(flakyOnChangeHoldInput(both)).toBeUndefined();
+      const onlyChange = await withBase(["tests/other.py::test_x"]);
+      expect(flakyOnChangeHoldInput(onlyChange)).toEqual([ID]);
+    });
+
+    it("the switch off is today's behaviour: the same run and file block the task, and the snapshot has no such key", async () => {
+      const entries = [failedEntry(0)];
+      const file = flakyFile([{ checkId: "readiness:0", flaky: [ID] }]);
+      for (const environment of [undefined, { ROVARA_FLAKY_RERUN: "0" }, { ROVARA_FLAKY_RERUN: "true" }] as const) {
+        const r = await run({ ...(environment === undefined ? {} : { environment }), entries, file });
+        expect(r.workflow, JSON.stringify(environment)).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+        expect(JSON.stringify(r.workflow)).not.toContain("flakyOnChange");
+        expect((await taskRecord(r.h, r.taskId)).autofixAsk).toMatchObject({ reason: "unclear-fault" });
+      }
+    });
   });
 
   it("keeps the evidence of a run's checks when they are recorded (write-once, the pack replaced only on a re-check of the same code), and the proof page shows it (lane L12 slice 3)", async () => {

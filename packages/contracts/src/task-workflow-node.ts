@@ -778,7 +778,7 @@ function validatedCandidate(input: unknown): CandidateManifest {
 
 export function recordWorkflowVerification(
   currentInput: unknown,
-  input: { candidate: CandidateManifest; checks: WorkflowVerificationResults; now: string; e2eQualification?: unknown },
+  input: { candidate: CandidateManifest; checks: WorkflowVerificationResults; now: string; e2eQualification?: unknown; flakyOnChange?: { count: number; ids: readonly string[] } | undefined },
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   if (current.stage !== "VERIFY" || (current.state !== "BLOCKED" && current.state !== "WAITING")) {
@@ -813,9 +813,10 @@ export function recordWorkflowVerification(
   // Every failed check could not run: coding again would not help, so the owner is told that, not "checks failed".
   const allBroken = failedResults.length > 0 && failedResults.every(workflowCheckResultBroken);
   const candidateChanged = current.candidate?.digest !== candidate.digest;
-  const { blockReason: _priorBlockReason, regressedChecks: _priorRegressions, ...withoutBlockReason } = current;
+  const { blockReason: _priorBlockReason, regressedChecks: _priorRegressions, flakyOnChange: _priorFlaky, ...withoutBlockReason } = current;
   void _priorBlockReason;
   void _priorRegressions;
+  void _priorFlaky;
   const { qualifiedRound: _priorQualifiedRound, ...unqualifiedE2E } = current.e2e ?? {};
   void _priorQualifiedRound;
   // A program places the workflow: on its check step (or the build's own step) while the checks stand, and past that
@@ -836,12 +837,24 @@ export function recordWorkflowVerification(
     candidate,
     ...(reviewBase === undefined ? {} : { reviewBase }),
     verification: checks.data,
+    // TE-C6: the fact only goes with a verification that passed (it is why a check counted as passed), and it names the code it is for.
+    ...(!passed || input.flakyOnChange === undefined || input.flakyOnChange.count < 1 ? {} : { flakyOnChange: { candidateDigest: candidate.digest, count: input.flakyOnChange.count, ids: [...input.flakyOnChange.ids] } }),
     ...(current.e2e === undefined ? {} : { e2e: { ...unqualifiedE2E, ...(e2eRequired && passed && e2eQualified && e2eQualification !== undefined ? { qualifiedRound: e2eQualification } : {}) } }),
     // A new candidate invalidates every prior review report.
     reviews: candidateChanged ? [] : current.reviews ?? [],
     updatedAt: input.now,
     ...placed,
   });
+}
+
+/**
+ * TE-C6 -> B5: the tests the workflow's current code has as flaky on the change (they failed once and passed on the rerun, and the base was not already flaky on them), as `ProofHoldFacts.flakyOnChange` takes them.
+ * Undefined when there are none or the fact is for other code. B5's host adds this one call to its `ProofHoldSource.facts`: `flakyOnChange: flakyOnChangeHoldInput(task.workflow)`.
+ */
+export function flakyOnChangeHoldInput(workflow: Pick<WorkflowSnapshot, "candidate" | "flakyOnChange"> | undefined): string[] | undefined {
+  const fact = workflow?.flakyOnChange;
+  if (workflow === undefined || fact === undefined || workflow.candidate === undefined || fact.candidateDigest !== workflow.candidate.digest || fact.ids.length === 0) return undefined;
+  return [...fact.ids];
 }
 
 /**

@@ -4,10 +4,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { CheckEntry, ProjectCommand } from "../../packages/contracts/src/index.js";
+import { FlakyRerunFileSchema, type CheckEntry, type ProjectCommand } from "../../packages/contracts/src/index.js";
 import { runChecks, type CheckPlan, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { CHECKS_MESSAGE_TYPE, checksFeedback, verificationExtension, type VerificationOptions } from "../../packages/worker/src/verification/extension.js";
-import { FLAKY_RERUN_IDS_MAX, isFullyFlaky, rerunFlaky } from "../../packages/worker/src/verification/flaky-rerun.js";
+import { FLAKY_RERUN_IDS_MAX, flakyRerunFileOf, isFullyFlaky, rerunFlaky, type FlakyRerunResult } from "../../packages/worker/src/verification/flaky-rerun.js";
 import { splitFailures } from "../../packages/worker/src/nightly-run.js";
 
 type State = "passed" | "failed" | "skipped";
@@ -392,5 +392,59 @@ describe("what the agent reads", () => {
     expect(text).toContain("Check: lint-ish");
     expect(text).not.toContain("pytest -q");
     expect(text).not.toContain("test_total");
+  });
+});
+
+describe("the file the worker saves for the broker", () => {
+  const result = (...rows: Array<{ checkId: string; flaky: string[]; failing: string[] }>): FlakyRerunResult => new Map(rows.map((row) => [row.checkId, row]));
+
+  it("names only the checks that are fully flaky, in the contract's shape", () => {
+    const file = flakyRerunFileOf(result({ checkId: "readiness:0", flaky: [ID_TOTAL], failing: [] }, { checkId: "readiness:1", flaky: [ID_TAX], failing: [ID_TOTAL] }));
+    expect(file?.name).toBe("flaky-rerun.json");
+    expect(FlakyRerunFileSchema.parse(JSON.parse(file!.content))).toEqual({ schemaVersion: 1, checks: [{ checkId: "readiness:0", flaky: [ID_TOTAL] }] });
+  });
+
+  it("is no file at all when no check is fully flaky (the broker then has nothing to excuse)", () => {
+    expect(flakyRerunFileOf(undefined)).toBeUndefined();
+    expect(flakyRerunFileOf(new Map())).toBeUndefined();
+    expect(flakyRerunFileOf(result({ checkId: "readiness:0", flaky: [ID_TOTAL], failing: [ID_TAX] }))).toBeUndefined();
+    expect(flakyRerunFileOf(result({ checkId: "readiness:0", flaky: [], failing: [] }))).toBeUndefined();
+  });
+});
+
+describe("the extension tells the worker what the round's rerun found", () => {
+  it("with the report of the round that reran, and with nothing after the extra turn", async () => {
+    const seen: Array<FlakyRerunResult | undefined> = [];
+    const flakyThenFail = { runs: [FIRST, { [ID_TOTAL]: "failed" }, FIRST] } satisfies World;
+    const { runners } = worldRunners(flakyThenFail);
+    const reports: unknown[] = [];
+    const extension = verificationExtension({
+      plan: () => ({ source: "project", readiness: [pytest()], projectBefore: ["passed"] }), runners, budgetMs: () => 30 * MINUTE, signal: new AbortController().signal,
+      recorder: { settled: async () => undefined, observeCall: async () => undefined, observe: () => undefined, observeExecutionEnd: () => undefined, observeTurnEnd: () => undefined } as unknown as VerificationOptions["recorder"],
+      onReport: (report) => { reports.push(report); }, flakyRerun: { rootPath: root, checks: [TESTS] }, onFlakyRerun: (value) => { seen.push(value); },
+    });
+    const pi = fakePi();
+    install(extension, pi.pi);
+    // Round one: the test fails again, so the agent gets its extra turn and the extension says nothing yet.
+    expect((await pi.settle()).continue).toBe(true);
+    expect(seen).toEqual([]);
+    // Round two reports without a rerun: the worker is told there is none.
+    await pi.settle();
+    expect(seen).toEqual([undefined]);
+  });
+
+  it("a flaky-only round reports at once and hands over the fully flaky result", async () => {
+    const seen: Array<FlakyRerunResult | undefined> = [];
+    const { runners } = worldRunners({ runs: [FIRST, { [ID_TOTAL]: "passed" }] });
+    const extension = verificationExtension({
+      plan: () => ({ source: "project", readiness: [pytest()], projectBefore: ["passed"] }), runners, budgetMs: () => 30 * MINUTE, signal: new AbortController().signal,
+      recorder: { settled: async () => undefined, observeCall: async () => undefined, observe: () => undefined, observeExecutionEnd: () => undefined, observeTurnEnd: () => undefined } as unknown as VerificationOptions["recorder"],
+      onReport: () => undefined, flakyRerun: { rootPath: root, checks: [TESTS] }, onFlakyRerun: (value) => { seen.push(value); },
+    });
+    const pi = fakePi();
+    install(extension, pi.pi);
+    await pi.settle();
+    expect(seen).toHaveLength(1);
+    expect(isFullyFlaky(seen[0]?.get("readiness:0"))).toBe(true);
   });
 });

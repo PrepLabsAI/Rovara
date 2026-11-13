@@ -60,6 +60,7 @@ import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { attachCitedCode } from "../../core/plan/store.js";
 import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
+import { createLocalFlakyChecks } from "./flaky-checks.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalLessons, type LocalLessons } from "./lessons.js";
 import { createLessonRoutes } from "./lessons-routes.js";
@@ -432,6 +433,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     sessionBindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) },
     milestones,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
+    // TE-C6: a failed check whose every failing test passed on the worker's one rerun may be recorded as passed (the draft is then held for it); off unless ROVARA_FLAKY_RERUN=1.
+    flakyChecks: createLocalFlakyChecks({ flow: { store, companyId }, blobs, testEnv: testEnvironment.deps, env: options.environment ?? process.env }),
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),

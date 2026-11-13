@@ -14,6 +14,7 @@ import {
   AGENTX_PREAMBLE_VERSION,
   CheckReportSchema,
   EvidenceRawSchema,
+  FlakyRerunFileSchema,
   createCandidateManifest,
   lastAssistantResponse,
   type CheckReport,
@@ -1244,6 +1245,24 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
       expect(fake.calls).toHaveLength(2);
       const raw = EvidenceRawSchema.parse(JSON.parse(run.artifacts.find((artifact) => artifact.name === "evidence-raw.json")!.content));
       expect(raw.checks[0]?.tests).toMatchObject({ total: 1, failed: 1, flakyOnRerun: ["tests/test_a.py::test_b"], flakyOnRerunCount: 1 });
+    });
+
+    it("saves the broker's flaky-rerun file for a fully flaky check, from a coding run (no extra turn) and from a checks run with no evidence asked for", async () => {
+      const fileOf = (run: Awaited<ReturnType<typeof runTask>>) => run.artifacts.filter((artifact) => artifact.name === "flaky-rerun.json").map((artifact) => FlakyRerunFileSchema.parse(JSON.parse(artifact.content)));
+      const coding = await gitWorkspaceRoot([pytestCheck]);
+      const codingRun = await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`)], readiness: [pytestCheck], runners: runnersFor(coding, "passed").runners, rootPath: coding, workflowMode: "IMPLEMENT", testEnvironment: plan() });
+      expect(fileOf(codingRun)).toEqual([{ schemaVersion: 1, checks: [{ checkId: "readiness:0", flaky: ["tests/test_a.py::test_b"] }] }]);
+      const checks = await gitWorkspaceRoot([pytestCheck]);
+      const checksRun = await runTask({ steps: [], readiness: [pytestCheck], runners: runnersFor(checks, "passed").runners, rootPath: checks, workflowMode: "CHECKS", testEnvironment: plan() });
+      expect(fileOf(checksRun)).toHaveLength(1);
+    });
+
+    it("saves no such file when the test fails again (control run), when the extra turn is given, or without the plan's flag", async () => {
+      const count = (run: Awaited<ReturnType<typeof runTask>>) => run.artifacts.filter((artifact) => artifact.name === "flaky-rerun.json").length;
+      const again = await gitWorkspaceRoot([pytestCheck]);
+      expect(count(await runTask({ steps: [write("app/notes.md", "note\n", "c1"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("Tried.\nAgentX result: not done")], readiness: [pytestCheck], runners: runnersFor(again, "failed").runners, rootPath: again, workflowMode: "IMPLEMENT", testEnvironment: plan() }))).toBe(0);
+      const off = await gitWorkspaceRoot([pytestCheck]);
+      expect(count(await runTask({ steps: [], readiness: [pytestCheck], runners: runnersFor(off, "passed").runners, rootPath: off, workflowMode: "CHECKS" }))).toBe(0);
     });
 
     it("the same run without the flag reruns nothing and writes no flaky key", async () => {
