@@ -236,6 +236,19 @@ describe("the failure pack", () => {
     expect(kinds).toEqual(["scripted", "scripted", "failure_pack", "failure_pack"]);
     expect(statuses).toEqual([200, 200, 429, 429]);
   });
+  it("M2: in a failure-pack run NO call counts toward proof, including the calls before afterCalls", () => {
+    const set = stamp("anthropic_messages", [{ id: "a" }]);
+    let state: ServeState = INITIAL_SERVE_STATE;
+    const rowsOfRun: [string, boolean, string | undefined][] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const result = serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), set, { failure: { mode: "rate_limit", afterCalls: 2 }, state });
+      rowsOfRun.push([result.kind, result.countsTowardProof, result.provenance]);
+      state = result.nextState;
+    }
+    expect(rowsOfRun).toEqual([["scripted", false, "before_task"], ["scripted", false, "before_task"], ["failure_pack", false, undefined], ["failure_pack", false, undefined]]);
+    // the same calls with no failure spec do count
+    expect(serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), set).countsTowardProof).toBe(true);
+  });
   it("a failure answer is never counted even when a counted reply exists for the call", () => {
     const set = stamp("openai_compatible", [{ id: "a" }]);
     for (const mode of ["rate_limit", "cut_off_stream", "token_limit", "refusal", "bad_tool_json"] as const) {
@@ -279,7 +292,7 @@ describe("requests that are not served", () => {
     const set = stamp("openai_compatible", [{ id: "a" }]);
     const models = serve({ method: "GET", path: "/p/openai/v1/models", query: "", headers: {}, body: undefined }, set);
     expect(models).toMatchObject({ kind: "not_served", countsTowardProof: false });
-    expect(models.answer.status).toBe(501);
+    expect(models.answer.status).toBe(422); // a 4xx: no SDK retries it (L2)
   });
   it("a request body past 1 MiB is refused before anything is read (F0a's own cap does not cover Anthropic or Cohere)", () => {
     for (const [path, family] of [["/p/openai/v1/chat/completions", "openai_compatible"], ["/p/anthropic/v1/messages", "anthropic_messages"], ["/p/cohere/v2/chat", "cohere"]] as const) {
@@ -294,8 +307,24 @@ describe("requests that are not served", () => {
     const broken = { version: 1, family: "anthropic_messages", replies: [{ id: "a", match: {}, response: { text: "x", finish: "stop", usage: { inputTokens: -5, outputTokens: 1 } }, provenance: "before_task", origin: "customer_written" }] } as never;
     const result = serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), broken);
     expect(result).toMatchObject({ kind: "not_served", countsTowardProof: false, replyId: "a" });
-    expect(result.answer.status).toBe(500);
+    expect(result.answer.status).toBe(422); // a 4xx: no SDK retries it (L2)
     expect(json(result).error.code).toBe("bad_reply");
+  });
+  it("L2: an answer that is not a success is never a 5xx or a 429 an SDK would retry (except a real unmatched 400 and the pack's own 429)", () => {
+    const broken = { version: 1, family: "anthropic_messages", replies: [{ id: "a", match: {}, response: { text: "x", finish: "stop", usage: { inputTokens: -5, outputTokens: 1 } }, provenance: "before_task", origin: "customer_written" }] } as never;
+    for (const result of [serve(post("/p/anthropic/v1/messages", ANTHROPIC_BODY), broken), serve({ method: "GET", path: "/p/openai/v1/models", query: "", headers: {}, body: undefined }, stamp("openai_compatible", [{ id: "m" }])), serve(post("/p/gemini/v1beta/models/m:rawPredict", {}), undefined)]) {
+      expect(result.kind).toBe("not_served");
+      expect(result.answer.status).toBeGreaterThanOrEqual(400);
+      expect(result.answer.status).toBeLessThan(500);
+      expect([408, 409, 429]).not.toContain(result.answer.status);
+    }
+    // F0a's own 500 internal_error (a reply its builder refuses) reaches the client as a 4xx too
+    const f0aBroken = { version: 1, family: "openai_compatible", replies: [{ id: "a", match: {}, response: { text: "x", finish: "stop", usage: { inputTokens: -5, outputTokens: 1 } }, provenance: "before_task", origin: "customer_written" }] } as never;
+    const viaF0a = serve(post("/p/openai/v1/chat/completions", OPENAI_BODY), f0aBroken);
+    expect(viaF0a).toMatchObject({ kind: "not_served", countsTowardProof: false });
+    expect(viaF0a.answer.status).toBe(422);
+    expect(json(viaF0a).error.code).toBe("internal_error");
+    expect(serveModelRequestWithReplies([{ id: "x", family: "nope" as never }], undefined, post("/p/x/y", {}), { seed: "s" }).answer.status).toBe(422);
   });
   it("a Bedrock-family row never reaches a served family even when listed as servable", () => {
     expect(serveModelRequestWithReplies([{ id: "b", family: "bedrock" }], undefined, post("/p/b/x", {}), { seed: "s" }).kind).toBe("not_served");
@@ -319,5 +348,49 @@ describe("speed and bounds", () => {
     const result = serve(post("/p/openai/v1/chat/completions", { model: "m", messages: [{ role: "user", content: "#1999#" }] }), set);
     expect(result.replyId).toBe("r1999");
     expect(performance.now() - started).toBeLessThan(1500);
+  });
+});
+
+describe("M3: embedding requests are capped before anything is built", () => {
+  const cohereSet = stamp("cohere", [{ id: "e", provenance: "task_made", origin: undefined }]);
+  const openaiSet = stamp("openai_compatible", [{ id: "e", provenance: "task_made", origin: undefined }]);
+  const geminiSet = stamp("gemini", [{ id: "e", provenance: "task_made", origin: undefined }]);
+  const refused = (result: ServeRepliesResult) => {
+    expect(result.kind).toBe("not_served");
+    expect(result.countsTowardProof).toBe(false);
+    expect(result.answer.status).toBe(400);
+    expect(result.answer.body.length).toBeLessThan(1000);
+  };
+  it("the reviewer's probe: 2,048 texts x 4,096 dimensions x six types is refused fast and small", () => {
+    const started = performance.now();
+    const before = process.memoryUsage().heapUsed;
+    for (const types of [["float"], ["float", "int8", "uint8", "binary", "ubinary", "base64"]]) {
+      refused(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 2048 }, () => "a"), output_dimension: 4096, embedding_types: types }), cohereSet));
+    }
+    refused(serve(post("/p/openai/v1/embeddings", { model: "m", input: Array.from({ length: 2048 }, () => "a"), dimensions: 4096 }), openaiSet));
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(process.memoryUsage().heapUsed - before).toBeLessThan(60 * 1024 * 1024);
+  });
+  it("each family's own limits: Cohere 96 texts, OpenAI 3,072 dimensions, Gemini 100 batch requests", () => {
+    expect(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 96 }, () => "a"), output_dimension: 1024 }), cohereSet).kind).toBe("scripted");
+    refused(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 97 }, () => "a") }), cohereSet));
+    expect(serve(post("/p/openai/v1/embeddings", { model: "m", input: ["a"], dimensions: 3072 }), openaiSet).kind).toBe("scripted");
+    refused(serve(post("/p/openai/v1/embeddings", { model: "m", input: ["a"], dimensions: 3073 }), openaiSet));
+    const batch = (count: number) => post("/p/gemini/v1beta/models/te:batchEmbedContents", { requests: Array.from({ length: count }, () => ({ content: { parts: [{ text: "a" }] } })) });
+    expect(serve(batch(100), geminiSet).kind).toBe("scripted");
+    refused(serve(batch(101), geminiSet));
+  });
+  it("a total cap on numbers: inputs x dimensions x types", () => {
+    refused(serve(post("/p/openai/v1/embeddings", { model: "m", input: Array.from({ length: 300 }, () => "a"), dimensions: 3072 }), openaiSet)); // 921,600 numbers
+    expect(serve(post("/p/openai/v1/embeddings", { model: "m", input: Array.from({ length: 80 }, () => "a"), dimensions: 3072 }), openaiSet).kind).toBe("scripted"); // 245,760
+    refused(serve(post("/p/cohere/v2/embed", { model: "m", texts: Array.from({ length: 90 }, () => "a"), output_dimension: 1536, embedding_types: ["float", "int8"] }), cohereSet)); // 276,480
+  });
+  it("the refusal is a fixed answer in the family's envelope, with no RangeError and no echo of the request", () => {
+    const result = serve(post("/p/openai/v1/embeddings", { model: "m", input: ["secret-input"], dimensions: 99_999 }), openaiSet);
+    expect(JSON.parse(result.answer.body).error.message).toBe("not run: this embedding request is larger than the model helper serves");
+    expect(result.answer.body).not.toContain("secret-input");
+  });
+  it("the failure pack still answers an oversized embedding (it builds nothing)", () => {
+    expect(serve(post("/p/cohere/v2/embed", { texts: Array.from({ length: 2048 }, () => "a"), output_dimension: 4096 }), undefined, { failure: { mode: "rate_limit" } }).answer.status).toBe(429);
   });
 });

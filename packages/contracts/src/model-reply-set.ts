@@ -13,7 +13,7 @@
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { MODEL_ECHO_PATTERN, MODEL_NAME_MAX_CHARS, MODEL_REPLY_MAX_CHARS, type ModelReply } from "./model-family-common.js";
-import { BEFORE_TASK_ORIGINS, REPLY_PROVENANCES, isReplyProvenance, type BeforeTaskOrigin, type ReplyProvenance } from "./model-reply-provenance.js";
+import { BEFORE_TASK_ORIGINS, REPLY_PROVENANCES, type BeforeTaskOrigin } from "./model-reply-provenance.js";
 import { ALL_REPLY_OPERATIONS, OPERATIONS_BY_FAMILY, SERVED_MODEL_FAMILIES, type ServedModelFamily } from "./model-served-family.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
 
@@ -26,6 +26,7 @@ const MODEL_REPLY_TOOL_CALLS_MAX = 32;
 const ARGS_MAX_DEPTH = 16;
 const ARGS_MAX_NODES = 5_000;
 const REPLY_SET_DIGEST_DOMAIN = "rovara-model-reply-set/v1\n";
+const REPLY_ENTRY_DIGEST_DOMAIN = "rovara-model-reply-entry/v1\n";
 
 const ReplyId = z.string().regex(/^[a-z0-9][a-z0-9_.-]{0,63}$/u).refine((id) => id !== "__proto__", "a plain id");
 
@@ -138,34 +139,111 @@ export function parseModelReplySetFileBytes(bytes: Uint8Array): ParsedReplySetFi
   return parsed.success ? { ok: true, set: parsed.data, digest: modelReplySetDigest(parsed.data) } : { ok: false, reason: "the reply set does not pass the reply-set schema" };
 }
 
-/** The strict parse of the helper's file (the resolved form, written by the worker). */
+/**
+ * The strict parse of the helper's file (the resolved form, written by the worker). A reply that says `independent` is refused: bytes can carry any provenance, and `independent` is accepted only from the Rovara-side
+ * channel (`createRovaraIndependentDecision`), never from a file.
+ */
 export function parseModelReplySetBytes(bytes: Uint8Array): ParsedReplySet {
   const read = parseBytes(bytes);
   if (!read.ok) return read;
   const parsed = ModelReplySetSchema.safeParse(read.json);
+  if (parsed.success && parsed.data.replies.some((reply) => reply.provenance === "independent")) return { ok: false, reason: "the reply set cannot carry an independent reply in a file" };
   return parsed.success ? { ok: true, set: parsed.data, digest: modelReplySetDigest(parsed.data) } : { ok: false, reason: "the reply set does not pass the reply-set schema" };
 }
 
-/** What the worker decided for one reply. */
+/** What the worker decided for one reply: the provenance, and the content hash of the reply it decided about (`modelReplyEntrySha256`). A decision whose hash is not the stamped reply's is `task_made`. */
 export interface ReplyProvenanceDecision {
-  readonly provenance: ReplyProvenance;
+  readonly provenance: "before_task" | "task_made";
   /** Required for `before_task`; ignored otherwise. */
   readonly origin?: BeforeTaskOrigin | undefined;
+  readonly contentSha256: string;
+}
+
+declare const INDEPENDENT_BRAND: unique symbol;
+/** An `independent` decision. Only `createRovaraIndependentDecision` makes one: the stamp accepts nothing else (a plain object, a copy or a spread of one is `task_made`). */
+export interface IndependentReplyDecision {
+  readonly provenance: "independent";
+  readonly contentSha256: string;
+  readonly [INDEPENDENT_BRAND]: true;
+}
+const MADE_INDEPENDENT = new WeakSet<object>();
+
+/**
+ * The ONLY way to make an `independent` decision, for the Rovara-side channel that delivers the independent reply agent's replies (a separate delivery, never a file in the sandbox). The caller states which reply
+ * content (`modelReplyEntrySha256`) it is for. Nothing in Part A calls this; the worker's code path for a Rovara-side delivery is Part B or later. A sandbox-writable value can never become one: the object is
+ * registered in a module-private set, so a copy or a look-alike is not accepted.
+ */
+export function createRovaraIndependentDecision(contentSha256: string): IndependentReplyDecision {
+  if (!/^[0-9a-f]{64}$/u.test(contentSha256)) throw new RangeError("a content hash is 64 lowercase hex digits");
+  const decision = Object.freeze({ provenance: "independent" as const, contentSha256 }) as IndependentReplyDecision;
+  MADE_INDEPENDENT.add(decision);
+  return decision;
+}
+
+/** The SHA-256 (hex) of a reply's `{id, match, response}` in canonical JSON: what a provenance decision is bound to, so an edit of any of the three changes it. */
+export function modelReplyEntrySha256(reply: Pick<ModelReplyFileEntry, "id" | "match" | "response">): string {
+  return sha256HexOf(new TextEncoder().encode(`${REPLY_ENTRY_DIGEST_DOMAIN}${canonicalJson({ id: reply.id, match: reply.match, response: reply.response })}`));
 }
 
 /**
- * The resolved set for a file set and the worker's decisions (reply id to decision). A reply with no decision, a provenance that is not exactly one of the three, or a `before_task` with no known origin is `task_made`:
- * fail closed. Nothing in the file can reach this function's decision: the file form has no provenance to read.
+ * The resolved set for a file set and the worker's decisions (reply id to decision). A reply is `before_task` only when a decision for its id says so, names a known origin AND carries this reply's content hash;
+ * `independent` only when the decision came from `createRovaraIndependentDecision` for this reply's content. Everything else (no decision, another hash, an unknown value, a look-alike object) is `task_made`: fail
+ * closed. The file's order is kept: `decideFromBase` returns the file in the base commit's order.
  */
-export function stampReplyProvenance(file: ModelReplySetFile, decisions: ReadonlyMap<string, ReplyProvenanceDecision>): ModelReplySet {
+export function stampReplyProvenance(file: ModelReplySetFile, decisions: ReadonlyMap<string, ReplyProvenanceDecision | IndependentReplyDecision>): ModelReplySet {
   const replies = file.replies.map((reply): ModelReplyEntry => {
-    const decision = decisions.get(reply.id);
-    const provenance: unknown = decision?.provenance;
-    if (isReplyProvenance(provenance) && provenance === "before_task" && (BEFORE_TASK_ORIGINS as readonly unknown[]).includes(decision?.origin)) return { ...reply, provenance, origin: decision?.origin };
-    if (isReplyProvenance(provenance) && provenance === "independent") return { ...reply, provenance };
+    const decision: unknown = decisions.get(reply.id);
+    const hash = modelReplyEntrySha256(reply);
+    if (typeof decision === "object" && decision !== null) {
+      const { provenance, contentSha256, origin } = decision as { provenance?: unknown; contentSha256?: unknown; origin?: unknown };
+      if (contentSha256 === hash) {
+        if (provenance === "before_task" && (BEFORE_TASK_ORIGINS as readonly unknown[]).includes(origin)) return { ...reply, provenance, origin: origin as BeforeTaskOrigin };
+        if (provenance === "independent" && MADE_INDEPENDENT.has(decision)) return { ...reply, provenance };
+      }
+    }
     return { ...reply, provenance: "task_made" };
   });
   return { version: file.version, family: file.family, replies };
+}
+
+export interface DecidedFromBase {
+  /** The file to stamp: base replies in BASE order (an edited one in place of its base reply, a deleted one restored), then the candidate's other replies in the candidate's order. */
+  readonly file: ModelReplySetFile;
+  readonly decisions: Map<string, ReplyProvenanceDecision>;
+}
+
+/**
+ * Provenance from the task's BASE COMMIT, by content (pure; the worker reads the two files, Part B). A candidate reply is `before_task` only if the base file has a reply with the same `{id, match, response}` (the same
+ * canonical hash). An edited reply (same id, other content) is `task_made` and takes its base reply's place; a reply the base does not have is `task_made` and goes after the base replies; a base reply the candidate
+ * deleted or renamed away is restored from the base as `before_task`, so reordering, deleting or renaming base replies cannot change which `before_task` reply wins. With no base file, or a base of another family,
+ * every reply is `task_made`. `origin` is what the worker knows about how the base reply got into the project's set.
+ */
+export function decideFromBase(base: ModelReplySetFile | undefined, candidate: ModelReplySetFile, origin: BeforeTaskOrigin): DecidedFromBase {
+  const decisions = new Map<string, ReplyProvenanceDecision>();
+  if (base === undefined || base.family !== candidate.family) {
+    for (const reply of candidate.replies) decisions.set(reply.id, { provenance: "task_made", contentSha256: modelReplyEntrySha256(reply) });
+    return { file: candidate, decisions };
+  }
+  const candidateById = new Map(candidate.replies.map((reply) => [reply.id, reply] as const));
+  const baseIds = new Set(base.replies.map((reply) => reply.id));
+  const ordered: ModelReplyFileEntry[] = [];
+  for (const baseReply of base.replies) {
+    const mine = candidateById.get(baseReply.id);
+    const baseHash = modelReplyEntrySha256(baseReply);
+    if (mine !== undefined && modelReplyEntrySha256(mine) !== baseHash) {
+      ordered.push(mine); // edited: served in the base position, never counted
+      decisions.set(mine.id, { provenance: "task_made", contentSha256: modelReplyEntrySha256(mine) });
+    } else {
+      ordered.push(baseReply); // identical, or deleted and restored
+      decisions.set(baseReply.id, { provenance: "before_task", origin, contentSha256: baseHash });
+    }
+  }
+  for (const reply of candidate.replies) {
+    if (baseIds.has(reply.id)) continue;
+    ordered.push(reply);
+    decisions.set(reply.id, { provenance: "task_made", contentSha256: modelReplyEntrySha256(reply) });
+  }
+  return { file: { version: candidate.version, family: candidate.family, replies: ordered }, decisions };
 }
 
 // ---- selection

@@ -70,6 +70,9 @@ const bodyBytes = (body: ModelHelperRequest["body"]): number => (body === undefi
 
 const fixedError = (status: number, code: ServeErrorCode | "bad_reply", message?: string): ModelAnswer => jsonAnswer(status, { error: { code, message: message ?? (code === "bad_reply" ? "the scripted reply could not be rendered" : SERVE_ERROR_WORDS[code]) } });
 
+/** A not-served answer is never a 5xx (an SDK retries those, and each retry would be one more ledger row): a 5xx from the builders below becomes a 422 with the same body. */
+const retrySafe = (answer: ModelAnswer): ModelAnswer => (answer.status >= 500 ? { ...answer, status: 422 } : answer);
+
 interface Base {
   readonly rowId: string | undefined;
   readonly family: ServedModelFamily | undefined;
@@ -101,7 +104,7 @@ export function serveModelRequestWithReplies(rows: readonly ServableRow[], reply
   if (row.routesTo === "local_aws_front" || row.family === "bedrock") {
     return notServed(fixedError(421, "routes_to_local_aws_front", BEDROCK_NOT_RUN_SENTENCE), state, { ...NO_BASE, rowId: row.id }, BEDROCK_NOT_RUN_SENTENCE);
   }
-  if (!isServedModelFamily(row.family)) return notServed(fixedError(501, "family_not_built"), state, { ...NO_BASE, rowId: row.id });
+  if (!isServedModelFamily(row.family)) return notServed(fixedError(422, "family_not_built"), state, { ...NO_BASE, rowId: row.id });
   const family: ServedModelFamily = row.family;
   const shape = MODEL_FAMILY_REGISTRY[family];
   const text = bodyText(request.body);
@@ -128,14 +131,15 @@ export function serveModelRequestWithReplies(rows: readonly ServableRow[], reply
   try {
     answer = shape.scripted(route, modelReplyOf(reply), { rows, request, facts, requestBytes: bodyBytes(request.body), seed: options.seed, lineEnding: options.lineEnding ?? "lf", created: options.created ?? 1_700_000_000 });
   } catch {
-    return { ...notServed(fixedError(500, "bad_reply"), next, base), replyId: reply.id };
+    return { ...notServed(fixedError(422, "bad_reply"), next, base), replyId: reply.id };
   }
-  if (answer === undefined || answer.status !== 200) return { ...notServed(answer ?? fixedError(501, "operation_not_built"), next, base), replyId: reply.id };
+  if (answer === undefined || answer.status !== 200) return { ...notServed(answer === undefined ? fixedError(422, "operation_not_built") : retrySafe(answer), next, base), replyId: reply.id };
   return {
     answer,
     kind: "scripted",
     resultClass: reply.provenance,
-    countsTowardProof: replyCountsTowardProof(reply.provenance),
+    /** A failure-pack run proves nothing: not even the calls that succeed before `afterCalls` count. */
+    countsTowardProof: failure === undefined && replyCountsTowardProof(reply.provenance),
     ...base,
     replyId: reply.id,
     provenance: reply.provenance,

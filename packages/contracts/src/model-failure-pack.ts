@@ -12,7 +12,8 @@
 //   token_limit     `output`: a complete answer with the family's length stop (`finish_reason: "length"`, `stop_reason: "max_tokens"`, `finishReason: "MAX_TOKENS"`, `MAX_TOKENS`); `input`: the input-too-long 400.
 //   refusal         OpenAI `refusal` (or `content_filter`), Anthropic `stop_reason: "refusal"`, Gemini `finishReason: "SAFETY"` (or `promptFeedback.blockReason`). Cohere documents no refusal marker: its answer is a refusal
 //                   sentence with `COMPLETE` (UNVERIFIED).
-//   bad_tool_json   a tool call whose arguments do not parse (OpenAI, Cohere: an unterminated string; Anthropic's stream: an unterminated `partial_json`) or are not an object (Gemini `args`, Anthropic's whole `input`).
+//   bad_tool_json   a tool call whose arguments break the declared schema: OpenAI and Cohere send an unterminated JSON string (does not parse); Anthropic's stream sends an unterminated `partial_json` (the SDK's partial parser
+//                   yields an object that does not match the schema, it is not a parse error); Gemini `args` and Anthropic's whole `input` are an OBJECT with the wrong keys and types.
 // `afterCalls` (the first n calls succeed from the reply set, then the failure starts) is counted by `model-serve-replies.ts`. PURE: no Node module, no socket, no clock, no randomness.
 import { z } from "zod";
 import { sseBody, seededId, type ModelReply, type SseLineEnding } from "./model-family-common.js";
@@ -115,7 +116,8 @@ export const FAILURE_PACK_TEXT = "This is the start of an answer from the Rovara
 export const FAILURE_REFUSAL_TEXT = "I can't help with that request.";
 const BAD_ARGS_PLACEHOLDER = { rovara_bad_tool_json: 1 } as const;
 const BAD_ARGS_TEXT = '{"value": [1, 2';
-const NOT_AN_OBJECT = "not-an-object";
+/** Arguments that are an object but break the declared schema (wrong keys, wrong types): google-genai (Python) raises on non-object args before customer code runs, so the object form is what a test of the customer's own validation needs. */
+const WRONG_SHAPE_ARGS = { rovara_wrong_key: ["not", "the", "declared", "type"] } as const;
 
 const renderContext = (context: FailureContext): RenderContext => ({ wire: context.wire, operation: context.operation, model: context.model, stream: context.stream, seed: context.seed, lineEnding: context.lineEnding, created: context.created, enumEncoding: context.enumEncoding });
 
@@ -206,9 +208,9 @@ function badToolJson(context: FailureContext): ModelAnswer {
   const good = renderModelReply(reply, renderContext(context));
   if (good === undefined) return familyErrorAnswer(context.wire, "not_applicable");
   const placeholder = JSON.stringify(BAD_ARGS_PLACEHOLDER);
-  // Arguments carried as a string (OpenAI, Cohere, Anthropic's `partial_json`): an unterminated JSON text. Arguments carried as an object (Gemini `args`, Anthropic's whole `input`): not an object.
+  // Arguments carried as a string (OpenAI, Cohere, Anthropic's `partial_json`): an unterminated JSON text (for Anthropic's stream the SDK's partial parser turns it into an object that breaks the schema, not a parse error). Arguments carried as an object (Gemini `args`, Anthropic's whole `input`): an object with the wrong keys and types, never a string.
   const asString = swap(good.body, JSON.stringify(placeholder), JSON.stringify(BAD_ARGS_TEXT));
-  const asObject = swap(good.body, `"args":${placeholder}`, `"args":${JSON.stringify(NOT_AN_OBJECT)}`) ?? swap(good.body, `"input":${placeholder}`, `"input":${JSON.stringify(NOT_AN_OBJECT)}`);
+  const asObject = swap(good.body, `"args":${placeholder}`, `"args":${JSON.stringify(WRONG_SHAPE_ARGS)}`) ?? swap(good.body, `"input":${placeholder}`, `"input":${JSON.stringify(WRONG_SHAPE_ARGS)}`);
   const body = asString ?? asObject;
   return body === undefined ? familyErrorAnswer(context.wire, "not_applicable") : { ...good, body };
 }

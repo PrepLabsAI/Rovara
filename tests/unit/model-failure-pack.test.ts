@@ -263,18 +263,20 @@ describe("bad_tool_json", () => {
     expect(() => JSON.parse(joined)).toThrow();
     expect(answer("bad_tool_json", { wire: "cohere", operation: "chat", stream: "sse" }).body).not.toContain("rovara_bad_tool_json");
   });
-  it("Anthropic: a whole input that is not an object, and an unterminated partial_json when streamed", () => {
+  it("Anthropic: a whole input of the wrong shape, and an unterminated partial_json when streamed (the SDK's partial parser then yields an object that breaks the schema)", () => {
     const whole = json(answer("bad_tool_json", { wire: "anthropic", operation: "messages" }).body);
-    expect(whole.content[0]).toMatchObject({ type: "tool_use", name: "get_weather", input: "not-an-object" });
+    expect(whole.content[0]).toMatchObject({ type: "tool_use", name: "get_weather", input: { rovara_wrong_key: ["not", "the", "declared", "type"] } });
     const stream = parseNamedSseText(answer("bad_tool_json", { wire: "anthropic", operation: "messages", stream: "sse" }).body);
     const joined = stream.ok ? stream.events.filter((event) => event.event === "content_block_delta").map((event) => JSON.parse(event.data).delta.partial_json).join("") : "";
-    expect(() => JSON.parse(joined)).toThrow();
+    expect(() => JSON.parse(joined)).toThrow(); // the stream's pieces are never a complete JSON text
   });
-  it("Gemini: functionCall.args that is not an object (whole and streamed)", () => {
+  it("M4: Gemini functionCall.args is an OBJECT with the wrong keys and types, never a string (google-genai Python needs an object)", () => {
+    const wrong = { rovara_wrong_key: ["not", "the", "declared", "type"] };
     const whole = json(answer("bad_tool_json", { wire: "gemini", operation: "generateContent" }).body);
-    expect(whole.candidates[0].content.parts[0].functionCall).toEqual({ name: "get_weather", args: "not-an-object" });
-    expect(answer("bad_tool_json", { wire: "gemini", operation: "streamGenerateContent", stream: "sse" }).body).toContain('"args":"not-an-object"');
-    expect(json(answer("bad_tool_json", { wire: "gemini", operation: "streamGenerateContent", stream: "json_array" }).body)[0].candidates[0].content.parts.at(-1).functionCall.args).toBe("not-an-object");
+    expect(whole.candidates[0].content.parts[0].functionCall).toEqual({ name: "get_weather", args: wrong });
+    expect(typeof whole.candidates[0].content.parts[0].functionCall.args).toBe("object");
+    expect(answer("bad_tool_json", { wire: "gemini", operation: "streamGenerateContent", stream: "sse" }).body).toContain(`"args":${JSON.stringify(wrong)}`);
+    expect(json(answer("bad_tool_json", { wire: "gemini", operation: "streamGenerateContent", stream: "json_array" }).body)[0].candidates[0].content.parts.at(-1).functionCall.args).toEqual(wrong);
   });
   it("uses the declared tool name, or unknown_tool", () => {
     expect(answer("bad_tool_json", { wire: "openai", toolName: undefined }).body).toContain('"name":"unknown_tool"');

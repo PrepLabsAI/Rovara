@@ -5,7 +5,9 @@ import {
   MODEL_REPLY_SET_MAX_REPLIES,
   ModelReplySetFileSchema,
   ModelReplySetSchema,
+  createRovaraIndependentDecision,
   modelReplyContentSha256,
+  modelReplyEntrySha256,
   modelReplySetDigest,
   parseModelReplySetFileBytes,
   parseModelReplySetBytes,
@@ -140,13 +142,14 @@ describe("the resolved form (what the helper loads)", () => {
 
 describe("stampReplyProvenance: the worker's decision is the only way a provenance gets in", () => {
   const file = ModelReplySetFileSchema.parse(fileSet([fileReply("a"), fileReply("b"), fileReply("c"), fileReply("d")]));
-  it("applies the worker's decisions", () => {
+  const hashOf = (id: string) => modelReplyEntrySha256(file.replies.find((reply) => reply.id === id) as never);
+  it("applies the worker's decisions (each bound to the reply's content hash)", () => {
     const set = stampReplyProvenance(
       file,
       new Map([
-        ["a", { provenance: "before_task" as const, origin: "customer_written" as const }],
-        ["b", { provenance: "task_made" as const }],
-        ["c", { provenance: "independent" as const }],
+        ["a", { provenance: "before_task" as const, origin: "customer_written" as const, contentSha256: hashOf("a") }],
+        ["b", { provenance: "task_made" as const, contentSha256: hashOf("b") }],
+        ["c", createRovaraIndependentDecision(hashOf("c"))],
       ]),
     );
     expect(set.replies.map((reply) => [reply.id, reply.provenance])).toEqual([["a", "before_task"], ["b", "task_made"], ["c", "independent"], ["d", "task_made"]]);
@@ -155,9 +158,9 @@ describe("stampReplyProvenance: the worker's decision is the only way a provenan
   });
   it("a reply with no decision, an unknown value or a before_task with no origin is task_made (never counted)", () => {
     const decisions = new Map<string, unknown>([
-      ["a", { provenance: "before_task" }],
-      ["b", { provenance: "REAL", origin: "customer_written" }],
-      ["c", { provenance: "before_task", origin: "trust_me" }],
+      ["a", { provenance: "before_task", contentSha256: hashOf("a") }],
+      ["b", { provenance: "REAL", origin: "customer_written", contentSha256: hashOf("b") }],
+      ["c", { provenance: "before_task", origin: "trust_me", contentSha256: hashOf("c") }],
     ]);
     const set = stampReplyProvenance(file, decisions as never);
     expect(set.replies.map((reply) => reply.provenance)).toEqual(["task_made", "task_made", "task_made", "task_made"]);

@@ -7,6 +7,8 @@ import { buildGeminiGenerateContent, buildGeminiStreamChunks, geminiJsonArrayBod
 import { buildAnthropicCountTokens, buildAnthropicMessage, buildAnthropicMessageStreamEvents, anthropicStreamBody } from "./model-family-anthropic.js";
 import { buildCohereChat, buildCohereChatStreamEvents, buildCohereEmbed, buildCohereRerank, cohereStreamBody } from "./model-family-cohere.js";
 import { buildOpenAiEmbeddings, buildOpenAiResponse, openAiResponseStreamBody } from "./model-family-openai-ops.js";
+import { anthropicErrorBody } from "./model-family-anthropic.js";
+import { cohereErrorBody } from "./model-family-cohere.js";
 import { buildGeminiBatchEmbedContents, buildGeminiEmbedContent } from "./model-family-gemini-extra.js";
 import type { ModelReply, SseLineEnding } from "./model-family-common.js";
 import type { ModelRequestFacts } from "./model-request-facts.js";
@@ -91,16 +93,48 @@ export function renderModelReply(reply: ModelReply, context: RenderContext): Mod
  * The operations that need a matched reply to be "expected" but whose bytes do not come from its text: token counts, embeddings and rerank. The numbers are filler that depends on the request's counts and the seed only.
  * Undefined when the operation is not one of these.
  */
+/** What the helper serves for an embedding call: at most this many inputs and dimensions per family, and at most `EMBEDDING_NUMBERS_MAX` numbers (inputs x dimensions x types) in one answer. */
+export const EMBEDDING_LIMITS = {
+  openai: { inputs: 2048, dimensions: 3072, defaultDimensions: 1536 },
+  cohere: { inputs: 96, dimensions: 4096, defaultDimensions: 1024 },
+  gemini: { inputs: 100, dimensions: 3072, defaultDimensions: 768 },
+} as const;
+export const EMBEDDING_NUMBERS_MAX = 262_144;
+export const EMBEDDING_TOO_BIG_SENTENCE = "not run: this embedding request is larger than the model helper serves";
+
+function tooBigAnswer(wire: ModelWire): ModelAnswer {
+  switch (wire) {
+    case "anthropic":
+      return jsonAnswer(400, anthropicErrorBody("invalid_request_error", EMBEDDING_TOO_BIG_SENTENCE));
+    case "cohere":
+      return jsonAnswer(400, cohereErrorBody(EMBEDDING_TOO_BIG_SENTENCE));
+    case "gemini":
+      return jsonAnswer(400, { error: { code: 400, message: EMBEDDING_TOO_BIG_SENTENCE, status: "INVALID_ARGUMENT" } });
+    case "openai":
+      return jsonAnswer(400, { error: { message: EMBEDDING_TOO_BIG_SENTENCE, type: "invalid_request_error", param: null, code: "embedding_request_too_large" } });
+  }
+}
+
+/** Whether an embedding request is within the limits above, judged BEFORE anything is built (a fixed 400 otherwise, never a RangeError, never a big allocation). */
+function embeddingWithinLimits(kind: keyof typeof EMBEDDING_LIMITS, inputs: number, dimensions: number | undefined, types: number): boolean {
+  const limit = EMBEDDING_LIMITS[kind];
+  const dims = dimensions ?? limit.defaultDimensions;
+  return inputs <= limit.inputs && dims <= limit.dimensions && inputs * dims * types <= EMBEDDING_NUMBERS_MAX;
+}
+
 export function renderUtilityOperation(facts: ModelRequestFacts, requestBytes: number, context: RenderContext): ModelAnswer | undefined {
   const approxTokens = Math.ceil(requestBytes / 4);
   if (context.wire === "openai" && context.operation === "embeddings") {
+    if (!embeddingWithinLimits("openai", facts.inputCount, facts.dimensions, 1)) return tooBigAnswer("openai");
     return jsonAnswer(200, buildOpenAiEmbeddings({ model: context.model, seed: context.seed, inputCount: facts.inputCount, dimensions: facts.dimensions, base64: facts.base64, promptTokens: Math.ceil((facts.promptText ?? "").length / 4) }));
   }
   if (context.wire === "anthropic" && context.operation === "count_tokens") return jsonAnswer(200, buildAnthropicCountTokens(approxTokens));
   if (context.wire === "cohere" && context.operation === "embed") {
+    if (!embeddingWithinLimits("cohere", facts.inputCount, facts.dimensions, Math.max(1, new Set(facts.embeddingTypes).size))) return tooBigAnswer("cohere");
     return jsonAnswer(200, buildCohereEmbed({ seed: context.seed, textCount: facts.inputCount, dimensions: facts.dimensions, types: facts.embeddingTypes, inputTokens: Math.ceil((facts.promptText ?? "").length / 4) }));
   }
   if (context.wire === "cohere" && context.operation === "rerank") return jsonAnswer(200, buildCohereRerank({ seed: context.seed, documentCount: facts.documentCount, topN: facts.topN }));
+  if (context.wire === "gemini" && (context.operation === "embedContent" || context.operation === "batchEmbedContents") && !embeddingWithinLimits("gemini", context.operation === "embedContent" ? 1 : facts.inputCount, facts.dimensions, 1)) return tooBigAnswer("gemini");
   if (context.wire === "gemini" && context.operation === "embedContent") return jsonAnswer(200, buildGeminiEmbedContent({ seed: context.seed, dimensions: facts.dimensions }));
   if (context.wire === "gemini" && context.operation === "batchEmbedContents") return jsonAnswer(200, buildGeminiBatchEmbedContents({ seed: context.seed, count: facts.inputCount, dimensions: facts.dimensions }));
   return undefined;
