@@ -287,7 +287,7 @@ describe("mark ready anyway", () => {
     const closed = { ...(await world.task()), closedAt: "2026-11-09T10:00:00.000Z" };
     const outcome = await markReadyAnyway(
       { store: world.store, audit: world.audit, roles, now: () => world.now.value, loadTask: async () => closed },
-      { companyId: ORG, taskId: TASK_ID, repositoryId: world.prs[0]!.repositoryId, number: world.prs[0]!.number, actorId: "owner-1" },
+      { companyId: ORG, taskId: TASK_ID, repositoryId: world.prs[0]!.repositoryId, number: world.prs[0]!.number, expectedHeadSha: world.prs[0]!.head, actorId: "owner-1" },
     ).then(() => true, (error: { code?: string }) => error.code);
     expect(outcome).toBe("TASK_ACCESS_DENIED");
   });
