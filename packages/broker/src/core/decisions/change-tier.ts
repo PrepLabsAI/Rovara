@@ -631,7 +631,7 @@ export const ADDED_BYTES_TOTAL_MAX = 20_000;
 
 /** Text that looks like a credential: a cloud key id, a platform token, a private key block. A fixture or a config that holds one is risky (a leaked credential, or a test of one that is wrongly real). */
 /** Line-ending characters other than the newline the patch is split on. */
-const LINE_BREAK_ODD = /[\r\u0085\u2028\u2029\u000B\u000C]/u;
+const LINE_BREAK_ODD = new RegExp(`[${["\\r", "\\u0085", "\\u2028", "\\u2029", "\\u000B", "\\u000C"].join("")}]`, "u");
 const SECRET_LIKE = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bgh[pousr]_[A-Za-z0-9]{30,}|\bsk-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{35}\b|\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}/u;
 /** A line that switches a check off: in a test runner's or scanner's configuration, an exclude, an ignore, a skip, an off, a lowered threshold. */
 const WEAKEN_CHECK_LINE = /\b(?:exclude|excludes|ignore|ignored|skips?|skipped|disable|disabled|select|extend-ignore|per-file-ignores|todo|allowFailure|allow_failures?|threshold|testPathIgnorePatterns|continue-on-error|coveragePathIgnorePatterns)\b|['"](?:off|0)['"]|:\s*(?:0|false)\b/iu;
