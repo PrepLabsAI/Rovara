@@ -8,8 +8,8 @@
 // Informational: a fault anywhere only means there is no pack for this code, and the pull request and the page say what they always said. Nothing here can change a verdict, block a publication or hold a callback
 // past its bound. Video, trace, screenshots and API samples are not gathered by this path (their capture lane is separate): the builder is given no media gate, so none is ever kept.
 import {
-  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor,
-  type CheckEntry, type CheckKind, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidenceRaw, type TestEnvProdDeny, type TestProofWeakening,
+  EVIDENCE_NOT_TESTED_MAX, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidenceBaselineSchema, EvidencePackReadSchema, EvidencePackSchema, EvidenceRawSchema, TEST_PROOF_ARTIFACT, TestProofSchema, evidenceIsFor,
+  type CheckEntry, type CheckKind, type EvidenceBaseline, type EvidenceEnvironment, type EvidenceNotTested, type EvidencePack, type EvidenceRaw, type RawBaseline, type TestEnvProdDeny, type TestProofWeakening,
 } from "@agentx/contracts";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
 import { storeEvidenceArtifacts, type EvidenceArtifactStore } from "./evidence-artifacts.js";
@@ -23,6 +23,8 @@ export interface EvidenceTask { ownerKey: string; workspaceId: string; taskId: s
 
 /** The pack is kept at a key that names its task and the exact code it is for; a reader asks for the current candidate's digest only. */
 export const evidencePackKey = (task: EvidenceTask, candidateDigest: string): string => `private/${task.ownerKey}/${task.workspaceId}/evidence-pack/${task.taskId}/${candidateDigest}.json`;
+/** TE-C1: the words of the baseline the task was compared with, beside its pack (the pack's own shape is unchanged). The same prefix, so a task's or a workspace's evidence erase deletes it, and the same retention class. */
+export const evidenceBaselineKey = (task: EvidenceTask, candidateDigest: string): string => `private/${task.ownerKey}/${task.workspaceId}/evidence-pack/${task.taskId}/${candidateDigest}.baseline.json`;
 const DIGEST = /^[a-f0-9]{64}$/u;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const PACK_READ_BYTES = 4 * 1_048_576;
@@ -32,6 +34,15 @@ export const DEFAULT_EVIDENCE_ENVIRONMENT: EvidenceEnvironment = { tier: "sandbo
 const NO_ENVIRONMENT_ITEM: EvidenceNotTested = { kind: "environment", id: "test_environment", text: "No approved test environment: the project's own test setup was used", reason: "not set up" };
 const NOT_CAPTURED_ITEM: EvidenceNotTested = { kind: "environment", id: "evidence_capture", text: "Test details were not captured for this run", reason: "the worker reported none" };
 const WITHHELD_ITEM: EvidenceNotTested = { kind: "environment", id: "data_guard", text: "Some test details were left out", reason: "personal or production data found" };
+
+/**
+ * TE-C1: what the keeper may do with the worker's baseline claim. `offered` are the shas THIS task's plan sent to the worker: a claim for any other sha is ignored. `resolve` looks the row up (the engine's own, for this task's
+ * company, project, revision and branch) and says the words, or nothing. Absent (the switch off, or a plan with no candidates): the claim is not looked at.
+ */
+export interface KeepEvidenceBaseline {
+  offered: readonly string[];
+  resolve(claim: RawBaseline): Promise<EvidenceBaseline | undefined>;
+}
 
 export interface KeepEvidenceInput {
   /** The org the task belongs to: the first pack an org keeps marks it, so an erase for an org that never kept evidence costs one read. */
@@ -49,6 +60,8 @@ export interface KeepEvidenceInput {
   environmentNote?: EvidenceNotTested | undefined;
   /** Test services: the dependencies the broker pinned for the run (see `PinnedDependency`). */
   dependencies?: readonly PinnedDependency[] | undefined;
+  /** TE-C1: see `KeepEvidenceBaseline`. */
+  baseline?: KeepEvidenceBaseline | undefined;
 }
 
 export interface KeepEvidenceDeps {
@@ -130,6 +143,9 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
       try { const parsed = EvidenceRawSchema.safeParse(JSON.parse(rawText)); parsedRaw = parsed.success ? parsed.data : undefined; } catch { parsedRaw = undefined; }
     }
     if (parsedRaw !== undefined && parsedRaw.candidateDigest !== input.candidateDigest) return { kept: false, reason: "not_bound" };
+    // TE-C1: the worker's claim is used only for a commit this task's plan offered; the engine then looks the row up itself. Anything else (a sha it did not offer, no offer, no row) is no baseline.
+    const claim = parsedRaw?.baseline;
+    const baselineWords = claim === undefined || input.baseline === undefined || !input.baseline.offered.includes(claim.sha) ? undefined : await input.baseline.resolve(claim).catch(() => undefined);
     if (parsedRaw !== undefined) {
       // TE-B3: the facts from the run on the original code join the raw file first, so the data guard and the builder check them like every other test name.
       parsedRaw = withWeakeningFacts(parsedRaw, await readWeakeningFacts(deps, input));
@@ -175,6 +191,18 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     await deps.store.blobs.put(evidencePackKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(checked.data), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" },
       // One pack per task and candidate digest: re-keeping the same candidate (a re-check, a retried keep) writes the pack again, so this caller overwrites on purpose.
       { overwrite: true });
+    // TE-C1: the words beside the pack, replaced (or removed) with every keep of the same code, so they never describe a run this keep did not compare with. Informational: a fault here is only a missing line.
+    // Only for a keep that was given baseline input (the switch on): with it off nothing here runs, so the keeper is byte for byte what it was.
+    if (input.baseline !== undefined) {
+      try {
+        // An abandoned call (its time has run out) writes nothing more.
+        if (deps.late?.() === true) return { kept: true, problems: built.problems, guardedParts: guarded };
+        if (baselineWords === undefined) await deps.store.blobs.delete(evidenceBaselineKey(input.task, input.candidateDigest));
+        else await deps.store.blobs.put(evidenceBaselineKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(EvidenceBaselineSchema.parse(baselineWords)), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-baseline" }, retention: "evidence-std" }, { overwrite: true });
+      } catch (error) {
+        deps.log?.("evidence.baseline_not_kept", { error: error instanceof Error ? error.name : "unknown" });
+      }
+    }
     return { kept: true, problems: built.problems, guardedParts: guarded };
   } catch (error) {
     deps.log?.("evidence.keep_failed", { error: error instanceof Error ? error.name : "unknown" });
@@ -190,6 +218,19 @@ export async function loadEvidencePack(blobs: Pick<EvidenceBlobStore, "get">, ta
     if (bytes === undefined) return undefined;
     const parsed = EvidencePackReadSchema.safeParse(JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown);
     return parsed.success && evidenceIsFor(parsed.data, candidateDigest) ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The words kept beside the pack for exactly this code of this task; undefined when there are none or they do not parse. Never throws. */
+export async function loadEvidenceBaseline(blobs: Pick<EvidenceBlobStore, "get">, task: EvidenceTask, candidateDigest: string | undefined): Promise<EvidenceBaseline | undefined> {
+  if (candidateDigest === undefined || !DIGEST.test(candidateDigest) || !TASK_ID.test(task.taskId)) return undefined;
+  try {
+    const bytes = await blobs.get(evidenceBaselineKey(task, candidateDigest), 4_096);
+    if (bytes === undefined) return undefined;
+    const parsed = EvidenceBaselineSchema.safeParse(JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown);
+    return parsed.success ? parsed.data : undefined;
   } catch {
     return undefined;
   }

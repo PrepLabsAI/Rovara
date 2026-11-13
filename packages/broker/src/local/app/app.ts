@@ -333,7 +333,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
 
   // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
-  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs });
+  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs, testEnv: { store, now: () => clock().getTime(), env: options.environment ?? process.env } });
   // The project's approved test environment: tasks pin it when they start, a coding or verification run is told its plan, and the owner approves a change on a page (the gate decides it).
   // `pages` and `gate` are made below; the module asks for them when it is used, never when it is built.
   const pagesServer: { current?: LocalPagesServer } = {};

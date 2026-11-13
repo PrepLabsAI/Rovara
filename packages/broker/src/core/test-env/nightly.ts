@@ -36,6 +36,8 @@ import {
   type StoredNightlyHealth,
 } from "@agentx/contracts";
 import { documentOf, expiryOf, type TestEnvDeps } from "./deps.js";
+import { mintTrustedBaselineRun, recordBaselineRow } from "./baseline-cache.js";
+import { baselineCacheEnabled } from "./switch.js";
 import { readApprovedTestEnvironment } from "./environment.js";
 import { classifyNightlyHealth } from "./nightly-health.js";
 import { recordNightUnavailable, sameDayRetryOf } from "./night-status.js";
@@ -342,6 +344,18 @@ export async function recordNightlyResult(
   const history = { ...keyOf(input.orgId, input.project, `TESTENV#BASELINE#${result.finishedAt}`), entityType: "TEST_ENV_BASELINE", orgId: input.orgId, project: input.project, baseline, ...healthField, ...(result.coverageMapSkipped === undefined ? {} : { coverageMapSkipped: result.coverageMapSkipped }), slowest: result.slowest, durationMs: result.durationMs, ...expiryOf(now + BASELINE_TTL_MS) };
   await deps.store.put({ item: documentOf(history) });
   await deps.store.put({ item: documentOf({ ...baselineLatestKey(input.orgId, input.project), entityType: "TEST_ENV_BASELINE_LATEST", orgId: input.orgId, project: input.project, baseline, ...healthField }) });
+  // TE-C1 (switch `ROVARA_BASELINE_CACHE`): this record is the ONE place a run becomes a trusted baseline row (slot lock, revision and branch are checked above). The row is an addition: a fault that cannot pass (a row the
+  // store will not hold) never fails the night's own record; one that may pass is thrown, so the worker's retry records the same result again (the put is repeatable).
+  if (baselineCacheEnabled(deps.env ?? process.env)) {
+    try {
+      const { coverageMapRef: _map, coverageMapBuiltAt: _built, ...summary } = baseline;
+      void _map; void _built;
+      await recordBaselineRow(deps, mintTrustedBaselineRun({ orgId: input.orgId, project: input.project, row: { ...summary, writer: "nightly" } }));
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", level: "warn", event: "test_env.baseline_row_failed", orgId: input.orgId, error: errorName(error) }));
+      if (mayPass(error)) throw error;
+    }
+  }
   // Before the run is released: a listener that fails leaves the run claimed, so the worker's retry records the same result again (every write above and in the listener is repeatable).
   if (onRecorded !== undefined) {
     try {

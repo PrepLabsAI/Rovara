@@ -7,6 +7,7 @@ import { CHECK_KIND_ID_PATTERN, CHECK_PARTS, PROOF_BASES, EVIDENCE_TRUST_CLASSES
 import { inertEvidenceText } from "./evidence-inert.js";
 import { forwardReader, safePathKey, setOwnProperty, tolerantRead, type TolerantRead, type TolerantReport } from "./forward-reader.js";
 import { TEST_ID_MAX } from "./test-id.js";
+import { RawBaselineSchema } from "./test-env-baseline.js";
 import { TestAnswerRecordsSchema } from "./test-answer-labels.js";
 import { ABSENT_ON_NEW_MAX, TestProofReasonSchema, TestProofVerdictSchema } from "./test-proof.js";
 import { TestServicesUsageRecordSchema } from "./test-services-usage.js";
@@ -518,6 +519,8 @@ export const EvidenceRawSchema = z
     browser: EvidencePackSchema.shape.browser.optional(),
     /** Test services: what the worker saw of the dependencies it started for the round, and the names the sealed tests asked for that no dependency answers. FACTS only: the broker decides every label from the pinned plan. */
     testServices: TestServicesUsageRecordSchema.optional(),
+    /** TE-C1: the nearest trusted baseline commit that is an ancestor of the task's base, found by the worker at the start of the round. Written only when the plan carried candidates (an asked-for field); the broker uses it only for a sha it offered. */
+    baseline: RawBaselineSchema.optional(),
   })
   .strict()
   .superRefine((raw, context) => {

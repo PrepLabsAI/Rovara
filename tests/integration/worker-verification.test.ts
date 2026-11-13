@@ -35,6 +35,7 @@ import { commitCandidateWorktree, readCandidateRepositories } from "../../packag
 import { CHECKS_MESSAGE_TYPE, checksArtifactContent, compactCheckReport } from "../../packages/worker/src/verification/extension.js";
 import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import * as buildSourceExport from "../../packages/worker/src/e2e-build-source-export.js";
+import * as baselineAncestry from "../../packages/worker/src/verification/baseline-ancestry.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -103,6 +104,11 @@ vi.mock("../../packages/worker/src/e2e-build-source-export.js", async (importOri
   return { ...original, exportCandidateBuildSourceInScratch: vi.fn(original.exportCandidateBuildSourceInScratch) };
 });
 
+vi.mock("../../packages/worker/src/verification/baseline-ancestry.js", async (importOriginal) => {
+  const original: typeof baselineAncestry = await importOriginal();
+  return { ...original, findBaselineAncestor: vi.fn(original.findBaselineAncestor) };
+});
+
 /** One model request: the conversation the model was given, without the system message. */
 type Request = Array<{ role: string; content: unknown }>;
 
@@ -126,6 +132,8 @@ async function runTask(options: {
   originalCode?: OriginalCode;
   /** The scripted model's context window. Pi 1.5 compacts a long transcript on its own, and a compaction asks the scripted model for a summary, which would use up the script; a run with huge outputs gives the model room. */
   contextWindow?: number;
+  /** More payload fields (TE-C1: the test environment's plan and the evidence request). */
+  payloadExtra?: Record<string, unknown>;
 }) {
   const { modelRuntime, faux } = await fauxModelRuntime(options.contextWindow === undefined ? {} : { contextWindow: options.contextWindow });
   const requests: Request[] = [];
@@ -142,7 +150,7 @@ async function runTask(options: {
   const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
     protocolVersion: 1, kind: "task", operationId: options.operationId ?? randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
     callbackCapability: "c".repeat(64),
-    payload: { conversationId: randomUUID(), prompt: "fix it", ...(options.readiness === undefined ? {} : { readiness: options.readiness }), ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }) },
+    payload: { conversationId: randomUUID(), prompt: "fix it", ...(options.readiness === undefined ? {} : { readiness: options.readiness }), ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }), ...(options.payloadExtra ?? {}) },
   };
   const rootPath = options.rootPath ?? await workspaceRoot(options.prepared ?? options.readiness ?? []);
   const events: WorkerEvent[] = [];
@@ -1846,4 +1854,83 @@ describe("PR-feedback review through the answer tool", () => {
     expect(record.toolNames).toEqual([]);
     expect(record.prompts[0]).not.toContain("submit_feedback_review");
   });
+});
+
+describe("TE-C1: the baseline claim of a verification run", () => {
+  const BASE_PLAN = { revision: 1, digest: "d".repeat(64), roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, checks: [{ id: "lint", kind: "lint" }] };
+  const git = (directory: string, ...args: string[]): string => execFileSync("git", ["-C", directory, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", ...args], { encoding: "utf8" }).trim();
+  /** A workspace whose repository has two commits; the task's base (the manifest's resolved commit) is the second. */
+  async function twoCommitWorkspace(): Promise<{ rootPath: string; first: string; second: string; repository: string }> {
+    const rootPath = await gitWorkspaceRoot([lint]);
+    const repository = join(rootPath, "app");
+    const first = git(repository, "rev-parse", "HEAD");
+    await writeFile(join(repository, "second.txt"), "two\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "second");
+    const second = git(repository, "rev-parse", "HEAD");
+    const manifestPath = join(rootPath, ".agentx/preparation-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { repositories: Array<Record<string, unknown>> };
+    manifest.repositories[0]!["resolvedCommit"] = second;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    return { rootPath, first, second, repository };
+  }
+  const rawOf = (run: Awaited<ReturnType<typeof runTask>>) => {
+    const artifact = run.artifacts.find((item) => item.name === "evidence-raw.json");
+    return artifact === undefined ? undefined : (JSON.parse(artifact.content) as { baseline?: unknown; checks: unknown[] });
+  };
+  /** What an agent (or a check) can do to a repository's .git: a rewritten ref, a replace ref, a shallow file and grafts. */
+  async function tamper(repository: string, first: string, second: string, stranger: string): Promise<void> {
+    git(repository, "update-ref", "refs/heads/rewritten", first);
+    await writeFile(join(repository, ".git", "shallow"), `${second}\n`);
+    await writeFile(join(repository, ".git", "info", "grafts"), `${second} ${stranger}\n`).catch(() => undefined);
+    await writeFile(join(repository, ".git", "packed-refs"), `${stranger} refs/heads/main\n`);
+  }
+
+  it("writes the nearest ancestor of the base into evidence-raw.json when the plan carried candidates, found BEFORE any check runs, and what the agent or a check did to .git changes nothing", async () => {
+    const { rootPath, first, second, repository } = await twoCommitWorkspace();
+    const stranger = "9".repeat(40);
+    // The agent's sandbox did this before the checks round started.
+    await tamper(repository, first, second, stranger);
+    const gitDirectory = join(repository, ".git");
+    expect(await readFile(join(gitDirectory, "shallow"), "utf8")).toContain(second);
+    const order: string[] = [];
+    vi.mocked(baselineAncestry.findBaselineAncestor).mockClear();
+    vi.mocked(baselineAncestry.findBaselineAncestor).mockImplementationOnce(async (input) => { order.push("ancestry"); return (await vi.importActual<typeof baselineAncestry>("../../packages/worker/src/verification/baseline-ancestry.js")).findBaselineAncestor(input); });
+    const fake = fakeRunners();
+    const tampering: CheckRunners = { ...fake.runners, runProjectCommand: async (command, ...rest) => {
+      order.push("check");
+      // The check itself (project code) does it again, and adds a replace ref.
+      git(repository, "update-ref", "refs/heads/rewritten-by-check", first);
+      return fake.runners.runProjectCommand(command, ...rest);
+    } };
+    const run = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: tampering, rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: stranger }, { sha: first }] } } });
+    expect(run.failure).toBeUndefined();
+    // Positive controls: the ancestry step ran once, before the first check, and the check really ran.
+    expect(vi.mocked(baselineAncestry.findBaselineAncestor)).toHaveBeenCalledTimes(1);
+    expect(order[0]).toBe("ancestry");
+    expect(order).toContain("check");
+    expect(rawOf(run)?.baseline).toEqual({ sha: first, commitsBack: 1 });
+  }, 60_000);
+
+  it("writes nothing for a plan with no candidates (an old engine), and for a task with more than one repository", async () => {
+    const { rootPath } = await twoCommitWorkspace();
+    const plain = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: BASE_PLAN } });
+    expect(plain.failure).toBeUndefined();
+    expect(rawOf(plain)).toBeUndefined();
+    const two = await twoCommitWorkspace();
+    const manifestPath = join(two.rootPath, ".agentx/preparation-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { repositories: Array<Record<string, unknown>> };
+    await mkdir(join(two.rootPath, "second-app"));
+    manifest.repositories.push({ ...manifest.repositories[0]!, name: "second-app", path: "second-app" });
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await writeFile(join(two.rootPath, "second-app", "README.md"), "second\n");
+    execFileSync("git", ["init", "-q", join(two.rootPath, "second-app")]);
+    git(join(two.rootPath, "second-app"), "add", ".");
+    git(join(two.rootPath, "second-app"), "commit", "-qm", "second app");
+    manifest.repositories[1]!["resolvedCommit"] = git(join(two.rootPath, "second-app"), "rev-parse", "HEAD");
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const many = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fakeRunners().runners, rootPath: two.rootPath, payloadExtra: { evidenceCapture: true, testEnvironment: { ...BASE_PLAN, baselineCandidates: [{ sha: two.first }] } } });
+    expect(many.failure).toBeUndefined();
+    expect(rawOf(many)?.baseline).toBeUndefined();
+  }, 60_000);
 });

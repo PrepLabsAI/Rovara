@@ -8,6 +8,7 @@
 // The feature strings are what a worker advertises on /ping: an older worker is refused the run at dispatch (a strict parse would refuse the field), never mis-run.
 import { z } from "zod";
 import { CoverageMapSchema } from "./test-env-nightly.js";
+import { BASELINE_CANDIDATES_MAX, BaselineCandidateSchema } from "./test-env-baseline.js";
 import { CheckKindSchema } from "./evidence.js";
 import { ProjectCommandSchema, RelativeWorkspacePathSchema } from "./project.js";
 import { SeedScriptLockSchema } from "./seed-script-lock.js";
@@ -304,6 +305,11 @@ export const TestEnvTaskPlanSchema = z
      * refused before dispatch, never sent half a plan); absent otherwise, so a plan without test services is today's plan byte for byte. Sent only to a worker whose /ping lists `TEST_SERVICES_PLAN_FEATURE`. Never empty.
      */
     dependencies: z.array(TaskDependencyPlanSchema).min(1).max(TASK_DEPENDENCY_PLAN_MAX).optional(),
+    /**
+     * TE-C1: the newest trusted baseline commits on the task's base branch (shas only), for the worker to find the nearest one that is an ancestor of the task's base commit. Present only when the switch `ROVARA_BASELINE_CACHE`
+     * is on and there is at least one; sent only to a worker that lists `TEST_ENV_BASELINE_FEATURE`. Absent: today's plan byte for byte. Never empty.
+     */
+    baselineCandidates: z.array(BaselineCandidateSchema).min(1).max(BASELINE_CANDIDATES_MAX).optional(),
   })
   .strict()
   .refine((plan) => plan.coverageMap === undefined || JSON.stringify(plan.coverageMap).length <= TEST_ENV_PLAN_MAP_MAX_BYTES, { message: "an inline coverage map is at most 256 KiB", path: ["coverageMap"] })

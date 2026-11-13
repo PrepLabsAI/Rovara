@@ -6,8 +6,10 @@
 //     re-check of the same code replaces, with the documented opt-in (`overwrite: true` in `evidence-keep.ts`: one pack per task and candidate digest).
 // It is informational: a fault or a slow store only means there is no evidence for this code. It never changes a verdict and never holds a callback longer than `EVIDENCE_KEEP_MAX_MS`.
 import { scanText } from "@agentx/verifier";
-import { workflowSelectedChecks, type CheckEntry, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
-import { keepEvidence, loadEvidencePack, policyKindsOf, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
+import { TestEnvTaskPlanSchema, workflowSelectedChecks, type CheckEntry, type EvidenceBaseline, type EvidencePack, type ObjectStorage, type WorkflowSnapshot } from "@agentx/contracts";
+import { keepEvidence, loadEvidenceBaseline, loadEvidencePack, policyKindsOf, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
+import type { TestEnvDeps } from "../../core/test-env/deps.js";
+import { taskBaselineOf } from "../../core/test-env/baseline-task.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import type { OperationRecord, TaskRecord } from "../../core/task-flow/records.js";
 import { readVerifiedText } from "./documents.js";
@@ -20,9 +22,11 @@ export interface LocalEvidence {
   keepAfterChecks(input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }): Promise<KeepEvidenceResult | undefined>;
   /** The pack kept for exactly this code of this task, or undefined. */
   packOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<EvidencePack | undefined>;
+  /** TE-C1: the words of the baseline the checks of exactly this code were compared with, or undefined. */
+  baselineOf(task: Pick<TaskRecord, "ownerKey" | "workspaceId" | "taskId">, candidateDigest: string | undefined): Promise<EvidenceBaseline | undefined>;
 }
 
-export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" | "companyId" | "log">; blobs: ObjectStorage }): LocalEvidence {
+export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" | "companyId" | "log">; blobs: ObjectStorage; testEnv?: Pick<TestEnvDeps, "store" | "now" | "env"> | undefined }): LocalEvidence {
   const { flow, blobs } = options;
   const log = (event: string, fields: Record<string, unknown>): void => flow.log?.({ component: "evidence", event, ...fields });
   return {
@@ -57,12 +61,23 @@ export function createLocalEvidence(options: { flow: Pick<TaskFlowDeps, "store" 
       }, {
         orgId: flow.companyId, task: { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, operationId: operation.id, candidateDigest: input.candidateDigest,
         checks: input.checks.filter((entry) => entry.source === "project"), policyKinds: policyKindsOf(workflowSelectedChecks(input.workflow.checkPolicy)),
+        // TE-C1: the candidates THIS operation's plan carried (read from the plan the broker stored with the operation, never from the worker), when the switch is on.
+        ...baselineInput(options.testEnv, flow.companyId, task.project, operation.dispatch.payload["testEnvironment"]),
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => { late = true; resolve(undefined); }, EVIDENCE_KEEP_MAX_MS); timer.unref(); });
       try { return await Promise.race([run, timeout]); } finally { clearTimeout(timer); }
     },
     packOf: (task, candidateDigest) => loadEvidencePack(blobs, { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, candidateDigest),
+    baselineOf: (task, candidateDigest) => loadEvidenceBaseline(blobs, { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, candidateDigest),
   };
+}
+
+/** The keeper's baseline input for an operation whose stored plan offered candidates; nothing (so the keeper looks at no claim) when the switch is off, the plan is not readable or it offered none. */
+function baselineInput(testEnv: Pick<TestEnvDeps, "store" | "now" | "env"> | undefined, companyId: string, project: string, storedPlan: unknown): { baseline?: ReturnType<typeof taskBaselineOf> } {
+  const plan = testEnv === undefined ? undefined : TestEnvTaskPlanSchema.safeParse(storedPlan);
+  if (testEnv === undefined || plan === undefined || !plan.success) return {};
+  const baseline = taskBaselineOf(testEnv, { orgId: companyId, project, plan: plan.data });
+  return baseline === undefined ? {} : { baseline };
 }
 
