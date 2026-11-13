@@ -203,8 +203,15 @@ describe("M4: one record at a time, and the stop carries to the next round", () 
     expect(first.taskState).toEqual({ overrun: true, forwards: 1 });
     const next = rig.engine({ capMicros: 1000, taskState: first.taskState });
     expect(await next.serve(chatFrame(rig.world, { user: "x", model: "fixture-large" }))).toEqual({ kind: "not_run", reason: "budget", sentence: capSentence(1000) });
-    const counted = rig.engine({ maxRecordings: 1, taskState: { forwards: 1 } });
-    expect(await counted.serve(chatFrame(rig.world, { user: "x", model: "fixture-large" }))).toEqual({ kind: "not_run", reason: "limit", sentence: recordingLimitSentence(1) });
+    // The count of real calls carries too (a fresh store: only the given count can stop this call).
+    const fresh = makeRig("memory", { report: two() });
+    try {
+      const counted = fresh.engine({ maxRecordings: 1, taskState: { forwards: 1 } });
+      expect(await counted.serve(chatFrame(fresh.world, { user: "x", model: "fixture-large" }))).toEqual({ kind: "not_run", reason: "limit", sentence: recordingLimitSentence(1) });
+      expect(counted.taskState.forwards).toBe(1);
+    } finally {
+      fresh.cleanup();
+    }
   });
 });
 
