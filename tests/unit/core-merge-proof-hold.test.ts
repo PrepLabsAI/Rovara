@@ -73,6 +73,20 @@ describe("the ready rule: a draft is held for its change proof", () => {
     expect(stored?.record).toMatchObject({ holds: true, reasons: ["proof_failed"], mode: "hold", headSha: pr.head });
     expect(stored?.override).toBeUndefined();
   });
+  it("a judgement that comes back to an earlier state (held, proven, held again) is still recorded, though its timeline line was said", async () => {
+    let facts: ProofHoldFacts = VACUOUS;
+    const { world, pr } = await heldWorld(undefined);
+    const source = { mode: () => "hold" as const, facts: async () => facts };
+    const task = { ...(await world.task()), orgId: ORG };
+    const judge = () => judgeProofHold({ store: world.store, timeline: world.timeline, proofHold: source }, task, pr, pr.head, world.now.value);
+    await judge();
+    facts = PROVEN;
+    await judge();
+    expect((await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head }))?.record.holds).toBe(false);
+    facts = VACUOUS;
+    await judge();
+    expect((await readProofHold(world.store, { taskId: TASK_ID, orgId: ORG }, { repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head }))?.record.holds).toBe(true);
+  });
   it("each reason holds the draft", async () => {
     const cases: ProofHoldFacts[] = [
       { ...PROVEN, absentOnNew: ["a > b"] }, { ...PROVEN, changedLines: { changed: 5, covered: 0 } }, { ...PROVEN, flakyOnChange: ["a > b"] },

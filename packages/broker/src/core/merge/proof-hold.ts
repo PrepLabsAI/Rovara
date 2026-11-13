@@ -186,14 +186,17 @@ export async function judgeProofHold(
     const stored = await deps.store.get(proofHoldKey(task.taskId, pullRequest.repositoryId, pullRequest.number));
     const changed = stored?.["stateKey"] !== stateKey;
     if (changed) {
-      const items: TransactItem[] = [{ kind: "put", item: plain({ ...proofHoldKey(task.taskId, pullRequest.repositoryId, pullRequest.number), entityType: PROOF_HOLD_ENTITY, stateKey, ...record }) }];
+      const recordItem = plain({ ...proofHoldKey(task.taskId, pullRequest.repositoryId, pullRequest.number), entityType: PROOF_HOLD_ENTITY, stateKey, ...record });
+      const items: TransactItem[] = [{ kind: "put", item: recordItem }];
       if (spoken && override === undefined && task.sessionId !== undefined) {
         items.push(deps.timeline.statusLine({ orgId: task.orgId, sessionId: task.sessionId }, {
           eventId: sessionEventId("proof_hold", `${task.taskId}\n${pullRequest.repositoryId}\n${String(pullRequest.number)}\n${stateKey}`), at,
           text: decision.holds ? `${proofHoldLine(decision.reasons)} A person can mark it ready anyway on the task page.` : proofWarningLine(decision),
         }));
       }
-      await deps.store.transact(items);
+      const written = await deps.store.transact(items);
+      // The timeline line was said before (the judgement came back to an earlier state, so its line's id exists): the record is still written.
+      if (!written.applied && items.length > 1) await deps.store.put({ item: recordItem });
     }
     await noteProofHoldOutcome(deps.store, task.orgId, task.project, `${pullRequest.repositoryId}#${String(pullRequest.number)}`, decision.wouldHold);
   } catch (error) {
