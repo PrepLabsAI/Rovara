@@ -151,14 +151,14 @@ describe("the reply body", () => {
 });
 
 describe("the key layout (TE-G7 extends it; it does not replace it)", () => {
-  it("builds ORG#<company>#MOCKSET#<project> and the four sort keys", () => {
+  it("builds ORG#<company>#MOCKSET#<project> and the five sort keys", () => {
     expect(replyStorePartition("org_aaaaaaaaaaaaaaaaaaaa", "proj")).toBe("ORG#org_aaaaaaaaaaaaaaaaaaaa#MOCKSET#proj");
     expect(companyOfKey(replyStorePartition(IMPLICIT_COMPANY_ID, "proj"))).toBe(IMPLICIT_COMPANY_ID);
     expect(replyHeadSortKey("main", "gemini")).toBe(`HEAD#model#${replyBranchKey("main")}#gemini`);
     expect(replyEntrySortKey(sha("a"))).toBe(`ENTRY#${sha("a")}`);
     expect(replyTaskSortKey("task-1", "gemini")).toBe("TASK#task-1#gemini");
     expect(replyJoinSortKey("task-1", "gemini")).toBe("JOIN#task-1#gemini");
-    expect([...REPLY_STORE_OWN_PREFIXES]).toEqual(["HEAD#model#", "ENTRY#", "TASK#", "JOIN#"]);
+    expect([...REPLY_STORE_OWN_PREFIXES]).toEqual(["HEAD#model#", "ENTRY#", "TASK#", "JOIN#", "MADE#"]);
   });
   it("never puts a branch name raw in a key: a branch with '#', '/', spaces and unicode is hashed", () => {
     for (const branch of ["feature/a#b", "has space", "ünï", "a".repeat(255), "HEAD#model#x"]) {
@@ -181,7 +181,7 @@ describe("the key layout (TE-G7 extends it; it does not replace it)", () => {
 
 describe("the fixed words", () => {
   it("are fixed text with no variable part", () => {
-    expect(Object.keys(REPLY_STORE_WORDS).sort()).toEqual(["conflict", "not_allowed", "not_found", "too_large", "too_many"]);
+    expect(Object.keys(REPLY_STORE_WORDS).sort()).toEqual(["conflict", "id_clash", "not_allowed", "not_found", "too_large", "too_many"]);
     for (const text of Object.values(REPLY_STORE_WORDS)) expect(text).toMatch(/^[a-z ,]+$/u);
   });
 });

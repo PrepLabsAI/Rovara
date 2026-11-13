@@ -887,9 +887,9 @@ Cloud can switch to this code with no data move.
 
 The Rovara-side home of a project's scripted model replies (DECISIONS 166a, 161) is `createReplySetStore` (`core/test-env/reply-set-store.ts`): a SERVICE over the existing `DocumentStore`, with no new interface, so
 decisions 42 and 63 are not triggered. Its shapes and key layout are in `packages/contracts/src/model-reply-store.ts` (`ORG#<company>#MOCKSET#<project>`; sort keys `HEAD#model#<sha256(branch)>#<family>`, `ENTRY#<entrySha256>`,
-`TASK#<taskId>#<family>`, `JOIN#<taskId>#<family>`), its pure rules in `model-reply-store-rules.ts`, and its conformance suite and two-company kit in `@agentx/testing` (`runReplySetStoreConformance`); Cloud keeps the same keys in its
+`TASK#<taskId>#<family>`, `JOIN#<taskId>#<family>`, and the durable `MADE#<entrySha256>` record of every content the coding agent wrote, which an import never turns into `before_task`), its pure rules in `model-reply-store-rules.ts`, and its conformance suite and two-company kit in `@agentx/testing` (`runReplySetStoreConformance`); Cloud keeps the same keys in its
 state table and runs the same suite. A reply's provenance is written once and never changes; the store never promotes a reply because it now sits on a base commit. TE-G7 extends the layout with its own sort-key prefixes
-and does not replace it. Part A has no callers: the worker and the post-merge join are part B.
+and must not reuse `ENTRY#`, `MADE#`, `TASK#`, `JOIN#` or `HEAD#model#`. Part A has no callers: the worker and the post-merge join are part B.
 
 ## Realtime (lane K1, a new interface: the owner decides it alone, decision 63)
 

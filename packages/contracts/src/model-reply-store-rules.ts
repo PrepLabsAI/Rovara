@@ -157,7 +157,7 @@ export function resolveRoundSet(head: unknown, overlay: unknown, bodies: ReplyBo
     for (const entry of own?.entries ?? []) {
       if (entry.provenance !== group || headShas.has(entry.entrySha256)) continue;
       const id = idFor(taken, entry.id, entry.entrySha256);
-      if (id === undefined) return fail("conflict", "id_clash");
+      if (id === undefined) return fail("id_clash", "id_clash");
       taken.add(id);
       (group === "independent" ? independent : taskMade).push({ id, entrySha256: entry.entrySha256, provenance: group });
     }
@@ -205,7 +205,7 @@ export function joinTaskReplies(head: unknown, overlay: unknown, options: JoinOp
         continue;
       }
       const id = idFor(taken, entry.id, entry.entrySha256);
-      if (id === undefined) return fail("conflict", "id_clash");
+      if (id === undefined) return fail("id_clash", "id_clash");
       taken.add(id);
       known.add(entry.entrySha256);
       added.push({ id, entrySha256: entry.entrySha256, provenance: group, addedBy: { taskId: own.taskId, source: group === "independent" ? "independent_channel" : "task_join" } });
@@ -269,7 +269,7 @@ export function planImport(head: unknown, file: ModelReplySetFile, options: Impo
     const body: ReplySetEntryBody = { id: reply.id, match: reply.match, response: reply.response };
     if (!ReplySetEntryBodySchema.safeParse(body).success) return fail("too_large", "reply_too_large");
     const id = idFor(taken, reply.id, sha);
-    if (id === undefined) return fail("conflict", "id_clash");
+    if (id === undefined) return fail("id_clash", "id_clash");
     taken.add(id);
     bodies.set(sha, body);
     newBodies.push(body);

@@ -156,7 +156,7 @@ export function runReplySetStoreConformance(name: string, harness: ReplySetStore
         expect(await service.putIndependentOverlay(A, { project: PROJECT, taskId: "task-one", family: FAMILY, entries: [{ reply: theirs, decision: createRovaraIndependentDecision(sha(theirs)) }, { reply: reply("other"), decision: createRovaraIndependentDecision(sha(theirs)) }] })).toEqual({ ok: false, word: "not_allowed" });
         const before = await service.readRoundSet(A, { ...query(), taskId: "task-one" });
         expect(before.ok && provenanceOf(before)).toEqual({ agent: "task_made" });
-        expect(await service.putIndependentOverlay(A, { project: PROJECT, taskId: "task-one", family: FAMILY, entries: [{ reply: theirs, decision: createRovaraIndependentDecision(sha(theirs)) }] })).toEqual({ ok: true, stored: 1 });
+        expect(await service.putIndependentOverlay(A, { project: PROJECT, taskId: "task-one", family: FAMILY, entries: [{ reply: theirs, decision: createRovaraIndependentDecision(sha(theirs)) }] })).toEqual({ ok: true, stored: 1, skipped: [] });
         const round = await service.readRoundSet(A, { ...query(), taskId: "task-one" });
         expect(round.ok && round.set.replies.map((entry) => `${entry.id}:${entry.provenance}`)).toEqual(["indep:independent", "agent:task_made"]);
         await service.joinTask(A, { project: PROJECT, taskId: "task-one", family: FAMILY, branch: BRANCH });

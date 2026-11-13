@@ -11,6 +11,9 @@
 //   - Writes: bodies first (content-addressed, idempotent), then ONE conditional write or transaction that moves the head (its `revision` must equal the one read; one retry, then `conflict`) and, for a join, writes the
 //     `JOIN#` marker and removes the overlay in the same transaction, so a retried join changes nothing.
 //   - Read back, every body is re-hashed and the head's digest recomputed (`resolveHead`): a row that no longer says what its key says is never served.
+//   - The durable `MADE#<entrySha256>` record: every content the coding agent wrote through `putOverlay` is recorded in the same transaction as a bump of the project's `MADE#version` counter, and never expires (only `eraseProject`
+//     removes it). An import skips every hash listed there, so a reply cannot become `before_task` because its overlay expired, was deleted, or never joined (the agent can force a failed join). An import's write checks the
+//     counter in its own transaction, so a concurrent overlay write makes it retry. TE-G7 must not reuse the prefixes `ENTRY#`, `MADE#`, `TASK#`, `JOIN#` or `HEAD#model#`.
 //   - Overlays and join markers expire 30 days after they were written (`INDEX_EXPIRY_ATTRIBUTE`); a row past its time that is not yet swept is treated as absent. Heads and bodies carry no expiry (they are the project's data).
 //
 // Cloud keeps the same keys in its state table with its own implementation of `ReplySetStoreService`; both pass `packages/testing/src/ports/reply-set-store-conformance.ts`.
@@ -28,7 +31,15 @@ import {
   REPLY_STORE_OWN_PREFIXES,
   REPLY_ENTRY_ROW_KIND,
   REPLY_HEAD_PREFIX,
-  REPLY_TASK_PREFIX,
+  REPLY_MADE_PREFIX,
+  REPLY_MADE_VERSION_KIND,
+  REPLY_MADE_VERSION_SORT_KEY,
+  REPLY_MADE_KIND,
+  ReplyMadeRowSchema,
+  ReplyMadeVersionRowSchema,
+  replyMadeSortKey,
+  type ReplySkipReason,
+  change,
   REPLY_ENTRY_BODY_MAX_BYTES,
   ReplyEntryRowSchema,
   ReplyJoinMarkerSchema,
@@ -212,6 +223,8 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
   };
   /** The condition that makes a head write apply only if nobody moved it since it was read. */
   const headCondition = (own: boolean, revision: number) => (own ? when.eq("revision", revision) : when.absent());
+  /** A row that is not there, or is past its expiry and not yet swept (a reader treats it as absent, so a writer must too). */
+  const absentOrExpired = () => when.or(when.absent(), when.lte(INDEX_EXPIRY_ATTRIBUTE, Math.floor(now().getTime() / 1000)));
   const headDocument = (pk: string, head: ReplySetHead): StoredDocument => asDocument({ pk, sk: replyHeadSortKey(head.branch, head.family) }, head);
 
   const validQuery = (query: ReplySetQuery): boolean =>
@@ -235,20 +248,51 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
     return CONFLICT;
   }
 
-  /** Every `task_made` content hash of the project (any branch) and every hash in an open overlay: what an import must not turn into `before_task`. */
-  async function notImportedShas(pk: string): Promise<Set<string>> {
+  /**
+   * What an import must not turn into `before_task`: every `task_made` entry of any head of the project and every hash in the durable MADE# record (a reply the coding agent ever wrote, whatever became of its overlay), plus the MADE
+   * counter's value as read BEFORE the hashes (the import's write checks it). A row that does not parse stops the import (fail closed): `undefined`.
+   */
+  async function notImportedShas(pk: string): Promise<{ shas: Set<string>; version: number | undefined } | undefined> {
+    let version: number | undefined;
+    const versionRow = await store.get({ pk, sk: REPLY_MADE_VERSION_SORT_KEY });
+    if (versionRow !== undefined) {
+      const parsed = ReplyMadeVersionRowSchema.safeParse(strip(versionRow));
+      if (!parsed.success) {
+        problem("row_invalid");
+        return undefined;
+      }
+      version = parsed.data.version;
+    }
     const shas = new Set<string>();
+    for (const row of await queryAll(store, { pk, sk: { op: "beginsWith", prefix: REPLY_MADE_PREFIX } })) {
+      if (row.sk === REPLY_MADE_VERSION_SORT_KEY) continue;
+      const parsed = ReplyMadeRowSchema.safeParse(strip(row));
+      if (!parsed.success || row.sk !== replyMadeSortKey(parsed.data.entrySha256)) {
+        problem("row_invalid");
+        return undefined;
+      }
+      shas.add(parsed.data.entrySha256);
+    }
     for (const row of await queryAll(store, { pk, sk: { op: "beginsWith", prefix: REPLY_HEAD_PREFIX } })) {
       const parsed = ReplySetHeadSchema.safeParse(strip(row));
-      if (!parsed.success) continue;
+      if (!parsed.success) {
+        problem("row_invalid");
+        return undefined;
+      }
       for (const entry of parsed.data.entries) if (entry.provenance === "task_made") shas.add(entry.entrySha256);
     }
-    for (const row of await queryAll(store, { pk, sk: { op: "beginsWith", prefix: REPLY_TASK_PREFIX } })) {
-      const parsed = ReplyOverlaySchema.safeParse(strip(row));
-      if (!parsed.success || live(row) === undefined) continue;
-      for (const entry of parsed.data.entries) shas.add(entry.entrySha256);
+    return { shas, version };
+  }
+  /** Records the contents the coding agent wrote: MADE# rows (idempotent) and one bump of the counter in the SAME transaction, in chunks (a transaction holds at most 100 items). */
+  async function recordMade(pk: string, shas: readonly string[]): Promise<void> {
+    const distinct = [...new Set(shas)];
+    const per = DOCUMENT_STORE_LIMITS.maxTransactItems - 2;
+    for (let from = 0; from < distinct.length; from += per) {
+      const items: TransactItem[] = distinct.slice(from, from + per).map((sha): TransactItem => ({ kind: "put", item: asDocument({ pk, sk: replyMadeSortKey(sha) }, { kind: REPLY_MADE_KIND, schemaVersion: 1, entrySha256: sha }) }));
+      items.push({ kind: "update", key: { pk, sk: REPLY_MADE_VERSION_SORT_KEY }, ops: [change.setIfAbsent("kind", REPLY_MADE_VERSION_KIND), change.setIfAbsent("schemaVersion", 1), change.add("version", 1)] });
+      const outcome = await store.transact(items);
+      if (!outcome.applied) throw new DocumentStoreError("conflict", "made record");
     }
-    return shas;
   }
   async function recordingCount(pk: string, family: ServedModelFamily): Promise<number> {
     const shas = new Set<string>();
@@ -268,11 +312,13 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
     return twice(async () => {
       const { head, own } = await writableHead(pk, input);
       const bodies = await readBodies(pk, head.entries.map((entry) => entry.entrySha256));
+      const made = await notImportedShas(pk);
+      if (made === undefined) return NOT_FOUND;
       const planned = planImport(head, { version: 1, family: input.family, replies: input.replies }, {
         origin: input.origin,
         source: input.source,
         commit: input.commit,
-        notImportedShas: await notImportedShas(pk),
+        notImportedShas: made.shas,
         bodies,
         existingRecordings: input.origin === "real_recording_capped" ? await recordingCount(pk, input.family) : undefined,
       });
@@ -282,7 +328,11 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
       }
       if (planned.added === 0) return { ok: true as const, added: 0, skipped: planned.skipped, revision: head.revision };
       await writeBodies(pk, planned.newBodies);
-      const written = await store.put({ item: headDocument(pk, planned.head), condition: headCondition(own, head.revision) });
+      // The head moves only if no overlay write recorded a MADE# hash since the counter was read (M1): the counter is checked in the same transaction.
+      const written = await store.transact([
+        { kind: "put", item: headDocument(pk, planned.head), condition: headCondition(own, head.revision) },
+        { kind: "check", key: { pk, sk: REPLY_MADE_VERSION_SORT_KEY }, condition: made.version === undefined ? when.absent() : when.eq("version", made.version) },
+      ]);
       return written.applied ? { ok: true as const, added: planned.added, skipped: planned.skipped, revision: planned.head.revision } : RETRY;
     });
   }
@@ -291,7 +341,7 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
   async function writeOverlay(
     scope: HostScope,
     input: { project: string; taskId: string; family: ServedModelFamily },
-    change: (existing: readonly ReplyOverlayEntry[]) => { entries: ReplyOverlayEntry[]; bodies: ReplySetEntryBody[] } | ReplyStoreFailure,
+    change: (existing: readonly ReplyOverlayEntry[]) => { entries: ReplyOverlayEntry[]; bodies: ReplySetEntryBody[]; made?: string[]; skipped?: { id: string; reason: ReplySkipReason }[] } | ReplyStoreFailure,
   ) {
     const pk = replyStorePartition(await companyOf(scope), input.project);
     return twice(async () => {
@@ -300,14 +350,16 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
       const changed = change(existing?.entries ?? []);
       if ("ok" in changed) return changed;
       if (changed.entries.length > REPLY_OVERLAY_MAX_ENTRIES) return { ok: false, word: "too_many" } satisfies ReplyStoreFailure;
+      // The durable record first (with its counter bump, one transaction per chunk): whatever happens to the overlay after this, the hashes stay listed.
+      await recordMade(pk, changed.made ?? []);
       await writeBodies(pk, changed.bodies);
       const next: ReplyOverlay = { kind: REPLY_OVERLAY_KIND, schemaVersion: 1, family: input.family, taskId: input.taskId, revision: (existing?.revision ?? 0) + 1, entries: changed.entries };
       const key = { pk, sk: replyTaskSortKey(input.taskId, input.family) };
       const outcome = await store.transact([
-        { kind: "put", item: asDocument(key, next, { [INDEX_EXPIRY_ATTRIBUTE]: expiresAt() }), condition: existing === undefined ? when.absent() : when.eq("revision", existing.revision) },
-        { kind: "check", key: { pk, sk: replyJoinSortKey(input.taskId, input.family) }, condition: when.absent() },
+        { kind: "put", item: asDocument(key, next, { [INDEX_EXPIRY_ATTRIBUTE]: expiresAt() }), condition: existing === undefined ? absentOrExpired() : when.eq("revision", existing.revision) },
+        { kind: "check", key: { pk, sk: replyJoinSortKey(input.taskId, input.family) }, condition: absentOrExpired() },
       ]);
-      return outcome.applied ? { ok: true as const, entries: changed.entries.length } : RETRY;
+      return outcome.applied ? { ok: true as const, entries: changed.entries.length, skipped: changed.skipped ?? [] } : RETRY;
     });
   }
 
@@ -379,7 +431,7 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
           entries.push({ id: reply.id, entrySha256: sha, provenance: "task_made", addedBy: { taskId: input.taskId, source: "task_join" } });
           bodies.push({ id: reply.id, match: reply.match, response: reply.response });
         }
-        return { entries, bodies };
+        return { entries, bodies, made: storable.map((reply) => modelReplyEntrySha256(reply)) };
       });
       return "ok" in written && written.ok === true ? { ok: true, stored: storable.length, tooLarge } : written;
     },
@@ -398,16 +450,20 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
         const known = new Set(existing.map((entry) => entry.entrySha256));
         const entries: ReplyOverlayEntry[] = [...existing];
         const bodies: ReplySetEntryBody[] = [];
+        const skipped: { id: string; reason: ReplySkipReason }[] = [];
         for (const { reply } of input.entries) {
           const sha = modelReplyEntrySha256(reply);
-          if (known.has(sha)) continue; // already in the overlay: its provenance stays as first written
+          if (known.has(sha)) {
+            skipped.push({ id: reply.id, reason: "already_in_overlay" }); // its provenance stays as first written
+            continue;
+          }
           known.add(sha);
           entries.push({ id: reply.id, entrySha256: sha, provenance: "independent", addedBy: { taskId: input.taskId, source: "independent_channel" } });
           bodies.push({ id: reply.id, match: reply.match, response: reply.response });
         }
-        return { entries, bodies };
+        return { entries, bodies, skipped };
       });
-      return "ok" in written && written.ok === true ? { ok: true, stored: input.entries.length } : written;
+      return "ok" in written && written.ok === true ? { ok: true, stored: input.entries.length - written.skipped.length, skipped: written.skipped } : written;
     },
 
     async importFromRepoFile(scope, input) {
@@ -452,7 +508,7 @@ export function createReplySetStore(options: ReplySetStoreOptions): ReplySetStor
         const marked = { kind: REPLY_JOIN_KIND, schemaVersion: 1, taskId: input.taskId, family: input.family, branch: input.branch, headRevision: joined.head.revision, added };
         const items: TransactItem[] = [];
         if (added > 0) items.push({ kind: "put", item: headDocument(pk, joined.head), condition: headCondition(own, head.revision) });
-        items.push({ kind: "put", item: asDocument({ pk, sk: replyJoinSortKey(input.taskId, input.family) }, marked, { [INDEX_EXPIRY_ATTRIBUTE]: expiresAt() }), condition: when.absent() });
+        items.push({ kind: "put", item: asDocument({ pk, sk: replyJoinSortKey(input.taskId, input.family) }, marked, { [INDEX_EXPIRY_ATTRIBUTE]: expiresAt() }), condition: absentOrExpired() });
         items.push({ kind: "delete", key: { pk, sk: replyTaskSortKey(input.taskId, input.family) }, condition: when.eq("revision", overlay.revision) });
         const outcome = await store.transact(items);
         return outcome.applied ? { ok: true as const, status: "joined" as const, added } : RETRY;

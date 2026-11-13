@@ -43,13 +43,13 @@ const seed = (service: ReturnType<typeof world>["service"], replies: ModelReplyF
   service.importFromRepoFile(A, { ...q(over), baseCommitSha: COMMIT, bytes: bytes(replies), origin: "customer_written" });
 
 describe("rows and keys", () => {
-  it("writes ORG#<company>#MOCKSET#<project> rows with the four sort-key kinds, the branch as a field and never raw in a key", async () => {
+  it("writes ORG#<company>#MOCKSET#<project> rows with the five sort-key kinds, the branch as a field and never raw in a key", async () => {
     const { service, rows, pk } = world();
     await seed(service, [reply("a")]);
     await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("b")] });
     const all = await rows();
     const keys = all.map((row) => row.sk).sort();
-    expect(keys).toEqual([replyEntrySortKey(modelReplyEntrySha256(reply("a"))), replyEntrySortKey(modelReplyEntrySha256(reply("b"))), replyHeadSortKey("feature/a#b", FAMILY), replyTaskSortKey("task-1", FAMILY)].sort());
+    expect(keys).toEqual([replyEntrySortKey(modelReplyEntrySha256(reply("a"))), replyEntrySortKey(modelReplyEntrySha256(reply("b"))), replyHeadSortKey("feature/a#b", FAMILY), replyTaskSortKey("task-1", FAMILY), `MADE#${modelReplyEntrySha256(reply("b"))}`, "MADE#version"].sort());
     expect(all.every((row) => row.pk === pk)).toBe(true);
     expect(pk).toBe(`ORG#${COMPANY_A.orgId}#MOCKSET#${PROJECT}`);
     expect(keys.some((key) => key.includes("feature"))).toBe(false);
@@ -64,11 +64,11 @@ describe("rows and keys", () => {
     const expiry = Math.floor(NOW.getTime() / 1000) + REPLY_OVERLAY_TTL_DAYS * 86_400;
     const expiries = async (): Promise<Record<string, unknown>> => Object.fromEntries((await rows()).map((row): [string, unknown] => [row.sk.split("#")[0] ?? "", row[INDEX_EXPIRY_ATTRIBUTE]]));
     let byPrefix = await expiries();
-    expect(byPrefix).toEqual({ HEAD: undefined, ENTRY: undefined, TASK: expiry });
+    expect(byPrefix).toEqual({ HEAD: undefined, ENTRY: undefined, TASK: expiry, MADE: undefined });
     expect(INDEX_EXPIRY_ATTRIBUTE).toBe("indexExpiresAt");
     await service.joinTask(A, { project: PROJECT, taskId: "task-1", family: FAMILY, branch: "feature/a#b" });
     byPrefix = await expiries();
-    expect(byPrefix).toEqual({ HEAD: undefined, ENTRY: undefined, JOIN: expiry });
+    expect(byPrefix).toEqual({ HEAD: undefined, ENTRY: undefined, JOIN: expiry, MADE: undefined });
   });
   it("keeps the company out of every row body: the company is only in the partition key", async () => {
     const { service, rows } = world();
@@ -96,7 +96,7 @@ describe("write order and the one join transaction", () => {
     const memory = new MemoryDocumentStore({ ttlAttribute: INDEX_EXPIRY_ATTRIBUTE });
     const order: string[] = [];
     const spy: DocumentStore = Object.create(memory) as DocumentStore;
-    Object.assign(spy, { put: async (request: Parameters<DocumentStore["put"]>[0]) => { order.push(request.item.sk.split("#")[0]!); return memory.put(request); }, getMany: (keys: Parameters<DocumentStore["getMany"]>[0]) => memory.getMany(keys), get: (key: Parameters<DocumentStore["get"]>[0]) => memory.get(key), query: (request: Parameters<DocumentStore["query"]>[0]) => memory.query(request), transact: (items: readonly TransactItem[]) => memory.transact(items), delete: (request: Parameters<DocumentStore["delete"]>[0]) => memory.delete(request), indexes: memory.indexes });
+    Object.assign(spy, { put: async (request: Parameters<DocumentStore["put"]>[0]) => { order.push(request.item.sk.split("#")[0]!); return memory.put(request); }, getMany: (keys: Parameters<DocumentStore["getMany"]>[0]) => memory.getMany(keys), get: (key: Parameters<DocumentStore["get"]>[0]) => memory.get(key), query: (request: Parameters<DocumentStore["query"]>[0]) => memory.query(request), transact: (items: readonly TransactItem[]) => { for (const item of items) if (item.kind === "put") order.push(item.item.sk.split("#")[0]!); return memory.transact(items); }, delete: (request: Parameters<DocumentStore["delete"]>[0]) => memory.delete(request), indexes: memory.indexes });
     const { service } = world({}, spy);
     await seed(service, [reply("a"), reply("b")]);
     expect(order).toEqual(["ENTRY", "ENTRY", "HEAD"]);
@@ -142,15 +142,16 @@ describe("a lost race", () => {
     let remaining = rivals;
     const store = Object.assign(Object.create(memory) as DocumentStore, {
       get: (k: Parameters<DocumentStore["get"]>[0]) => memory.get(k), getMany: (k: Parameters<DocumentStore["getMany"]>[0]) => memory.getMany(k), query: (r: Parameters<DocumentStore["query"]>[0]) => memory.query(r),
-      delete: (r: Parameters<DocumentStore["delete"]>[0]) => memory.delete(r), transact: (i: readonly TransactItem[]) => memory.transact(i), indexes: memory.indexes,
-      put: async (request: Parameters<DocumentStore["put"]>[0]) => {
-        if (request.item.sk.startsWith("HEAD#model#") && remaining > 0) {
+      delete: (r: Parameters<DocumentStore["delete"]>[0]) => memory.delete(r), put: (r: Parameters<DocumentStore["put"]>[0]) => memory.put(r), indexes: memory.indexes,
+      transact: async (items: readonly TransactItem[]) => {
+        const headPut = items.find((item) => item.kind === "put" && item.item.sk.startsWith("HEAD#model#"));
+        if (headPut !== undefined && headPut.kind === "put" && remaining > 0) {
           remaining -= 1;
           // somebody else moves the head between our read and our write
-          const current = await memory.get({ pk: request.item.pk, sk: request.item.sk });
-          await memory.put({ item: { ...(current ?? request.item), revision: ((current?.revision as number | undefined) ?? 0) + 1, entries: current?.entries ?? [], digest: current?.digest ?? request.item.digest } as StoredDocument });
+          const current = await memory.get({ pk: headPut.item.pk, sk: headPut.item.sk });
+          await memory.put({ item: { ...(current ?? headPut.item), revision: ((current?.revision as number | undefined) ?? 0) + 1, entries: current?.entries ?? [], digest: current?.digest ?? headPut.item.digest } as StoredDocument });
         }
-        return memory.put(request);
+        return memory.transact(items);
       },
     });
     return store;
@@ -282,18 +283,19 @@ describe("what the sandbox can and cannot write", () => {
     const round = await service.readRoundSet(A, { ...q(), taskId: "task-1" });
     expect(round.ok && round.set.replies.map((entry) => entry.id)).toEqual(["ind", "new"]);
   });
-  it("lets the base-commit file of a repo project reach before_task only through the explicit import: an edited file is task_made until then", async () => {
+  it("keeps an edited base-file reply the agent wrote task_made even through an explicit import (the durable MADE# record)", async () => {
     const { service } = world();
     await seed(service, [reply("a")]);
-    // a human edits the repo file outside Rovara: the candidate's unseen reply is the task's task_made overlay, never before_task
+    // the candidate's unseen reply is the task's task_made overlay, never before_task
     await service.putOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY, replies: [reply("a"), reply("hand-edited", "changed in the repo")] });
     const round = await service.readRoundSet(A, { ...q(), taskId: "task-1" });
     expect(round.ok && round.set.replies.map((entry) => `${entry.id}:${entry.provenance}`)).toEqual(["a:before_task", "hand-edited:task_made"]);
     await service.deleteOverlay(A, { project: PROJECT, taskId: "task-1", family: FAMILY });
-    // the next explicit import counts it
-    expect(await seed(service, [reply("a"), reply("hand-edited", "changed in the repo")])).toMatchObject({ ok: true, added: 1 });
+    expect(await seed(service, [reply("a"), reply("hand-edited", "changed in the repo")])).toMatchObject({ ok: true, added: 0 });
     const read = await service.readSet(A, q());
-    expect(read.ok && read.set.replies.map((entry) => `${entry.id}:${entry.provenance}`)).toEqual(["a:before_task", "hand-edited:before_task"]);
+    expect(read.ok && read.set.replies.map((entry) => `${entry.id}:${entry.provenance}`)).toEqual(["a:before_task"]);
+    // a reply no task ever wrote is imported as before_task
+    expect(await seed(service, [reply("a"), reply("by-the-customer", "written outside any task")])).toMatchObject({ ok: true, added: 1 });
   });
 });
 

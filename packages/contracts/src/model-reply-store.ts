@@ -10,7 +10,11 @@
 //   ENTRY#<entrySha256>                    one reply body, content-addressed and immutable, shared by every branch of the project (no provenance on it: provenance lives in the head)
 //   TASK#<taskId>#<family>                 the task's overlay: replies made in this task, not yet joined (expires)
 //   JOIN#<taskId>#<family>                 the idempotency marker of a join (expires)
-// TE-G7 adds `HEAD#service#<name>...` and its own entry kinds under the same partition without migrating a row; this lane's reads and erase look only at the four prefixes above and ignore every other sort key.
+//   MADE#<entrySha256>                     the DURABLE record that the coding agent wrote this content in some task (never expires; only `eraseProject` removes it). An import never turns a hash listed here into
+//                                          `before_task`, whatever became of the overlay (expiry, delete, a join that failed). `MADE#version` is the project's counter, bumped in the same transaction as every MADE write, so an import can
+//                                          check it and cannot race an overlay write.
+// TE-G7 adds `HEAD#service#<name>...` and its own entry kinds under the same partition without migrating a row; this lane's reads and erase look only at the five prefixes above and ignore every other sort key.
+// TE-G7 MUST NOT reuse the prefixes `ENTRY#`, `MADE#`, `TASK#`, `JOIN#` or `HEAD#model#` (a row of its own under one of them would be read, parsed as this lane's kind, refused, and make an import fail closed).
 //
 // PURE: no I/O. The rules (`model-reply-store-rules.ts`) and the service (`packages/broker/src/core/test-env/reply-set-store.ts`) are built on these shapes.
 import { z } from "zod";
@@ -41,6 +45,7 @@ export const REPLY_STORE_WORDS = {
   too_large: "reply too large",
   too_many: "too many replies",
   conflict: "reply set changed, try again",
+  id_clash: "reply id clash",
   not_allowed: "not allowed",
 } as const;
 export type ReplyStoreWord = keyof typeof REPLY_STORE_WORDS;
@@ -127,6 +132,14 @@ export const REPLY_ENTRY_ROW_KIND = "model_reply_entry";
 export const ReplyEntryRowSchema = z.object({ kind: z.literal(REPLY_ENTRY_ROW_KIND), schemaVersion: z.literal(1), entrySha256: Sha256Hex, body: ReplySetEntryBodySchema }).strict();
 export type ReplyEntryRow = z.infer<typeof ReplyEntryRowSchema>;
 
+/** One content hash the coding agent wrote. No task id and no time: the same content is the same row, written again and again without change. */
+export const REPLY_MADE_KIND = "model_reply_made";
+export const ReplyMadeRowSchema = z.object({ kind: z.literal(REPLY_MADE_KIND), schemaVersion: z.literal(1), entrySha256: Sha256Hex }).strict();
+export type ReplyMadeRow = z.infer<typeof ReplyMadeRowSchema>;
+export const REPLY_MADE_VERSION_KIND = "model_reply_made_version";
+export const ReplyMadeVersionRowSchema = z.object({ kind: z.literal(REPLY_MADE_VERSION_KIND), schemaVersion: z.literal(1), version: z.number().int().min(0) }).strict();
+export type ReplyMadeVersionRow = z.infer<typeof ReplyMadeVersionRowSchema>;
+
 export const REPLY_JOIN_KIND = "model_reply_join";
 export const ReplyJoinMarkerSchema = z
   .object({
@@ -149,8 +162,11 @@ export const REPLY_HEAD_PREFIX = "HEAD#model#";
 export const REPLY_ENTRY_PREFIX = "ENTRY#";
 export const REPLY_TASK_PREFIX = "TASK#";
 export const REPLY_JOIN_PREFIX = "JOIN#";
-/** The four sort-key prefixes this lane owns. Every other prefix in the partition (TE-G7's) is ignored by this lane's reads and erase. */
-export const REPLY_STORE_OWN_PREFIXES = [REPLY_HEAD_PREFIX, REPLY_ENTRY_PREFIX, REPLY_TASK_PREFIX, REPLY_JOIN_PREFIX] as const;
+export const REPLY_MADE_PREFIX = "MADE#";
+/** The sort key of the project's MADE counter (not 64 hex digits, so it never collides with a `MADE#<entrySha256>` row). */
+export const REPLY_MADE_VERSION_SORT_KEY = "MADE#version";
+/** The five sort-key prefixes this lane owns. Every other prefix in the partition (TE-G7's) is ignored by this lane's reads and erase. */
+export const REPLY_STORE_OWN_PREFIXES = [REPLY_HEAD_PREFIX, REPLY_ENTRY_PREFIX, REPLY_TASK_PREFIX, REPLY_JOIN_PREFIX, REPLY_MADE_PREFIX] as const;
 
 /** `ORG#<company>#MOCKSET#<project>`. The company comes from the caller's session or operation, never from an id or a body. */
 export const replyStorePartition = (companyId: string, project: string): string => companyScoped(companyId, `${REPLY_STORE_PARTITION_NAME}#${project}`);
@@ -159,6 +175,7 @@ export const replyHeadSortKey = (branch: string, family: ServedModelFamily): str
 export const replyEntrySortKey = (entrySha256: string): string => `${REPLY_ENTRY_PREFIX}${entrySha256}`;
 export const replyTaskSortKey = (taskId: string, family: ServedModelFamily): string => `${REPLY_TASK_PREFIX}${taskId}#${family}`;
 export const replyJoinSortKey = (taskId: string, family: ServedModelFamily): string => `${REPLY_JOIN_PREFIX}${taskId}#${family}`;
+export const replyMadeSortKey = (entrySha256: string): string => `${REPLY_MADE_PREFIX}${entrySha256}`;
 
 // ---- what the service answers (the shapes the conformance suite and Cloud's implementation share)
 
@@ -186,6 +203,9 @@ export interface ReplySetQuery {
   readonly defaultBranch?: string;
   readonly family: ServedModelFamily;
 }
+/** Why a reply sent to `putIndependentOverlay` was not added. */
+export const REPLY_SKIP_REASONS = ["already_in_overlay"] as const;
+export type ReplySkipReason = (typeof REPLY_SKIP_REASONS)[number];
 export type ImportOrigin = Exclude<BeforeTaskOrigin, "real_recording_capped">;
 export type JoinStatus = "joined" | "already_joined";
 
@@ -201,8 +221,11 @@ export interface ReplySetStoreService {
   /** Writes the task's `task_made` replies (replacing the task's earlier `task_made` ones; `independent` ones already there are kept). A reply over 256 KiB is not stored and is named in `tooLarge`. */
   putOverlay(scope: HostScope, input: { readonly project: string; readonly taskId: string; readonly family: ServedModelFamily; readonly replies: readonly ModelReplyFileEntry[] }): Promise<{ readonly ok: true; readonly stored: number; readonly tooLarge: readonly string[] } | ReplyStoreFailure>;
   /** For R2's channel only: each reply with the decision `createRovaraIndependentDecision` made for it. A reply whose decision does not stamp it `independent` is refused (`not_allowed`) and nothing is written. */
-  putIndependentOverlay(scope: HostScope, input: { readonly project: string; readonly taskId: string; readonly family: ServedModelFamily; readonly entries: readonly { readonly reply: ModelReplyFileEntry; readonly decision: IndependentReplyDecision }[] }): Promise<{ readonly ok: true; readonly stored: number } | ReplyStoreFailure>;
-  /** An explicit import of a base commit's reply file as `before_task` (never a side effect of starting a task). */
+  putIndependentOverlay(scope: HostScope, input: { readonly project: string; readonly taskId: string; readonly family: ServedModelFamily; readonly entries: readonly { readonly reply: ModelReplyFileEntry; readonly decision: IndependentReplyDecision }[] }): Promise<{ readonly ok: true; readonly stored: number; readonly skipped: readonly { readonly id: string; readonly reason: ReplySkipReason }[] } | ReplyStoreFailure>;
+  /**
+   * An explicit import of a base commit's reply file as `before_task` (never a side effect of starting a task). It skips every content hash in the durable `MADE#` record (a reply the coding agent ever wrote). NEVER reachable from a worker callback
+   * or any path the sandbox can drive (part B: only the setup agent and a maintainer's "refresh from the repo" call it), and `branch` must be the BASE branch of the project, never a task's.
+   */
   importFromRepoFile(scope: HostScope, input: ReplySetQuery & { readonly baseCommitSha: string; readonly bytes: Uint8Array; readonly origin: ImportOrigin }): Promise<{ readonly ok: true; readonly added: number; readonly skipped: number; readonly revision: number } | ReplyStoreFailure>;
   /** The post-merge join of one task's overlay into the merged branch's head. Idempotent through the `JOIN#` marker. */
   joinTask(scope: HostScope, input: { readonly project: string; readonly taskId: string; readonly family: ServedModelFamily; readonly branch: string; readonly defaultBranch?: string }): Promise<{ readonly ok: true; readonly status: JoinStatus; readonly added: number } | ReplyStoreFailure>;
