@@ -1,13 +1,13 @@
 // tests/contract/admin-change-notifier.test.ts
 // Spec 025 E13: a change whose Slack step started gets one direct message with Confirm and Cancel;
 // when the change ends, the message is edited to say how. Only the notifier posts (D11).
-import { AdminChangePendingRecordSchema } from "@agentx/contracts";
+import { AdminChangePendingRecordSchema } from "@rovara-code/contracts";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { describe, expect, it, vi } from "vitest";
-import { ADMIN_CHANGE_EXPIRY_GRACE_MS, cachedSlackClient, createNotifierHandler, noticeDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { SlackPostError, chatPostMessage, chatUpdate } from "../../packages/broker/src/aws/slack-web.js";
-import { adminChangeMessage, adminChangeOutcomeMessage } from "../../packages/broker/src/developer/change-messages.js";
-import { noticesFromStream, type Notice, type StreamRecord } from "../../packages/broker/src/developer/notifications.js";
+import { ADMIN_CHANGE_EXPIRY_GRACE_MS, cachedSlackClient, createNotifierHandler, noticeDelaySeconds, type NotifierDependencies } from "../../packages/core/src/aws/developer-task-notifier.js";
+import { SlackPostError, chatPostMessage, chatUpdate } from "../../packages/core/src/aws/slack-web.js";
+import { adminChangeMessage, adminChangeOutcomeMessage } from "../../packages/core/src/developer/change-messages.js";
+import { noticesFromStream, type Notice, type StreamRecord } from "../../packages/core/src/developer/notifications.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const CHANGE = "55555555-5555-4555-8555-555555555555";

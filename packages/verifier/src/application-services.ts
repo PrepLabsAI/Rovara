@@ -8,15 +8,15 @@ import { canonicalJson, E2EAppRecipeSchema, E2ERunBindingSchema, e2eApplicationP
   type E2EApplicationServicePorts, type E2EApplicationNetworkPorts, type E2EApplicationExternalConnectionRef,
   type E2EApplicationAccountDefinition, type E2EApplicationProjectContract, type E2EAppRecipe, type E2ERunBinding,
   type E2EApplicationSupervisorPorts, type E2ERunInput, type ProjectSetupRunnerToolchain,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { validateE2EApplicationNetworkRoutes } from "./application-network.js";
 import { e2eBindingDigest, e2ePolicyDigest, E2EExpectedCaseSchema, E2ERoundSchema, E2EScenarioSchema, E2ERuntimeAccountRefSchema,
-  type E2EExpectedCase, type E2ERound, type E2EScenario, type E2ERuntimeAccountRef } from "@agentx/contracts";
+  type E2EExpectedCase, type E2ERound, type E2EScenario, type E2ERuntimeAccountRef } from "@rovara-code/contracts";
 import type { E2EApplicationCliLaunchContext } from "./application-runtime-bootstrap.js";
 import type { E2EApplicationRuntimePorts } from "./application-runtime.js";
 import { e2eApplicationGroupUsesModel, e2eCompiledRuntime, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
-import { E2EAssertionSchema } from "@agentx/contracts";
-import { E2EMockSpecSchema, type E2EMockSpec } from "@agentx/contracts";
+import { E2EAssertionSchema } from "@rovara-code/contracts";
+import { E2EMockSpecSchema, type E2EMockSpec } from "@rovara-code/contracts";
 import { E2EApplicationAccountIdentityProjectionSchema, E2EApplicationObservationBindingSchema, E2EApplicationProofBytesSchema,
   E2EApplicationSubjectIdentityProjectionSchema, E2EApplicationCaseCaptureSchema,
   type E2EApplicationObservationBinding, type E2EApplicationProofBytes, type E2EApplicationCaseCapture } from "./application-result-adapter.js";

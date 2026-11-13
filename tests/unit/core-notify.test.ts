@@ -2,15 +2,15 @@
 // channel adapters the registry holds. The adapters here are fakes; no provider is named.
  
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, NOTIFY_BATCH_MINUTES, agentSessionKey, type ChannelEvent, type ConversationRef, type OrgId } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionChange, type SessionTaskFacts, type SummaryDependencies } from "../../packages/broker/src/core/sessions/index.js";
+import { IMPLICIT_COMPANY_ID, NOTIFY_BATCH_MINUTES, agentSessionKey, type ChannelEvent, type ConversationRef, type OrgId } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/core/src/ports/fake-channel-adapter.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionChange, type SessionTaskFacts, type SummaryDependencies } from "../../packages/core/src/core/sessions/index.js";
 import {
   ATTENTION_RETRY_BASE_MS, ATTENTION_TARGET_TRIES_MAX, attentionKindOf, attentionText, batchEventId, deliverAttention, queueAttention, readNotifyPrefs, writeNotifyPrefs, PENDING_PK,
-} from "../../packages/broker/src/core/notify/index.js";
+} from "../../packages/core/src/core/notify/index.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OWNER = localOwnerPrincipal();

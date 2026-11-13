@@ -6,7 +6,7 @@ import {
   environmentConnectorSecretPrefix,
   environmentSettingsPrefix,
   environmentStackName,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 describe("environment names", () => {
   it.each(["production", "staging", "dev-2", "a", "a1", "abcdefghijklmnopqrst"])("accepts %s", (name) => {

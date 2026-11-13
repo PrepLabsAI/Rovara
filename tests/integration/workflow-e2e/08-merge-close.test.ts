@@ -4,9 +4,9 @@
 // blocked task's discard), a teammate's Close, and the Canvas closeout.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_BLOCK_REASONS, agentXError } from "@agentx/contracts";
-import { developerIdForSlackUser } from "../../../packages/broker/src/aws/admin-actions.js";
-import { CLOSED_REPLY } from "../../../packages/broker/src/developer/share-messages.js";
+import { WORKFLOW_BLOCK_REASONS, agentXError } from "@rovara-code/contracts";
+import { developerIdForSlackUser } from "../../../packages/core/src/aws/admin-actions.js";
+import { CLOSED_REPLY } from "../../../packages/core/src/developer/share-messages.js";
 import { SLACK_TEAM } from "../../support/slack-broker.js";
 import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, FIXED, MERGED, PLAN, TEAMMATE, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";

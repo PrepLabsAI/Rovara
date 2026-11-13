@@ -1,13 +1,13 @@
 // The reflection queue: the message holds ids only; the worker claims a reflection once, runs it under a deadline, and answers a batch the partial way (only the messages that need another try come back).
 import { describe, expect, it, vi } from "vitest";
-import { DocumentStoreError, LESSONS_REFLECT_DEAD_LETTER_QUEUE, LESSONS_REFLECT_LEASE_GRACE_SECONDS, LESSONS_REFLECT_MAX_ATTEMPTS, LESSONS_REFLECT_MAX_RECEIVES, LESSONS_REFLECT_QUEUE, LESSONS_REFLECT_RETRY_BACKOFF_SECONDS, LESSONS_WORKER_TIMEOUT_SECONDS } from "@agentx/contracts";
-import { CLAIM_TTL_SECONDS, LEASE_MS, documentReflectClaims, reflectClaimKey, type ClaimStore, type Lease, type TakeResult } from "../../../packages/broker/src/lessons/reflect-claims.js";
-import { ReflectMessageSchema, parseReflectMessage, queueReflectQueue, queueReflectVisibility, reflectQueueOf } from "../../../packages/broker/src/lessons/reflect-queue.js";
-import { handleReflectBatch, retryDelaySeconds, runReflectMessage, type ReflectWorkerDeps } from "../../../packages/broker/src/lessons/reflect-worker.js";
-import { logRef } from "../../../packages/broker/src/lessons/log-ref.js";
-import { currentLearningAttempt, learningCallMayStart } from "../../../packages/broker/src/lessons/learning-deadline.js";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { MemoryQueueService } from "../../../packages/broker/src/ports/memory-queue.js";
+import { DocumentStoreError, LESSONS_REFLECT_DEAD_LETTER_QUEUE, LESSONS_REFLECT_LEASE_GRACE_SECONDS, LESSONS_REFLECT_MAX_ATTEMPTS, LESSONS_REFLECT_MAX_RECEIVES, LESSONS_REFLECT_QUEUE, LESSONS_REFLECT_RETRY_BACKOFF_SECONDS, LESSONS_WORKER_TIMEOUT_SECONDS } from "@rovara-code/contracts";
+import { CLAIM_TTL_SECONDS, LEASE_MS, documentReflectClaims, reflectClaimKey, type ClaimStore, type Lease, type TakeResult } from "../../../packages/core/src/lessons/reflect-claims.js";
+import { ReflectMessageSchema, parseReflectMessage, queueReflectQueue, queueReflectVisibility, reflectQueueOf } from "../../../packages/core/src/lessons/reflect-queue.js";
+import { handleReflectBatch, retryDelaySeconds, runReflectMessage, type ReflectWorkerDeps } from "../../../packages/core/src/lessons/reflect-worker.js";
+import { logRef } from "../../../packages/core/src/lessons/log-ref.js";
+import { currentLearningAttempt, learningCallMayStart } from "../../../packages/core/src/lessons/learning-deadline.js";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { MemoryQueueService } from "../../../packages/core/src/ports/memory-queue.js";
 
 const TEST_ORG = "org_aaaaaaaaaaaaaaaaaaaa";
 

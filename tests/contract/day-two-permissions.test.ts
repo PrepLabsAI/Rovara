@@ -3,7 +3,7 @@
 // kept by hand, so this test cannot prove they name every call a command makes: the real proof is
 // Task 20's IAM policy simulator run against the deployed operator role.
 import { describe, expect, it } from "vitest";
-import { operatorRoleStatements } from "@agentx/contracts";
+import { operatorRoleStatements } from "@rovara-code/contracts";
 import { CONFIG_AWS_ACTIONS, DOCTOR_AWS_ACTIONS, UPGRADE_AWS_ACTIONS } from "../../packages/cli/src/day-two-actions.js";
 
 const scope = {

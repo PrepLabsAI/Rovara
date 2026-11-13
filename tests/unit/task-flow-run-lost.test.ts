@@ -1,10 +1,10 @@
 // The run-lost watchdog (`sweepLostRuns`): a worker machine lost after the delivery of an operation must not leave the operation, and the task with it, running for ever.
 import { describe, expect, it } from "vitest";
-import { change, queryAll } from "@agentx/contracts";
-import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { RUN_LOST_GRACE_SECONDS, RUN_LOST_MESSAGE } from "../../packages/broker/src/core/task-flow/run-watch.js";
-import { runWatchKey, runWatchPartition } from "../../packages/broker/src/core/task-flow/run-watch-rows.js";
-import type { OperationRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
+import { change, queryAll } from "@rovara-code/contracts";
+import { operationKey, workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { RUN_LOST_GRACE_SECONDS, RUN_LOST_MESSAGE } from "../../packages/core/src/core/task-flow/run-watch.js";
+import { runWatchKey, runWatchPartition } from "../../packages/core/src/core/task-flow/run-watch-rows.js";
+import type { OperationRecord, WorkspaceRecord } from "../../packages/core/src/core/task-flow/records.js";
 import { COMPANY, createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 /** A task on the Full path whose planning step has been handed to a worker machine and is running there. */

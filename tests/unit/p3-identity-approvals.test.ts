@@ -8,15 +8,15 @@ import {
   actorOfExternalAccount, checkApprovalSignIn, checkApprovalSignInSetting, createWorkflowSnapshot, externalAccountKey, externalAccountOfActor, externalAccountOfHostAccount, isKnownOrgRole, readExternalAccount,
   submitWorkflowArtifact, DEFAULT_APPROVAL_SIGN_IN_SETTING,
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type AuditEvent, type AuditSink, type IdentityProvider, type Principal, type TransactItem, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createDecisionGate, approvalRecordKey, type DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { isCommentMethod, strictMethodsFor } from "../../packages/broker/src/core/decisions/strong-methods.js";
-import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { approvalSignInSettingKey, changeApprovalSignInSetting, readApprovalSignInRule, readApprovalSignInSetting } from "../../packages/broker/src/core/decisions/sign-in-setting.js";
-import { createIdentityMergePeople, soleOwnerPeople } from "../../packages/broker/src/core/merge/people.js";
-import { mergeReadiness, prepareMerge, pressMerge } from "../../packages/broker/src/core/merge/index.js";
+} from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createDecisionGate, approvalRecordKey, type DecisionAttempt } from "../../packages/core/src/core/decisions/approval-gate.js";
+import { isCommentMethod, strictMethodsFor } from "../../packages/core/src/core/decisions/strong-methods.js";
+import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/core/src/core/decisions/workflow-subject.js";
+import { approvalSignInSettingKey, changeApprovalSignInSetting, readApprovalSignInRule, readApprovalSignInSetting } from "../../packages/core/src/core/decisions/sign-in-setting.js";
+import { createIdentityMergePeople, soleOwnerPeople } from "../../packages/core/src/core/merge/people.js";
+import { mergeReadiness, prepareMerge, pressMerge } from "../../packages/core/src/core/merge/index.js";
 import { TASK_ID as MERGE_TASK, mergeWorld, OWNER_SESSION } from "../support/merge-world.js";
 import { commentReads, freshComment } from "../support/comment-fakes.js";
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalJson, E2EAssertionSchema } from "@agentx/contracts";
+import { canonicalJson, E2EAssertionSchema } from "@rovara-code/contracts";
 import { executeE2EAPIApplicationScenario, type E2EApiRuntimePorts } from "../../packages/verifier/src/api-runtime.js";
 import { E2EApplicationAssertionObservationSchema, evaluateE2EApplicationAssertionObservation } from "../../packages/verifier/src/application-result-adapter.js";
 

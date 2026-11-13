@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ModelRefSchema, ModelSelectionSchema, ProjectModelsSchema, SwebenchRunnerConfigSchema, SwebenchRunSchema,
   SwebenchStartRequestSchema, TaskUsageTelemetrySchema, ThinkingLevelSchema, WorkerInvocationSchema, createTaskUsageTelemetry,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const sonnet = { provider: "anthropic", modelId: "claude-sonnet-4-6" };

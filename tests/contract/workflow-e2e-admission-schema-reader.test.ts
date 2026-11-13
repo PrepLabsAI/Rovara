@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { E2EWorkflowAdmissionRef } from "@agentx/contracts";
-import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionSchemaReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
+import type { E2EWorkflowAdmissionRef } from "@rovara-code/contracts";
+import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionSchemaReader } from "../../packages/core/src/aws/workflow-e2e-admission-schema.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const referenceFor = (bytes: Buffer, override: Partial<E2EWorkflowAdmissionRef["admissionRef"]> = {}): E2EWorkflowAdmissionRef => ({ schemaVersion: 1, taskId: "11111111-1111-4111-8111-111111111111",

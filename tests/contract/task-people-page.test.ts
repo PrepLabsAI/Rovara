@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { TaskPeopleChangeResult, TaskPeopleDisplayReadRequest, TaskPeopleProposal } from "@agentx/contracts";
-import type { TaskPeopleView } from "../../packages/broker/src/developer/task-people.js";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
-import { createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
-import { createTaskWeb, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import type { TaskPeopleChangeResult, TaskPeopleDisplayReadRequest, TaskPeopleProposal } from "@rovara-code/contracts";
+import type { TaskPeopleView } from "../../packages/core/src/developer/task-people.js";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
+import type { AdaptedHttpRequest } from "../../packages/core/src/aws/lambda.js";
+import { createTaskWebApi } from "../../packages/core/src/aws/task-web-api.js";
+import { createTaskWeb, type TaskDocumentView } from "../../packages/core/src/aws/task-web.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
 import { DEV_ISSUER, createDeveloperTaskBroker, type Developer } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 

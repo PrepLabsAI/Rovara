@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef } from "@agentx/contracts";
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef } from "@rovara-code/contracts";
 import { afterAll, describe, expect, it } from "vitest";
 import { allOutputText, caseStatusesAll, observations } from "../support/e2e-executor-output.js";
 import { collectAccountsRun } from "../support/linux-accounts.js";

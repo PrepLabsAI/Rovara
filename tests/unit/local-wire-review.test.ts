@@ -1,12 +1,12 @@
 // Lane L9-wire, review round 1: the lower-level cases (plan feedback, keys, the state folder lock, the message limit, the start transaction).
 import { afterEach, describe, expect, it } from "vitest";
-import { createLocalPagesServer, type LocalPagesServer } from "../../packages/broker/src/core/local-pages/index.js";
+import { createLocalPagesServer, type LocalPagesServer } from "../../packages/core/src/core/local-pages/index.js";
 import { fakeWorld, raw } from "../support/local-pages-fakes.js";
-import { when } from "@agentx/contracts";
-import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED, createSessionControlHost } from "../../packages/broker/src/local/app/host.js";
+import { when } from "@rovara-code/contracts";
+import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED, createSessionControlHost } from "../../packages/core/src/local/app/host.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { PLAN_FEEDBACK_MAX, planFeedbackKey, planFeedbackOf } from "../../packages/broker/src/core/task-flow/stage-machine.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { PLAN_FEEDBACK_MAX, planFeedbackKey, planFeedbackOf } from "../../packages/core/src/core/task-flow/stage-machine.js";
 
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 

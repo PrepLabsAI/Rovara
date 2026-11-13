@@ -17,7 +17,7 @@
 //   - NOT HERE, a TS30 wiring item: the seeding of a Prove run. `seedRun` (seeds, then `seeded`) must be called once after the helpers start, by whoever wires Prove's boot step; Prove's own ports (service-runner.ts) only start and probe.
 //   - A reset kind with no hook, or a hook that fails, is a refusal, never a silent skip (`ServiceRunnerError`).
 import { randomBytes } from "node:crypto";
-import type { ProjectCommand, SeedScriptLock, TaskDependencyPlan } from "@agentx/contracts";
+import type { ProjectCommand, SeedScriptLock, TaskDependencyPlan } from "@rovara-code/contracts";
 import { HELPER_CREDENTIAL_PATTERNS, controlCallArgs, type HelperFiles } from "./service-helpers.js";
 import type { ResetContext, ResetHook, ResetHooks, ResetOutcome, ServiceSession } from "./service-runner.js";
 

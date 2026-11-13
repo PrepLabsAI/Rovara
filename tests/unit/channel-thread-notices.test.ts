@@ -3,21 +3,21 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   IMPLICIT_COMPANY_ID, change, createWorkflowSnapshot, submitWorkflowArtifact, type ActorRef, type ChannelDecision, type ChannelEvent, type CodeMilestone, type ConversationRef, type DecisionRisk, type JsonValue, type OrgId, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
-import { createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { strictMethodsFor } from "../../packages/broker/src/core/decisions/strong-methods.js";
-import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { createWorkflowDocumentSubject, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
+} from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/core/src/ports/fake-channel-adapter.js";
+import { createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { strictMethodsFor } from "../../packages/core/src/core/decisions/strong-methods.js";
+import { createDecisionGate } from "../../packages/core/src/core/decisions/approval-gate.js";
+import { createWorkflowDocumentSubject, workflowTaskKey } from "../../packages/core/src/core/decisions/workflow-subject.js";
 import {
   bindChannelSpace, channelThreadHandler, createChannelSink, decisionRefusalWords, planCardPosted, postApprovalCard, CARD_TTL_SECONDS, issueChannelLinkCode, linkedPerson, readApprovalCard, recordTaskThread, redeemChannelLinkCode, threadFollows, cardKey,
   type ChannelCompanyOf, type ChannelMemberRule,
-} from "../../packages/broker/src/core/channel/index.js";
-import { createDocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
-import { ticketMomentsOnChange } from "../../packages/broker/src/core/ticket-updates/moments.js";
-import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
-import { createLocalChat } from "../../packages/broker/src/local/app/chat.js";
+} from "../../packages/core/src/core/channel/index.js";
+import { createDocumentMilestones } from "../../packages/core/src/core/milestones/milestones.js";
+import { ticketMomentsOnChange } from "../../packages/core/src/core/ticket-updates/moments.js";
+import { developerIdOf, taskSessionId } from "../../packages/core/src/core/sessions/create.js";
+import { createLocalChat } from "../../packages/core/src/local/app/chat.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OTHER = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;

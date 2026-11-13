@@ -1,4 +1,4 @@
-import { DEVELOPER_FAILURE_MESSAGE_MAX, redactSecrets, redactText, type ProjectCommand } from "@agentx/contracts";
+import { DEVELOPER_FAILURE_MESSAGE_MAX, redactSecrets, redactText, type ProjectCommand } from "@rovara-code/contracts";
 import type { CommandResult } from "./readiness.js";
 import { MAX_COMMAND_OUTPUT_BYTES, redactedTail, withoutSplitPair } from "./collected-process.js";
 

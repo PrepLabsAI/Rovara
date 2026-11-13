@@ -1,4 +1,4 @@
-import { agentXError, type AgentXError } from "@agentx/contracts";
+import { agentXError, type AgentXError } from "@rovara-code/contracts";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 /** The model is told it is looping after this many identical failing calls in a row (#127). */

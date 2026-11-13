@@ -4,7 +4,7 @@ import {
   SwebenchRunResultSchema,
   SwebenchRunnerConfigSchema,
   parseSwebenchCommand,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 describe("the eval swebench command (spec 043 FR-001)", () => {
   it("reads a dataset, one instance and an optional model", () => {

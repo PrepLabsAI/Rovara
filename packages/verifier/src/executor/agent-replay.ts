@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { E2EAgentTraceFileSchema, canonicalJson, type E2EReplayTrace } from "@agentx/contracts";
+import { E2EAgentTraceFileSchema, canonicalJson, type E2EReplayTrace } from "@rovara-code/contracts";
 import type { StepExecutor } from "e2e";
 import { isAgentError } from "e2e/agent";
 import type { E2EWebAgentPorts } from "../web-runtime.js";

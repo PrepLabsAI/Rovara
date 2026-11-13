@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, cp, lstat, mkdir, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { WEB_API_QUALIFICATION_APP_TREE_DIGEST, webApiQualificationAppTreeDigest } from "@agentx/contracts";
+import { WEB_API_QUALIFICATION_APP_TREE_DIGEST, webApiQualificationAppTreeDigest } from "@rovara-code/contracts";
 
 const MAX_FILES = 256;
 const MAX_FILE_BYTES = 1024 * 1024;

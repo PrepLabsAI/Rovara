@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
+import { webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
 import { createAPIApplicationCliHost, executeE2EAPIApplicationScenario, type E2EApiRuntimePorts } from "../../packages/verifier/src/api-runtime.js";
 import { createWebApplicationCliHost, executeWebSteps, type E2EWebRuntimePorts } from "../../packages/verifier/src/web-runtime.js";
 

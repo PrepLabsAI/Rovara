@@ -60,7 +60,7 @@ describe("the requalify-infra unit", () => {
       Extract<DeployStep, { kind: "execute-change-set" }>, Extract<DeployStep, { kind: "verify-stack-resources" }>, Extract<DeployStep, { kind: "verify-lambda-code" }>,
     ];
     // boot.sh rides beside the handler, as it does for the session steps.
-    expect(build).toMatchObject({ unit: "requalify-steps", logicalId: REQUALIFY_LAMBDA.logicalId, entry: "packages/broker/src/aws/runtime-requalify-handler.ts", extraFiles: [{ from: "packages/worker/ec2/boot.sh", name: "boot.sh" }] });
+    expect(build).toMatchObject({ unit: "requalify-steps", logicalId: REQUALIFY_LAMBDA.logicalId, entry: "packages/core/src/aws/runtime-requalify-handler.ts", extraFiles: [{ from: "packages/worker/ec2/boot.sh", name: "boot.sh" }] });
     // The function does not exist yet: its bucket is checked against the Broker's, which reads from the same artifact bucket.
     expect(upload).toMatchObject({ logicalId: REQUALIFY_LAMBDA.logicalId, from: build.id, bucketCheckLogicalId: CONTROL_PLANE_LAMBDAS.broker.logicalId });
     expect(upload.keyPrefix).toBe(`test-deploy/0123456789ab/${REQUALIFY_LAMBDA.logicalId}-`);

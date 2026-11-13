@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isValidTestId, testIdOf } from "@agentx/contracts";
+import { isValidTestId, testIdOf } from "@rovara-code/contracts";
 import { TEST_REPORT_MAX_BYTES, TEST_REPORT_MAX_TESTS, displayLine } from "../../packages/worker/src/verification/test-report.js";
 import { REPORT_FOLDER_MAX_FILES, readJunitFolder, readTestReportAt } from "../../packages/worker/src/verification/test-report-folder.js";
 

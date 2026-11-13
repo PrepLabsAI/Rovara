@@ -3,55 +3,61 @@
   "comment": "Findings the port guard accepts, each pinned to one file's exact content (its git blob id at the tip): any change to the file flags it again, and an entry whose file changed or is gone is itself a finding (accepted-stale). Only cloud-aws and secret findings can be listed. CI reads this file from code/next, never from the pull request. Editing it is a guard edit, reviewed by hand.",
   "accepted": [
     {
-      "path": "packages/broker/src/aws/channel-api-lambda.ts",
+      "path": "packages/core/src/aws/broker-shared.ts",
+      "rule": "cloud-aws",
+      "blob": "18e7dd762f68fab45502284ecddc18ccf7f8c676",
+      "reason": "already public as packages/broker/src/aws/broker-shared.ts (mainline, and code/next as a short re-export); the modular split only moved it. Git pairs the old mainline file with developer/plan-instructions.ts, so a range from mainline reads this one as new"
+    },
+    {
+      "path": "packages/core/src/aws/channel-api-lambda.ts",
       "rule": "cloud-aws",
       "blob": "c7e705423aa7731a32261db8cd44a3ad3421c0db",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
-      "path": "packages/broker/src/aws/channel-commands.ts",
+      "path": "packages/core/src/aws/channel-commands.ts",
       "rule": "cloud-aws",
       "blob": "11d7bf99d9030d0fcdd131f5aa28adc4c326b0ca",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
-      "path": "packages/broker/src/aws/channel-conversation.ts",
+      "path": "packages/core/src/aws/channel-conversation.ts",
       "rule": "cloud-aws",
       "blob": "4c1d53d1eec46e703206a27ce378f2de89cb2852",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
-      "path": "packages/broker/src/aws/slack-adapter.ts",
+      "path": "packages/core/src/aws/slack-adapter.ts",
       "rule": "cloud-aws",
       "blob": "e9e837508d33be37982fa5b78bf023a6fc2bba4c",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
-      "path": "packages/broker/src/aws/slack-channel-presses.ts",
+      "path": "packages/core/src/aws/slack-channel-presses.ts",
       "rule": "cloud-aws",
       "blob": "7afa740a3bc81e2aeef09dffdd2d92a262653bc4",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
-      "path": "packages/broker/src/aws/slack-channel-router.ts",
+      "path": "packages/core/src/aws/slack-channel-router.ts",
       "rule": "cloud-aws",
       "blob": "8db65d8028d42c51ea9a21ec6f3aa050dfe9d932",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
-      "path": "packages/broker/src/aws/slack-directory-channel.ts",
+      "path": "packages/core/src/aws/slack-directory-channel.ts",
       "rule": "cloud-aws",
       "blob": "d16621063ac8a05ebb0f0ae6f5c3b08609d5cb79",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
-      "path": "packages/broker/src/aws/slack-notice-channel.ts",
+      "path": "packages/core/src/aws/slack-notice-channel.ts",
       "rule": "cloud-aws",
       "blob": "9faa9e75f37433e18336e13579520e7223c260bc",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
     },
     {
-      "path": "packages/broker/src/aws/slack-press-routing.ts",
+      "path": "packages/core/src/aws/slack-press-routing.ts",
       "rule": "cloud-aws",
       "blob": "c80d0134ab3bf09b6683084961151909e270ce92",
       "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"

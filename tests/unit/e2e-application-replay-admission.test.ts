@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2EApplicationPlanIntentSchema, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, deriveE2EApplicationRuntimeAccountRef, e2eApplicationMetadataSourceRefs, type E2EScenario } from "@agentx/contracts";
+import { E2EApplicationPlanIntentSchema, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, deriveE2EApplicationRuntimeAccountRef, e2eApplicationMetadataSourceRefs, type E2EScenario } from "@rovara-code/contracts";
 import { decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
-import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
-import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationReplayAdmission, type ApplicationAdmissionInput, type ApplicationRoundApproval } from "../../packages/broker/src/e2e/application-admission.js";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
-import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { createWorkflowE2EAdmissionAgentStepsReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
+import { ApplicationDispatchRefusal } from "../../packages/core/src/e2e/application-dispatch-check.js";
+import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationReplayAdmission, type ApplicationAdmissionInput, type ApplicationRoundApproval } from "../../packages/core/src/e2e/application-admission.js";
+import { evaluateApplicationPlanApproval } from "../../packages/core/src/e2e/application-plan-approval.js";
+import { e2eAgentRoutePolicyLimits } from "../../packages/core/src/e2e/model-route-registry.js";
+import { createWorkflowE2EAdmissionAgentStepsReader } from "../../packages/core/src/aws/workflow-e2e-admission-schema.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { ordersManifestWith, registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { PROFILE, approvedSetup, binding, csvScenario, snapshotOf, webApiRow } from "../support/e2e-application-plan-fixtures.js";
@@ -160,7 +160,7 @@ describe("an audit replay of a verified application round runs the cases the rou
 });
 
 describe("the broker derives a replay's plan identity from the one function the candidate round uses", () => {
-  const source = readFileSync(new URL("../../packages/broker/src/aws/broker.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../packages/core/src/aws/broker.ts", import.meta.url), "utf8");
   const bodyOf = (name: string) => {
     const start = source.indexOf(`async function ${name}(`);
     expect(start, name).toBeGreaterThan(-1);

@@ -1,7 +1,7 @@
 // tests/contract/admin-read-bindings.test.ts
 // Spec 025 A11: channel bindings, with public channels' names and private channels by ID only.
 import { describe, expect, it, vi } from "vitest";
-import { channelLabels } from "../../packages/broker/src/aws/admin-reads.js";
+import { channelLabels } from "../../packages/core/src/aws/admin-reads.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { bindChannel } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, issuer } from "../support/slack-broker.js";

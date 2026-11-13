@@ -5,10 +5,10 @@ import {
   ChannelActionSchema, ChannelAdapterRegistrationSchema, ChannelCapabilitiesSchema, ChannelCommandSchema, ChannelEventSchema,
   adapterTakesCommand, channelEventId, generateWebhookSecret, verifyWebhook, webhookHeaders,
   type ChannelAdapterRecord, type ChannelEvent,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { EndpointRefused } from "@agentx/gateway";
-import { sendChannelCommand, type ChannelCommandDependencies } from "../../packages/broker/src/aws/channel-commands.js";
-import { createChannelEventSender, fitEventToAdapter, unsendableReason } from "../../packages/broker/src/aws/channel-events.js";
+import { sendChannelCommand, type ChannelCommandDependencies } from "../../packages/core/src/aws/channel-commands.js";
+import { createChannelEventSender, fitEventToAdapter, unsendableReason } from "../../packages/core/src/aws/channel-events.js";
 
 const NOW = Date.parse("2026-11-10T10:00:00.000Z");
 const SECRET = generateWebhookSecret();

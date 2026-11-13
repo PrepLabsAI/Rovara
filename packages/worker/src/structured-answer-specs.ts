@@ -4,7 +4,7 @@
 import {
   INTENT_BLOCK_INFO_STRING, IntentAssessmentSchema, PLAN_CRITIC_POINTS_MAX, PLAN_CRITIQUE_INFO_STRING, PLAN_CRITIQUE_POINT_MAX_CHARS, SPEC_VERDICTS, WorkflowReviewFindingSchema,
   parseWorkflowReviewerResponse, readIntentBlock, readPlanCritique, reviewJsonShape,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { z } from "zod";
 import { PLAN_CRITIQUE_ANSWER_MAX_BYTES } from "./plan-critic.js";
 import { answerSchemaOf, fencedBlock, type AnswerChannelSpec } from "./structured-answer.js";

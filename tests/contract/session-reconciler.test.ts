@@ -1,16 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Ec2RuntimeBinding } from "../../packages/contracts/src/session.js";
-import { failActiveOperation } from "../../packages/broker/src/aws/outbox-failure.js";
-import { SessionManager } from "../../packages/broker/src/aws/sessions.js";
+import { failActiveOperation } from "../../packages/core/src/aws/outbox-failure.js";
+import { SessionManager } from "../../packages/core/src/aws/sessions.js";
 import {
   createReconcilerHandler,
   type ExecutionStatus,
   type InstanceView,
   type ReconcilerDependencies,
   type VolumeView,
-} from "../../packages/broker/src/aws/session-reconciler.js";
-import { STUCK_CANCEL_LOST_MESSAGE, sweepStuckCancels, type StuckCancelDependencies } from "../../packages/broker/src/aws/stuck-cancels.js";
+} from "../../packages/core/src/aws/session-reconciler.js";
+import { STUCK_CANCEL_LOST_MESSAGE, sweepStuckCancels, type StuckCancelDependencies } from "../../packages/core/src/aws/stuck-cancels.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = new Date("2026-09-27T12:00:00.000Z");

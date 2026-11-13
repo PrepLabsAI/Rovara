@@ -1,12 +1,12 @@
 // Issue #49: Linear's team check guards only the tools it knows. An approved tool outside that set
 // whose input names an item can reach another team, so registration's preflight warns about it.
-import { ProjectDefinitionSchema } from "@agentx/contracts";
+import { ProjectDefinitionSchema } from "@rovara-code/contracts";
 import { LINEAR_GUARDED_ITEM_TOOLS, issueInTeamGuard, linearConnector } from "@agentx/gateway";
 import { describe, expect, it, vi } from "vitest";
-import type { ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
-import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
-import { linearConnectorType } from "../../packages/broker/src/aws/linear-connector-type.js";
-import { preflightConnectors } from "../../packages/broker/src/aws/registration-preflight.js";
+import type { ConnectorType } from "../../packages/core/src/aws/connector-types.js";
+import { CredentialRegistry } from "../../packages/core/src/aws/credentials.js";
+import { linearConnectorType } from "../../packages/core/src/aws/linear-connector-type.js";
+import { preflightConnectors } from "../../packages/core/src/aws/registration-preflight.js";
 import { createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { LINEAR_FIXTURE_TOOLS } from "../support/fake-linear-mcp.js";

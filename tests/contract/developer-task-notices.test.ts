@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
 import { marshall } from "@aws-sdk/util-dynamodb";
-import { noticesFromStream, noticesOf, readStream, type StreamRecord } from "../../packages/broker/src/developer/notifications.js";
+import { noticesFromStream, noticesOf, readStream, type StreamRecord } from "../../packages/core/src/developer/notifications.js";
 import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
 

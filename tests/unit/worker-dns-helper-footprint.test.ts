@@ -1,6 +1,6 @@
 // The DNS helper containers (the setup run's watch and the sealed round's name server) run the worker's own image under a 128 MB memory limit (setup-network.ts `helperRunArgs`, check-sandbox.ts
-// `sealedDnsHelperRunArgs`). Loading the whole `@agentx/contracts` barrel takes about 210 MB of RSS, and on linux-runtime (CI 41791561884) the sealed helper was OOM-killed (exit 137, oom=true) before it
-// bound .2:53, so every sealed lookup failed. The helpers' modules therefore import only node built-ins, each other, and the small `@agentx/contracts/dns-helper` entry, which loads about 55 MB.
+// `sealedDnsHelperRunArgs`). Loading the whole `@rovara-code/contracts` barrel takes about 210 MB of RSS, and on linux-runtime (CI 41791561884) the sealed helper was OOM-killed (exit 137, oom=true) before it
+// bound .2:53, so every sealed lookup failed. The helpers' modules therefore import only node built-ins, each other, and the small `@rovara-code/contracts/dns-helper` entry, which loads about 55 MB.
 // The limit stays: the helper sits on a network an untrusted program can reach. These tests pin what the helpers load, measure the contracts part, and pin the limit.
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -17,10 +17,10 @@ function importsOf(source: string): string[] {
 }
 
 const HELPER_MODULES = ["packages/worker/src/sealed-dns-helper.ts", "packages/worker/src/setup-dns-watch-helper.ts", "packages/worker/src/setup-dns-watch.ts"];
-const ALLOWED = new Set(["./setup-dns-watch.js", "@agentx/contracts/dns-helper"]);
+const ALLOWED = new Set(["./setup-dns-watch.js", "@rovara-code/contracts/dns-helper"]);
 
 describe("the DNS helpers load little enough for their 128 MB limit", () => {
-  it("the helpers' modules import only node built-ins, each other and @agentx/contracts/dns-helper (never the barrel)", async () => {
+  it("the helpers' modules import only node built-ins, each other and @rovara-code/contracts/dns-helper (never the barrel)", async () => {
     for (const path of HELPER_MODULES) {
       const specifiers = importsOf(await readFile(path, "utf8"));
       expect(specifiers.length, path).toBeGreaterThan(0);
@@ -41,11 +41,11 @@ describe("the DNS helpers load little enough for their 128 MB limit", () => {
       expect(child.status, child.stderr).toBe(0);
       return Number(child.stdout.trim()) / 1024;
     };
-    const lean = peak("@agentx/contracts/dns-helper");
+    const lean = peak("@rovara-code/contracts/dns-helper");
     // About 55 MB measured (node 22.23.2); the node process alone is about 40 MB. Under 96 MB leaves the helper's sockets and record room inside 128 MB.
     expect(lean).toBeLessThan(96);
     // The barrel is the reason for the entry: if it ever became small, this test should be revisited, not the limit raised.
-    expect(peak("@agentx/contracts")).toBeGreaterThan(lean + 50);
+    expect(peak("@rovara-code/contracts")).toBeGreaterThan(lean + 50);
   });
 
   it("both helpers keep a 128 MB cap with swap at the same size (the limit is kept, not removed)", () => {

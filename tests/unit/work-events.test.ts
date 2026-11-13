@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, WORK_EVENT_BLOCK_CAUSES, WORK_EVENT_FAILURE_CAUSES, WORK_EVENT_KINDS, WORK_EVENT_SHARDS, WorkEventSchema, queryAll, workEventCauseIsFailure, workEventExpiresAt, workEventId, workEventKey, workEventMonths, workEventPartition, workEventPartitions, workEventShard,
   type DocumentStore, type WorkEventInput, type WorkEventKind,
-} from "@agentx/contracts";
-import { WORK_EVENTS_PER_CHANGE_MAX, listWorkEvents, recordWorkEvent, workEventItem, workEventItems, workEventRow } from "../../packages/broker/src/core/work-events/work-events.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+} from "@rovara-code/contracts";
+import { WORK_EVENTS_PER_CHANGE_MAX, listWorkEvents, recordWorkEvent, workEventItem, workEventItems, workEventRow } from "../../packages/core/src/core/work-events/work-events.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 const orgId = IMPLICIT_COMPANY_ID;
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";

@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { FixtureSetSchema, canonicalJson, fixtureEntry, fixtureSetDigest, type FixtureSet } from "@agentx/contracts";
+import { FixtureSetSchema, canonicalJson, fixtureEntry, fixtureSetDigest, type FixtureSet } from "@rovara-code/contracts";
 import { FixtureFetchRefused, fetchFixtureSet } from "../../packages/worker/src/fixture-fetch.js";
 
 const dependency = { id: "payments-api", family: "http:api.example-pay.com", protocol: "http_json", target: "api.example-pay.com" } as const;

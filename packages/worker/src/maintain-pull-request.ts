@@ -10,7 +10,7 @@ import {
   agentXError,
   type WorkerInvocation,
   type PullRequestLifecycleResult,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME } from "./git.js";
 import { assertCredentialFreeRemote, type GitCredential } from "./git-auth.js";
 import { assertWorkspaceIsPlain, runIsolatedGit, withIsolatedRepository } from "./isolated-repository.js";

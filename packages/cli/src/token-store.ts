@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 const execFileAsync = promisify(execFile);
 

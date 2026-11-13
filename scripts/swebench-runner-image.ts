@@ -4,7 +4,7 @@
 // pushes it to the worker repository with a `swebench-` tag, and points the eval runner-image
 // parameter at its digest. The broker reads that parameter per run, so no other release is needed.
 // A production write: run it yourself, after the eval stack is deployed (docs/swebench-eval.md).
-import { environmentSettingsPrefix, SWEBENCH_SETTING_PARAMETERS, WORKER_INVOCATION_FEATURES, type SwebenchRunnerFeatures } from "@agentx/contracts";
+import { environmentSettingsPrefix, SWEBENCH_SETTING_PARAMETERS, WORKER_INVOCATION_FEATURES, type SwebenchRunnerFeatures } from "@rovara-code/contracts";
 import { Runner, assertDigestImage, buildAndPushImage, parseReleaseArgs, splitEnvFlag, verifyRepositoryImage } from "./release-common.js";
 
 const LEGACY_SETTINGS_PREFIX = "/agentx/production/";

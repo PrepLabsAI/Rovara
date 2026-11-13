@@ -7,7 +7,7 @@
 // `maxPatchBytes` bytes. It journals nothing and calls nothing back. A failure of any kind answers `unavailable` (the caller uses the pull request's diff); no error text leaves this module.
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { PEEK_FILES_MAX, PEEK_PATCH_MAX_BYTES, redactText, type PeekAnswer, type WorkerInvocation } from "@agentx/contracts";
+import { PEEK_FILES_MAX, PEEK_PATCH_MAX_BYTES, redactText, type PeekAnswer, type WorkerInvocation } from "@rovara-code/contracts";
 import type { PreparationManifest } from "./prepare.js";
 import { redactCredentials } from "./events.js";
 import { runIsolatedGit } from "./isolated-repository.js";

@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MCP_SERVER_STATUSES, McpServerEntrySchema, McpServerStatusSchema, McpStdioProposalSchema, McpStdioSpecSchema, mcpSecretEnvNameProblem, readStoredMcpServerEntry, stdioSpecIfComplete,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);

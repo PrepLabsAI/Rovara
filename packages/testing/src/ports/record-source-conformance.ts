@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   RecordSourceIdSchema, recordDraftRefusal, recordIdempotencyKey, recordSourceDraftProblem,
   type Audience, type RecordDraft, type RecordIngestOutcome, type RecordPollRequest, type RecordSink, type TeamRecordSource,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const COMPANY = "org_00000000000000000000";
 const OTHER = "org_11111111111111111111";

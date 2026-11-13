@@ -16,7 +16,7 @@
 // this listener's own Host, and is then held to the manifest flow's own state, once.
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { ManifestHost, OpenManifestHost } from "../context.js";
 import { WIZARD_CSP, WIZARD_CSS, WIZARD_JS, wizardHtml } from "./page.js";
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY, type AnswerReply } from "./protocol.js";

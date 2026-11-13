@@ -3,7 +3,7 @@
 // already, the GitHub owner exists and is the kind the answers say, and the app name fits both
 // platforms and is free on GitHub. Each is a PrerequisiteCheck for the checklist; nothing is
 // created, and a GitHub that cannot answer is "could not check", never a wrong answer.
-import { environmentStackName } from "@agentx/contracts";
+import { environmentStackName } from "@rovara-code/contracts";
 import { installOrder } from "../deploy/parameters.js";
 import type { StackStatusReader } from "./context.js";
 import { githubAppSlug, type GitHubApi } from "./github-app.js";

@@ -2,8 +2,8 @@
 // what was written, and a fake clock. The batch broker tests keep their own copy of this setup.
 import { vi, type Mock } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { agentXError, type ModelIdentifier } from "@agentx/contracts";
-import { withEvalBatches, type EvalBatchDependencies } from "../../packages/broker/src/aws/eval-batch.js";
+import { agentXError, type ModelIdentifier } from "@rovara-code/contracts";
+import { withEvalBatches, type EvalBatchDependencies } from "../../packages/core/src/aws/eval-batch.js";
 import {
   handleSwebenchCallback,
   issueSwebenchCapability,
@@ -11,7 +11,7 @@ import {
   type SwebenchDependencies,
   type SwebenchDeployment,
   type SwebenchSlackContext,
-} from "../../packages/broker/src/aws/swebench.js";
+} from "../../packages/core/src/aws/swebench.js";
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 
 export const TEAM = "T0BSHLLUGBD";

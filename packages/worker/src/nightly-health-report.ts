@@ -1,7 +1,7 @@
 // Setup and test health SH27/SH28 (worker side): what a nightly run reports about its own steps. PURE: the run's facts go in, the counts of the nightly result AND the `health` block come out of the SAME tally, so
 // the two always agree (the broker reads a result whose counts differ as "unclear", never as passed). The broker classifies the block with its own rules (`classifyNightlyHealth`); nothing here decides a verdict, and
 // no log, message or test name goes in: fixed step words, flags and counts only.
-import { NIGHTLY_STEP_WORDS, NightlyHealthReportSchema, type NightlyHealthReport, type NightlyRanFrom, type NightlyStepWord } from "@agentx/contracts";
+import { NIGHTLY_STEP_WORDS, NightlyHealthReportSchema, type NightlyHealthReport, type NightlyRanFrom, type NightlyStepWord } from "@rovara-code/contracts";
 
 export type NightlyStepStatus = "passed" | "failed" | "skipped";
 

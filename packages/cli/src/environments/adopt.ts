@@ -1,6 +1,6 @@
 import { DescribeStacksCommand, type CloudFormationClient, type DescribeStacksCommandOutput } from "@aws-sdk/client-cloudformation";
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
-import { agentXError, DEFAULT_ENVIRONMENT, KEYED_MODEL_PROVIDERS, type StackPart } from "@agentx/contracts";
+import { agentXError, DEFAULT_ENVIRONMENT, KEYED_MODEL_PROVIDERS, type StackPart } from "@rovara-code/contracts";
 import { DIRECT_PROVIDERS, ModelsAnswersSchema, type DirectProvider } from "../deploy/answer-schemas.js";
 import { writeEnvironmentCache } from "./cache.js";
 import { withEnvironmentLock } from "./lock.js";

@@ -38,7 +38,7 @@ npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --requir
 | A push to `mainline` that changes | Result |
 |---|---|
 | Only docs, specs, top-level `tests/`, `scripts/` or `.github` | No pipeline execution |
-| Any other deployable package (`packages/broker`, `cli`, `gateway`, `mcp`, `orchestrator`, `slack-service`), `environments/` or `infra`, but no worker image input | Checks, then a control-plane deploy. The deployed worker digest is reused and the runtime is unchanged |
+| Any other deployable package (`packages/core`, `cli`, `gateway`, `mcp`, `orchestrator`, `slack-service`), `environments/` or `infra`, but no worker image input | Checks, then a control-plane deploy. The deployed worker digest is reused and the runtime is unchanged |
 | A worker image input: `packages/worker`, `packages/contracts`, `packages/model-runtime`, the Dockerfile, `.dockerignore`, root `package.json`, `package-lock.json` or tsconfigs, or a workspace `package.json` | Checks, a new ARM64 image, a runtime update to `READY` on that digest, then a control-plane deploy |
 
 Whether the worker changed is judged against the deployed image. The pipeline reads the commit

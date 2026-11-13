@@ -14,7 +14,7 @@ import {
   type FixtureEntry,
   type ServiceMockUsage,
   type TestEnvProdDeny,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { verifyAdditionSet } from "./additions.js";
 import { FakeServerRefused, startFakeServer } from "./fake-server.js";
 import { FixtureSetRefused, loadFixtureSet } from "./fixture-set.js";

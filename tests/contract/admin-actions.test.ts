@@ -2,9 +2,9 @@
 // Spec 025 E8, E9, E19: the handlers 25e's change tools apply that had no admin command before.
 import { describe, expect, it, vi } from "vitest";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
-import { developerIdForSlackUser, endSessions, grantProjectAccess, projectGrant, resolveDeveloper, revokeProjectAccess, setWorkspaceLimits, type AdminActionDependencies } from "../../packages/broker/src/aws/admin-actions.js";
-import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, isWholeLimit, readWorkspaceLimits } from "../../packages/broker/src/developer/limits.js";
-import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
+import { developerIdForSlackUser, endSessions, grantProjectAccess, projectGrant, resolveDeveloper, revokeProjectAccess, setWorkspaceLimits, type AdminActionDependencies } from "../../packages/core/src/aws/admin-actions.js";
+import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, isWholeLimit, readWorkspaceLimits } from "../../packages/core/src/developer/limits.js";
+import { emailIndexKey } from "../../packages/core/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const ADMIN = { issuer: "https://identity.example.test", subject: "admin-subject" };

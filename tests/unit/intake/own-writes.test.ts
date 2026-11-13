@@ -2,12 +2,12 @@
 // writes (before it sends it), and an event that matches a note is Rovara's own and starts nothing; an event on a ticket Rovara just changed in a way that can't be matched is not taken for a member's act (it waits for
 // Start); a read of the notes that fails is no guess.
 import { describe, expect, it } from "vitest";
-import { DocumentStoreError, intakeItemIdOf, type CodeIntentRequest, type OrgId } from "@agentx/contracts";
-import { ingestIntake, type IntakeCandidate, type IntakePorts } from "../../../packages/broker/src/core/intake/engine.js";
+import { DocumentStoreError, intakeItemIdOf, type CodeIntentRequest, type OrgId } from "@rovara-code/contracts";
+import { ingestIntake, type IntakeCandidate, type IntakePorts } from "../../../packages/core/src/core/intake/engine.js";
 import {
   OWN_WRITE_DELIVERY_LAG_MS, OWN_WRITE_LABEL_WINDOW_MS, OWN_WRITE_SKEW_MS, OWN_WRITE_TOUCH_WINDOW_MS, OWN_WRITE_WIDE_CAP_MS, noteOwnWrite, ownWriteVerdictOf,
-} from "../../../packages/broker/src/core/intake/own-writes.js";
-import { readIntakeItem } from "../../../packages/broker/src/core/intake/store.js";
+} from "../../../packages/core/src/core/intake/own-writes.js";
+import { readIntakeItem } from "../../../packages/core/src/core/intake/store.js";
 import { RecordingStore } from "../../support/intake-world.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;

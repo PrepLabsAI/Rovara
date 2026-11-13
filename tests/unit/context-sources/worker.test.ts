@@ -2,7 +2,7 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { ContextToolCallResponse, ContextToolCatalog } from "@agentx/contracts";
+import type { ContextToolCallResponse, ContextToolCatalog } from "@rovara-code/contracts";
 import { brokerContextCall, contextToolsCatalogSource, createContextTools } from "../../../packages/worker/src/context-sources/bridge.js";
 import { contextSourcesNote, frameForModel, isContextToolName, stubFor } from "../../../packages/worker/src/context-sources/frame.js";
 import { stubPersistedContextResults } from "../../../packages/worker/src/context-sources/transcript.js";

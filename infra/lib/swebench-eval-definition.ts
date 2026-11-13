@@ -7,7 +7,7 @@
 // release that fails for any other reason still terminates the instance, then fails the execution
 // (SlotReleaseFailed, its only Fail state), so the control plane's EvalExecutionsFailed alarm sees
 // it rather than a slot leaking unseen; the batch tick repairs the slot.
-import { SWEBENCH_RUN_TIME_LIMIT_SECONDS } from "@agentx/contracts";
+import { SWEBENCH_RUN_TIME_LIMIT_SECONDS } from "@rovara-code/contracts";
 
 type State = Record<string, unknown>;
 

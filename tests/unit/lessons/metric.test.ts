@@ -3,9 +3,9 @@
 import { describe, expect, it } from "vitest";
 import {
   METRIC_MIN_CORRECTIONS, REPEAT_LOOKBACK_DAYS, sameMistakeTwice, type CorrectionMatcher, type CorrectionRecord, type CorrectionSource, type MetricDeps, type MetricStore,
-} from "../../../packages/broker/src/lessons/metric.js";
-import { InMemoryLessonStore, type LoadManifestEntry } from "../../../packages/broker/src/lessons/store.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
+} from "../../../packages/core/src/lessons/metric.js";
+import { InMemoryLessonStore, type LoadManifestEntry } from "../../../packages/core/src/lessons/store.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
 import { KEY, PROJECT, WS, lessonRecord, seed } from "./lesson-helpers.js";
 
 const DAY = 86_400_000;

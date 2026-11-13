@@ -11,7 +11,7 @@ import type {
   EvalBatchWatchUpdateResult,
   ModelIdentifier,
   ProjectModelOptions,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { matchApprovedModel, modelOptionsMessage } from "./model-command.js";
 import { SLACK_FORMAT, escapeText } from "./slack-format.js";
 import { DATASET_NAMES } from "./swebench-command.js";

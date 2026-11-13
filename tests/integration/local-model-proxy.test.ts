@@ -6,8 +6,8 @@ import { Type } from "typebox";
 import type { Context } from "@earendil-works/pi-ai";
 import { ROUTE_PROVIDER, createModelRuntimeWithFallback } from "../../packages/model-runtime/src/index.js";
 import { modelAccessSource } from "../../packages/worker/src/model-access.js";
-import { CAPABILITY_HEADER, MODEL_PROXY_PREFIX, WORKSPACE_HEADER, localRoute } from "../../packages/broker/src/local/model-proxy/index.js";
-import { defaultModelOf } from "../../packages/broker/src/local/model-choice.js";
+import { CAPABILITY_HEADER, MODEL_PROXY_PREFIX, WORKSPACE_HEADER, localRoute } from "../../packages/core/src/local/model-proxy/index.js";
+import { defaultModelOf } from "../../packages/core/src/local/model-choice.js";
 import {
   OPERATION, OTHER_OPERATION, OTHER_WORKSPACE, WORKSPACE, askForToken, loadGatewayRelay, startModelProxyWorld, type ModelProxyWorld,
 } from "../support/model-proxy-world.js";
@@ -1019,7 +1019,7 @@ describe("a call that does not fit the budget: wait, or the budget is spent", ()
 
 describe("the reservation estimate", () => {
   it("reserves one token to each byte of the request for input, at most two million, and the named output limit", async () => {
-    const { worstCaseUsage, ASSUMED_MAX_INPUT_TOKENS } = await import("../../packages/broker/src/local/model-proxy/index.js");
+    const { worstCaseUsage, ASSUMED_MAX_INPUT_TOKENS } = await import("../../packages/core/src/local/model-proxy/index.js");
     expect(worstCaseUsage({ max_tokens: 64 }, 1_000)).toEqual({ input: 1_000, output: 64, cacheRead: 0, cacheWrite: 0 });
     expect(worstCaseUsage({}, 10_000_000).input).toBe(ASSUMED_MAX_INPUT_TOKENS);
     expect(worstCaseUsage({ max_output_tokens: 300 }, 1).output).toBe(300);

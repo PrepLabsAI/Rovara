@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { types } from "node:util";
-import { copyBoundedE2EJsonData, copyBoundedE2ESourceBytes } from "@agentx/contracts";
-import { canonicalJson, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, type E2EQualifiedResult, type E2ERunBinding, type E2ERound, type E2EScenario } from "@agentx/contracts";
+import { copyBoundedE2EJsonData, copyBoundedE2ESourceBytes } from "@rovara-code/contracts";
+import { canonicalJson, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, type E2EQualifiedResult, type E2ERunBinding, type E2ERound, type E2EScenario } from "@rovara-code/contracts";
 import { E2EReportSchema, type E2EReport } from "./report-schema.js";
 import type { E2ESelectionPacket, E2ESelectionTuple } from "./selection.js";
 import { compareE2EPublicList } from "./selection.js";

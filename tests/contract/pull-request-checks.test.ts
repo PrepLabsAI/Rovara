@@ -8,9 +8,9 @@ import {
   checksSection,
   type CheckEntry,
   type CheckReport,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { beforeAll, describe, expect, it, type vi } from "vitest";
-import { DRAFT_REFUSED_PULL_REQUEST_NOTE } from "../../packages/broker/src/github-app.js";
+import { DRAFT_REFUSED_PULL_REQUEST_NOTE } from "../../packages/core/src/github-app.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import {
   call,

@@ -36,7 +36,7 @@ the Slack service's existing signed route family) naming only the request's choi
   the Slack ingress from the verified Slack event when it queued the request. The record must match the asking thread
   and person, is kept 10 minutes and is used once. A body carrying text is refused.
 - Only a new request's own thread (no task there yet).
-- Its own deterministic check of the text (`packages/broker/src/core/intake/quick-auto-start.ts`), on the text
+- Its own deterministic check of the text (`packages/core/src/core/intake/quick-auto-start.ts`), on the text
   normalised with NFKC and with invisible format characters removed: at most 280 characters and 3 lines (split on
   \r, \n, U+2028, U+2029); no markup (tags, braces, Slack-escaped `&lt;` `&gt;` `&amp;`) or text that talks to the
   assistant; no word written in two scripts; nothing the path rules call high risk, by word (auth, login, payments,

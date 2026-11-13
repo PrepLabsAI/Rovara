@@ -131,6 +131,40 @@ jobs:
           diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json"
           npm run release:verify -- "$RUNNER_TEMP/release-a"
 
+  # What Cloud installs. Every package under packages/ is packed with `npm pack` and each tarball is checked to hold what its package.json points at
+  # (scripts/pack-packages.ts); the tarballs are uploaded as one build artifact. Nothing is published to npm (decision 154): there is no npm
+  # publish step and no publish token, and the upload needs no more than the read-only token the workflow already has.
+  pack:
+    needs: scope
+    if: needs.scope.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      # A version no earlier build has had (<version>-ci.<short sha>), on every package and on the dependencies they have on each other, so a
+      # stale npm cache cannot hide a new tarball. This edits the checkout only; the commit keeps its plain version.
+      - name: Stamp a unique version
+        run: |
+          base=$(node -p "require('./packages/contracts/package.json').version")
+          node scripts/stamp-package-versions.ts "${base}-ci.$(git rev-parse --short=9 HEAD)"
+      - run: npm run build
+      - run: npm run pack:packages -- "$RUNNER_TEMP/packs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: code-packages
+          path: |
+            ${{ runner.temp }}/packs/*.tgz
+            ${{ runner.temp }}/packs/packs.json
+          if-no-files-found: error
+          retention-days: 14
+
   # Real Chromium E2E checks need a Linux ARM64 Docker host, the platform Rovara's runtime targets. This job
   # builds the pinned browser executor image, smoke-tests it with no network, then runs tests/linux against
   # it. Docker's bridge networks on the runner can reach the cloud metadata service; the first step drops
@@ -303,7 +337,7 @@ jobs:
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:
-    needs: [scope, checks, test, release, linux-runtime]
+    needs: [scope, checks, test, release, pack, linux-runtime]
     if: always() && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5

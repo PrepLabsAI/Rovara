@@ -29,8 +29,8 @@ import { E2E_AGENT_RECOMMENDED_MODELS } from "../packages/contracts/src/e2e-agen
 import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
 import { e2eQualificationPrefix } from "../packages/contracts/src/session.js";
 import type { ModelProvider } from "../packages/contracts/src/model-providers.js";
-import { recordDrivingTest, validateModelCheckResult, type ExpectedModelCheck } from "../packages/broker/src/e2e/model-checks.js";
-import { e2eAgentInstallationFromParameters, e2eModelDiscoveryKey, readE2EModelRouteShape } from "../packages/broker/src/e2e/model-route-registry.js";
+import { recordDrivingTest, validateModelCheckResult, type ExpectedModelCheck } from "../packages/core/src/e2e/model-checks.js";
+import { e2eAgentInstallationFromParameters, e2eModelDiscoveryKey, readE2EModelRouteShape } from "../packages/core/src/e2e/model-route-registry.js";
 import { deriveE2EAgentRouteForModel, e2eAgentRouteDefinitionDigest, type E2EAgentInstallation } from "../packages/model-runtime/src/e2e-route-derive.js";
 import { Runner, type ReleaseOptions } from "./release-common.js";
 import { loadAllowlist, parseOptions } from "./test-deploy.js";

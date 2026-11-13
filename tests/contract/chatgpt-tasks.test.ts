@@ -3,9 +3,9 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { ChatGptConnectionView } from "../../packages/contracts/src/index.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import type { ChatGptConnections } from "../../packages/broker/src/chatgpt/connections.js";
-import { chatGptOwner, chatGptTaskModel } from "../../packages/broker/src/chatgpt/task-model.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import type { ChatGptConnections } from "../../packages/core/src/chatgpt/connections.js";
+import { chatGptOwner, chatGptTaskModel } from "../../packages/core/src/chatgpt/task-model.js";
 import { CHATGPT_TOKEN_MARGIN_MS, chatGptTokenSource } from "../../packages/worker/src/chatgpt-token.js";
 import { resolveTaskSessionModel } from "../../packages/worker/src/task-model.js";
 import { call, createBroker, ensureWorkspace, loadSlackBroker, markReady, registerSlackProject, serviceCall, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";

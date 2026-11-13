@@ -1,9 +1,9 @@
 // Spec 025 D17: the broker verifies developer access tokens itself (no API Gateway JWT authorizer).
 import { createHmac, createPublicKey, type JsonWebKey } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { AgentXError } from "@agentx/contracts";
-import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
-import { issueAccessToken, kmsTokenSigner, type PublicSigningJwk } from "../../packages/broker/src/developer/tokens.js";
+import { AgentXError } from "@rovara-code/contracts";
+import { developerTokenVerifier } from "../../packages/core/src/developer/verify-token.js";
+import { issueAccessToken, kmsTokenSigner, type PublicSigningJwk } from "../../packages/core/src/developer/tokens.js";
 import { ISSUER, T0, fakeKms, localSigner } from "../support/developer-fakes.js";
 
 const SUB = "d".repeat(64);

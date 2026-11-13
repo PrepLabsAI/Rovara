@@ -1,10 +1,10 @@
 // The author rules compare MERGED ids. A developer who was merged into another reads as that other, so an author recorded under the old
 // id (A, merged into B) is B, and B approving is the author approving; two approvers that are one member after the merge are not two people.
 import { describe, expect, it } from "vitest";
-import { approveLesson, rollbackLessonSet, type ApproveDeps } from "../../../packages/broker/src/lessons/approve.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { loadLessonsForStage, approvedForUse, type LoadDeps } from "../../../packages/broker/src/lessons/load.js";
-import { DEFAULT_APPROVAL_POLICY } from "../../../packages/broker/src/lessons/policy.js";
+import { approveLesson, rollbackLessonSet, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { loadLessonsForStage, approvedForUse, type LoadDeps } from "../../../packages/core/src/lessons/load.js";
+import { DEFAULT_APPROVAL_POLICY } from "../../../packages/core/src/lessons/policy.js";
 import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, directory, embedder, lessonRecord, seed, settings, allowAllAccess } from "./lesson-helpers.js";
 
 /** ann-old and bob-old were merged away: they now read as ann and bob. */

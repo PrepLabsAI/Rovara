@@ -1,7 +1,7 @@
 // Saved project images (SV wiring): the lease goes to ONE operation (and the same operation can have it again), and a job whose build ended without a result is ended too, so the project does not wait out a lease for a
 // build nobody is running; a repository that moved since the queue is a requeue for the heads now, never a failure and never an arbitrary reachable commit.
 import { describe, expect, it } from "vitest";
-import { checkRebuild, endBuildJob, leaseForDispatch, SAVED_ENV_FAILURE_BACKOFF_MS } from "../../packages/broker/src/core/test-env/saved-env.js";
+import { checkRebuild, endBuildJob, leaseForDispatch, SAVED_ENV_FAILURE_BACKOFF_MS } from "../../packages/core/src/core/test-env/saved-env.js";
 import { COMMIT, savedEnvWorld } from "../support/saved-env-world.js";
 
 async function queued(over: Parameters<typeof savedEnvWorld>[0] = {}) {

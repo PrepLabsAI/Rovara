@@ -1,8 +1,8 @@
 // The meta repo's config file (`.rovara/project.yaml`): how a file's text is read, and what it would change in a project, worked out without writing anything. The cases are the Cloud suite's own, run over
 // Code's copy of the reader and the planner (the broker's pending-change store and its apply step are Cloud's and stay there).
 import { describe, expect, it } from "vitest";
-import { StoredProjectDefinitionSchema, parseCommandLine } from "@agentx/contracts";
-import { parseMetaConfigFile, planMetaConfigChange, githubFullName } from "../../packages/broker/src/core/meta-repo/config-plan.js";
+import { StoredProjectDefinitionSchema, parseCommandLine } from "@rovara-code/contracts";
+import { parseMetaConfigFile, planMetaConfigChange, githubFullName } from "../../packages/core/src/core/meta-repo/config-plan.js";
 
 const repo = (name: string, extra: Record<string, unknown> = {}) => ({
   name, url: `https://github.com/acme/${name}.git`, path: `repo/${name}`, defaultBranch: "main", credentialRef: "github-app", installationId: 55, githubRepositoryId: 100 + name.length, ...extra,

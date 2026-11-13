@@ -12,8 +12,8 @@
 // The outcome is the items to show the model, a text-free record of everything considered, and fixed-wording notices. Nothing here
 // stores rule text, logs a path, or reads outside the sources it is handed.
 import { createHash } from "node:crypto";
-import type { MetaSkillSnapshot } from "@agentx/contracts";
-import { COMPANY_RULES_EXCEED_BUDGET_MESSAGE, agentXError, assertCompanyRulesWithinBudget } from "@agentx/contracts";
+import type { MetaSkillSnapshot } from "@rovara-code/contracts";
+import { COMPANY_RULES_EXCEED_BUDGET_MESSAGE, agentXError, assertCompanyRulesWithinBudget } from "@rovara-code/contracts";
 import { inertContextText, inertLabel } from "../context-text.js";
 import { applyBudget } from "./budget.js";
 import { firstMatchingPattern } from "./glob.js";

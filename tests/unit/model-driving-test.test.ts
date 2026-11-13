@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { DRIVING_TEST_BUDGET, WEB_API_REQUIRED_PROBES, canonicalJson, e2eModelRouteRevision, type E2EModelReceipt } from "@agentx/contracts";
+import { DRIVING_TEST_BUDGET, WEB_API_REQUIRED_PROBES, canonicalJson, e2eModelRouteRevision, type E2EModelReceipt } from "@rovara-code/contracts";
 import { deriveE2EAgentRouteForModel } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { DRIVING_TEST_LIMITS, DRIVING_TEST_SCENARIO_ID, createWebApiProbePlan, webApiDrivingTestPlan, webApiProbeDriver } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import { installedWebApiQualificationAppRoot } from "../../packages/verifier/src/host/web-api-qualification-app.js";

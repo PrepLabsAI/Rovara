@@ -6,7 +6,7 @@ import {
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   canonicalJson, e2eScenarioBundleDigest, isE2EApplicationAdmissionSchemaVersion, selectE2EExecutionPlan, verifyE2ESourceSnapshot,
   type E2ESourceSnapshot, type E2EWorkflowAdmissionRef, type WorkerInvocation,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { executeWorkflowE2EApplicationChecks, type WorkflowE2EApplicationRuntime, type WorkflowE2EModelChannelDependencies } from "./workflow-e2e-application-checks.js";
 import { collectE2EActualCliRun, compileE2EScenarios, e2ePrivateTransferMaxBytes, e2eSnapshotSourceDigest, observeInstalledRuntimeManifestForHost, runE2EActualCli } from "@agentx/verifier";
 

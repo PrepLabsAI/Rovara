@@ -4,10 +4,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { EvidencePackSchema, type CheckEntry, type TestEnvProdDeny } from "../../packages/contracts/src/index.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentEvidenceBlobStore, type EvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { dataGuardScanWorks, evidenceFindings as findings, guardPack as guard, guardRaw as guardRawWith, evidenceTexts } from "../../packages/broker/src/core/proof/evidence-guard.js";
-import { evidencePackKey, keepEvidence, loadEvidencePack, policyKindsOf, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createDocumentEvidenceBlobStore, type EvidenceBlobStore } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import { dataGuardScanWorks, evidenceFindings as findings, guardPack as guard, guardRaw as guardRawWith, evidenceTexts } from "../../packages/core/src/core/proof/evidence-guard.js";
+import { evidencePackKey, keepEvidence, loadEvidencePack, policyKindsOf, type KeepEvidenceDeps } from "../../packages/core/src/core/proof/evidence-keep.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
 
 const scan = scanTextForTests;

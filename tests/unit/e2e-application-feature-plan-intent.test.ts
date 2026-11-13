@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveE2EApplicationFeatureExecutionSelection, type E2EApplicationFeatureSelectionInput } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
+import { deriveE2EApplicationFeatureExecutionSelection, type E2EApplicationFeatureSelectionInput } from "../../packages/core/src/e2e/application-feature-plan-intent.js";
 import type { E2EApplicationPlanIntent, E2EPolicy } from "../../packages/contracts/src/index.js";
 
 const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [],

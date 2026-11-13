@@ -1,9 +1,9 @@
 // the broker attaches the draft's seed commands to the database dependency it proposes (never to setup), refuses an unsafe one, says so when there is no database to hold it, and the less-safe
 // reading (a second person, high risk) follows from the seed, as it always did.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, formatCommandLine, testEnvLessSafeChanges, testEnvApprovalRisk, type SetupProposal, type TestEnvironmentBody } from "@agentx/contracts";
-import { SEED_LEFT_OUT_OF_SETUP_NOTE, SEED_NOT_TAKEN_NOTE, SEED_NO_DATABASE_NOTE, attachDraftSeeds, SEED_OFFERED_NOTE, SEED_REFUSED_NOTE, withoutRoutedSeeds } from "../../packages/broker/src/core/test-env/seed-routing.js";
-import { sanitizeTestEnvDraft } from "../../packages/broker/src/core/test-env/draft.js";
+import { TestEnvironmentBodySchema, formatCommandLine, testEnvLessSafeChanges, testEnvApprovalRisk, type SetupProposal, type TestEnvironmentBody } from "@rovara-code/contracts";
+import { SEED_LEFT_OUT_OF_SETUP_NOTE, SEED_NOT_TAKEN_NOTE, SEED_NO_DATABASE_NOTE, attachDraftSeeds, SEED_OFFERED_NOTE, SEED_REFUSED_NOTE, withoutRoutedSeeds } from "../../packages/core/src/core/test-env/seed-routing.js";
+import { sanitizeTestEnvDraft } from "../../packages/core/src/core/test-env/draft.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 
 const ON = { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "1" };
@@ -164,7 +164,7 @@ describe("seed files in a draft", () => {
   const withFiles = (candidates: unknown[], seeds: unknown[] | undefined, files: unknown[]) => ({ ...draftOf(candidates, seeds), seedFiles: files });
   const file = (path: string) => ({ path, source: { path: path.replace(/^service\//u, ""), line: 1 } });
   it("become the Postgres dependency's file seed; a seed command found too is not attached and leaves setup, said in the note", async () => {
-    const { SEED_FILE_OFFERED_NOTE } = await import("../../packages/broker/src/core/test-env/seed-routing.js");
+    const { SEED_FILE_OFFERED_NOTE } = await import("../../packages/core/src/core/test-env/seed-routing.js");
     const raw = { ...withFiles([postgres], [seed("npm", ["run", "seed"])], [file("service/db/seeds/users.sql")]), environment: { ...body(), repos: [{ ...body().repos[0]!, setupCommands: [cmd("npm", ["ci"]), cmd("npm", ["run", "seed"])] }] } };
     const draft = sanitizeTestEnvDraft(raw, options)!;
     const dependency = draft.environment.dependencies!.find((item) => item.family === "postgres")!;

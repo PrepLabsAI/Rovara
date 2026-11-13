@@ -1,9 +1,9 @@
 // The task-end seam: the host is told once that a task ended, whether the person closed it or a merged pull request completed it, and whichever came first. Fake adapters only.
 import { describe, expect, it } from "vitest";
-import { closeLoadedTask } from "../../packages/broker/src/core/task-flow/close.js";
-import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
-import { taskEndKey } from "../../packages/broker/src/core/task-flow/task-end.js";
-import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
+import { closeLoadedTask } from "../../packages/core/src/core/task-flow/close.js";
+import { readTask } from "../../packages/core/src/core/task-flow/reads.js";
+import { taskEndKey } from "../../packages/core/src/core/task-flow/task-end.js";
+import { recoveryRowKey } from "../../packages/core/src/core/merge/store.js";
 import { TASK_ID } from "../support/merge-world.js";
 import { OWNER_ID, ORG, host } from "../support/service-host.js";
 

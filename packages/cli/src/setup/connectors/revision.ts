@@ -4,7 +4,7 @@
 // (a missing or unparseable preflight report, or the connector simply absent from it), is never
 // reported as set up (F17).
 import { stat } from "node:fs/promises";
-import { agentXError, environmentConnectorSecretPrefix, type ConnectorConfig, type ProjectDefinition } from "@agentx/contracts";
+import { agentXError, environmentConnectorSecretPrefix, type ConnectorConfig, type ProjectDefinition } from "@rovara-code/contracts";
 import { loadProjectConfig } from "../../config.js";
 import type { InitSecrets, FinishFlags } from "../../init/context.js";
 import type { ConnectorType } from "../../init/install-state.js";

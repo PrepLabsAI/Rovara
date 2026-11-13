@@ -3,12 +3,12 @@
 import { randomUUID } from "node:crypto";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { vi, type Mock } from "vitest";
-import { sharedTaskKey, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
-import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
-import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
-import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
-import type { TaskShare } from "../../packages/broker/src/developer/task-records.js";
-import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
+import { sharedTaskKey, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse } from "@rovara-code/contracts";
+import type { DeveloperApiConfiguration } from "../../packages/core/src/aws/developer-routes.js";
+import type { DeveloperTaskActions } from "../../packages/core/src/aws/developer-task-actions.js";
+import type { StreamRecord } from "../../packages/core/src/developer/notifications.js";
+import type { TaskShare } from "../../packages/core/src/developer/task-records.js";
+import { developerTokenVerifier } from "../../packages/core/src/developer/verify-token.js";
 import { localSigner } from "./developer-fakes.js";
 import type { FakeDynamoDb, FakeDynamoDbOptions } from "./fake-dynamodb.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, orchestratorPrincipal, registerSlackProject, type Handler } from "./slack-broker.js";

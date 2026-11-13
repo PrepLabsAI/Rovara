@@ -1,7 +1,7 @@
 // N9 (INTG2): the worker's request for a project registry's token. It names the registry and presents the preparation's own grant; the broker decides which host, which
 // duration and whether the preparation is still running (project-registries/exchange.ts). Nothing but a fixed sentence leaves this file on a failure: the broker's answer
 // (which may name a path or a credential reference) is not carried, and a token is never in an error.
-import { RegistryCredentialSchema, agentXError, type RegistryCredential, type WorkerInvocation } from "@agentx/contracts";
+import { RegistryCredentialSchema, agentXError, type RegistryCredential, type WorkerInvocation } from "@rovara-code/contracts";
 
 export type RegistryCredentialProvider = (registry: string) => Promise<RegistryCredential>;
 

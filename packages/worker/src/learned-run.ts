@@ -4,7 +4,7 @@
 //     or could not be checked, is left out (see learned-context.ts);
 //   - the block is labelled, delimited advice (`renderLearnedBlock`); it grants no tool and no permission, and says so.
 // A read that cannot be verified is "not checked", never "stale": a broken object store must not push a good lesson toward retirement.
-import type { LessonStage, LoadReport } from "@agentx/contracts";
+import type { LessonStage, LoadReport } from "@rovara-code/contracts";
 import { openBaseCommitSource, type KnowledgeFileSource } from "./knowledge/source.js";
 import { learnedContextSection, type BaseFile, type BaseFileReader } from "./learned-context.js";
 

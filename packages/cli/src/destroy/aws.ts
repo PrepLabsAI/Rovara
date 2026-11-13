@@ -12,7 +12,7 @@ import { DeleteAliasCommand, DescribeKeyCommand, ListAliasesCommand, ListResourc
 import { DeleteLogGroupCommand, DescribeLogGroupsCommand, ListTagsForResourceCommand } from "@aws-sdk/client-cloudwatch-logs";
 import { DeleteBucketCommand, DeleteObjectsCommand, GetBucketTaggingCommand, ListObjectVersionsCommand } from "@aws-sdk/client-s3";
 import { DeleteSecretCommand, DescribeSecretCommand, ListSecretsCommand, RestoreSecretCommand } from "@aws-sdk/client-secrets-manager";
-import { agentXError, environmentPullThroughPrefix } from "@agentx/contracts";
+import { agentXError, environmentPullThroughPrefix } from "@rovara-code/contracts";
 import type { RetainedResource } from "./inventory.js";
 import { isOwnedAlias, isOwnedSecret, isOwnedWorker } from "./names.js";
 

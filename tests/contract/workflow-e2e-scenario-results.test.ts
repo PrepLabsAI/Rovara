@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2EScenarioResultsSchema } from "@agentx/contracts";
-import { workflowE2ENotifierBlocks } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
+import { E2EScenarioResultsSchema } from "@rovara-code/contracts";
+import { workflowE2ENotifierBlocks } from "../../packages/core/src/aws/developer-task-notifier.js";
+import { developerTaskRouteDependencies } from "../../packages/core/src/aws/developer-routes.js";
+import { getTaskDocumentView } from "../../packages/core/src/aws/developer-tasks.js";
 import { MAYA } from "../support/developer-task-broker.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound, type RoundCore } from "../support/e2e-application-round-harness.js";
@@ -15,7 +15,7 @@ import { OTHER_SHOT, SHOT, SHOT_SHA } from "../support/e2e-scenario-results.js";
 
 afterEach(disposeRealCandidates);
 
-const brokerModule = () => import("../../packages/broker/src/aws/broker.js");
+const brokerModule = () => import("../../packages/core/src/aws/broker.js");
 const operations = (round: RoundCore) => round.operationRows(() => true);
 const scenarioResultsOf = async (round: RoundCore, actor: "owner" | "viewer" = "owner") =>
   (await brokerModule()).loadWorkflowE2EScenarioResults(round.harness.brokerInput as never, round.taskNow() as never, operations(round), actor);

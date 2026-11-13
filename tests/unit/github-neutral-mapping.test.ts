@@ -1,8 +1,8 @@
 // Port lane P2, item C4: GitHub's words become Rovara's at the adapter, and only there.
 import { describe, expect, it } from "vitest";
-import { GITHUB_ACTIONS_APP_ID } from "@agentx/contracts";
-import { accountKindOf, checkOf, detailsOf, mergeableStateOf, statusOf } from "../../packages/broker/src/plugins/code-host/github/mapping.js";
-import type { PullRequestStatus } from "../../packages/broker/src/github-pull-status.js";
+import { GITHUB_ACTIONS_APP_ID } from "@rovara-code/contracts";
+import { accountKindOf, checkOf, detailsOf, mergeableStateOf, statusOf } from "../../packages/core/src/plugins/code-host/github/mapping.js";
+import type { PullRequestStatus } from "../../packages/core/src/github-pull-status.js";
 
 const status = (over: Partial<PullRequestStatus> = {}): PullRequestStatus => ({
   number: 7, state: "open", draft: false, headSha: "a".repeat(40), baseBranch: "main", mergeableState: "clean", checks: [], requiredChecks: [], baseHasRequiredChecks: false, headHasWorkflowFiles: false,

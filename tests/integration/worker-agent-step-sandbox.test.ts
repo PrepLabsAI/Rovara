@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, getCurrentTools, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AGENTX_WORKER_PROMPT, ProjectDefinitionSchema, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_WORKER_PROMPT, ProjectDefinitionSchema, type ProjectDefinition, type WorkerInvocation } from "@rovara-code/contracts";
 import type { AgentSkillFile } from "../../packages/worker/src/agent-step.js";
 import { FILE_OPS_NODE_FLAGS, type FileOpsTarget } from "../../packages/worker/src/file-ops-exec.js";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type PiSessionInput } from "../../packages/worker/src/pi-session.js";

@@ -1,8 +1,8 @@
 // Design review stage: a reviewer's citation must match something THAT reviewer was given. The broker applies the check to the answer it reads itself.
 import { describe, expect, it } from "vitest";
-import type { DesignCitation, RawDesignFinding, ReviewerRole } from "@agentx/contracts";
-import { buildReviewerPacket, renderPacketDocument } from "../../packages/broker/src/core/design-review/packet.js";
-import { filterReviewerCitations, citationProblem, checkResolveCitations, type CitablePacketItem } from "../../packages/broker/src/core/design-review/citations.js";
+import type { DesignCitation, RawDesignFinding, ReviewerRole } from "@rovara-code/contracts";
+import { buildReviewerPacket, renderPacketDocument } from "../../packages/core/src/core/design-review/packet.js";
+import { filterReviewerCitations, citationProblem, checkResolveCitations, type CitablePacketItem } from "../../packages/core/src/core/design-review/citations.js";
 
 const sha = (c: string): string => c.repeat(64);
 const PIN = "a".repeat(40);

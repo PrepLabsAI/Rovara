@@ -4,7 +4,7 @@
 // only the value itself, to hold in memory for the length of one deploy.
 import { randomBytes } from "node:crypto";
 import { CreateSecretCommand, GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 /** The number of random bytes in a freshly created callback signing key (before base64url encoding).
  * Exported so callers that must bound a buffer against "the longest secret we ever redact"

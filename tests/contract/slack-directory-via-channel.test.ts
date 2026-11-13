@@ -3,9 +3,9 @@
 // outages. All in-process, through the adapter's real command route.
 import { describe, expect, it, vi } from "vitest";
 import { builtInAdapterRecord, generateWebhookSecret } from "../../packages/contracts/src/index.js";
-import { slackDirectoryCall } from "../../packages/broker/src/aws/slack-directory-channel.js";
-import { createSlackChannelCommandsHandler } from "../../packages/broker/src/aws/slack-adapter.js";
-import { slackDirectory, type SlackDirectory, type SlackProblem } from "../../packages/broker/src/developer/slack-directory.js";
+import { slackDirectoryCall } from "../../packages/core/src/aws/slack-directory-channel.js";
+import { createSlackChannelCommandsHandler } from "../../packages/core/src/aws/slack-adapter.js";
+import { slackDirectory, type SlackDirectory, type SlackProblem } from "../../packages/core/src/developer/slack-directory.js";
 
 const NOW = Date.parse("2026-11-11T12:00:00.000Z");
 const SECRET = generateWebhookSecret();

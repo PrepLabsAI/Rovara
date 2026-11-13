@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 import {
   ChannelFormSchema, createWorkflowSnapshot, formOfSlackModal, formValuesOfSlackState, slackModalOf, slackStateOfFormValues, submitWorkflowArtifact,
 } from "../../packages/contracts/src/index.js";
-import { chatGptPasteModal, chatGptResultView } from "../../packages/broker/src/aws/slack-chatgpt.js";
-import { detailsMessageView } from "../../packages/broker/src/aws/slack-details-view.js";
-import { workflowSlackHandlers, type SlackBlockAction } from "../../packages/broker/src/aws/slack-interactivity.js";
+import { chatGptPasteModal, chatGptResultView } from "../../packages/core/src/aws/slack-chatgpt.js";
+import { detailsMessageView } from "../../packages/core/src/aws/slack-details-view.js";
+import { workflowSlackHandlers, type SlackBlockAction } from "../../packages/core/src/aws/slack-interactivity.js";
 
 const nowSeconds = 1_758_657_600;
 const requester = "U0123456789";

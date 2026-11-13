@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, PLUGIN_POINT_CARDINALITY, change, companyScoped, isAllowedModuleSpecifier, when, type AuditEvent, type AuditSink, type DocumentStore } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, registerCodeDefaults, type ModuleImporter } from "../../packages/broker/src/ports/index.js";
+import { IMPLICIT_COMPANY_ID, PLUGIN_POINT_CARDINALITY, change, companyScoped, isAllowedModuleSpecifier, when, type AuditEvent, type AuditSink, type DocumentStore } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, registerCodeDefaults, type ModuleImporter } from "../../packages/core/src/ports/index.js";
 import * as pluginModule from "../../packages/local-adapters/src/audit-sink-plugin.js";
 import { AUDIT_DETAILS_MAX_BYTES, AuditLogError, SqliteAuditLog } from "../../packages/local-adapters/src/sqlite-audit-log.js";
 import { DocumentAuditSink, auditRowKey, startAuditCopy, startAuditCopyFromPrimary, verifyAuditCopy } from "../../packages/local-adapters/src/document-audit-sink.js";
@@ -94,7 +94,7 @@ describe("DocumentAuditSink: the record commits with the change", () => {
 
   it("a transaction that fails for a store fault leaves no row, so the retry makes the only one", async () => {
     const { store, sink } = make();
-    store.injectFault(new (await import("@agentx/contracts")).DocumentStoreError("unavailable", "down"));
+    store.injectFault(new (await import("@rovara-code/contracts")).DocumentStoreError("unavailable", "down"));
     await expect(store.transact([...sink.stage(event(1))])).rejects.toThrow();
     expect(await rowsOf(store)).toEqual([]);
     expect((await store.transact([...sink.stage(event(1))])).applied).toBe(true);

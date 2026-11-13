@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
-import { evaluateProjectAuthority, readProjectAuthority, type ProjectAuthorityReader } from "../../packages/broker/src/developer/task-project-access.js";
-import { DEFAULT_DEVELOPER_TASK_POLICY, developerTaskPolicy, type SlackChannelBinding } from "@agentx/contracts";
+import { createTaskAuthorityAdmission } from "../../packages/core/src/aws/task-authority-admission.js";
+import { evaluateProjectAuthority, readProjectAuthority, type ProjectAuthorityReader } from "../../packages/core/src/developer/task-project-access.js";
+import { DEFAULT_DEVELOPER_TASK_POLICY, developerTaskPolicy, type SlackChannelBinding } from "@rovara-code/contracts";
 
 const binding = (channelId: string, projectName = "payments-api"): SlackChannelBinding & { pk: string; sk: string } => ({
   pk: "SLACK_BINDING#T0BSHLLUGBD", sk: `CHANNEL#${channelId}`,

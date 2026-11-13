@@ -1,12 +1,12 @@
 // Convergence lane A2: the `queue` plug-in "sqs" for the registry. Opt-in: Code's default queue stays SQLite, and nothing loads this
 // module unless the owner's config names it. Config entry:
-//   { "point": "queue", "name": "sqs", "module": "@rovara/aws-adapters/sqs",
+//   { "point": "queue", "name": "sqs", "module": "@rovara-code/aws/sqs",
 //     "settings": { "region": "us-west-2", "queues": { "dispatch": { "url": "https://sqs.us-west-2.amazonaws.com/<account>/<queue>", "deadLetterUrl": "..." } } } }
 // The queues are declared by the deployment; this adapter creates none. `deadLetterUrl` is the queue the declared queue's redrive policy
 // names (checked at first use). Credentials come from the AWS SDK's default chain; the config never holds one. A FIFO queue is one whose
 // URL ends in `.fifo`.
 import { SQSClient } from "@aws-sdk/client-sqs";
-import type { JsonObject, PluginModule } from "@agentx/contracts";
+import type { JsonObject, PluginModule } from "@rovara-code/contracts";
 import { SqsQueueService, type SqsQueueDeclaration, type SqsSender } from "./sqs-queue.js";
 
 const SETTINGS = ["region", "endpoint", "queues"] as const;

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ConnectorCallRequest, ConnectorCatalog } from "@agentx/contracts";
+import type { ConnectorCallRequest, ConnectorCatalog } from "@rovara-code/contracts";
 
 /** One bridge for every presented connector tool. No per-vendor tool implementations. */
 export function createConnectorTools(

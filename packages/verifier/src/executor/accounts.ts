@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_ANONYMOUS_SESSION_REF_PREFIX, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2ERuntimeAccountRefSchema, canonicalJson, e2eAnonymousAccountIdDigest,
-  e2eAnonymousRuntimeAccountRef, readE2EApplicationProjectContract, type E2EExecutorPlan, type E2ERuntimeAccountRef } from "@agentx/contracts";
+  e2eAnonymousRuntimeAccountRef, readE2EApplicationProjectContract, type E2EExecutorPlan, type E2ERuntimeAccountRef } from "@rovara-code/contracts";
 import type { E2EApplicationOwnedSubject } from "../application-result-adapter.js";
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";

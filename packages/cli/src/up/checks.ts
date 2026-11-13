@@ -3,7 +3,7 @@
 import { createServer } from "node:net";
 import { lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, PluginRegistryError, type ModelKeyStore, type SecretStore } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PluginRegistryError, type ModelKeyStore, type SecretStore } from "@rovara-code/contracts";
 import {
   KEYS_FILE_NAME,
   LOCAL_MODEL_PROVIDERS,
@@ -22,7 +22,7 @@ import {
   resolveConfigLocation,
   type DockerRunner,
   type GhRunner,
-} from "@agentx/broker/local";
+} from "@rovara-code/core/local";
 
 export type UpCheckStatus = "ok" | "warn" | "fail";
 

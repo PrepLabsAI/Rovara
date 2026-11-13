@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { checkAllowedPrivateEndpoint, checkPrivateEndpointForProbe, isNeverCalledAddress, parseInstallCidrs, parsePrivateTarget, privateMcpEndpointGuard, probeMcpEndpointGuard } from "../../../packages/broker/src/connections/private-endpoints.js";
+import { checkAllowedPrivateEndpoint, checkPrivateEndpointForProbe, isNeverCalledAddress, parseInstallCidrs, parsePrivateTarget, privateMcpEndpointGuard, probeMcpEndpointGuard } from "../../../packages/core/src/connections/private-endpoints.js";
 
 const resolves = (...addresses: string[]) => async () => addresses;
 const INSTALL = ["10.0.0.0/8"];

@@ -1,4 +1,4 @@
-export { AGENTX_PROTOCOL_VERSION } from "@agentx/contracts";
+export { AGENTX_PROTOCOL_VERSION } from "@rovara-code/contracts";
 export * from "./journal.js";
 export * from "./artifacts.js";
 export * from "./callback-client.js";

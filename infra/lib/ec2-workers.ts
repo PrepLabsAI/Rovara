@@ -11,7 +11,7 @@ import {
   aws_logs as logs,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { environmentRolePath } from "@agentx/contracts";
+import { environmentRolePath } from "@rovara-code/contracts";
 import type { AgentXNaming } from "./naming.js";
 
 /** The worker's HTTP port: /ping for health probes, /invocations for signed work (#80). */

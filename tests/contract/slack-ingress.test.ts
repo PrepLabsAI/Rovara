@@ -12,11 +12,11 @@ import {
   SlackWorkflowStartError,
   slackIngressSettings,
   validSignature,
-} from "../../packages/broker/src/aws/slack-ingress.js";
-import type { SlackMemberCheck } from "../../packages/broker/src/aws/slack-members.js";
-import { WORKFLOW_CHOICE_WAITING_NOTICE, WorkflowChoiceWaitingError, workflowChoiceRefusal, workflowStartedNotice, workflowStartFailureNotice, type WorkflowChoiceOutcome } from "../../packages/broker/src/aws/slack-workflow-choice.js";
+} from "../../packages/core/src/aws/slack-ingress.js";
+import type { SlackMemberCheck } from "../../packages/core/src/aws/slack-members.js";
+import { WORKFLOW_CHOICE_WAITING_NOTICE, WorkflowChoiceWaitingError, workflowChoiceRefusal, workflowStartedNotice, workflowStartFailureNotice, type WorkflowChoiceOutcome } from "../../packages/core/src/aws/slack-workflow-choice.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { chatPostEphemeral } from "../../packages/broker/src/aws/slack-web.js";
+import { chatPostEphemeral } from "../../packages/core/src/aws/slack-web.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
 
 const signingSecret = "8f742231b10e8888abcd99yyyzzz85a5";

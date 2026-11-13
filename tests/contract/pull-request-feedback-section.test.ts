@@ -3,8 +3,8 @@
 // GitHub's limit.
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { PULL_REQUEST_BODY_MAX_CHARS, WorkflowFeedbackReviewReportSchema, type WorkflowSnapshot } from "@agentx/contracts";
-import { PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, approvedFeedbackFixes, inertGitHubText, shortFixSummary, withFeedbackFixes, withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
+import { PULL_REQUEST_BODY_MAX_CHARS, WorkflowFeedbackReviewReportSchema, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, approvedFeedbackFixes, inertGitHubText, shortFixSummary, withFeedbackFixes, withStatusLines } from "../../packages/core/src/developer/pull-request-feedback-section.js";
 
 const ZWJ = "‍";
 const taskId = randomUUID();

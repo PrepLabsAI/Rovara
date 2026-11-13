@@ -6,7 +6,7 @@ import {
   WORKSPACE_PROJECT_INDEX,
   WORKSPACE_SESSION_STATE_INDEX,
   type IndexDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 /**
  * The table's key schema: partition key `pk` (text) and sort key `sk` (text), the attributes the port's `DocumentKey` names. The

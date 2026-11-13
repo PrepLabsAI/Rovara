@@ -1,10 +1,10 @@
 // The two tracker adapters a laptop signs in to (Linear, Jira), over a fake of each tracker's HTTP API. What is held: the sign-in goes only to the tracker's own address with no redirect followed; who asked is read
 // from the tracker's own history (never the ticket's text); the same comment key is the same comment; a write the tracker refuses is a refusal, not a fault; an error never carries the key or the text.
 import { describe, expect, it } from "vitest";
-import { TrackerSearchError, TrackerWriteRefusedError, type HostScope } from "@agentx/contracts";
-import { LINEAR_HISTORY_PAGES_MAX, createLinearApiAccess, linearCommentIdFor, workspaceOfIssueUrl } from "../../../packages/broker/src/plugins/tracker/linear/api.js";
-import { linearTracker } from "../../../packages/broker/src/plugins/tracker/linear/index.js";
-import { JIRA_CHANGELOG_PAGES_MAX, JIRA_MARKER_PROPERTY, jiraSiteOf, jiraTracker } from "../../../packages/broker/src/plugins/tracker/jira/index.js";
+import { TrackerSearchError, TrackerWriteRefusedError, type HostScope } from "@rovara-code/contracts";
+import { LINEAR_HISTORY_PAGES_MAX, createLinearApiAccess, linearCommentIdFor, workspaceOfIssueUrl } from "../../../packages/core/src/plugins/tracker/linear/api.js";
+import { linearTracker } from "../../../packages/core/src/plugins/tracker/linear/index.js";
+import { JIRA_CHANGELOG_PAGES_MAX, JIRA_MARKER_PROPERTY, jiraSiteOf, jiraTracker } from "../../../packages/core/src/plugins/tracker/jira/index.js";
 
 const SCOPE: HostScope = { orgId: "org_aaaaaaaaaaaaaaaaaaaa" };
 // Built at run time: a fixture must not look like a real key.

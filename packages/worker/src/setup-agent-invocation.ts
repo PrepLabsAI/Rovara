@@ -1,7 +1,7 @@
 // The setup run as the worker receives it (sh-setup-wire, SH14): builds the real ports of `runSetupAgent` from the task invocation's dependencies and returns the task's result. `run-task.ts` calls it from one
 // early hunk; everything about the run itself is in `setup-agent-run.ts`.
-import { agentXError } from "@agentx/contracts";
-import type { WorkerInvocation } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
+import type { WorkerInvocation } from "@rovara-code/contracts";
 import { EventBatcher, type EventBatchSink } from "./events.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";
 import type { PreparationManifest } from "./prepare.js";

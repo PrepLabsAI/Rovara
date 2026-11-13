@@ -3,7 +3,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { taskGraphDigest } from "@agentx/contracts";
+import { taskGraphDigest } from "@rovara-code/contracts";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
 import { assertJourneyInvariants, registerJourneyInvariants } from "../support/workflow-e2e-invariants.js";

@@ -6,9 +6,9 @@ import {
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   canonicalJson, e2eScenarioBundleDigest, selectE2EExecutionPlan,
   verifyE2ESourceSnapshot, E2ERunBindingSchema, E2ERoundSchema, type E2EPlanSelectionInput, type E2ESourceSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { compileE2EScenarios, runE2EActualCli, collectE2EActualCliRun, e2eSnapshotSourceDigest, observeInstalledRuntimeManifestForHost } from "@agentx/verifier";
-import type { WorkerInvocation } from "@agentx/contracts";
+import type { WorkerInvocation } from "@rovara-code/contracts";
 
 const sha = (value: string | Uint8Array): string => createHash("sha256").update(value).digest("hex");
 

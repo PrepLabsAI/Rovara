@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { access, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import {
   InMemoryProjectRegistry,
   InMemoryRegistry,
@@ -11,7 +11,7 @@ import {
   ResumeCoordinator,
   type AuthenticatedIdentity,
   type ProjectMembership,
-} from "../../packages/broker/src/index.js";
+} from "../../packages/core/src/index.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { classifyFailure, createDiagnostic } from "../../packages/worker/src/diagnostics.js";
 import { describe, expect, it, vi } from "vitest";

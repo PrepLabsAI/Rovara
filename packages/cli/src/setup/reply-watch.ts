@@ -1,7 +1,7 @@
 // FR-018 step 11 and FR-041's check (owner decision 7): a person mentions the bot (the ingress
 // never answers a bot, so the CLI cannot post the test itself), and the CLI watches turn records
 // for an answered turn in that channel. No Slack history scope is needed.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { exportTurns } from "../admin/turns.js";
 import type { AdminSession } from "./services.js";
 

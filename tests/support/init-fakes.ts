@@ -2,7 +2,7 @@
 import { createHmac, generateKeyPairSync, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, environmentStackName, type ReleaseManifest } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, environmentStackName, type ReleaseManifest } from "@rovara-code/contracts";
 import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";

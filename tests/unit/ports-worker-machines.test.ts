@@ -1,8 +1,8 @@
 // Port lane W0: the fake worker machines pass the worker-machines conformance suite.
 import { randomUUID } from "node:crypto";
-import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type WorkerInvocation } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
-import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
+import { FakeWorkerMachines } from "../../packages/core/src/ports/fake-worker-machines.js";
 import { runWorkerMachinesConformance } from "../support/ports/worker-machines-conformance.js";
 
 function invocation(operationId: string): WorkerInvocation {

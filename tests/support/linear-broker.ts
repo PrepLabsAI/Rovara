@@ -2,7 +2,7 @@
 // static-secret credential, a project whose latest revision approves four Linear tools, the test
 // channel bound, and a ready thread workspace.
 import { expect, vi } from "vitest";
-import { githubConnectorType } from "../../packages/broker/src/aws/connector-types.js";
+import { githubConnectorType } from "../../packages/core/src/aws/connector-types.js";
 import { CHARTERARC_TEAM_ID, linearViaFake, startFakeLinearMcp } from "./fake-linear-mcp.js";
 import { call, createBroker, ensureWorkspace, markReady } from "./slack-broker.js";
 

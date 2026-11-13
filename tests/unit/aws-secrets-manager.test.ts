@@ -1,11 +1,11 @@
 // Convergence lane A3 (owner decision 72, O2): the Secrets Manager `secrets` adapter passes Code's conformance suite over a faithful stand-in, reads only under its prefix, reads a company's
 // own secret only for that company, and never lets a value or the service's own words into an error.
 import { describe, expect, it } from "vitest";
-import { SecretValue } from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
-import { LocalSecretError } from "../../packages/broker/src/ports/secret-error.js";
+import { SecretValue } from "@rovara-code/contracts";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/core/src/ports/adapter-registry.js";
+import { LocalSecretError } from "../../packages/core/src/ports/secret-error.js";
 import { createSecretsManagerSecretStore, isAwsSecretName, SecretsManagerSecretError } from "../../packages/aws-adapters/src/secrets-manager/index.js";
-import { SecretsManagerSettingsSchema, secretsManagerSecretsPlugin } from "../../packages/broker/src/plugins/secrets/aws-secrets-manager/plugin.js";
+import { SecretsManagerSettingsSchema, secretsManagerSecretsPlugin } from "../../packages/core/src/plugins/secrets/aws-secrets-manager/plugin.js";
 import { FakeSecretsManager } from "../support/ports/aws-fakes.js";
 import { runSecretStoreConformance } from "../support/ports/secret-store-conformance.js";
 
@@ -149,7 +149,7 @@ describe("Secrets Manager secrets: the plug-in", () => {
     const service = new FakeSecretsManager();
     service.set("rovara/github", "token-value");
     const registry = createAdapterRegistry();
-    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "secrets", name: "aws-secrets-manager", module: "@agentx/broker/plugins/secrets-aws", settings: { region: "us-west-2", profile: "rovara-secrets", namePrefix: "rovara/" } }] }), { registry, importModule: importer(service) });
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "secrets", name: "aws-secrets-manager", module: "@rovara-code/core/plugins/secrets-aws", settings: { region: "us-west-2", profile: "rovara-secrets", namePrefix: "rovara/" } }] }), { registry, importModule: importer(service) });
     const store = registry.require("secrets");
     expect((await store.read(COMPANY, { awsSecret: "github" }))?.reveal()).toBe("token-value");
     expect(await store.read(COMPANY, { env: "HOME" })).toBeUndefined();

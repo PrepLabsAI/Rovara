@@ -1,4 +1,4 @@
-import type { E2ECollection, E2ERunInput, E2ERuntimePorts } from "@agentx/contracts";
+import type { E2ECollection, E2ERunInput, E2ERuntimePorts } from "@rovara-code/contracts";
 
 const CLEANUP_CAP_MS = 60_000;
 

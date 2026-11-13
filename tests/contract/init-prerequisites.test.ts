@@ -1,6 +1,6 @@
 import { MissingOpenRouterSecret, DEFAULT_BEDROCK_MODELS } from "@agentx/model-runtime/config";
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError } from "@rovara-code/contracts";
 import { EC2Client, type DescribeAddressesCommand } from "@aws-sdk/client-ec2";
 import { ServiceQuotasClient, type GetServiceQuotaCommand } from "@aws-sdk/client-service-quotas";
 import {

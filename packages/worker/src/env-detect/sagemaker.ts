@@ -7,7 +7,7 @@
 //   - test doubles of the Runtime client (`Stubber`, moto, a mocked client, a cassette): the candidate then carries `fakedByTests`, and Rovara starts nothing.
 // Only names, numbers and fixed words leave this file: an endpoint name that is a plain SageMaker name (never one shaped like a key), a signal word and a line. No value from a setting, no host, no payload.
 // A call with no literal endpoint name anywhere is a question for a maintainer, never a guess. Detection reads; nothing is run.
-import { awsEmulatorServiceRow, looksLikeSecretValue, SAGEMAKER_DETECTION_SIGNALS, SageMakerEndpointNameSchema, type SageMakerDetectionSignal } from "@agentx/contracts";
+import { awsEmulatorServiceRow, looksLikeSecretValue, SAGEMAKER_DETECTION_SIGNALS, SageMakerEndpointNameSchema, type SageMakerDetectionSignal } from "@rovara-code/contracts";
 import { callArguments, candidate, DEPENDENCY_SKIP_DIRS, mergeCandidates } from "./dependency-candidates.js";
 import { ownEntries, ownGet, parseSafeYaml } from "./safe-yaml.js";
 import { lineOf, type DependencyCandidate, type Detection, type Detector } from "./types.js";

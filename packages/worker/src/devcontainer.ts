@@ -10,7 +10,7 @@ import {
   agentXError,
   type ProjectCommand,
   type StoredProjectDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { runCollected, TIMEOUT_KILL_GRACE_MS } from "./collected-process.js";
 import {

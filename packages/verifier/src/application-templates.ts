@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, APPLICATION_E2E_TEST_PATH, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, type E2EExpectedCase, type E2EScenario } from "@agentx/contracts";
-import type { E2EApplicationCliHostDescriptor, E2EApplicationLaunchTarget } from "@agentx/contracts";
+import { canonicalJson, APPLICATION_E2E_TEST_PATH, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, type E2EExpectedCase, type E2EScenario } from "@rovara-code/contracts";
+import type { E2EApplicationCliHostDescriptor, E2EApplicationLaunchTarget } from "@rovara-code/contracts";
 import type { E2EApplicationSelectionPacket } from "./application-identity.js";
 
 export const E2E_APPLICATION_COMPILER_PROTOCOL = "trusted-e2e-application-compiler/v1" as const;

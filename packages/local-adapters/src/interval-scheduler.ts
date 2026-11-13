@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import {
   SchedulerError, companyScoped, isScheduleId, when,
   type DocumentKey, type DocumentStore, type DueSchedule, type StoredDocument, type ScheduleEntry, type ScheduleSubscription, type Scheduler, type SchedulerCapabilities,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const MINUTE_MS = 60_000;
 const DEFAULT_MAX_LATE_SECONDS = 3_600;

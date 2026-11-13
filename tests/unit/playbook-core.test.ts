@@ -13,21 +13,21 @@ import {
   type PlaybookFile,
   type ProjectDefinition,
   type TransactItem,
-} from "@agentx/contracts";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { createPlaybookService, stepForMode, type PlaybookMode } from "../../packages/broker/src/core/playbook/service.js";
-import { createCodeHostPlaybookSource, fixedPlaybookSource } from "../../packages/broker/src/core/playbook/source.js";
-import { readProjectPlaybook, readStoredDesignReview } from "../../packages/broker/src/core/playbook/store.js";
-import { readEffectiveDesignReview } from "../../packages/broker/src/core/design-review/setting.js";
-import { runningProcessOf } from "../../packages/broker/src/core/playbook/process.js";
-import { computeHowWeWork } from "../../packages/broker/src/core/playbook/view.js";
-import { parsePlaybookText } from "../../packages/broker/src/core/playbook/file.js";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
-import { orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
+} from "@rovara-code/contracts";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { createStoreProjectSource } from "../../packages/core/src/core/task-flow/project-source.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { FakeCodeHost } from "../../packages/core/src/plugins/fake/code-host.js";
+import { FakeHostModel } from "../../packages/core/src/plugins/fake/model.js";
+import { createPlaybookService, stepForMode, type PlaybookMode } from "../../packages/core/src/core/playbook/service.js";
+import { createCodeHostPlaybookSource, fixedPlaybookSource } from "../../packages/core/src/core/playbook/source.js";
+import { readProjectPlaybook, readStoredDesignReview } from "../../packages/core/src/core/playbook/store.js";
+import { readEffectiveDesignReview } from "../../packages/core/src/core/design-review/setting.js";
+import { runningProcessOf } from "../../packages/core/src/core/playbook/process.js";
+import { computeHowWeWork } from "../../packages/core/src/core/playbook/view.js";
+import { parsePlaybookText } from "../../packages/core/src/core/playbook/file.js";
+import { TASK_FLOW_INDEXES } from "../../packages/core/src/core/task-flow/flow.js";
+import { orgProjectCatalogKey, projectRevisionKey } from "@rovara-code/contracts";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
 const URL_ = "https://examplehost.test/acme/app";

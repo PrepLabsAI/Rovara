@@ -1,8 +1,8 @@
 // The one-screen plan is a pure, capped, deterministic view of a plan document, and a plan that does not fit gets a `plan-too-big` finding.
 import { describe, expect, it } from "vitest";
-import { PLAN_ONE_SCREEN_MAX_CHARS, PlanOneScreenSchema, planQualityFinding, type PlanClaim, type PlanDocument, type RunEstimate } from "@agentx/contracts";
-import { costLine, cutWords, planFiles, planFullCharacters, planIsTooBig, planOneScreen, planOneScreenText } from "../../packages/broker/src/developer/plan-one-screen.js";
-import { planQualityFindings } from "../../packages/broker/src/developer/plan-quality.js";
+import { PLAN_ONE_SCREEN_MAX_CHARS, PlanOneScreenSchema, planQualityFinding, type PlanClaim, type PlanDocument, type RunEstimate } from "@rovara-code/contracts";
+import { costLine, cutWords, planFiles, planFullCharacters, planIsTooBig, planOneScreen, planOneScreenText } from "../../packages/core/src/developer/plan-one-screen.js";
+import { planQualityFindings } from "../../packages/core/src/developer/plan-quality.js";
 import { planDocument } from "../support/plan-documents.js";
 
 const estimate: RunEstimate = { lowUsd: 1.2, highUsd: 3.1, runLimitUsd: 6, stopAtUsd: 9, basis: "history", samples: 4, minutes: { low: 12, high: 25, basis: "history", samples: 4 } };

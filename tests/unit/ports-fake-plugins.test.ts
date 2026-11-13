@@ -1,7 +1,7 @@
 // P2: the fakes pass the contract suites, and a deliberately broken fake fails the check that guards the behaviour it breaks. The second half is what
 // shows a suite can fail at all: a contract that no broken adapter can fail proves nothing.
 import { describe, expect, it } from "vitest";
-import { FakeCheckRunner, FakeCodeHost, FakeTracker, fakeSignedDelivery, type FakeRawEvent } from "@agentx/broker/fakes";
+import { FakeCheckRunner, FakeCodeHost, FakeTracker, fakeSignedDelivery, type FakeRawEvent } from "@rovara-code/core/fakes";
 import type { CodeHostEvents, GitCredential, RepositoryRef } from "../../packages/contracts/src/index.js";
 import { checkRunnerChecks } from "../support/ports/check-runner-conformance.js";
 import { codeHostChecks } from "../support/ports/code-host-conformance.js";

@@ -8,11 +8,11 @@ import {
 import {
   ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock,
   recycleDriftedWorker, rethrowAsDeferredIfHeld, replayPredatesRenewal, requalifyHoldFence, requalifyDrainCount, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
-} from "../../packages/broker/src/e2e/requalify-hold.js";
+} from "../../packages/core/src/e2e/requalify-hold.js";
 import { E2E_REPLAY_REFUSALS } from "../../packages/contracts/src/index.js";
-import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
+import { E2E_OWNER_SENTENCES } from "../../packages/core/src/e2e/owner-sentences.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
+import { ApplicationDispatchRefusal } from "../../packages/core/src/e2e/application-dispatch-check.js";
 
 const NOW = Date.parse("2026-10-27T03:00:00.000Z");
 const RUN = "0b8a2f64-7c1d-4e0a-9f1b-3d5c6e7f8a90";
@@ -103,8 +103,8 @@ describe("the hold as a condition inside a start's own transaction", () => {
   });
   it("is the item every start transaction carries: the four system starts of a CHECKS operation (checks, baseline, grounding, replay) and the setup run's admission", () => {
     // The checks start is exercised end to end (contract test); the others share its shape, and a start without the item would let a round begin on the old machine.
-    expect(readFileSync("packages/broker/src/aws/developer-tasks.ts", "utf8").split("requalifyHoldFence(deps.tableName").length - 1).toBe(4);
-    const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
+    expect(readFileSync("packages/core/src/aws/developer-tasks.ts", "utf8").split("requalifyHoldFence(deps.tableName").length - 1).toBe(4);
+    const broker = readFileSync("packages/core/src/aws/broker.ts", "utf8");
     expect(broker).toContain("requalifyHoldFence(dependencies.tableName, Date.now())] };");
     // Both setup transactions (the registration and the admin retry) report a refused fence as the fixed reason.
     expect(broker.split("await rethrowAsDeferredIfHeld(dependencies, error, Date.now())").length - 1).toBe(2);

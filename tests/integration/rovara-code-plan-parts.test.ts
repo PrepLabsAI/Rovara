@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PLAN_PARTS_SENTENCE, type WorkerInvocation } from "@agentx/contracts";
+import { PLAN_PARTS_SENTENCE, type WorkerInvocation } from "@rovara-code/contracts";
 import { fauxAssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";

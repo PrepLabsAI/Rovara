@@ -1,7 +1,7 @@
 // What the broker decides before it asks the image registry for a login: the switch, the approved pin, the Prove report, the repository's name, and that nobody else made the repository first.
 import { describe, expect, it } from "vitest";
-import { HostedSavedEnvRegistryAuthSchema, SAVED_ENV_PULL_SESSION_SECONDS, SAVED_ENV_PUSH_SESSION_SECONDS, savedEnvRepositoryName } from "@agentx/contracts";
-import { mintPullSession, mintPushSession, repositoryOf, verifyRepository } from "../../packages/broker/src/core/test-env/saved-env-session.js";
+import { HostedSavedEnvRegistryAuthSchema, SAVED_ENV_PULL_SESSION_SECONDS, SAVED_ENV_PUSH_SESSION_SECONDS, savedEnvRepositoryName } from "@rovara-code/contracts";
+import { mintPullSession, mintPushSession, repositoryOf, verifyRepository } from "../../packages/core/src/core/test-env/saved-env-session.js";
 import { APPROVED, savedEnvWorld, type WorldOptions } from "../support/saved-env-world.js";
 
 const ids = { orgId: "org-1", projectId: "proj-1" };

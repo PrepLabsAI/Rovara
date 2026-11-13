@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { E2ERepositoryInspectionSchema, E2ESetupProposalSchema, canonicalJson, createCandidateManifest, inspectE2ERepository, inspectE2ERepositoryBeforeContractApiTargets,
-  proposeE2ESetup, verifyE2ESetupProposal } from "@agentx/contracts";
+  proposeE2ESetup, verifyE2ESetupProposal } from "@rovara-code/contracts";
 import { PROFILE } from "../support/e2e-application-plan-fixtures.js";
 
 // Task 3.4 (Ruling DA): discovery proposes `api-1` for a web app whose project contract names it in `targetAccounts`. An inspection or setup proposal stored before that

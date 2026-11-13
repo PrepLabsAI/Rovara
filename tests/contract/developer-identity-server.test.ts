@@ -6,12 +6,12 @@ import {
   parseSlackSignInSecret,
   remoteJwksCache,
   unconfiguredProvider,
-} from "../../packages/broker/src/aws/developer-identity.js";
-import { CHANNEL_MEMBERS_MAX_CHANNELS, TaskPeopleDisplayReadRequestSchema, TaskPeopleDisplayReadResponseSchema, TaskPersonProofRequestSchema, TaskPersonProofResponseSchema } from "@agentx/contracts";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import { ProviderNotConfiguredError, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
-import type { HttpResult } from "../../packages/broker/src/developer/server.js";
-import { kmsTokenSigner } from "../../packages/broker/src/developer/tokens.js";
+} from "../../packages/core/src/aws/developer-identity.js";
+import { CHANNEL_MEMBERS_MAX_CHANNELS, TaskPeopleDisplayReadRequestSchema, TaskPeopleDisplayReadResponseSchema, TaskPersonProofRequestSchema, TaskPersonProofResponseSchema } from "@rovara-code/contracts";
+import { ownerKeyForSubject } from "../../packages/core/src/aws/lambda.js";
+import { ProviderNotConfiguredError, slackSignInProvider } from "../../packages/core/src/developer/providers.js";
+import type { HttpResult } from "../../packages/core/src/developer/server.js";
+import { kmsTokenSigner } from "../../packages/core/src/developer/tokens.js";
 import {
   BOT_TOKEN, CLI_REDIRECT, ISSUER, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, authorizeQuery, httpEvent, identityHarness,
   type FakeSlackUser,

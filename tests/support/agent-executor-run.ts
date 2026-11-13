@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { e2eApplicationGroupAgentSteps } from "../../packages/verifier/src/application-scenarios.js";
-import { E2EAgentActionLedgerSchema, type E2EModelReceipt } from "@agentx/contracts";
+import { E2EAgentActionLedgerSchema, type E2EModelReceipt } from "@rovara-code/contracts";
 import { createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import { createE2EModelEvidenceCollector, openE2EModelChannelSession } from "../../packages/worker/src/e2e-model-channel-session.js";
 import { createScriptedE2EInvoke, type ScriptedTurn } from "../../packages/worker/src/e2e-model-scripted.js";

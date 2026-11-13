@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { DESIGN_REVIEW_EVAL_CASES } from "../eval/design-review/cases.js";
 import { adversarialMerge, alwaysAnswers, faithfulMerge, scriptedReviewer } from "../eval/design-review/fake-models.js";
 import { catches, runDesignReviewEval, scoreFindings, summaryLines, type PipelineOutcomes } from "../eval/design-review/run.js";
-import { requirementIdsOf } from "../../packages/broker/src/core/design-review/round-inputs.js";
+import { requirementIdsOf } from "../../packages/core/src/core/design-review/round-inputs.js";
 import { readDesignMeta, DESIGN_REVIEW_TIERS } from "../../packages/contracts/src/index.js";
 
 const planted = DESIGN_REVIEW_EVAL_CASES.reduce((sum, evalCase) => sum + evalCase.planted.length, 0);

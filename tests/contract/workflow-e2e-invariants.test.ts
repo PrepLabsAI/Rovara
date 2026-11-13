@@ -1,8 +1,8 @@
 // The journey invariant checker can fail: each hand-built bad journey breaks one invariant and must be refused with that
 // invariant's name, while the good journey they are built from passes.
 import { describe, expect, it } from "vitest";
-import { workflowMessage, workflowMessageKey } from "../../packages/broker/src/developer/workflow-messages.js";
-import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "@agentx/contracts";
+import { workflowMessage, workflowMessageKey } from "../../packages/core/src/developer/workflow-messages.js";
+import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "@rovara-code/contracts";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { JourneyInvariantError, assertJourneyInvariants, type JourneyLedgerEntry, type JourneyView } from "../support/workflow-e2e-invariants.js";
 

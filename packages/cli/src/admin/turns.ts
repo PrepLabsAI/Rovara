@@ -1,4 +1,4 @@
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { adminResponseBody } from "./http.js";
 
 const DURATION = /^(\d{1,4})([mhd])$/;

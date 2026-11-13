@@ -1,6 +1,6 @@
 // FR-018 step 7 for a Cognito identity: the admin user, created once. Cognito emails a temporary
 // password; the first sign-in asks for a new one. Re-running never sends a second email.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { ADMIN_GROUP } from "./admin-session.js";
 import type { CognitoAdmin } from "./services.js";
 

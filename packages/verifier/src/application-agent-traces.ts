@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { E2EAgentTraceFileSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, parseVerifiedE2EAgentActionLedger, reviewCapturedE2EAgentTrace,
-  type E2EAgentTraceBinding, type VerifiedE2EAgentActionLedger } from "@agentx/contracts";
+  type E2EAgentTraceBinding, type VerifiedE2EAgentActionLedger } from "@rovara-code/contracts";
 import { agentCaseDirectoryName } from "./executor/evidence-paths.js";
 
 /**

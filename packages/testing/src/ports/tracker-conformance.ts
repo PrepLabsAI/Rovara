@@ -4,7 +4,7 @@ import { expect } from "vitest";
 import {
   TrackerCapabilitiesSchema, TrackerEventSchema, TrackerItemSchema,
   type ChangeRequestRef, type HostScope, type NeutralStatus, type RawDelivery, type Tracker,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { twoCompanyChecks, type TwoCompanyIsolation } from "../isolation/two-company.js";
 import { rejection, type ContractCheck } from "./plugin-contract-kit.js";
 

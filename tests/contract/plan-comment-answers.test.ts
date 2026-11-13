@@ -3,11 +3,11 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseCommentAnswers, plainPageRefs, plannerReplyCommentId, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
-import { decideTaskWorkflow, listPageComments, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { APPROVED_COMMENT_ANSWERS_INSTRUCTION, COMMENT_ANSWERS_INSTRUCTION, readDecisionDetail } from "../../packages/broker/src/developer/owner-answers.js";
-import { writePlannerReplies } from "../../packages/broker/src/developer/page-comments.js";
+import { parseCommentAnswers, plainPageRefs, plannerReplyCommentId, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { decideTaskWorkflow, listPageComments, type DeveloperTaskRouteDependencies } from "../../packages/core/src/aws/developer-tasks.js";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
+import { APPROVED_COMMENT_ANSWERS_INSTRUCTION, COMMENT_ANSWERS_INSTRUCTION, readDecisionDetail } from "../../packages/core/src/developer/owner-answers.js";
+import { writePlannerReplies } from "../../packages/core/src/developer/page-comments.js";
 import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
@@ -164,7 +164,7 @@ describe("planner answers to included comments", () => {
   });
 
   it("a record never holds more than 25 answers, an answer twice, or one for a comment that was not sent", async () => {
-    const { plannerRepliesItem } = await import("../../packages/broker/src/developer/page-comments.js");
+    const { plannerRepliesItem } = await import("../../packages/core/src/developer/page-comments.js");
     const ids = Array.from({ length: 30 }, () => randomUUID());
     const detail = { schemaVersion: 1, taskId: "t", requestId: randomUUID(), decision: "REQUEST_CHANGES", artifactSha256: "a".repeat(64), answers: [], includedCommentIds: ids.slice(0, 25), at: "2026-10-11T09:00:00.000Z" } as never;
     const answers = [...ids.map((_, index) => ({ ref: `c${index + 1}`, outcome: "done" as const, reason: "x" })), { ref: "c1", outcome: "not_changed" as const, reason: "again" }, { ref: "c0", outcome: "done" as const, reason: "x" }];
@@ -533,7 +533,7 @@ describe("the page's view of comments sent with a decision", () => {
   const context = { readerId: MAYA.developerId, now: Date.parse("2026-10-11T10:00:00.000Z"), artifacts: [] as Array<{ id: string; type: "requirements" | "design" | "plan"; version: number }> };
 
   it("a comment sent with the coding plan's approval reads as sent to coding, without hiding an answer that failed or one still coming", async () => {
-    const { pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    const { pageCommentViews } = await import("../../packages/core/src/aws/plan-page/comments.js");
     const views = pageCommentViews([
       person({ lockedBy: approved }),
       person({ lockedBy: approved, ask: { state: "answered", at: "2026-10-11T09:10:00.000Z" } }),
@@ -546,7 +546,7 @@ describe("the page's view of comments sent with a decision", () => {
   });
 
   it("a planner reply says which document handled the comment and which claim cites it, worked out from its ID and the stored plans", async () => {
-    const { pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    const { pageCommentViews } = await import("../../packages/core/src/aws/plan-page/comments.js");
     const asked = person({ document: "design", version: 1, lockedBy: approved });
     const artifact = { id: randomUUID(), type: "plan" as const, version: 2 };
     const reply = (id: string, forVersion: number): TaskComment => ({
@@ -570,7 +570,7 @@ describe("the page's view of comments sent with a decision", () => {
   });
 
   it("a claim number in a planner's reply is a link only when that version of the handling document has the claim", async () => {
-    const { pageCommentViews, replyParts } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    const { pageCommentViews, replyParts } = await import("../../packages/core/src/aws/plan-page/comments.js");
     const asked = person({ document: "design", version: 1, lockedBy: approved });
     const artifact = { id: randomUUID(), type: "plan" as const, version: 1 };
     const claimIds = new Map([[artifact.id, new Set(["1", "1.1", "1.1.1", "1.2", "1.2.1", "1.2.2", "1.2.3"])]]);
@@ -602,7 +602,7 @@ describe("the page's view of comments sent with a decision", () => {
   });
 
   it("an AgentX reply shows as plain text: emphasis markers around a short phrase go, real asterisks and code stay", async () => {
-    const { plainReplyText, pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    const { plainReplyText, pageCommentViews } = await import("../../packages/core/src/aws/plan-page/comments.js");
     expect(plainReplyText("You can press *Request changes* in Slack, or add a _comment_ before approving.")).toBe("You can press Request changes in Slack, or add a comment before approving.");
     expect(plainReplyText("**Not changed**: *the copy*, (*one*) and _two_.")).toBe("Not changed: the copy, (one) and two.");
     for (const text of ["a*b and 2*3*4", "Match **/*.ts and src/*.js", "5 * 3 * 2", "snake_case_name and __init__", "set FOO=_bar_ and FOO:_baz_", "emoji :*) ok*", "an *unfinished phrase", "* a list marker", "Run `*raw*` and ```\n*fenced*\n```", "https://example.test/a_b_c"]) {
@@ -617,7 +617,7 @@ describe("the page's view of comments sent with a decision", () => {
   });
 
   it("a locked comment says which decision it was sent with", async () => {
-    const { pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    const { pageCommentViews } = await import("../../packages/core/src/aws/plan-page/comments.js");
     const views = pageCommentViews([person({ lockedBy: approved }), person({ lockedBy: { ...approved, decision: "REQUEST_CHANGES" } }), person()], context);
     expect(views.map((view) => [view.sent, view.sentWith])).toEqual([[true, "APPROVE"], [true, "REQUEST_CHANGES"], [false, undefined]]);
   });

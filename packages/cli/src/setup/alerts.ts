@@ -5,7 +5,7 @@
 import { DescribeBudgetCommand } from "@aws-sdk/client-budgets";
 import { DescribeAlarmHistoryCommand, SetAlarmStateCommand } from "@aws-sdk/client-cloudwatch";
 import { ListSubscriptionsByTopicCommand, SubscribeCommand } from "@aws-sdk/client-sns";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { Prompter } from "../init/prompts.js";
 
 export interface Subscription { arn: string; protocol: string; endpoint: string }

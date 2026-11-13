@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as contracts from "../../packages/contracts/src/index.js";
-import { noticesOf } from "../../packages/broker/src/developer/notifications.js";
+import { noticesOf } from "../../packages/core/src/developer/notifications.js";
 
 describe("the unreachable single-comment PR feedback path is gone", () => {
   it("exports no legacy feedback transitions or request schema", () => {

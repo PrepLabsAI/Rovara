@@ -1,6 +1,6 @@
 // Spec 025 FR-027: the tools' view of the control plane. The stdio server gives it the signed-in
 // developer's session (packages/cli); the hosted endpoint will give it another.
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME } from "@rovara-code/contracts";
 import { randomUUID } from "node:crypto";
 import {
   AgentXConfigurationConfirmSchema,
@@ -44,7 +44,7 @@ import {
   type WorkflowPublishRetryRequest,
   type WorkflowResolveFindingsInput,
   forwardReader,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { z } from "zod";
 import { CLOSE_BUSY_STEP, NEXT_STEPS, SHARE_BUSY_STEP, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
 

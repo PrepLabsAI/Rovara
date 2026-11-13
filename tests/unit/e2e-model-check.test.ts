@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DRIVING_TEST_BUDGET, E2EModelCheckResultSchema, E2E_MODEL_CHECK_REQUEST_SCHEMA, e2eModelRouteRevision, type E2EModelRouteDefinition } from "@agentx/contracts";
+import { DRIVING_TEST_BUDGET, E2EModelCheckResultSchema, E2E_MODEL_CHECK_REQUEST_SCHEMA, e2eModelRouteRevision, type E2EModelRouteDefinition } from "@rovara-code/contracts";
 import { createGovernedE2EModelRoute } from "../../packages/model-runtime/src/e2e-route.js";
 import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput } from "../../packages/model-runtime/src/e2e-route.js";
 import { deriveE2EAgentRouteForModel, e2eAgentRouteDefinitionDigest } from "../../packages/model-runtime/src/e2e-route-derive.js";
-import { validateModelCheckResult } from "../../packages/broker/src/e2e/model-checks.js";
+import { validateModelCheckResult } from "../../packages/core/src/e2e/model-checks.js";
 import { createDrivingTestLedger, drivingTestHostConfig, requestIdOf, runE2EModelCheck, withOutputCap } from "../../packages/worker/src/e2e-model-check.js";
 import { CANARY_REQUEST_KEY, CANARY_RESULT_KEY, parseCanaryCliArgs, runRequest, s3CanaryTransport, serveModelChecks, type CanaryTransport } from "../../packages/worker/src/e2e-model-canary-cli.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";

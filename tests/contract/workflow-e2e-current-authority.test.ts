@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalJson, canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, DeveloperTaskViewSchema, E2ESharedViewSchema, portableOperationId, taskGraphDigest, workspaceSessionKey, workflowRequestId, WorkflowSnapshotSchema } from "@agentx/contracts";
-import { getTaskDocumentView, startTaskWorkflowPublicationFromSystem } from "../../packages/broker/src/aws/developer-tasks.js";
-import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
-import { e2eFeatureVerifierKey, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { projectSetupBindingDigest } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
-import { createWorkflowE2EDisplayObject } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
-import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "../../packages/broker/src/aws/workflow-e2e-current-authority.js";
+import { canonicalJson, canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, DeveloperTaskViewSchema, E2ESharedViewSchema, portableOperationId, taskGraphDigest, workspaceSessionKey, workflowRequestId, WorkflowSnapshotSchema } from "@rovara-code/contracts";
+import { getTaskDocumentView, startTaskWorkflowPublicationFromSystem } from "../../packages/core/src/aws/developer-tasks.js";
+import { workflowDispatchItem } from "../../packages/core/src/aws/broker-shared.js";
+import { e2eFeatureVerifierKey, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
+import { projectSetupBindingDigest } from "../../packages/core/src/aws/project-setup-runtime-catalog.js";
+import { createWorkflowE2EDisplayObject } from "../../packages/core/src/aws/workflow-e2e-notifier-projection.js";
+import { workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
+import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "../../packages/core/src/aws/workflow-e2e-current-authority.js";
 import { createSingleAnswerPlanBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 

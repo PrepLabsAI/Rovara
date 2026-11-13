@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { WORKER_INVOCATION_FEATURES, WorkerInvocationSchema } from "@agentx/contracts";
+import { WORKER_INVOCATION_FEATURES, WorkerInvocationSchema } from "@rovara-code/contracts";
 
 const base = {
   protocolVersion: 1,

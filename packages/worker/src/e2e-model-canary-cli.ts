@@ -13,7 +13,7 @@
 // Exit 0 when it stops, 1 when a result could not be written, 2 for bad arguments.
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { pathToFileURL } from "node:url";
-import { E2E_MODEL_CHECK_RESULT_SCHEMA, MODEL_CHECK_MAX_PER_RUNNER, MODEL_CHECK_MIN_SPACING_MS } from "@agentx/contracts";
+import { E2E_MODEL_CHECK_RESULT_SCHEMA, MODEL_CHECK_MAX_PER_RUNNER, MODEL_CHECK_MIN_SPACING_MS } from "@rovara-code/contracts";
 import { runE2EModelCanary } from "./e2e-model-canary.js";
 import { requestFingerprint, requestIdOf, runE2EModelCheck } from "./e2e-model-check.js";
 

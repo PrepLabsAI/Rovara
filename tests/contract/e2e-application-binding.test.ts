@@ -6,12 +6,12 @@ import {
   E2ERuntimeAccountRefSchema, PlanApprovalRefSchema, SourceRefSchema, canonicalJson, createCandidateManifest, e2eAppBuildManifestDigest,
   inspectE2ERepository, proposeE2ESetup, type E2EApplicationPlanIntent, type E2EAppBuildManifest,
   type E2EAppArtifactRef, type E2EPolicy, type E2ESourceSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import {
   deriveE2EApplicationApprovalBinding, validateE2EAppBuildBinding,
   e2eApplicationMetadataSourceRefs,
-} from "../../packages/broker/src/e2e/application-plan-binding.js";
-import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
+} from "../../packages/core/src/e2e/application-plan-binding.js";
+import { buildFeatureE2EPlanningContext } from "../../packages/core/src/e2e/feature-plan-planning-context.js";
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const packageBytes = Buffer.from(JSON.stringify({ name: "ordinary-orders", type: "module", scripts: { start: "node server.js" } }));

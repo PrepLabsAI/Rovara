@@ -1,16 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/broker/src/aws/feedback-review-web.js";
-import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/broker/src/aws/developer-tasks.js";
-import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
-import { canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, taskGraphDigest, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type TaskPersonProofRequest, type TaskPersonProofResponse, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
+import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/core/src/aws/feedback-review-web.js";
+import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/core/src/aws/developer-tasks.js";
+import { authenticateDeveloperSessionId } from "../../packages/core/src/aws/developer-routes.js";
+import { canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, taskGraphDigest, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type TaskPersonProofRequest, type TaskPersonProofResponse, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@rovara-code/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
-import { githubWorkflowPullRequestKey, taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
-import { feedbackReviewNoticeId } from "../../packages/broker/src/developer/notifications.js";
-import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
-import { changeTaskPeople, type CheckTaskPerson, type StoredTaskRole, type TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import { githubWorkflowPullRequestKey, taskOwnerKey, type DeveloperTaskRecord } from "../../packages/core/src/developer/task-records.js";
+import { feedbackReviewNoticeId } from "../../packages/core/src/developer/notifications.js";
+import type { AdaptedHttpRequest } from "../../packages/core/src/aws/lambda.js";
+import { changeTaskPeople, type CheckTaskPerson, type StoredTaskRole, type TaskPeopleDependencies } from "../../packages/core/src/developer/task-people.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { ownerKeyForSubject } from "../../packages/core/src/aws/lambda.js";
 import { SLACK_TEAM } from "../support/slack-broker.js";
 import { planDocument } from "../support/plan-documents.js";
 
@@ -704,7 +704,7 @@ describe("broker-backed feedback review data", () => {
     expect((review.findings as Array<{ id: string }>).map(finding => finding.id)).toEqual(["finding-2", "finding-1"]);
     expect(review.reportOrder).toEqual(["finding-1", "finding-2"]);
     // What the card shows for the same two recommended fixes: the earlier finding's label is the one added.
-    const { feedbackCardCheckChanges } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const { feedbackCardCheckChanges } = await import("../../packages/core/src/aws/developer-task-notifier.js");
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workflow: WorkflowSnapshot };
     expect(review.recommendedCheckChanges).toMatchObject([{ added: [{ label: "First label" }] }]);
     expect(feedbackCardCheckChanges(task.workflow.checkPolicy, [fix("First label"), fix("Second label")].map(item => ({ proposedDisposition: "IMPLEMENT", ...item })))

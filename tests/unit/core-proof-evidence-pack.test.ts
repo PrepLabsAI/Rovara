@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { EVIDENCE_ARTIFACT_RETENTION, consoleErrorsWords, EvidencePackSchema, EvidenceViewSchema, type ArtifactRef, type EvidenceArtifactKind, type EvidenceEnvironment } from "../../packages/contracts/src/evidence.js";
 import type { CheckEntry } from "../../packages/contracts/src/checks.js";
-import { buildEvidencePack, evidenceHref, evidenceViewOf, type EvidenceBuildInput, type StoredArtifact } from "../../packages/broker/src/core/proof/evidence-pack.js";
+import { buildEvidencePack, evidenceHref, evidenceViewOf, type EvidenceBuildInput, type StoredArtifact } from "../../packages/core/src/core/proof/evidence-pack.js";
 
 const sha = (letter: string) => letter.repeat(64);
 const DIGEST = sha("c");

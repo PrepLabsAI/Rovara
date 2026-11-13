@@ -279,22 +279,22 @@ interface LambdaSpec {
  * installer's setup page is in another stack and is not here; a unit test keeps this list equal to the infra's entries.
  */
 export const CONTROL_PLANE_LAMBDAS = {
-  broker: { logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker.ts" },
-  dispatcher: { logicalId: "DispatcherD4A12972", entry: "packages/broker/src/aws/dispatcher.ts" },
-  "plan-evidence": { logicalId: "PlanEvidence3615C4CB", entry: "packages/broker/src/aws/plan-evidence-handler.ts" },
-  "outbox-publisher": { logicalId: "OutboxPublisherD572F72E", entry: "packages/broker/src/aws/outbox-publisher.ts" },
-  "slack-ingress": { logicalId: "SlackIngress5C88FFA0", entry: "packages/broker/src/aws/slack-ingress.ts" },
-  "eval-batch-tick": { logicalId: "EvalBatchTickA4585B04", entry: "packages/broker/src/aws/eval-batch-tick.ts" },
-  "developer-sign-in": { logicalId: "DeveloperSignInFunction10B62B05", entry: "packages/broker/src/aws/developer-identity.ts" },
-  "developer-task-notifier": { logicalId: "DeveloperTaskNotifierFunction551419CC", entry: "packages/broker/src/aws/developer-task-notifier.ts" },
-  "channel-ingress": { logicalId: "ChannelApiIngress9235D30E", entry: "packages/broker/src/aws/channel-api-lambda.ts" },
-  "channel-event-sender": { logicalId: "ChannelApiEventSenderDECD5203", entry: "packages/broker/src/aws/channel-events.ts" },
+  broker: { logicalId: "BrokerE1355FD6", entry: "packages/core/src/aws/broker.ts" },
+  dispatcher: { logicalId: "DispatcherD4A12972", entry: "packages/core/src/aws/dispatcher.ts" },
+  "plan-evidence": { logicalId: "PlanEvidence3615C4CB", entry: "packages/core/src/aws/plan-evidence-handler.ts" },
+  "outbox-publisher": { logicalId: "OutboxPublisherD572F72E", entry: "packages/core/src/aws/outbox-publisher.ts" },
+  "slack-ingress": { logicalId: "SlackIngress5C88FFA0", entry: "packages/core/src/aws/slack-ingress.ts" },
+  "eval-batch-tick": { logicalId: "EvalBatchTickA4585B04", entry: "packages/core/src/aws/eval-batch-tick.ts" },
+  "developer-sign-in": { logicalId: "DeveloperSignInFunction10B62B05", entry: "packages/core/src/aws/developer-identity.ts" },
+  "developer-task-notifier": { logicalId: "DeveloperTaskNotifierFunction551419CC", entry: "packages/core/src/aws/developer-task-notifier.ts" },
+  "channel-ingress": { logicalId: "ChannelApiIngress9235D30E", entry: "packages/core/src/aws/channel-api-lambda.ts" },
+  "channel-event-sender": { logicalId: "ChannelApiEventSenderDECD5203", entry: "packages/core/src/aws/channel-events.ts" },
   "sessions-steps": {
-    logicalId: "SessionsSteps3B98DD2B", entry: "packages/broker/src/aws/session-steps.ts",
+    logicalId: "SessionsSteps3B98DD2B", entry: "packages/core/src/aws/session-steps.ts",
     extraFiles: [{ from: "packages/worker/ec2/boot.sh", name: "boot.sh" }],
   },
-  "sessions-reaper": { logicalId: "SessionsReaper8FEF958E", entry: "packages/broker/src/aws/session-reaper.ts" },
-  "sessions-reconciler": { logicalId: "SessionsReconciler4316A0A2", entry: "packages/broker/src/aws/session-reconciler.ts" },
+  "sessions-reaper": { logicalId: "SessionsReaper8FEF958E", entry: "packages/core/src/aws/session-reaper.ts" },
+  "sessions-reconciler": { logicalId: "SessionsReconciler4316A0A2", entry: "packages/core/src/aws/session-reconciler.ts" },
 } as const satisfies Record<string, LambdaSpec>;
 /**
  * Repo-built control-plane Lambdas that test-deploy does not move, with why. The proof function is invoked through a published

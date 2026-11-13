@@ -1,16 +1,16 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type * as Contracts from "@agentx/contracts";
+import type * as Contracts from "@rovara-code/contracts";
 
 // The verifier consults the plan's required-criteria completeness (as P0 does) before it lets a round pass. No admission the compiler accepts has a waiting required
 // criterion in the fixtures available here, so the contracts function is stubbed while the real evidence still flows through the real verifier.
 const completeness = vi.hoisted(() => ({ override: undefined as boolean | undefined }));
-vi.mock("@agentx/contracts", async (importOriginal) => {
+vi.mock("@rovara-code/contracts", async (importOriginal) => {
   const actual = await importOriginal<typeof Contracts>();
   return { ...actual, e2ePlanHasCompleteRequiredCriteria: (plan: Parameters<typeof actual.e2ePlanHasCompleteRequiredCriteria>[0]) => completeness.override ?? actual.e2ePlanHasCompleteRequiredCriteria(plan) };
 });
 
-const { verifyApplicationE2EEvidence } = await import("../../packages/broker/src/e2e/application-evidence.js");
+const { verifyApplicationE2EEvidence } = await import("../../packages/core/src/e2e/application-evidence.js");
 const { encodeE2EApplicationExecutionAdmission } = await import("../../packages/verifier/src/application-scenarios.js");
 const { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope } = await import("../support/e2e-application-evidence-fixture.js");
 

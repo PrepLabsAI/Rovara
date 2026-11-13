@@ -2,8 +2,8 @@
 // the connection index it counts, and the checks doctor prints from it.
 import { describe, expect, it, vi } from "vitest";
 import type { ChatGptHealth } from "../../packages/contracts/src/index.js";
-import { chatGptConnections, type ChatGptSealer } from "../../packages/broker/src/chatgpt/connections.js";
-import { CHATGPT_TOKEN_URL } from "../../packages/broker/src/chatgpt/oauth.js";
+import { chatGptConnections, type ChatGptSealer } from "../../packages/core/src/chatgpt/connections.js";
+import { CHATGPT_TOKEN_URL } from "../../packages/core/src/chatgpt/oauth.js";
 import { chatGptChecks, readChatGptHealth, type ChatGptHealthRead } from "../../packages/cli/src/doctor/chatgpt.js";
 import type { DoctorContext } from "../../packages/cli/src/doctor/checks.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";

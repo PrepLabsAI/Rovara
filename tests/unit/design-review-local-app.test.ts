@@ -9,19 +9,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   DesignReviewBindingSchema, IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, WorkflowSnapshotSchema, closeDesignReview, decideWorkflow, enableDesignReview, recordIntentAssessment, startWorkflowPlanAfterUnderstand, startWorkflowUnderstand,
   designWaitOf, submitWorkflowArtifact, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
-import { approvalRecordKey } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { designApprovalKey } from "../../packages/broker/src/core/design-review/decision.js";
-import { ROVARA_CODE_PROGRAM } from "../../packages/broker/src/core/plan/program.js";
-import { deriveKey } from "../../packages/broker/src/local/app/app.js";
-import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { CALLBACK_KEY_FILE_NAME } from "../../packages/broker/src/local/state-directory.js";
-import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
+} from "@rovara-code/contracts";
+import { CallbackCapabilities } from "../../packages/core/src/callbacks.js";
+import { approvalRecordKey } from "../../packages/core/src/core/decisions/approval-gate.js";
+import { designApprovalKey } from "../../packages/core/src/core/design-review/decision.js";
+import { ROVARA_CODE_PROGRAM } from "../../packages/core/src/core/plan/program.js";
+import { deriveKey } from "../../packages/core/src/local/app/app.js";
+import { startLocalRuntime, type LocalRuntime } from "../../packages/core/src/local/runtime.js";
+import { CALLBACK_KEY_FILE_NAME } from "../../packages/core/src/local/state-directory.js";
+import { FakeWorkerMachines } from "../../packages/core/src/ports/fake-worker-machines.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { Command } from "commander";
 import { registerDesignReviewCommand } from "../../packages/cli/src/up/cli.js";
-import { sweepDesignWaits } from "../../packages/broker/src/core/design-review/wait.js";
+import { sweepDesignWaits } from "../../packages/core/src/core/design-review/wait.js";
 import { taskOf, toRound, waitingWithBlocker, world as flowWorld } from "../support/design-review-flow-world.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
 

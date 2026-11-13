@@ -1,10 +1,10 @@
 // A second review on the document-store fake, with the policy seams recorded and a model seam the test fills. One world is one company with one owner.
-import { secondReviewModelKey, type Approvers, type ApprovalProof, type JsonValue, type ApprovalRequest, type AuditEvent, type AuditSink, type ModelIdentifier, type Principal, type SecondReviewModelRef, type SecondReviewReplayCase, type SecondReviewReplayRun, type SecondReviewVerdict, type TransactItem } from "@agentx/contracts";
-import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createAllowAllAdmission, createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { recordReplayRun, recordVerdict } from "../../packages/broker/src/core/second-review/evidence.js";
-import { createSecondReview, secondReviewReplayKey, secondReviewVerdictKey, type SecondReview, type SecondReviewSeams } from "../../packages/broker/src/core/second-review/index.js";
+import { secondReviewModelKey, type Approvers, type ApprovalProof, type JsonValue, type ApprovalRequest, type AuditEvent, type AuditSink, type ModelIdentifier, type Principal, type SecondReviewModelRef, type SecondReviewReplayCase, type SecondReviewReplayRun, type SecondReviewVerdict, type TransactItem } from "@rovara-code/contracts";
+import { IMPLICIT_COMPANY_ID } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createAllowAllAdmission, createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { recordReplayRun, recordVerdict } from "../../packages/core/src/core/second-review/evidence.js";
+import { createSecondReview, secondReviewReplayKey, secondReviewVerdictKey, type SecondReview, type SecondReviewSeams } from "../../packages/core/src/core/second-review/index.js";
 
 /** Plain JSON of a value (a document the store holds), typed. */
 export const plain = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;

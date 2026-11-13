@@ -2,12 +2,12 @@
 // given the request and the owner's words. The tests drive the real flow on the in-memory fakes and play the owner's decision the way the gate's `onDecided` does (the words, then a PLAN row).
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { decideWorkflow, type JsonValue, type WorkerInvocation } from "@agentx/contracts";
-import { dispatchRowItem, dueDispatchRows } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
-import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
-import type { WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { commitWorkflow, planFeedbackKey, runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
+import { decideWorkflow, type JsonValue, type WorkerInvocation } from "@rovara-code/contracts";
+import { dispatchRowItem, dueDispatchRows } from "../../packages/core/src/core/task-flow/dispatch-rows.js";
+import { taskKey, workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { readTask } from "../../packages/core/src/core/task-flow/reads.js";
+import type { WorkspaceRecord } from "../../packages/core/src/core/task-flow/records.js";
+import { commitWorkflow, planFeedbackKey, runDispatchRow } from "../../packages/core/src/core/task-flow/stage-machine.js";
 import { COMPANY, createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const READY = { kind: "ready", path: "QUICK", restatement: "Add a health endpoint", assumptions: ["It returns 200"] } as const;

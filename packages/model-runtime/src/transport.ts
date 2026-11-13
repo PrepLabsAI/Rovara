@@ -1,5 +1,5 @@
 import type { Api, AnthropicMessagesCompat, OpenAICompletionsCompat, OpenAIResponsesCompat } from "@earendil-works/pi-ai";
-import type { KeyedModelProvider } from "@agentx/contracts";
+import type { KeyedModelProvider } from "@rovara-code/contracts";
 
 // Shared by the coding runtime (index.ts) and the governed e2e route (e2e-provider-invoke.ts), so both reach a keyed
 // provider the same way. Neither imports the other.

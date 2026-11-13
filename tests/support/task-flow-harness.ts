@@ -15,17 +15,17 @@ import {
   type Principal,
   type ProjectDefinition,
   type TransactItem,
-} from "@agentx/contracts";
-import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
-import { FakeWorkerMachines, type FakeWorkerMachinesOptions } from "../../packages/broker/src/ports/fake-worker-machines.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
-import { createAllowAllAdmission, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createTransactionalOutbox } from "../../packages/broker/src/ports/transactional-outbox.js";
-import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
-import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import type { TaskCaller, TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
-import { createTaskFlow, TASK_FLOW_INDEXES, type TaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
+} from "@rovara-code/contracts";
+import { RepositoryGrantService } from "../../packages/core/src/repository-access.js";
+import { FakeWorkerMachines, type FakeWorkerMachinesOptions } from "../../packages/core/src/ports/fake-worker-machines.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { MemoryQueueService } from "../../packages/core/src/ports/memory-queue.js";
+import { createAllowAllAdmission, createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createTransactionalOutbox } from "../../packages/core/src/ports/transactional-outbox.js";
+import { createStoreProjectSource } from "../../packages/core/src/core/task-flow/project-source.js";
+import { createOwnerTaskAccess } from "../../packages/core/src/core/task-flow/access.js";
+import type { TaskCaller, TaskFlowDeps } from "../../packages/core/src/core/task-flow/deps.js";
+import { createTaskFlow, TASK_FLOW_INDEXES, type TaskFlow } from "../../packages/core/src/core/task-flow/flow.js";
 
 export const COMPANY: OrgId = IMPLICIT_COMPANY_ID;
 export const SIGNING_KEY = Buffer.alloc(32, 9);

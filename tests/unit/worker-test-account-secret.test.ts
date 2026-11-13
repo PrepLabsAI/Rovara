@@ -3,7 +3,7 @@ import { chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, readdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { e2eSecretSpellings, testAccountSecretName } from "@agentx/contracts";
+import { e2eSecretSpellings, testAccountSecretName } from "@rovara-code/contracts";
 import {
   SECRET_REFUSALS, TestAccountSecretError, sweepTestAccountEnvFiles, assertPrivateDirectory, assertPrivateTmpfsDirectory, dockerEnvFileArgs, isTmpfsDirectory, mountOf, namesHoldingSecret, withTestAccountSecrets, withoutTestAccountNames,
   type ReadSecret, type SecretPlace, type SecretRefusal, type WithSecretsInput,

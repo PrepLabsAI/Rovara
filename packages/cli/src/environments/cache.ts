@@ -1,6 +1,6 @@
 import { access, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import YAML from "yaml";
 import type { DeploymentSettings } from "../deployment.js";
 import type { EnvironmentSettings } from "./settings.js";

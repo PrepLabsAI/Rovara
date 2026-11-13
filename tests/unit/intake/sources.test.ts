@@ -1,7 +1,7 @@
 // The project's intake rule on the document store: replaced as a whole, bounded, and the count kept beside it cannot drift.
 import { describe, expect, it } from "vitest";
-import { intakeSourceCountKey, type IntakeChannelRef, type OrgId } from "@agentx/contracts";
-import { INTAKE_MAX_SOURCES_PER_PROJECT, addIntakeSource, intakeSourceIdOf, listAllIntakeSources, listIntakeSources, readIntakeSource, replaceIntakeSources } from "../../../packages/broker/src/core/intake/sources.js";
+import { intakeSourceCountKey, type IntakeChannelRef, type OrgId } from "@rovara-code/contracts";
+import { INTAKE_MAX_SOURCES_PER_PROJECT, addIntakeSource, intakeSourceIdOf, listAllIntakeSources, listIntakeSources, readIntakeSource, replaceIntakeSources } from "../../../packages/core/src/core/intake/sources.js";
 import { RecordingStore } from "../../support/intake-world.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;

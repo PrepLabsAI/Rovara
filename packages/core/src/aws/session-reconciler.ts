@@ -1,0 +1,621 @@
+import {
+  CreateTagsCommand,
+  DeleteVolumeCommand,
+  DescribeInstancesCommand,
+  DescribeVolumesCommand,
+  EC2Client,
+  TerminateInstancesCommand,
+} from "@aws-sdk/client-ec2";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SSMClient } from "@aws-sdk/client-ssm";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from "@rovara-code/contracts";
+import { requiredEnvironment } from "./lambda.js";
+import { failActiveOperation } from "./outbox-failure.js";
+import { SessionManager, workspaceBinding } from "./sessions.js";
+import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
+import { sweepStuckSetups } from "./stuck-setup.js";
+import { stuckCancelRetrier, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult, type StuckCancelWorker } from "./stuck-cancels.js";
+import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type SlackThreadPlace, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
+import { cachedSlackPoster } from "./developer-task-notifier.js";
+import { slackNoticeChannelFromEnvironment } from "./slack-notice-channel.js";
+import { isStaleWorkerAmi, readQualifiedWorkerAmi } from "./worker-ami.js";
+import { renewalAgeMetrics, readRenewalAgeDays } from "./reconciler-renewal-age.js";
+
+/** A just-launched instance or just-created volume is not judged until its session has recorded it. */
+export const GRACE_MS = 15 * 60_000;
+/** A workspace's volume outlives its close by this long before the reconciler deletes it. */
+export const CLOSED_VOLUME_MS = 60 * 60_000;
+/** Consecutive failed /ping probes before a READY worker is replaced. */
+export const UNRESPONSIVE_PROBES = 3;
+/**
+ * AUTOREQUALIFY AR-4: a worker on another AMI than the pinned one is recycled only after it has been
+ * idle this long (the idle reaper's threshold), and at most this many per run (every 10 minutes), so a
+ * renewal rolls through the warm workers gradually instead of cold-starting them all at once.
+ */
+export const STALE_AMI_IDLE_MS = 5 * 60_000;
+export const MAX_STALE_AMI_RECYCLES_PER_RUN = 2;
+export const QUARANTINE_TAG = "agentx:quarantined";
+const WORKER_PORT = 8080;
+const PING_TIMEOUT_MS = 2_000;
+
+export interface InstanceView { instanceId: string; state: string; workspaceId?: string; launchedAt: string; /** The AMI the instance runs. */ imageId?: string }
+export interface VolumeView { volumeId: string; state: string; workspaceId?: string; createdAt: string; quarantined: boolean }
+export type ExecutionStatus = "RUNNING" | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "ABORTED" | "PENDING_REDRIVE";
+
+export interface ReconcilerReport {
+  orphanInstances: string[];
+  lostInstances: string[];
+  unresponsiveInstances: string[];
+  stuckProvisioning: string[];
+  restartedProvisioning: string[];
+  stuckDeleting: string[];
+  requeued: string[];
+  closedVolumesDeleted: string[];
+  quarantinedVolumes: string[];
+  /** Spec 025 FR-055: workspaces whose developer-task setup the sweep failed this run. */
+  stuckSetups: string[];
+  /** Issue 195: tasks left CANCEL_REQUESTED that this run retried or ended; absent when no sweep is wired. */
+  stuckCancels?: StuckCancelSweepResult;
+  /** Issue 173: idle Slack tasks cancelled with nobody waiting; present only where the backstop is wired. */
+  unwaitedTasks?: UnwaitedTaskSweepResult;
+  /** AUTOREQUALIFY AR-4: workspaces whose idle worker ran another AMI than the pinned one and was stopped; present only where the pin is wired. */
+  recycledStaleAmi?: string[];
+}
+
+export interface ReconcilerDependencies {
+  sessions: Pick<SessionManager, "get" | "listByState" | "markLost" | "recordPingFailure" | "clearPingFailures" | "requeueParked" | "claimStop" | "markFailed" | "markDeleted" | "ensureSession">;
+  /** This environment's ec2-ebs instances that are not yet terminated. */
+  instances: () => Promise<InstanceView[]>;
+  /** This environment's ec2-ebs workspace volumes. */
+  volumes: () => Promise<VolumeView[]>;
+  executionStatus: (executionArn: string) => Promise<ExecutionStatus | undefined>;
+  ping: (url: string) => Promise<string | undefined>;
+  terminate: (instanceId: string) => Promise<void>;
+  deleteVolume: (volumeId: string) => Promise<void>;
+  quarantine: (volumeId: string) => Promise<void>;
+  /** Fails the workspace's active operation and releases it; returns the operation ID, if any. */
+  failActiveOperation: (workspaceId: string, error: string) => Promise<string | undefined>;
+  /** When the workspace closed, if it did. */
+  closedAt: (workspaceId: string) => Promise<string | undefined>;
+  binding: (workspaceId: string) => Promise<Ec2RuntimeBinding | undefined>;
+  emit: (metrics: Record<string, number>) => void;
+  /** Spec 025 FR-055: fails developer-task prepares 50 minutes old; absent in tests that do not need it. */
+  sweepStuckSetups?: (now: Date) => Promise<{ failed: string[] }>;
+  /** Issue 195: retries once, or ends, tasks stuck CANCEL_REQUESTED among the listed workspaces; absent in tests that do not need it. */
+  sweepStuckCancels?: (candidates: StuckCancelCandidate[], now: Date) => Promise<StuckCancelSweepResult>;
+  /**
+   * Issue 173: cancels Slack thread tasks idle over 24 hours with nobody waiting, among the given
+   * workspaces. Named environments only; absent in the legacy deployment and in tests that do not need it.
+   */
+  sweepUnwaitedTasks?: (workspaceIds: Iterable<string>, now: Date) => Promise<UnwaitedTaskSweepResult>;
+  /**
+   * AUTOREQUALIFY AR-4: the AMI the test machine was last qualified on (undefined before the first
+   * automatic requalification); rejects when the setting is unreadable. Workers idle on any other
+   * AMI are stopped, so the next dispatch provisions the pinned one. Absent in tests that do not need it.
+   */
+  qualifiedWorkerAmi?: () => Promise<string | undefined>;
+  /** ARGUARD: days since the last successful renewal of the test machine (undefined until its schedule was enabled once); absent where the renewal is not wired. */
+  renewalAgeDays?: (now: Date) => Promise<number | undefined>;
+  /** Spec 025 A6: deletes failure and usage index days older than 30 days; absent in tests that do not need it. */
+  expireIndexDays?: (now: Date) => Promise<{ deleted: number }>;
+  now?: () => Date;
+  log?: (entry: Record<string, unknown>) => void;
+}
+
+const LIVE_STATES: readonly WorkspaceSessionState[] = ["PROVISIONING", "READY", "STOPPING", "STOPPED", "FAILED", "DELETING"];
+/** Session states that own their instance: anything else holding one is an orphan. */
+const INSTANCE_OWNERS: ReadonlySet<WorkspaceSessionState> = new Set(["PROVISIONING", "READY", "STOPPING", "DELETING"]);
+const GONE = new Set(["terminated", "shutting-down"]);
+
+/**
+ * The reconciler (issue #86, flow 5 in #76), run every 10 minutes. Repairs drift between this
+ * environment's ec2-ebs instances and volumes and the SESSION items that own them. It never deletes
+ * a volume it cannot tie to a closed workspace: an unclaimed one is quarantined and alarmed (#22).
+ */
+export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
+  const log = dependencies.log ?? ((entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry })));
+  return async (): Promise<ReconcilerReport> => {
+    const now = (dependencies.now?.() ?? new Date()).getTime();
+    const report: ReconcilerReport = {
+      orphanInstances: [], lostInstances: [], unresponsiveInstances: [], stuckProvisioning: [], restartedProvisioning: [],
+      stuckDeleting: [], requeued: [], closedVolumesDeleted: [], quarantinedVolumes: [], stuckSetups: [],
+    };
+    // AUTOREQUALIFY AR-4: read once per run. An unreadable setting recycles nothing this run and is
+    // counted; every other repair goes on.
+    let qualifiedAmi: string | undefined;
+    let qualifiedAmiReadFailed = false;
+    if (dependencies.qualifiedWorkerAmi !== undefined) {
+      report.recycledStaleAmi = [];
+      try {
+        qualifiedAmi = await dependencies.qualifiedWorkerAmi();
+      } catch (error) {
+        qualifiedAmiReadFailed = true;
+        log({ event: "reconciler.qualified_ami_unreadable", errorName: error instanceof Error ? error.name : "unknown" });
+      }
+    }
+    const sessions = new Map<string, WorkspaceSession>();
+    for (const state of LIVE_STATES) {
+      for (const session of await dependencies.sessions.listByState(state)) sessions.set(session.workspaceId, session);
+    }
+    const instances = await dependencies.instances();
+    const instanceById = new Map(instances.map((instance) => [instance.instanceId, instance]));
+    const settled = (timestamp: string) => now - Date.parse(timestamp) > GRACE_MS;
+
+    // Instances no session owns.
+    for (const instance of instances) {
+      if (GONE.has(instance.state) || !settled(instance.launchedAt)) continue;
+      const owner = instance.workspaceId === undefined ? undefined : sessions.get(instance.workspaceId);
+      if (owner !== undefined && owner.instanceId === instance.instanceId && INSTANCE_OWNERS.has(owner.state)) continue;
+      await dependencies.terminate(instance.instanceId);
+      report.orphanInstances.push(instance.instanceId);
+      log({ event: "reconciler.orphan_terminated", instanceId: instance.instanceId, workspaceId: instance.workspaceId });
+    }
+
+    // Issue 202: each live worker's answer to this run's ping, for the stuck-cancel sweep.
+    const workers = new Map<string, StuckCancelWorker>();
+    for (const session of sessions.values()) {
+      switch (session.state) {
+        case "READY": {
+          const worker = await reconcileReady(dependencies, session, instanceById, report, log, now, qualifiedAmi);
+          if (worker !== undefined) workers.set(session.workspaceId, worker);
+          break;
+        }
+        case "PROVISIONING":
+          await reconcileProvisioning(dependencies, session, report, log);
+          break;
+        case "DELETING":
+          await reconcileDeleting(dependencies, session, instanceById, report, log);
+          break;
+        default:
+          break;
+      }
+    }
+
+    // Issue 195: after the session repairs above (a lost READY worker's operation is already failed),
+    // and in its own try, so a failure here never stops the repairs that follow. Compute is judged
+    // from this run's snapshot: a worker the repairs above just stopped still counts as alive, so
+    // its one retry may be spent on it. The next run sees it gone and ends the task.
+    const stuckCancelMetrics = await reconcileStuckCancels(dependencies, sessions, instanceById, workers, now, report, log);
+
+    // Volumes no session claims.
+    for (const volume of await dependencies.volumes()) {
+      if (volume.quarantined) {
+        report.quarantinedVolumes.push(volume.volumeId);
+        continue;
+      }
+      if (!settled(volume.createdAt) || volume.workspaceId === undefined) continue;
+      const owner = sessions.get(volume.workspaceId) ?? await dependencies.sessions.get(volume.workspaceId);
+      if (owner !== undefined && owner.state !== "DELETED" && owner.volumeId === volume.volumeId) continue;
+      const closedAt = await dependencies.closedAt(volume.workspaceId);
+      if (closedAt !== undefined && now - Date.parse(closedAt) > CLOSED_VOLUME_MS && volume.state === "available") {
+        await dependencies.deleteVolume(volume.volumeId);
+        report.closedVolumesDeleted.push(volume.volumeId);
+        log({ event: "reconciler.closed_volume_deleted", volumeId: volume.volumeId, workspaceId: volume.workspaceId });
+        continue;
+      }
+      if (closedAt !== undefined) continue;
+      await dependencies.quarantine(volume.volumeId);
+      report.quarantinedVolumes.push(volume.volumeId);
+      log({ event: "reconciler.volume_quarantined", volumeId: volume.volumeId, workspaceId: volume.workspaceId });
+    }
+
+    // FR-055, C17: last, so a failure here never stops the EC2 repairs above. A failed sweep is
+    // logged (its error name only) and counted, the metrics are still emitted (F17), and the run
+    // then fails so the existing SessionReconcilerErrors alarm still sees it.
+    let sweepError: Error | undefined;
+    if (dependencies.sweepStuckSetups !== undefined) {
+      try {
+        // The sweep logs each failed setup itself (stuck_setup.failed), so nothing is repeated here.
+        report.stuckSetups = (await dependencies.sweepStuckSetups(new Date(now))).failed;
+      } catch (error) {
+        sweepError = error instanceof Error ? error : new Error("stuck-setup sweep failed");
+        log({ event: "reconciler.stuck_setup_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
+      }
+    }
+
+    // Issue 173: after the repairs above, so a failure here never stops them. Each failed cancel is
+    // logged by the sweep and retried on the next run (the task is still live), so a failure here is
+    // logged by its error name, counted for the UnwaitedTaskFailures alarm, and the run goes on.
+    let unwaitedMetrics: Record<string, number> = {};
+    if (dependencies.sweepUnwaitedTasks !== undefined) {
+      try {
+        report.unwaitedTasks = await dependencies.sweepUnwaitedTasks(sessions.keys(), new Date(now));
+        unwaitedMetrics = {
+          ReconcilerUnwaitedTasksCancelled: report.unwaitedTasks.cancelled.length,
+          ReconcilerUnwaitedTaskFailures: report.unwaitedTasks.failed.length,
+          ReconcilerUnwaitedTaskReadFailures: report.unwaitedTasks.readFailures.length,
+          // No alarm: a bot removed from a channel or a bad secret shows here and in the logs.
+          ReconcilerUnwaitedTaskNoteFailures: report.unwaitedTasks.noteFailures,
+        };
+      } catch (error) {
+        log({ event: "reconciler.unwaited_task_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
+        // Nothing was cancelled or tried: the sweep's own reads failed.
+        unwaitedMetrics = { ReconcilerUnwaitedTasksCancelled: 0, ReconcilerUnwaitedTaskFailures: 0, ReconcilerUnwaitedTaskReadFailures: 1, ReconcilerUnwaitedTaskNoteFailures: 0 };
+      }
+    }
+
+    // Spec 025 A6: housekeeping. A failure is logged by its error name and the run goes on; the
+    // next run's 15-day look-back catches the day up, so no metric or report field changes.
+    if (dependencies.expireIndexDays !== undefined) {
+      try {
+        await dependencies.expireIndexDays(new Date(now));
+      } catch (error) {
+        log({ event: "reconciler.index_expiry_failed", errorName: error instanceof Error ? error.name : "unknown" });
+      }
+    }
+
+    const renewalAge = await renewalAgeMetrics(dependencies.renewalAgeDays, new Date(now), log);
+    dependencies.emit({
+      ReconcilerOrphanInstances: report.orphanInstances.length,
+      ReconcilerLostInstances: report.lostInstances.length,
+      ReconcilerUnresponsiveInstances: report.unresponsiveInstances.length,
+      ReconcilerStuckProvisioning: report.stuckProvisioning.length,
+      ReconcilerStuckDeleting: report.stuckDeleting.length,
+      ReconcilerRequeued: report.requeued.length,
+      ReconcilerClosedVolumesDeleted: report.closedVolumesDeleted.length,
+      ReconcilerQuarantinedVolumes: report.quarantinedVolumes.length,
+      ReconcilerStuckSetups: report.stuckSetups.length,
+      ReconcilerStuckSetupErrors: sweepError === undefined ? 0 : 1,
+      ...(dependencies.qualifiedWorkerAmi === undefined ? {} : {
+        ReconcilerRecycledStaleAmi: report.recycledStaleAmi?.length ?? 0,
+        ReconcilerQualifiedAmiReadFailures: qualifiedAmiReadFailed ? 1 : 0,
+      }),
+      ...stuckCancelMetrics,
+      ...unwaitedMetrics,
+      ...renewalAge,
+    });
+    if (sweepError !== undefined) throw sweepError;
+    return report;
+  };
+}
+
+/** What is known of each listed workspace's compute, from this run's session and instance reads. */
+function computeOf(session: WorkspaceSession, instances: Map<string, InstanceView>): StuckCancelCompute {
+  switch (session.state) {
+    case "READY":
+      return instances.get(session.instanceId!)?.state === "running" ? "alive" : "gone";
+    case "STOPPED":
+    case "FAILED":
+    case "DELETING":
+      return "gone";
+    default:
+      // PROVISIONING or STOPPING: the next run sees where it settled.
+      return "unknown";
+  }
+}
+
+/**
+ * Issue 195: runs the stuck-cancel sweep over the listed workspaces. Each action is logged by the
+ * sweep and counted here; a sweep that throws is logged by its error name and counted as a failure
+ * for the StuckCancels alarm (named environments), and the run goes on.
+ */
+async function reconcileStuckCancels(
+  dependencies: ReconcilerDependencies,
+  sessions: Map<string, WorkspaceSession>,
+  instances: Map<string, InstanceView>,
+  workers: Map<string, StuckCancelWorker>,
+  now: number,
+  report: ReconcilerReport,
+  log: (entry: Record<string, unknown>) => void,
+): Promise<Record<string, number>> {
+  if (dependencies.sweepStuckCancels === undefined) return {};
+  // Only workspaces with a listed session: a task runs only on a session's compute, so a stuck
+  // cancel on a workspace with none (or a DELETED one) is not looked for here.
+  const candidates = [...sessions.values()].map((session): StuckCancelCandidate => {
+    const compute = computeOf(session, instances);
+    const worker = compute === "alive" ? workers.get(session.workspaceId) : undefined;
+    return { workspaceId: session.workspaceId, compute, ...(worker === undefined ? {} : { worker }) };
+  });
+  let sweepFailed = 0;
+  try {
+    report.stuckCancels = await dependencies.sweepStuckCancels(candidates, new Date(now));
+  } catch (error) {
+    sweepFailed = 1;
+    log({ event: "reconciler.stuck_cancel_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
+  }
+  const swept = report.stuckCancels;
+  return {
+    ReconcilerStuckCancelRetries: swept?.retried.length ?? 0,
+    ReconcilerStuckCancelsEnded: swept?.ended.length ?? 0,
+    ReconcilerStuckCancelsInterrupted: swept?.interrupted.length ?? 0,
+    ReconcilerStuckCancelsUnretried: swept?.unretried.length ?? 0,
+    ReconcilerStuckCancelFailures: (swept?.failed.length ?? 0) + sweepFailed,
+  };
+}
+
+/** Repairs a READY session; returns its worker's answer to the ping (issue 202), if it answered. */
+async function reconcileReady(
+  dependencies: ReconcilerDependencies,
+  session: WorkspaceSession,
+  instances: Map<string, InstanceView>,
+  report: ReconcilerReport,
+  log: (entry: Record<string, unknown>) => void,
+  now: number,
+  qualifiedAmi?: string,
+): Promise<StuckCancelWorker | undefined> {
+  const instance = instances.get(session.instanceId!);
+  if (instance === undefined || instance.state !== "running") {
+    // Terminated, stopped or gone from under a READY session: its work cannot finish.
+    if (instance !== undefined && !GONE.has(instance.state)) await dependencies.terminate(instance.instanceId);
+    if (!(await dependencies.sessions.markLost(session))) return;
+    const operationId = await dependencies.failActiveOperation(session.workspaceId, "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request");
+    report.lostInstances.push(session.instanceId!);
+    log({ event: "reconciler.instance_lost", workspaceId: session.workspaceId, instanceId: session.instanceId, failedOperationId: operationId });
+    return undefined;
+  }
+  let status: string | undefined;
+  try {
+    status = await dependencies.ping(`http://${session.privateIp}:${WORKER_PORT}/ping`);
+  } catch {
+    status = undefined;
+  }
+  if (status === "Healthy" || status === "HealthyBusy") {
+    if (session.pingFailures !== undefined) await dependencies.sessions.clearPingFailures(session);
+  } else if (await dependencies.sessions.recordPingFailure(session) >= UNRESPONSIVE_PROBES) {
+    // Replaced: the next run finds the instance gone and handles it as lost.
+    await dependencies.terminate(session.instanceId!);
+    report.unresponsiveInstances.push(session.instanceId!);
+    log({ event: "reconciler.instance_unresponsive", workspaceId: session.workspaceId, instanceId: session.instanceId });
+  }
+  if ((session.waitingOutboxIds ?? []).length > 0) {
+    const { requeued } = await dependencies.sessions.requeueParked(session.workspaceId);
+    report.requeued.push(...requeued);
+  } else if (
+    status === "Healthy" && isStaleWorkerAmi(instance.imageId, qualifiedAmi)
+    && (report.recycledStaleAmi?.length ?? 0) < MAX_STALE_AMI_RECYCLES_PER_RUN
+    && now - Date.parse(session.lastActivityAt!) > STALE_AMI_IDLE_MS
+  ) {
+    // AUTOREQUALIFY AR-4: the recycle mark. The same READY -> STOPPING claim the idle reaper makes,
+    // so it holds only if nothing touched the session since it was read and the workspace has no
+    // operation in progress (a dispatch racing it always wins). The reaper terminates the instance
+    // and finishes the stop; the next dispatch provisions the pinned AMI. A busy or unprobed worker
+    // is left to finish, and is judged again on the next run.
+    if (await dependencies.sessions.claimStop(session)) {
+      report.recycledStaleAmi?.push(session.workspaceId);
+      log({ event: "reconciler.stale_ami_recycled", workspaceId: session.workspaceId, generation: session.generation, instanceId: instance.instanceId, imageId: instance.imageId, qualifiedAmi });
+    }
+  }
+  return status === "Healthy" ? "idle" : status === "HealthyBusy" ? "busy" : undefined;
+}
+
+async function reconcileProvisioning(
+  dependencies: ReconcilerDependencies,
+  session: WorkspaceSession,
+  report: ReconcilerReport,
+  log: (entry: Record<string, unknown>) => void,
+): Promise<void> {
+  if (session.executionArn === undefined) {
+    // Its start failed before the execution was recorded; starting again is idempotent by name.
+    const binding = await dependencies.binding(session.workspaceId);
+    if (binding === undefined) return;
+    await dependencies.sessions.ensureSession({ workspaceId: session.workspaceId, binding });
+    report.restartedProvisioning.push(session.workspaceId);
+    return;
+  }
+  const status = await dependencies.executionStatus(session.executionArn);
+  // A running provisioner is trusted: it has its own 45-minute timeout.
+  if (status === undefined || status === "RUNNING" || status === "PENDING_REDRIVE") return;
+  if (session.instanceId !== undefined) await dependencies.terminate(session.instanceId);
+  try {
+    await dependencies.sessions.markFailed(session.workspaceId, session.generation, `provisioning ended ${status} without finishing`);
+  } catch (error) {
+    // It reached READY or FAILED after all.
+    if (!(error instanceof Error && error.message.includes("STALE_FENCE"))) throw error;
+    return;
+  }
+  report.stuckProvisioning.push(session.workspaceId);
+  log({ event: "reconciler.provisioning_stuck", workspaceId: session.workspaceId, generation: session.generation, executionStatus: status });
+}
+
+async function reconcileDeleting(
+  dependencies: ReconcilerDependencies,
+  session: WorkspaceSession,
+  instances: Map<string, InstanceView>,
+  report: ReconcilerReport,
+  log: (entry: Record<string, unknown>) => void,
+): Promise<void> {
+  if (session.executionArn !== undefined) {
+    const status = await dependencies.executionStatus(session.executionArn);
+    if (status === "RUNNING" || status === "PENDING_REDRIVE") return;
+  }
+  // The deleter cannot run again under its name (unique for 90 days), so finish here.
+  const instance = session.instanceId === undefined ? undefined : instances.get(session.instanceId);
+  if (instance !== undefined && !GONE.has(instance.state)) {
+    await dependencies.terminate(instance.instanceId);
+    report.stuckDeleting.push(session.workspaceId);
+    return;
+  }
+  if (instance !== undefined && instance.state === "shutting-down") return;
+  if (session.volumeId !== undefined) {
+    const volume = (await dependencies.volumes()).find((candidate) => candidate.volumeId === session.volumeId);
+    if (volume !== undefined) {
+      if (volume.state !== "available") {
+        report.stuckDeleting.push(session.workspaceId);
+        return;
+      }
+      await dependencies.deleteVolume(volume.volumeId);
+    }
+  }
+  await dependencies.sessions.markDeleted(session.workspaceId);
+  report.stuckDeleting.push(session.workspaceId);
+  log({ event: "reconciler.deletion_finished", workspaceId: session.workspaceId });
+}
+
+const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration));
+const ec2 = new EC2Client(awsClientConfiguration);
+const ssm = new SSMClient(awsClientConfiguration);
+const sfn = new SFNClient(awsClientConfiguration);
+const tableName = process.env.STATE_TABLE_NAME ?? "";
+const ownFilters = () => [
+  { Name: "tag:DeploymentMode", Values: ["ec2-ebs"] },
+  { Name: "tag:Environment", Values: [requiredEnvironment("ENVIRONMENT_TAG")] },
+];
+const tag = (tags: Array<{ Key?: string | undefined; Value?: string | undefined }> | undefined, key: string) => tags?.find((candidate) => candidate.Key === key)?.Value;
+
+/**
+ * Issue 195: the stuck-cancel sweep runs in every reconciler, using the State table it already
+ * reads and writes. A stuck cancel on a live worker is queued again in this process, through the
+ * cancel route's own code, and its callbacks are signed with the callback signing key. Only a named
+ * environment's reconciler holds that key (#173), so the legacy one logs and counts it instead.
+ */
+function stuckCancelSweep(): NonNullable<ReconcilerDependencies["sweepStuckCancels"]> {
+  const retryCancel = stuckCancelRetrier(process.env, { client: documentClient, tableName });
+  // Issue 202: a Slack thread whose workspace a failed cancel held is told it is free again, where
+  // the reconciler holds the Slack secret (#173's backstop, named environments).
+  const postNote = backstop.state === "on" ? slackThreadPoster() : undefined;
+  const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
+  return (candidates, now) => sweepStuckCancels({
+    client: documentClient, tableName, ...(retryCancel === undefined ? {} : { retryCancel }), ...(postNote === undefined ? {} : { postNote }), log,
+  }, candidates, now);
+}
+
+/**
+ * Issue 173, named environments only: the reconciler cancels through the shared cancel code (it
+ * already reads and writes the State table; the outbox publisher dispatches the cancel), reads the
+ * thread's activeTurn (GetItem on THREAD# keys only), and posts the note with the bot token (the
+ * Slack secret alone).
+ */
+function unwaitedTaskSweep(): NonNullable<ReconcilerDependencies["sweepUnwaitedTasks"]> {
+  const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
+  const callbackSigningKey = requiredEnvironment("CALLBACK_SIGNING_KEY");
+  const postNote = slackThreadPoster();
+  const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
+  return (workspaceIds, now) => sweepUnwaitedTasks({
+    client: documentClient,
+    tableName,
+    threadsTableName,
+    callbackSigningKey,
+    postNote,
+    log,
+  }, workspaceIds, now);
+}
+
+let threadPoster: ((thread: SlackThreadPlace, text: string) => Promise<void>) | undefined;
+
+/**
+ * Posts a note into a Slack thread with the bot token (the Slack secret alone), shared by the
+ * sweeps that tell a thread what they did. A bad secret fails the note as SlackSecretInvalid, the
+ * name the sweeps log; never the secret's text.
+ */
+function slackThreadPoster(): (thread: SlackThreadPlace, text: string) => Promise<void> {
+  if (threadPoster !== undefined) return threadPoster;
+  const secrets = new SecretsManagerClient(awsClientConfiguration);
+  const slackSecretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  // Spec 062 Phase 7c: through the Slack adapter when Slack goes through the channel API.
+  const post = slackNoticeChannelFromEnvironment(secrets)?.post ?? cachedSlackPoster(() => secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }))
+    .then((secret) => slackBotTokenFrom(secret.SecretString)));
+  threadPoster = async (thread, text) => { await post({ channel: thread.channelId, threadTs: thread.threadTs, text }); };
+  return threadPoster;
+}
+
+// Issue 173: a half-wired environment runs without the backstop; say so once, by the missing names.
+const backstop = unwaitedTaskBackstopConfiguration(process.env);
+if (backstop.state === "partial") console.log(JSON.stringify({ component: "session-reconciler", event: "reconciler.unwaited_task_backstop_partial", missing: backstop.missing.join(",") }));
+
+export const handler = createReconcilerHandler({
+  sessions: new SessionManager({
+    documentClient,
+    tableName,
+    executions: {
+      provisionerArn: process.env.PROVISIONER_ARN ?? "",
+      deleterArn: process.env.DELETER_ARN ?? "",
+      async start(input) {
+        return (await sfn.send(new StartExecutionCommand(input))).executionArn!;
+      },
+    },
+  }),
+  async instances() {
+    const found: InstanceView[] = [];
+    let NextToken: string | undefined;
+    do {
+      const page = await ec2.send(new DescribeInstancesCommand({
+        Filters: [...ownFilters(), { Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped", "shutting-down"] }],
+        ...(NextToken ? { NextToken } : {}),
+      }));
+      for (const reservation of page.Reservations ?? []) {
+        for (const instance of reservation.Instances ?? []) {
+          const workspaceId = tag(instance.Tags, "agentx:workspace");
+          found.push({
+            instanceId: instance.InstanceId!,
+            state: instance.State?.Name ?? "unknown",
+            launchedAt: (instance.LaunchTime ?? new Date()).toISOString(),
+            ...(workspaceId === undefined ? {} : { workspaceId }),
+            ...(instance.ImageId === undefined ? {} : { imageId: instance.ImageId }),
+          });
+        }
+      }
+      NextToken = page.NextToken;
+    } while (NextToken);
+    return found;
+  },
+  async volumes() {
+    const found: VolumeView[] = [];
+    let NextToken: string | undefined;
+    do {
+      // Workspace volumes only: root volumes carry no agentx:workspace tag and go with their instance.
+      const page = await ec2.send(new DescribeVolumesCommand({ Filters: [...ownFilters(), { Name: "tag-key", Values: ["agentx:workspace"] }], ...(NextToken ? { NextToken } : {}) }));
+      for (const volume of page.Volumes ?? []) {
+        const workspaceId = tag(volume.Tags, "agentx:workspace");
+        found.push({
+          volumeId: volume.VolumeId!,
+          state: volume.State ?? "unknown",
+          createdAt: (volume.CreateTime ?? new Date()).toISOString(),
+          quarantined: tag(volume.Tags, QUARANTINE_TAG) !== undefined,
+          ...(workspaceId === undefined ? {} : { workspaceId }),
+        });
+      }
+      NextToken = page.NextToken;
+    } while (NextToken);
+    return found;
+  },
+  async executionStatus(executionArn) {
+    try {
+      return (await sfn.send(new DescribeExecutionCommand({ executionArn }))).status;
+    } catch (error) {
+      if (error instanceof Error && error.name === "ExecutionDoesNotExist") return undefined;
+      throw error;
+    }
+  },
+  async ping(url) {
+    const response = await fetch(url, { signal: AbortSignal.timeout(PING_TIMEOUT_MS) });
+    const body = await response.json() as { status?: unknown };
+    return typeof body.status === "string" ? body.status : undefined;
+  },
+  async terminate(instanceId) {
+    await ec2.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
+  },
+  async deleteVolume(volumeId) {
+    await ec2.send(new DeleteVolumeCommand({ VolumeId: volumeId }));
+  },
+  async quarantine(volumeId) {
+    await ec2.send(new CreateTagsCommand({ Resources: [volumeId], Tags: [{ Key: QUARANTINE_TAG, Value: new Date().toISOString() }] }));
+  },
+  failActiveOperation: (workspaceId, error) => failActiveOperation(documentClient, tableName, workspaceId, error),
+  async closedAt(workspaceId) {
+    const item = (await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" } }))).Item as { status?: string; closedAt?: string } | undefined;
+    return item?.status === "CLOSED" ? item.closedAt : undefined;
+  },
+  binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
+  sweepStuckCancels: stuckCancelSweep(),
+  sweepStuckSetups: (now) => sweepStuckSetups(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),
+  // AUTOREQUALIFY AR-4: wired where the stack names the pin; a deployment without it behaves as before.
+  ...(process.env.WORKER_QUALIFIED_AMI_PARAMETER === undefined ? {} : { qualifiedWorkerAmi: () => readQualifiedWorkerAmi(ssm, process.env.WORKER_QUALIFIED_AMI_PARAMETER!) }),
+  renewalAgeDays: (now) => readRenewalAgeDays(documentClient, tableName, now),
+  ...(backstop.state === "on" ? { sweepUnwaitedTasks: unwaitedTaskSweep() } : {}),
+  ...(indexSweepWanted(process.env) ? { expireIndexDays: (now: Date) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))) } : {}),
+  emit(metrics) {
+    console.log(JSON.stringify({
+      _aws: {
+        Timestamp: Date.now(),
+        CloudWatchMetrics: [{ Namespace: requiredEnvironment("AGENTX_METRICS_NAMESPACE"), Dimensions: [[]], Metrics: Object.keys(metrics).map((Name) => ({ Name, Unit: "Count" })) }],
+      },
+      component: "session-reconciler",
+      event: "metric",
+      ...metrics,
+    }));
+  },
+});

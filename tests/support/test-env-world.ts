@@ -1,6 +1,6 @@
 // A document store holding one registered project, for the tests of the test environment's modules.
-import { projectMetaKey, projectRevisionKey, type OrgId } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { projectMetaKey, projectRevisionKey, type OrgId } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 /** The project as the store reader finds it: one revision, an active record, and (when asked) a dev container. */
 export async function projectStore(orgId: OrgId, project: string, options: { devcontainer?: boolean; archived?: boolean; store?: MemoryDocumentStore } = {}): Promise<MemoryDocumentStore> {

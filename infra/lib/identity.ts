@@ -1,7 +1,7 @@
 import { Aws, CfnCondition, CfnOutput, CfnParameter, Duration, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import type { Construct } from "constructs";
-import { assertCognitoDomainSafe } from "@agentx/contracts";
+import { assertCognitoDomainSafe } from "@rovara-code/contracts";
 import type { AgentXNaming } from "./naming.js";
 
 export const ADMIN_GROUP = "agentx-admin";

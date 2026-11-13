@@ -3,7 +3,7 @@
 // the caller, only its name reaches the log.
 import { CredentialUnavailable } from "@agentx/gateway";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE } from "../../packages/broker/src/aws/broker-shared.js";
+import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE } from "../../packages/core/src/aws/broker-shared.js";
 import { adminCall, adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 

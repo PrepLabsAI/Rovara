@@ -1,4 +1,4 @@
-import { modelCheckClassSentence, type ModelRef, type ProjectModelOptions } from "@agentx/contracts";
+import { modelCheckClassSentence, type ModelRef, type ProjectModelOptions } from "@rovara-code/contracts";
 import type { ConversationFormat } from "./conversation-format.js";
 
 export type ModelCommand = { kind: "list" } | { kind: "use"; selector: string };

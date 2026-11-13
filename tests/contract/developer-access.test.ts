@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ChannelMembersRequest, SlackChannelBinding } from "@agentx/contracts";
-import { accessDeniedMessage, resolveDeveloperAccess } from "../../packages/broker/src/developer/access.js";
+import type { ChannelMembersRequest, SlackChannelBinding } from "@rovara-code/contracts";
+import { accessDeniedMessage, resolveDeveloperAccess } from "../../packages/core/src/developer/access.js";
 
 const binding = (channelId: string, projectName: string): SlackChannelBinding => ({ teamId: "T0TEAM1", channelId, projectName, updatedAt: "2026-09-27T00:00:00.000Z" });
 const bindings = [binding("C0PAY0001", "payments-api"), binding("C0PAY0002", "payments-api"), binding("C0LEDGER1", "ledger"), binding("C0DOCS001", "docs")];

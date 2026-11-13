@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { TaskPersonInviteClaimRequest, TaskPersonInviteOutcome } from "../../packages/contracts/src/developer.js";
-import { taskPersonInviteThroughLambda, type TaskPersonInviteInvoker } from "../../packages/broker/src/aws/task-person-invite-transport.js";
+import { taskPersonInviteThroughLambda, type TaskPersonInviteInvoker } from "../../packages/core/src/aws/task-person-invite-transport.js";
 
 const request = (): TaskPersonInviteClaimRequest => ({ kind: "task-person-invite-claimed", taskId: "11111111-1111-4111-8111-111111111111",
   requestId: "22222222-2222-4222-8222-222222222222", claimDigest: "a".repeat(64), admission: { version: 1, id: randomUUID(),

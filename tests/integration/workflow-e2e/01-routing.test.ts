@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { MAYA } from "../../support/developer-task-broker.js";
 import { createWorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, PLAN, TEAMMATE, actionIds, atPlanReview, expectNoJargon, journeySuite, runs, said } from "../../support/workflow-e2e-journeys.js";
-import { workflowStartedNotice } from "../../../packages/broker/src/aws/slack-workflow-choice.js";
+import { workflowStartedNotice } from "../../../packages/core/src/aws/slack-workflow-choice.js";
 
 const OWNER = MAYA.slackUserId!;
 const APPROVED = `Coding plan approved by <@${OWNER}>. Writing the code now; then I'll run 1 check.`;

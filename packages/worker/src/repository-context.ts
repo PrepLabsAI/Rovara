@@ -1,6 +1,6 @@
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { AgentXNameSchema, RelativeWorkspacePathSchema, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, agentXError } from "@agentx/contracts";
+import { AgentXNameSchema, RelativeWorkspacePathSchema, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, agentXError } from "@rovara-code/contracts";
 import { inertContextText, inertLabel, quotedContextText } from "./context-text.js";
 import type { PreparationManifest } from "./prepare.js";
 import { runFileOp } from "./sandbox-file-ops.js";

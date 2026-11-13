@@ -1,4 +1,4 @@
-import type { E2EApplicationEvidenceRef } from "@agentx/contracts";
+import type { E2EApplicationEvidenceRef } from "@rovara-code/contracts";
 import type { BoundCase } from "./mock-ledger.js";
 
 /** The bytes of one retained frame, made by the readback; the same shape the supervisor receipt's closure carries. */

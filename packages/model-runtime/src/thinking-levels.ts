@@ -1,5 +1,5 @@
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { ThinkingLevelSchema, type ModelIdentifier, type ModelRef, type ProjectModels, type ThinkingLevel } from "@agentx/contracts";
+import { ThinkingLevelSchema, type ModelIdentifier, type ModelRef, type ProjectModels, type ThinkingLevel } from "@rovara-code/contracts";
 import { catalogModel } from "./catalog.js";
 
 /**

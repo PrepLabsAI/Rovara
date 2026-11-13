@@ -1,6 +1,6 @@
 // FR-050: that stacks exist and are healthy, that they run the release the settings name, the engine
 // they were deployed with, and their last drift result.
-import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
+import { environmentStackName, type ReleaseManifest } from "@rovara-code/contracts";
 import { installOrder, type DeployPart } from "../deploy/parameters.js";
 import { check, type DoctorCheck, type DoctorContext, type DoctorStack } from "./checks.js";
 

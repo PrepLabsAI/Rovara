@@ -4,11 +4,11 @@ import { describe, expect, it } from "vitest";
 import {
   BRANCH_SYNCS_PER_DAY_MAX, CI_FAILED_JOBS_MAX, CI_FIX_ROUNDS_MAX, CI_OUTPUT_BLOCK_HEADER, WorkflowSnapshotSchema, branchConflictAskMessage, branchConflictStopMessage, ciFixAskMessage, ciFixStopMessage,
   createCandidateManifest, createWorkflowSnapshot, startWorkflowFix, type Autonomy, type MergeTrackingItem, type OrgId, type WorkflowProgram, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { conflictDecider, installBranchSyncDeciders, syncDecider, uninstallBranchSyncDeciders } from "../../packages/broker/src/core/branch-sync/branch-sync.js";
-import { ciFixDecider, installCiFixDecider, readCiEvidence, readLatestCiEvidence, uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
-import { WORKFLOW_NO_CANDIDATE_DIGEST, type MergeActionContext, type MergeActionDecider, type MergeActionInput, type MergeActionRequest, type MergeActionSlot } from "../../packages/broker/src/core/branch-sync/merge-action.js";
+} from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { conflictDecider, installBranchSyncDeciders, syncDecider, uninstallBranchSyncDeciders } from "../../packages/core/src/core/branch-sync/branch-sync.js";
+import { ciFixDecider, installCiFixDecider, readCiEvidence, readLatestCiEvidence, uninstallCiFixDecider } from "../../packages/core/src/core/ci-fix/ci-fix.js";
+import { WORKFLOW_NO_CANDIDATE_DIGEST, type MergeActionContext, type MergeActionDecider, type MergeActionInput, type MergeActionRequest, type MergeActionSlot } from "../../packages/core/src/core/branch-sync/merge-action.js";
 
 const at = "2026-10-25T12:00:00.000Z";
 const NOW = Date.parse(at);

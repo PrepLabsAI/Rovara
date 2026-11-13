@@ -2,8 +2,8 @@
 // Spec 025 FR-054, C11, C13, C14: a shared thread's service calls, resolved by the broker.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { indexExpiresAt, SLACK_OIDC_ISSUER } from "@agentx/contracts";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import { indexExpiresAt, SLACK_OIDC_ISSUER } from "@rovara-code/contracts";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
 import { MAYA, createDeveloperTaskBroker, markThreadPosted, teammate } from "../support/developer-task-broker.js";
 import { SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 

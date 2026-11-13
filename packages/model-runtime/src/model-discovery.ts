@@ -1,4 +1,4 @@
-import { E2E_AGENT_BEDROCK_QUOTA_CODES, bedrockProfileGeography, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { E2E_AGENT_BEDROCK_QUOTA_CODES, bedrockProfileGeography, type E2EModelFailureClass, type ModelProvider } from "@rovara-code/contracts";
 
 /**
  * Model discovery and recommendation (M1.4 Task 4.10C, D-4): which of the models Rovara could use does this account actually see, and how to rank them for the owner.

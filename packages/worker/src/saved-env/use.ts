@@ -36,7 +36,7 @@ import {
   type SavedEnvRegistryAuth,
   type SavedEnvUseStep,
   type StoredProjectDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { assertCredentialFreeRemote, runGitWithCredential, type GitCredential } from "../git-auth.js";
 import { createDockerCli, type DockerCli } from "../swebench/containers.js";
 import { DEFAULT_LINK_POLICY, inspectLink, type LinkPolicy } from "./links.js";

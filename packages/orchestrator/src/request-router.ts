@@ -2,7 +2,7 @@
 // action gate's own classifier model, runtime and deadline. It only suggests: nothing that changes code starts from it.
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
-import { REQUEST_ROUTER_SYSTEM_PROMPT, parseRequestRoute, requestRouterPrompt, type RequestRouteKind, type RequestRouteOutcome } from "@agentx/contracts";
+import { REQUEST_ROUTER_SYSTEM_PROMPT, parseRequestRoute, requestRouterPrompt, type RequestRouteKind, type RequestRouteOutcome } from "@rovara-code/contracts";
 import { ClassifierError, ClassifierTimeoutError, completeBeforeDeadline, usableClassifierTimeout } from "./action-classifier.js";
 
 /** The router's sorting and how it went. Anything but a usable answer is `unclear`; never the model's reason. */

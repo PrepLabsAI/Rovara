@@ -3,16 +3,16 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, intakeItemIdOf, type CodeMilestone, type OrgId } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, intakeItemIdOf, type CodeMilestone, type OrgId } from "@rovara-code/contracts";
 import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
 import { registerIntakeCommand } from "../../packages/cli/src/up/cli.js";
-import { sessionBindingsOf } from "../../packages/broker/src/core/sessions/bindings.js";
-import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
-import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
-import { FAKE_TRACKER_KIND, FakeTracker } from "../../packages/broker/src/plugins/fake/tracker.js";
-import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { codeMilestoneItems } from "../../packages/broker/src/core/milestones/milestones.js";
+import { sessionBindingsOf } from "../../packages/core/src/core/sessions/bindings.js";
+import { taskSessionId } from "../../packages/core/src/core/sessions/create.js";
+import { FakeWorkerMachines } from "../../packages/core/src/ports/fake-worker-machines.js";
+import { FAKE_TRACKER_KIND, FakeTracker } from "../../packages/core/src/plugins/fake/tracker.js";
+import { startLocalRuntime, type LocalRuntime } from "../../packages/core/src/local/runtime.js";
+import { codeMilestoneItems } from "../../packages/core/src/core/milestones/milestones.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 
 const cleanup: Array<() => Promise<void>> = [];

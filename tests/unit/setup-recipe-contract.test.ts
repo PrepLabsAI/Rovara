@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SETUP_MARKER_FILES, SetupRecipeBodySchema, markerFilesOf, parseSetupRecipeSource, recipeFits, recipeNamesRepository, setupFingerprint, setupRecipeDigest, setupRecipeSource, type SetupRecipeBody,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const cmd = (executable: string, args: string[] = [], cwd = "{repo}") => ({ cwd, executable, args, timeoutSeconds: 600 });
 const recipe = (): SetupRecipeBody => SetupRecipeBodySchema.parse({

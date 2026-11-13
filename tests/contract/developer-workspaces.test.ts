@@ -1,9 +1,9 @@
 // Spec 041: GET /v1/dev/workspaces -- the projects a developer may use, with the workspaces in
 // them, read through the sparse byWorkspaceProject index.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WORKSPACE_PROJECT_INDEX, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
-import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
-import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
+import { WORKSPACE_PROJECT_INDEX, type ChannelMembersRequest, type ChannelMembersResponse } from "@rovara-code/contracts";
+import type { DeveloperApiConfiguration } from "../../packages/core/src/aws/developer-routes.js";
+import { developerTokenVerifier } from "../../packages/core/src/developer/verify-token.js";
 import { createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { localSigner } from "../support/developer-fakes.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";

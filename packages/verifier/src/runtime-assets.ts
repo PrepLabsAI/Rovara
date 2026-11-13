@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute, dirname, resolve } from "node:path";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import { expectedE2EConfigDigest, verifyE2ECompiledFileInventory } from "./identity.js";
 import type { E2ECompiledSuite } from "./scenarios.js";
 

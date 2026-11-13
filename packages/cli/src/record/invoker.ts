@@ -6,7 +6,7 @@ import { rmSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SAGEMAKER_ENDPOINT_LIMITS } from "@agentx/contracts";
+import { SAGEMAKER_ENDPOINT_LIMITS } from "@rovara-code/contracts";
 
 export interface InvokeRequest {
   endpointName: string;

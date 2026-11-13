@@ -3,14 +3,14 @@
 // one, so no network is reached; the global fetch throws.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrgId } from "../../packages/contracts/src/index.js";
-import { datadogConnectionCheck } from "../../packages/broker/src/connectors/native/datadog-connector-type.js";
-import { sentryConnectionCheck } from "../../packages/broker/src/connectors/native/sentry-connector-type.js";
-import { OrgConnectionStore } from "../../packages/broker/src/connections/store.js";
+import { datadogConnectionCheck } from "../../packages/core/src/connectors/native/datadog-connector-type.js";
+import { sentryConnectionCheck } from "../../packages/core/src/connectors/native/sentry-connector-type.js";
+import { OrgConnectionStore } from "../../packages/core/src/connections/store.js";
 import { InMemoryConnectionSecrets, memoryStore } from "../support/connection-fakes.js";
 
 const seen = vi.hoisted(() => ({ urls: [] as string[], made: 0 }));
 
-vi.mock("../../packages/broker/src/connectors/native/vendor-fetch.js", async (importOriginal) => {
+vi.mock("../../packages/core/src/connectors/native/vendor-fetch.js", async (importOriginal) => {
   const original = await importOriginal<Record<string, unknown>>();
   return {
     ...original,

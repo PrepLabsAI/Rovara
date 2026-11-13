@@ -1,19 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { E2E_DEFAULT_MODEL_ROUTE_ID, e2eModelRouteRevision } from "@agentx/contracts";
+import { E2E_DEFAULT_MODEL_ROUTE_ID, e2eModelRouteRevision } from "@rovara-code/contracts";
 import { GetCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { approveE2EAgentRoute, planE2EAgentRoute } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { modelRouteForAdmission as modelRouteForAdmissionWith } from "../../packages/broker/src/e2e/application-evidence.js";
+import { approveE2EAgentRoute, planE2EAgentRoute } from "../../packages/core/src/e2e/model-route-registry.js";
+import { modelRouteForAdmission as modelRouteForAdmissionWith } from "../../packages/core/src/e2e/application-evidence.js";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 import { createOrdersM14AgentPlan } from "../support/orders-m14-agent.js";
 import { deriveE2EAgentRoute } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
-import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
+import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/core/src/e2e/application-evidence.js";
 import { SCRIPTED_REGISTRY_ROUTE, asLinuxRun, assembleAgentRun, brokerRoundFor } from "../support/agent-collection.js";
-import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
-import { scrubScenarioResults } from "../../packages/broker/src/e2e/application-display.js";
+import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/core/src/e2e-presentation.js";
+import { scrubScenarioResults } from "../../packages/core/src/e2e/application-display.js";
 
 // The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
 assumeDrivingTestsPassed();
@@ -141,7 +141,7 @@ describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
       delete copy.groupRun.actual.collectionInputs["agentModel"];
       return [key, copy] as const;
     })), aggregate: undefined };
-    const forgedVerdict = (await import("../../packages/broker/src/e2e/application-evidence.js")).verifyApplicationE2EEvidence(forged);
+    const forgedVerdict = (await import("../../packages/core/src/e2e/application-evidence.js")).verifyApplicationE2EEvidence(forged);
     expect(forgedVerdict.verdict).toBe("UNKNOWN");
     expect(forgedVerdict.groups[0]!.reason).toMatch(/^model-receipts-mismatch:/);
   });

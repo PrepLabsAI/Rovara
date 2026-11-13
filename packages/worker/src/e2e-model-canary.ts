@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2EModelReceiptSchema, e2eModelRouteRevision, type E2EModelChannelRequest, type E2EModelReceipt } from "@agentx/contracts";
+import { E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2EModelReceiptSchema, e2eModelRouteRevision, type E2EModelChannelRequest, type E2EModelReceipt } from "@rovara-code/contracts";
 import {
   E2EPayloadRefusedError,
   assertE2EEnvironmentCannotRedirect,

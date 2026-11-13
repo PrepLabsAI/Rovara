@@ -1,6 +1,6 @@
 // agentx doctor (FR-050, FR-051): every check group in order. Each group runs even when an earlier
 // one failed, so one run lists everything wrong.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { readInstallAnswers, readInstallProgress } from "../init/install-state.js";

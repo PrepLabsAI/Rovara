@@ -6,17 +6,17 @@
 //      and one it refuses later turns the trigger off with the reason, never leaving it "on" and waiting;
 //   4. one start per schedule slot even if the fire arrives again after the run is over.
 import { describe, expect, it } from "vitest";
-import { SchedulerError, type Approvers, type DueSchedule } from "@agentx/contracts";
+import { SchedulerError, type Approvers, type DueSchedule } from "@rovara-code/contracts";
 import { createIntervalScheduler } from "../../packages/local-adapters/src/interval-scheduler.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createScheduleRouter } from "../../packages/broker/src/core/automation/schedule-router.js";
-import { automationRequest, verifyOwnerProof } from "../../packages/broker/src/core/automation/authority.js";
-import { dispatchTriggerEvent } from "../../packages/broker/src/core/triggers/dispatch.js";
-import { afterTargetChanged, createTrigger, enableTrigger, repairPendingSchedules, triggerEnableRequest } from "../../packages/broker/src/core/triggers/lifecycle.js";
-import { handleScheduleFire, triggerScheduleHandler } from "../../packages/broker/src/core/triggers/schedules.js";
-import { cancelChainRun } from "../../packages/broker/src/core/chains/runner.js";
-import { chainGateRequest, decideChainGate } from "../../packages/broker/src/core/chains/gates.js";
-import { startChainRun, onStepEnded } from "../../packages/broker/src/core/chains/runner.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createScheduleRouter } from "../../packages/core/src/core/automation/schedule-router.js";
+import { automationRequest, verifyOwnerProof } from "../../packages/core/src/core/automation/authority.js";
+import { dispatchTriggerEvent } from "../../packages/core/src/core/triggers/dispatch.js";
+import { afterTargetChanged, createTrigger, enableTrigger, repairPendingSchedules, triggerEnableRequest } from "../../packages/core/src/core/triggers/lifecycle.js";
+import { handleScheduleFire, triggerScheduleHandler } from "../../packages/core/src/core/triggers/schedules.js";
+import { cancelChainRun } from "../../packages/core/src/core/chains/runner.js";
+import { chainGateRequest, decideChainGate } from "../../packages/core/src/core/chains/gates.js";
+import { startChainRun, onStepEnded } from "../../packages/core/src/core/chains/runner.js";
 import { approversOf } from "../support/automation-approvers.js";
 import { COMPANY, OWNER, PROJECT, createAutomationWorld, publishAgent, publishChain, republishAgent, republishChain, reporterOverlay, type AutomationWorld } from "../support/automation-world.js";
 

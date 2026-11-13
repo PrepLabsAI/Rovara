@@ -1,17 +1,22 @@
 {
-  "name": "@agentx/contracts",
+  "name": "@rovara-code/contracts",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "exports": {
     ".": "./dist/index.js",
+    "./browser": "./dist/browser.js",
     "./dns-helper": "./dist/dns-helper.js"
   },
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
   "sideEffects": false,
   "dependencies": {
+    "@aws-crypto/sha256-js": "5.2.0",
     "typescript": "5.9.3",
-    "zod": "4.6.6",
-    "@aws-crypto/sha256-js": "5.2.0"
+    "zod": "4.6.6"
   }
 }

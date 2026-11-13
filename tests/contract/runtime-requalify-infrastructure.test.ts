@@ -9,7 +9,7 @@ import { HEALTH_ALARM_CONDITIONAL_SUFFIXES, HEALTH_ALARM_SUFFIXES, REQUALIFY_AGE
 import { REQUALIFY_SCHEDULE_LOGICAL_ID } from "../../scripts/test-deploy-requalify.js";
 import { checkLambdaBundles } from "../../scripts/lambda-load-check.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
-import { requalifyDrainStatus } from "../../packages/broker/src/e2e/requalify-hold.js";
+import { requalifyDrainStatus } from "../../packages/core/src/e2e/requalify-hold.js";
 import { drainFixtureRows, drainIamClient, DRAIN_FIXTURE_NOW } from "../support/drain-iam-client.js";
 
 skipLambdaBundling();
@@ -272,7 +272,7 @@ describe("the renewal's step machine", () => {
 
 describe("the renewal's Lambda bundle", () => {
   it("loads (or stops at a missing environment variable only), like every control-plane Lambda", async () => {
-    const report = await checkLambdaBundles({ root: process.cwd(), entries: [{ name: "runtime-requalify", entry: "packages/broker/src/aws/runtime-requalify-handler.ts" }] });
+    const report = await checkLambdaBundles({ root: process.cwd(), entries: [{ name: "runtime-requalify", entry: "packages/core/src/aws/runtime-requalify-handler.ts" }] });
     expect(report.results.map((result) => result.name)).toEqual(["runtime-requalify"]);
     expect(report.problems).toEqual([]);
     expect(report.ok).toBe(true);

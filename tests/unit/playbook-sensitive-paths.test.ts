@@ -1,8 +1,8 @@
 // A merged change to the playbook file changes what every later task is told, and design review's cost and approvers, so a pull request that touches it is graded high, in both places that grade paths.
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, type VerificationReport } from "@agentx/contracts";
-import { isSensitivePath as planSensitive } from "../../packages/broker/src/core/decisions/sensitive-paths.js";
-import { assessRisk, isSensitivePath as proofSensitive, type RiskFile } from "../../packages/broker/src/core/proof/risk.js";
+import { createCandidateManifest, type VerificationReport } from "@rovara-code/contracts";
+import { isSensitivePath as planSensitive } from "../../packages/core/src/core/decisions/sensitive-paths.js";
+import { assessRisk, isSensitivePath as proofSensitive, type RiskFile } from "../../packages/core/src/core/proof/risk.js";
 
 const digest = createCandidateManifest([{ repositoryId: "payments", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]).digest;
 const clean: VerificationReport = { reviewOnly: false, passed: [{ label: "Unit tests" }], failed: [], notChecked: [], testsAdded: [] };

@@ -56,7 +56,7 @@ import {
   type QueueService,
   type ReceiveOptions,
   type ReceivedMessage,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 /** The commands this adapter sends. */
 export type SqsCommand = SendMessageCommand | ReceiveMessageCommand | DeleteMessageCommand | ChangeMessageVisibilityCommand | GetQueueAttributesCommand;

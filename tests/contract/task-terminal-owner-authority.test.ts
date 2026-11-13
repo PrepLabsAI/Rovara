@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { developerTaskRouteDependencies } from "../../packages/core/src/aws/developer-routes.js";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
+import { routeDeveloperTaskRequest } from "../../packages/core/src/aws/developer-tasks.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 

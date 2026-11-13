@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import type * as ChildProcessModule from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { CALLBACK_SIGNING_KEY_BYTES } from "../../packages/cli/src/deploy/signing-key.js";
-import type { AgentXError } from "@agentx/contracts";
+import type { AgentXError } from "@rovara-code/contracts";
 import { cliErrorFor, interactiveConfirm, realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
 
 // Wraps the real `spawn` in a mock that calls through by default, so every other test here still

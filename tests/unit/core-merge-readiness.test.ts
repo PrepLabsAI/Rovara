@@ -1,9 +1,9 @@
 // Port lane L7a: the pure rules of the merge core (Cloud's, unchanged): what the checks say, whose approval counts, when the pull requests may be merged and in whose words.
 import { describe, expect, it } from "vitest";
 import { MERGE_NOT_READY_MESSAGES as M, WORKFLOW_BLOCK_REASONS, type ChangeRequestStatus, type MergeTrackingItem } from "../../packages/contracts/src/index.js";
-import { humanApprovalOf, latestReviewers } from "../../packages/broker/src/core/merge/approval.js";
-import { mergeReadiness, mergeViewFromReadiness, riskOfTask, type MergePullRequestFacts, type ReadinessInput } from "../../packages/broker/src/core/merge/merge.js";
-import { NO_CI_GRACE_MS, PERMISSION_LOOKUPS_MAX, readBranch, readCi, readHeadByRovara, readReviews, tracksMerge } from "../../packages/broker/src/core/merge/merge-tracking.js";
+import { humanApprovalOf, latestReviewers } from "../../packages/core/src/core/merge/approval.js";
+import { mergeReadiness, mergeViewFromReadiness, riskOfTask, type MergePullRequestFacts, type ReadinessInput } from "../../packages/core/src/core/merge/merge.js";
+import { NO_CI_GRACE_MS, PERMISSION_LOOKUPS_MAX, readBranch, readCi, readHeadByRovara, readReviews, tracksMerge } from "../../packages/core/src/core/merge/merge-tracking.js";
 
 const HEAD = "a".repeat(40);
 const OLD = "1".repeat(40);

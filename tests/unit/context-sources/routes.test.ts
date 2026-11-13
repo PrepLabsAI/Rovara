@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { callContextTool, listContextTools } from "../../../packages/broker/src/context-sources/routes.js";
+import { callContextTool, listContextTools } from "../../../packages/core/src/context-sources/routes.js";
 import { GET_TOOL, PLAIN_TOOL, SEARCH_TOOL, WRITE_TOOL, routeWorld, source } from "./fixtures.js";
-import { toolSchemaHash } from "../../../packages/broker/src/context-sources/settings.js";
+import { toolSchemaHash } from "../../../packages/core/src/context-sources/settings.js";
 
 const request = (tool: string, args: Record<string, unknown>, requestId = "00000000-0000-4000-8000-000000000001") => ({ requestId, tool, arguments: args });
 const search = (query = "login bug") => request("src_sim_search_tickets", { query });

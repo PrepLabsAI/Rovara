@@ -1,5 +1,5 @@
 // A SWE-bench deployment for the batch admin route tests.
-import type { SwebenchDeployment } from "../../packages/broker/src/aws/swebench.js";
+import type { SwebenchDeployment } from "../../packages/core/src/aws/swebench.js";
 
 export function swebenchDeploymentForTests(runnerImage: string): SwebenchDeployment {
   return {

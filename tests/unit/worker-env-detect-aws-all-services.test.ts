@@ -1,7 +1,7 @@
 // Wide AWS plans (every service the emulator's table serves): detection reads the table, not a hand map. boto3, the JS SDK, Java and Go packages, CloudFormation types, Terraform prefixes and CDK modules each name a
 // service the way their SDK does; a service no seed handler creates resources for is still a candidate and says it starts empty; a Terraform type no service owns is a `mentioned` candidate, never dropped.
 import { describe, expect, it } from "vitest";
-import { AWS_EMULATOR_SERVICES, awsServiceKeyFromCfnType, awsServiceKeyFromSdkName } from "@agentx/contracts";
+import { AWS_EMULATOR_SERVICES, awsServiceKeyFromCfnType, awsServiceKeyFromSdkName } from "@rovara-code/contracts";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { awsServiceOfTerraformType } from "../../packages/worker/src/env-detect/iac-resources.js";
 import { awsServicesFromList, normalizeAwsService } from "../../packages/worker/src/env-detect/dependency-candidates.js";

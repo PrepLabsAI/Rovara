@@ -4,11 +4,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId, planQualityFinding } from "@agentx/contracts";
-import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
-import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
-import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { noticesOf, type Notice } from "../../packages/broker/src/developer/notifications.js";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId, planQualityFinding } from "@rovara-code/contracts";
+import { developerTaskIdentity, plannerRepliesKey } from "../../packages/core/src/developer/task-records.js";
+import { SlackPostError, chatPostMessage } from "../../packages/core/src/aws/slack-web.js";
+import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/core/src/aws/developer-task-notifier.js";
+import { noticesOf, type Notice } from "../../packages/core/src/developer/notifications.js";
 import { MAYA, createSingleAnswerPlanBroker, recordStream } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -1932,7 +1932,7 @@ describe("an uncertain start post is logged (25c note 3)", () => {
 
 describe("the PR feedback advisory summary", () => {
   it("posts a brief, redacted summary with a secure detail link and named actions", async () => {
-    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const { feedbackReviewSlackMessage } = await import("../../packages/core/src/aws/developer-task-notifier.js");
     const message = feedbackReviewSlackMessage({
       taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
       reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
@@ -1966,7 +1966,7 @@ describe("the PR feedback advisory summary", () => {
   });
 
   it("says which checks the recommended fix changes and shows every added check's exact command, so Approve visibly covers them (0.2.12 live test)", async () => {
-    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const { feedbackReviewSlackMessage } = await import("../../packages/core/src/aws/developer-task-notifier.js");
     const BANNED = /\b(candidate|revision|digest|operation|artifact|workflow|invalid json)\b|\b(SUCCEEDED|FAILED|INTERRUPTED|CANCELLED)\b/i;
     type Added = { label: string; command: { cwd: string; executable: string; args: string[] } };
     const card = (checkChanges?: Array<{ obsolete: string[]; added: Added[] }>) => feedbackReviewSlackMessage({
@@ -2012,7 +2012,7 @@ describe("the PR feedback advisory summary", () => {
   });
 
   it("marks every check line verbatim, so Slack never links a URL or turns @channel or @here in a command into a mention", async () => {
-    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const { feedbackReviewSlackMessage } = await import("../../packages/core/src/aws/developer-task-notifier.js");
     const message = feedbackReviewSlackMessage({
       taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
       reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
@@ -2028,7 +2028,7 @@ describe("the PR feedback advisory summary", () => {
   });
 
   it("says on the card exactly what Approve applies for the recommended fixes together: A drops X, and B adds X's command (0.2.12 review)", async () => {
-    const { feedbackCardCheckChanges } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const { feedbackCardCheckChanges } = await import("../../packages/core/src/aws/developer-task-notifier.js");
     const x = { id: "proposed-1", label: "Sentence present", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 } };
     const policy = { required: [], optional: [], selectedOptionalIds: [], proposed: [x] };
     const fix = (fixProposal: { obsoleteChecks?: string[]; replacementChecks?: unknown[] }) => ({ proposedDisposition: "IMPLEMENT", fixProposal: { summary: "s", fileChanges: [], tests: [], ...fixProposal } });
@@ -2040,7 +2040,7 @@ describe("the PR feedback advisory summary", () => {
   });
 
   it("does not offer approval when there are no recommended fixes", async () => {
-    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const { feedbackReviewSlackMessage } = await import("../../packages/core/src/aws/developer-task-notifier.js");
     const message = feedbackReviewSlackMessage({
       taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
       reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
@@ -2055,7 +2055,7 @@ describe("the PR feedback advisory summary", () => {
   });
 
   it("asks the reviewer's question when a finding is left to the owner, and offers an answer in words instead of Approve (0.2.8 live test)", async () => {
-    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const { feedbackReviewSlackMessage } = await import("../../packages/core/src/aws/developer-task-notifier.js");
     const BANNED = /\b(candidate|revision|digest|operation|artifact|workflow|invalid json)\b|\b(SUCCEEDED|FAILED|INTERRUPTED|CANCELLED)\b/i;
     const message = feedbackReviewSlackMessage({
       taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
@@ -2100,7 +2100,7 @@ describe("the PR feedback advisory summary", () => {
   });
 
   it("shows at most three questions, binds the answer to those, and keeps escaped text within Slack's limits", async () => {
-    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const { feedbackReviewSlackMessage } = await import("../../packages/core/src/aws/developer-task-notifier.js");
     // Every character escapes to several: three questions at their visible limit would pass 3,000 characters in one section.
     const hostile = "<&>".repeat(200);
     const message = feedbackReviewSlackMessage({

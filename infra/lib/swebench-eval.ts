@@ -21,7 +21,7 @@ import {
   aws_stepfunctions as sfn,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { SWEBENCH_SETTING_PARAMETERS, environmentRolePath } from "@agentx/contracts";
+import { SWEBENCH_SETTING_PARAMETERS, environmentRolePath } from "@rovara-code/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { grantProviderKeySecrets } from "./model-keys.js";
 import { SWEBENCH_DEPLOYMENT_MODE, SWEBENCH_RUN_TAG, swebenchEvalDefinition } from "./swebench-eval-definition.js";

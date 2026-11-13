@@ -1,6 +1,6 @@
 // FR-046's checks. 15e's `agentx doctor` calls checkDeveloperSignIn unchanged (R5). Never prints
 // a secret: the Slack test request carries only the client ID and the callback URL.
-import { AgentXConfigurationSchema } from "@agentx/contracts";
+import { AgentXConfigurationSchema } from "@rovara-code/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 import type { InitSecrets } from "../init/context.js";

@@ -1,8 +1,8 @@
 // The channel contract suite (packages/testing/src/channel), run on the fake adapter and on the real Slack adapter over a fake network, and shown to fail on adapters broken on purpose. The Slack run is the proof: it is the shipped
 // adapter (its web client, rendering, socket and parsing), and only the chat tool's network is fake.
 import { describe, expect, it } from "vitest";
-import type { ChannelAdapter, ChannelEvent, ChannelInboundSink } from "@agentx/contracts";
-import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
+import type { ChannelAdapter, ChannelEvent, ChannelInboundSink } from "@rovara-code/contracts";
+import { FakeChannelAdapter } from "../../packages/core/src/ports/fake-channel-adapter.js";
 import { channelChecks, fakeChannelWorld, slackChannelWorld, slackTokens, type ChannelWorld } from "../../packages/testing/src/channel/index.js";
 import { runContract } from "../../packages/testing/src/ports/plugin-contract-kit.js";
 

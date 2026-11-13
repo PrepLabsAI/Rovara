@@ -2,11 +2,11 @@
 // every kind of server. A real change (other words, other case, an invisible character) must. HTTP servers use the same hash, so an address-based server whose server re-wraps its
 // descriptions between two probes still gets approved.
 import { describe, expect, it } from "vitest";
-import { approveMcpServer, documentMcpServerStore, newServerId, normaliseDescription, proposeMcpServer, summariseProbe, type McpProber, type McpServerDependencies } from "../../../packages/broker/src/context-sources/mcp-servers.js";
-import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../../packages/broker/src/core/task-flow/flow.js";
-import type { DiscoveredTool } from "../../../packages/broker/src/context-sources/settings.js";
+import { approveMcpServer, documentMcpServerStore, newServerId, normaliseDescription, proposeMcpServer, summariseProbe, type McpProber, type McpServerDependencies } from "../../../packages/core/src/context-sources/mcp-servers.js";
+import { INDEX_EXPIRY_ATTRIBUTE } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../../packages/core/src/core/task-flow/flow.js";
+import type { DiscoveredTool } from "../../../packages/core/src/context-sources/settings.js";
 import { GET_TOOL, NOW, ORG, SEARCH_TOOL } from "./fixtures.js";
 
 const withDescription = (description: string | undefined): DiscoveredTool[] => [SEARCH_TOOL, { ...GET_TOOL, description }];

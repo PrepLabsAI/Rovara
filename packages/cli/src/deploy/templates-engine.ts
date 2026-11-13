@@ -19,7 +19,7 @@ import {
   type StackEvent,
 } from "@aws-sdk/client-cloudformation";
 import { HeadObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@rovara-code/contracts";
 import type { DeployEvent, DeployRequest, StackDeployer, StackOutputs } from "./deployer.js";
 import { sha256Hex } from "./hash.js";
 import { SECRET_PARAMETERS } from "./parameters.js";

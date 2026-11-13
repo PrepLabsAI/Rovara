@@ -10,7 +10,7 @@
 //
 // Wiring pending: the caller (the worker's start, after the service runner exists) gives the registry host and a `pull` that runs `docker pull <reference>`; nothing calls this yet.
 import { readFile } from "node:fs/promises";
-import { PREPULL_MAX_IMAGES, PrepullListSchema, catalogImageReference, catalogRepositoryName, type PrepullList } from "@agentx/contracts";
+import { PREPULL_MAX_IMAGES, PrepullListSchema, catalogImageReference, catalogRepositoryName, type PrepullList } from "@rovara-code/contracts";
 
 /** The list shipped in the worker image, beside `dist/` (the same relative place from `src/` and from `dist/`). */
 export const PREPULL_LIST_URL = new URL("../service-catalog/prepull.json", import.meta.url);

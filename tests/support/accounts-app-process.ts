@@ -3,7 +3,7 @@ import { cp, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readE2EApplicationProjectContract, type E2EExecutorPlan } from "@agentx/contracts";
+import { readE2EApplicationProjectContract, type E2EExecutorPlan } from "@rovara-code/contracts";
 import { ACCOUNTS_APP_FILES, ACCOUNTS_FIXTURE_ROOT } from "./e2e-accounts-fixture.js";
 import type { OrdersExecutorFixture } from "./e2e-orders-executor-fixture.js";
 

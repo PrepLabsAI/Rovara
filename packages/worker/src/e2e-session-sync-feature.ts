@@ -1,4 +1,4 @@
-import { E2E_EXECUTOR_SESSION_SYNC_IMAGE_LABEL, E2E_EXECUTOR_SESSION_SYNC_IMAGE_LABEL_VALUE } from "@agentx/contracts";
+import { E2E_EXECUTOR_SESSION_SYNC_IMAGE_LABEL, E2E_EXECUTOR_SESSION_SYNC_IMAGE_LABEL_VALUE } from "@rovara-code/contracts";
 import { createProcessDockerCli, type DockerCli } from "@agentx/verifier";
 
 const INSPECT_TIMEOUT_MS = 10_000;

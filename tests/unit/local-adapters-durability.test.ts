@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { OUTBOX_PENDING_INDEX, queryAll, type DocumentChange } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX, queryAll, type DocumentChange } from "@rovara-code/contracts";
 import { SqliteDatabase, SqliteDocumentStore, SqliteQueueService } from "../../packages/local-adapters/src/index.js";
 
 const CHILD = join(import.meta.dirname, "../support/ports/sqlite-crash-child.ts");

@@ -2,7 +2,7 @@ import { chmodSync, realpathSync } from "node:fs";
 import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { E2EAgentActionLedgerSchema, type E2EModelReceipt } from "@agentx/contracts";
+import { E2EAgentActionLedgerSchema, type E2EModelReceipt } from "@rovara-code/contracts";
 import { createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import { runIsolatedE2EApplication, type E2EIsolatedApplicationRun } from "../../packages/verifier/src/application-runtime.js";
 import { e2eApplicationGroupAgentSteps } from "../../packages/verifier/src/application-scenarios.js";

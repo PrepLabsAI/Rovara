@@ -7,7 +7,7 @@ import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Command } from "commander";
-import { DeveloperTaskResponseSchema } from "@agentx/contracts";
+import { DeveloperTaskResponseSchema } from "@rovara-code/contracts";
 import { LOOP_CONFIG_PATH, initialLoopConfig, readLoopConfig } from "./config.js";
 import { LoopDaemon } from "./daemon.js";
 import { LOOPS, loopNamed, stepOf } from "./definitions.js";

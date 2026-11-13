@@ -1,6 +1,6 @@
 import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { createCandidateManifest } from "@agentx/contracts";
+import { createCandidateManifest } from "@rovara-code/contracts";
 import { exportCandidateBuildSourceInScratch, type CandidateBuildSourceExport } from "./e2e-build-source-export.js";
 import { createProcessCandidateGit } from "./e2e-candidate-source.js";
 import { withIsolatedGit } from "./isolated-git.js";

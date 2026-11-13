@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const ROOT = join(import.meta.dirname, "../../packages/broker/src/core");
+const ROOT = join(import.meta.dirname, "../../packages/core/src/core");
 const FOLDERS = ["automation", "automatic-runs", "triggers", "chains", "agents"];
 
 function files(folder: string): string[] {
@@ -16,7 +16,7 @@ const all = FOLDERS.flatMap(files);
 const source = (file: string): string => readFileSync(join(ROOT, file), "utf8");
 const importsOf = (text: string): string[] => [...text.matchAll(/from "([^"]+)"/gu)].map((match) => match[1]!);
 
-const BROKER = join(import.meta.dirname, "../../packages/broker/src");
+const BROKER = join(import.meta.dirname, "../../packages/core/src");
 const LOCAL_FILE = join(BROKER, "local/app/automation.ts");
 function allBrokerFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? (entry.name === "node_modules" || entry.name === "dist" ? [] : allBrokerFiles(join(dir, entry.name))) : entry.name.endsWith(".ts") ? [join(dir, entry.name)] : []));

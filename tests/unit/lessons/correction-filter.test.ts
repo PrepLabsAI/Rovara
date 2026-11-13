@@ -1,6 +1,6 @@
 // Lessons outcomes: the cheap pre-filter in front of the judge. The cases are in lessons-outcomes.test.ts too, through the whole path; here are its edges.
 import { describe, expect, it } from "vitest";
-import { looksLikeCorrection } from "../../../packages/broker/src/lessons/correction-filter.js";
+import { looksLikeCorrection } from "../../../packages/core/src/lessons/correction-filter.js";
 
 describe("looksLikeCorrection", () => {
   it("is false for empty, very short, praise, nit, acknowledgement and bare-question text, in any case and with a path prefix", () => {

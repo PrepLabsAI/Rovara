@@ -1,7 +1,7 @@
 // The channel suite's world for the real Slack adapter (`SlackChannel`, owner decision 58). The adapter is the shipped code: its web client, its rendering, its socket and what it hears. Only the network is fake: a `fetch` that
 // answers the way the chat tool's web API does (and keeps what it was sent), and a socket the "tool" pushes envelopes into. Every token is built at run time (the repository is public; push protection refuses key-shaped text).
-import { SlackChannel, type SocketLike } from "@agentx/broker/channel-slack-adapter";
-import type { ActorRef, ChannelAdapter, ChannelDecision, ConversationRef } from "@agentx/contracts";
+import { SlackChannel, type SocketLike } from "@rovara-code/core/channel-slack-adapter";
+import type { ActorRef, ChannelAdapter, ChannelDecision, ConversationRef } from "@rovara-code/contracts";
 import { until, type ChannelPerson, type ChannelWorld, type ShownButton, type ShownMessage, type ShownRequest } from "./channel-conformance.js";
 
 const WSS = "wss://wss-primary.slack.com/link/?ticket=conformance";

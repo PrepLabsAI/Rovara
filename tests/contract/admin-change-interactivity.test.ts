@@ -10,7 +10,7 @@ import {
   adminChangePressEvent,
   createSlackInteractivityHandler,
   type SlackActionHandler,
-} from "../../packages/broker/src/aws/slack-interactivity.js";
+} from "../../packages/core/src/aws/slack-interactivity.js";
 
 const SIGNING = "s".repeat(32);
 const CHANGE = "55555555-5555-4555-8555-555555555555";

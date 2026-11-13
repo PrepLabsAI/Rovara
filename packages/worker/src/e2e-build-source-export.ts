@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { E2EApplicationBuildSourceManifestSchema, E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, canonicalJson, type CandidateManifest, type E2EApplicationBuildSourceManifest } from "@agentx/contracts";
+import { E2EApplicationBuildSourceManifestSchema, E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, canonicalJson, type CandidateManifest, type E2EApplicationBuildSourceManifest } from "@rovara-code/contracts";
 import { encodeE2EApplicationBuildSourceArchive } from "@agentx/verifier";
 import { makeWorkerScratch } from "./worker-scratch.js";
 import { BuildSourceCapError, createProcessCandidateGit, type CandidateBuildSourceGit } from "./e2e-candidate-source.js";

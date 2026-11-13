@@ -1,7 +1,7 @@
 // The `scheduler` point: the in-memory fake and the default pass the contract.
 import { describe, expect, it } from "vitest";
-import { PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SchedulerError } from "@agentx/contracts";
-import { createAdapterRegistry, createFakeScheduler, createUnavailableScheduler, registerCodeDefaults, scheduleSlotId } from "../../packages/broker/src/ports/index.js";
+import { PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SchedulerError } from "@rovara-code/contracts";
+import { createAdapterRegistry, createFakeScheduler, createUnavailableScheduler, registerCodeDefaults, scheduleSlotId } from "../../packages/core/src/ports/index.js";
 import { runSchedulerConformance } from "../support/ports/scheduler-conformance.js";
 
 runSchedulerConformance("the in-memory fake", {

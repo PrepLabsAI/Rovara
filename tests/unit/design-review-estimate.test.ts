@@ -1,12 +1,12 @@
 // Design review stage: the estimate, the cost gate and the spend card source. Money, so every edge is pinned: the estimate equals the second-review picker's
 // own function for one reviewer, "Cost unavailable" is never a number, a gate never runs on its own, and the card's choices are the ones the rules allow.
 import { describe, expect, it } from "vitest";
-import { DecisionCardSchema, type ModelIdentifier } from "@agentx/contracts";
-import * as estimateModule from "../../packages/broker/src/core/design-review/estimate.js";
-import { PLANNER_REVISION_TOKENS, MERGE_TOKENS, REVIEWER_CACHE_READ_SHARE, ROLE_INPUT_FLOOR_TOKENS, ROLE_INPUT_TURN_FACTOR, ROLE_OUTPUT_TOKENS, estimateReviewerUsd, routeCaches, plannerRunsFor, estimateDesignReviewUsd as estimateWithPacket, designReviewKeyBudgets, gateDesignReviewCost, nextLowerTier, recordedReviewerCost, reviewersForRound, TIER_REVIEWERS, type DesignReviewEstimate, type DesignReviewEstimateInput, type PriceLookup } from "../../packages/broker/src/core/design-review/estimate.js";
-import { designSpendCardItem, designSpendChoicePath } from "../../packages/broker/src/core/design-review/spend-card.js";
-import { cardOfItem } from "../../packages/broker/src/core/decisions/project.js";
-import { estimateSecondReviewUsd } from "../../packages/broker/src/core/design-review/estimate.js";
+import { DecisionCardSchema, type ModelIdentifier } from "@rovara-code/contracts";
+import * as estimateModule from "../../packages/core/src/core/design-review/estimate.js";
+import { PLANNER_REVISION_TOKENS, MERGE_TOKENS, REVIEWER_CACHE_READ_SHARE, ROLE_INPUT_FLOOR_TOKENS, ROLE_INPUT_TURN_FACTOR, ROLE_OUTPUT_TOKENS, estimateReviewerUsd, routeCaches, plannerRunsFor, estimateDesignReviewUsd as estimateWithPacket, designReviewKeyBudgets, gateDesignReviewCost, nextLowerTier, recordedReviewerCost, reviewersForRound, TIER_REVIEWERS, type DesignReviewEstimate, type DesignReviewEstimateInput, type PriceLookup } from "../../packages/core/src/core/design-review/estimate.js";
+import { designSpendCardItem, designSpendChoicePath } from "../../packages/core/src/core/design-review/spend-card.js";
+import { cardOfItem } from "../../packages/core/src/core/decisions/project.js";
+import { estimateSecondReviewUsd } from "../../packages/core/src/core/design-review/estimate.js";
 
 const STRONG: ModelIdentifier = { provider: "anthropic", modelId: "strong-model" };
 const FAST: ModelIdentifier = { provider: "anthropic", modelId: "fast-model" };

@@ -17,7 +17,7 @@ import {
   type CheckReport,
   type ModelIdentifier,
   type ProjectModelOptions,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { WorkerAccess } from "@agentx/orchestrator";
 import type { GateSession } from "@agentx/orchestrator/action-gate";
 import { EXPIRED_TEXT, checkConfirmation, settleConfirmations, type ConfirmationAnswer, type ConfirmationCheck, type ConfirmationStore } from "./confirmations.js";

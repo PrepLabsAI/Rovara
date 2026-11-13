@@ -6,14 +6,14 @@ import {
   IMPLICIT_COMPANY_ID, change, codeMilestoneKey, companyScoped, mergeTrackingDecisionDigest, mergeTrackingKey, when,
   type ApprovalProof, type AuditEvent, type AuditSink, type CodeHost, type CodeMilestone, type MergeTrackingItem, type TransactItem, type WorkflowSnapshot,
 } from "../../packages/contracts/src/index.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { FakeCodeHost, FakeHostModel } from "@rovara-code/core/fakes";
 import {
   fixedCodeSettings, plain, prepareMerge, soleOwnerPeople, storeLinkedChangeRequests, taskRecordKey,
   type CodeMergeHost, type CodeMilestones, type MergeDependencies, type MergeTask, type MergeTrackingDependencies, type PreparedMerge, type SessionTimeline,
-} from "../../packages/broker/src/core/merge/index.js";
-import { linkedChangeRequestStep } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
+} from "../../packages/core/src/core/merge/index.js";
+import { linkedChangeRequestStep } from "../../packages/core/src/core/proof/revert/linked-change-requests.js";
 
 export const ORG = IMPLICIT_COMPANY_ID;
 export const TASK_ID = "11111111-1111-4111-8111-111111111111";

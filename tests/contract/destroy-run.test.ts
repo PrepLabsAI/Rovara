@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import { inventoryParameterName } from "../../packages/cli/src/destroy/inventory.js";
 import { runDestroy, type DestroyDependencies } from "../../packages/cli/src/destroy/run.js";
 import { developerTokenKey, readDeveloperConfig, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";

@@ -1,7 +1,7 @@
 // Spec 025 FR-054, C12: a continue-mode turn starts only once the task's workspace has no active
 // operation (the developer's own run, or the operation the previous channel turn started), waiting
 // at most 30 minutes. The consumer's heartbeat keeps the queue message invisible meanwhile.
-import { CHANNEL_TURN_WAIT_MS, type ThreadWorkspaceResult } from "@agentx/contracts";
+import { CHANNEL_TURN_WAIT_MS, type ThreadWorkspaceResult } from "@rovara-code/contracts";
 import { withDeadline } from "./lazy-worker.js";
 import type { ServiceLog, ThreadServiceApi } from "./processor.js";
 

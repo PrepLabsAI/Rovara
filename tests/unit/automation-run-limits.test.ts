@@ -4,9 +4,9 @@
 //   3. a reservation is settled when its run's task ends (with what the install says it cost), once; it is given back on every path where no run was made;
 //   4. a task that is stopped is stopped by the step's timeout, the run's own time and a cancel; a step whose task waits for the owner does not time out; a retry never starts beside a task that may still run.
 import { describe, expect, it } from "vitest";
-import { NO_CAP_MESSAGE, startUnattendedRun, sweepUnattendedRuns, type AutomatedRunRequest } from "../../packages/broker/src/core/automation/run-seam.js";
-import { cancelChainRun, onStepEnded, readChainRun, readStepAttempts, startChainRun, stepShareUsd, sweepChainRuns } from "../../packages/broker/src/core/chains/runner.js";
-import { createTrigger, enableTrigger, triggerEnableRequest } from "../../packages/broker/src/core/triggers/lifecycle.js";
+import { NO_CAP_MESSAGE, startUnattendedRun, sweepUnattendedRuns, type AutomatedRunRequest } from "../../packages/core/src/core/automation/run-seam.js";
+import { cancelChainRun, onStepEnded, readChainRun, readStepAttempts, startChainRun, stepShareUsd, sweepChainRuns } from "../../packages/core/src/core/chains/runner.js";
+import { createTrigger, enableTrigger, triggerEnableRequest } from "../../packages/core/src/core/triggers/lifecycle.js";
 import { COMPANY, OWNER, PROJECT, createAutomationWorld, publishAgent, publishChain, type AutomationWorld } from "../support/automation-world.js";
 
 const uuid = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;

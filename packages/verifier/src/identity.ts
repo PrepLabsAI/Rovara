@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, type E2EExpectedCase } from "@agentx/contracts";
+import { canonicalJson, type E2EExpectedCase } from "@rovara-code/contracts";
 
 export const E2E_COMPILER_PROTOCOL = "trusted-e2e-compiler/v1" as const;
 export const E2E_UPSTREAM_PACKAGE = "e2e" as const;

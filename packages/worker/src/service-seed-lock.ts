@@ -4,7 +4,7 @@
 // anything but files and folders makes the read throw (or the listing unknown), which is a refusal.
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import { SEED_LOCK_LIMITS, seedLockHolds, type ProjectCommand, type SeedScriptLock, type SeedSourceReader } from "@agentx/contracts";
+import { SEED_LOCK_LIMITS, seedLockHolds, type ProjectCommand, type SeedScriptLock, type SeedSourceReader } from "@rovara-code/contracts";
 
 /**
  * The checkout as the resolver reads it, rooted at the command's folder (`rootPath` + the command's `cwd`). `repositoryPaths` are the repositories' folders: `anyAbove` looks from the command's folder up to the root of

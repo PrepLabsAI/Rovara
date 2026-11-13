@@ -2,13 +2,13 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { E2EApplicationBuildSourceManifest, E2ESourceSnapshot } from "@agentx/contracts";
-import { assessCandidateBuildSource, candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
+import type { E2EApplicationBuildSourceManifest, E2ESourceSnapshot } from "@rovara-code/contracts";
+import { assessCandidateBuildSource, candidateBuildSourceAdmissionReference } from "../../packages/core/src/aws/candidate-build-source.js";
 import { exportCandidateBuildSource } from "../../packages/worker/src/e2e-build-source-export.js";
 import { createProcessCandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
 import { readCommittedCandidateSourceExport } from "../../packages/worker/src/verification/candidate.js";
 import { exportBaselineSource } from "../../packages/worker/src/baseline-source-export.js";
-import { assessBaselineSource } from "../../packages/broker/src/aws/baseline-source.js";
+import { assessBaselineSource } from "../../packages/core/src/aws/baseline-source.js";
 
 const roots: string[] = [];
 /** Removes every repository this module made; call it from an afterEach. */

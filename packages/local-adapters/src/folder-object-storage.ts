@@ -24,7 +24,7 @@ import {
   type ObjectPutOptions,
   type ObjectStat,
   type ObjectStorage,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const FOLDER = "D_";
 const FILE = "F_";

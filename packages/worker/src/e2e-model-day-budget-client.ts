@@ -5,7 +5,7 @@ import {
   E2EModelDayBudgetResponseSchema,
   type E2EModelDayBudgetRequest,
   type E2EModelDayBudgetResponse,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { E2EDayLimits } from "@agentx/model-runtime";
 
 /**

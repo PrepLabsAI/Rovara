@@ -11,7 +11,7 @@ import { DESIGN_REVIEW_LOST_FINDINGS_PROBLEM, sentAsRendered, type OpenDesignRev
 import { designReviewAnswerSpec } from "../../packages/worker/src/design-review-answers.js";
 import { createReviewSessionOpener } from "../../packages/worker/src/design-review-sessions.js";
 import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
-import { ANSWER_TOOL_OVERHEAD_TOKENS, BYTES_PER_TOKEN, FIRST_CALL_OVERHEAD_TOKENS, estimateInputTokens } from "../../packages/broker/src/core/design-review/packet.js";
+import { ANSWER_TOOL_OVERHEAD_TOKENS, BYTES_PER_TOKEN, FIRST_CALL_OVERHEAD_TOKENS, estimateInputTokens } from "../../packages/core/src/core/design-review/packet.js";
 import { answerToolInstruction } from "../../packages/worker/src/structured-answer.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 

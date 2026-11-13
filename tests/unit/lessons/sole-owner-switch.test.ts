@@ -3,8 +3,8 @@
 import { describe, expect, it } from "vitest";
 import {
   approveSoleOwnerSwitch, setSoleOwnerSwitch, type SoleOwnerSwitchChange, type SoleOwnerSwitchDeps, type SoleOwnerSwitchStore, type Tier0Fence,
-} from "../../../packages/broker/src/lessons/sole-owner-switch.js";
-import { lessonAuditSink } from "../../../packages/broker/src/lessons/audit-sink.js";
+} from "../../../packages/core/src/lessons/sole-owner-switch.js";
+import { lessonAuditSink } from "../../../packages/core/src/lessons/audit-sink.js";
 import { Audit, Clock, WS } from "./lesson-helpers.js";
 
 function world(over: { eligible?: string[]; owners?: string[]; complete?: boolean } = {}) {

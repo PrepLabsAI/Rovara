@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { connectMcp, JIRA_MCP_ENDPOINT } from "@agentx/gateway";
-import { githubConnectorType, type ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
-import { jiraConnectorType } from "../../packages/broker/src/aws/jira-connector-type.js";
+import { githubConnectorType, type ConnectorType } from "../../packages/core/src/aws/connector-types.js";
+import { jiraConnectorType } from "../../packages/core/src/aws/jira-connector-type.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
 import { SlackThreadWorkspaceResultSchema } from "../../packages/contracts/src/slack.js";
 import { startFakeAtlassian, type FakeAtlassian } from "../support/fake-atlassian-mcp.js";

@@ -4,7 +4,7 @@
 // `path` absent: `~/.rovara/objects`. A relative path is relative to the folder the process runs in.
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import type { JsonObject, PluginModule } from "@agentx/contracts";
+import type { JsonObject, PluginModule } from "@rovara-code/contracts";
 import { FolderObjectStorage, FOLDER_OBJECT_DEFAULT_MAX_BYTES } from "./folder-object-storage.js";
 import { allowOnly, optionalNumber, SettingsError } from "./settings.js";
 

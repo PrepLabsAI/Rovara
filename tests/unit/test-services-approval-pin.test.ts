@@ -1,9 +1,9 @@
 // Test services: at approval, a `local` dependency whose catalog entry has no pinned digest gets the same fixed "not available yet" words as any backing cannot start.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, type OrgId } from "@agentx/contracts";
-import { TEST_SERVICES_MIN_CATALOG_REVISION, isPrepulledEntry, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import type { TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
-import { proposeTestEnvironment } from "../../packages/broker/src/core/test-env/environment.js";
+import { TestEnvironmentBodySchema, type OrgId } from "@rovara-code/contracts";
+import { TEST_SERVICES_MIN_CATALOG_REVISION, isPrepulledEntry, taskDependencyPlansOf } from "../../packages/core/src/core/test-env/dependency-plan.js";
+import type { TestEnvDeps } from "../../packages/core/src/core/test-env/deps.js";
+import { proposeTestEnvironment } from "../../packages/core/src/core/test-env/environment.js";
 import { digestOfId, pinnedCatalog, unpinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 import { projectStore } from "../support/test-env-world.js";
 

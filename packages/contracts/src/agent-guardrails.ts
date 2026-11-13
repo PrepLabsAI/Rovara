@@ -1,5 +1,5 @@
 // The company's agent guardrails: the limits the owner sets for every agent in the company. This file holds what the document is and which values it accepts;
-// the broker reads and writes it and checks recipes against it (packages/broker/src/core/agents/guardrails.ts).
+// the broker reads and writes it and checks recipes against it (packages/core/src/core/agents/guardrails.ts).
 import { z } from "zod";
 import { AutonomySchema, BuiltinAgentIdSchema } from "./agent.js";
 import { ModelIdentifierSchema } from "./models.js";

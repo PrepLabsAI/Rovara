@@ -6,7 +6,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@rovara-code/contracts";
 import { CDK_CONSTRUCT_IDS, cdkAppArguments, type CommandRunner } from "./cdk-engine.js";
 import type { DeployPart } from "./parameters.js";
 

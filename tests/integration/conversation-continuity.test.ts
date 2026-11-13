@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WorkerInvocation } from "@agentx/contracts";
+import type { WorkerInvocation } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { WorkspaceConversationStore } from "../../packages/worker/src/conversations.js";

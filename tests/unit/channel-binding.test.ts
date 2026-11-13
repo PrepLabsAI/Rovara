@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ChannelBindingSchema, channelBindingAttributes, channelBindingFromSlack, channelBindingKey, channelBindingPartition,
   channelBindingSortPrefix, isChannelBindingKeyOf, readChannelBindingItem, slackBindingOf, type ChannelBinding,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const slackRef = { channel: "slack", tenant: "T0123ABCD", space: "C0456EFGH" };
 const whatsappRef = { channel: "whatsapp", tenant: "+14155550100", space: "group=AbC-12_x" };

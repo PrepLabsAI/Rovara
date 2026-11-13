@@ -1,8 +1,8 @@
 // The lease of a start is fenced by its holder, and a ticket's body survives a cut-short direct start.
 import { describe, expect, it } from "vitest";
-import { agentXError, intakeItemIdOf, type CodeIntentRequest, type OrgId } from "@agentx/contracts";
-import { ingestIntake, startWaitingIntake, type IntakeCandidate, type IntakePorts } from "../../../packages/broker/src/core/intake/engine.js";
-import { readIntakeItem, INTAKE_START_LEASE_MS } from "../../../packages/broker/src/core/intake/store.js";
+import { agentXError, intakeItemIdOf, type CodeIntentRequest, type OrgId } from "@rovara-code/contracts";
+import { ingestIntake, startWaitingIntake, type IntakeCandidate, type IntakePorts } from "../../../packages/core/src/core/intake/engine.js";
+import { readIntakeItem, INTAKE_START_LEASE_MS } from "../../../packages/core/src/core/intake/store.js";
 import { RecordingStore } from "../../support/intake-world.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, e2eAgentValueKeyId, e2eModelRouteRevision, type E2EModelReceipt, type E2EModelRouteDefinition, type E2ERoundScope } from "@agentx/contracts";
+import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, e2eAgentValueKeyId, e2eModelRouteRevision, type E2EModelReceipt, type E2EModelRouteDefinition, type E2ERoundScope } from "@rovara-code/contracts";
 import { deriveE2EAgentRoute, scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { E2EAgentModelEvidenceSchema, E2E_AGENT_LEDGER_MAX_BYTES, evaluateE2EAgentCase, type E2EAgentCaseInput, type E2EAgentUnknownCode } from "../../packages/verifier/src/application-agent-result.js";
 

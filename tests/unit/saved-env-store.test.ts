@@ -1,10 +1,10 @@
 // The saved environment registry's store on the document store. One row per project, written with its audit steps in ONE transaction, fenced by the row's version; deleted projects are found through the
 // sparse due index until their registry deletion is final.
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_DISPATCH_DUE_INDEX, orgPk, type AuditEvent, type AuditSink, type DocumentKey, type OrgId, type SavedEnvManifest, type StoredDocument, type TransactItem } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { SAVED_ENV_JOB_LEASE_MS, type SavedEnvAuditEntry, type SavedEnvImageRecord, type SavedEnvState } from "../../packages/broker/src/core/test-env/saved-env.js";
-import { SAVED_ENV_INDEXES, SAVED_ENV_PURGE_PARTITION, documentSavedEnvStore, savedEnvAuditEvent } from "../../packages/broker/src/core/test-env/saved-env-store.js";
+import { WORKFLOW_DISPATCH_DUE_INDEX, orgPk, type AuditEvent, type AuditSink, type DocumentKey, type OrgId, type SavedEnvManifest, type StoredDocument, type TransactItem } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { SAVED_ENV_JOB_LEASE_MS, type SavedEnvAuditEntry, type SavedEnvImageRecord, type SavedEnvState } from "../../packages/core/src/core/test-env/saved-env.js";
+import { SAVED_ENV_INDEXES, SAVED_ENV_PURGE_PARTITION, documentSavedEnvStore, savedEnvAuditEvent } from "../../packages/core/src/core/test-env/saved-env-store.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const OTHER = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;

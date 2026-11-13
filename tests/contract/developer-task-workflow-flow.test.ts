@@ -3,24 +3,24 @@ import { describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, workflowRequestId } from "../../packages/contracts/src/task-workflow-node.js";
 import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies-node.js";
 import { executeSerialWorkflowDependencies } from "../../packages/worker/src/workflow-dependencies.js";
-import { canonicalPlanJson, parsePlanDocument, planDocumentMarkdown, readCanonicalPlan, type PlanDocument, type TaskPersonProofRequest, type TaskPersonProofResponse, type WorkItemProgressV1 } from "@agentx/contracts";
-import { SlackThreadWorkspaceResultSchema } from "@agentx/contracts";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
+import { canonicalPlanJson, parsePlanDocument, planDocumentMarkdown, readCanonicalPlan, type PlanDocument, type TaskPersonProofRequest, type TaskPersonProofResponse, type WorkItemProgressV1 } from "@rovara-code/contracts";
+import { SlackThreadWorkspaceResultSchema } from "@rovara-code/contracts";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@rovara-code/contracts";
 import * as workflowContracts from "../../packages/contracts/src/index.js";
-import { plainBlockReason, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
-import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
-import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
-import { captureWorkflowFeedbackNote, decideTaskWorkflow, getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, taskPageUrl, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
-import { GATED_TASK_TURN_REFUSAL, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
-import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
-import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
-import { getTaskPeople, takeTaskOwnership, type TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
-import { recordThreadNoteThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
+import { plainBlockReason, workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
+import { developerTaskIdentity } from "../../packages/core/src/developer/task-records.js";
+import { taskOwnerKey } from "../../packages/core/src/developer/task-records.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { githubWorkflowPullRequestKey } from "../../packages/core/src/developer/task-records.js";
+import { captureWorkflowFeedbackNote, decideTaskWorkflow, getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, taskPageUrl, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/core/src/aws/developer-tasks.js";
+import { GATED_TASK_TURN_REFUSAL, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, workflowDispatchItem } from "../../packages/core/src/aws/broker-shared.js";
+import { failOutboxOperation } from "../../packages/core/src/aws/outbox-failure.js";
+import { guardTaskDispatch } from "../../packages/core/src/aws/task-dispatch-access.js";
+import { getTaskPeople, takeTaskOwnership, type TaskPeopleDependencies } from "../../packages/core/src/developer/task-people.js";
+import { recordThreadNoteThroughBroker } from "../../packages/core/src/aws/slack-ingress.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument, type RawChecksInput } from "../support/plan-documents.js";
-import { attachEvidence, planEvidenceJobItem } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
-import { noticesFromStream } from "../../packages/broker/src/developer/notifications.js";
+import { attachEvidence, planEvidenceJobItem } from "../../packages/core/src/developer/plan-evidence-jobs.js";
+import { noticesFromStream } from "../../packages/core/src/developer/notifications.js";
 import { DEV_ISSUER, MAYA, OMAR, createSingleAnswerPlanBroker, markThreadPosted, recordStream, teammate } from "../support/developer-task-broker.js";
 import type { Developer } from "../support/developer-task-broker.js";
 import { registerSlackProject } from "../support/slack-broker.js";
@@ -5036,7 +5036,7 @@ describe("pushing an approved PR feedback fix to the same pull request (item 7)"
       t.gh.state.parent = "d".repeat(40);
       return t;
     };
-    const comment = async (harness: Harness) => (await import("../../packages/broker/src/aws/broker.js")).processGithubWorkflowEvent(harness.brokerInput as never,
+    const comment = async (harness: Harness) => (await import("../../packages/core/src/aws/broker.js")).processGithubWorkflowEvent(harness.brokerInput as never,
       { kind: "PR_COMMENT", action: "created", installationId: 1, repositoryId: 1, fullName: "example/demo", number: 42 }, randomUUID());
     for (const event of ["comment", "synchronize"] as const) {
       const t = await blockedAfterLandedPush();
@@ -5075,7 +5075,7 @@ describe("pushing an approved PR feedback fix to the same pull request (item 7)"
     }
   });
   /** A GitHub webhook delivery for pull request #42, reconciled against GitHub as the broker does (loaded once the harness set the broker up). */
-  const pullRequestEvent = async (harness: Harness, action: string) => (await import("../../packages/broker/src/aws/broker.js")).processGithubWorkflowEvent(harness.brokerInput as never,
+  const pullRequestEvent = async (harness: Harness, action: string) => (await import("../../packages/core/src/aws/broker.js")).processGithubWorkflowEvent(harness.brokerInput as never,
     { kind: "PULL_REQUEST", action, installationId: 1, repositoryId: 1, fullName: "example/demo", number: 42 }, randomUUID());
 
   it("dispatches an update, not a new pull request, when the fix's reviews pass", async () => {

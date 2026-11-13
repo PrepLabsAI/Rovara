@@ -1,6 +1,6 @@
 // Shared fixtures for the context-source tests (lane E).
-import type { ContextSource, OrgId } from "@agentx/contracts";
-import { toolSchemaHash, type DiscoveredTool, type SourceEnvironment } from "../../../packages/broker/src/context-sources/settings.js";
+import type { ContextSource, OrgId } from "@rovara-code/contracts";
+import { toolSchemaHash, type DiscoveredTool, type SourceEnvironment } from "../../../packages/core/src/context-sources/settings.js";
 
 export const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 export const CONNECTION = "con_aaaaaaaaaaaaaaaaaaaa";
@@ -39,13 +39,13 @@ export function environment(over: Partial<SourceEnvironment> & { tools?: Discove
 
 // ---- the broker route's world (E2)
 import { vi } from "vitest";
-import type { ContextToolsDependencies, ContextToolsRun, ContextServerSession } from "../../../packages/broker/src/context-sources/routes.js";
-import { documentUsageStore } from "../../../packages/broker/src/context-sources/usage.js";
-import type { ContextItemSeen } from "../../../packages/broker/src/context-sources/team-record.js";
-import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../../packages/broker/src/core/task-flow/flow.js";
-import type { Citation } from "@agentx/contracts";
+import type { ContextToolsDependencies, ContextToolsRun, ContextServerSession } from "../../../packages/core/src/context-sources/routes.js";
+import { documentUsageStore } from "../../../packages/core/src/context-sources/usage.js";
+import type { ContextItemSeen } from "../../../packages/core/src/context-sources/team-record.js";
+import { INDEX_EXPIRY_ATTRIBUTE } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../../packages/core/src/core/task-flow/flow.js";
+import type { Citation } from "@rovara-code/contracts";
 
 export type Answer = { isError?: boolean; content?: Array<{ type: string; text?: string }>; structuredContent?: unknown };
 

@@ -9,7 +9,7 @@ import { ProviderCheckHttpError, bedrockThrottleSentence, checkModel, type Model
 import type { QuotaClient } from "@agentx/model-runtime/model-discovery";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import { agentXError, AgentXError, KEYED_MODEL_PROVIDERS, type ModelProvider } from "@agentx/contracts";
+import { agentXError, AgentXError, KEYED_MODEL_PROVIDERS, type ModelProvider } from "@rovara-code/contracts";
 import { assertCdkBootstrapped, type CommandRunner } from "../deploy/cdk-engine.js";
 import { releaseRegionProblem, type ReleaseCoverage } from "../deploy/release.js";
 import type { ParameterStore } from "../environments/parameter-store.js";

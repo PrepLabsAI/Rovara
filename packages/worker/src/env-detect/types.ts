@@ -1,6 +1,6 @@
 // Environment detectors (E2, design proof-test-env section 4.1): CODE reads the repository first and says what it found, with where (file and line) or which detector. The read-only setup agent then fills only the gaps.
 // Detectors are pure over a bounded reader: they never run a command and never read outside the file list they are given.
-import type { CheckKind, ProjectCommand, SageMakerDetectionSignal, TestEnvDependencyKind } from "@agentx/contracts";
+import type { CheckKind, ProjectCommand, SageMakerDetectionSignal, TestEnvDependencyKind } from "@rovara-code/contracts";
 
 /** Where a detected value came from: a file and line, or a detector's name. */
 export type DetectedSource = { path: string; line: number } | `detector:${string}` | `recipe:${string}@${string}`;

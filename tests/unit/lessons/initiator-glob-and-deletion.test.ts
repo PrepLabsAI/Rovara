@@ -1,15 +1,15 @@
 // Initiator, glob reach with no literal prefix, deletion that rollback cannot undo, cause-aware erasure, title and description
 // allow-list, THING words, body paths, reviewRequired on held pending lessons.
 import { describe, expect, it } from "vitest";
-import { lessonDeletionPort } from "../../../packages/broker/src/lessons/deletion.js";
-import { buildWeeklyDigest } from "../../../packages/broker/src/lessons/digest.js";
-import { touchesRiskyPath } from "../../../packages/broker/src/lessons/guards.js";
-import { processDraft, resumeAndResettle, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { reflectSubject } from "../../../packages/broker/src/lessons/reflect.js";
-import type { EvidenceSpan } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { type TierInput } from "../../../packages/broker/src/lessons/tier.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
+import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
+import { buildWeeklyDigest } from "../../../packages/core/src/lessons/digest.js";
+import { touchesRiskyPath } from "../../../packages/core/src/lessons/guards.js";
+import { processDraft, resumeAndResettle, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { reflectSubject } from "../../../packages/core/src/lessons/reflect.js";
+import type { EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { type TierInput } from "../../../packages/core/src/lessons/tier.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, candidateJson, codeCite, draft, embedder, lessonRecord, memberSpan, reply, seed, settings, subject, verifier, classifyTier, facts, autoSettings, allowAllAccess } from "./lesson-helpers.js";
 
 const valid = [{ index: 0, result: "valid" as const, at: 1 }];

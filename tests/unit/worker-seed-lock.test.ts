@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { seedScriptLockOf, type SeedScriptLock } from "@agentx/contracts";
+import { seedScriptLockOf, type SeedScriptLock } from "@rovara-code/contracts";
 import { SeedError, runSeeds, type SeedPorts } from "../../packages/worker/src/service-reset.js";
 import { checkoutSeedReader, seedLockHoldsInCheckout } from "../../packages/worker/src/service-seed-lock.js";
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { ChromiumSandboxAttestationSchema, E2EScenarioBundleSchema, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, e2eModelRouteRevision, evaluateChromiumSandbox, webApiProbeRunId,
-  type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeObservation } from "@agentx/contracts";
+  type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeObservation } from "@rovara-code/contracts";
 import { parseE2EApplicationReport } from "./application-report-schema.js";
 import { E2EApplicationCollectionOracleSchema, E2EApplicationCollectionSchema, qualifyE2EApplicationCollection, type E2EApplicationCollectionOracle } from "./application-result-adapter.js";
 

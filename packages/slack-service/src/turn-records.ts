@@ -7,7 +7,7 @@ import {
   type SlackRequestMessage,
   type TurnObservation,
   type TurnRecord,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { ServiceLog, TurnDraft } from "./processor.js";
 
 /** DynamoDB's item limit is 400 KB; this leaves room for keys and attribute overhead. */

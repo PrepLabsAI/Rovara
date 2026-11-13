@@ -6,7 +6,7 @@
 // validation: both import the same regex or schema object, so a region, account, identity, models,
 // images or alert-email answer is refused (or accepted) identically wherever it is checked.
 import { z } from "zod";
-import { MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN, type KeyedModelProvider } from "@agentx/contracts";
+import { MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN, type KeyedModelProvider } from "@rovara-code/contracts";
 
 /** Shared with `runInitExport`'s own `--region`/`--account` validation, so both commands refuse the
  * same malformed values the same way. */

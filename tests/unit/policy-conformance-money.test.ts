@@ -1,7 +1,7 @@
 // The money cases of the admission conformance suite (`capacity`): a positive control (a small reference adapter that holds a budget correctly passes them all)
 // and negative controls (an adapter that reads and then writes without a fence, or one that admits an unknown cost as free, is caught).
 import { describe, expect, it } from "vitest";
-import type { Admission, AdmissionDecision, AdmissionRequest, Cost } from "@agentx/contracts";
+import type { Admission, AdmissionDecision, AdmissionRequest, Cost } from "@rovara-code/contracts";
 import { raceAdmissions, runAdmissionConformance } from "../support/ports/policy-conformance.js";
 
 const COMPANY = "org_00000000000000000000";

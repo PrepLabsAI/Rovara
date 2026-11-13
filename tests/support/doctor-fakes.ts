@@ -1,6 +1,6 @@
 // Everything agentx doctor reads, faked: a healthy templates-engine environment by default, with
 // every secret well formed. Tests break one thing at a time.
-import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
+import { environmentStackName, type ReleaseManifest } from "@rovara-code/contracts";
 import type { DoctorContext, DoctorServices, DoctorStack } from "../../packages/cli/src/doctor/checks.js";
 import { githubWebhookUrl } from "../../packages/cli/src/init/github-app.js";
 import type { InstallProgress } from "../../packages/cli/src/init/install-state.js";

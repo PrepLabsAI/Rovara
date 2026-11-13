@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { E2ERoundSchema, E2ERunBindingSchema, ProjectSetupRunnerToolchainSchema, canonicalJson } from "@agentx/contracts";
-import type { E2EApplicationEvidenceRef, E2ERound, E2ERunBinding, ProjectSetupRunnerToolchain } from "@agentx/contracts";
+import { E2ERoundSchema, E2ERunBindingSchema, ProjectSetupRunnerToolchainSchema, canonicalJson } from "@rovara-code/contracts";
+import type { E2EApplicationEvidenceRef, E2ERound, E2ERunBinding, ProjectSetupRunnerToolchain } from "@rovara-code/contracts";
 import { collectE2EApplicationRun as collect, encodeE2EApplicationSupervisorReadback, e2eApplicationErrorReason, e2eApplicationPrivateTransferMaxBytes,
   normalizeE2EApplicationPublicList, readE2EApplicationSupervisorProof } from "./application-result-adapter.js";
 import type { E2EApplicationCaseCapture, E2EApplicationSupervisorReadback } from "./application-result-adapter.js";

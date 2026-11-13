@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EvalBatchFileSchema, EvalMemoryDimensionSchema, MemoryInputSchema, compareMemoryArms, evalMemoryArmCount, evalMemoryArms, memoryInputForArm, type MemoryArmRow,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const SNAPSHOT = `snp_${"0123456789abcdef0123"}`;
 const row = (task: string, arm: "on" | "off", resolved: boolean | undefined, repeat?: number): MemoryArmRow => ({ task, arm, resolved, ...(repeat === undefined ? {} : { repeat }) });

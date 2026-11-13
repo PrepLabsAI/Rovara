@@ -29,7 +29,7 @@ import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { ROUTE_PROVIDER, TOOL_SEARCH_TOOL_NAME, createModelRuntimeWithFallback, excludeUnselectedBuiltIns, planToolExposure, routeUsageIdentity, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice, type ModelProxyOptions } from "@agentx/model-runtime";
 import { createPiSettingsManager } from "@agentx/model-runtime/pi-settings";
-import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, SEARCH_TEAM_KNOWLEDGE_TOOL, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type InvocationModelRoute, type ThinkingLevel } from "@agentx/contracts";
+import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, SEARCH_TEAM_KNOWLEDGE_TOOL, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type InvocationModelRoute, type ThinkingLevel } from "@rovara-code/contracts";
 import { compactionExtension, type CompactionSummariser, type SessionCompactionOptions } from "./compaction.js";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
@@ -46,7 +46,7 @@ import {
   type RepositoryContextFile,
 } from "./repository-context.js";
 import { quotedContextText } from "./context-text.js";
-import type { LoadedKnowledgeManifest } from "@agentx/contracts";
+import type { LoadedKnowledgeManifest } from "@rovara-code/contracts";
 import { buildLoadedKnowledgeManifest } from "./knowledge/manifest.js";
 import { mergeSkills } from "./knowledge/skills.js";
 import { knowledgeExtension } from "./knowledge/extension.js";

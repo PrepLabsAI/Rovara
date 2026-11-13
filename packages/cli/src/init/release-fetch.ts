@@ -4,7 +4,7 @@
 // its entries are checked for containment (assertArchiveEntriesAreSafe, assertExtractedTreeIsContained).
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
-import { agentXError, ReleaseManifestSchema, type ReleaseManifest } from "@agentx/contracts";
+import { agentXError, ReleaseManifestSchema, type ReleaseManifest } from "@rovara-code/contracts";
 import type { CommandRunner } from "../deploy/cdk-engine.js";
 import { sourceReleaseVersion } from "../deploy/cdk-source.js";
 import type { LoadedRelease } from "../deploy/release.js";

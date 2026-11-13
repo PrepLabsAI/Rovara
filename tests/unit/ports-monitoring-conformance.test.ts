@@ -1,6 +1,6 @@
 // The `monitoring` point (lane K1): the fake and an adapter Code ships pass the monitoring conformance suite.
-import { createFakeMonitoringAdapter } from "../../packages/broker/src/ports/index.js";
-import { nativeMonitoringAdapters } from "../../packages/broker/src/monitoring/native-adapters.js";
+import { createFakeMonitoringAdapter } from "../../packages/core/src/ports/index.js";
+import { nativeMonitoringAdapters } from "../../packages/core/src/monitoring/native-adapters.js";
 import { runMonitoringConformance } from "../support/ports/monitoring-conformance.js";
 
 const answer = (status: number, body: unknown): typeof fetch => async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });

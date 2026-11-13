@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import type { WorkerInvocation } from "@agentx/contracts";
+import type { WorkerInvocation } from "@rovara-code/contracts";
 import { PENDING_CANCEL_TTL_MS, WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { executeWorkerCancelInvocation } from "../../packages/worker/src/cancel-invocation.js";
 import { closeInvocationResult } from "../../packages/worker/src/close-workspace.js";

@@ -1,6 +1,6 @@
 import jsonata from "jsonata";
 import { describe, expect, it } from "vitest";
-import { WORKER_AMI_ID_PATTERN } from "../../packages/broker/src/aws/worker-ami.js";
+import { WORKER_AMI_ID_PATTERN } from "../../packages/core/src/aws/worker-ami.js";
 import {
   PROBE_ATTEMPTS,
   PROBE_INTERVAL_SECONDS,

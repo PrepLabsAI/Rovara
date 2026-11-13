@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { REGISTRY_TOKEN_MIN_LENGTH, agentXError, scrubRegistrySecrets, type PrepareRegistry, type ProjectCommand, type RegistryCredential } from "@agentx/contracts";
+import { REGISTRY_TOKEN_MIN_LENGTH, agentXError, scrubRegistrySecrets, type PrepareRegistry, type ProjectCommand, type RegistryCredential } from "@rovara-code/contracts";
 import type { CommandResult } from "./readiness.js";
 import type { RegistryCredentialProvider } from "./registry-credentials.js";
 import { GIT_CHANGED_MESSAGE, RegistryTokenLeakError, gitStates, gitStatesDiffer, readIssuedTokens, recordIssuedTokens, removeTree, workspaceHoldsToken } from "./registry-guard.js";

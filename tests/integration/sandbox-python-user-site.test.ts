@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { ProjectDefinitionSchema, type ProjectCommand, type ProjectDefinition } from "@agentx/contracts";
+import { ProjectDefinitionSchema, type ProjectCommand, type ProjectDefinition } from "@rovara-code/contracts";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";

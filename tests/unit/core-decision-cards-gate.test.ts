@@ -2,15 +2,15 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { DecisionCardsViewSchema, IMPLICIT_COMPANY_ID, createWorkflowSnapshot, submitWorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { WORKFLOW_DOCUMENT_CARD_KINDS, createDecisionPerformer, workflowDocumentHandler, type ProvingCaller } from "../../packages/broker/src/core/decisions/performer.js";
-import { routeDecisionCards, type DecisionSources } from "../../packages/broker/src/core/decisions/routes.js";
-import { decisionCardPath, type DecisionItem } from "../../packages/broker/src/core/decisions/project.js";
-import { documentDecisionStore } from "../../packages/broker/src/core/decisions/store.js";
+import { DecisionCardsViewSchema, IMPLICIT_COMPANY_ID, createWorkflowSnapshot, submitWorkflowArtifact, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createDecisionGate } from "../../packages/core/src/core/decisions/approval-gate.js";
+import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/core/src/core/decisions/workflow-subject.js";
+import { WORKFLOW_DOCUMENT_CARD_KINDS, createDecisionPerformer, workflowDocumentHandler, type ProvingCaller } from "../../packages/core/src/core/decisions/performer.js";
+import { routeDecisionCards, type DecisionSources } from "../../packages/core/src/core/decisions/routes.js";
+import { decisionCardPath, type DecisionItem } from "../../packages/core/src/core/decisions/project.js";
+import { documentDecisionStore } from "../../packages/core/src/core/decisions/store.js";
 import { commentReads, freshComment } from "../support/comment-fakes.js";
 
 const TASK_ID = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";

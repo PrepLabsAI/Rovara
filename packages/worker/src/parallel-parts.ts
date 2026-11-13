@@ -1,4 +1,4 @@
-import { PARALLEL_PARTS_MAX, TaskGraphV1Schema, WorkItemProgressV1Schema, taskGraphDigest, taskGraphOrder, type TaskGraphV1, type WorkItemProgressV1 } from "@agentx/contracts";
+import { PARALLEL_PARTS_MAX, TaskGraphV1Schema, WorkItemProgressV1Schema, taskGraphDigest, taskGraphOrder, type TaskGraphV1, type WorkItemProgressV1 } from "@rovara-code/contracts";
 import type { ExecuteSerialWorkflowDependenciesInput, ExecuteSerialWorkflowDependenciesResult, WorkflowDependencyExecutionContext } from "./workflow-dependencies.js";
 
 // Rovara Code v2: independent parts of an approved plan build at once on the task's one machine, each in its own working copy, and are merged one at a time into one

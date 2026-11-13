@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import {
   E2ERuntimeProbeManifestSchema,
   E2ERuntimeCapabilityDescriptorSchema,
@@ -13,10 +13,10 @@ import {
 import {
   admitE2ERegisteredRuntime,
   e2eRegisteredRuntimeKey,
-} from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
-import { E2EFeatureVerifierCatalogRecordSchema, E2EFeatureVerifierRecordSchema, WEB_API_WEB_ENGINE, webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { RUNTIME_PROPOSAL_MAX_BYTES, issueRuntimeInstallChallenge, registerRuntimeInstallation, retainImmutableProposal, type RuntimeInstallationDependencies } from "../../packages/broker/src/aws/runtime-installation.js";
-import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
+} from "../../packages/core/src/aws/e2e-runtime-readiness.js";
+import { E2EFeatureVerifierCatalogRecordSchema, E2EFeatureVerifierRecordSchema, WEB_API_WEB_ENGINE, webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
+import { RUNTIME_PROPOSAL_MAX_BYTES, issueRuntimeInstallChallenge, registerRuntimeInstallation, retainImmutableProposal, type RuntimeInstallationDependencies } from "../../packages/core/src/aws/runtime-installation.js";
+import type { AuthenticatedIdentity } from "../../packages/core/src/auth.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../../packages/verifier/src/rovara-http-engine-descriptor.js";
 import { qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
 import { WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES, runtimeInstallationProposalSha256, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";

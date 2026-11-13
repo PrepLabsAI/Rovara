@@ -1,6 +1,6 @@
 // Test services on a laptop: a Docker that pulls by name, resolves a tag to a digest the test chooses (and can move), and writes down every call. No real daemon is ever used.
 import { createHash } from "node:crypto";
-import type { DockerResult, DockerRunner } from "../../packages/broker/src/local/docker-runner.js";
+import type { DockerResult, DockerRunner } from "../../packages/core/src/local/docker-runner.js";
 
 // Docker Hub's official-image prefix, built from parts so the CI image scan does not read it as an image the tests pull.
 const OFFICIAL_LIBRARY = ["docker.io", "library", ""].join("/");

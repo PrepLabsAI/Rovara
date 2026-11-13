@@ -6,12 +6,12 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { inspect } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
-import { createAdapterRegistry, LocalSecretError, asSecretValue, modelKeyReadError, secretsPluginWords, createFileModelKeyStore, createLocalSecretStore, createRegistrySecretStore, createSecretModelKeyStore, SECRET_FILE_MAX_BYTES } from "../../packages/broker/src/ports/index.js";
-import { contextSecretReader } from "../../packages/broker/src/plugins/index.js";
-import { createLocalModelKeyStore, createLocalSecrets } from "../../packages/broker/src/local/runtime.js";
-import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";
-import { resolveGithubAccess } from "../../packages/broker/src/plugins/code-host/github/token-access.js";
+import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@rovara-code/contracts";
+import { createAdapterRegistry, LocalSecretError, asSecretValue, modelKeyReadError, secretsPluginWords, createFileModelKeyStore, createLocalSecretStore, createRegistrySecretStore, createSecretModelKeyStore, SECRET_FILE_MAX_BYTES } from "../../packages/core/src/ports/index.js";
+import { contextSecretReader } from "../../packages/core/src/plugins/index.js";
+import { createLocalModelKeyStore, createLocalSecrets } from "../../packages/core/src/local/runtime.js";
+import { githubTokenCodeHost } from "../../packages/core/src/plugins/code-host/github/token-code-host.js";
+import { resolveGithubAccess } from "../../packages/core/src/plugins/code-host/github/token-access.js";
 import { runSecretStoreConformance } from "../support/ports/secret-store-conformance.js";
 
 const folders: string[] = [];

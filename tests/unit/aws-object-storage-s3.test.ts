@@ -2,10 +2,10 @@
 // given, `x-amz-meta-*` metadata, the `rovara-retention` tag that the bucket's lifecycle rules read), and never passes on S3's own words.
 import type { GetObjectCommand } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
-import { EVIDENCE_ARTIFACT_RETENTION, ObjectConflictError, ObjectKeyError, ObjectMetaError, ObjectTooBigError } from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
+import { EVIDENCE_ARTIFACT_RETENTION, ObjectConflictError, ObjectKeyError, ObjectMetaError, ObjectTooBigError } from "@rovara-code/contracts";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/core/src/ports/adapter-registry.js";
 import { S3ObjectStorage, S3ObjectStorageError, S3_METADATA_MAX_BYTES, s3ExpiryOf, s3RetentionTagging, type S3ObjectClient, type S3RetentionTag } from "../../packages/aws-adapters/src/s3/index.js";
-import { S3ObjectStorageSettingsSchema, s3ObjectStoragePlugin } from "../../packages/broker/src/plugins/object-storage/s3/plugin.js";
+import { S3ObjectStorageSettingsSchema, s3ObjectStoragePlugin } from "../../packages/core/src/plugins/object-storage/s3/plugin.js";
 import { awsError, FakeS3, lifecycleExpiry, type FakeLifecycleRule } from "../support/ports/aws-fakes.js";
 import { runObjectStorageConformance } from "../support/ports/object-storage-conformance.js";
 
@@ -204,7 +204,7 @@ describe("S3 object storage: the plug-in", () => {
     expect(S3ObjectStorageSettingsSchema.safeParse({ bucket: "Bad_Bucket", region: "us-west-2", profile: "p" }).success).toBe(false);
     const s3 = new FakeS3({ bucket: BUCKET });
     const registry = createAdapterRegistry();
-    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "object-storage", name: "s3", module: "@agentx/broker/plugins/object-storage-s3", settings: { bucket: BUCKET, region: "us-west-2", profile: "rovara-objects", maxObjectMiB: 1, retentionTags: { "evidence-std": { key: "expiry", value: "std" } } } }] }), { registry, importModule: importer(s3) });
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "object-storage", name: "s3", module: "@rovara-code/core/plugins/object-storage-s3", settings: { bucket: BUCKET, region: "us-west-2", profile: "rovara-objects", maxObjectMiB: 1, retentionTags: { "evidence-std": { key: "expiry", value: "std" } } } }] }), { registry, importModule: importer(s3) });
     const store = registry.require("object-storage");
     await store.put("k", new Uint8Array([7]), { contentType: "a/b", metadata: {}, retention: "evidence-std" });
     expect(s3.tagsOf("k")).toEqual({ expiry: "std" });
@@ -213,7 +213,7 @@ describe("S3 object storage: the plug-in", () => {
 
   it("names a bad setting without echoing its value", async () => {
     const registry = createAdapterRegistry();
-    const error = await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "object-storage", name: "s3", module: "@agentx/broker/plugins/object-storage-s3", settings: { bucket: "Private_Name_9", region: "us-west-2", profile: "p" } }] }), { registry, importModule: importer(new FakeS3({ bucket: BUCKET })) }).catch((caught: unknown) => caught);
+    const error = await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "object-storage", name: "s3", module: "@rovara-code/core/plugins/object-storage-s3", settings: { bucket: "Private_Name_9", region: "us-west-2", profile: "p" } }] }), { registry, importModule: importer(new FakeS3({ bucket: BUCKET })) }).catch((caught: unknown) => caught);
     expect(String(error)).toContain("bucket");
     expect(String(error)).not.toContain("Private_Name_9");
   });

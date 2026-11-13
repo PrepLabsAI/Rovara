@@ -1,9 +1,9 @@
 // ~/.agentx/developer.yaml: which AgentX environments this computer has signed in to (FR-011).
 // Never holds a token: tokens live in the system token store.
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME } from "@rovara-code/contracts";
 import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE, EnvironmentNameSchema, agentXError } from "@agentx/contracts";
+import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE, EnvironmentNameSchema, agentXError } from "@rovara-code/contracts";
 import YAML from "yaml";
 import { z } from "zod";
 import { tokenStoreKey } from "../auth.js";

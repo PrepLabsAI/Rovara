@@ -1,7 +1,7 @@
 // The contracts side of spec text: inert text, fences, where a spec may be written, and evidence.
 import { describe, expect, it } from "vitest";
-import { SpecDraftSchema, SpecReviewInputSchema, SpecTargetSchema, readSpecVerdicts, specFileNameProblem, specFolderProblem, specLine, specMarkdown } from "@agentx/contracts";
-import { assertRenderedSpec, extractLabelledLines, rovaraRenderer, teamTemplateRenderer } from "../../packages/broker/src/core/spec/index.js";
+import { SpecDraftSchema, SpecReviewInputSchema, SpecTargetSchema, readSpecVerdicts, specFileNameProblem, specFolderProblem, specLine, specMarkdown } from "@rovara-code/contracts";
+import { assertRenderedSpec, extractLabelledLines, rovaraRenderer, teamTemplateRenderer } from "../../packages/core/src/core/spec/index.js";
 
 const PLAN = "a".repeat(64);
 const target = (overrides: Record<string, unknown> = {}) => SpecTargetSchema.parse({ format: "rovara", ...overrides });

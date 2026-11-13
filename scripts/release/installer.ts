@@ -16,7 +16,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { App, LegacyStackSynthesizer, type IReusableStackSynthesizer } from "aws-cdk-lib";
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME } from "@rovara-code/contracts";
 import { INSTALLER_DESCRIPTION, InstallerStack } from "../../infra/lib/installer.js";
 import { checkedNoAmbientCdkContext, checkedVersion, RELEASE_SYNTH_ROOT, withRepoRootCwd } from "./build.js";
 import { zipDirectory } from "./zip.js";

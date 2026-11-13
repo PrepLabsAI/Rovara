@@ -1,6 +1,6 @@
 // NH-1: the nightly run as the worker receives it: ED-1 (the broker's commit on the default branch, nothing else), the services refusal, one report to the broker, and what is sent first and last.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, type CoverageMapData, type TestEnvironmentBody } from "@agentx/contracts";
+import { TestEnvironmentBodySchema, type CoverageMapData, type TestEnvironmentBody } from "@rovara-code/contracts";
 import { NIGHTLY_SERVICES_UNAVAILABLE, runNightlyInvocation, type NightlyInvocationDependencies } from "../../packages/worker/src/nightly-invocation.js";
 import { NIGHTLY_WALL_CLOCK_MESSAGE, type NightlyPorts } from "../../packages/worker/src/nightly-run.js";
 import { counted } from "../../packages/worker/src/verification/test-report.js";

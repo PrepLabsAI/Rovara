@@ -5,9 +5,9 @@ import { expect } from "vitest";
 import {
   ChangeRequestDetailsSchema, ChangeRequestFeedbackSchema, ChangeRequestStatusSchema, CodeHostCapabilitiesSchema, CodeHostEventSchema, GitCredentialSchema, hostRateLimitRetryAt, MergeObservationSchema,
   type ChangeRequestRef, type CodeHost, type HostScope, type RawDelivery, type ReadBudget, type RepositoryRef,
-} from "@agentx/contracts";
-import type { FakeHostModel } from "@agentx/broker/fakes";
-import { workerGitCredentialUsable } from "@agentx/contracts";
+} from "@rovara-code/contracts";
+import type { FakeHostModel } from "@rovara-code/core/fakes";
+import { workerGitCredentialUsable } from "@rovara-code/contracts";
 import { twoCompanyChecks, type TwoCompanyIsolation } from "../isolation/two-company.js";
 import { rejection, SHA40, type ContractCheck } from "./plugin-contract-kit.js";
 

@@ -4,7 +4,7 @@
 // 2026-09-25 evaluation in the spec's Decisions.
 import {
   keyedProviderSecretName, KEYED_MODEL_PROVIDERS, defaultBoundaryName, environmentCloudFormationRoleName, environmentOperatorRoleName, environmentRolePath, environmentStackName,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { DirectProvider } from "../deploy/answer-schemas.js";
 import { installOrder } from "../deploy/parameters.js";
 import { callbackSigningKeySecretName } from "../deploy/signing-key.js";

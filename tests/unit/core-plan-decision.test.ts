@@ -1,10 +1,10 @@
 // What a plan decision takes from the stored plan: its own decisions and what it says of needing no change come from the checked document, never from the surface; a structured plan that cannot be read
 // back is not approved (fail closed); and a Markdown plan has nothing to read.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, createWorkflowSnapshot, submitWorkflowArtifact, type JsonValue, type WorkflowSnapshot } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { PLAN_UNREADABLE_REFUSAL, createWorkflowDocumentSubject, workflowTaskKey, type WorkflowSubjectOptions } from "../../packages/broker/src/core/decisions/workflow-subject.js";
+import { IMPLICIT_COMPANY_ID, createWorkflowSnapshot, submitWorkflowArtifact, type JsonValue, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { PLAN_UNREADABLE_REFUSAL, createWorkflowDocumentSubject, workflowTaskKey, type WorkflowSubjectOptions } from "../../packages/core/src/core/decisions/workflow-subject.js";
 
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const PLAN = "b".repeat(64);
@@ -59,8 +59,8 @@ describe("a plan decision and the stored plan", () => {
 
 describe("sending coding back to planning with Rovara Code's own sequence", () => {
   it("is offered for the standard sequence (and stands at its plan step afterwards), not for a custom one", async () => {
-    const { workflowReviseShapeOk, revisePlanWithLiveChange, WORKFLOW_BLOCK_REASONS } = await import("@agentx/contracts");
-    const { ROVARA_CODE_PROGRAM } = await import("../../packages/broker/src/core/plan/program.js");
+    const { workflowReviseShapeOk, revisePlanWithLiveChange, WORKFLOW_BLOCK_REASONS } = await import("@rovara-code/contracts");
+    const { ROVARA_CODE_PROGRAM } = await import("../../packages/core/src/core/plan/program.js");
     const base = waiting("structured");
     const at = (program: unknown, programStepId?: string) => ({ ...base, definitionVersion: "1.1.0", program, ...(programStepId === undefined ? {} : { programStepId }), stage: "IMPLEMENT", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.liveSteerReapprovalRevise }) as unknown as WorkflowSnapshot;
     expect(workflowReviseShapeOk(at(ROVARA_CODE_PROGRAM, "build"))).toBe(true);

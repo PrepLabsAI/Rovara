@@ -14,7 +14,7 @@
 // stay in the CLI process -- the browser is never given one.
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@rovara-code/contracts";
 import { WORKSPACES_CSP, WORKSPACES_CSS, WORKSPACES_JS, workspacesHtml } from "./page.js";
 import { UI_TOKEN_HEADER, UI_TOKEN_QUERY, type UiData, type UiDataReply } from "./protocol.js";
 

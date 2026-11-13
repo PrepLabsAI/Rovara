@@ -6,11 +6,11 @@ import { describe, expect, it } from "vitest";
 import {
   ANSWER_STALE_MS, SlackPageCommentMessageSchema, SlackRequestMessageSchema, agentxAnswerCommentId, pageCommentAttributes, pageCommentEventId,
   type PlanDocument, type TaskComment, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { createPageComment, listPageComments, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { deleteTaskComment, editTaskComment, takeAskRateAcrossTasks, takeRate } from "../../packages/broker/src/developer/page-comments.js";
-import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
+} from "@rovara-code/contracts";
+import { createPageComment, listPageComments, type DeveloperTaskRouteDependencies } from "../../packages/core/src/aws/developer-tasks.js";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
+import { deleteTaskComment, editTaskComment, takeAskRateAcrossTasks, takeRate } from "../../packages/core/src/developer/page-comments.js";
+import { taskOwnerKey } from "../../packages/core/src/developer/task-records.js";
 import { MAYA, createSingleAnswerPlanBroker, teammate } from "../support/developer-task-broker.js";
 import { planAnswer } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";

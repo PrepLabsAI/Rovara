@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { STUCK_SETUP_MESSAGE, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
-import { deriveTaskStatus, type OperationFacts } from "../../packages/broker/src/developer/task-records.js";
+import { STUCK_SETUP_MESSAGE, sweepStuckSetups } from "../../packages/core/src/aws/stuck-setup.js";
+import { deriveTaskStatus, type OperationFacts } from "../../packages/core/src/developer/task-records.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
 

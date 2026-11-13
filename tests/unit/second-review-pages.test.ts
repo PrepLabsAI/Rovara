@@ -1,12 +1,12 @@
 // The local pages for the second review: the settings page (who reviews, how it counts, the model list) and the acknowledgement on a task's page. Every change is one verified form the owner makes in
 // their own browser session; the page server never decides anything the service does not (the service's own refusals come back as the page's fixed words).
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SecondOpinionSchema, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, secondReviewModelKey } from "@agentx/contracts";
-import { createLocalPagesServer, type LocalPagesServer } from "../../packages/broker/src/core/local-pages/index.js";
-import { createLocalPageData, createPageExtraActions } from "../../packages/broker/src/local/app/page-data.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
-import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
+import { SecondOpinionSchema, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, secondReviewModelKey } from "@rovara-code/contracts";
+import { createLocalPagesServer, type LocalPagesServer } from "../../packages/core/src/core/local-pages/index.js";
+import { createLocalPageData, createPageExtraActions } from "../../packages/core/src/local/app/page-data.js";
+import { taskKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { readTask } from "../../packages/core/src/core/task-flow/reads.js";
+import { createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
 import { TASK, formBody, raw } from "../support/local-pages-fakes.js";
 import { COMPANY, GPT, OWNER, createWorld, replayRun, type SecondReviewWorld, plain } from "../support/second-review-world.js";
 import { createHarness, type Harness } from "../support/task-flow-harness.js";

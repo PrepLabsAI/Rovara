@@ -10,7 +10,7 @@ import { SECBENCH_PATCH_TEMPLATE, SECBENCH_PATCH_TEMPLATE_SHA256, secbenchPatchP
 import { createGitRunner, predictionPatch, SECBENCH_SOURCE_EXTENSIONS, untrackedFiles } from "../../packages/worker/src/swebench/history.js";
 import { gradeSecbenchPrediction, SECBENCH_EVALUATOR_COMMIT, SECBENCH_EVALUATOR_PACKAGES } from "../../packages/worker/src/swebench/grade-secbench.js";
 import type { ProcessRunner } from "../../packages/worker/src/swebench/grade.js";
-import type { SecbenchVerdict, SwebenchRun, SwebenchRunResult } from "@agentx/contracts";
+import type { SecbenchVerdict, SwebenchRun, SwebenchRunResult } from "@rovara-code/contracts";
 import { resultMessage } from "../../packages/slack-service/src/swebench-command.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { runSwebench, type RunReporter } from "../../packages/worker/src/swebench/run.js";

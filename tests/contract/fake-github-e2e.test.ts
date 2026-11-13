@@ -2,7 +2,7 @@
 // reviews and inline comments arrive with their own IDs (GraphQL sends database IDs as strings), and any call can fail.
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { GitHubAppCredentialProvider } from "../../packages/broker/src/github-app.js";
+import { GitHubAppCredentialProvider } from "../../packages/core/src/github-app.js";
 import { FakeGitHub } from "../support/workflow-e2e-github.js";
 
 const REPO = "https://github.com/example/demo.git";

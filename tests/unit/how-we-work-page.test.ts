@@ -1,16 +1,16 @@
 // The How we work page and routes on `rovara up`: the project's playbook file as a person reads it, and a place to try a draft. Nothing here writes the file or the store: a draft is looked at only.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { HowWeWorkViewSchema, IMPLICIT_COMPANY_ID, ProjectPlaybookResponseSchema, agentXError, projectPlaybookKey, type ProjectDefinition } from "@agentx/contracts";
-import { createLocalPagesServer, type LocalPagesServer } from "../../packages/broker/src/core/local-pages/index.js";
-import { DRAFT_CHARACTERS_MAX } from "../../packages/broker/src/core/local-pages/how-we-work-page.js";
-import { createPlaybookService } from "../../packages/broker/src/core/playbook/service.js";
-import { fixedPlaybookSource } from "../../packages/broker/src/core/playbook/source.js";
-import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createNoopAuditSink } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createLocalPlaybook, EDIT_THE_FILE } from "../../packages/broker/src/local/app/playbook.js";
-import { registerProject } from "../../packages/broker/src/local/app/projects.js";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
+import { HowWeWorkViewSchema, IMPLICIT_COMPANY_ID, ProjectPlaybookResponseSchema, agentXError, projectPlaybookKey, type ProjectDefinition } from "@rovara-code/contracts";
+import { createLocalPagesServer, type LocalPagesServer } from "../../packages/core/src/core/local-pages/index.js";
+import { DRAFT_CHARACTERS_MAX } from "../../packages/core/src/core/local-pages/how-we-work-page.js";
+import { createPlaybookService } from "../../packages/core/src/core/playbook/service.js";
+import { fixedPlaybookSource } from "../../packages/core/src/core/playbook/source.js";
+import { createStoreProjectSource } from "../../packages/core/src/core/task-flow/project-source.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createNoopAuditSink } from "../../packages/core/src/ports/policy-defaults.js";
+import { createLocalPlaybook, EDIT_THE_FILE } from "../../packages/core/src/local/app/playbook.js";
+import { registerProject } from "../../packages/core/src/local/app/projects.js";
+import { TASK_FLOW_INDEXES } from "../../packages/core/src/core/task-flow/flow.js";
 import { fakeWorld, formBody, formOf, raw } from "../support/local-pages-fakes.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;

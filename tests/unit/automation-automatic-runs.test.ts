@@ -5,11 +5,11 @@
 //   4. a repeat of a request is one run and counts once;
 //   5. an unattended start carries no approval of anything.
 import { describe, expect, it } from "vitest";
-import { startUnattendedRun, sweepUnattendedRuns, type AutomatedRunRequest } from "../../packages/broker/src/core/automation/run-seam.js";
-import { claimAutomaticRun, readAutomaticRunsUse, setAutomaticRunsCap } from "../../packages/broker/src/core/automatic-runs/cap.js";
-import { startAutomaticRun, type AutomaticRunInput } from "../../packages/broker/src/core/automatic-runs/start.js";
-import { putAutomaticRunWatch, sweepAutomaticRuns } from "../../packages/broker/src/core/automatic-runs/end.js";
-import { automaticRunsView } from "../../packages/broker/src/core/automatic-runs/view.js";
+import { startUnattendedRun, sweepUnattendedRuns, type AutomatedRunRequest } from "../../packages/core/src/core/automation/run-seam.js";
+import { claimAutomaticRun, readAutomaticRunsUse, setAutomaticRunsCap } from "../../packages/core/src/core/automatic-runs/cap.js";
+import { startAutomaticRun, type AutomaticRunInput } from "../../packages/core/src/core/automatic-runs/start.js";
+import { putAutomaticRunWatch, sweepAutomaticRuns } from "../../packages/core/src/core/automatic-runs/end.js";
+import { automaticRunsView } from "../../packages/core/src/core/automatic-runs/view.js";
 import { COMPANY, OWNER, PROJECT, START, createAutomationWorld, type AutomationWorld } from "../support/automation-world.js";
 
 const uuid = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;

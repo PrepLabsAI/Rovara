@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type E2EModelRouteDefinition } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type E2EModelRouteDefinition } from "@rovara-code/contracts";
 
 /**
  * The worker environment variables that can redirect or re-authenticate a model call (M1.4 Task 4.1, Ruling M4-Q).

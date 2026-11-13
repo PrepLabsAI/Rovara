@@ -1,9 +1,9 @@
 // What the planner is asked for: one agentx-plan block, and the document it is changing shown as data.
-import { PLAN_DOCUMENT_INFO_STRING, commentRefInAuthor, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, canonicalPlanJson, parsePlanDocument } from "@agentx/contracts";
+import { PLAN_DOCUMENT_INFO_STRING, commentRefInAuthor, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, canonicalPlanJson, parsePlanDocument } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
-import { asksForApplicationPlan, asksForCodeAnchors, planChecksInstructions, planDocumentInstructions, withoutApplicationPlanText, withoutCodeAnchorText } from "../../packages/broker/src/aws/broker-shared.js";
+import { asksForApplicationPlan, asksForCodeAnchors, planChecksInstructions, planDocumentInstructions, withoutApplicationPlanText, withoutCodeAnchorText } from "../../packages/core/src/aws/broker-shared.js";
 import { planDocument } from "../support/plan-documents.js";
-import type { FeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
+import type { FeatureE2EPlanningContext } from "../../packages/core/src/e2e/feature-plan-planning-context.js";
 
 describe("planDocumentInstructions", () => {
   it("asks for exactly one agentx-plan block and describes every claim, evidence kind and decision field", () => {

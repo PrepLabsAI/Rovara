@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { formOfSlackModal, slackModalOf } from "../../packages/contracts/src/index.js";
 // A Slack Web API double that refuses what Slack refuses.
 // Limits are Slack's documented ones, plus the project's own brief limit on thread posts.
-import { SlackPostError } from "../../packages/broker/src/aws/slack-web.js";
+import { SlackPostError } from "../../packages/core/src/aws/slack-web.js";
 
 export const SLACK_LIMITS = {
   privateMetadata: 3000, sectionText: 3000, messageBlocks: 50, modalBlocks: 100, checkboxOptions: 10, selectOptions: 100,

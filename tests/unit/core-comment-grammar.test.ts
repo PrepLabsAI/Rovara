@@ -1,7 +1,7 @@
 // Lane L12 review: the words of a comment command (an approval names its version) and the one shape that is Rovara's own reply.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ROVARA_REPLY_MARKER, isRovareReplyComment, parseRovaraComment } from "@agentx/contracts";
+import { ROVARA_REPLY_MARKER, isRovareReplyComment, parseRovaraComment } from "@rovara-code/contracts";
 
 describe("/rovara approve names the version", () => {
   it("reads an optional repository and an optional digest of 8 to 12 hex characters", () => {

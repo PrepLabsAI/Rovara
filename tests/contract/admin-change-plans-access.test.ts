@@ -2,9 +2,9 @@
 // Spec 025 E7 to E10, E19: stopping work, granting and revoking access, ending a sign-in, and the limits.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { planChange, stateHash, type PlanDependencies } from "../../packages/broker/src/aws/admin-change-plans.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
+import { planChange, stateHash, type PlanDependencies } from "../../packages/core/src/aws/admin-change-plans.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { emailIndexKey } from "../../packages/core/src/developer/store.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { MAYA } from "../support/developer-task-broker.js";
 
@@ -12,7 +12,7 @@ const admin = { issuer: "https://identity.example.test", subject: "admin-subject
 async function harness() {
   const endDeveloperSessions = vi.fn(async () => ({ ok: true as const }));
   const broker = await createAdminReadBroker({ developerExtra: { endDeveloperSessions } });
-  const module = await import("../../packages/broker/src/aws/broker.js") as unknown as { createPlanDependencies(input: never): PlanDependencies };
+  const module = await import("../../packages/core/src/aws/broker.js") as unknown as { createPlanDependencies(input: never): PlanDependencies };
   const deps = module.createPlanDependencies(broker.brokerInput as never);
   const membership = broker.db.find((item) => item.entityType === "MEMBERSHIP" && item.role === "administrator")[0]!;
   return { ...broker, deps, endDeveloperSessions, membership, identity: { ...admin, ownerKey: String(membership.ownerKey) } };

@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { mergeRecoveryItem } from "../../../packages/broker/src/aws/workflow-merge-recovery.js";
-import { githubWorkflowPullRequestKey } from "../../../packages/broker/src/developer/task-records.js";
+import { mergeRecoveryItem } from "../../../packages/core/src/aws/workflow-merge-recovery.js";
+import { githubWorkflowPullRequestKey } from "../../../packages/core/src/developer/task-records.js";
 import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { PLAN, editsOrFix, journeySuite, openDraftPr, said, MERGED } from "../../support/workflow-e2e-journeys.js";
 

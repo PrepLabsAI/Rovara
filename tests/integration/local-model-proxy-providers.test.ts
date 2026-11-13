@@ -3,13 +3,13 @@
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { SecretValue, modelPriceRows, type Cost, type MeterEntry, type ModelProviderAdapter } from "@agentx/contracts";
+import { SecretValue, modelPriceRows, type Cost, type MeterEntry, type ModelProviderAdapter } from "@rovara-code/contracts";
 import { modelNotEnabledBody } from "../../packages/model-runtime/src/index.js";
-import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
+import { createPriceTableMetering } from "../../packages/core/src/ports/policy-defaults.js";
 import {
   MODEL_PROXY_PREFIX, WORKSPACE_HEADER, builtinModelProviderBook, createLocalModelProxy, localRoute, type LocalModelProxy, type ModelProviderBook, type ProxyRoute,
-} from "../../packages/broker/src/local/model-proxy/index.js";
-import { AWS_MODULE_MISSING, AwsCredentialSetupError, BUILTIN_MODEL_PROVIDERS, NATIVE_CHAT_CAPABILITIES, NATIVE_MESSAGES_CAPABILITIES, NATIVE_RESPONSES_CAPABILITIES, bedrockModelProvider } from "../../packages/broker/src/plugins/model-provider/index.js";
+} from "../../packages/core/src/local/model-proxy/index.js";
+import { AWS_MODULE_MISSING, AwsCredentialSetupError, BUILTIN_MODEL_PROVIDERS, NATIVE_CHAT_CAPABILITIES, NATIVE_MESSAGES_CAPABILITIES, NATIVE_RESPONSES_CAPABILITIES, bedrockModelProvider } from "../../packages/core/src/plugins/model-provider/index.js";
 import { fakeKey } from "../support/model-proxy-world.js";
 
 const COMPANY = "org_00000000000000000000";

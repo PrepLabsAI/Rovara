@@ -154,7 +154,7 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version-file: .node-version, cache: npm }
       - run: npm ci
-      # release:build imports workspace packages (e.g. @agentx/contracts) by their built dist/
+      # release:build imports workspace packages (e.g. @rovara-code/contracts) by their built dist/
       # output, which is gitignored: without this, a fresh checkout fails with
       # ERR_MODULE_NOT_FOUND before release:build even starts.
       - run: npm run build
@@ -184,7 +184,7 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version-file: .node-version, cache: npm, registry-url: "https://registry.npmjs.org" }
       - run: npm ci
-      # release:pack-cli bundles packages/cli, which resolves @agentx/contracts through its built
+      # release:pack-cli bundles packages/cli, which resolves @rovara-code/contracts through its built
       # dist/ output (gitignored): without this, a fresh checkout fails with ERR_MODULE_NOT_FOUND.
       - run: npm run build
       # Trusted publishing (OIDC, no stored token) needs a newer npm than Node 22 ships.

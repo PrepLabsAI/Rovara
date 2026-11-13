@@ -3,9 +3,9 @@
 // changes nothing; its hash moves when the state it covers moves.
 import { describe, expect, it, vi } from "vitest";
 import { CredentialUnavailable } from "@agentx/gateway";
-import { redactSecrets, type ChannelInfoRequest, type ChannelMembersRequest } from "@agentx/contracts";
-import { fieldDiff, looksLikeSecret, planChange, stateHash, type PlanDependencies } from "../../packages/broker/src/aws/admin-change-plans.js";
-import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
+import { redactSecrets, type ChannelInfoRequest, type ChannelMembersRequest } from "@rovara-code/contracts";
+import { fieldDiff, looksLikeSecret, planChange, stateHash, type PlanDependencies } from "../../packages/core/src/aws/admin-change-plans.js";
+import { CredentialRegistry } from "../../packages/core/src/aws/credentials.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { bindChannel, registerRevision } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
@@ -30,7 +30,7 @@ async function harness(options: { channelByName?: PlanDependencies["channelByNam
     channelInfo, channelMembers,
     ...(options.secrets === undefined ? {} : { brokerExtra: { connectorCredentials: { secrets: options.secrets, githubApp } } }),
   });
-  const module = await import("../../packages/broker/src/aws/broker.js") as unknown as { createPlanDependencies(input: never): PlanDependencies };
+  const module = await import("../../packages/core/src/aws/broker.js") as unknown as { createPlanDependencies(input: never): PlanDependencies };
   const developer = (broker.brokerInput as { developer: object }).developer;
   const deps = module.createPlanDependencies({ ...broker.brokerInput, ...(options.channelByName ? { developer: { ...developer, channelByName: options.channelByName } } : {}) } as never);
   // The registering admin's owner key: registration wrote its administrator membership.

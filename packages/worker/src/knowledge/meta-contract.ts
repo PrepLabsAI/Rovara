@@ -5,7 +5,7 @@
 // is merged yet, so the resolver depends only on this small interface. When Lane A lands, one function, `metaRepoCheckoutOf`, changes:
 // it reads the invocation's `knowledgeCommit` and the prepared meta repository instead of returning nothing. Nothing else in this lane moves.
 
-import type { MetaSkillPin } from "@agentx/contracts";
+import type { MetaSkillPin } from "@rovara-code/contracts";
 
 /** The meta repo as the worker has it: a read-only, sparse checkout and the commit every stage reads it at. */
 export interface MetaRepoCheckout {

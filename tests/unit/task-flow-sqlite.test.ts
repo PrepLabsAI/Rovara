@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteDocumentStore, SqliteQueueService } from "../../packages/local-adapters/src/index.js";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
-import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import type { WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
+import { TASK_FLOW_INDEXES } from "../../packages/core/src/core/task-flow/flow.js";
+import { workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import type { WorkspaceRecord } from "../../packages/core/src/core/task-flow/records.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 
 const cleanups: Array<() => Promise<void>> = [];

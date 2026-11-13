@@ -33,7 +33,7 @@ export const REST = "rest";
 export const PROGRAM_DIRECTORY = "node_modules/.cache/lint-shards";
 
 /**
- * The shards before the catch-all. A shard is a group of paths linted together, and a path is a directory ("packages/broker") or, to
+ * The shards before the catch-all. A shard is a group of paths linted together, and a path is a directory ("packages/core") or, to
  * split a big directory, a glob over the files directly in it ("tests/contract/a*.ts"; only `*` and `?`, which eslint, the ignore
  * patterns and a tsconfig `include` all read the same way). tests/contract and tests/unit are split by the first letter of the file name: the
  * biggest shard bounds the memory of the whole run, and one process over all of tests/contract peaked at 4.5 GB (all of tests/unit passed the 4 GB cap
@@ -54,7 +54,7 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   { name: "tests-unit-folders", directories: ["tests/unit/context-sources", "tests/unit/contracts", "tests/unit/intake", "tests/unit/lessons"] },
   { name: "tests-integration", directories: ["tests/integration"] },
   { name: "tests-support", directories: ["tests/support"] },
-  { name: "broker", directories: ["packages/broker"] },
+  { name: "broker", directories: ["packages/core"] },
   { name: "cli", directories: ["packages/cli"] },
   { name: "worker", directories: ["packages/worker"] },
   { name: "verifier", directories: ["packages/verifier"] },

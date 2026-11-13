@@ -6,10 +6,10 @@ import {
   ChannelCommandSchema, builtInAdapterRecord, channelMessageOfSlackBlocks, generateWebhookSecret, slackBlocksOf, verifyWebhook, webhookHeaders,
   type ChannelCommand,
 } from "../../packages/contracts/src/index.js";
-import { createSlackChannelCommandsHandler } from "../../packages/broker/src/aws/slack-adapter.js";
-import { createSlackNoticeChannel } from "../../packages/broker/src/aws/slack-notice-channel.js";
-import { SlackPostError, postMayHaveLanded } from "../../packages/broker/src/aws/slack-web.js";
-import { answeredWorkflowCard, feedbackReviewFailedMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { createSlackChannelCommandsHandler } from "../../packages/core/src/aws/slack-adapter.js";
+import { createSlackNoticeChannel } from "../../packages/core/src/aws/slack-notice-channel.js";
+import { SlackPostError, postMayHaveLanded } from "../../packages/core/src/aws/slack-web.js";
+import { answeredWorkflowCard, feedbackReviewFailedMessage } from "../../packages/core/src/developer/workflow-messages.js";
 
 const NOW = Date.parse("2026-11-11T12:00:00.000Z");
 const SECRET = generateWebhookSecret();

@@ -2,7 +2,7 @@
 // Offline: FakeDynamoDb, a vi.fn state machine and S3, and a fake clock.
 import { describe, expect, it, vi, type Mock } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { SwebenchLaunchSchema, agentXError, summarize, type ModelIdentifier, type SwebenchLaunch } from "@agentx/contracts";
+import { SwebenchLaunchSchema, agentXError, summarize, type ModelIdentifier, type SwebenchLaunch } from "@rovara-code/contracts";
 import {
   EVAL_BATCH_REFERENCE_TOKENS,
   createBatch,
@@ -18,7 +18,7 @@ import {
   topUpBatches,
   withEvalBatches,
   type EvalBatchDependencies,
-} from "../../packages/broker/src/aws/eval-batch.js";
+} from "../../packages/core/src/aws/eval-batch.js";
 import {
   handleSwebenchCallback,
   issueSwebenchCapability,
@@ -28,7 +28,7 @@ import {
   type SwebenchDependencies,
   type SwebenchDeployment,
   type SwebenchSlackContext,
-} from "../../packages/broker/src/aws/swebench.js";
+} from "../../packages/core/src/aws/swebench.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const TEAM = "T0BSHLLUGBD";

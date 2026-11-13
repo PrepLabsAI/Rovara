@@ -1,4 +1,4 @@
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError } from "@rovara-code/contracts";
 import { agentGitHubGuard, GuardRejection, type GuardInput } from "../../packages/gateway/src/index.js";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -7,7 +7,7 @@ import {
   checkAgentTokenPermissions,
   githubAgentToolPermissions,
   isGitHubAgentToolRefused,
-} from "../../packages/broker/src/agents/github-agent-tools.js";
+} from "../../packages/core/src/agents/github-agent-tools.js";
 
 const REFUSAL = "Pushes and merges happen only through Rovara Code's pull request flow.";
 

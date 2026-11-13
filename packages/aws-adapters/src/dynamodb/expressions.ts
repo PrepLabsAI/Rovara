@@ -4,8 +4,8 @@
 // character in a name can change what an expression means. One builder serves one request, so the condition and the update of a
 // request share the placeholders (DynamoDB refuses a placeholder that a request defines and does not use, and one it uses and does
 // not define; the builder only emits what it used).
-import type { AttributePath, Condition, IndexSortRange, SortKeyRange, UpdateOp } from "@agentx/contracts";
-import type { JsonValue } from "@agentx/contracts";
+import type { AttributePath, Condition, IndexSortRange, SortKeyRange, UpdateOp } from "@rovara-code/contracts";
+import type { JsonValue } from "@rovara-code/contracts";
 import { toWire, type WireItem, type WireValue } from "./attribute-values.js";
 
 export class ExpressionBuilder {

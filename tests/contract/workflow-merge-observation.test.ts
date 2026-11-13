@@ -1,7 +1,7 @@
-import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, type WorkflowFeedbackBundle, type WorkflowSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, type WorkflowFeedbackBundle, type WorkflowSnapshot } from "@rovara-code/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { reconcileTaskPullRequestFeedback, type ReconcileTaskPullRequestFeedbackInput } from "../../packages/broker/src/aws/github-webhooks.js";
-import type { GitHubPullRequestFeedback } from "../../packages/broker/src/github-app.js";
+import { reconcileTaskPullRequestFeedback, type ReconcileTaskPullRequestFeedbackInput } from "../../packages/core/src/aws/github-webhooks.js";
+import type { GitHubPullRequestFeedback } from "../../packages/core/src/github-app.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = "2026-10-11T12:00:00.000Z";

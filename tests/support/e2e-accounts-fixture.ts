@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalJson, type E2EScenario } from "@agentx/contracts";
+import { canonicalJson, type E2EScenario } from "@rovara-code/contracts";
 import { createWebApiProbePlan, type WebApiProbePlan } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 
 const repoRoot = join(import.meta.dirname, "../..");

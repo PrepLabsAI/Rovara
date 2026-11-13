@@ -1,7 +1,7 @@
 // Setup and test health SH32: the toolchain the sandbox's base image lacks is added by a proposed dev container, at the smallest listed version that satisfies the repository's own minimum, cited; Node and
 // Python (already in the base image) get none; a version that cannot be found or is not offered is a question; a repository's own dev container is used, never replaced.
 import { describe, expect, it } from "vitest";
-import { DEVCONTAINER_PATH_PATTERN, SETUP_DEVCONTAINER_MAX_BYTES } from "@agentx/contracts";
+import { DEVCONTAINER_PATH_PATTERN, SETUP_DEVCONTAINER_MAX_BYTES } from "@rovara-code/contracts";
 import { ENV_DETECT_MAX_PATHS, boundedReader } from "../../packages/worker/src/env-detect/index.js";
 import { BASE_IMAGE_LANGUAGES, DEVCONTAINER_IMAGE_VERSIONS, proposeToolchain } from "../../packages/worker/src/env-detect/toolchain.js";
 

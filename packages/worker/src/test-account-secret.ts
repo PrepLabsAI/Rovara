@@ -15,7 +15,7 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { isAbsolute, join, sep } from "node:path";
-import { TEST_ACCOUNT_SECRET_VERSION_STAGE, checkTestAccountKeyShape, e2eSecretSpellings, parseTestAccountSecretGrant, type TestAccountSecretGrant } from "@agentx/contracts";
+import { TEST_ACCOUNT_SECRET_VERSION_STAGE, checkTestAccountKeyShape, e2eSecretSpellings, parseTestAccountSecretGrant, type TestAccountSecretGrant } from "@rovara-code/contracts";
 
 /** Where a command runs. Only a sealed check round may hold a test account's secret. */
 export type SecretPlace = "sealed_check" | "setup_run" | "setup_agent" | "working_sandbox" | "task_agent" | "team_runner";

@@ -6,7 +6,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
-import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE } from "@rovara-code/contracts";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();

@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseWorkflowReviewerResponse, redactText, reviewerFocus, reviewJsonShape, unfence, type WorkflowReviewFinding } from "@agentx/contracts";
+import { parseWorkflowReviewerResponse, redactText, reviewerFocus, reviewJsonShape, unfence, type WorkflowReviewFinding } from "@rovara-code/contracts";
 import { z } from "zod";
 import type { LoopRepoConfig } from "./config.js";
 import type { Exec } from "./exec.js";

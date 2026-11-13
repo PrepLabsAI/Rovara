@@ -1,14 +1,14 @@
 // The design review's packet readers on `rovara up`: the broker reads the files a design names from the repository's own code host at the commit asked for, the meta repository's files, and nothing for a
 // repository the project does not have; a host that cannot answer leaves the file out; and the task's own ticket thread is withheld from the MCP items.
 import { describe, expect, it } from "vitest";
-import type { CodeHost, ContextSource, ProjectDefinition } from "@agentx/contracts";
-import { localPacketSources } from "../../packages/broker/src/local/app/design-review-sources.js";
-import type { ContextToolsDependencies } from "../../packages/broker/src/context-sources/routes.js";
-import { readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import type { CodeHost, ContextSource, ProjectDefinition } from "@rovara-code/contracts";
+import { localPacketSources } from "../../packages/core/src/local/app/design-review-sources.js";
+import type { ContextToolsDependencies } from "../../packages/core/src/context-sources/routes.js";
+import { readSlotPacket } from "../../packages/core/src/core/design-review/packet-store.js";
+import { taskKey } from "../../packages/core/src/core/task-flow/keys.js";
 import { COMPANY } from "../support/task-flow-harness.js";
 import { design, finish, nextJob, planned, toDesignPhase, world } from "../support/design-review-flow-world.js";
-import { DesignReviewBindingSchema } from "@agentx/contracts";
+import { DesignReviewBindingSchema } from "@rovara-code/contracts";
 
 const COMMIT = "a".repeat(40);
 const repositories = [

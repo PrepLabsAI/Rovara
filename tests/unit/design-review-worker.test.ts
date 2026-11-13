@@ -7,16 +7,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DESIGN_REVIEW_WORKER_FEATURE, DesignReviewBindingSchema, DesignReviewRoundSchema, DesignReviewWorkerResultSchema, PacketDeliverySchema, READ_ONLY_TOOLS, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema,
   LIGHT_CRITIC_PROMPT_ID, MODEL_NOT_ENABLED_CODE, modelFailureCodeOf, packetDigestOf, reviewerMessagesOf, type DesignReviewBinding, type DesignReviewTier, type ReviewerRole, type WorkerInvocation,
-} from "@agentx/contracts";
-import { buildReviewerPacket, type PacketReaders } from "../../packages/broker/src/core/design-review/packet.js";
-import { WorkerReportSchema, verifyReviewerReport } from "../../packages/broker/src/core/design-review/verify.js";
-import { assembleRoundFindings } from "../../packages/broker/src/core/design-review/round-findings.js";
-import { lostBlockerFindings, ownDesignFindings, withOwnFindings } from "../../packages/broker/src/core/design-review/own-findings.js";
-import { designCardFactsOf } from "../../packages/broker/src/core/design-review/card-source.js";
-import { designApprovalProofLine, designApprovalReason } from "../../packages/broker/src/core/design-review/approval.js";
+} from "@rovara-code/contracts";
+import { buildReviewerPacket, type PacketReaders } from "../../packages/core/src/core/design-review/packet.js";
+import { WorkerReportSchema, verifyReviewerReport } from "../../packages/core/src/core/design-review/verify.js";
+import { assembleRoundFindings } from "../../packages/core/src/core/design-review/round-findings.js";
+import { lostBlockerFindings, ownDesignFindings, withOwnFindings } from "../../packages/core/src/core/design-review/own-findings.js";
+import { designCardFactsOf } from "../../packages/core/src/core/design-review/card-source.js";
+import { designApprovalProofLine, designApprovalReason } from "../../packages/core/src/core/design-review/approval.js";
 /** The reason rule of an approval (who may approve is the approval gate's, tested with the gate). */
 const decideDesignApproval = (input: { openBlockers: number; blockerReason?: string | undefined }) => { const answer = designApprovalReason(input); return answer.ok ? { ok: true as const, ...(answer.proofReason === undefined ? {} : { proofReason: answer.proofReason }) } : { ok: false as const, code: answer.code }; };
-import { riskTierOf } from "../../packages/broker/src/core/decisions/risk-tier.js";
+import { riskTierOf } from "../../packages/core/src/core/decisions/risk-tier.js";
 import { RECORDED_COMPREHENSION_ANSWER, RECORDED_CRITIC_ANSWER } from "../support/design-review-recorded-answers.js";
 import { DESIGN_REVIEW_LOST_FINDINGS_PROBLEM, designReviewRetryPrompt, mergeMaterialOf, modelKeyIdOf, runDesignReview, sentDigestOf, type DesignReviewPorts, type DesignReviewSession, type OpenDesignReviewSession } from "../../packages/worker/src/design-review.js";
 import { createReviewSessionOpener, designReviewBindingOf, runDesignReviewOperation, slotRuntimeFor } from "../../packages/worker/src/design-review-sessions.js";

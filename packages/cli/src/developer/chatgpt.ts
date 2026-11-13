@@ -6,7 +6,7 @@ import { createServer, type Server } from "node:http";
 import {
   CHATGPT_CALLBACK_URL, CLI_PACKAGE_NAME, ChatGptConnectStartSchema, ChatGptConnectionViewSchema, agentXError,
   type ChatGptConnectFinishRequest, type ChatGptConnectionView,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { sanitizeServerText } from "../auth.js";
 import { developerRequest } from "./commands.js";
 import type { DeveloperSessionDeps } from "./session.js";

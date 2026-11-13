@@ -1,6 +1,6 @@
 import {parseTaskModelFallbackAuthorization} from "./model-fallback-authority.js";
 export {parseTaskModelFallbackAuthorization} from "./model-fallback-authority.js";
-import { type TaskModelFallbackAuthorization,type TaskModelFallbackRequest,TaskModelFallbackRequestSchema,type TaskModelPolicyBinding,agentXError, type InvocationModelRoute, type ModelSelection, type SecondReviewerPayload } from "@agentx/contracts";
+import { type TaskModelFallbackAuthorization,type TaskModelFallbackRequest,TaskModelFallbackRequestSchema,type TaskModelPolicyBinding,agentXError, type InvocationModelRoute, type ModelSelection, type SecondReviewerPayload } from "@rovara-code/contracts";
 import { ROUTE_PROVIDER, routedThinkingLevel, type ChatGptFallbackReason, type ModelFallbackNotice, type ModelProxyOptions } from "@agentx/model-runtime";
 import type { EventBatchSink } from "./events.js";
 import { createChatGptPiSessionAdapter, createProxyPiSessionAdapter, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";

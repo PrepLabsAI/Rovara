@@ -8,7 +8,7 @@ import {
   MAX_LOADED_KNOWLEDGE_ITEMS,
   type LoadedKnowledgeItem,
   type LoadedKnowledgeManifest,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { inertContextText } from "../context-text.js";
 import type { KnowledgeStage } from "./model.js";
 import type { KnowledgeRecord, ResolvedKnowledge } from "./resolve.js";

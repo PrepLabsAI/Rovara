@@ -1,4 +1,4 @@
-import { slackThreadUrl, splitSlackMessage, type SlackThread } from "@agentx/contracts";
+import { slackThreadUrl, splitSlackMessage, type SlackThread } from "@rovara-code/contracts";
 import type { ConversationFormat } from "./conversation-format.js";
 
 /**

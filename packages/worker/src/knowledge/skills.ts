@@ -9,7 +9,7 @@
 // Only `name` and `description` sit in the prompt until the model calls `read_skill`. At most 32 skills a stage; skills in code repositories
 // are not read (Q8).
 import { createHash } from "node:crypto";
-import { MAX_META_SKILLS, type MetaSkillPin, type MetaSkillSkipReason, type MetaSkillSnapshot } from "@agentx/contracts";
+import { MAX_META_SKILLS, type MetaSkillPin, type MetaSkillSkipReason, type MetaSkillSnapshot } from "@rovara-code/contracts";
 import { inertContextText } from "../context-text.js";
 import type { AgentSkillFile } from "../agent-step.js";
 import { parseFrontMatter } from "./frontmatter.js";

@@ -18,8 +18,8 @@
 // The network is a fake GitHub (`tests/support/ports/github-fixture-api.ts`), never the real one. `RecordingNetwork` wraps its `fetch` and records what the client asked for, including
 // the `redirect` and `signal` options, and it follows redirects the way `fetch` does so that a client that forgot `redirect: "error"` is caught following one.
 import { expect } from "vitest";
-import { hostRateLimitRetryAt, type HostScope } from "@agentx/contracts";
-import type { GitHubCodeHostProvider } from "@agentx/broker";
+import { hostRateLimitRetryAt, type HostScope } from "@rovara-code/contracts";
+import type { GitHubCodeHostProvider } from "@rovara-code/core";
 
 export interface RecordedRequest {
   method: string;

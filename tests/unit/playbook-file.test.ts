@@ -1,8 +1,8 @@
 // "How we work" in Code is the file `.rovara/playbook.yaml`. These tests read it the way the broker does: strictly, as data from a repository.
 import { describe, expect, it } from "vitest";
-import { HOW_WE_WORK_UNUSED_STAGE_NOTE, PLAYBOOK_FILE_MAX_BYTES, PLAYBOOK_FILE_TEMPLATE, PLAYBOOK_RULE_TEXT_MAX, type PlaybookFile } from "@agentx/contracts";
-import { PLAYBOOK_TAG_MESSAGE, designReviewOfPlaybook, overlayOfPlaybook, parsePlaybookText, playbookDigest, playbookIsEmpty } from "../../packages/broker/src/core/playbook/file.js";
-import { RULE_TEXT_MAX, inertRuleText } from "../../packages/broker/src/core/playbook/inert-rule-text.js";
+import { HOW_WE_WORK_UNUSED_STAGE_NOTE, PLAYBOOK_FILE_MAX_BYTES, PLAYBOOK_FILE_TEMPLATE, PLAYBOOK_RULE_TEXT_MAX, type PlaybookFile } from "@rovara-code/contracts";
+import { PLAYBOOK_TAG_MESSAGE, designReviewOfPlaybook, overlayOfPlaybook, parsePlaybookText, playbookDigest, playbookIsEmpty } from "../../packages/core/src/core/playbook/file.js";
+import { RULE_TEXT_MAX, inertRuleText } from "../../packages/core/src/core/playbook/inert-rule-text.js";
 
 const ok = (text: string): PlaybookFile => {
   const parsed = parsePlaybookText(text);

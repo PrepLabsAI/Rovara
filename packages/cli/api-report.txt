@@ -1,0 +1,1 @@
+# @agentx/cli: exported names per named entry (tests/contract/package-api-report.test.ts; refresh with UPDATE_API_REPORT=1)

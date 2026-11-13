@@ -7,8 +7,8 @@ import {
   type GithubMergeReadBudget,
   type MergeRecoveryDependencies,
   type MergeRecoveryResult,
-} from "../../packages/broker/src/aws/workflow-merge-recovery.js";
-import { releaseItems } from "../../packages/broker/src/developer/limits.js";
+} from "../../packages/core/src/aws/workflow-merge-recovery.js";
+import { releaseItems } from "../../packages/core/src/developer/limits.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const TABLE = "state";

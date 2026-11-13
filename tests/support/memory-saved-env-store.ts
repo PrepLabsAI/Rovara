@@ -1,5 +1,5 @@
 // An in-memory SavedEnvStore for tests: compare-and-set on the row's version, and the audit entries kept beside it.
-import type { SavedEnvAuditEntry, SavedEnvState, SavedEnvStore } from "../../packages/broker/src/core/test-env/saved-env.js";
+import type { SavedEnvAuditEntry, SavedEnvState, SavedEnvStore } from "../../packages/core/src/core/test-env/saved-env.js";
 
 export interface MemorySavedEnvStore extends SavedEnvStore {
   rows: Map<string, SavedEnvState>;

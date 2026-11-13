@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { taskGraphDigest, type TaskGraphV1 } from "@agentx/contracts";
+import { taskGraphDigest, type TaskGraphV1 } from "@rovara-code/contracts";
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies } from "../../packages/worker/src/workflow-dependencies.js";
 
 const taskId = "8c330a74-b4c6-4f01-9356-5fe54fc55b19";

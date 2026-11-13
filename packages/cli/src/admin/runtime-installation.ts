@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { Ec2RuntimeBindingSchema, RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema, WebApiRuntimeInstallProposalSchema, canonicalJson, webApiRuntimeInstallProposalSha256 } from "@agentx/contracts";
+import { Ec2RuntimeBindingSchema, RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema, WebApiRuntimeInstallProposalSchema, canonicalJson, webApiRuntimeInstallProposalSha256 } from "@rovara-code/contracts";
 import { z } from "zod";
 import { adminResponseBody } from "./http.js";
 

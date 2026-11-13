@@ -4,7 +4,7 @@
 //   - a line that does not parse, repeats a request id, or disagrees with itself (or with the pinned set, when the set is given) is malformed; a ledger with a malformed line is not trusted;
 //   - a ledger that reached its bound is not trusted either: the last line says so, and what came after it was never written.
 import { z } from "zod";
-import type { FixtureSet } from "@agentx/contracts";
+import type { FixtureSet } from "@rovara-code/contracts";
 import { carriesCredential, MOCK_LEDGER_WITHHELD } from "../host/mock-ledger.js";
 import { CORE_LEDGER_MAX_LINES } from "./fake-core.js";
 import { FAKE_LEDGER_OUTCOMES, FAKE_UNMOCKED_BODY, FAKE_UNMOCKED_STATUS, fakeResponseDigest, type FakeLedgerOutcome } from "./fake-server.js";

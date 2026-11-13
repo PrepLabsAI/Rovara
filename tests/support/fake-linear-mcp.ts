@@ -5,8 +5,8 @@ import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders } from "node:http";
 import { connectMcp, type McpConnection } from "@agentx/gateway";
-import type { ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
-import { linearConnectorType } from "../../packages/broker/src/aws/linear-connector-type.js";
+import type { ConnectorType } from "../../packages/core/src/aws/connector-types.js";
+import { linearConnectorType } from "../../packages/core/src/aws/linear-connector-type.js";
 import { vendorTools } from "./vendor-fixtures.js";
 
 export const LINEAR_FIXTURE_TOOLS: McpConnection["tools"] = vendorTools("linear");

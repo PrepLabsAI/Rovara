@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { DevcontainerPaths } from "./devcontainer.js";
 import type { FileMount } from "./devcontainer-file-paths.js";
 import { MAX_REQUEST_ARGUMENT_BYTES, type FileOpsErrorCode, type SandboxFileRequest, type SandboxFileResponse } from "./sandbox-file-ops.js";

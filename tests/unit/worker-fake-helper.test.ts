@@ -4,7 +4,7 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { FixtureSetSchema, fixtureEntry, fixtureSetDigest, type FixtureSet } from "@agentx/contracts";
+import { FixtureSetSchema, fixtureEntry, fixtureSetDigest, type FixtureSet } from "@rovara-code/contracts";
 import { FakeHelperRefused, parseFakeLedgerSummary, parseServeArguments, parseSummarizeArguments, serveFake, summarizeFakeLedger } from "../../packages/worker/src/fake-helper.js";
 
 const dependency = { id: "payments", family: "http:api.example-pay.com", protocol: "http_json", target: "api.example-pay.com" } as const;

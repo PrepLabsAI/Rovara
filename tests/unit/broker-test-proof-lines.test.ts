@@ -2,8 +2,8 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, type TestProof } from "../../packages/contracts/src/index.js";
-import { loadTestProofLines, testProofPullRequestLines } from "../../packages/broker/src/developer/test-proof-lines.js";
-import { workflowPullRequestStatusLines } from "../../packages/broker/src/aws/developer-tasks.js";
+import { loadTestProofLines, testProofPullRequestLines } from "../../packages/core/src/developer/test-proof-lines.js";
+import { workflowPullRequestStatusLines } from "../../packages/core/src/aws/developer-tasks.js";
 
 const inert = (line: string) => line.replaceAll("@", "@‍").replace(/<[^>]*>/gu, "").trim();
 const DIGEST = "a".repeat(64);

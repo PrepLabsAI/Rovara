@@ -2,7 +2,7 @@
 // as soon as it is known. A done step is skipped on every later run (FR-019: re-running a
 // completed step changes nothing); a failed step is not recorded, so the next run retries it; a
 // waiting step (a person must act first, FR-035) is recorded and stops the run.
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@rovara-code/contracts";
 import { cliErrorFor } from "../deploy/commands.js";
 import { withEnvironmentLock, type LockRecord } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";

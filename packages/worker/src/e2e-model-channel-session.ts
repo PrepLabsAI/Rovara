@@ -1,4 +1,4 @@
-import type { E2EModelReceipt, E2EModelRouteDefinition } from "@agentx/contracts";
+import type { E2EModelReceipt, E2EModelRouteDefinition } from "@rovara-code/contracts";
 import {
   assertE2EEnvironmentCannotRedirect,
   assertE2ESharedAwsConfigCannotRedirect,

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { EMPTY_TURN_OBSERVATION, isSlackTurnRecord, type TurnRecord } from "../../packages/contracts/src/turns.js";
 import { aiToolTurnRecordKeys, type AiToolTurnRecord } from "../../packages/contracts/src/turns.js";
-import { TURN_EXPORT_PAGE_BYTES, TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader, type TurnRecordSource, type TurnRecordStartKey } from "../../packages/broker/src/aws/turns.js";
+import { TURN_EXPORT_PAGE_BYTES, TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader, type TurnRecordSource, type TurnRecordStartKey } from "../../packages/core/src/aws/turns.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
 const now = Date.parse("2026-09-24T12:00:00.000Z");

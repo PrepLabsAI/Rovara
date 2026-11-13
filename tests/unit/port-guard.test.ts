@@ -86,7 +86,7 @@ class Lane {
     roots.push(this.dir);
     git(this.dir, "init", "-q", "-b", "code-next");
     this.write("README.md", "base\n");
-    this.write("packages/broker/src/tasks.ts", 'export const tasks = 1;\n');
+    this.write("packages/core/src/tasks.ts", 'export const tasks = 1;\n');
     git(this.dir, "add", "-A");
     git(this.dir, "commit", "-q", "-m", "base");
     git(this.dir, "branch", "base");
@@ -115,7 +115,7 @@ const rules = (findings: Finding[]): string[] => findings.map((finding) => findi
 
 describe("port-guard on a temp repository", () => {
   it("passes a clean range", () => {
-    lane.write("packages/worker/src/engine.ts", 'import { tasks } from "../../broker/src/tasks.js";\nexport const engine = tasks;\n');
+    lane.write("packages/worker/src/engine.ts", 'import { tasks } from "../../core/src/tasks.js";\nexport const engine = tasks;\n');
     lane.write("docs/notes.md", "A plain note about a worker.\n");
     lane.commit();
     expect(lane.guard()).toEqual([]);
@@ -127,12 +127,12 @@ describe("port-guard on a temp repository", () => {
 
   describe("rule (a): Cloud-only paths", () => {
     it.each([
-      ["a company directory", `packages/broker/src/${ORG}/members.ts`],
-      ["a budget directory", `packages/broker/src/${SPEND}/limits.ts`],
-      ["an audit directory", `packages/broker/src/${AUDIT}/outbox.ts`],
-      ["a team record directory", `packages/broker/src/${TEAM_RECORD}/store.ts`],
-      ["a devices directory", `packages/broker/src/${DEVICES}/sessions.ts`],
-      ["a directory in any case", `packages/broker/src/${ORG.toUpperCase()}/x.ts`],
+      ["a company directory", `packages/core/src/${ORG}/members.ts`],
+      ["a budget directory", `packages/core/src/${SPEND}/limits.ts`],
+      ["an audit directory", `packages/core/src/${AUDIT}/outbox.ts`],
+      ["a team record directory", `packages/core/src/${TEAM_RECORD}/store.ts`],
+      ["a devices directory", `packages/core/src/${DEVICES}/sessions.ts`],
+      ["a directory in any case", `packages/core/src/${ORG.toUpperCase()}/x.ts`],
       ["a Cloud-only contracts file", `packages/contracts/src/${ORG}-node.ts`],
       ["the Cloud web UI package", "packages/ui/src/App.tsx"],
       ["the Cloud web package", "packages/web/package.json"],
@@ -165,23 +165,23 @@ describe("port-guard on a temp repository", () => {
     });
 
     it("still fails a Cloud-only file that a later commit deletes, because the history is pushed too", () => {
-      lane.write(`packages/broker/src/${ORG}/members.ts`, "export {};\n");
+      lane.write(`packages/core/src/${ORG}/members.ts`, "export {};\n");
       lane.commit("add");
-      git(lane.dir, "rm", "-q", "-r", `packages/broker/src/${ORG}`);
+      git(lane.dir, "rm", "-q", "-r", `packages/core/src/${ORG}`);
       git(lane.dir, "commit", "-q", "-m", "remove");
       const findings = lane.guard();
       expect(findings).toHaveLength(1);
-      expect(findings[0]).toMatchObject({ rule: "cloud-path", file: `packages/broker/src/${ORG}/members.ts` });
+      expect(findings[0]).toMatchObject({ rule: "cloud-path", file: `packages/core/src/${ORG}/members.ts` });
       expect(findings[0]!.commit).toMatch(/^[0-9a-f]{8}$/);
     });
 
     it("lets a lane delete a Cloud-only file", () => {
       git(lane.dir, "switch", "-q", "base");
-      lane.write(`packages/broker/src/${ORG}/members.ts`, "export {};\n");
+      lane.write(`packages/core/src/${ORG}/members.ts`, "export {};\n");
       lane.commit("legacy");
       git(lane.dir, "switch", "-q", "lane");
       git(lane.dir, "reset", "-q", "--hard", "base");
-      git(lane.dir, "rm", "-q", "-r", `packages/broker/src/${ORG}`);
+      git(lane.dir, "rm", "-q", "-r", `packages/core/src/${ORG}`);
       git(lane.dir, "commit", "-q", "-m", "drop");
       expect(lane.guard()).toEqual([]);
     });
@@ -190,7 +190,7 @@ describe("port-guard on a temp repository", () => {
   describe("rule (b): imports of Cloud-only code", () => {
     it.each([
       ["a relative import of a Cloud-only directory", `import { m } from "./${ORG}/members.js";\n`],
-      ["a relative import that climbs out of the package", `import { m } from "../../broker/src/${SPEND}/limits.js";\n`],
+      ["a relative import that climbs out of the package", `import { m } from "../../core/src/${SPEND}/limits.js";\n`],
       ["a directory import with no file name", `import { m } from "./${AUDIT}";\n`],
       ["a Cloud-only contracts file", `import { m } from "../../contracts/src/${ORG}-budget.js";\n`],
       ["an export from", `export * from "./${TEAM_RECORD}/store.js";\n`],
@@ -201,7 +201,7 @@ describe("port-guard on a temp repository", () => {
       ["a multi-line import", `import {\n  a,\n  b,\n} from "./${ORG}/members.js";\n`],
       ["the Cloud web UI package", `import { App } from "@agentx/${j("u", "i")}";\n`],
       ["the audit verifier package", `import { verify } from "@rovara/${AUDIT}-verifier";\n`],
-      ["a Cloud-only subpath of a package", `import { out } from "@agentx/broker/${AUDIT}/outbox";\n`],
+      ["a Cloud-only subpath of a package", `import { out } from "@rovara-code/core/${AUDIT}/outbox";\n`],
     ])("fails %s", (_name, source) => {
       lane.write("packages/worker/src/engine.ts", source);
       lane.commit();
@@ -236,7 +236,7 @@ describe("port-guard on a temp repository", () => {
     it("lets ordinary imports through", () => {
       lane.write(
         "packages/worker/src/engine.ts",
-        'import { readFileSync } from "node:fs";\nimport { z } from "zod";\nimport { tasks } from "../../broker/src/tasks.js";\nimport { x } from "@agentx/contracts";\nexport const a = [readFileSync, z, tasks, x];\n',
+        'import { readFileSync } from "node:fs";\nimport { z } from "zod";\nimport { tasks } from "../../core/src/tasks.js";\nimport { x } from "@rovara-code/contracts";\nexport const a = [readFileSync, z, tasks, x];\n',
       );
       lane.commit();
       expect(lane.guard()).toEqual([]);
@@ -379,7 +379,7 @@ describe("port-guard on a temp repository", () => {
     });
 
     it("sees a backup copy of a Cloud-only file twice over: as a stray file and as a Cloud-only path", () => {
-      lane.write(`packages/broker/src/${ORG}/members.ts-E`, "export const a = 1;\n");
+      lane.write(`packages/core/src/${ORG}/members.ts-E`, "export const a = 1;\n");
       lane.commit();
       expect(rules(lane.guard())).toEqual(expect.arrayContaining(["stray-file", "cloud-path"]));
     });
@@ -400,7 +400,7 @@ describe("port-guard on a temp repository", () => {
     });
 
     it("passes a clean range that has ordinary files, hidden files and names that only look close", () => {
-      lane.write("packages/worker/src/engine.ts", 'import { tasks } from "../../broker/src/tasks.js";\nexport const engine = tasks;\n');
+      lane.write("packages/worker/src/engine.ts", 'import { tasks } from "../../core/src/tasks.js";\nexport const engine = tasks;\n');
       lane.write("packages/worker/src/engine.test.ts", 'import { engine } from "./engine.js";\n');
       lane.write(".gitignore", "node_modules\n");
       lane.write(".github/workflows/lint.yml", "name: lint\n");
@@ -753,12 +753,12 @@ describe("port-guard hardening (review of lane L0)", () => {
     expect(lane.guard()).toEqual([]);
     lane.write(`packages/contracts/src/${AUDIT}-ledger.ts`, "export {};\n");
     lane.write(`packages/contracts/src/${AUDIT}-sink-store.ts`, "export {};\n");
-    lane.write(`packages/broker/src/${AUDIT}/sink.ts`, "export {};\n");
+    lane.write(`packages/core/src/${AUDIT}/sink.ts`, "export {};\n");
     lane.commit();
     expect(lane.guard().map((f) => f.file).sort()).toEqual([
-      `packages/broker/src/${AUDIT}/sink.ts`,
       `packages/contracts/src/${AUDIT}-ledger.ts`,
       `packages/contracts/src/${AUDIT}-sink-store.ts`,
+      `packages/core/src/${AUDIT}/sink.ts`,
     ]);
   });
 
@@ -846,10 +846,10 @@ describe("port-guard hardening (review of lane L0)", () => {
     lane.write("docs/lane.md", "lane\n");
     lane.commit("lane");
     git(lane.dir, "merge", "-q", "--no-ff", "--no-commit", "side");
-    lane.write(`packages/broker/src/${ORG}/evil.ts`, "export {};\n");
+    lane.write(`packages/core/src/${ORG}/evil.ts`, "export {};\n");
     lane.write("docs/evil.md", `${PROSPECT}\n`);
     lane.commit("merge");
-    git(lane.dir, "rm", "-q", "-r", `packages/broker/src/${ORG}`, "docs/evil.md");
+    git(lane.dir, "rm", "-q", "-r", `packages/core/src/${ORG}`, "docs/evil.md");
     git(lane.dir, "commit", "-q", "-m", "tidy");
     const findings = lane.guard();
     expect(rules(findings)).toEqual(expect.arrayContaining(["cloud-path", "private-name"]));
@@ -868,7 +868,7 @@ describe("port-guard hardening (review of lane L0)", () => {
   });
 
   it.each([
-    ["a template literal", "const m = await import(`../../broker/src/" + ORG + "/x.js`);\n"],
+    ["a template literal", "const m = await import(`../../core/src/" + ORG + "/x.js`);\n"],
     ["a comment before the string", 'const m = await import(/* why */ "./' + ORG + '/x.js");\n'],
     ["require.resolve", 'const p = require.resolve("./' + ORG + '/x.js");\n'],
     ["a triple-slash reference", '/// <reference path="./' + ORG + '/x.d.ts" />\n'],
@@ -882,7 +882,7 @@ describe("port-guard hardening (review of lane L0)", () => {
   });
 
   it("fails a package file or tsconfig that points a path or dependency into Cloud-only code", () => {
-    lane.write("packages/worker/tsconfig.json", `{ "compilerOptions": { "paths": { "@x/*": ["../broker/src/${ORG}/*"] } } }\n`);
+    lane.write("packages/worker/tsconfig.json", `{ "compilerOptions": { "paths": { "@x/*": ["../core/src/${ORG}/*"] } } }\n`);
     lane.write("packages/mcp/package.json", `{ "dependencies": { "x": "file:../${j("w", "eb")}" } }\n`);
     lane.commit();
     expect(lane.guard().filter((f) => f.rule === "cloud-import").map((f) => f.file).sort()).toEqual(["packages/mcp/package.json", "packages/worker/tsconfig.json"]);
@@ -1118,8 +1118,8 @@ describe("port-guard pieces", () => {
   });
 
   it("recognises Cloud-only paths and nothing near them", () => {
-    expect(cloudPathRule(`packages/broker/src/${ORG}/a.ts`)).not.toBeNull();
-    expect(cloudPathRule(`packages/broker/src/${ORG}anizer/a.ts`)).toBeNull();
+    expect(cloudPathRule(`packages/core/src/${ORG}/a.ts`)).not.toBeNull();
+    expect(cloudPathRule(`packages/core/src/${ORG}anizer/a.ts`)).toBeNull();
     expect(cloudPathRule(`docs/${AUDIT}-ledger-notes.md`)).toBeNull();
     expect(cloudPathRule("packages/uikit/a.ts")).toBeNull();
     expect(cloudPathRule("packages/worker/src/engine.ts")).toBeNull();

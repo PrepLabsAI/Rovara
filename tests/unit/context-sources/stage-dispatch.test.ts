@@ -1,9 +1,9 @@
 // Which steps are dispatched with the capability to read a project's sources: a step of a stage that has a source, on a worker that can use it, and no other. The step's own operation record is
 // read back, so what the worker would be sent is what is checked.
 import { describe, expect, it } from "vitest";
-import { DesignReviewBindingSchema } from "@agentx/contracts";
-import { acceptStep, readWorkspace, type StepInput } from "../../../packages/broker/src/core/task-flow/stage-machine.js";
-import { readTask } from "../../../packages/broker/src/core/task-flow/reads.js";
+import { DesignReviewBindingSchema } from "@rovara-code/contracts";
+import { acceptStep, readWorkspace, type StepInput } from "../../../packages/core/src/core/task-flow/stage-machine.js";
+import { readTask } from "../../../packages/core/src/core/task-flow/reads.js";
 import { createHarness, newRequestId } from "../../support/task-flow-harness.js";
 
 const BINDING = DesignReviewBindingSchema.parse({ version: 1, round: 1, reviewers: [{ role: "critic", keySlot: "r1-critic", packetDigest: "a".repeat(64), model: { provider: "anthropic", modelId: "m1" } }] });

@@ -3,17 +3,17 @@ import { describe, expect, it } from "vitest";
 import {
   CoverageMapSchema, DocumentStoreError, NIGHTLY_STEP_WORDS, NightlyBaselineSchema, NightlyResultSchema, StoredNightlyHealthSchema, agentXError, projectPk,
   type DocumentStore,
-} from "@agentx/contracts";
-import { NIGHTLY_ENVIRONMENT_CAUSES, NIGHTLY_HEALTH_STEPS, NIGHTLY_UNCLEAR_CAUSES } from "../../packages/broker/src/core/test-env/nightly-health.js";
+} from "@rovara-code/contracts";
+import { NIGHTLY_ENVIRONMENT_CAUSES, NIGHTLY_HEALTH_STEPS, NIGHTLY_UNCLEAR_CAUSES } from "../../packages/core/src/core/test-env/nightly-health.js";
 import {
   alreadyFailingTests, coverageMapDigest, failingSetIsWhole, handleNightlyFire, lastNightlyFailures, mapAgeDays, nightlyHealthOf, readCoverageMap, readLatestNightlyHealth, readNightlyBaseline,
   recordNightlyResult, splitFailures, type MapStore,
-} from "../../packages/broker/src/core/test-env/nightly.js";
-import { nightFailedItem, readLatestNight, readNightRows, sameDayRetryOf } from "../../packages/broker/src/core/test-env/night-status.js";
-import { createObjectMapStore } from "../../packages/broker/src/core/test-env/nightly-wiring.js";
-import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { nightlyMapKey, nightlyMapsOfProject } from "../../packages/broker/src/core/test-env/map-keys.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+} from "../../packages/core/src/core/test-env/nightly.js";
+import { nightFailedItem, readLatestNight, readNightRows, sameDayRetryOf } from "../../packages/core/src/core/test-env/night-status.js";
+import { createObjectMapStore } from "../../packages/core/src/core/test-env/nightly-wiring.js";
+import { createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import { nightlyMapKey, nightlyMapsOfProject } from "../../packages/core/src/core/test-env/map-keys.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 import { HEAD1, HEAD2, ORG, PROJECT, T0, map, nightlyWorld, result, rows } from "../support/nightly-world.js";
 
 const PK = projectPk(ORG, PROJECT);

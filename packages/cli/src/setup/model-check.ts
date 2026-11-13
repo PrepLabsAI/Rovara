@@ -1,7 +1,7 @@
 // `agentx project model-check discover | test` (M1.4 Task 4.10C): the on-account checks of the AI navigation model. `discover` lists the models this account can use, in tiers, and
 // makes no model call. `test` runs the driving test of one model on the qualified runner: it shows the worst-case cost first, asks for confirmation, and polls for the answer.
 // Both go through the control plane (an administrator's sign-in is the only authority); neither reads a secret.
-import { DRIVING_TEST_BUDGET, E2E_AGENT_ELIGIBLE_MODELS, agentXError } from "@agentx/contracts";
+import { DRIVING_TEST_BUDGET, E2E_AGENT_ELIGIBLE_MODELS, agentXError } from "@rovara-code/contracts";
 import type { Prompter } from "../init/prompts.js";
 import { adminResponseBody } from "../admin/http.js";
 import type { AdminSession } from "./services.js";

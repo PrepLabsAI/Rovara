@@ -1,17 +1,17 @@
 // Integration of T4 (PLANVIEW) with T5 (PLANSELFCHECK): the card, the task page, the full-plan route and the unreadable-plan card show what the plan self-check stored
 // (T5's record contract): its findings and notes, the fixed "not checked" line when there is no usable record, and the direction of each check on the unchanged code.
 import { describe, expect, it } from "vitest";
-import { WorkflowSnapshotSchema, createWorkflowSnapshot, planQualityFinding, WORKFLOW_BLOCK_REASONS, type PlanDocument } from "@agentx/contracts";
+import { WorkflowSnapshotSchema, createWorkflowSnapshot, planQualityFinding, WORKFLOW_BLOCK_REASONS, type PlanDocument } from "@rovara-code/contracts";
 import {
   NOT_CHECKED_SENTENCE, PlanSelfCheckRecordSchema, loadPlanSelfCheck, planSelfCheckKeyOf, readPlanSelfCheck,
-} from "../../packages/broker/src/developer/plan-self-check.js";
-import { NOT_TRIED_SENTENCES } from "../../packages/broker/src/developer/plan-check-tried.js";
-import { planCheckSummary } from "../../packages/broker/src/developer/plan-check-summary.js";
-import { structuredExtraLines, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
-import { renderPlanDocument } from "../../packages/broker/src/aws/plan-page/render-plan.js";
-import { readTaskPlanDocument } from "../../packages/broker/src/aws/task-plan-document.js";
-import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
-import { createTaskWeb, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
+} from "../../packages/core/src/developer/plan-self-check.js";
+import { NOT_TRIED_SENTENCES } from "../../packages/core/src/developer/plan-check-tried.js";
+import { planCheckSummary } from "../../packages/core/src/developer/plan-check-summary.js";
+import { structuredExtraLines, workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
+import { renderPlanDocument } from "../../packages/core/src/aws/plan-page/render-plan.js";
+import { readTaskPlanDocument } from "../../packages/core/src/developer/task-plan-document.js";
+import { getTaskDocumentView } from "../../packages/core/src/aws/developer-tasks.js";
+import { createTaskWeb, type TaskDocumentView } from "../../packages/core/src/aws/task-web.js";
 import { PRIYA, pageTask } from "../support/page-tasks.js";
 import { planDocument } from "../support/plan-documents.js";
 

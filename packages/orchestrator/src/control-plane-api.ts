@@ -9,7 +9,7 @@ import {
   taskResultChecks,
   type CheckReport,
   type Operation,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import {
   pollOperation,
   type OperationPollingTransport,

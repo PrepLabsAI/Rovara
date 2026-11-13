@@ -2,7 +2,7 @@
 // (R3): the legacy deployment must not change.
 import { ArnFormat, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, aws_apigatewayv2 as apigwv2, aws_dynamodb as dynamodb, aws_iam as iam, aws_kms as kms, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { SIGN_IN_CLIENTS_PK } from "@agentx/contracts";
+import { SIGN_IN_CLIENTS_PK } from "@rovara-code/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { packagedFunction } from "./control-plane.js";
 
@@ -94,7 +94,7 @@ export class DeveloperSignIn extends Construct {
     });
 
     const oidcSecretName = `agentx/${props.env}/developer-oidc`;
-    const fn = this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-identity.ts", {
+    const fn = this.function = packagedFunction(this, "Function", "packages/core/src/aws/developer-identity.ts", {
       AGENTX_ENV: props.env,
       DEVELOPER_TOKEN_ISSUER: issuer,
       DEVELOPER_SIGNIN_TABLE_NAME: table.tableName,
@@ -153,7 +153,7 @@ export class DeveloperSignIn extends Construct {
 
     // D17: no API Gateway JWT authorizer. One would fetch <api>/v1/auth's discovery document when it
     // is created, before this API exists, so a fresh install could never create it. The broker
-    // verifies the developer access token itself (packages/broker/src/developer/verify-token.ts).
+    // verifies the developer access token itself (packages/core/src/developer/verify-token.ts).
     const devRoute = new apigwv2.CfnRoute(this, "DevRoute", {
       apiId: props.api.ref, routeKey: DEV_ROUTE_KEY, target: `integrations/${props.brokerIntegration.ref}`, authorizationType: "NONE",
     });

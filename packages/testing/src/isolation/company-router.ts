@@ -4,7 +4,7 @@
 //
 // It fails closed. A call that carries no scope, a scope that names no company (`{ system: ... }`), a resolver that throws or answers `undefined`, and a company with no adapter are all
 // refused with one fixed sentence that names no company, and the call goes to nobody. The router never falls back to a first or default company.
-import { HostScopeSchema, agentXError, type HostScope } from "@agentx/contracts";
+import { HostScopeSchema, agentXError, type HostScope } from "@rovara-code/contracts";
 
 export type CompanyResolver = (scope: HostScope) => string | undefined | Promise<string | undefined>;
 

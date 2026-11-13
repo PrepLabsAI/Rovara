@@ -3,7 +3,7 @@ import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-be
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { BEDROCK_REGION_PREFIXES, canonicalModelName, type ModelIdentifier } from "@agentx/contracts";
+import { BEDROCK_REGION_PREFIXES, canonicalModelName, type ModelIdentifier } from "@rovara-code/contracts";
 
 /**
  * The provider name a routed model is registered under. Here, not in index.ts: the package root loads the whole coding-agent runtime (which reads `import.meta.url` when it loads and cannot be bundled into a

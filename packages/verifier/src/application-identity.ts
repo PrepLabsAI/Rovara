@@ -2,8 +2,8 @@ import { types } from "node:util";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { APPLICATION_E2E_TEST_PATH, E2EExecutionPlanSchema, canonicalJson,
-  e2eApplicationUpstreamTestIdFromIdentity, type E2EExecutionPlan, type E2EExpectedCase } from "@agentx/contracts";
-import { copyBoundedE2EJsonData } from "@agentx/contracts";
+  e2eApplicationUpstreamTestIdFromIdentity, type E2EExecutionPlan, type E2EExpectedCase } from "@rovara-code/contracts";
+import { copyBoundedE2EJsonData } from "@rovara-code/contracts";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 120) => z.string().trim().min(1).max(max);

@@ -3,7 +3,7 @@
 // 128-character cut like macOS `security add-generic-password -w`.
 import { readFile as readFileFromDisk } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@rovara-code/contracts";
 
 export interface TextWriter { write(text: string): unknown }
 export interface PromptFlag { flag: string }

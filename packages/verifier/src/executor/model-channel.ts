@@ -14,7 +14,7 @@ import {
   type E2EModelChannelResponse,
   type E2EModelChannelStepMarker,
   type E2EModelSessionSync,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { maskModelCall, ModelMaskDepthError } from "./model-mask.js";
 import { createSessionSyncState, syncSessionBeforeCall, type E2EModelSessionSource } from "./model-channel-sync.js";
 

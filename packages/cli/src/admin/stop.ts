@@ -1,4 +1,4 @@
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 export async function stopWorkspace(
   input: { controlPlaneUrl: string; accessToken: string; workspaceId: string },

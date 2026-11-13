@@ -4,13 +4,13 @@
 import { describe, expect, it } from "vitest";
 import {
   TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES, testEnvDigest, type JsonValue, type TestEnvironmentBody,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { AWS_EMULATOR_SERVICES } from "../../packages/contracts/src/generated/aws-emulator-services.js";
-import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
-import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { createTaskTestEnvironment } from "../../packages/broker/src/core/test-env/seam.js";
-import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
-import { acceptStep, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
+import { documentOf, type TestEnvDeps } from "../../packages/core/src/core/test-env/deps.js";
+import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/core/src/core/test-env/environment.js";
+import { createTaskTestEnvironment } from "../../packages/core/src/core/test-env/seam.js";
+import { readTask, workspaceOperations } from "../../packages/core/src/core/task-flow/reads.js";
+import { acceptStep, readWorkspace } from "../../packages/core/src/core/task-flow/stage-machine.js";
 import { COMPANY, createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 

@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { taskGraphDigest, type TaskGraphV1 } from "@agentx/contracts";
+import { taskGraphDigest, type TaskGraphV1 } from "@rovara-code/contracts";
 import { executeParallelWorkflowDependencies } from "../../packages/worker/src/parallel-parts.js";
 import { PARTS_DIRECTORY, capturePartTree, checkoutIntegratedTree, createPartWorkingCopy, integrateTrees, partDirectory } from "../../packages/worker/src/parallel-parts-git.js";
 import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";

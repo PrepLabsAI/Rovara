@@ -3,7 +3,7 @@
 // (unreadable answers, a timeout) [LIVE-BUG B6], the automatic start failing, older issues, an accepted finding raised
 // again on new code, and a change too large to show the reviewers in full.
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, openReviewFindings } from "@agentx/contracts";
+import { WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, openReviewFindings } from "@rovara-code/contracts";
 import { reviewerFindings, reviewerHangs, reviewerProse } from "../../support/model-fixtures.js";
 import { reviewerReply } from "../../support/faux-scripts.js";
 import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";

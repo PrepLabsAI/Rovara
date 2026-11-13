@@ -4,7 +4,7 @@
  * the thread remembered, posting its result instead of running the model (and any approved call)
  * again.
  */
-import { checksReplyPrefix, redactAndCap, type CheckReport } from "@agentx/contracts";
+import { checksReplyPrefix, redactAndCap, type CheckReport } from "@rovara-code/contracts";
 
 /** The worker operation a turn was waiting on, kept on the thread's META row until the turn ends. */
 export interface ActiveTurn {

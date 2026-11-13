@@ -1,7 +1,7 @@
 // SH25 (review M1): the worker's request for the saved environment pull login. The prepare invocation carries no credential (an invocation is stored); the worker presents the preparation's own grant right before the
 // pull and the broker decides whether the preparation is still running and which image it may pull (test-env/saved-env-login.ts). Nothing but a fixed sentence leaves this file on a failure, and the login is returned
 // to the caller only: it is never logged or written here.
-import { SAVED_ENV_FALLBACK_PATH, SAVED_ENV_LOGIN_PATH, SavedEnvRegistryAuthSchema, agentXError, type SavedEnvRegistryAuth, type SavedEnvUseStep, type WorkerInvocation } from "@agentx/contracts";
+import { SAVED_ENV_FALLBACK_PATH, SAVED_ENV_LOGIN_PATH, SavedEnvRegistryAuthSchema, agentXError, type SavedEnvRegistryAuth, type SavedEnvUseStep, type WorkerInvocation } from "@rovara-code/contracts";
 
 export type SavedEnvLoginProvider = () => Promise<SavedEnvRegistryAuth>;
 

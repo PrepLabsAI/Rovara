@@ -1,7 +1,7 @@
 // The `realtime` point (lane K1): the in-process adapter passes the contract, it is Code's default, and a listener hears only its company and audience.
 import { describe, expect, it } from "vitest";
-import { PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, isRealtimeAudience, isRealtimeNotice } from "@agentx/contracts";
-import { createAdapterRegistry, createInProcessRealtime, registerCodeDefaults } from "../../packages/broker/src/ports/index.js";
+import { PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, isRealtimeAudience, isRealtimeNotice } from "@rovara-code/contracts";
+import { createAdapterRegistry, createInProcessRealtime, registerCodeDefaults } from "../../packages/core/src/ports/index.js";
 import { runRealtimeConformance } from "../support/ports/realtime-conformance.js";
 
 runRealtimeConformance("the in-process adapter", {

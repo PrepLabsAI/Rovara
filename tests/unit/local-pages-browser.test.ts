@@ -3,7 +3,7 @@
 import { existsSync } from "node:fs";
 import { chromium, type Browser } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createLocalPagesServer, type LocalPagesServer } from "../../packages/broker/src/core/local-pages/index.js";
+import { createLocalPagesServer, type LocalPagesServer } from "../../packages/core/src/core/local-pages/index.js";
 import { TASK, fakeWorld, type FakeWorld } from "../support/local-pages-fakes.js";
 
 const haveChromium = existsSync(chromium.executablePath());

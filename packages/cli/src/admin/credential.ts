@@ -1,7 +1,7 @@
 import {
   CredentialRegistrationSchema,
   agentXError,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { adminResponseBody } from "./http.js";
 
 interface CredentialAdminInput {

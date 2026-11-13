@@ -4,7 +4,7 @@ import { mkdir, open, readFile, realpath, rmdir, symlink } from "node:fs/promise
 import { spawn } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalJson, ProjectSetupRunnerToolchainSchema, type E2ESourceSnapshot, type ProjectSetupRunnerToolchain } from "@agentx/contracts";
+import { canonicalJson, ProjectSetupRunnerToolchainSchema, type E2ESourceSnapshot, type ProjectSetupRunnerToolchain } from "@rovara-code/contracts";
 import { compareE2EPublicList, type E2ESelectionPacket } from "./selection.js";
 import { createE2ERuntimeAssets, createE2ERuntimeLaunchId, parseE2EFirstPartyCapture, type E2EFirstPartyCaptureResult } from "./runtime-assets.js";
 import { validateE2ECompiledRuntimeAdmission, type E2ECompiledSuite } from "./scenarios.js";

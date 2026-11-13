@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { taskGraphDigest } from "@agentx/contracts";
+import { taskGraphDigest } from "@rovara-code/contracts";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 

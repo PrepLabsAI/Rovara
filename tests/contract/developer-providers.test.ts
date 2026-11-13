@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProviderNotConfiguredError, ProviderUnavailableError, oidcSignInProvider, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
+import { ProviderNotConfiguredError, ProviderUnavailableError, oidcSignInProvider, slackSignInProvider } from "../../packages/core/src/developer/providers.js";
 import {
   ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, fakeOidc, fakeSlack, routeFetch, rsaKeyPair,
 } from "../support/developer-fakes.js";

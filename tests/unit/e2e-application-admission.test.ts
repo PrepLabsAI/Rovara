@@ -3,20 +3,20 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { type E2EScenario, E2EApplicationPlanIntentSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V1, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, E2E_MODEL_FREE_LIMITS, E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
-  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, e2eRuntimeBindingKey, E2ESetupProposalSchema, createCandidateManifest, inspectE2ERepository, proposeE2ESetup, verifyE2ESetupProposal } from "@agentx/contracts";
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, e2eRuntimeBindingKey, E2ESetupProposalSchema, createCandidateManifest, inspectE2ERepository, proposeE2ESetup, verifyE2ESetupProposal } from "@rovara-code/contracts";
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, e2eCompiledRuntime,
   validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
-import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
-import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
-import { ApplicationBaselineSkipped, ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
-import { baselineStartFailureReason } from "../../packages/broker/src/aws/workflow-e2e-baseline.js";
-import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
+import { candidateBuildSourceAdmissionReference } from "../../packages/core/src/aws/candidate-build-source.js";
+import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/core/src/e2e/application-admission.js";
+import { ApplicationBaselineSkipped, ApplicationDispatchRefusal } from "../../packages/core/src/e2e/application-dispatch-check.js";
+import { baselineStartFailureReason } from "../../packages/core/src/aws/workflow-e2e-baseline.js";
+import { e2eAgentRoutePolicyLimits } from "../../packages/core/src/e2e/model-route-registry.js";
+import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval } from "../../packages/core/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { builtWebAndApiAdmission } from "../support/e2e-web-and-api-admission.js";
 import { PROFILE, anonymousScenario, anonymousTargetOf, binding, csvScenario, inferredSnapshot, oneAppWebAndApiFixture, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
-import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionNeedsModelFreeLimitsReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
+import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionNeedsModelFreeLimitsReader } from "../../packages/core/src/aws/workflow-e2e-admission-schema.js";
 
 afterEach(disposeRealCandidates);
 const candidateOf = createRealCandidate;

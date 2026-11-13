@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidateManifest, inferNodeWebRecipe, type E2ESourceSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, inferNodeWebRecipe, type E2ESourceSnapshot } from "@rovara-code/contracts";
 import { INFERRED_APP_FILES, INFERRED_FIXTURE_ROOT } from "../support/e2e-inferred-fixture.js";
 
 // The Task 3.3 fixture app is what the Linux test and the journey run: a web app with a start script and a lockfile and no `agentx.e2e` contract.

@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DocumentStoreError, change, queryAll, queryIndexAll, when, type DocumentChange, type IndexDefinition } from "@agentx/contracts";
+import { DocumentStoreError, change, queryAll, queryIndexAll, when, type DocumentChange, type IndexDefinition } from "@rovara-code/contracts";
 import { SqliteDatabase, SqliteDocumentStore, prefixEnd } from "../../packages/local-adapters/src/index.js";
 import { runDocumentStoreConformance } from "../support/ports/document-store-conformance.js";
 import { FAST_FEED, sqliteStoreHarness } from "../support/ports/sqlite-harness.js";

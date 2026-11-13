@@ -2,7 +2,7 @@
 //
 // The broker already cleans, cuts and frames every answer (broker/src/context-sources/present.ts). The worker does not trust that it did: it strips hidden
 // characters again, and an answer that is not in the frame is put in one, so no path shows the model a source's words as bare text.
-import { defuseFrameTags, stripHiddenCharacters, SEARCH_TEAM_KNOWLEDGE_TOOL, type ContextToolCallResponse, type ContextToolCatalog } from "@agentx/contracts";
+import { defuseFrameTags, stripHiddenCharacters, SEARCH_TEAM_KNOWLEDGE_TOOL, type ContextToolCallResponse, type ContextToolCatalog } from "@rovara-code/contracts";
 
 const FRAME = /<source-result source="([^"]{0,120})" item="([^"]{0,120})"[^>]*>\n([\s\S]*?)\n<\/source-result>/gu;
 const MAX_ANSWER_CHARS = 220_000;

@@ -1,7 +1,7 @@
 // A world for the tests of the evidence path: the evidence blob store over an in-memory document store, the artifact listing the broker reads the worker's raw file through, and the stand-in data guard.
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import type { KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createDocumentEvidenceBlobStore } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import type { KeepEvidenceDeps } from "../../packages/core/src/core/proof/evidence-keep.js";
 import { scanTextForTests } from "./evidence-scan.js";
 
 export const EVIDENCE_TASK = { ownerKey: "owner-1", workspaceId: "ws-1", taskId: "task-1" };

@@ -1,8 +1,8 @@
 import { createHmac } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { createSlackIngressHandler } from "../../packages/broker/src/aws/slack-ingress.js";
-import { createSlackInteractivityHandler } from "../../packages/broker/src/aws/slack-interactivity.js";
+import { createSlackIngressHandler } from "../../packages/core/src/aws/slack-ingress.js";
+import { createSlackInteractivityHandler } from "../../packages/core/src/aws/slack-interactivity.js";
 import {
   botNameOf, missingScopes, probeSlackUrls, readSlackTeamIdFromSecret, SIGN_IN_BOT_SCOPES, SLACK_BOT_SCOPES, signSlackRequest, slackAppManifest, slackAppStep, slackBotDisplayName, slackBotScopes, slackCreateAppUrl,
   slackSecretName, slackSecretWithBot, SlackTeamIdError, slackSecretWithSignIn, slackSignInCallbackUrl, slackValuesFields, SLACK_VALUES_TITLE, slackWebApi, verifySlackUrls,

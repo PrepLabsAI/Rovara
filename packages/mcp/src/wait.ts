@@ -1,5 +1,5 @@
 // Spec 025 US2, D10, R21: waiting on a task. Ending first is not an error; a cancelled call stops at once.
-import { ENDED_TASK_STATUSES, taskStatusText, type DeveloperTaskClientView } from "@agentx/contracts";
+import { ENDED_TASK_STATUSES, taskStatusText, type DeveloperTaskClientView } from "@rovara-code/contracts";
 import type { ControlPlaneClient } from "./client.js";
 
 const FIRST_INTERVAL_MS = 2_000;

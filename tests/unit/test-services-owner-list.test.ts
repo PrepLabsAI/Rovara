@@ -6,17 +6,17 @@ import {
   CATALOG_SIGNATURE_ALGORITHM, IMPLICIT_COMPANY_ID, OWNER_IMAGE_REFUSALS, ServiceCatalogSchema, catalogSigningKeysCompiledIn, OWNER_STARTER_IMAGES, OwnerServiceImageSchema, catalogSigningMessage, checkMirrorServesDigest, describeImage, isOwnerListCatalog, normalizeOwnerList,
   ownerCatalogOf, ownerImageReferences, ownerImageRequest, ownerListReferences, ownerStarterEntries, parseBundlePublicKey, parseImageReference, resolveCatalogImage, sha256HexOf, starterImageFor,
   type OwnerListEntry, type TestEnvDependencyCandidate,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { loadSignedCatalogWith } from "../../packages/contracts/dist/catalog-load-core.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { prepareLocalTestServices } from "../../packages/broker/src/local/test-services-install.js";
-import { localTestServicesDigestPart, testServicesEnvironment } from "../../packages/broker/src/local/test-services.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { prepareLocalTestServices } from "../../packages/core/src/local/test-services-install.js";
+import { localTestServicesDigestPart, testServicesEnvironment } from "../../packages/core/src/local/test-services.js";
 import {
   NO_IMAGES_SENTENCE, createOwnerImageService, createOwnerImageStore, pinImageThroughDocker, proposeServiceImages, resolveOwnerImages, type OwnerImageService,
-} from "../../packages/broker/src/local/test-services-owner-list.js";
+} from "../../packages/core/src/local/test-services-owner-list.js";
 import { OwnerDocker, sha } from "../support/owner-docker.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 

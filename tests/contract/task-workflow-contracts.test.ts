@@ -22,7 +22,7 @@ import {
   StartDeveloperTaskRequestSchema,
   WorkflowDecisionRequestSchema,
   WorkflowDecisionSchema,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const ownerId = "a".repeat(64);

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { agentXError, isKeyedModelProvider, type E2EModelFailure, type KeyedModelProvider } from "@agentx/contracts";
+import { agentXError, isKeyedModelProvider, type E2EModelFailure, type KeyedModelProvider } from "@rovara-code/contracts";
 import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Message, Model, Tool } from "@earendil-works/pi-ai";
 import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as bedrockStream } from "@earendil-works/pi-ai/api/bedrock-converse-stream";
@@ -12,7 +12,7 @@ import { assertE2EEnvironmentCannotRedirect, assertE2ERouteMatchesInstallation }
 import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput, E2EModelChannelCall } from "./e2e-route.js";
 import { BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, classifyProviderFailure, isNetworkCode } from "./provider-failure.js";
 import { TRANSPORTS, requestCompat } from "./transport.js";
-import type { E2EModelRouteDefinition } from "@agentx/contracts";
+import type { E2EModelRouteDefinition } from "@rovara-code/contracts";
 
 /**
  * The provider call of the governed e2e model route (M1.4 Task 4.1, amendment A1 and Ruling M4-Q).

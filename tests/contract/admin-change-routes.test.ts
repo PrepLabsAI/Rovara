@@ -2,8 +2,8 @@
 // Spec 025 FR-039 to FR-041, FR-051, FR-052, SC-005 and SC-011 at the routes: a change is planned,
 // stored and audited, and applies at most once, only after a valid confirmation.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AdminChangePendingRecordSchema, type ChannelInfoRequest, type ChannelMembersRequest } from "@agentx/contracts";
-import { adminChangeOutcomeMessage } from "../../packages/broker/src/developer/change-messages.js";
+import { AdminChangePendingRecordSchema, type ChannelInfoRequest, type ChannelMembersRequest } from "@rovara-code/contracts";
+import { adminChangeOutcomeMessage } from "../../packages/core/src/developer/change-messages.js";
 import { ADMIN_SLACK, ADMIN_TOKEN, TRACE, createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 import { bindChannel, unbindChannel } from "../support/developer-task-broker.js";

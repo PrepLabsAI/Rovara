@@ -9,8 +9,8 @@ import { CAPTURE_API_SAMPLES_MAX, CAPTURE_DIR, admittedCapturePolicy, captureApi
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";
 import { recordApiSample } from "../../packages/verifier/src/api-runtime.js";
-import { apiEvidenceOf, readCaptureApiSamples, scenarioSamplesOf } from "../../packages/broker/src/e2e/api-evidence.js";
-import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence-pack.js";
+import { apiEvidenceOf, readCaptureApiSamples, scenarioSamplesOf } from "../../packages/core/src/e2e/api-evidence.js";
+import { buildEvidencePack } from "../../packages/core/src/core/proof/evidence-pack.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const enc = (value: unknown) => Buffer.from(JSON.stringify(value));
@@ -294,6 +294,6 @@ describe("small things in the samples and the evidence lines", () => {
   });
   it("M6: changed paths carry real key names from bodies, so no pull request line may print them (they are not among the fixed evidence words)", async () => {
     const { readFileSync } = await import("node:fs");
-    for (const file of ["packages/broker/src/core/proof/evidence-lines.ts", "packages/broker/src/core/proof/proof-section.ts"]) expect(readFileSync(file, "utf8"), file).not.toMatch(/changedPaths/u);
+    for (const file of ["packages/core/src/core/proof/evidence-lines.ts", "packages/core/src/core/proof/proof-section.ts"]) expect(readFileSync(file, "utf8"), file).not.toMatch(/changedPaths/u);
   });
 });

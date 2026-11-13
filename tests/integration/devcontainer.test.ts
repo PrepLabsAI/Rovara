@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } f
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { ProjectDefinitionSchema, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
+import { ProjectDefinitionSchema, type ProjectDefinition, type WorkerInvocation } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   containerBashOperations,

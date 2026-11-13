@@ -1,4 +1,4 @@
-import {TaskModelFallbackRequestSchema,type TaskModelFallbackRequest,type TaskModelFallbackAuthorization} from "@agentx/contracts";
+import {TaskModelFallbackRequestSchema,type TaskModelFallbackRequest,type TaskModelFallbackAuthorization} from "@rovara-code/contracts";
 import {parseTaskModelFallbackAuthorization,taskModelPolicyBindingsMatch} from "./model-fallback-authority.js";
 import { createHash } from "node:crypto";
 import {
@@ -16,7 +16,7 @@ import {
   type E2EModelDayBudgetRequest,
   type E2EModelDayBudgetResponse,
   type E2EWorkflowAdmissionRef,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import type { EventBatchSink } from "./events.js";
 import type { WorkerTerminalResult } from "./server.js";

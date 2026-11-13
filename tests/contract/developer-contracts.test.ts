@@ -10,7 +10,7 @@ import {
   apiVersionCompatible,
   developerIssuer,
   isLoopbackRedirectUri,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const configuration = {
   env: "staging",

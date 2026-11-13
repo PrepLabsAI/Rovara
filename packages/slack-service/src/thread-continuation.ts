@@ -4,7 +4,7 @@
 // the thread as the assistant's, so a continued request there goes to the assistant. Best effort: a lost record only
 // means the person mentions AgentX again.
 import { PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { threadContinuationPersonItem, threadContinuationThreadUpdate, type ContinuationThread } from "@agentx/contracts";
+import { threadContinuationPersonItem, threadContinuationThreadUpdate, type ContinuationThread } from "@rovara-code/contracts";
 import type { ServiceLog } from "./processor.js";
 
 export function createContinuationRecorder(deps: {

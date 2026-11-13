@@ -1,6 +1,6 @@
 import { CfnCondition, CfnParameter, Fn, Stack, aws_iam as iam } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, type KeyedModelProvider } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, type KeyedModelProvider } from "@rovara-code/contracts";
 
 /**
  * A keyed provider's optional secret ARN parameter (specs 032, 054). Only a reference is deployed;

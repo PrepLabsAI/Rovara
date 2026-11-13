@@ -1,7 +1,7 @@
 // What the owner and a tool see of the per-step model setting: the page (everything a model says about itself is escaped), the plain lines for the terminal and an AI tool, and the MCP tool that only reads.
 import { describe, expect, it, vi } from "vitest";
-import { ModelSelectionBodySchema, ModelSelectionStateSchema, modelSelectionLines, type ModelSelectionState } from "@agentx/contracts";
-import { renderModelSelection } from "../../packages/broker/src/core/local-pages/models-page.js";
+import { ModelSelectionBodySchema, ModelSelectionStateSchema, modelSelectionLines, type ModelSelectionState } from "@rovara-code/contracts";
+import { renderModelSelection } from "../../packages/core/src/core/local-pages/models-page.js";
 import { DEVELOPER_TOOLS } from "../../packages/mcp/src/index.js";
 
 const ref = (provider: string, modelId: string) => ({ provider, modelId });

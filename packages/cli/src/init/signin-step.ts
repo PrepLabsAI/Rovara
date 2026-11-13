@@ -5,7 +5,7 @@
 // collects any company OIDC app values that method needs, and applies the same change as agentx
 // signin enable (F16: enableSlackSignIn and enableOidcSignIn are shared, not copied), under the lock
 // the step runner already holds.
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@rovara-code/contracts";
 import { readEnvironmentSettings } from "../environments/settings.js";
 import { applySignInChange, errorReason } from "../signin/apply.js";
 import { enableOidcSignIn, enableSlackSignIn, type SignInCredentials } from "../signin/collect.js";

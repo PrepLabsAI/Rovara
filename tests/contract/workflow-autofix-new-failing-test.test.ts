@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   WORKFLOW_AGENTX_ACTOR_ID, WorkflowDecisionRecordSchema, WorkflowSnapshotSchema, autoFixAskCard, autoFixDecision, classifyBlockedWorkflow, createCandidateManifest, createWorkflowSnapshot, wholeTaskSpendUsd,
   AUTO_FIX_CODE_CLASS, type AutoFixBudget, type AutoFixFacts, type WorkflowDecision, type WorkflowSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const NOW = "2026-11-02T12:00:00.000Z";
 const ownerId = "a".repeat(64);

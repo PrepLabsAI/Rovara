@@ -2,7 +2,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { RuntimeInstallChallengeSchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, type RuntimeInstallChallenge, type WebApiProbeRun } from "@agentx/contracts";
+import { RuntimeInstallChallengeSchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, type RuntimeInstallChallenge, type WebApiProbeRun } from "@rovara-code/contracts";
 import { containedRuntimeProfileForHost } from "./container-envelope.js";
 import { createProcessDockerCli } from "./host/docker-application-host.js";
 import { WEB_API_BUILD_IMAGE, createWebApiProbeRunner, type WebApiProbeModelChannelFactory } from "./host/web-api-probe-runner.js";

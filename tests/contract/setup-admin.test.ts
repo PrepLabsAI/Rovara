@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { rm } from "node:fs/promises";
 import { AdminAddUserToGroupCommand, AdminCreateUserCommand, AdminListGroupsForUserCommand, type AdminGetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js";
 import { ensureCognitoAdmin } from "../../packages/cli/src/setup/admin-user.js";
 import { openAdminSession, tokenClaimValues, userPoolId } from "../../packages/cli/src/setup/admin-session.js";

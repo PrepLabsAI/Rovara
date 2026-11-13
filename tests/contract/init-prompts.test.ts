@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import {
   ADVANCED_QUESTION, askForm, checkPrivateKeyPem, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, readHidden, secretFromSource,
   terminalPrompter, unattendedPrompter, type FormField,

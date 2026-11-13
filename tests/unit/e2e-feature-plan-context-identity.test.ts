@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { E2EApplicationIdentityMissingError, E2EApplicationPlanIntentSchema, WEB_API_RUNTIME_PROFILE_ID, createCandidateManifest, inspectE2ERepository, proposeE2ESetup,
-  type E2EPolicy, type E2ESourceSnapshot } from "@agentx/contracts";
+  type E2EPolicy, type E2ESourceSnapshot } from "@rovara-code/contracts";
 import { readFileSync } from "node:fs";
-import { buildFeatureE2EPlanningContext, describeFeatureE2EExecutableKinds } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
-import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
+import { buildFeatureE2EPlanningContext, describeFeatureE2EExecutableKinds } from "../../packages/core/src/e2e/feature-plan-planning-context.js";
+import { evaluateApplicationPlanApproval } from "../../packages/core/src/e2e/application-plan-approval.js";
+import { webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
 import { webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 

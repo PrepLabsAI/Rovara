@@ -1,5 +1,5 @@
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import type { SwebenchRunnerConfig } from "@agentx/contracts";
+import type { SwebenchRunnerConfig } from "@rovara-code/contracts";
 import type { RunReporter } from "./run.js";
 
 const CALLBACK_ATTEMPTS = 5;

@@ -26,7 +26,7 @@ import {
   type CompanyInstructionsSource,
   type CompanyRule,
   type CompanyRulePriority,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 /** A larger file is refused; the rules are at most 12,000 characters, so this leaves room for headings and layout. */
 export const COMPANY_INSTRUCTIONS_FILE_MAX_BYTES = 64 * 1_024;

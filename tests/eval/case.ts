@@ -6,7 +6,7 @@ import { z } from "zod";
 import {
   BUILT_IN_CONNECTOR_TYPES,
   type StoredConnectorConfig,
-} from "../../packages/broker/src/aws/connector-types.js";
+} from "../../packages/core/src/aws/connector-types.js";
 import type { ConnectorPolicy } from "../../packages/gateway/src/index.js";
 import {
   ConnectorNameSchema,

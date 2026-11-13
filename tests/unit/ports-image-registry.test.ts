@@ -1,7 +1,7 @@
 // The `image-registry` point: the in-memory fake and the default "none" pass the contract; a login is held to one repository and a local-looking host.
 import { describe, expect, it } from "vitest";
-import { HostedSavedEnvRegistryAuthSchema, ImageRegistryError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SavedEnvRegistryAuthSchema, savedEnvRegistryAuthSchema, savedEnvRepositoryName } from "@agentx/contracts";
-import { createAdapterRegistry, createFakeImageRegistry, createUnavailableImageRegistry, registerCodeDefaults } from "../../packages/broker/src/ports/index.js";
+import { HostedSavedEnvRegistryAuthSchema, ImageRegistryError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SavedEnvRegistryAuthSchema, savedEnvRegistryAuthSchema, savedEnvRepositoryName } from "@rovara-code/contracts";
+import { createAdapterRegistry, createFakeImageRegistry, createUnavailableImageRegistry, registerCodeDefaults } from "../../packages/core/src/ports/index.js";
 import { runImageRegistryConformance } from "../support/ports/image-registry-conformance.js";
 
 runImageRegistryConformance("the in-memory fake", {

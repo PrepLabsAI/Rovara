@@ -1,10 +1,10 @@
 // a peek at a running task's working tree, for an Ask. One `peek` invocation through the machines port, to a worker that is up and lists the feature, with a filler where a capability goes (it opens
 // nothing); any failure is no diff, and nothing is ever woken for it.
 import { describe, expect, it } from "vitest";
-import { PEEK_FEATURE, PEEK_NO_CALLBACK_CAPABILITY, PEEK_PATCH_MAX_BYTES, WorkerInvocationSchema, type PeekAnswer } from "@agentx/contracts";
-import { createAskDiffReader, createPeekClient, diffFromPeek, splitPatchByFile } from "../../packages/broker/src/core/sessions/peek.js";
-import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { PEEK_FEATURE, PEEK_NO_CALLBACK_CAPABILITY, PEEK_PATCH_MAX_BYTES, WorkerInvocationSchema, type PeekAnswer } from "@rovara-code/contracts";
+import { createAskDiffReader, createPeekClient, diffFromPeek, splitPatchByFile } from "../../packages/core/src/core/sessions/peek.js";
+import { FakeWorkerMachines } from "../../packages/core/src/ports/fake-worker-machines.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const WORKSPACE = "6f0d1c1e-1b9e-4c64-8f4a-0d7f6a9c3b11";

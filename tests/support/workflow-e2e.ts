@@ -35,15 +35,15 @@ import {
   type WorkerInvocation,
   type WorkflowOptionalCheck,
   type WorkflowSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { AttributeValue } from "@aws-sdk/client-dynamodb";
 import type { InvokeCommand } from "@aws-sdk/client-lambda";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
-import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
-import { canvasCloseoutService, createCanvasCloseoutStore, createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { captureFeedbackNoteThroughBroker, createSlackIngressHandler, recordIntakeThroughBroker, recordThreadNoteThroughBroker, startWorkflowThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
-import { createSlackInteractivityHandler, invokeWorkflowDecision, workflowSlackHandlers } from "../../packages/broker/src/aws/slack-interactivity.js";
-import { answerChosenRequest, createDynamoWorkflowChoiceStore, offerWorkflowChoice, startChosenWorkflow, type SlackWorkflowStartInput } from "../../packages/broker/src/aws/slack-workflow-choice.js";
+import type { HttpApiV2Event } from "../../packages/core/src/aws/lambda.js";
+import { canvasCloseoutService, createCanvasCloseoutStore, createNotifierHandler } from "../../packages/core/src/aws/developer-task-notifier.js";
+import { captureFeedbackNoteThroughBroker, createSlackIngressHandler, recordIntakeThroughBroker, recordThreadNoteThroughBroker, startWorkflowThroughBroker } from "../../packages/core/src/aws/slack-ingress.js";
+import { createSlackInteractivityHandler, invokeWorkflowDecision, workflowSlackHandlers } from "../../packages/core/src/aws/slack-interactivity.js";
+import { answerChosenRequest, createDynamoWorkflowChoiceStore, offerWorkflowChoice, startChosenWorkflow, type SlackWorkflowStartInput } from "../../packages/core/src/aws/slack-workflow-choice.js";
 import { createChoiceOffer, routeSlackRequest } from "../../packages/slack-service/src/request-routing.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { handleTaskQuestion, runTaskAnswer } from "../../packages/slack-service/src/task-question.js";
@@ -53,19 +53,19 @@ import { threadContinuationOf } from "../../packages/contracts/src/index.js";
 import { runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import type { RequestRoute } from "../../packages/orchestrator/src/request-router.js";
-import type { Notice, StreamRecord } from "../../packages/broker/src/developer/notifications.js";
-import type { GitHubFeedbackComment, GitHubPullRequestFeedback } from "../../packages/broker/src/github-app.js";
-import { GitHubAppCredentialProvider, webhookSecretFromSecret } from "../../packages/broker/src/github-app.js";
-import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
-import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
-import { guardTaskDispatch, type TaskDispatchGuard } from "../../packages/broker/src/aws/task-dispatch-access.js";
-import { failActiveOperation, failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
-import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
-import type { CheckTaskPerson } from "../../packages/broker/src/developer/task-people.js";
-import { runPlanEvidenceJob, type PlanEvidenceRunOutcome } from "../../packages/broker/src/aws/plan-evidence-handler.js";
-import type { PlanEvidenceEvent } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
+import type { Notice, StreamRecord } from "../../packages/core/src/developer/notifications.js";
+import type { GitHubFeedbackComment, GitHubPullRequestFeedback } from "../../packages/core/src/github-app.js";
+import { GitHubAppCredentialProvider, webhookSecretFromSecret } from "../../packages/core/src/github-app.js";
+import { RepositoryGrantService } from "../../packages/core/src/repository-access.js";
+import { createDispatcherHandler } from "../../packages/core/src/aws/dispatcher.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { createEc2Delivery } from "../../packages/core/src/aws/ec2-delivery.js";
+import { guardTaskDispatch, type TaskDispatchGuard } from "../../packages/core/src/aws/task-dispatch-access.js";
+import { failActiveOperation, failOutboxOperation } from "../../packages/core/src/aws/outbox-failure.js";
+import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/core/src/aws/lambda.js";
+import type { CheckTaskPerson } from "../../packages/core/src/developer/task-people.js";
+import { runPlanEvidenceJob, type PlanEvidenceRunOutcome } from "../../packages/core/src/aws/plan-evidence-handler.js";
+import type { PlanEvidenceEvent } from "../../packages/core/src/developer/plan-evidence-jobs.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { createRepositoryCredentialProvider } from "../../packages/worker/src/repository-credentials.js";
@@ -75,7 +75,7 @@ import { postWorkerTerminalResult } from "../../packages/worker/src/terminal-cal
 import { publishWorkspace } from "../../packages/worker/src/publish.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
-import { workflowDependenciesConfigurationFromEnvironment } from "../../packages/broker/src/aws/workflow-dependencies-configuration.js";
+import { workflowDependenciesConfigurationFromEnvironment } from "../../packages/core/src/aws/workflow-dependencies-configuration.js";
 import { inspectWorkspaceForClose } from "../../packages/worker/src/close-workspace.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
@@ -86,8 +86,8 @@ import { FAUX_MODEL, fauxModelRuntime } from "./faux-model.js";
 import { workflowModel, type WorkflowTurn } from "./faux-scripts.js";
 import { planAnswer, planDocument, turnPlanIntoMarkdown } from "./plan-documents.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, orchestratorPrincipal, registerSlackProject, type Handler } from "./slack-broker.js";
-import { SlackPostError } from "../../packages/broker/src/aws/slack-web.js";
-import type { SlackRequestQueue } from "../../packages/broker/src/developer/page-comments.js";
+import { SlackPostError } from "../../packages/core/src/aws/slack-web.js";
+import type { SlackRequestQueue } from "../../packages/core/src/developer/page-comments.js";
 import { StrictSlackWeb } from "./strict-slack.js";
 import { FakeGitHub, type FakeGitHubOptions } from "./workflow-e2e-github.js";
 import { trackJourney, type JourneyLedgerEntry } from "./workflow-e2e-invariants.js";
@@ -239,7 +239,7 @@ function githubDatabaseId(id: string): number {
 
 /**
  * What the session reconciler records on a workspace's active operation when the worker's compute is lost mid-run
- * (packages/broker/src/aws/session-reconciler.ts, its call to failActiveOperation).
+ * (packages/core/src/aws/session-reconciler.ts, its call to failActiveOperation).
  */
 export const LOST_COMPUTE_ERROR = "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request";
 

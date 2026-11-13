@@ -1,4 +1,4 @@
-import type { E2EModelChannelClient, E2EModelChannelRequest, E2EModelChannelResponse } from "@agentx/contracts";
+import type { E2EModelChannelClient, E2EModelChannelRequest, E2EModelChannelResponse } from "@rovara-code/contracts";
 
 /**
  * The model of an agent step, as the AI SDK sees it: a v4 language model whose only transport is the worker's model channel (Task 4.3b).

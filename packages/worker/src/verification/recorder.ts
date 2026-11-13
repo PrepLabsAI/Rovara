@@ -1,6 +1,6 @@
 // Spec 051: what the agent ran. Fed Pi's extension `tool_call` and `tool_result` events, it keeps each test command the
 // agent ran (contracts' scanTestCommands, #299), with its exit code and whether the workspace had changed first.
-import { scanTestCommands, type TestCommandScan } from "@agentx/contracts";
+import { scanTestCommands, type TestCommandScan } from "@rovara-code/contracts";
 
 export interface RecordedCommand {
   order: number;

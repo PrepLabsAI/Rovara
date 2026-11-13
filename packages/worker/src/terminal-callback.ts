@@ -1,4 +1,4 @@
-import { AgentXErrorCodeSchema, type WorkerInvocation } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, type WorkerInvocation } from "@rovara-code/contracts";
 import type { WorkerTerminalResult } from "./server.js";
 import type { createWorkerCallbackSinks } from "./callback-client.js";
 

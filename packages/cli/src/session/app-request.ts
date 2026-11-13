@@ -1,6 +1,6 @@
 // Lane L8: the small helpers the session commands share. One signed-in call to a `/v1/app/*` route of the broker, and the rules for showing what came back:
 // every value that came from the broker (or a model through it) is untrusted text, and a terminal must never be moved, recoloured or reordered by one.
-import { AgentXErrorCodeSchema, CLI_PACKAGE_NAME, agentXError } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, CLI_PACKAGE_NAME, agentXError } from "@rovara-code/contracts";
 import { ReportedFailure, exitCodeForError } from "../output.js";
 import { developerAccessToken, type DeveloperSessionDeps } from "../developer/session.js";
 

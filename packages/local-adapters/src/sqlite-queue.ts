@@ -17,7 +17,7 @@ import {
   type QueueService,
   type ReceiveOptions,
   type ReceivedMessage,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { SqliteDatabase, SqliteFailure, storableText, type SqliteDatabaseOptions, type SqliteRow } from "./sqlite-database.js";
 
 const SCHEMA_VERSION = "1";

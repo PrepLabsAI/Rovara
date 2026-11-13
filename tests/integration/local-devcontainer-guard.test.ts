@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { DOCKER_SOCKET_GUARD_SOURCE } from "../../packages/broker/src/local/isolation/docker-socket-guard-source.js";
+import { DOCKER_SOCKET_GUARD_SOURCE } from "../../packages/core/src/local/isolation/docker-socket-guard-source.js";
 import { createDevcontainerCli, ensureDevcontainer, runDevcontainerCommand, type DevcontainerTarget } from "../../packages/worker/src/devcontainer.js";
 
 const socket = process.env["ROVARA_LOCAL_DEVCONTAINER_DOCKER_SOCKET"];

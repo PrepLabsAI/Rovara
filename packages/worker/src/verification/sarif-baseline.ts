@@ -5,7 +5,7 @@
 // Informational: a skipped or failed baseline is only "no baseline" (the findings are then not reported at all, never reported as clean), and it never changes a check result. The one fault that is not
 // survivable is failing to put the agent's files back (AgentFilesRestoreError), which is rethrown exactly as TESTPROOF rethrows it. The run is bounded by what is left of the check round's budget.
 import { lstat, unlink, writeFile } from "node:fs/promises";
-import type { ProjectCommand } from "@agentx/contracts";
+import type { ProjectCommand } from "@rovara-code/contracts";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { AgentFilesRestoreError, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
 import { containedReportPath, readContainedReport } from "./report-file.js";

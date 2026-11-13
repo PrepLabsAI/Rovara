@@ -5,9 +5,9 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH, E2EExecutorPlanSchema, e2eModelRouteRevision, generateE2EAgentValueKey, readE2EApplicationProjectContract,
-  type E2EExecutorPlan, type E2EScenario } from "@agentx/contracts";
+  type E2EExecutorPlan, type E2EScenario } from "@rovara-code/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
-import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
+import { e2eAgentRoutePolicyLimits } from "../../packages/core/src/e2e/model-route-registry.js";
 import { createWebApiProbePlan, type WebApiProbePlan, type WebApiProbeRunner } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 
 /**

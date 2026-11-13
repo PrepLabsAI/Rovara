@@ -1,17 +1,17 @@
 // A host that is not the local app: the host-neutral services composed over fake adapters (the in-memory store and queue, a fake code host, a fake chat channel, the fake worker machines of the task-flow harness).
 // One task waits for the merge of one pull request, with a session of its own and a tracking row.
-import { IMPLICIT_COMPANY_ID, WorkflowSnapshotSchema, change, createCandidateManifest, createWorkflowSnapshot, type ConversationRef, type OrgId, type WorkflowProgram } from "@agentx/contracts";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { createTaskSessionItems, developerIdOf, taskSessionId, type SessionTaskFacts } from "../../packages/broker/src/core/sessions/index.js";
-import { fixedCodeSettings, type MergePeople } from "../../packages/broker/src/core/merge/index.js";
-import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
-import { createMergeTrackingService, createMilestoneService, createNoticeService, createSessionService } from "../../packages/broker/src/services/index.js";
+import { IMPLICIT_COMPANY_ID, WorkflowSnapshotSchema, change, createCandidateManifest, createWorkflowSnapshot, type ConversationRef, type OrgId, type WorkflowProgram } from "@rovara-code/contracts";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { FakeChannelAdapter } from "../../packages/core/src/ports/fake-channel-adapter.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { MemoryQueueService } from "../../packages/core/src/ports/memory-queue.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { TASK_FLOW_INDEXES } from "../../packages/core/src/core/task-flow/flow.js";
+import { taskKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { createTaskSessionItems, developerIdOf, taskSessionId, type SessionTaskFacts } from "../../packages/core/src/core/sessions/index.js";
+import { fixedCodeSettings, type MergePeople } from "../../packages/core/src/core/merge/index.js";
+import { recoveryRowKey } from "../../packages/core/src/core/merge/store.js";
+import { createMergeTrackingService, createMilestoneService, createNoticeService, createSessionService } from "../../packages/core/src/services/index.js";
 import { TASK_ID, mergeWorld } from "./merge-world.js";
 import { createHarness } from "./task-flow-harness.js";
 

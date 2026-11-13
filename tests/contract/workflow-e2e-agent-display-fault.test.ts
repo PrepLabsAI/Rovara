@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type * as AgentDisplay from "../../packages/broker/src/e2e/application-agent-display.js";
+import type * as AgentDisplay from "../../packages/core/src/e2e/application-agent-display.js";
 import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { asLinuxRun, assembleAgentRun, brokerRoundFor } from "../support/agent-collection.js";
 
 // Fix round 1 (finding m6): the navigation block is display data. If deriving it throws, the verdict stays what the verifier decided and the row only loses its badge.
-vi.mock("../../packages/broker/src/e2e/application-agent-display.js", async (importOriginal) => {
+vi.mock("../../packages/core/src/e2e/application-agent-display.js", async (importOriginal) => {
   const original = await importOriginal<typeof AgentDisplay>();
   return { ...original, agentNavigationOf: () => { throw new Error("password=hunter2-secret derivation fault"); } };
 });

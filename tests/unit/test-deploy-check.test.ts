@@ -1044,14 +1044,14 @@ describe("parseDeployedCodeKey", () => {
 describe("sourcePathsFor", () => {
   it("maps built workspace output to its source, drops node_modules for the lockfile, and keeps extra files", () => {
     expect(sourcePathsFor(
-      ["packages/broker/src/aws/dispatcher.ts", "packages/contracts/dist/session.js", "packages/contracts/dist/sub/x.js", "node_modules/zod/index.js", "node_modules/@aws-sdk/a/b.js"],
+      ["packages/core/src/aws/dispatcher.ts", "packages/contracts/dist/session.js", "packages/contracts/dist/sub/x.js", "node_modules/zod/index.js", "node_modules/@aws-sdk/a/b.js"],
       ["packages/worker/ec2/boot.sh"],
     )).toEqual([
       "package-lock.json",
-      "packages/broker/src/aws/dispatcher.ts",
       "packages/contracts/package.json",
       "packages/contracts/src/session.ts",
       "packages/contracts/src/sub/x.ts",
+      "packages/core/src/aws/dispatcher.ts",
       "packages/worker/ec2/boot.sh",
     ]);
   });
@@ -1420,7 +1420,7 @@ describe("gatherCheckFacts", () => {
   const gather = (fake: ReturnType<typeof fakeAws>) => gatherCheckFacts({
     runner: fake.runner, region: "us-east-1", env: ENV,
     headTemplate: () => template(),
-    builtZips: async () => ({ shas: { BrokerE1355FD6: "b" }, sources: { BrokerE1355FD6: ["packages/broker/src/aws/broker.ts"] } }),
+    builtZips: async () => ({ shas: { BrokerE1355FD6: "b" }, sources: { BrokerE1355FD6: ["packages/core/src/aws/broker.ts"] } }),
     headRevision: HEAD_REVISION,
     changedSince: (revision, paths) => { changes.push({ revision, paths: [...paths] }); return changed; },
   });
@@ -1803,7 +1803,7 @@ describe("gatherCheckFacts", () => {
     const deployedSha = Buffer.from(hex, "hex").toString("base64");
     const fake = fakeAws({ brokerSha: deployedSha, brokerKey: `test-deploy/0b35a884/BrokerE1355FD6-${hex}.zip` });
     const { facts } = await gather(fake);
-    expect(changes).toEqual([{ revision: "0b35a884", paths: ["packages/broker/src/aws/broker.ts"] }]);
+    expect(changes).toEqual([{ revision: "0b35a884", paths: ["packages/core/src/aws/broker.ts"] }]);
     expect(facts.inputsChanged).toEqual({ BrokerE1355FD6: true });
     expect(facts.headRevision).toBe(HEAD_REVISION);
     // Unknown provenance (the fixture's literal key) is never looked up.

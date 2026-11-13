@@ -10,8 +10,8 @@
 // evidence lines, never the token.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { githubConnectorType } from "../../packages/broker/src/aws/connector-types.js";
-import { linearConnectorType } from "../../packages/broker/src/aws/linear-connector-type.js";
+import { githubConnectorType } from "../../packages/core/src/aws/connector-types.js";
+import { linearConnectorType } from "../../packages/core/src/aws/linear-connector-type.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
 import { call, createBroker, ensureWorkspace, loadSlackBroker, markReady, orchestratorPrincipal, type Handler } from "../support/slack-broker.js";
 

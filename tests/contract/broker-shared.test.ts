@@ -1,7 +1,7 @@
 // tests/contract/broker-shared.test.ts
 // Spec 025 C19: which AWS errors the broker treats as temporary.
 import { describe, expect, it } from "vitest";
-import { isTemporaryAwsError } from "../../packages/broker/src/aws/broker-shared.js";
+import { isTemporaryAwsError } from "../../packages/core/src/aws/broker-shared.js";
 
 describe("isTemporaryAwsError (spec 025 C19)", () => {
   it("names throttling and 5xx answers temporary, and nothing else", () => {

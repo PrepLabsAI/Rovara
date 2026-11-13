@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { ConnectorCatalogSchema, agentXError, type ConnectorCallRequest, type ConnectorCatalog } from "@agentx/contracts";
+import { ConnectorCatalogSchema, agentXError, type ConnectorCallRequest, type ConnectorCatalog } from "@rovara-code/contracts";
 import { z } from "zod";
 
 const CAPABILITY_HEADER = "x-agentx-callback-capability";

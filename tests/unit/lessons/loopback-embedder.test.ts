@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { runLessonEmbedderConformance } from "../../support/ports/learning-conformance.js";
 import {
   HASHING_EMBEDDER_SPEC, createHashingEmbedder, LOOPBACK_EMBEDDER_LIMITS, LoopbackEmbedderError, createLoopbackEmbedder, learningAdapterFromEnvironment, loopbackBase,
-} from "../../../packages/broker/src/lessons/local-embedder.js";
+} from "../../../packages/core/src/lessons/local-embedder.js";
 
 type Call = { url: string; body: { model: string; input: string[] } };
 

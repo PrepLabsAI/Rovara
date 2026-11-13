@@ -6,8 +6,8 @@
 import { describe, expect, it } from "vitest";
 import { builtinRecipe, ROVARA_CODE_BUILD_GUIDANCE, ROVARA_CODE_PLAN_GUIDANCE } from "../../packages/contracts/src/agent-templates.js";
 import { PLAN_DOCUMENT_INFO_STRING, parsePlanDocument, planAnswerProposesChecks, planDocumentMarkdown, withCiChecks, type CiCheckInput } from "../../packages/contracts/src/workflow-plan-document.js";
-import { PLAN_CRITIC_QUALITY_CHECKLIST, planCritiquePrompt } from "../../packages/broker/src/rovara-code/critic.js";
-import { CI_CHECKS_MAX, ciChecksFromWorkflows, readCiChecks } from "../../packages/broker/src/rovara-code/ci-checks.js";
+import { PLAN_CRITIC_QUALITY_CHECKLIST, planCritiquePrompt } from "../../packages/core/src/rovara-code/critic.js";
+import { CI_CHECKS_MAX, ciChecksFromWorkflows, readCiChecks } from "../../packages/core/src/rovara-code/ci-checks.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 // ---- the guidance, word for word

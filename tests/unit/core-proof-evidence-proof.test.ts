@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 import { EvidencePackSchema, resolveEvidenceMode, type EvidencePack } from "../../packages/contracts/src/evidence.js";
 import type { PlanDocument } from "../../packages/contracts/src/index.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
-import { evidenceLines, evidenceLinkLine, EVIDENCE_NOT_TESTED_LISTED, type ProofEvidenceContext } from "../../packages/broker/src/core/proof/evidence-lines.js";
-import { PULL_REQUEST_BODY_MAX_BYTES, rovaraPullRequestBody } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { PROOF_LEVEL_LAST, proofSection } from "../../packages/broker/src/core/proof/proof-section.js";
+import { evidenceLines, evidenceLinkLine, EVIDENCE_NOT_TESTED_LISTED, type ProofEvidenceContext } from "../../packages/core/src/core/proof/evidence-lines.js";
+import { PULL_REQUEST_BODY_MAX_BYTES, rovaraPullRequestBody } from "../../packages/core/src/core/proof/pull-request-body.js";
+import { PROOF_LEVEL_LAST, proofSection } from "../../packages/core/src/core/proof/proof-section.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const now = "2026-11-04T12:00:00.000Z";

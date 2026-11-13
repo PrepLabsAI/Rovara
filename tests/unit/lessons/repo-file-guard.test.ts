@@ -4,10 +4,10 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { RepositoryMismatch, guardTarget, headOf, readOwnPr, repositoryIdOfPlace, verifyRepository } from "../../../packages/broker/src/lessons/repo-file-host.js";
+import { RepositoryMismatch, guardTarget, headOf, readOwnPr, repositoryIdOfPlace, verifyRepository } from "../../../packages/core/src/lessons/repo-file-host.js";
 import { FakeRepoHost, passSetup } from "./repo-file-helpers.js";
 
-const dir = join(import.meta.dirname, "../../../packages/broker/src/lessons");
+const dir = join(import.meta.dirname, "../../../packages/core/src/lessons");
 const source = (name: string): string => readFileSync(join(dir, name), "utf8");
 
 /**
@@ -161,7 +161,7 @@ describe("the repository-id guard is enforced structurally (TypeScript AST, with
   const lessonsFiles = readdirSync(dir).filter((name) => name.endsWith(".ts") && (/^repo-file-.*\.ts$/u.test(name) || source(name).includes("RepoFileTarget"))).map((name) => join(dir, name)).sort();
   const virtualPath = join(dir, "virtual-probe.ts");
   const probeSource = `
-import type { CodeHost } from "@agentx/contracts";
+import type { CodeHost } from "@rovara-code/contracts";
 import { assertGuarded, guardTarget, type RepoFileTarget } from "./repo-file-host.js";
 export async function okEntry(deps: unknown, target: RepoFileTarget): Promise<unknown> { const t = guardTarget(target); return t.host.baseBranchHead(t.repository, "x", t.scope); }
 export async function okAlias(target: RepoFileTarget): Promise<void> { const t = guardTarget(target); const h = t.host; await h.deleteBranch!(t.repository, "b", t.scope); }

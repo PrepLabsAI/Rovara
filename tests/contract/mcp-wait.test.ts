@@ -1,6 +1,6 @@
 // tests/contract/mcp-wait.test.ts
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DeveloperTaskView } from "@agentx/contracts";
+import type { DeveloperTaskView } from "@rovara-code/contracts";
 import type { ToolCall } from "../../packages/mcp/src/tools.js";
 import { ToolError, WAIT_POLL_DEADLINE_MS, waitForTask, type ControlPlaneClient } from "../../packages/mcp/src/index.js";
 

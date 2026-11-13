@@ -4,10 +4,10 @@
 import { describe, expect, it } from "vitest";
 import {
   WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, startWorkflowBranchSync, startWorkflowBranchSyncRun, type Autonomy, type CodeHost, type OrgId, type WorkflowProgram, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { branchWritersKey, noteBranchHead, noteRestackRefused, openBranchWriters, readBranchWriters, type BranchWriters } from "../../packages/broker/src/core/branch-sync/branch-writers.js";
-import { ANCESTRY_WALK_MAX, decideBranchMethod, forcePushLease, headBuildsOnBase, isForcePushRefusal, plainBranchName, planRestackOutcome } from "../../packages/broker/src/core/branch-sync/restack.js";
+} from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { branchWritersKey, noteBranchHead, noteRestackRefused, openBranchWriters, readBranchWriters, type BranchWriters } from "../../packages/core/src/core/branch-sync/branch-writers.js";
+import { ANCESTRY_WALK_MAX, decideBranchMethod, forcePushLease, headBuildsOnBase, isForcePushRefusal, plainBranchName, planRestackOutcome } from "../../packages/core/src/core/branch-sync/restack.js";
 
 const at = "2026-11-09T12:00:00.000Z";
 const TASK = "00000000-0000-4000-8000-0000000000a1";

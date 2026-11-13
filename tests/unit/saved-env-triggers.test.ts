@@ -1,12 +1,12 @@
 // What makes the registry look at a project (push, poll, the nightly, a task) and what settles the end of a rebuild (the sweep): all inert with the switch off, none throws into its caller, and a build that
 // ended without a result is ended with the backoff and its workspace retired.
 import { describe, expect, it } from "vitest";
-import { NIGHTLY_SOURCE } from "@agentx/contracts";
-import { SAVED_ENV_FAILURE_BACKOFF_MS, SAVED_ENV_JOB_LEASE_MS, checkRebuild } from "../../packages/broker/src/core/test-env/saved-env.js";
-import { startMarkerKey } from "../../packages/broker/src/core/test-env/saved-env-markers.js";
-import { SAVED_ENV_BUILD_MAX_AGE_MS, retireBuildWorkspace, sweepSavedEnvBuilds } from "../../packages/broker/src/core/test-env/saved-env-sweep.js";
-import { runSavedEnvPoll, savedEnvBeforeNightly, savedEnvPushQueue } from "../../packages/broker/src/core/test-env/saved-env-triggers.js";
-import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { NIGHTLY_SOURCE } from "@rovara-code/contracts";
+import { SAVED_ENV_FAILURE_BACKOFF_MS, SAVED_ENV_JOB_LEASE_MS, checkRebuild } from "../../packages/core/src/core/test-env/saved-env.js";
+import { startMarkerKey } from "../../packages/core/src/core/test-env/saved-env-markers.js";
+import { SAVED_ENV_BUILD_MAX_AGE_MS, retireBuildWorkspace, sweepSavedEnvBuilds } from "../../packages/core/src/core/test-env/saved-env-sweep.js";
+import { runSavedEnvPoll, savedEnvBeforeNightly, savedEnvPushQueue } from "../../packages/core/src/core/test-env/saved-env-triggers.js";
+import { operationKey, workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
 import { COMPANY, PROJECT, approve, environmentBody, savedWorld, textOf, type SavedWorld } from "../support/saved-env-harness.js";
 
 const ids = { orgId: COMPANY, projectId: PROJECT };

@@ -1,8 +1,8 @@
 // Fix with agent on the task's page: the button is one verified form bound to the error the page showed and to that one press, the diagnosis is drawn as plain text (a model's words are never a link, a tag or a control),
 // and the page's refusals are its fixed words. The page server decides nothing: it hands the verified press to the action.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createLocalPagesServer, type LocalPagesServer } from "../../packages/broker/src/core/local-pages/index.js";
-import type { PlanDiagnosisView } from "../../packages/broker/src/core/local-pages/views.js";
+import { createLocalPagesServer, type LocalPagesServer } from "../../packages/core/src/core/local-pages/index.js";
+import type { PlanDiagnosisView } from "../../packages/core/src/core/local-pages/views.js";
 import { TASK, fakeWorld, formBody, formOf, planView, raw, type FakeWorld } from "../support/local-pages-fakes.js";
 
 let server: LocalPagesServer;

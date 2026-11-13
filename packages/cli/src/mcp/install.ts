@@ -3,13 +3,13 @@
 //
 // The entry only runs the published CLI (`npx -y @preplabsai/rovara-code@<version> [--env <name>] mcp`);
 // it never holds a token: the MCP server reads the developer sign-in from the system token store.
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME } from "@rovara-code/contracts";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { parse as parseToml, TomlError } from "smol-toml";
 
 export type McpClientKind = "claude-code" | "codex" | "cursor";

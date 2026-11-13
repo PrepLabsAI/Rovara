@@ -128,7 +128,7 @@ export class ChannelAdapters extends Construct {
 
     // Phase 7c2: the neutral channel ingress with the built-in Slack adapter's router, which may call the broker and the
     // adapter's commands; Slack has its answer before the hand-off, so the API may take longer than Slack would wait.
-    const ingress = this.ingress = packagedFunction(this, "Ingress", "packages/broker/src/aws/channel-api-lambda.ts", {
+    const ingress = this.ingress = packagedFunction(this, "Ingress", "packages/core/src/aws/channel-api-lambda.ts", {
       CHANNEL_ADAPTERS: enabled,
       STATE_TABLE_NAME: props.state.tableName,
       CHANNEL_STATE_TABLE_NAME: channelState.tableName,
@@ -185,7 +185,7 @@ export class ChannelAdapters extends Construct {
       sourceArn: `arn:${stack.partition}:execute-api:${stack.region}:${stack.account}:${props.api.ref}/*/POST/v1/channels/*`,
     });
 
-    const sender = packagedFunction(this, "EventSender", "packages/broker/src/aws/channel-events.ts", {
+    const sender = packagedFunction(this, "EventSender", "packages/core/src/aws/channel-events.ts", {
       CHANNEL_ADAPTERS: enabled,
       STATE_TABLE_NAME: props.state.tableName,
       CHANNEL_EVENT_QUEUE_URL: events.queueUrl,

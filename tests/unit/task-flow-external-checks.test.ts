@@ -1,10 +1,10 @@
 // Port lane P2, review M2: a project whose external check names a provider nothing in this release runs is refused at task start with a clear sentence, before any machine; and if one still gets to the
 // dispatcher the operation FAILS with the sentence instead of throwing and being redelivered until its attempts run out.
 import { describe, expect, it } from "vitest";
-import { UNRUNNABLE_EXTERNAL_CHECK_MESSAGE } from "@agentx/contracts";
-import { createTaskFlow } from "../../packages/broker/src/core/task-flow/index.js";
-import type { ProjectRevision } from "../../packages/broker/src/core/task-flow/deps.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { UNRUNNABLE_EXTERNAL_CHECK_MESSAGE } from "@rovara-code/contracts";
+import { createTaskFlow } from "../../packages/core/src/core/task-flow/index.js";
+import type { ProjectRevision } from "../../packages/core/src/core/task-flow/deps.js";
+import { operationKey } from "../../packages/core/src/core/task-flow/keys.js";
 import { createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const OTHER = { provider: "examplebuild", name: "q", reference: "pipeline/1", timeoutMinutes: 10 };

@@ -386,7 +386,7 @@ describe("the start's transaction and the workspace limit (FR-020, R6)", () => {
 
 describe("shared broker helpers (ruling F9)", () => {
   it("defines hashJson and isConditional once, in the module broker.ts and developer-tasks.ts both import", () => {
-    const source = (file: string) => readFileSync(new URL(`../../packages/broker/src/aws/${file}`, import.meta.url), "utf8");
+    const source = (file: string) => readFileSync(new URL(`../../packages/core/src/aws/${file}`, import.meta.url), "utf8");
     for (const file of ["broker.ts", "developer-tasks.ts"]) {
       expect(source(file)).not.toMatch(/(?:function|const)\s+(?:hashJson|isConditional)\b/);
       expect(source(file)).toMatch(/import \{[^}]*\bhashJson\b[^}]*\bisConditional\b[^}]*\} from "\.\/broker-shared\.js"/);

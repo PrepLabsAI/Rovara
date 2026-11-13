@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boundedSink, droppingSink, emptySearch, withoutLiveFacts, type ContextItemSeen } from "../../../packages/broker/src/context-sources/team-record.js";
+import { boundedSink, droppingSink, emptySearch, withoutLiveFacts, type ContextItemSeen } from "../../../packages/core/src/context-sources/team-record.js";
 
 const item = (over: Partial<ContextItemSeen> = {}): ContextItemSeen => ({
   orgId: "org1", projectId: "proj", taskId: "task1", stage: "PLAN", sourceId: "sim", system: "sim", itemRef: "P1", title: "T", permissionSnapshot: null, fetchedAt: "2026-11-01T10:00:00Z", contentDigest: "a".repeat(64), standing: "outsider", ...over,

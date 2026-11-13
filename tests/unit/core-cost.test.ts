@@ -1,12 +1,12 @@
 // Lane L6b: the cost split. The estimate (from the cost of earlier runs), the actual figure (tokens times a price table, through the Metering seam), and the run-cost record that feeds the next estimate.
  
 import { describe, expect, it } from "vitest";
-import { DEFAULT_RUN_ESTIMATE_USD, MAX_RUN_LIMIT_USD, runCostKey, type MeterEntry, type Metering, type OrgId, type PriceTable } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
-import { costLine, costUsdOf, createCostLedger } from "../../packages/broker/src/core/cost/ledger.js";
-import { estimatePathOf, estimateRun, planRunLimit, recordRunCost, runCostInputOf } from "../../packages/broker/src/core/cost/estimate.js";
-import { remainingUsd, taskLimitUsd } from "../../packages/broker/src/core/cost/limits.js";
+import { DEFAULT_RUN_ESTIMATE_USD, MAX_RUN_LIMIT_USD, runCostKey, type MeterEntry, type Metering, type OrgId, type PriceTable } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createPriceTableMetering } from "../../packages/core/src/ports/policy-defaults.js";
+import { costLine, costUsdOf, createCostLedger } from "../../packages/core/src/core/cost/ledger.js";
+import { estimatePathOf, estimateRun, planRunLimit, recordRunCost, runCostInputOf } from "../../packages/core/src/core/cost/estimate.js";
+import { remainingUsd, taskLimitUsd } from "../../packages/core/src/core/cost/limits.js";
 
 const ORG = "org_00000000000000000000" as OrgId;
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";

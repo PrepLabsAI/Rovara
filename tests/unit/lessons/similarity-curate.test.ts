@@ -1,11 +1,11 @@
 // The curator with the fused shortlist and ONE listwise judge call per draft. Both modes: no embedder, and a fake embedder.
 import { beforeEach, describe, expect, it } from "vitest";
-import { curateDraft, retireLesson, type CurateDeps } from "../../../packages/broker/src/lessons/curate.js";
-import { LearningRefusal, type LessonsPauseStore } from "../../../packages/broker/src/lessons/pause.js";
-import type { PipelineModel } from "../../../packages/broker/src/lessons/ports.js";
-import type { LessonDraft } from "../../../packages/broker/src/lessons/reflect.js";
-import { resetNoEmbedderNotice, textHash, lessonTextOf } from "../../../packages/broker/src/lessons/similarity.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
+import { curateDraft, retireLesson, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
+import { LearningRefusal, type LessonsPauseStore } from "../../../packages/core/src/lessons/pause.js";
+import type { PipelineModel } from "../../../packages/core/src/lessons/ports.js";
+import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
+import { resetNoEmbedderNotice, textHash, lessonTextOf } from "../../../packages/core/src/lessons/similarity.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, closeEmbedder, codeCite, draft, embedder, lessonRecord, seed, settings, verifier } from "./lesson-helpers.js";
 
 const text = (title: string, body: string, over: Partial<LessonDraft> = {}): LessonDraft => draft({ title, description: "", body, ...over });

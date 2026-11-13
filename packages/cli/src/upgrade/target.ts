@@ -1,6 +1,6 @@
 // FR-042: which release an upgrade moves to, that it never moves back (question 3), and the
 // release's notes. Ruling F31 (amended by the controller): never a prerelease target, as init.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { RELEASE_REPOSITORY } from "../init/release-fetch.js";
 import { isPrereleaseVersion } from "../version.js";
 

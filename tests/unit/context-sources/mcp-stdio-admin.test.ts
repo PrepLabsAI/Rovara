@@ -2,16 +2,16 @@
 // the proposal's id, BEFORE the test (the test task reads them) and are taken away again when the test fails; they are never in an entry, a response, a log or an audit event; the sentences
 // an admin reads for a failed test come from fixed tables and never from the host; and the host is told, best effort, to start a server before a stage and to release it when it is turned off.
 import { describe, expect, it } from "vitest";
-import { MCP_INSTALL_FAILURES, MCP_PROBE_FAILURES, type McpInstallFailureCode } from "@agentx/contracts";
+import { MCP_INSTALL_FAILURES, MCP_PROBE_FAILURES, type McpInstallFailureCode } from "@rovara-code/contracts";
 import {
   McpProbeError, approveMcpServer, disableMcpServer, documentMcpServerStore, probeFailureSentence, proposeMcpServer, removeMcpServer, stdioSecretDocument, type McpHostControl, type McpProber, type McpServerDependencies, type McpServerSecrets,
-} from "../../../packages/broker/src/context-sources/mcp-servers.js";
+} from "../../../packages/core/src/context-sources/mcp-servers.js";
 import { routeMcpServers } from "../../support/mcp-server-routes.js";
-import { gatewayProber, hostControlClient, hostProbeClient, prewarmStdioServers } from "../../../packages/broker/src/context-sources/server-port.js";
-import { createContextSourcesRuntime, createMcpServerDependencies } from "../../../packages/broker/src/context-sources/wiring.js";
-import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../../packages/broker/src/core/task-flow/flow.js";
+import { gatewayProber, hostControlClient, hostProbeClient, prewarmStdioServers } from "../../../packages/core/src/context-sources/server-port.js";
+import { createContextSourcesRuntime, createMcpServerDependencies } from "../../../packages/core/src/context-sources/wiring.js";
+import { INDEX_EXPIRY_ATTRIBUTE } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../../packages/core/src/core/task-flow/flow.js";
 import { GET_TOOL, NOW, ORG, SEARCH_TOOL } from "./fixtures.js";
 
 const admin = { orgId: ORG, developerId: "dev1", orgRole: "admin" };
@@ -329,7 +329,7 @@ describe("prewarm at stage start", () => {
     const host: Pick<McpHostControl, "warm"> = { warm: async () => { inFlight += 1; peak = Math.max(peak, inFlight); await new Promise((resolve) => setTimeout(resolve, 20)); inFlight -= 1; } };
     await prewarmStdioServers({ host, servers: w.deps.store, stdioEnabled: true }, ORG, [wiki.serverId, second.serverId]);
     expect(peak).toBe(2);
-    const source = await (await import("node:fs/promises")).readFile("packages/broker/src/context-sources/server-port.ts", "utf8");
+    const source = await (await import("node:fs/promises")).readFile("packages/core/src/context-sources/server-port.ts", "utf8");
     expect(source).toContain("deps.waitMs ?? 2_000");
   });
   it("never throws and never waits for long: a host that fails or hangs, and a registry that fails, are not the stage's problem; at most 16 are asked", async () => {

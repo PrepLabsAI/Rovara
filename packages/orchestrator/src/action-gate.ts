@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { redactText, type ActionPolicy, type ConnectorCatalog } from "@agentx/contracts";
+import { redactText, type ActionPolicy, type ConnectorCatalog } from "@rovara-code/contracts";
 import { TOOL_SEARCH_TOOL_NAME } from "@agentx/model-runtime";
 import { ClassifierError, usableClassifierTimeout, type ActionClassifier, type ClassifierUsage, type ClassifierVerdict } from "./action-classifier.js";
 

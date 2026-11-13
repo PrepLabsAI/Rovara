@@ -1,11 +1,11 @@
 // Lane L8: commands in pull request comments, against the W0 fakes: a memory document store, and the local-owner approvers fed a fake code host.
 import { describe, expect, it } from "vitest";
-import type { ApprovalOffer } from "../../packages/broker/src/core/local-pages/index.js";
-import { createPrCommentCommands, type CommentPermission, type LookedUpComment, type PendingOffer, type PrCommentEvent, type PrCommandWorld } from "../../packages/broker/src/core/pr-commands/index.js";
-import { CODE_HOST_COMMENT_METHOD, createLocalOwnerApprovers } from "../../packages/broker/src/ports/policy-defaults.js";
+import type { ApprovalOffer } from "../../packages/core/src/core/local-pages/index.js";
+import { createPrCommentCommands, type CommentPermission, type LookedUpComment, type PendingOffer, type PrCommentEvent, type PrCommandWorld } from "../../packages/core/src/core/pr-commands/index.js";
+import { CODE_HOST_COMMENT_METHOD, createLocalOwnerApprovers } from "../../packages/core/src/ports/policy-defaults.js";
 import { ARTIFACT_DIGEST, commentReads, freshComment } from "../support/comment-fakes.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, parseRovaraComment, type ApprovalProof, type ExternalAccountRef } from "@agentx/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, parseRovaraComment, type ApprovalProof, type ExternalAccountRef } from "@rovara-code/contracts";
 
 const OFFER: ApprovalOffer = { requestId: "card-7", revision: 4, artifactDigest: ARTIFACT_DIGEST, kind: "plan" };
 const PENDING: PendingOffer = { taskId: "0b4f2b1e-3c6a-4d2e-9a77-5f1d8c0a1e11", approval: OFFER, postedAt: "2026-11-09T10:00:00.000Z", repository: "example/repo" };

@@ -1,14 +1,14 @@
 // The two-company isolation kit (packages/testing/src/isolation): it passes on adapters that keep two companies apart, and it FAILS on adapters that do not. The second half is what
 // makes it a proof: every mutant here is a router that leaks in one specific way, and the check that guards that way must catch it.
 import { describe, expect, it } from "vitest";
-import type { CheckRunner, CodeHost, SecretValue, Tracker } from "@agentx/contracts";
+import type { CheckRunner, CodeHost, SecretValue, Tracker } from "@rovara-code/contracts";
 import {
   COMPANY_A, COMPANY_A_ID, COMPANY_B, COMPANY_B_ID, NO_COMPANY_WORDS, SHARED_RAW_IDS, assertFailsClosed, assertNoSecretLeaks, assertSurfacesIsolated, assertTwoCompanyIsolation, captureLogs,
   createCompanySecretStore, failingResolver, fakeCheckRunnerCompanies, fakeCodeHostCompanies, fakeTrackerCompanies, routeByCompany, twoCompanyChecks,
   type CompanyResolver, type IsolationSurface, type TwoCompanyIsolation,
 } from "../../packages/testing/src/isolation/index.js";
 import { runContract } from "../../packages/testing/src/ports/plugin-contract-kit.js";
-import type { FakeCodeHost, FakeTracker } from "../../packages/broker/src/plugins/fake/index.js";
+import type { FakeCodeHost, FakeTracker } from "../../packages/core/src/plugins/fake/index.js";
 
 const REPO = { url: SHARED_RAW_IDS.repositoryUrl };
 

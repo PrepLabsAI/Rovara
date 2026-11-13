@@ -3,7 +3,7 @@
 // fails can be tried again there, while the terminal path stops exactly as it did.
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { adminUserStep, alertsStep, e2eStep, firstProjectStep } from "../../packages/cli/src/init/finish-steps.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";

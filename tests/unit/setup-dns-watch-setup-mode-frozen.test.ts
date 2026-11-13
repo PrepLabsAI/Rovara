@@ -12,13 +12,13 @@ import { helperRunArgs, setupNetworkAddresses } from "../../packages/worker/src/
 
 const SOURCE = new URL("../../packages/worker/src/setup-dns-watch.ts", import.meta.url);
 const SEALED_MARKER = "// ===== SEALED MODE (TS16): appended after the setup mode; the setup mode above this line is frozen (tests/unit/setup-dns-watch-setup-mode-frozen.test.ts) =====\n";
-// Replaces c68b6a76... (2026-11-04, fix/053-linux-2): the only change above the marker is the contracts import, now `@agentx/contracts/dns-helper` instead of the barrel, so the helper fits its 128 MB limit
+// Replaces c68b6a76... (2026-11-04, fix/053-linux-2): the only change above the marker is the contracts import, now `@rovara-code/contracts/dns-helper` instead of the barrel, so the helper fits its 128 MB limit
 // (the barrel got the sealed helper OOM-killed on linux-runtime; tests/unit/worker-dns-helper-footprint.test.ts). The behaviour snapshot below is unchanged.
-const SETUP_MODE_SHA256 = "068992ab451f0058868d3731dc57ba927bb4f6a8075cec5e2fec49d88ac0d481";
+const SETUP_MODE_SHA256 = "8c7273fdbfe02f13f5abd4354d5631b8e54a471c67f933b3d47c96e85567553e";
 const HELPER_SOURCE = new URL("../../packages/worker/src/setup-dns-watch-helper.ts", import.meta.url);
 const HELPER_SHA256 = "822da350f1a8864ec02edcd008564b13bf0eb303d43f955e21250c544df61c55";
 const NETWORK_SOURCE = new URL("../../packages/worker/src/setup-network.ts", import.meta.url);
-const NETWORK_SHA256 = "5ba47b5940e5ad5b0c9826d7e875de8938906f376ce7b6238c19fba77eecca0e";
+const NETWORK_SHA256 = "e2409b36b47dd3fb7f9ec2c6d0029208774d1d12d3ec447ea87b2021872496f3";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 

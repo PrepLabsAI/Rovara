@@ -5,7 +5,7 @@
 import { chmod, mkdir, open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 export function initLogPath(home: string, env: string): string {
   return join(home, ".agentx", "logs", `init-${env}.log`);

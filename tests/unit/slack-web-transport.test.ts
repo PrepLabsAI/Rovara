@@ -1,6 +1,6 @@
 // Spec 062 FR-042: each package calls the Slack Web API through one module, with the token only in the header.
 import { describe, expect, it, vi } from "vitest";
-import { slackWebFetch } from "../../packages/broker/src/aws/slack-web.js";
+import { slackWebFetch } from "../../packages/core/src/aws/slack-web.js";
 import { SlackApiError, createSlackWebClient } from "../../packages/slack-service/src/slack-web.js";
 
 const answer = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });

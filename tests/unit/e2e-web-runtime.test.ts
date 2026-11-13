@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import { evaluateE2EApplicationRawAssertion } from "../../packages/verifier/src/application-services.js";
 import { createWebApplicationCliHost, executeWebSteps, type E2EWebRuntimePorts } from "../../packages/verifier/src/web-runtime.js";
 import { readE2EApplicationInstalledFileFixture } from "../../packages/verifier/src/application-runtime-assets.js";

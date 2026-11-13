@@ -7,7 +7,7 @@
 // document store (the row count and newest hash), that no newer rows were cut off. It is a local record for the machine's owner, not a tamper-proof ledger: Cloud's ledger, its verifier and its outbox stay
 // Cloud only (decision 41).
 import { createHash } from "node:crypto";
-import { canonicalJson, type AuditEvent } from "@agentx/contracts";
+import { canonicalJson, type AuditEvent } from "@rovara-code/contracts";
 import { AuditLogError, auditDigest, checkAuditEvent, storedAuditEvent } from "./audit-event.js";
 import { SqliteDatabase, type SqliteDatabaseOptions, type SqliteRow } from "./sqlite-database.js";
 

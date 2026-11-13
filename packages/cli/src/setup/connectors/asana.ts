@@ -7,7 +7,7 @@
 // client, tags the secret agentx-writable=refresh-token and registers the credential as
 // oauth-refresh-token, all before get_project. Only the project revision waits for the read.
 // The sign-in listens on 127.0.0.1:8765 only, and closes on every path (admin/authorize.ts).
-import { agentXError, OAuthAppSecretSchema, type ConnectorConfig } from "@agentx/contracts";
+import { agentXError, OAuthAppSecretSchema, type ConnectorConfig } from "@rovara-code/contracts";
 import type { AuthorizeSecrets } from "../../admin/authorize.js";
 import { AlertEmailSchema } from "../../deploy/answer-schemas.js";
 import { secretFromSource } from "../../init/prompts.js";

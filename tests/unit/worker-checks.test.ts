@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { CheckEntrySchema, type ProjectCommand } from "@agentx/contracts";
+import { CheckEntrySchema, type ProjectCommand } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 import {
   createCheckRunners,

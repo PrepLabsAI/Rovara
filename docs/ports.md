@@ -2,7 +2,7 @@
 
 The ports are the seams where one outside system can be swapped for another with no change to the core (owner decisions 40 and 51).
 This page says what each port is, where its code is, and what an adapter must do. The interfaces are in
-`packages/contracts/src/ports/`; the in-memory fakes, the registry and Code's defaults are in `packages/broker/src/ports/`; the
+`packages/contracts/src/ports/`; the in-memory fakes, the registry and Code's defaults are in `packages/core/src/ports/`; the
 conformance suites are in `tests/support/ports/`.
 
 A change to any interface on this page needs both owners to approve (decision 42a).
@@ -77,7 +77,7 @@ The interface is the hosted product's own lessons seam, name for name (`LessonEm
 without changing the TeamRecord rows they keep (not yet run against them). Lane K1 added the checks: `tests/support/ports/learning-conformance.ts` has one suite for an embedder (`runLessonEmbedderConformance`: a spec, a fixed
 dimension, finite numbers, `embedMany` in order and equal to `embed`, deterministic) and one for vector storage (`runLessonVectorsConformance`: one vector per lesson, a new spec replaces the old one,
 nothing for another spec, idempotent `remove`, companies and projects apart, many ids in one call). Code's hashing embedder and `documentLessonVectors` pass them, as do the fakes
-(`createFixedLessonEmbedder`, `createMemoryLessonVectors`, `createMemoryLearningAdapter` in `packages/broker/src/ports/learning.ts`).
+(`createFixedLessonEmbedder`, `createMemoryLessonVectors`, `createMemoryLearningAdapter` in `packages/core/src/ports/learning.ts`).
 
 ## Company scope
 
@@ -112,7 +112,7 @@ the company from each call (`ModelKeyStore`, `IdentityProvider`, the outbox, `Wo
 - `document-semantics.ts` holds the rules as plain functions; the fake and a SQLite adapter can use them, a DynamoDB adapter
   translates and is held to the same answers by the suite.
 
-**DynamoDB adapter (lane A1, `packages/aws-adapters`, `@rovara/aws-adapters`; public under owner decision 72 O2; opt-in, never Code's default).**
+**DynamoDB adapter (lane A1, `packages/aws-adapters`, `@rovara-code/aws`; public under owner decision 72 O2; opt-in, never Code's default).**
 `DynamoDocumentStore` keeps the hosted State table's layout unchanged, so no data moves: table keys `pk`/`sk` (text) are the port's key, a
 document's attributes are the item's attributes in the form the hosted broker's document client writes (`S`, `N`, `BOOL`, `NULL`, `L`, `M`),
 and the adapter adds no attribute of its own. `STATE_TABLE_INDEXES` names the table's four indexes; `outbox-pending` is listed apart as
@@ -131,7 +131,7 @@ Rulings (controller review of lane A1, 2026-11-11):
   the State table holds no `SS`, `NS`, `BS` or `B` attribute.
 - **The port's size cap stays 400 KiB of compact JSON.** DynamoDB measures size its own way (about 3 bytes per one-digit number in a list,
   3 bytes per empty map), so it may refuse some documents under the cap, such as number-dense lists. Such a refusal is `invalid_request`
-  (a conformance case pins this for every store). The plug-in `@rovara/aws-adapters/dynamodb`
+  (a conformance case pins this for every store). The plug-in `@rovara-code/aws/dynamodb`
 (settings `tableName`, `region`, `endpoint`, `indexes`, `ttlAttribute`) builds the store without a feed. The suite runs against
 `tests/support/ports/dynamodb-fake.ts`, an in-memory DynamoDB that parses the real expressions; it is not yet run against DynamoDB Local.
 
@@ -155,7 +155,7 @@ conditional write and drops an ended or running one), and `outboxId` identifies 
 `expiresAt`. Messages of one ordered group keep their order only if one relay runs at a time. `createTransactionalOutbox` is written
 once over the two ports; the store must keep `OUTBOX_PENDING_INDEX`.
 
-**SQS adapter (lane A2, `packages/aws-adapters/src/sqs`, `@rovara/aws-adapters/sqs`; public, opt-in, never Code's default).**
+**SQS adapter (lane A2, `packages/aws-adapters/src/sqs`, `@rovara-code/aws/sqs`; public, opt-in, never Code's default).**
 `SqsQueueService` implements `Queue` on queues the deployment declares (settings `queues: { <name>: { url, deadLetterUrl? } }`, `region`,
 `endpoint`); it creates and changes no queue. At first use it reads the queue's attributes and takes its visibility timeout, redrive policy
 (`maxReceiveCount`; `deadLetterUrl`, read back, must be a queue of the same kind and the one a redrive policy names) and size limit from SQS, and `queue(name, options)` throws for options that differ.
@@ -347,7 +347,7 @@ rows. The record itself (where rows are kept, how long, vectors, erasure) stays 
   Text under B is allowed: the source hands it to `distillTransient`.
 - Who a source's account is, the source's settings and the capture switch are the adapter's own dependencies, given when it is made (the host's people and settings), not part of the seam.
 - **Code registers no source and keeps no record** (owner decision 102: no local team record in Code for now): `createRefusingRecordSink()` answers every write "this install keeps no team record". The fakes are `createMemoryRecordSink()` (keeps the whole contract) and
-  `createFakeRecordSource()` (scripted deliveries and polls), in `packages/broker/src/ports/record-source.ts`. `tests/support/ports/record-source-conformance.ts` holds two suites: `runRecordSinkConformance` (for any
+  `createFakeRecordSource()` (scripted deliveries and polls), in `packages/core/src/ports/record-source.ts`. `tests/support/ports/record-source-conformance.ts` holds two suites: `runRecordSinkConformance` (for any
   sink) and `runRecordSourceConformance` (for any source, fed recorded deliveries; optionally made with settings it cannot read, when it must record nothing). The sink suite records with a `RecordSample` the harness
   supplies (a source, a row kind, a source instance and how a place is named) and calls the harness's `setup(workspaceId, scope)` before the first write in each place, so a sink that refuses unknown sources or places
   without settings writes its own settings first. Code's fakes use `CHAT_SAMPLE`. The hosted sink is meant to pass the suite over a test table; that has not been run yet.
@@ -374,7 +374,7 @@ and asks the point; it does not write its own reader.
 
 - **A reference is plain data**: an object with exactly one entry, whose key is the kind of source and whose value says which one (`SecretRef`, `SecretRefSchema`). A config file holds
   references, never the secret. The kinds belong to the adapter. Code's adapter (`createLocalSecretStore`) knows `{ "env": "NAME" }`, `{ "file": "/absolute/path" }` and
-  `{ "key": "provider" }` (an entry of the owner's `keys.json`, the key file alone). `SecretSource` (`{ env }` or `{ file }`, `packages/broker/src/plugins/module-support.ts`) is Code's
+  `{ "key": "provider" }` (an entry of the owner's `keys.json`, the key file alone). `SecretSource` (`{ env }` or `{ file }`, `packages/core/src/plugins/module-support.ts`) is Code's
   reference format for plug-in settings: it is a `SecretRef` that Code's adapter knows. Cloud's adapter later reads its secret service with its own kind (for example `{ "secretService": "<name>" }`);
   a kind an adapter does not know answers `undefined`, so one config can name sources for more than one install.
 - **Failure is quiet**: no secret is `undefined`. A source that exists but must not be used or a reference that is not valid is an error with a FIXED sentence that
@@ -405,8 +405,8 @@ and asks the point; it does not write its own reader.
   config-loaded plug-in. It sees every reference asked, and so can answer, and so choose, every model key and the GitHub token; it is trusted as much as the broker itself. Task input and project files cannot name a reference.
   Install a `secrets` plug-in only from a source you trust as you would trust the broker.
 - A conformance suite for every adapter is `tests/support/ports/secret-store-conformance.ts`.
-- **AWS Secrets Manager (convergence lane A3, owner decision 72 O2).** Opt-in: `{ "point": "secrets", "name": "aws-secrets-manager", "module": "@agentx/broker/plugins/secrets-aws", "settings": { "region",
-  one AWS identity, "namePrefix": "rovara/", "companyPaths"? } }` (`createSecretsManagerSecretStore` in `@rovara/aws-adapters/secrets-manager`; the module is `packages/broker/src/plugins/secrets/aws-secrets-manager/`, which shows the adapter's fixed sentences as `LocalSecretError`). Its reference kind is `{ "awsSecret": "<name under the prefix>" }`:
+- **AWS Secrets Manager (convergence lane A3, owner decision 72 O2).** Opt-in: `{ "point": "secrets", "name": "aws-secrets-manager", "module": "@rovara-code/core/plugins/secrets-aws", "settings": { "region",
+  one AWS identity, "namePrefix": "rovara/", "companyPaths"? } }` (`createSecretsManagerSecretStore` in `@rovara-code/aws/secrets-manager`; the module is `packages/core/src/plugins/secrets/aws-secrets-manager/`, which shows the adapter's fixed sentences as `LocalSecretError`). Its reference kind is `{ "awsSecret": "<name under the prefix>" }`:
   the secret read is `namePrefix` + the value (the hosted product's names, such as `agentx/<env>/org-connectors/<company>/<id>`, read as they are), and the value is checked first (plain parts, no `.` or `..`),
   so no reference reaches outside the prefix. A value whose first part is one of `companyPaths` names a company's own secret and is read only when its second part is the call's company. A hosted (many-company) setup MUST set `namePrefix` to its environment's path and `companyPaths` (`org-connectors`, `org-hooks`); without `companyPaths` any name under the prefix is read for any company. `clientFor(companyId)`
   lets a deployment sign each company's reads with a session that reaches only that company's secrets (IAM is the second fence). Missing, scheduled for deletion or empty is `undefined`; a refusal, a KMS
@@ -458,8 +458,8 @@ object carries a content type, a few small text facts (at most 32 and 2 KB in al
   adapters above run it in `tests/unit/ports-object-storage.test.ts`.
 - **Proof code.** `EvidenceBlobStore`, `EvidenceBlobMeta` and `EvidenceObjectTooBigError` stay as names over the port, so the proof code needs no change; the
   wiring lane takes the store from `registry.require("object-storage")`.
-- **S3 (convergence lane A3, owner decision 72 O2: the generic AWS adapters are public).** Opt-in: `{ "point": "object-storage", "name": "s3", "module": "@agentx/broker/plugins/object-storage-s3",
-  "settings": { "bucket", "region", one of "profile" / "roleArn" / "allowAmbientAwsCredentials": true, "maxObjectMiB"?, "expectedBucketOwner"? } }` (`S3ObjectStorage` in the public AWS adapters package `@rovara/aws-adapters/s3`, `packages/aws-adapters`; the module that gives it an AWS identity is `packages/broker/src/plugins/object-storage/s3/`). It keeps the hosted
+- **S3 (convergence lane A3, owner decision 72 O2: the generic AWS adapters are public).** Opt-in: `{ "point": "object-storage", "name": "s3", "module": "@rovara-code/core/plugins/object-storage-s3",
+  "settings": { "bucket", "region", one of "profile" / "roleArn" / "allowAmbientAwsCredentials": true, "maxObjectMiB"?, "expectedBucketOwner"? } }` (`S3ObjectStorage` in the public AWS adapters package `@rovara-code/aws/s3`, `packages/aws-adapters`; the module that gives it an AWS identity is `packages/core/src/plugins/object-storage/s3/`). It keeps the hosted
   product's layout so no data moves: the key as given (no prefix), the metadata as S3 user metadata (`x-amz-meta-*`), and a retention class as an object tag only when the settings map it (`"retentionTags": { "<class>": { "key", "value" } }`): the
   adapter names no tag itself, so no object can carry an expiry tag by accident; the hosted deployment passes its own map (`evidence-short`, `evidence-std` and `e2e-screenshot` to its tag), so its
   objects carry the tags they carry today. How long a tagged class is kept is the BUCKET's lifecycle rules; a class the map does not name is untagged and kept until deleted, and the adapter never sets a lifetime itself. Write once is `If-None-Match: *`; an object whose lifecycle expiry
@@ -472,7 +472,7 @@ object carries a content type, a few small text facts (at most 32 and 2 KB in al
 
 ## Local model proxy (lane L9a, PROVISIONAL: owner decision 58, until Pratik agrees)
 
-The worker never holds a model key. `packages/broker/src/local/model-proxy/` is a small proxy served on the callback listener: a worker asks for a
+The worker never holds a model key. `packages/core/src/local/model-proxy/` is a small proxy served on the callback listener: a worker asks for a
 token with its callback capability (`GET /v1/internal/model-access`, action `model-access`) and sends model calls with it to `/v1/internal/model-proxy/v1/...`;
 the proxy reads the real key through the `model-keys` port, forwards to the provider, meters through the `metering` port and holds the task budget. It
 mirrors Cloud's proxy (packages/model-proxy in Cloud is LiteLLM plus a Python guard, which Code does not carry): the guard's per-route field allow-lists,
@@ -497,7 +497,7 @@ guard's allow-lists are untouched, and the task budget reads the provider's pric
 
 These three points hold Cloud's ports (`packages/contracts/src/plugins/`), which use neutral words only: change request, revision, check,
 review, item. A caller reads an adapter's `capabilities` and never branches on its name. The adapters are in
-`packages/broker/src/plugins/<point>/<name>/`; the lookups Cloud's own registry did are plain functions over the one registry in
+`packages/core/src/plugins/<point>/<name>/`; the lookups Cloud's own registry did are plain functions over the one registry in
 `plugins/routing.ts`.
 
 | Point | Port | Adapters here | Registry name |
@@ -627,7 +627,7 @@ registered by an HTTP call is not yet visible to other processes. The follow-up 
 `ChannelAdapterRecord` as a webhook `ChannelAdapter` (signing in `deliver`), and a rule that refuses a config name already used by a
 record.
 
-**Slack is an ordinary `channel` adapter now** (owner decision 58). `AdapterChannelIdSchema` takes any channel id, `slack` included; the id a webhook adapter may be REGISTERED over HTTP under (`RegisteredChannelIdSchema`) still excludes `slack`, because the hosted product serves that chat tool on its own built-in path until it moves onto the adapter. The in-process adapter is `packages/broker/src/plugins/channel/slack` (module `@agentx/broker/plugins/channel-slack`; see `docs/local.md`, "Chat and notices"). What an in-process adapter hears goes through `createChannelSink` (`core/channel/sink.ts`), which applies the channel API's checks: the actor and the conversation share a tenant, the space is bound to one of the adapter's projects, the adapter's event id is used once, the account is linked to a person (an unlinked one gets a one-use code, once an hour), and a decision matches an open card Rovara posted (`core/channel/cards.ts`) for that exact conversation, revision and digest, of a kind the adapter may decide (`adapterMayDecide`), before the `decide` seam asks the approval gate with a credential of the method `chat-<channel>`. Links, bindings, cards, claims and the thread of a start are stored under the company scope (`ORG#<company>#...`, decision 58); the hosted adapter registry's records (`CHANNEL_ADAPTERS`, and the unscoped link keys of registered adapters) are unchanged.
+**Slack is an ordinary `channel` adapter now** (owner decision 58). `AdapterChannelIdSchema` takes any channel id, `slack` included; the id a webhook adapter may be REGISTERED over HTTP under (`RegisteredChannelIdSchema`) still excludes `slack`, because the hosted product serves that chat tool on its own built-in path until it moves onto the adapter. The in-process adapter is `packages/core/src/plugins/channel/slack` (module `@rovara-code/core/plugins/channel-slack`; see `docs/local.md`, "Chat and notices"). What an in-process adapter hears goes through `createChannelSink` (`core/channel/sink.ts`), which applies the channel API's checks: the actor and the conversation share a tenant, the space is bound to one of the adapter's projects, the adapter's event id is used once, the account is linked to a person (an unlinked one gets a one-use code, once an hour), and a decision matches an open card Rovara posted (`core/channel/cards.ts`) for that exact conversation, revision and digest, of a kind the adapter may decide (`adapterMayDecide`), before the `decide` seam asks the approval gate with a credential of the method `chat-<channel>`. Links, bindings, cards, claims and the thread of a start are stored under the company scope (`ORG#<company>#...`, decision 58); the hosted adapter registry's records (`CHANNEL_ADAPTERS`, and the unscoped link keys of registered adapters) are unchanged.
 
 **For a many-company host.** The sink reads its company and its person from two seams (`companyOf`, `personOf` in `createChannelSink`), with Code's single company and the owner's links as the defaults: a host whose chat app serves several companies answers `companyOf` from a tenant-to-company index, and a host that identifies people by its own sign-in answers `personOf` from that identity data instead of link rows; every key the sink reads or writes is then under the company that answered. The work seam's items carry the company. Moving a host onto these keys needs a backfill: `ORG#<company>#CHANNEL_TENANTS` (one row per channel and tenant a space is bound in, `<channel>/<tenant>`) is new, so existing bindings must get their row or `listAllChannelBindings` will not find them; unbinding leaves the row, which is harmless. Hosted Slack bindings already use the same `ORG#` layout.
 
@@ -674,7 +674,7 @@ The internal build-system detector stays an optional plug-in package outside the
 
 ## Setting a project up (the setup agent)
 
-The setup agent (`packages/broker/src/core/setup-agent/`, the owner's side in `docs/local.md`) is core code on the existing ports; it adds no plug-in interface and changes none.
+The setup agent (`packages/core/src/core/setup-agent/`, the owner's side in `docs/local.md`) is core code on the existing ports; it adds no plug-in interface and changes none.
 - `DocumentStore`: the run's pointer, journal, commands, website asks, the proposal row and the candidate revision are plain rows under Cloud's `SETUP_DRAFT#` and project keys; every race is a condition or a transaction (the single-run pointer, the command counter, the open-asks counter, the catalog move).
 - `Approvers` through the approval gate: two subjects, `setup-host` (a website a run asked for) and `setup-proposal` (a project's candidate setup commands). Both are `risk: "high"`, so only a strong method decides them (the local page's own session; a code host comment never does), and
   both are bound to what the owner saw: the ask and its time, or the digest of the commands and the candidate revision. The proposal is waiting for a decision only once its candidate check passed.
@@ -714,9 +714,9 @@ email notices stay names only (decision 61): they are not points until a lane ne
 
 ## The task flow core (lane L6a)
 
-`packages/broker/src/core/task-flow/` is Cloud's task start, the driver of the stage machine and the dispatch of work to worker machines, built only on
+`packages/core/src/core/task-flow/` is Cloud's task start, the driver of the stage machine and the dispatch of work to worker machines, built only on
 the ports above (`createTaskFlow`, or `createTaskFlowFromRegistry` over the `storage`, `queue`, `worker-machines`, `admission` and `audit-sink` points).
-The pure transitions stay in `@agentx/contracts` (`task-workflow-node.ts`); this is what reads a task, applies one, and writes it fenced on the revision.
+The pure transitions stay in `@rovara-code/contracts` (`task-workflow-node.ts`); this is what reads a task, applies one, and writes it fenced on the revision.
 
 - **Start** (`startTask`) is one `transact`: workspace, its preparation operation and staged dispatch message, task, index row, callback pointer,
   conversation, idempotency record, the workspace-slot charge, whatever `Admission.stage` and `AuditSink.stage` return, and the first step's dispatch row.
@@ -755,7 +755,7 @@ and the build step reads it against the contracts' schemas and the task's own re
 - **Checks** are run by the worker inside the coding run and read here: the candidate (the code the run ended on) must be the code its checks ran on, in every repository, starting from the
   commit preparation recorded (confirmed at the code host before the first pin). A rerun is a CHECKS run.
 - **Reviews** start by themselves on the checked code; each report must be for this code, from this run, and exactly the reviews asked for.
-- **Fixing a block** (`runAutofix`, the policy in `@agentx/contracts` `workflow-autofix.ts`): a code fault goes back to coding at most twice per approved plan; a hiccup of the checks or reviews is
+- **Fixing a block** (`runAutofix`, the policy in `@rovara-code/contracts` `workflow-autofix.ts`): a code fault goes back to coding at most twice per approved plan; a hiccup of the checks or reviews is
   retried once; anything unclear, a person's job or a reached limit is an ask (`autofixAsk` on the task), with what failed. `deps.taskSpendUsd` says what the task cost; **nothing priced counts as
   nothing spent**, so a model with no price (neither its provider's table nor the catalog's list) leaves the count limits alone to bound the rounds (the hosted product's to decide).
 - **Plan risk** (`gradePlanRisk`): the planner's own document may only RAISE the tier. The core computes a floor itself from every path the plan's text and the request name (sensitive paths, count of files, a cost estimate where the task has one) and the tier is the higher of the two; a plan that claims every claim is proved is not thereby low.
@@ -773,7 +773,7 @@ and the build step reads it against the contracts' schemas and the task's own re
 ## Browser and API checks (`core/e2e/`)
 
 The checks that run the app a task changed in a browser and against its API (E2E) on the document store and object storage. Cloud's `workflow-e2e-*`, `e2e-*` and `broker/e2e-rounds` code is on DynamoDB and S3; the same code lives under
-`packages/broker/src/aws/` (unchanged DynamoDB form, used by the older broker and its tests) and in `packages/broker/src/e2e/` (the shared parts: the plan and admission builders, the evidence verifier, the account registry's rows, the display
+`packages/core/src/aws/` (unchanged DynamoDB form, used by the older broker and its tests) and in `packages/core/src/e2e/` (the shared parts: the plan and admission builders, the evidence verifier, the account registry's rows, the display
 and the model route registry). `core/e2e/` is the ports version of what reads and writes:
 
 - **Stored keys are Cloud's, byte for byte**: `ORG#<company>#PROJECT#<project>` / `E2E_ACCOUNT#...`, `E2E_ACCOUNT_LATEST#...` and `E2E_MODEL_BUDGET#<day>` (the org-scoped project partition: `projectPk`), `DEVTASK#<task>` / `E2E_BASELINE#<plan digest>`,
@@ -799,7 +799,7 @@ and `e2e/model-checks.ts` still read through the DynamoDB client; decision-51 ga
 ## Shared names Cloud imports, not copies (owner decision 60, item R4)
 
 Some contract files are in Code (signing keys, editions, run estimates, task budgets, record trust, the port types above). The hosted product has copies of some of them. The rule for the step where Cloud
-consumes Code: **Cloud imports every shared name from Code's contracts (`@agentx/contracts`); it does not keep a second copy.** Two packages exporting the same name is a bug, because a type or a constant
+consumes Code: **Cloud imports every shared name from Code's contracts (`@rovara-code/contracts`); it does not keep a second copy.** Two packages exporting the same name is a bug, because a type or a constant
 that drifts in one of them is a silent break. When a name must change, it changes in Code first (the old name kept as an alias for one release where the item says so), and Cloud follows in its next consume step.
 Cloud's own files keep only what is Cloud's (its adapters, its policies, its data). Nothing in this repository changes for this rule; it is written down so a Cloud change that adds a copy is caught in review.
 
@@ -892,7 +892,7 @@ keeps a catch-up feed writes it in its own store before it publishes; that feed 
 - `publish({ companyId, entries, deadline })` sends each entry to one audience: everyone watching a session (`{ kind: "session", sessionId }`), a project (`{ kind: "project", project }`) or one person
   (`{ kind: "person", personId }`). It **never throws**: an entry that is not a notice or an audience, past the 200-entry batch, past the deadline or lost by the transport is counted in `failed`; it answers `{ sent, failed }`.
 - Who hears a change (the owner, the people a decision waits on, followers) is decided in the core before `publish`; who may LISTEN to an audience is the adapter's own sign-in check where listeners are outside the process.
-- **Code's default is `in-process`** (`createInProcessRealtime`, `packages/broker/src/ports/realtime.ts`): the install's own pages `listen(companyId, listener, audience?)` in the same process; with no listener a publish
+- **Code's default is `in-process`** (`createInProcessRealtime`, `packages/core/src/ports/realtime.ts`): the install's own pages `listen(companyId, listener, audience?)` in the same process; with no listener a publish
   reaches nobody, so registering it changes nothing for an install whose pages do not listen. It is also the fake (`published()`, `setDown`). The hosted adapter (not built yet) is meant to post to its cloud events service with its own
   channel names for the three audiences, so nothing it stores or signs would change. `tests/support/ports/realtime-conformance.ts` is the suite.
 
@@ -908,4 +908,4 @@ adapter's settings, set by the owner: a call never names a sender.
 - `capabilities.available` says whether the adapter can send at all; the core decides before it offers email and falls back to another channel when it is false. The unsubscribe link is sent as the parsed link's `href`
   (`emailUnsubscribeHref`), never the raw text; the recipient and the link get the same control-character check as the subject.
 - **Code's default is `none`, and Code ships no other email adapter** (owner decision 101) (`createUnavailableEmailSender`, `available: false`): every send is `unavailable`, so a person's email choice reads as not set up and notices go through the channel adapters, as before. The fake is
-  `createFakeEmailSender` (`packages/broker/src/ports/email.ts`). The hosted adapter (not built yet) is meant to be its cloud email service with today's sender address and grant. `tests/support/ports/email-conformance.ts` is the suite.
+  `createFakeEmailSender` (`packages/core/src/ports/email.ts`). The hosted adapter (not built yet) is meant to be its cloud email service with today's sender address and grant. `tests/support/ports/email-conformance.ts` is the suite.

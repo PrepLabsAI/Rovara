@@ -4,7 +4,7 @@
 import {
   REQUALIFY_PROFILE_ID, REQUALIFY_TAGS, RequalifyLockSchema, RequalifyRunRecordSchema, RequalifyScheduleEnabledSchema, requalifyHoldKey, requalifyLockKey, requalifyRunKey, requalifyScheduleEnabledKey,
 } from "../packages/contracts/src/index.js";
-import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
+import { e2eModelCheckRunnerKey } from "../packages/core/src/e2e/model-route-registry.js";
 import type { CheckTemplate, Finding } from "./test-deploy-check.js";
 import { REQUALIFY_SCHEDULE_CONTEXT_KEY, REQUALIFY_SCHEDULE_LOGICAL_ID, scheduleFindings, scheduleStateOf, type ScheduleFact } from "./test-deploy-requalify-schedule.js";
 
@@ -16,7 +16,7 @@ export const REQUALIFY_LAMBDA = {
   unit: "requalify-steps",
   // CDK's logical ID of `RuntimeRequalify/Steps` (infra/lib/runtime-requalify.ts); a contract test synthesizes the stack and requires this exact value.
   logicalId: "RuntimeRequalifyStepsAC5E645B",
-  entry: "packages/broker/src/aws/runtime-requalify-handler.ts",
+  entry: "packages/core/src/aws/runtime-requalify-handler.ts",
   extraFiles: [{ from: "packages/worker/ec2/boot.sh", name: "boot.sh" }],
 } as const;
 export type RequalifyLambdaUnit = typeof REQUALIFY_LAMBDA.unit;

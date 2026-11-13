@@ -63,7 +63,7 @@ export class DeveloperTaskNotifier extends Construct {
       "A shared task's notice exhausted its receives and is in the notice dead-letter queue. Check the developer task notifier logs for its message ID.");
     deadLetterAlarm("StreamFailuresAlarm", "DeveloperNoticeStreamFailures", this.streamFailures,
       "A batch of state table changes could not be turned into shared task notices, so a thread may have missed updates. Check the developer task notifier logs, and the failure queue for the shard and sequence numbers.");
-    this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-task-notifier.ts", {
+    this.function = packagedFunction(this, "Function", "packages/core/src/aws/developer-task-notifier.ts", {
       STATE_TABLE_NAME: props.state.tableName,
       CONTROL_PLANE_URL: props.controlPlaneUrl,
       ARTIFACT_BUCKET_NAME: props.artifactBucket.bucketName,

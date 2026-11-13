@@ -17,7 +17,7 @@ import {
   type TestEnvProveReport,
   type TestEnvironmentBody,
   testEnvDigest,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 type Step = (typeof TEST_ENV_PROVE_STEPS)[number];
 type Failure = NonNullable<TestEnvProveReport["steps"][number]["failure"]>;

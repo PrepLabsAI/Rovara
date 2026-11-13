@@ -12,11 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect as tlsConnect } from "node:tls";
 import { afterAll, describe, expect, it } from "vitest";
-import { DEFAULT_AGENT_ALLOW_DOMAINS } from "@agentx/contracts";
-import { LOCAL_DEFAULT_ALLOW_DOMAINS, hostIsAllowed, localAllowedDomains } from "../../packages/broker/src/local/isolation/allow-list.js";
-import { DOCKER_SOCKET_GUARD_SOURCE } from "../../packages/broker/src/local/isolation/docker-socket-guard-source.js";
-import { EGRESS_GATEWAY_SOURCE } from "../../packages/broker/src/local/isolation/egress-gateway-source.js";
-import { startCallbackServer } from "../../packages/broker/src/local/callback-server.js";
+import { DEFAULT_AGENT_ALLOW_DOMAINS } from "@rovara-code/contracts";
+import { LOCAL_DEFAULT_ALLOW_DOMAINS, hostIsAllowed, localAllowedDomains } from "../../packages/core/src/local/isolation/allow-list.js";
+import { DOCKER_SOCKET_GUARD_SOURCE } from "../../packages/core/src/local/isolation/docker-socket-guard-source.js";
+import { EGRESS_GATEWAY_SOURCE } from "../../packages/core/src/local/isolation/egress-gateway-source.js";
+import { startCallbackServer } from "../../packages/core/src/local/callback-server.js";
 import { isForbiddenAddress, proxyHostName } from "../../packages/worker/src/test-account-proxy.js";
 
 const scratch: string[] = [];

@@ -6,14 +6,14 @@ import { describe, expect, it } from "vitest";
 import {
   DIAGNOSIS_RATE, ErrorRefSchema, IMPLICIT_COMPANY_ID, workflowBlockErrorRef,
   type DiagnosisFailureReason, type ErrorRef, type OrgId,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import {
   DIAGNOSIS_LAPTOP_FAILURE_WORDS, DIAGNOSIS_LAPTOP_REFUSALS, DIAGNOSIS_LAPTOP_WORDS, DiagnosisModelProblem, createDiagnosis, diagnosisWordsChecked,
   type DiagnosisAnswerer, type DiagnosisTaskView, type DiagnosisWords,
-} from "../../packages/broker/src/core/diagnosis/index.js";
-import type { TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+} from "../../packages/core/src/core/diagnosis/index.js";
+import type { TaskRecord } from "../../packages/core/src/core/task-flow/records.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OWNER = localOwnerPrincipal();

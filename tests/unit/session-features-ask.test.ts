@@ -2,14 +2,14 @@
 // words, and the context the model is given (a tier, a fence, no secrets). The model is a fake `AskAnswerer`.
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { describe, expect, it } from "vitest";
-import { ASK_RATE, IMPLICIT_COMPANY_ID, companyScoped, sessionRateKey, askLockKey, askRequestKey, sessionAskKey, type Admission, type AdmissionRequest, type AuditEvent, type OrgId, type Principal } from "@agentx/contracts";
-import { ASK_BUSY_TEXT, ASK_CLOSED_TEXT, ASK_NOT_SET_UP_TEXT, ASK_RATE_TEXT, askIdFor, createAsk, type AskAnswerer } from "../../packages/broker/src/core/sessions/ask.js";
-import { buildAskContext, ASK_AUDIENCE_POLICY } from "../../packages/broker/src/core/sessions/ask-context.js";
-import { createTaskSessionItems, developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/index.js";
-import { sessionNoteItems } from "../../packages/broker/src/core/sessions/notes.js";
+import { ASK_RATE, IMPLICIT_COMPANY_ID, companyScoped, sessionRateKey, askLockKey, askRequestKey, sessionAskKey, type Admission, type AdmissionRequest, type AuditEvent, type OrgId, type Principal } from "@rovara-code/contracts";
+import { ASK_BUSY_TEXT, ASK_CLOSED_TEXT, ASK_NOT_SET_UP_TEXT, ASK_RATE_TEXT, askIdFor, createAsk, type AskAnswerer } from "../../packages/core/src/core/sessions/ask.js";
+import { buildAskContext, ASK_AUDIENCE_POLICY } from "../../packages/core/src/core/sessions/ask-context.js";
+import { createTaskSessionItems, developerIdOf, taskSessionId } from "../../packages/core/src/core/sessions/index.js";
+import { sessionNoteItems } from "../../packages/core/src/core/sessions/notes.js";
 import { holdingAdmission } from "../support/holding-admission.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OWNER = localOwnerPrincipal();

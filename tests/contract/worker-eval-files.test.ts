@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { EVAL_FILES_FEATURE, EvalFilesPayloadSchema, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
+import { EVAL_FILES_FEATURE, EvalFilesPayloadSchema, WORKER_INVOCATION_FEATURES } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentsFileWithPointer, placeEvalFiles } from "../../packages/worker/src/eval-files.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";

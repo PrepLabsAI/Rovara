@@ -55,7 +55,7 @@ import {
   type UpdateOp,
   type UpdateRequest,
   type WriteResult,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { UnrepresentableValueError, assertCloudReadableNumbers, assertWellFormedText, fromWireItem, hasLoneSurrogate, toWireItem, type WireItem } from "./attribute-values.js";
 import { ExpressionBuilder } from "./expressions.js";
 

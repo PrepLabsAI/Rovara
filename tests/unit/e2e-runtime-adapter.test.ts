@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createE2EAppAdapterPacket } from "../../packages/verifier/src/runtime-adapter.js";
 import type { E2ECompiledSuite } from "../../packages/verifier/src/scenarios.js";
-import type { E2ESourceSnapshot } from "@agentx/contracts";
+import type { E2ESourceSnapshot } from "@rovara-code/contracts";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 

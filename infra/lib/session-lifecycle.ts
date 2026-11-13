@@ -20,7 +20,7 @@ import {
   aws_stepfunctions as sfn,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
+import { WORKER_SETTING_PARAMETERS } from "@rovara-code/contracts";
 import { packagedFunction } from "./control-plane.js";
 import { EC2_WORKER_AMI_PARAMETER } from "./ec2-workers.js";
 import type { AgentXNaming } from "./naming.js";
@@ -78,7 +78,7 @@ export class SessionLifecycle extends Construct {
     const workerAmiParameterArn = `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${workerAmiParameterName}`;
     const settingParameterArns = Object.values(WORKER_SETTING_PARAMETERS).map((name) =>
       `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${naming.ec2.workerSettingsPrefix}${name}`);
-    this.steps = packagedFunction(this, "Steps", "packages/broker/src/aws/session-steps.ts", {
+    this.steps = packagedFunction(this, "Steps", "packages/core/src/aws/session-steps.ts", {
       STATE_TABLE_NAME: props.state.tableName,
       WORKER_SETTINGS_PREFIX: naming.ec2.workerSettingsPrefix,
       INVOKE_SIGNING_KEY_ARN: props.invokeSigningKey.keyArn,
@@ -177,7 +177,7 @@ export class SessionLifecycle extends Construct {
 
     // The idle reaper (#85): every minute, stops sessions idle over five minutes or older than 14
     // days, and finishes stopping ones whose instance is gone.
-    this.reaper = packagedFunction(this, "Reaper", "packages/broker/src/aws/session-reaper.ts", {
+    this.reaper = packagedFunction(this, "Reaper", "packages/core/src/aws/session-reaper.ts", {
       STATE_TABLE_NAME: props.state.tableName,
       PROVISIONER_ARN: this.provisioner.stateMachineArn,
       DELETER_ARN: this.deleter.stateMachineArn,
@@ -214,7 +214,7 @@ export class SessionLifecycle extends Construct {
     // The reconciler (#86): every 10 minutes, repairs drift between this environment's ec2-ebs
     // instances and volumes and their SESSION items. It never deletes a volume it cannot tie to a
     // closed workspace; unclaimed ones are only tagged and alarmed (#22).
-    this.reconciler = packagedFunction(this, "Reconciler", "packages/broker/src/aws/session-reconciler.ts", {
+    this.reconciler = packagedFunction(this, "Reconciler", "packages/core/src/aws/session-reconciler.ts", {
       STATE_TABLE_NAME: props.state.tableName,
       PROVISIONER_ARN: this.provisioner.stateMachineArn,
       DELETER_ARN: this.deleter.stateMachineArn,

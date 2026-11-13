@@ -1,23 +1,47 @@
 {
-  "name": "@agentx/testing",
+  "name": "@rovara-code/testing",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "The conformance suites for Rovara Code's plug-in ports, the fakes they run on, and the two-company isolation kit. A new provider package runs these against its adapter (docs/architecture/testing-package.md).",
   "exports": {
     ".": "./dist/index.js",
-    "./ports/*": "./dist/ports/*.js",
-    "./isolation": "./dist/isolation/index.js",
     "./channel": "./dist/channel/index.js",
-    "./fakes": "./dist/fakes/index.js"
+    "./fakes": "./dist/fakes/index.js",
+    "./isolation": "./dist/isolation/index.js",
+    "./ports": "./dist/ports/index.js",
+    "./ports/check-runner-conformance": "./dist/ports/check-runner-conformance.js",
+    "./ports/code-host-conformance": "./dist/ports/code-host-conformance.js",
+    "./ports/document-store-conformance": "./dist/ports/document-store-conformance.js",
+    "./ports/email-conformance": "./dist/ports/email-conformance.js",
+    "./ports/github-client-conformance": "./dist/ports/github-client-conformance.js",
+    "./ports/image-registry-conformance": "./dist/ports/image-registry-conformance.js",
+    "./ports/learning-conformance": "./dist/ports/learning-conformance.js",
+    "./ports/monitoring-conformance": "./dist/ports/monitoring-conformance.js",
+    "./ports/object-storage-conformance": "./dist/ports/object-storage-conformance.js",
+    "./ports/outbox-conformance": "./dist/ports/outbox-conformance.js",
+    "./ports/plugin-contract-kit": "./dist/ports/plugin-contract-kit.js",
+    "./ports/plugin-fake-worlds": "./dist/ports/plugin-fake-worlds.js",
+    "./ports/policy-conformance": "./dist/ports/policy-conformance.js",
+    "./ports/queue-conformance": "./dist/ports/queue-conformance.js",
+    "./ports/realtime-conformance": "./dist/ports/realtime-conformance.js",
+    "./ports/record-source-conformance": "./dist/ports/record-source-conformance.js",
+    "./ports/scheduler-conformance": "./dist/ports/scheduler-conformance.js",
+    "./ports/secret-store-conformance": "./dist/ports/secret-store-conformance.js",
+    "./ports/tracker-conformance": "./dist/ports/tracker-conformance.js",
+    "./ports/worker-machines-conformance": "./dist/ports/worker-machines-conformance.js"
   },
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
   "engines": {
     "node": ">=22.19.0 <23"
   },
   "dependencies": {
-    "@agentx/broker": "0.1.0",
-    "@agentx/contracts": "0.1.0"
+    "@rovara-code/contracts": "0.1.0",
+    "@rovara-code/core": "0.1.0"
   },
   "devDependencies": {
     "vitest": "5.0.3"

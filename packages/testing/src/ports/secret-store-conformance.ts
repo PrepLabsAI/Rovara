@@ -1,7 +1,7 @@
 // Owner decision 60 (item R2): the conformance suite every `secrets` adapter must pass: Code's own adapter now, Cloud's secret-service adapter later.
 import { format, inspect } from "node:util";
 import { describe, expect, it } from "vitest";
-import { SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
+import { SecretValue, type SecretRef, type SecretStore } from "@rovara-code/contracts";
 
 export interface SecretStoreUnderTest {
   store: SecretStore;

@@ -1,4 +1,4 @@
-import { E2E_MODEL_SESSION_SYNC_MAX_BODY_BYTES, E2E_MODEL_SESSION_SYNC_MAX_VALUES, boundSessionValue, type E2EModelSessionSync, type E2EModelSessionSyncReply } from "@agentx/contracts";
+import { E2E_MODEL_SESSION_SYNC_MAX_BODY_BYTES, E2E_MODEL_SESSION_SYNC_MAX_VALUES, boundSessionValue, type E2EModelSessionSync, type E2EModelSessionSyncReply } from "@rovara-code/contracts";
 
 /**
  * The client half of the session sync (MIDSTEPCOOKIE): what the executor does before each model call.

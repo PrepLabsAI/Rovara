@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_LOADED_KNOWLEDGE_BYTES, MAX_LOADED_KNOWLEDGE_ITEMS, loadedKnowledgeOfProgress } from "@agentx/contracts";
+import { MAX_LOADED_KNOWLEDGE_BYTES, MAX_LOADED_KNOWLEDGE_ITEMS, loadedKnowledgeOfProgress } from "@rovara-code/contracts";
 import { EventBatcher, WORKER_EVENT_PAYLOAD_MAX_BYTES, type WorkerEvent } from "../../packages/worker/src/events.js";
 import { buildLoadedKnowledgeManifest, loadedKnowledgePayload } from "../../packages/worker/src/knowledge/manifest.js";
 import type { KnowledgeRecord, ResolvedKnowledge } from "../../packages/worker/src/knowledge/resolve.js";

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { E2EApplicationCliHostDescriptorSchema, E2EScenarioSchema, E2ERunBindingSchema, E2ERuntimeAccountRefSchema,
   canonicalJson, type E2ERuntimeAccountRef, type E2EScenario, type E2EApplicationAccountPorts, type E2EApplicationPreparedEnvironment,
-  type E2EApplicationSupervisorPorts } from "@agentx/contracts";
+  type E2EApplicationSupervisorPorts } from "@rovara-code/contracts";
 import type { TestFixtures } from "e2e";
 import type { EngineHandle } from "e2e/engine";
 import { ASSERTION_FIXTURE, assertionStepFixture, assertionStepsOf, runInsideAssertionSteps, type AssertionSteps } from "./assertion-steps.js";
@@ -21,7 +21,7 @@ import { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment, type E
   type E2EApplicationPreparationInputs } from "./application-services.js";
 import { runIsolatedE2EApplication, type E2EApplicationRuntimePorts } from "./application-runtime.js";
 import { createE2EApplicationRuntimePorts } from "./application-services.js";
-import type { E2ERunInput, ProjectSetupRunnerToolchain } from "@agentx/contracts";
+import type { E2ERunInput, ProjectSetupRunnerToolchain } from "@rovara-code/contracts";
 import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
 import { stripStepIndexes } from "./executor/capture.js";
 

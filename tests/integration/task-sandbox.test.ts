@@ -6,7 +6,7 @@ import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { ProjectDefinitionSchema, type ProjectCommand, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
+import { ProjectDefinitionSchema, type ProjectCommand, type ProjectDefinition, type WorkerInvocation } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";

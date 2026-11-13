@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { canonicalJson } from "@agentx/contracts";
-import type { E2ESourceSnapshot } from "@agentx/contracts";
-import type { E2EMockSpec } from "@agentx/contracts";
-import { inspectE2EPortableSource } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
+import type { E2ESourceSnapshot } from "@rovara-code/contracts";
+import type { E2EMockSpec } from "@rovara-code/contracts";
+import { inspectE2EPortableSource } from "@rovara-code/contracts";
 import type { E2ECompiledSuite } from "./scenarios.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");

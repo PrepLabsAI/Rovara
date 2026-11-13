@@ -1,7 +1,7 @@
 // Plan 6 Task 8, the worker's side of the plan check. The critic is a read-only model run: it reads the plan against the repository and ends its answer with a `rovara-plan-critique`
 // block. An answer whose block cannot be read is asked for once more, in the same session, with what is wrong; whichever answer comes last is uploaded and the broker decides (it reads the
 // block again, and blocks the check when it still cannot). Nothing here believes the critic: the answer is saved as it was written, and the broker is the one that bounds and redacts it.
-import { PLAN_CRITIQUE_INFO_STRING, readPlanCritique } from "@agentx/contracts";
+import { PLAN_CRITIQUE_INFO_STRING, readPlanCritique } from "@rovara-code/contracts";
 
 /** The artifact the broker reads the plan check's answer from. */
 export const PLAN_CRITIQUE_ARTIFACT = "plan-critique.md";

@@ -8,7 +8,7 @@ import {
   buildSystemSetupPrograms,
   parseBuildSystemProfiles,
   type BuildSystemProfile,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { setExtraSubcommandPrograms } from "./setup-agent-journal.js";
 
 let installed: readonly BuildSystemProfile[] = [];

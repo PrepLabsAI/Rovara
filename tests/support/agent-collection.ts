@@ -10,10 +10,10 @@ import type { ReplayRun } from "./agent-replay-run.js";
 import { withModelChannel } from "./orders-m14-agent.js";
 import { createHash } from "node:crypto";
 import { e2eCompiledRuntime } from "../../packages/verifier/src/application-scenarios.js";
-import type { E2EApplicationExecutionAdmission, E2EModelRouteDefinition, E2ERoundScope } from "@agentx/contracts";
+import type { E2EApplicationExecutionAdmission, E2EModelRouteDefinition, E2ERoundScope } from "@rovara-code/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { encodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
-import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput, type ApplicationEvidenceVerification } from "../../packages/broker/src/e2e/application-evidence.js";
+import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput, type ApplicationEvidenceVerification } from "../../packages/core/src/e2e/application-evidence.js";
 import { aggregateEvidenceEnvelope, groupEvidenceEnvelope } from "./e2e-application-evidence-fixture.js";
 
 /** A real agent run (the real executor, Chromium, the scripted model through the worker's proxy) read back the way the Docker host reads it. */

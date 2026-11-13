@@ -1,16 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { SLACK_OIDC_ISSUER, type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import * as taskPersonIdentity from "../../packages/broker/src/developer/task-person-identity.js";
+import { SLACK_OIDC_ISSUER, type TaskPersonProofRequest, type TaskPersonProofResponse } from "@rovara-code/contracts";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { ownerKeyForSubject } from "../../packages/core/src/aws/lambda.js";
+import * as taskPersonIdentity from "../../packages/core/src/developer/task-person-identity.js";
 import {
   resolveTaskPersonId,
   resolveTaskPickerPerson,
   type ProjectAccessSubject,
   type TaskPersonIdentityDependencies,
-} from "../../packages/broker/src/developer/task-person-identity.js";
-import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
-import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
+} from "../../packages/core/src/developer/task-person-identity.js";
+import type { DeveloperTaskRecord } from "../../packages/core/src/developer/task-records.js";
+import type { DeveloperRecord } from "../../packages/core/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { T0, TEAM } from "../support/developer-fakes.js";
 

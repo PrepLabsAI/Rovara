@@ -44,7 +44,7 @@ describe("the renewal's deploy units against the synthesized control-plane stack
   });
 
   it("bundles boot.sh beside the handler exactly as the infra does", () => {
-    expect(REQUALIFY_LAMBDA.entry).toBe("packages/broker/src/aws/runtime-requalify-handler.ts");
+    expect(REQUALIFY_LAMBDA.entry).toBe("packages/core/src/aws/runtime-requalify-handler.ts");
     expect(REQUALIFY_LAMBDA.extraFiles).toEqual([{ from: "packages/worker/ec2/boot.sh", name: "boot.sh" }]);
   });
 

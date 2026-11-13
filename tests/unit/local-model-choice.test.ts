@@ -1,13 +1,13 @@
 // Port lane L13: which model a laptop task step calls. The rule is one pure function, shared by the task flow and `rovara up --check`.
 import { describe, expect, it } from "vitest";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { PluginConfigSchema } from "@agentx/contracts";
+import { PluginConfigSchema } from "@rovara-code/contracts";
 import { DEFAULT_DIRECT_MODELS, DEFAULT_OPENROUTER_WORKER_MODEL } from "@agentx/model-runtime/config";
-import type { ModelProviderAdapter } from "@agentx/contracts";
-import { chooseLocalModel, defaultModelOf } from "../../packages/broker/src/local/model-choice.js";
-import { readyProviders, type ModelProviderBook } from "../../packages/broker/src/local/model-proxy/index.js";
-import { BUILTIN_MODEL_PROVIDERS, NATIVE_CHAT_CAPABILITIES, bedrockModelProvider } from "../../packages/broker/src/plugins/model-provider/index.js";
-import { localRoute } from "../../packages/broker/src/local/model-proxy/providers.js";
+import type { ModelProviderAdapter } from "@rovara-code/contracts";
+import { chooseLocalModel, defaultModelOf } from "../../packages/core/src/local/model-choice.js";
+import { readyProviders, type ModelProviderBook } from "../../packages/core/src/local/model-proxy/index.js";
+import { BUILTIN_MODEL_PROVIDERS, NATIVE_CHAT_CAPABILITIES, bedrockModelProvider } from "../../packages/core/src/plugins/model-provider/index.js";
+import { localRoute } from "../../packages/core/src/local/model-proxy/providers.js";
 import { E2E_AGENT_ELIGIBLE_MODELS } from "../../packages/contracts/src/e2e-agent-models.generated.js";
 
 describe("the default OpenRouter model", () => {

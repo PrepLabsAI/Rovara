@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, type E2ERound, type E2ERunBinding } from "@agentx/contracts";
+import { canonicalJson, type E2ERound, type E2ERunBinding } from "@rovara-code/contracts";
 import { createE2ECollectionOracleFromCompiledSuite, parseE2EReport, qualifyE2ECollection, type E2ECollection, type E2ECollectionOracle, type E2EStructuralQualification } from "./result-adapter.js";
 import type { E2ECompiledSuite } from "./scenarios.js";
 import type { E2EActualCliRun } from "./runtime-cli.js";

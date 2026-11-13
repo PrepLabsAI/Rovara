@@ -1,14 +1,14 @@
 // The hourly resume of unfinished lesson deletions and the nightly re-reflection of reverted tasks, from the record's `rovara.reverted_by` link rows of the last 72 hours.
 import { describe, expect, it, vi } from "vitest";
-import type { CounterDeps } from "../../../packages/broker/src/lessons/counters.js";
-import { REVERT_WINDOW_MS, lessonsExpireJob, lessonsNightlyJob, lessonsPromoteJob, lessonsResumeJob, lessonsRevertJob, lessonsTrialRepairJob, MAX_TRIAL_REPAIR_CHECKS, type LessonsJobDeps } from "../../../packages/broker/src/lessons/jobs.js";
-import { PENDING_GRACE_MS, projectHash, documentNightlyState, type NightlyPass, type NightlyPassState, type NightlyStateStore } from "../../../packages/broker/src/lessons/nightly-state.js";
-import { sweepExpired } from "../../../packages/broker/src/lessons/expiry.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { TRIAL_APPROVER, TRIAL_STABLE_AFTER_DAYS } from "../../../packages/broker/src/lessons/trial.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
-import type { RevertedTasksReader } from "../../../packages/broker/src/lessons/task-outcome-rows.js";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
+import type { CounterDeps } from "../../../packages/core/src/lessons/counters.js";
+import { REVERT_WINDOW_MS, lessonsExpireJob, lessonsNightlyJob, lessonsPromoteJob, lessonsResumeJob, lessonsRevertJob, lessonsTrialRepairJob, MAX_TRIAL_REPAIR_CHECKS, type LessonsJobDeps } from "../../../packages/core/src/lessons/jobs.js";
+import { PENDING_GRACE_MS, projectHash, documentNightlyState, type NightlyPass, type NightlyPassState, type NightlyStateStore } from "../../../packages/core/src/lessons/nightly-state.js";
+import { sweepExpired } from "../../../packages/core/src/lessons/expiry.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { TRIAL_APPROVER, TRIAL_STABLE_AFTER_DAYS } from "../../../packages/core/src/lessons/trial.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import type { RevertedTasksReader } from "../../../packages/core/src/lessons/task-outcome-rows.js";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
 import { Audit, settings, lessonRecord, seed, REFUSING_JUDGE } from "./lesson-helpers.js";
 
 const ORG_A = "org_aaaaaaaaaaaaaaaaaaaa";

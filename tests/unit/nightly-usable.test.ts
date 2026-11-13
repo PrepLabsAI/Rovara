@@ -1,9 +1,9 @@
 // The last nightly baseline is "what already fails" only while it is recent (7 days) or run on the branch's unchanged head, from the branch the tasks are based on, whole and readable. Otherwise it excuses nothing.
 import { describe, expect, it } from "vitest";
-import { NightlyBaselineSchema, projectPk, projectRevisionKey } from "@agentx/contracts";
-import { NIGHTLY_BASELINE_MAX_AGE_MS, projectBaseBranch, taskBaseBranches, usableNightlyFailing } from "../../packages/broker/src/core/test-env/nightly-usable.js";
-import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { NightlyBaselineSchema, projectPk, projectRevisionKey } from "@rovara-code/contracts";
+import { NIGHTLY_BASELINE_MAX_AGE_MS, projectBaseBranch, taskBaseBranches, usableNightlyFailing } from "../../packages/core/src/core/test-env/nightly-usable.js";
+import { documentOf } from "../../packages/core/src/core/test-env/deps.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 const ORG = `org_${"f".repeat(20)}`;
 const PROJECT = "web";

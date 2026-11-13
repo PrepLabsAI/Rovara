@@ -1,6 +1,6 @@
 // The conformance suite every `scheduler` adapter must pass: the in-memory fake, Code's local timer, and Cloud's hosted scheduler adapter later.
 import { describe, expect, it } from "vitest";
-import { SchedulerError, type DueSchedule, type ScheduleEntry, type Scheduler } from "@agentx/contracts";
+import { SchedulerError, type DueSchedule, type ScheduleEntry, type Scheduler } from "@rovara-code/contracts";
 
 export interface SchedulerUnderTest {
   scheduler: Scheduler;

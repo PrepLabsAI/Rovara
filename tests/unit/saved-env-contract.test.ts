@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SAVED_ENV_MAX_KEY_FILES, SavedEnvManifestSchema, computeEnvironmentKey, EnvironmentKeyInputSchema, type EnvironmentKeyInput,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const H1 = "1".repeat(64);
 const H2 = "2".repeat(64);

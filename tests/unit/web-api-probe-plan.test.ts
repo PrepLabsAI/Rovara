@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { WEB_API_AGENT_GUARD_MARKER_TESTID, WEB_API_AGENT_GUARD_PAGE_PATH, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_IDS, WEB_API_AGENT_PROBE_LIMITS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, canonicalJson, e2eModelRouteRevision, webApiProbeRunId } from "../../packages/contracts/src/index.js";
-import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
+import { e2eAgentRoutePolicyLimits } from "../../packages/core/src/e2e/model-route-registry.js";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel } from "../../packages/verifier/src/application-scenarios.js";
 import { assertAgentProbeAssetMatchesPin, loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";

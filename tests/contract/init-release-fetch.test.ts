@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError } from "@rovara-code/contracts";
 import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
 import { fetchRelease, readReleaseManifest, readWithProgress, releaseAssetUrls, releaseCacheDir, sourceRelease } from "../../packages/cli/src/init/release-fetch.js";

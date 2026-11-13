@@ -3,17 +3,17 @@
 // no level reads a missing session; a person short of the level is told what they need. On a Code install the local owner holds `edit` on every session and nobody else holds anything.
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, agentSessionKey, type OrgId, type Principal } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, agentSessionKey, type OrgId, type Principal } from "@rovara-code/contracts";
 import {
   SessionStore, createSessionControl, createTaskSessionItems, developerIdOf, taskSessionId, type MessagePlan, type SessionControlHost,
-} from "../../packages/broker/src/core/sessions/index.js";
+} from "../../packages/core/src/core/sessions/index.js";
 import {
   ASK_NOT_ALLOWED_TEXT, createSessionAccess, localOwnerMembers, requireAsk, requireLevelOf, sessionPersonOf, type SessionCompanyRole, type SessionMembers, type SessionProjectRole,
-} from "../../packages/broker/src/core/sessions/access.js";
-import { createAsk, type AskAnswerer } from "../../packages/broker/src/core/sessions/ask.js";
-import { followSession, recordPresence } from "../../packages/broker/src/core/sessions/followers.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+} from "../../packages/core/src/core/sessions/access.js";
+import { createAsk, type AskAnswerer } from "../../packages/core/src/core/sessions/ask.js";
+import { followSession, recordPresence } from "../../packages/core/src/core/sessions/followers.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 import { holdingAdmission } from "../support/holding-admission.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;

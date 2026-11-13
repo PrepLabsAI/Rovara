@@ -11,7 +11,7 @@
 // The seam is GUARDED, not only used: tests/unit/worker-execution-target.test.ts resolves every use of `TaskSandbox.runCommand` and `TaskSandbox.bashOperations` through the type checker and fails on any outside this
 // file and task-sandbox.ts (optional chains, destructuring, aliases and string keys included). Two consumers are not wired through it yet and MUST be when they are: Prove's production ports (the setup executor builds
 // `ProvePorts.runCommand`, use `proveCommandPort(executionFor(...))`) and the person-command runner (setup-command-runner.ts takes a `BashOperations`; hand it the seam's, as setup-agent-run.ts does). The runner never runs the agent: the agent, its model calls and its edits stay central (the contract forbids those fields).
-import { RunnerIdSchema, agentXError, type ProjectCommand } from "@agentx/contracts";
+import { RunnerIdSchema, agentXError, type ProjectCommand } from "@rovara-code/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import type { CommandResult } from "./readiness.js";
 import type { TaskSandbox } from "./task-sandbox.js";

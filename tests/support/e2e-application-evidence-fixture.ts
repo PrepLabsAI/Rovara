@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import process from "node:process";
-import { canonicalJson, e2eRuntimeBindingOf, type E2EApplicationExecutionAdmission, type E2ERound, type E2ERunBinding } from "@agentx/contracts";
+import { canonicalJson, e2eRuntimeBindingOf, type E2EApplicationExecutionAdmission, type E2ERound, type E2ERunBinding } from "@rovara-code/contracts";
 import { collectE2EApplicationRun } from "../../packages/verifier/src/application-collection.js";
 import { dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest } from "../../packages/verifier/src/host/executor-readback.js";
 import { E2EApplicationCaseCaptureSchema, E2EApplicationObservationBindingSchema, e2eApplicationAggregateRunUsage, type E2EApplicationCollectionResult } from "../../packages/verifier/src/application-result-adapter.js";

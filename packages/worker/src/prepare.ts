@@ -19,7 +19,7 @@ import {
   type PrepareRegistry,
   type ProjectCommand,
   type StoredProjectDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { defaultVenvLinkPolicy, isVenvInterpreterLink, type VenvLinkPolicy } from "./workspace-links.js";
 import { materializeMetaKnowledge } from "./meta-checkout.js";
 import {

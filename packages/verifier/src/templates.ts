@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, E2E_CANDIDATE_INSPECTION_PROTOCOL, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, resolveE2EPortableRegistration, type E2EExpectedCase, type E2EExecutionPlan, type E2EPortableOperationRegistration, type E2EPortablePurpose, type E2EScenario } from "@agentx/contracts";
+import { canonicalJson, E2E_CANDIDATE_INSPECTION_PROTOCOL, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, resolveE2EPortableRegistration, type E2EExpectedCase, type E2EExecutionPlan, type E2EPortableOperationRegistration, type E2EPortablePurpose, type E2EScenario } from "@rovara-code/contracts";
 import { E2E_CANDIDATE_RESPONSE_PROTOCOL, E2E_CANDIDATE_REQUEST_PROTOCOL, E2E_CANDIDATE_RESPONSE_SCOPE, E2E_SUPERVISOR_RPC_PROTOCOL, E2E_GENERATED_CONFIG_PATH, E2E_GENERATED_TEST_PATH, E2E_SELECTION_PACKET_PATH, expectedE2EConfigDigest, upstreamE2ECaseIdentity, type E2ECompiledFile, type E2ECompiledInventory } from "./identity.js";
 import { createE2ESelectionPacket } from "./selection.js";
 

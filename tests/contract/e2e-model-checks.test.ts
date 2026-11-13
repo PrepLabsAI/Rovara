@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { DRIVING_TEST_FIRST_CALL_CASE_ID, E2E_MODEL_CHECK_RESULT_SCHEMA, e2eModelRouteRevision, type E2EModelReceipt } from "@agentx/contracts";
+import { DRIVING_TEST_FIRST_CALL_CASE_ID, E2E_MODEL_CHECK_RESULT_SCHEMA, e2eModelRouteRevision, type E2EModelReceipt } from "@rovara-code/contracts";
 import { deriveE2EAgentRouteForModel, e2eAgentRouteDefinitionDigest, type E2EAgentInstallation } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import {
   ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, untestedRouteSentence, validateModelCheckResult, type ExpectedModelCheck, type ModelCheckDependencies,
-} from "../../packages/broker/src/e2e/model-checks.js";
+} from "../../packages/core/src/e2e/model-checks.js";
 import {
   e2eAgentInstallationFromParameters, e2eModelCheckRunnerKey, e2eModelRouteCanaryKey, e2eModelRouteShapeKey, e2eModelRouteTestKey, planE2EAgentRoute, readE2EModelRouteShape,
-} from "../../packages/broker/src/e2e/model-route-registry.js";
+} from "../../packages/core/src/e2e/model-route-registry.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 // M1.4 Task 4.10C, tests 34 and 35: the broker's validation of a model check result, the rows a validated result writes, and the two admin routes' logic.

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { E2E_AGENT_ACTIONS_SCHEMA_VERSION, E2EAgentActionLedgerSchema, canonicalJson, e2eAgentValueDigest, e2eAgentValueKeyId,
-  type E2EAgentActionLedger } from "@agentx/contracts";
+  type E2EAgentActionLedger } from "@rovara-code/contracts";
 import { E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "./evidence-paths.js";
 
 /**

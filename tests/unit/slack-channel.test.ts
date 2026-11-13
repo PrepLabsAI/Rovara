@@ -1,10 +1,10 @@
 // The chat tool's channel adapter: its web client, its message shapes, what it hears, its socket, and the adapter as a plug-in. The network is a fake; every token is built at run time (push protection).
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, type ChannelDecision, type ChannelEvent, type InboundMessage } from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters } from "../../packages/broker/src/ports/adapter-registry.js";
+import { IMPLICIT_COMPANY_ID, type ChannelDecision, type ChannelEvent, type InboundMessage } from "@rovara-code/contracts";
+import { createAdapterRegistry, loadAdapters } from "../../packages/core/src/ports/adapter-registry.js";
 import {
   NO_THREAD, SLACK_CAPABILITIES, SlackApiError, SlackChannel, changesModal, changesPressOf, changesSubmissionOf, cleanChatText, decisionOf, escapeText, messageOf, renderEvent, slackChannelPlugin, slackWeb, startSocket, textOf, SOCKET_QUEUE_MAX, type SocketLike,
-} from "../../packages/broker/src/plugins/channel/slack/index.js";
+} from "../../packages/core/src/plugins/channel/slack/index.js";
 
 const BOT_TOKEN = ["xoxb", "1111111111", "2222222222", "abcdefghijklmnop"].join("-");
 const APP_TOKEN = ["xapp", "1", "A0123456789", "3333333333", "abcdefghijklmnopqrstuvwx"].join("-");

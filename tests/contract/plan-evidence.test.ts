@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { PlanEvidenceBundleSchema, type PlanClaim, type PlanDocument } from "@agentx/contracts";
-import { resolvePlanEvidence } from "../../packages/broker/src/developer/plan-evidence.js";
+import { PlanEvidenceBundleSchema, type PlanClaim, type PlanDocument } from "@rovara-code/contracts";
+import { resolvePlanEvidence } from "../../packages/core/src/developer/plan-evidence.js";
 import { planDocument } from "../support/plan-documents.js";
 
 const COMMIT = "a".repeat(40);

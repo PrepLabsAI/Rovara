@@ -3,7 +3,7 @@ import {
   feedbackNoticeToDecisionMeasure,
   feedbackRecommendationMeasure,
   feedbackReopenedMeasure,
-} from "../../packages/broker/src/developer/feedback-review-measures.js";
+} from "../../packages/core/src/developer/feedback-review-measures.js";
 
 describe("privacy-safe feedback review measures", () => {
   it("records notice-to-decision time as a coarse aggregate event name and timestamp", () => {

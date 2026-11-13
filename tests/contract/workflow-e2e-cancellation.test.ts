@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WorkerInvocationSchema } from "@agentx/contracts";
+import { WorkerInvocationSchema } from "@rovara-code/contracts";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { executeWorkerCancelInvocation } from "../../packages/worker/src/cancel-invocation.js";

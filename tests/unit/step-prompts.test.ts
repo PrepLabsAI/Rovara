@@ -6,17 +6,17 @@ import { describe, expect, it } from "vitest";
 import {
   AGENTX_PREAMBLE, INTENT_BLOCK_INFO_STRING, WORKFLOW_PLAN_MAX_BYTES, lastFencedBlock, parseAgentClaim, readIntentBlock, UNDERSTAND_UNREADABLE_MESSAGE,
   type WorkflowArtifact, type WorkflowIntent, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { readIntentArtifact } from "@agentx/contracts";
+} from "@rovara-code/contracts";
+import { readIntentArtifact } from "@rovara-code/contracts";
 import { settleUnderstanding } from "../../packages/worker/src/understand.js";
-import { DEFAULT_PROMPTS, PLAN_EARLIER_HEADER, PLAN_PREVIOUS_HEADER, PLAN_SECTIONS, planRules } from "../../packages/broker/src/core/task-flow/step-prompts.js";
-import { planContextOf } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { UNDERSTAND_REQUEST_HEADER, PLAN_UNDERSTANDING_HEADER, ANSWERS_BLOCK_HEADER } from "../../packages/broker/src/rovara-code/understand.js";
-import { approvedCodingPlan } from "../../packages/broker/src/core/build-step/plan-input.js";
-import { NO_PUBLISH_NOTE, implementPrompt, reviewPrompt, sendBackPrompt } from "../../packages/broker/src/core/build-step/prompts.js";
-import { documentSummary } from "../../packages/broker/src/core/decisions/plan-summary.js";
-import { planFactsOf } from "../../packages/broker/src/core/decisions/plan-risk.js";
-import { loadWorkflowDocument } from "../../packages/broker/src/developer/plan-document-reader.js";
+import { DEFAULT_PROMPTS, PLAN_EARLIER_HEADER, PLAN_PREVIOUS_HEADER, PLAN_SECTIONS, planRules } from "../../packages/core/src/core/task-flow/step-prompts.js";
+import { planContextOf } from "../../packages/core/src/core/task-flow/stage-machine.js";
+import { UNDERSTAND_REQUEST_HEADER, PLAN_UNDERSTANDING_HEADER, ANSWERS_BLOCK_HEADER } from "../../packages/core/src/rovara-code/understand.js";
+import { approvedCodingPlan } from "../../packages/core/src/core/build-step/plan-input.js";
+import { NO_PUBLISH_NOTE, implementPrompt, reviewPrompt, sendBackPrompt } from "../../packages/core/src/core/build-step/prompts.js";
+import { documentSummary } from "../../packages/core/src/core/decisions/plan-summary.js";
+import { planFactsOf } from "../../packages/core/src/core/decisions/plan-risk.js";
+import { loadWorkflowDocument } from "../../packages/core/src/developer/plan-document-reader.js";
 
 const REQUEST = "Add a --json flag to the status command so it prints its result as JSON.";
 const fence = (info: string, body: string): string => `\`\`\`${info}\n${body}\n\`\`\``;

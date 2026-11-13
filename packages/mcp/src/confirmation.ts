@@ -2,7 +2,7 @@
 // one, else by the Slack Confirm button; apply it, decline it, or report that it waits. One trace
 // ID runs through every call of one change (FR-052). Answers are read loosely (R1): a status this
 // CLI does not know is neither applied nor pending.
-import { ADMIN_CHANGE_PROGRESS_MS, ADMIN_CHANGE_SLACK_WAIT_MS, type AdminChangeViewWire } from "@agentx/contracts";
+import { ADMIN_CHANGE_PROGRESS_MS, ADMIN_CHANGE_SLACK_WAIT_MS, type AdminChangeViewWire } from "@rovara-code/contracts";
 import type { AdminControlPlaneClient } from "./admin-client.js";
 import { ToolError, plainText, type ToolErrorCode } from "./errors.js";
 import type { ToolCall } from "./tools.js";

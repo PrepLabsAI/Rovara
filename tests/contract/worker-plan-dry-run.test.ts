@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   PLAN_DRY_RUN_FEATURE, PlanDryRunReportSchema, WORKER_INVOCATION_FEATURES, builtinFileCheckCommand, planDryRunCommandSha256,
   type PlanDryRunReport,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { DockerCli } from "@agentx/verifier";
 import { classifyDryRunExit, grepFileOperands, proposedChecksOfPlan, runPlanDryRun, type ProposedCheckToTry } from "../../packages/worker/src/plan-dry-run.js";
 import { materializeBaseSource } from "../../packages/worker/src/baseline-source-export.js";
@@ -18,7 +18,7 @@ import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { createApplicationChecksFeatureMonitor } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
-import { planDryRunFindings, planDryRunOriginalResults, planDryRunWarnings, readPlanDryRunOutcome, workerTriesProposedChecks } from "../../packages/broker/src/developer/plan-dry-run-results.js";
+import { planDryRunFindings, planDryRunOriginalResults, planDryRunWarnings, readPlanDryRunOutcome, workerTriesProposedChecks } from "../../packages/core/src/developer/plan-dry-run-results.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const PASSWORD = "PLANTED-PASSWORD-7f3a91c2";

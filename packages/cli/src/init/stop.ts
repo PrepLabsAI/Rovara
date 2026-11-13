@@ -1,6 +1,6 @@
 // Spec 048 FR-060: a stop the person chose (declining the plan, Stop for now, stopping at the root
 // warning or a check-again question) is not a failure, so the page shows no failure screen for it.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 const chosen = new WeakSet<object>();
 

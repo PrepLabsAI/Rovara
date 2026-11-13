@@ -15,7 +15,7 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationBuildSourceManifestS
   type E2EAppArtifactRef, type E2EAppBuildManifest, type E2EExecutionPlan, type E2EExpectedCase,
   type E2EApplicationPortableProjection, type E2EApplicationGroupAdmission, type E2ERound, type E2ERunBinding,
   type E2EApplicationExecutionAdmission,
-  type E2ERegisteredRuntime, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot, type E2EPolicy } from "@agentx/contracts";
+  type E2ERegisteredRuntime, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot, type E2EPolicy } from "@rovara-code/contracts";
 import { compileE2EScenarios } from "./scenarios.js";
 
 export type { E2EApplicationCompilationContext };

@@ -10,7 +10,7 @@
 // repository's file names is put into an error.
 import { chmod, lstat, readdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import type { PrepareMeta } from "@agentx/contracts";
+import type { PrepareMeta } from "@rovara-code/contracts";
 import { runIsolatedGit } from "./isolated-repository.js";
 
 /** More than this many files are not read: a knowledge folder is documents, not a code tree. */

@@ -1,4 +1,4 @@
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { adoptEnvironment, type CallerIdentity, type StackReader } from "./adopt.js";
 import { writeEnvironmentCache } from "./cache.js";
 import type { ParameterStore } from "./parameter-store.js";

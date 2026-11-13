@@ -19,7 +19,7 @@ import {
   type UpdateOp,
   change,
   when,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { AuditLogError, auditDigest, checkAuditEvent, storedAuditEvent } from "./audit-event.js";
 import type { SqliteAuditLog } from "./sqlite-audit-log.js";
 

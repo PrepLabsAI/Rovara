@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js";
 import { prepareWorkspace, verifyCheckedOutHeads } from "../../packages/worker/src/prepare.js";

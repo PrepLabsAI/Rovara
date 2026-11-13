@@ -2,14 +2,14 @@
 // problem it can fix (or when the answer was unreadable), keeps the findings beside the plan, and never moves the digest the owner approves.
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { PLAN_DRY_RUN_FEATURE, WORKFLOW_BLOCK_REASONS, planDryRunCommandSha256, planQualityFinding, type PlanDryRunClass, type WorkflowSnapshot } from "@agentx/contracts";
-import { planDocumentInstructions, withoutPlanQualityText, asksForPlanQuality } from "../../packages/broker/src/aws/broker-shared.js";
+import { PLAN_DRY_RUN_FEATURE, WORKFLOW_BLOCK_REASONS, planDryRunCommandSha256, planQualityFinding, type PlanDryRunClass, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { planDocumentInstructions, withoutPlanQualityText, asksForPlanQuality } from "../../packages/core/src/aws/broker-shared.js";
 import {
   PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, planRevisionPrompt, planRevisionsUsed,
-} from "../../packages/broker/src/developer/plan-self-check.js";
-import { planQualityFindings } from "../../packages/broker/src/developer/plan-quality.js";
+} from "../../packages/core/src/developer/plan-self-check.js";
+import { planQualityFindings } from "../../packages/core/src/developer/plan-quality.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { createPlanQualityNegotiationRecorder } from "../../packages/broker/src/aws/dispatcher.js";
+import { createPlanQualityNegotiationRecorder } from "../../packages/core/src/aws/dispatcher.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;

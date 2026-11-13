@@ -5,10 +5,10 @@
 //   4. a gate waits for the owner: nothing a step reports decides it, a proof for another gate is refused, and a gate nobody decides takes its reject edge;
 //   5. a step's report goes on as information with secrets removed, and an edge back is taken at most its limit.
 import { describe, expect, it } from "vitest";
-import { CHAIN_MAX_CONCURRENT_RUNS } from "@agentx/contracts";
-import { chainGraphProblems, validateChainForPublish } from "../../packages/broker/src/core/chains/validate.js";
-import { advanceChainRun, cancelChainRun, onStepEnded, readChainRun, readStepAttempts, startChainRun, stepRequestId, sweepChainRuns } from "../../packages/broker/src/core/chains/runner.js";
-import { chainGateRequest, decideChainGate } from "../../packages/broker/src/core/chains/gates.js";
+import { CHAIN_MAX_CONCURRENT_RUNS } from "@rovara-code/contracts";
+import { chainGraphProblems, validateChainForPublish } from "../../packages/core/src/core/chains/validate.js";
+import { advanceChainRun, cancelChainRun, onStepEnded, readChainRun, readStepAttempts, startChainRun, stepRequestId, sweepChainRuns } from "../../packages/core/src/core/chains/runner.js";
+import { chainGateRequest, decideChainGate } from "../../packages/core/src/core/chains/gates.js";
 import { COMPANY, OWNER, PROJECT, createAutomationWorld, publishAgent, publishChain, type AutomationWorld } from "../support/automation-world.js";
 import { approversOf } from "../support/automation-approvers.js";
 
@@ -62,8 +62,8 @@ describe("designing and publishing a chain", () => {
     const chain = await world.chains.create({ orgId: COMPANY, name: "Raced", by: OWNER.personId, definition: twoStep(agentId) });
     const draft = (await world.chains.getDraft(COMPANY, chain.chainId))!;
     const checked = await validateChainForPublish(world.roster, COMPANY, draft.definition);
-    const { writeGuardrails } = await import("../../packages/broker/src/core/agents/guardrails.js");
-    const { DEFAULT_AGENT_GUARDRAILS } = await import("@agentx/contracts");
+    const { writeGuardrails } = await import("../../packages/core/src/core/agents/guardrails.js");
+    const { DEFAULT_AGENT_GUARDRAILS } = await import("@rovara-code/contracts");
     await writeGuardrails(world.agents.table, COMPANY, { ...DEFAULT_AGENT_GUARDRAILS, requireCrossCompanyReview: true }, OWNER.personId);
     await expect(world.chains.publish({ orgId: COMPANY, chainId: chain.chainId, expectedDraftRevision: draft.revision, by: OWNER.personId, pinned: checked.pinned, problems: checked.problems, guardrailsRevision: checked.guardrailsRevision })).rejects.toThrow(/Someone else changed/u);
   });
@@ -246,7 +246,7 @@ describe("gates", () => {
     const { agentId } = await publishAgent(world);
     const design = { ...gated(agentId), steps: gated(agentId).steps.map((step) => (step.kind === "gate" ? { ...step, approvers: [{ kind: "starter" }] } : step)) };
     const chainId = await publishChain(world, agentId, design);
-    const { createTrigger, triggerEnableRequest, enableTrigger } = await import("../../packages/broker/src/core/triggers/lifecycle.js");
+    const { createTrigger, triggerEnableRequest, enableTrigger } = await import("../../packages/core/src/core/triggers/lifecycle.js");
     const trigger = await createTrigger(world.dispatch, { orgId: COMPANY, target: { kind: "chain", chainId }, project: PROJECT, spec: { kind: "event", source: "github", type: "pull_request.opened" }, by: OWNER.personId });
     await expect(enableTrigger(world.dispatch, COMPANY, trigger.triggerId, world.proofFor(await triggerEnableRequest(world.dispatch, trigger)))).rejects.toThrow(/no one starts an event or schedule run/u);
     });

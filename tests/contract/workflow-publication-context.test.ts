@@ -4,7 +4,7 @@ import {
   workflowPublicationContextDigest,
   type WorkerInvocation,
   type WorkflowPublicationContextV1,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const sha = (character: string) => character.repeat(40);
 

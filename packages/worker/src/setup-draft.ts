@@ -10,7 +10,7 @@ import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEVCONTAINER_PATH_PATTERN, SETUP_COMMANDS_MAX, SETUP_PROPOSAL_INFO_STRING, SETUP_SECRETS_MAX, sanitizeSetupProposal, setupProposalAnswerOf, type SetupProposal,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { scanRepositories, type SetupScan } from "./setup-scan.js";
 import { dropUntrackedCitations, isTracked, trackedScanOf, type TrackedPaths } from "./setup-citations.js";
 

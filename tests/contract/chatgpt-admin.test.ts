@@ -2,9 +2,9 @@
 // through the admin change path; off, nobody connects and every task runs on the default model.
 import { describe, expect, it, vi } from "vitest";
 import { runConfigSet, type ConfigServices } from "../../packages/cli/src/config/commands.js";
-import { chatGptConnections, type ChatGptConnections, type ChatGptSealer } from "../../packages/broker/src/chatgpt/connections.js";
-import { CHATGPT_SETTINGS_KEY, readChatGptSettings } from "../../packages/broker/src/chatgpt/settings.js";
-import { chatGptTaskSelection } from "../../packages/broker/src/chatgpt/task-model.js";
+import { chatGptConnections, type ChatGptConnections, type ChatGptSealer } from "../../packages/core/src/chatgpt/connections.js";
+import { CHATGPT_SETTINGS_KEY, readChatGptSettings } from "../../packages/core/src/chatgpt/settings.js";
+import { chatGptTaskSelection } from "../../packages/core/src/chatgpt/task-model.js";
 import { createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { configServicesFor } from "../support/config-services.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";

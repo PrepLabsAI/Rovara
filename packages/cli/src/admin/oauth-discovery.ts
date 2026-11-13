@@ -2,7 +2,7 @@
 // --endpoint` needs no vendor profile. RFC 9728 (protected resource metadata), RFC 8414
 // (authorization server metadata) and RFC 7591 (dynamic client registration), as the MCP
 // authorization specification uses them. Nothing here sends a credential.
-import { agentXError, publicHttpsUrlProblem } from "@agentx/contracts";
+import { agentXError, publicHttpsUrlProblem } from "@rovara-code/contracts";
 import { readLimitedText } from "@agentx/gateway";
 
 const TIMEOUT_MS = 10_000;

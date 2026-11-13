@@ -7,9 +7,9 @@ import { PrepareSavedEnvSchema, SavedEnvPanelSchema, savedEnvRepositoryName, typ
 import {
   ARCHIVE_POLICY, SAVED_ENV_FAILURE_BACKOFF_MS, SAVED_ENV_JOB_LEASE_MS, authorizeLease, checkRebuild, imageForTask, leaseForDispatch, lightSetup, markStale, mintPushForJob, savedEnvForPrepare, savedEnvPullLogin, sweepDeleted, SAVED_ENV_TASK_CHECK_MS, SAVED_ENV_RESET_COOLDOWN_MS, onProjectRegistered, onProjectArchived, onProjectDeleted, rebuildReason, recordBuild, reportFailure, requestReset, walk,
   type SavedEnvState,
-} from "../../packages/broker/src/core/test-env/saved-env.js";
-import { panelView, resetFromPanel, savedEnvPanel } from "../../packages/broker/src/core/test-env/saved-env-panel.js";
-import { installSavedEnv, savedEnvPrepareOf } from "../../packages/broker/src/core/test-env/saved-env-prepare.js";
+} from "../../packages/core/src/core/test-env/saved-env.js";
+import { panelView, resetFromPanel, savedEnvPanel } from "../../packages/core/src/core/test-env/saved-env-panel.js";
+import { installSavedEnv, savedEnvPrepareOf } from "../../packages/core/src/core/test-env/saved-env-prepare.js";
 import { APPROVED, COMMIT, DAY, KEY, T0, dig, imageOf, iso, manifestOf, savedEnvWorld, type WorldOptions } from "../support/saved-env-world.js";
 
 const ids = { orgId: "org-1", projectId: "proj-1" };
@@ -500,7 +500,7 @@ describe("the push login belongs to the job's lease (mintPushForJob) and the tok
   });
 
   it("only saved-env.ts uses the raw mintPushSession (routes call mintPushForJob)", () => {
-    const root = join(import.meta.dirname, "..", "..", "packages", "broker", "src");
+    const root = join(import.meta.dirname, "..", "..", "packages", "core", "src");
     const users: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {

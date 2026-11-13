@@ -3,12 +3,12 @@
 // are the ones a real install makes.
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
-import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
-import { FakeCodeHost } from "@agentx/broker/fakes";
-import { NO_HOST_MESSAGE } from "../../packages/broker/src/plugins/routing.js";
-import { pressMerge, registryRepositoryResolver, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { githubCodeHost } from "../../packages/core/src/plugins/code-host/github/index.js";
+import { GitHubAppCredentialProvider } from "../../packages/core/src/plugins/code-host/github/client.js";
+import { FakeCodeHost } from "@rovara-code/core/fakes";
+import { NO_HOST_MESSAGE } from "../../packages/core/src/plugins/routing.js";
+import { pressMerge, registryRepositoryResolver, trackPullRequest } from "../../packages/core/src/core/merge/index.js";
 import { GitHubFixtureApi } from "../support/ports/github-fixture-api.js";
 import { RecordingNetwork, TenantBinding } from "../support/ports/github-client-conformance.js";
 import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
@@ -42,7 +42,7 @@ describe("the merge core over the registry, the GitHub adapter and the real GitH
     await trackPullRequest(w.tracking, TASK_ID);
     const pr = w.prs[0]!;
     expect((await w.trackingOf(pr))).toMatchObject({ ci: "passing", review: "approved" });
-    const prepared = await (await import("../../packages/broker/src/core/merge/index.js")).prepareMerge(w.deps, { taskId: TASK_ID, requestId: w.requestId() });
+    const prepared = await (await import("../../packages/core/src/core/merge/index.js")).prepareMerge(w.deps, { taskId: TASK_ID, requestId: w.requestId() });
     const result = await pressMerge(w.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: w.proofFor(prepared) });
     expect(result.status).toBe("MERGED");
     expect(pr.model.getChangeRequest(String(pr.number)).state).toBe("merged");

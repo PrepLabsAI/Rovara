@@ -4,7 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const folder = resolve("packages/broker/src/core/plan");
+const folder = resolve("packages/core/src/core/plan");
 
 function closureOf(entries: readonly string[]): { files: Set<string>; sdk: string[] } {
   const files = new Set<string>();
@@ -35,9 +35,9 @@ describe("core/plan", () => {
   });
 
   it("the moved helpers are still exported where the hosted product reads them", async () => {
-    const answers = await import("../../packages/broker/src/developer/owner-answers.js");
-    const keys = await import("../../packages/broker/src/developer/plan-evidence-jobs.js");
-    const shared = await import("../../packages/broker/src/aws/broker-shared.js");
+    const answers = await import("../../packages/core/src/developer/owner-answers.js");
+    const keys = await import("../../packages/core/src/developer/plan-evidence-jobs.js");
+    const shared = await import("../../packages/core/src/aws/broker-shared.js");
     expect(typeof answers.ownerAnswersSentence).toBe("function");
     expect(typeof answers.planOwnerAnswers).toBe("function");
     expect(typeof keys.planEvidenceSources).toBe("function");

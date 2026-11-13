@@ -4,17 +4,17 @@ import { describe, expect, it } from "vitest";
 import {
   FixtureSetSchema, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, fixtureEntry, fixtureSetDigest, TEST_SERVICES_FAKE_USAGE_WORDS, testEnvDigest,
   type FixtureSet, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type TestServicesUsageRecord, type VerifiedCatalog,
-} from "@agentx/contracts";
-import { DEPENDENCY_PLAN_REFUSAL_WORDS, TEST_SERVICES_MIN_CATALOG_REVISION, dependenciesStartableNow, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import { approvedFixturesOf, fixtureDigestsOfEnvironment, fixtureDigestsOfPlan, recordsOf, type FixtureStoreFactory } from "../../packages/broker/src/core/test-env/fixture-lookup.js";
-import { createFixtureStore, createMemoryFixturePorts, verifiedFixtureDecision, type FixtureStore } from "../../packages/broker/src/core/test-env/fixture-store.js";
-import { environmentUnusedReason, testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
-import { testEnvPlanFor, testEnvImplementPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
-import { FAKE_USAGE_ITEM_ID, dependencyEvidenceOf, type PinnedDependency, type RawUsage } from "../../packages/broker/src/core/proof/dependency-evidence.js";
-import { packDependencyLines } from "../../packages/broker/src/core/proof/dependency-lines.js";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
-import { dependencyStepsOf } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
-import { dependencyCardLines } from "../../packages/broker/src/core/test-env/dependency-card-lines.js";
+} from "@rovara-code/contracts";
+import { DEPENDENCY_PLAN_REFUSAL_WORDS, TEST_SERVICES_MIN_CATALOG_REVISION, dependenciesStartableNow, taskDependencyPlansOf } from "../../packages/core/src/core/test-env/dependency-plan.js";
+import { approvedFixturesOf, fixtureDigestsOfEnvironment, fixtureDigestsOfPlan, recordsOf, type FixtureStoreFactory } from "../../packages/core/src/core/test-env/fixture-lookup.js";
+import { createFixtureStore, createMemoryFixturePorts, verifiedFixtureDecision, type FixtureStore } from "../../packages/core/src/core/test-env/fixture-store.js";
+import { environmentUnusedReason, testEnvironmentForStart } from "../../packages/core/src/core/test-env/usable.js";
+import { testEnvPlanFor, testEnvImplementPlanFor } from "../../packages/core/src/core/test-env/task-plan.js";
+import { FAKE_USAGE_ITEM_ID, dependencyEvidenceOf, type PinnedDependency, type RawUsage } from "../../packages/core/src/core/proof/dependency-evidence.js";
+import { packDependencyLines } from "../../packages/core/src/core/proof/dependency-lines.js";
+import { evidenceEnvironmentOf } from "../../packages/core/src/core/test-env/evidence-line.js";
+import { dependencyStepsOf } from "../../packages/core/src/core/test-env/prove-from-setup-check.js";
+import { dependencyCardLines } from "../../packages/core/src/core/test-env/dependency-card-lines.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
 import { pinnedCatalog, unpinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 

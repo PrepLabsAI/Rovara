@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ModelsAnswersSchema } from "../deploy/answer-schemas.js";
-import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix } from "@agentx/contracts";
+import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix } from "@rovara-code/contracts";
 import { ParameterExistsError, type ParameterStore } from "./parameter-store.js";
 
 export const EnvironmentSettingsSchema = z.object({

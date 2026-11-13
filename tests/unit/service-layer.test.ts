@@ -1,12 +1,12 @@
 // The host-neutral service layer composed by a host that is not the local app: fake adapters only, no `local/app` code. One merge is tracked and recorded, one session sweep runs and one notice is delivered, and the
 // host's own rules (who a person is on the code host, the words of a notice) are the ones it passed in.
 import { describe, expect, it } from "vitest";
-import * as broker from "../../packages/broker/src/index.js";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { writeNotifyPrefs } from "../../packages/broker/src/core/notify/index.js";
-import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
-import { createNoticeService } from "../../packages/broker/src/services/index.js";
+import * as broker from "../../packages/core/src/index.js";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { taskKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { writeNotifyPrefs } from "../../packages/core/src/core/notify/index.js";
+import { recoveryRowKey } from "../../packages/core/src/core/merge/store.js";
+import { createNoticeService } from "../../packages/core/src/services/index.js";
 import { TASK_ID } from "../support/merge-world.js";
 import { CONVERSATION, FOOTER, ORG, OWNER_ID, SESSION, host } from "../support/service-host.js";
 

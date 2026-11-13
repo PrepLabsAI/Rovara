@@ -9,7 +9,7 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { SshCredentialMaterialSchema } from "@agentx/contracts";
+import { SshCredentialMaterialSchema } from "@rovara-code/contracts";
 import { runGitWithCredential } from "../../packages/worker/src/git-auth.js";
 
 const execFile = promisify(execFileCallback);

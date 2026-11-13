@@ -1,6 +1,6 @@
 // Port lane P6 (item L2): what both parts of Code's local audit trail agree on: how an event is checked, and the digest that says two records are the same facts.
 import { createHash } from "node:crypto";
-import { canonicalJson, type AuditEvent } from "@agentx/contracts";
+import { canonicalJson, type AuditEvent } from "@rovara-code/contracts";
 import { storableText } from "./sqlite-database.js";
 
 const ACTION = /^[a-z][a-z0-9_]*(?:[.-][a-z0-9_]+)*$/;

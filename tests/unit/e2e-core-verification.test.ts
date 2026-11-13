@@ -3,13 +3,13 @@
 // Runs on the pinned Node (22.23.2), like every suite built on the application evidence fixture, which signs the toolchain version into the evidence: run it with `vt`, not under another patch version.
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalJson, type DocumentStore, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
-import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { failClosedAuthority, type E2EAuthority } from "../../packages/broker/src/core/e2e/authority.js";
-import { loadApplicationEvidenceInputs, settleBaselineRound, verifyWorkflowE2EEvidence, type E2EVerificationDiagnostic } from "../../packages/broker/src/core/e2e/verification.js";
-import { markWorkflowE2EBaselineUnavailable, readWorkflowE2EBaselineRecord, requestWorkflowE2EBaselineRound } from "../../packages/broker/src/core/e2e/baseline.js";
+import { canonicalJson, type DocumentStore, type E2EWorkflowAdmissionRef } from "@rovara-code/contracts";
+import type { OperationRecord } from "../../packages/core/src/core/task-flow/records.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import { failClosedAuthority, type E2EAuthority } from "../../packages/core/src/core/e2e/authority.js";
+import { loadApplicationEvidenceInputs, settleBaselineRound, verifyWorkflowE2EEvidence, type E2EVerificationDiagnostic } from "../../packages/core/src/core/e2e/verification.js";
+import { markWorkflowE2EBaselineUnavailable, readWorkflowE2EBaselineRecord, requestWorkflowE2EBaselineRound } from "../../packages/core/src/core/e2e/baseline.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope, type ApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
@@ -142,7 +142,7 @@ describe("settling a baseline round", () => {
     await settleBaselineRound(deps, operation("CANCELLED"), "CANCELLED");
     expect((await readWorkflowE2EBaselineRecord(state, task))?.state).toBe("REQUESTED");
     const started = { baseCommitSha: "b".repeat(40), operationId: "op-b1", roundId: "r1", admissionSha256: "d".repeat(64), startedAt: "2026-11-10T10:00:00.000Z", deadlineAt: "2026-11-10T10:30:00.000Z" };
-    const { baselineStartItem } = await import("../../packages/broker/src/core/e2e/baseline.js");
+    const { baselineStartItem } = await import("../../packages/core/src/core/e2e/baseline.js");
     expect((await state.store.transact([baselineStartItem(task, started)])).applied).toBe(true);
     await settleBaselineRound(deps, operation("CANCELLED"), "CANCELLED");
     expect(await readWorkflowE2EBaselineRecord(state, task)).toMatchObject({ state: "UNAVAILABLE", reason: "stopped" });
@@ -151,7 +151,7 @@ describe("settling a baseline round", () => {
   it("marks a started record whose operation failed as one that could not run, and never replaces a result", async () => {
     const { deps, state } = await seed();
     const started = { baseCommitSha: "b".repeat(40), operationId: "op-b1", roundId: "r1", admissionSha256: "d".repeat(64), startedAt: "2026-11-10T10:00:00.000Z", deadlineAt: "2026-11-10T10:30:00.000Z" };
-    const { baselineStartItem } = await import("../../packages/broker/src/core/e2e/baseline.js");
+    const { baselineStartItem } = await import("../../packages/core/src/core/e2e/baseline.js");
     await state.store.transact([baselineStartItem(task, started)]);
     await settleBaselineRound(deps, operation("FAILED"), "FAILED");
     expect(await readWorkflowE2EBaselineRecord(state, task)).toMatchObject({ state: "UNAVAILABLE", reason: "run-failed" });

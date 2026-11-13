@@ -5,7 +5,7 @@
 import {
   ADMIN_FAILURES_DEFAULT_LIMIT, ADMIN_LIST_MAX, ADMIN_WORKSPACES_DEFAULT_LIMIT, AdminUsageGroupBySchema, MISSING_ALARM_STATE, WorkspaceStatusSchema, inertName,
   type AdminHealthResponse, type AdminRequester, type AdminUsageGroupBy,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { z } from "zod";
 import { ADMIN_SIGN_IN_STEP, type AdminControlPlaneClient } from "./admin-client.js";
 import { ToolError } from "./errors.js";

@@ -1,11 +1,11 @@
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { indexExpiresAt, type E2EDisplayBaseline } from "@agentx/contracts";
+import { indexExpiresAt, type E2EDisplayBaseline } from "@rovara-code/contracts";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import {
   E2E_BASELINE_ATTEMPT, E2E_BASELINE_RUN_GRACE_MS, baselineStartItem, markWorkflowE2EBaselineUnavailable, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord,
   requestWorkflowE2EBaselineRound, workflowE2EBaselineView,
-} from "../../packages/broker/src/aws/workflow-e2e-baseline.js";
+} from "../../packages/core/src/aws/workflow-e2e-baseline.js";
 import { failedBaseline } from "../support/e2e-scenario-results.js";
 
 // M1.3 Task 3.7b, review findings F1, F3, F8 and F9: the baseline round has a record of its own, beside the task. It is written once per approved plan, says when the round

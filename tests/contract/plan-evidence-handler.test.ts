@@ -1,10 +1,10 @@
 // Spec 061 (slice 1.1, task 5): the PlanEvidence job reads a stored plan's cited code in the background, with retries.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { WorkflowSnapshot } from "@agentx/contracts";
-import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
-import { runPlanEvidenceJob, type PlanEvidenceRunDependencies } from "../../packages/broker/src/aws/plan-evidence-handler.js";
-import { PLAN_EVIDENCE_EVENT_SOURCE, planEvidenceDueKey } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
+import type { WorkflowSnapshot } from "@rovara-code/contracts";
+import { getTaskDocumentView } from "../../packages/core/src/aws/developer-tasks.js";
+import { runPlanEvidenceJob, type PlanEvidenceRunDependencies } from "../../packages/core/src/aws/plan-evidence-handler.js";
+import { PLAN_EVIDENCE_EVENT_SOURCE, planEvidenceDueKey } from "../../packages/core/src/developer/plan-evidence-jobs.js";
 import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 

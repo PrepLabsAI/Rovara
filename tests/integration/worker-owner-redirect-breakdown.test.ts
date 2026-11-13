@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { REDIRECT_RESTART_NOTE, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE, taskGraphDigest, type TaskGraphV1 } from "@agentx/contracts";
+import { REDIRECT_RESTART_NOTE, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE, taskGraphDigest, type TaskGraphV1 } from "@rovara-code/contracts";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 

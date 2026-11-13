@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalJson, E2EApplicationPreparedEnvironmentSchema, e2eApplicationPreparedEnvironmentDigest } from "@agentx/contracts";
+import { canonicalJson, E2EApplicationPreparedEnvironmentSchema, e2eApplicationPreparedEnvironmentDigest } from "@rovara-code/contracts";
 import { createAPIApplicationCliHost, executeE2EAPIApplicationScenario, validateE2EAPIApplicationPath, type E2EApiRuntimePorts } from "../../packages/verifier/src/api-runtime.js";
 import type { E2EApplicationCliLaunchContext } from "../../packages/verifier/src/application-runtime-bootstrap.js";
 import { createE2EApplicationRuntimePorts, prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from "../../packages/verifier/src/application-services.js";

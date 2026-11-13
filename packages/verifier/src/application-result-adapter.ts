@@ -4,7 +4,7 @@ import { z } from "zod";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, e2eModelRouteRevision, e2eRuntimeBindingOf, copyBoundedE2EJsonData, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema, E2E_REPLAY_STOP_CODES,
   E2EExpectedCaseSchema, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAssertionSchema,
   E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, isE2EAnonymousSessionRef, readE2EApplicationProjectContract, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
-  type E2ERound, type E2ERoundScope, type E2ERunBinding, type E2ERuntimeAccountRef } from "@agentx/contracts";
+  type E2ERound, type E2ERoundScope, type E2ERunBinding, type E2ERuntimeAccountRef } from "@rovara-code/contracts";
 import { E2E_REPORT_MAX_BYTES, E2E_APP_RPC_FRAME_MAX_BYTES, e2ePrivateTransferMaxBytes, type E2EStructuralQualification } from "./result-adapter.js";
 import { parseE2EApplicationReport, type E2EApplicationReport } from "./application-report-schema.js";
 import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
@@ -15,7 +15,7 @@ import { isPinnedRovaraHttpEngine } from "./rovara-http-engine-descriptor.js";
 import { SINKHOLE_ORIGIN_REF, planApplicationOrigins } from "./application-mocks.js";
 import { E2EAgentModelEvidenceSchema, evaluateE2EAgentCase, type E2EAgentCaseResult, type E2EAgentModelEvidence, type E2EAgentUnknownCode } from "./application-agent-result.js";
 import { agentCaseDirectoryName } from "./executor/evidence-paths.js";
-import { E2E_MODEL_BUDGET_MAX_CALL_TOKENS } from "@agentx/contracts";
+import { E2E_MODEL_BUDGET_MAX_CALL_TOKENS } from "@rovara-code/contracts";
 import { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "./application-templates.js";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/);

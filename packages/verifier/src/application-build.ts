@@ -6,7 +6,7 @@ import { canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes, E2EAp
   validateE2EAppBuildBinding, verifyE2ESourceSnapshot,
   type E2EApplicationApprovalBinding, type E2EApplicationBuildBinding, type E2EApplicationBuildSourceManifest,
   type E2EApplicationBuildSourceRef, type E2EApplicationEvidenceRef, type E2EAppArtifactOutput,
-  type E2EAppArtifactRef, type E2EAppBuildManifest, type E2EAppRecipe, type E2ERuntimeProfile, type E2ESourceSnapshot } from "@agentx/contracts";
+  type E2EAppArtifactRef, type E2EAppBuildManifest, type E2EAppRecipe, type E2ERuntimeProfile, type E2ESourceSnapshot } from "@rovara-code/contracts";
 import { validateE2EApplicationBuildSourceManifest } from "./application-build-source.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");

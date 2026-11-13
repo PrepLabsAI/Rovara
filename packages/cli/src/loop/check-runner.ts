@@ -2,7 +2,7 @@
 // the shell, as CI runs it, in its own process group, so a timeout stops everything it started. What a failure
 // shows is the end of its output, with secrets redacted.
 import { spawn } from "node:child_process";
-import { redactText } from "@agentx/contracts";
+import { redactText } from "@rovara-code/contracts";
 import type { LoopRepoConfig } from "./config.js";
 
 /** How much of a failing check's output is kept: its last lines matter most. */

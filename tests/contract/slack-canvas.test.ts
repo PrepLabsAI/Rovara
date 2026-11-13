@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTaskPlanCanvas, deleteTaskPlanCanvas } from "../../packages/broker/src/aws/slack-web.js";
+import { createTaskPlanCanvas, deleteTaskPlanCanvas } from "../../packages/core/src/aws/slack-web.js";
 
 const CHANNEL = "C12345678";
 

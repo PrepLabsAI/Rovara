@@ -2,7 +2,7 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUILD_SYSTEM_PROFILES_ENV, serializeBuildSystemProfiles } from "@agentx/contracts";
+import { BUILD_SYSTEM_PROFILES_ENV, serializeBuildSystemProfiles } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { installBuildSystemProfiles, installedDetectorModules } from "../../packages/worker/src/build-systems.js";
 import { BUILT_IN_DETECTOR_NAMES, boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";

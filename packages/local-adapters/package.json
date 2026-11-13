@@ -12,10 +12,14 @@
     "./company-instructions": "./dist/company-instructions-plugin.js"
   },
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
   "engines": {
     "node": ">=22.19.0 <23"
   },
   "dependencies": {
-    "@agentx/contracts": "0.1.0"
+    "@rovara-code/contracts": "0.1.0"
   }
 }

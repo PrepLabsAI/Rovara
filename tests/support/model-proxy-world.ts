@@ -8,15 +8,15 @@ import type { AddressInfo } from "node:net";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SecretValue, agentXError, type Cost, type MeterEntry, type MeterResult, type ModelKeyStore, type PriceTable } from "@agentx/contracts";
-import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
-import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
-import { startCallbackServer, type CallbackServer } from "../../packages/broker/src/local/callback-server.js";
-import { EGRESS_GATEWAY_SOURCE } from "../../packages/broker/src/local/isolation/egress-gateway-source.js";
+import { SecretValue, agentXError, type Cost, type MeterEntry, type MeterResult, type ModelKeyStore, type PriceTable } from "@rovara-code/contracts";
+import { CallbackCapabilities } from "../../packages/core/src/callbacks.js";
+import { createPriceTableMetering } from "../../packages/core/src/ports/policy-defaults.js";
+import { startCallbackServer, type CallbackServer } from "../../packages/core/src/local/callback-server.js";
+import { EGRESS_GATEWAY_SOURCE } from "../../packages/core/src/local/isolation/egress-gateway-source.js";
 import {
   CAPABILITY_HEADER, WORKSPACE_HEADER, capabilityModelGrants, createLocalModelProxy, localRoute, withOneShotOperations,
   type LocalModelProxy, type ModelGrantSource, type ModelProxyEvent, type OneShotOperations, type ProxyRoute,
-} from "../../packages/broker/src/local/model-proxy/index.js";
+} from "../../packages/core/src/local/model-proxy/index.js";
 
 export const COMPANY = "org_00000000000000000000";
 export const WORKSPACE = "11111111-1111-4111-8111-111111111111";

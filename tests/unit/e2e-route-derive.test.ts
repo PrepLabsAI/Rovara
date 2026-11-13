@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import { e2eModelRouteRevision } from "../../packages/contracts/src/e2e-model-channel.js";
 import { deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment, resolveE2EAgentRouteForAdmission, scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
-import { deriveE2EAgentRoute as brokerDerive, e2eAgentInstallationFromParameters } from "../../packages/broker/src/e2e/model-route-registry.js";
+import { deriveE2EAgentRoute as brokerDerive, e2eAgentInstallationFromParameters } from "../../packages/core/src/e2e/model-route-registry.js";
 import { deriveE2EAgentRoute as installedDerive } from "@agentx/model-runtime/e2e-route-derive";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
 
@@ -125,7 +125,7 @@ describe("the route derivation module", () => {
   it("imports nothing but contracts (and node:crypto for the route digest), so the broker that loads its subpath never loads pi-ai", () => {
     const source = readFileSync(new URL("../../packages/model-runtime/src/e2e-route-derive.ts", import.meta.url), "utf8");
     const specifiers = [...source.matchAll(/^\s*(?:import|export)[^"']*from\s+["']([^"']+)["']/gm)].map((match) => match[1]);
-    expect(specifiers).toEqual(["node:crypto", "@agentx/contracts"]);
+    expect(specifiers).toEqual(["node:crypto", "@rovara-code/contracts"]);
     expect((JSON.parse(readFileSync(new URL("../../packages/model-runtime/package.json", import.meta.url), "utf8")) as { exports: Record<string, string> }).exports["./e2e-route-derive"]).toBe("./dist/e2e-route-derive.js");
   });
 });

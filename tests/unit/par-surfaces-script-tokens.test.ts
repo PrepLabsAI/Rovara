@@ -8,18 +8,18 @@ import { join } from "node:path";
 import {
   CreateScriptTokenBodySchema, CreatedScriptTokenSchema, IMPLICIT_COMPANY_ID, SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE, SCRIPT_TOKEN_PERMISSIONS, SCRIPT_TOKENS_PER_PERSON_MAX, ScriptTokenListSchema, WORKER_INVOCATION_FEATURES, orgScriptTokensKey, scriptTokenKey,
   type AuditEvent, type AuditSink,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createScriptToken, listScriptTokens, noteScriptTokenUse, readScriptToken, revokeScriptToken, ScriptTokenRecordSchema, type ScriptTokenDependencies } from "../../packages/broker/src/core/script-tokens/store.js";
-import { hashScriptToken, isScriptTokenHeader, mintScriptToken, parseScriptTokenHeader, scriptTokenMatches } from "../../packages/broker/src/core/script-tokens/token-format.js";
-import { scriptTokensEnabled } from "../../packages/broker/src/core/script-tokens/switch.js";
-import { takeRate } from "../../packages/broker/src/core/script-tokens/rate.js";
-import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { LocalPageSessions, MAX_SESSIONS } from "../../packages/broker/src/core/local-pages/guard.js";
-import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
+import { scriptTokenRoute } from "../../packages/core/src/core/script-tokens/authenticate.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createScriptToken, listScriptTokens, noteScriptTokenUse, readScriptToken, revokeScriptToken, ScriptTokenRecordSchema, type ScriptTokenDependencies } from "../../packages/core/src/core/script-tokens/store.js";
+import { hashScriptToken, isScriptTokenHeader, mintScriptToken, parseScriptTokenHeader, scriptTokenMatches } from "../../packages/core/src/core/script-tokens/token-format.js";
+import { scriptTokensEnabled } from "../../packages/core/src/core/script-tokens/switch.js";
+import { takeRate } from "../../packages/core/src/core/script-tokens/rate.js";
+import { FakeWorkerMachines } from "../../packages/core/src/ports/fake-worker-machines.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { LocalPageSessions, MAX_SESSIONS } from "../../packages/core/src/core/local-pages/guard.js";
+import { startLocalRuntime, type LocalRuntime } from "../../packages/core/src/local/runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
 

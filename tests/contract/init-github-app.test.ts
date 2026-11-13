@@ -2,7 +2,7 @@ import { createVerify } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@rovara-code/contracts";
 import {
   githubAppJwt, githubAppManifest, githubAppSecretName, githubAppStep, githubNewAppUrl, githubRestApi, manifestFormPage, parseManifestCallback, startManifestListener,
 } from "../../packages/cli/src/init/github-app.js";

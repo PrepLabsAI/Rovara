@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SAVED_ENV_MAX_KEY_FILES } from "@agentx/contracts";
+import { SAVED_ENV_MAX_KEY_FILES } from "@rovara-code/contracts";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import {
   environmentKeyFromRepositories, hashWorkspaceFile, keyFilePaths, stripJsonComments, type KeyRepository,

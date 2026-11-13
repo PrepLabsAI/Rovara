@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { workflowSendBackOffered, type WorkflowSnapshot } from "@agentx/contracts";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { workflowSendBackOffered, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import type { ObservedApiOutcome } from "../support/e2e-application-evidence-fixture.js";
 import { MAYA } from "../support/developer-task-broker.js";
@@ -21,7 +21,7 @@ const PASS = { kind: "http-status", status: 200 } as const satisfies ObservedApi
 const WRONG = { kind: "http-status", status: 503 } as const satisfies ObservedApiOutcome;
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 // The broker module reads its environment when it loads, so it is imported only once the harness (which sets that environment up) has started.
-const brokerModule = () => import("../../packages/broker/src/aws/broker.js");
+const brokerModule = () => import("../../packages/core/src/aws/broker.js");
 const operations = (round: ApplicationRound) => round.operationRows(() => true);
 const publicationChecksOf = async (round: ApplicationRound) => (await brokerModule()).loadWorkflowE2EPublicationChecks(round.harness.brokerInput as never, round.taskNow() as never, operations(round));
 const workflowOf = (round: ApplicationRound) => round.workflowNow() as unknown as WorkflowSnapshot;

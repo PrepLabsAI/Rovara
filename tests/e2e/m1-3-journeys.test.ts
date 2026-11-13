@@ -11,16 +11,16 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
   E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkerInvocationSchema, createCandidateManifest, canonicalJson, e2eAnonymousRuntimeAccountRef, e2eApiSchemaComponentId, isSafeE2ESourcePath,
   readE2EApplicationProjectContract, workflowSendBackOffered, workspaceSessionKey, type E2EScenario, type E2ESourceSnapshot, type WorkerInvocation,
-} from "@agentx/contracts";
-import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
-import { accountRegistryEntriesFromRows, latestAccountRef } from "../../packages/broker/src/e2e/application-account-registry.js";
-import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
-import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/broker/src/aws/dispatcher.js";
-import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
-import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
-import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
-import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
+} from "@rovara-code/contracts";
+import { buildFeatureE2EPlanningContext } from "../../packages/core/src/e2e/feature-plan-planning-context.js";
+import { accountRegistryEntriesFromRows, latestAccountRef } from "../../packages/core/src/e2e/application-account-registry.js";
+import { e2eRegisteredRuntimeKey } from "../../packages/core/src/aws/e2e-runtime-readiness.js";
+import { webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
+import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/core/src/aws/dispatcher.js";
+import { createEc2Delivery } from "../../packages/core/src/aws/ec2-delivery.js";
+import { createOutboxPublisherHandler } from "../../packages/core/src/aws/outbox-publisher.js";
+import { guardTaskDispatch } from "../../packages/core/src/aws/task-dispatch-access.js";
+import { createTaskAuthorityAdmission } from "../../packages/core/src/aws/task-authority-admission.js";
 import { createDockerApplicationHost, createProcessDockerCli, type DockerCli } from "@agentx/verifier";
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/server.js";
@@ -455,8 +455,8 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
      *  - candidate 2, as the fixture ships: PASS, publishable; the baseline recorded beside it changed nothing.
      */
     async function resultsFlow() {
-      const brokerModule = await import("../../packages/broker/src/aws/broker.js");
-      const notifierModule = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+      const brokerModule = await import("../../packages/core/src/aws/broker.js");
+      const notifierModule = await import("../../packages/core/src/aws/developer-task-notifier.js");
       const taskNow = () => harness.db.get(taskKey.pk, taskKey.sk) as never;
       const resultsNow = () => brokerModule.loadWorkflowE2EScenarioResults(harness.brokerInput as never, taskNow(), operationRows(() => true), "owner");
       const presentation = () => brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, taskNow(), operationRows(() => true), "owner");
@@ -586,8 +586,8 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
      * carries the password, by the host's own predicate (every spelling it knows, base64 included).
      */
     async function credentialEchoFlow() {
-      const brokerModule = await import("../../packages/broker/src/aws/broker.js");
-      const notifierModule = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+      const brokerModule = await import("../../packages/core/src/aws/broker.js");
+      const notifierModule = await import("../../packages/core/src/aws/developer-task-notifier.js");
       faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]), fauxAssistantMessage("I added the export.")]);
       await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
       const implemented = await runOperation("IMPLEMENT");
@@ -662,7 +662,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const refs = checks.operation.workflowE2EGroupEvidenceRefs as Array<{ evidenceRef: { key: string } }>;
     const stored = refs.map((ref) => JSON.parse(harness.s3.objects.get(ref.evidenceRef.key)!) as { groupRun: { diagnostics: unknown; collection: { result: { status: string; reason: string; mockedOrigins?: string[]; cases: Array<{
       status: string; reason: string; mockedOrigins?: string[]; assertionReceipts: Array<{ assertionIndex: number; status: string }>; coverage: { observedMockedComponentIds: string[] } }> } } } });
-    const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+    const brokerModule = await import("../../packages/core/src/aws/broker.js");
     const presentation = () => brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, harness.db.get(taskKey.pk, taskKey.sk) as never, operationRows(() => true), "owner");
 
     if (variant === "mocked-origin") {
@@ -743,7 +743,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     expect(await readFile(join(defective, "server.mjs"), "utf8")).toContain("defects/viewer-access.json");
     const fixed = await stageAccountsCandidate(root, "candidate-fixed");
     const implementation = (candidate: string) => fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]);
-    const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+    const brokerModule = await import("../../packages/core/src/aws/broker.js");
     const presentation = () => brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, harness.db.get(taskKey.pk, taskKey.sk) as never, operationRows(() => true), "owner");
     type CaseResult = { caseId: string; status: string; reason: string; accountContextId: string; accountContextDigest: string; assertionReceipts: Array<{ assertionIndex: number; status: string }> };
     const casesOf = (operation: Record<string, unknown>): CaseResult[] => (operation.workflowE2EGroupEvidenceRefs as Array<{ evidenceRef: { key: string } }>).flatMap((ref) =>
@@ -878,7 +878,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     // Both cases are the anonymous profile's: one account context, the one the fixed reference gives, since a signed-out visitor is nobody's account.
     const contextId = `app-account-${createHash("sha256").update(canonicalJson([plannedRef!.applicationId, plannedRef!.profileId, plannedRef!.revision, plannedRef!.definitionDigest])).digest("hex")}`.slice(0, 120);
     expect(cases.map((item) => item.accountContextId)).toEqual([contextId, contextId]);
-    const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+    const brokerModule = await import("../../packages/core/src/aws/broker.js");
     const task = harness.db.get(taskKey.pk, taskKey.sk) as never;
     const presentation = await brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, task, operationRows(() => true), "owner");
     expect(presentation?.shared.e2e.status).toBe("PASS");
@@ -919,7 +919,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const leaky = await stageOrdersWebCandidate(root, "candidate-leaky", withTenantCheckRemoved);
     const fixed = await stageOrdersWebCandidate(root, "candidate-fixed");
     const implementation = (candidate: string) => fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]);
-    const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+    const brokerModule = await import("../../packages/core/src/aws/broker.js");
     const presentation = () => brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, harness.db.get(taskKey.pk, taskKey.sk) as never, operationRows(() => true), "owner");
     type GroupCase = { caseId: string; status: string; accountContextId: string; assertionReceipts: Array<{ assertionIndex: number; status: string }> };
     type GroupRun = { binding: { groupId: string; expectedCases: Array<{ targetId: string }> }; collection: { status: string; result: { cases: GroupCase[] } } };

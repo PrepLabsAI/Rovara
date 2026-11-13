@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AgentXErrorCodeSchema, redactText, type WorkerInvocation } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, redactText, type WorkerInvocation } from "@rovara-code/contracts";
 
 /**
  * Structured worker logs. The EC2 worker container ships stdout and stderr through docker's awslogs driver

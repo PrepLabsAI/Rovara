@@ -8,13 +8,13 @@
 //   POST   /v1/app/org/mcp-servers/{id}/reapprove     approve the tools shown by `review` ({toolsHash}): one click; the pinned install is unchanged
 //   DELETE /v1/app/org/mcp-servers/{id}               remove a disabled or waiting entry
 import { z } from "zod";
-import { agentXError } from "@agentx/contracts";
-import { drainControllerEvents, serverActivities } from "../../packages/broker/src/context-sources/controller-events.js";
+import { agentXError } from "@rovara-code/contracts";
+import { drainControllerEvents, serverActivities } from "../../packages/core/src/context-sources/controller-events.js";
 
 export interface AgentCaller { orgId: string; developerId: string; orgRole: string }
 export interface AdaptedHttpRequest { method: string; path: string; headers: Record<string, string>; requestId: string; body?: string }
 export class StatusReply { constructor(readonly statusCode: number, readonly body: object) {} }
-import { approveMcpServer, disableMcpServer, listMcpServers, proposeMcpServer, reapprovePausedMcpServer, removeMcpServer, reviewPausedMcpServer, stdioAvailable, type McpServerDependencies } from "../../packages/broker/src/context-sources/mcp-servers.js";
+import { approveMcpServer, disableMcpServer, listMcpServers, proposeMcpServer, reapprovePausedMcpServer, removeMcpServer, reviewPausedMcpServer, stdioAvailable, type McpServerDependencies } from "../../packages/core/src/context-sources/mcp-servers.js";
 
 export const MCP_SERVERS_PATH = /^\/v1\/app\/org\/mcp-servers(?:\/(mcp[a-z0-9]{6,24})(?:\/(approve|disable|review|reapprove))?)?$/;
 

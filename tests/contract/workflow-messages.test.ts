@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WorkflowStageSchema, WorkflowStateSchema, WORKFLOW_AGENTX_ACTOR_ID, createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, WorkflowSnapshotViewSchema, workflowFindingFingerprint, type WorkflowSnapshot } from "@agentx/contracts";
-import { WORKFLOW_ACTION_IDS, documentSummaryLines, slackSectionTexts, feedbackReviewFailedMessage, plainBlockReason, planReviewLink, workflowMessage, workflowMessageKey, workflowModalCopy } from "../../packages/broker/src/developer/workflow-messages.js";
-import { WORKFLOW_ACTION_IDS as INTERACTIVITY_ACTION_IDS } from "../../packages/broker/src/aws/slack-interactivity.js";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WorkflowStageSchema, WorkflowStateSchema, WORKFLOW_AGENTX_ACTOR_ID, createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, WorkflowSnapshotViewSchema, workflowFindingFingerprint, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { WORKFLOW_ACTION_IDS, documentSummaryLines, slackSectionTexts, feedbackReviewFailedMessage, plainBlockReason, planReviewLink, workflowMessage, workflowMessageKey, workflowModalCopy } from "../../packages/core/src/developer/workflow-messages.js";
+import { WORKFLOW_ACTION_IDS as INTERACTIVITY_ACTION_IDS } from "../../packages/core/src/aws/slack-interactivity.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
 
 const taskId = "11111111-1111-4111-8111-111111111111";
@@ -11,7 +11,7 @@ const plan = { id: "plan-v1", type: "plan" as const, version: 1, sha256: "c".rep
 const JARGON = /\b(candidate|revision|digest|operation|artifact|workflow|SUCCEEDED|FAILED|INTERRUPTED|invalid json)\b/i;
 /** The words no workflow post may use: technical ones in any case, and the raw statuses as written. */
 const BANNED = /\b(candidate|revision|digest|operation|artifact|workflow|invalid json)\b|\b(SUCCEEDED|FAILED|INTERRUPTED|CANCELLED)\b|ended (SUCCEEDED|FAILED)/i;
-/** Every block reason the broker writes, by the stages it stops (grep blockWorkflow and blockReason in packages/broker). */
+/** Every block reason the broker writes, by the stages it stops (grep blockWorkflow and blockReason in packages/core). */
 const BROKER_BLOCK_REASONS: Array<{ stages: string[]; reason: string; plain: boolean }> = [
   ...Object.values(WORKFLOW_BLOCK_REASONS).map((reason) => ({ stages: ["PLAN", "IMPLEMENT", "VERIFY", "WAIT_FOR_MERGE"], reason, plain: true })),
   { stages: ["REVIEW"], reason: WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, plain: true },

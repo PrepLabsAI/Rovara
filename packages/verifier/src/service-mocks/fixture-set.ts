@@ -6,7 +6,7 @@ import {
   serviceMockRequestHash,
   type ServiceMockEntry,
   type ServiceMockFixtureSet,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 type Kind = ServiceMockFixtureSet["service"]["kind"];
 

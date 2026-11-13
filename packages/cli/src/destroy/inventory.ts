@@ -3,7 +3,7 @@
 // a re-run after the stacks are gone still knows them. Also the plan shown before confirming, the
 // typed confirmation, and the vendor steps printed at the end.
 import { z } from "zod";
-import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, environmentStackName, STACK_PARTS, type StackPart } from "@agentx/contracts";
+import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, environmentStackName, STACK_PARTS, type StackPart } from "@rovara-code/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { CONNECTOR_TYPES, SSM_STANDARD_VALUE_LIMIT, type ConnectorType } from "../init/install-state.js";
 

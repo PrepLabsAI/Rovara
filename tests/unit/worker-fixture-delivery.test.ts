@@ -1,7 +1,7 @@
 // Test services, slice 3 (s3-fakes-run): the worker's fixture delivery. It asks the broker for the digest the plan pinned, refuses an answer for another digest, an address that is not https and one that has run out,
 // downloads at once and holds the bytes to the digest (the content digest is verified). Every refusal is a fixed word; the address and the broker's words are never in an error.
 import { describe, expect, it } from "vitest";
-import { FixtureSetSchema, canonicalJson, fixtureEntry, fixtureSetDigest, type FixtureSet } from "@agentx/contracts";
+import { FixtureSetSchema, canonicalJson, fixtureEntry, fixtureSetDigest, type FixtureSet } from "@rovara-code/contracts";
 import { FixtureDeliveryRefused, createFixtureDelivery, type FixtureSetCallback } from "../../packages/worker/src/fixture-delivery.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 

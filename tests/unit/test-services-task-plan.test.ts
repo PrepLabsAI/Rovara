@@ -1,14 +1,14 @@
 // Test services: which dependencies a task's plan starts (pinned from the signed catalog), when an approved environment with dependencies may be used by a task, and what happens when it cannot be planned.
 import { describe, expect, it, vi } from "vitest";
-import { TestEnvironmentBodySchema, TestEnvTaskPlanSchema, testEnvDigest, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type VerifiedCatalog } from "@agentx/contracts";
-import { DEPENDENCY_PLAN_REFUSAL_WORDS, TEST_SERVICES_MIN_CATALOG_REVISION, dependenciesStartableNow, serviceCatalogSourceOf, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS } from "../../packages/broker/src/core/test-env/devcontainer-check.js";
-import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
-import { UNUSED_WORDS, environmentUnusedReason, testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
+import { TestEnvironmentBodySchema, TestEnvTaskPlanSchema, testEnvDigest, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type VerifiedCatalog } from "@rovara-code/contracts";
+import { DEPENDENCY_PLAN_REFUSAL_WORDS, TEST_SERVICES_MIN_CATALOG_REVISION, dependenciesStartableNow, serviceCatalogSourceOf, taskDependencyPlansOf } from "../../packages/core/src/core/test-env/dependency-plan.js";
+import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS } from "../../packages/core/src/core/test-env/devcontainer-check.js";
+import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/core/src/core/test-env/task-plan.js";
+import { UNUSED_WORDS, environmentUnusedReason, testEnvironmentForStart } from "../../packages/core/src/core/test-env/usable.js";
 import { loaderTrusting, pinnedCatalog, testSigner, unpinnedCatalog, verifiedCatalog, digestOfId } from "../support/catalog-pinning.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
 import { projectStore } from "../support/test-env-world.js";
-import { CATALOG_SIGNATURE_ALGORITHM, catalogSigningMessage, parseBundlePublicKey, sha256HexOf } from "@agentx/contracts";
+import { CATALOG_SIGNATURE_ALGORITHM, catalogSigningMessage, parseBundlePublicKey, sha256HexOf } from "@rovara-code/contracts";
 
 const ORG: OrgId = BENCH_ORG;
 const PROJECT = "service";

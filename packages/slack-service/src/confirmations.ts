@@ -5,7 +5,7 @@ import {
   parseConfirmationReply,
   type ConfirmationReply,
   type PendingConfirmation,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { createGateSession, type GateApproval, type GateSession } from "@agentx/orchestrator/action-gate";
 import { deterministicUuid } from "./ids.js";
 import type { ServiceLog } from "./processor.js";

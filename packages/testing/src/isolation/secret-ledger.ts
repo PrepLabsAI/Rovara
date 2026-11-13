@@ -1,6 +1,6 @@
 // A secret store that serves many companies and keeps a ledger: every `read(companyId, ref)` is recorded, and a read made while a test says it is acting for company X by any other
 // company fails at once. It is the harness the isolation kit uses for "secrets come only from the calling company": an adapter that reads company B's secret while serving company A trips it.
-import { SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
+import { SecretValue, type SecretRef, type SecretStore } from "@rovara-code/contracts";
 
 export interface SecretRead {
   readonly companyId: string;

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { E2ERegisteredRuntimeSchema, WEB_API_AGENT_PROBE_IDS, WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema, canonicalJson, e2eRuntimeCapabilityDigest, evaluateWebApiProbeObservation,
   webApiProbeAssetManifestPath, webApiProbeRunId, webApiProposalQualifiesAgent, type WebApiProbeObservation } from "../../packages/contracts/src/index.js";
-import { e2eWebApiRuntimeRecords, webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
+import { e2eWebApiRuntimeRecords, webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
 import { WebApiQualificationRejected, assertRuntimeInstallationHostIdentity, qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
 import { MODEL_SOCKET_PATH_MAX_BYTES, e2eModelSocketPath } from "../../packages/verifier/src/host/docker-application-host.js";
 import { main as qualificationCli, webApiProbeRunnerConfig } from "../../packages/verifier/src/install-qualification-cli.js";

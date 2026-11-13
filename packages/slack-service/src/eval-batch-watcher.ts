@@ -27,7 +27,7 @@ import type {
   EvalBatchWatchChange,
   EvalBatchWatched,
   EvalBatchWatchUpdateResult,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { batchStartMessage, modelLabel, usd } from "./eval-batch-command.js";
 import { escapeText } from "./slack-format.js";
 import { SlackApiError } from "./slack-web.js";

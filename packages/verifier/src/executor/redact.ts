@@ -1,4 +1,4 @@
-import { e2eScannableEmailLocalPart, e2eSecretSpellings, type E2EExecutorAccount } from "@agentx/contracts";
+import { e2eScannableEmailLocalPart, e2eSecretSpellings, type E2EExecutorAccount } from "@rovara-code/contracts";
 
 /**
  * Every spelling of a secret that an HTTP client, a JSON encoder, a URL builder or a base64, base64url or hex field could leave in an output file or a model prompt. It is the contracts'

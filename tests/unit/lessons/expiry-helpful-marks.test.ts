@@ -1,10 +1,10 @@
 // A lesson with a queued helpful mark is not expired before the mark settles (the sweep leaves it), and a correction with no file list is in scope for every lesson.
 // The task-end tests are in task-end.test.ts, the merge rule in curate.test.ts, the sweep and the project-wide check in lessons-jobs.test.ts and task-project-wide.test.ts.
 import { describe, expect, it } from "vitest";
-import { recordTaskOutcome, settleHelpful, type CounterDeps } from "../../../packages/broker/src/lessons/counters.js";
-import { sweepExpired } from "../../../packages/broker/src/lessons/expiry.js";
-import { InMemoryLessonStore, type LessonStore } from "../../../packages/broker/src/lessons/store.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
+import { recordTaskOutcome, settleHelpful, type CounterDeps } from "../../../packages/core/src/lessons/counters.js";
+import { sweepExpired } from "../../../packages/core/src/lessons/expiry.js";
+import { InMemoryLessonStore, type LessonStore } from "../../../packages/core/src/lessons/store.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
 import { Audit, Clock, Judge, KEY, WS, lessonRecord, seed, settings } from "./lesson-helpers.js";
 
 const DAY = 86_400_000;

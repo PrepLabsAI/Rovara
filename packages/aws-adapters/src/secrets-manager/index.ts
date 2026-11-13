@@ -12,7 +12,7 @@
 // Read on every call (a rotation takes effect at once), never cached. A value is never logged and never put in an error: every refusal is a fixed `SecretsManagerSecretError` sentence (safe to show), and
 // Secrets Manager's own error text (it can quote the secret's name or ARN) is never passed on.
 import { GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
-import { SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
+import { SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@rovara-code/contracts";
 
 /**
  * A refusal with a FIXED sentence: it never quotes a reference's value, a secret's name or value, or the service's own words, so it is safe to show. (Code's broker shows it as its own

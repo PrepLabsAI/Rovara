@@ -1,7 +1,7 @@
 // FR-050: the Slack token, the request URLs, and the bot's membership of the bound channel. Slack's
 // own "Verified" mark cannot be read without an app configuration token (15d1 decision), so the URLs
 // get the same signed self-probe agentx init sends.
-import { AgentXError, environmentStackName } from "@agentx/contracts";
+import { AgentXError, environmentStackName } from "@rovara-code/contracts";
 import { probeSlackUrls, readSlackBotToken, replaceSlackBotTokenStep, slackSecretName, SlackSignatureRefusedError } from "../init/slack-app.js";
 import { SlackRateLimitedError } from "../setup/channel-add.js";
 import { plainMessage } from "../output.js";

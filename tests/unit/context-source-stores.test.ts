@@ -1,10 +1,10 @@
 // The stores behind context sources, on the document store port: the counters a stage's allowance rests on, the revision rule of a project's sources, and the events of a host.
 import { describe, expect, it } from "vitest";
-import { INDEX_EXPIRY_ATTRIBUTE, change, orgScoped, type McpControllerEvent, type OrgId } from "@agentx/contracts";
-import { documentContextSourceStore } from "../../packages/broker/src/context-sources/store.js";
-import { SOURCE_FAILURE_LIMIT, STAGE_TOTAL_CALLS, documentUsageStore } from "../../packages/broker/src/context-sources/usage.js";
-import { documentControllerEventStore, drainControllerEvents } from "../../packages/broker/src/context-sources/controller-events.js";
-import { documentMcpServerStore, summariseProbe } from "../../packages/broker/src/context-sources/mcp-servers.js";
+import { INDEX_EXPIRY_ATTRIBUTE, change, orgScoped, type McpControllerEvent, type OrgId } from "@rovara-code/contracts";
+import { documentContextSourceStore } from "../../packages/core/src/context-sources/store.js";
+import { SOURCE_FAILURE_LIMIT, STAGE_TOTAL_CALLS, documentUsageStore } from "../../packages/core/src/context-sources/usage.js";
+import { documentControllerEventStore, drainControllerEvents } from "../../packages/core/src/context-sources/controller-events.js";
+import { documentMcpServerStore, summariseProbe } from "../../packages/core/src/context-sources/mcp-servers.js";
 import { memoryStore } from "../support/connection-fakes.js";
 import { NOW, ORG, SEARCH_TOOL, source } from "./context-sources/fixtures.js";
 

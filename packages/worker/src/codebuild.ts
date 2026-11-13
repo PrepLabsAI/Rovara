@@ -2,7 +2,7 @@ import {
   agentXError,
   type CodeBuildCheckResult,
   type CodeBuildGateDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 export interface CodeBuildRequest {
   action: "start" | "status";

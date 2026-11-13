@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse, type TaskPersonProofRequest } from "@agentx/contracts";
-import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
-import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
-import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
-import { getTaskPeople, getTaskPeopleCapabilities } from "../../packages/broker/src/developer/task-people.js";
+import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse, type TaskPersonProofRequest } from "@rovara-code/contracts";
+import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import type { DeveloperTaskRecord } from "../../packages/core/src/developer/task-records.js";
+import { developerTokenVerifier } from "../../packages/core/src/developer/verify-token.js";
+import { slackDirectory } from "../../packages/core/src/developer/slack-directory.js";
+import { getTaskPeople, getTaskPeopleCapabilities } from "../../packages/core/src/developer/task-people.js";
 import { adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { identityHarness, localSigner } from "../support/developer-fakes.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";

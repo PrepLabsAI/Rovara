@@ -1,6 +1,6 @@
 // Slice 2, s2-emulator-run: the emulator's ledger in the usage record (service-usage-record.ts, the ONE port). What the program chose (operation names, paths) is never shown unless it has the shape of an operation name and
 // the redactor leaves it alone; counts are coarse buckets; a ledger that cannot be read is "unreadable", never "no calls"; a run with no emulator has slice 1's record byte for byte.
-import { TEST_SERVICES_AWS_USAGE_LIMITS, TestServicesAwsUsageSchema, TestServicesUsageRecordSchema } from "@agentx/contracts";
+import { TEST_SERVICES_AWS_USAGE_LIMITS, TestServicesAwsUsageSchema, TestServicesUsageRecordSchema } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 import { parseLedgerSummary, type EmulatorLedger, type LedgerService } from "../../packages/worker/src/emulator-ledger.js";
 import { newLocalAwsCredentials } from "../../packages/worker/src/service-helpers.js";

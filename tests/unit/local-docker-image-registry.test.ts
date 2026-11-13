@@ -3,9 +3,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ImageRegistryError, savedEnvRepositoryName } from "@agentx/contracts";
-import { LOCAL_REGISTRY_IMAGE, REGISTRY_LABEL, createDockerImageRegistry } from "../../packages/broker/src/local/docker-image-registry.js";
-import type { DockerRunner } from "../../packages/broker/src/local/docker-runner.js";
+import { ImageRegistryError, savedEnvRepositoryName } from "@rovara-code/contracts";
+import { LOCAL_REGISTRY_IMAGE, REGISTRY_LABEL, createDockerImageRegistry } from "../../packages/core/src/local/docker-image-registry.js";
+import type { DockerRunner } from "../../packages/core/src/local/docker-runner.js";
 import { startFakeRegistryServer } from "../support/fake-registry-server.js";
 import { runImageRegistryConformance } from "../support/ports/image-registry-conformance.js";
 

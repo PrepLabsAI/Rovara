@@ -1,9 +1,9 @@
 // What a model costs: the provider's own table first, then the catalog's list price; a model neither knows is unpriced, and unpriced is never free. The same lookup prices the usage the metering port records.
 import { describe, expect, it } from "vitest";
-import type { ModelProviderAdapter, ModelUsage } from "@agentx/contracts";
+import type { ModelProviderAdapter, ModelUsage } from "@rovara-code/contracts";
 import { listPricesPerMillion } from "../../packages/model-runtime/src/catalog.js";
-import { catalogPriceOf, costMicrosOf, createModelPrices, usdPerMillion, type CatalogPrices } from "../../packages/broker/src/core/cost/price-table.js";
-import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
+import { catalogPriceOf, costMicrosOf, createModelPrices, usdPerMillion, type CatalogPrices } from "../../packages/core/src/core/cost/price-table.js";
+import { createPriceTableMetering } from "../../packages/core/src/ports/policy-defaults.js";
 
 const provider = (kind: string, prices?: ModelProviderAdapter["prices"]): ModelProviderAdapter => ({
   kind, name: kind, address: "https://models.example.test/v1", signIn: { kind: "bearer-key" },

@@ -10,7 +10,7 @@ import {
   type SlackThread,
   type SlackThreadNoteAnsweredRequest,
   type TaskQuestionRoute,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { NO_TEXT_RESPONSE } from "@agentx/orchestrator/orchestrator";
 import type { RequestRoute, RequestRouter } from "@agentx/orchestrator/request-router";
 import { deterministicUuid, requestIdSequence } from "./ids.js";

@@ -214,14 +214,14 @@ describe("private branch names and the private repository name", () => {
 
 describe("the AWS line: four generic adapters are public, everything else AWS stays private", () => {
   it("refuses a NEW file under an aws/ directory but lets Code's existing files there be edited", () => {
-    const lane = new Lane({ [`packages/broker/src/${AWS}/existing.ts`]: "export const a = 1;\n" });
-    lane.write(`packages/broker/src/${AWS}/existing.ts`, "export const a = 2;\n");
+    const lane = new Lane({ [`packages/core/src/${AWS}/existing.ts`]: "export const a = 1;\n" });
+    lane.write(`packages/core/src/${AWS}/existing.ts`, "export const a = 2;\n");
     lane.commit("edit");
     expect(lane.guard()).toEqual([]);
-    lane.write(`packages/broker/src/${AWS}/handler.ts`, "export const h = 1;\n");
+    lane.write(`packages/core/src/${AWS}/handler.ts`, "export const h = 1;\n");
     lane.commit("add");
     const findings = lane.guard();
-    expect(findings.map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-aws:packages/broker/src/${AWS}/handler.ts`]);
+    expect(findings.map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-aws:packages/core/src/${AWS}/handler.ts`]);
     expect(findings[0]!.detail).toMatch(/Cloud AWS handler/);
   });
 
@@ -237,9 +237,9 @@ describe("the AWS line: four generic adapters are public, everything else AWS st
 
   it("still fails a new aws/ file that a later commit deletes, because the history is pushed too", () => {
     const lane = new Lane();
-    lane.write(`packages/broker/src/${AWS}/handler.ts`, "export {};\n");
+    lane.write(`packages/core/src/${AWS}/handler.ts`, "export {};\n");
     lane.commit("add");
-    git(lane.dir, "rm", "-q", `packages/broker/src/${AWS}/handler.ts`);
+    git(lane.dir, "rm", "-q", `packages/core/src/${AWS}/handler.ts`);
     git(lane.dir, "commit", "-q", "-m", "remove");
     expect(rules(lane.guard())).toEqual(["cloud-aws"]);
   });
@@ -351,13 +351,13 @@ const SDK_STS = j("@aws-sdk/", "client-", "sts");
 const CDK = j("aws-cdk", "-lib");
 
 describe("a sanctioned AWS adapter and text fixtures (A-H1)", () => {
-  const BEDROCK = "packages/broker/src/plugins/model-provider/bedrock";
+  const BEDROCK = "packages/core/src/plugins/model-provider/bedrock";
 
   it("lets the Bedrock model-provider plug-in import the one client the data names, in its own folder only", () => {
     expect(awsImportReason(`${BEDROCK}/credentials.ts`, SDK_STS, true)).toBeNull();
     expect(awsImportReason(`${BEDROCK}/credentials.ts`, SDK("ec2"), true)).not.toBeNull();
     expect(awsImportReason(`${BEDROCK}/credentials.ts`, CDK, true)).not.toBeNull();
-    expect(awsImportReason("packages/broker/src/plugins/model-provider/other/credentials.ts", SDK_STS, true)).not.toBeNull();
+    expect(awsImportReason("packages/core/src/plugins/model-provider/other/credentials.ts", SDK_STS, true)).not.toBeNull();
     expect(awsImportReason(`${BEDROCK}-extra/credentials.ts`, SDK_STS, true)).not.toBeNull();
     expect(boundary().awsSdkSanctioned.map((entry) => entry.id)).toEqual(["bedrock-model-provider"]);
   });
@@ -439,8 +439,9 @@ describe("history that is already public (A-H1)", () => {
     expect(() => parseBoundary(JSON.stringify({ ...boundary(), knownHistory: [{ commit: commit.slice(0, 8), rule, file: FILE, reason: "x" }] }), "x")).toThrow(GuardError);
   });
 
-  it("lists the one real exception, by full sha", () => {
-    expect(boundary().knownHistory.map((entry) => `${entry.commit.slice(0, 8)} ${entry.rule}`)).toEqual(["45eb9a7d private-name"]);
+  it("lists the real exceptions, by full sha", () => {
+    // df0d55d2: the sanctioned Bedrock credentials file at its pre-split broker path (the sanctioned folder now names packages/core).
+    expect(boundary().knownHistory.map((entry) => `${entry.commit.slice(0, 8)} ${entry.rule}`)).toEqual(["df0d55d2 cloud-aws", "45eb9a7d private-name"]);
   });
 });
 

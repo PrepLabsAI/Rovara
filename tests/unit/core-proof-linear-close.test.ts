@@ -1,9 +1,9 @@
 // Plan 6 Task 20: until Plan 9 closes Linear issues itself, Linear's own GitHub integration closes one when a pull request whose title or body says "Fixes <KEY>" merges. The key
 // comes only from the session's own Linear binding in the task's org; it is checked to be an issue key (never free text); and no model-written line can say a second one.
 import { describe, expect, it } from "vitest";
-import type { SessionBinding } from "@agentx/contracts";
-import { inertLine } from "../../packages/broker/src/core/proof/inert-text.js";
-import { breakLinearKeys, linearCloseLine, linearIssueKeyOf, linearIssueKeyOfBindings, neutralizeLinearWords, parseLinearIssue, sealLinearText } from "../../packages/broker/src/core/proof/linear-close.js";
+import type { SessionBinding } from "@rovara-code/contracts";
+import { inertLine } from "../../packages/core/src/core/proof/inert-text.js";
+import { breakLinearKeys, linearCloseLine, linearIssueKeyOf, linearIssueKeyOfBindings, neutralizeLinearWords, parseLinearIssue, sealLinearText } from "../../packages/core/src/core/proof/linear-close.js";
 
 const issue = (issueId: string, url = "https://linear.app/acme/issue/ENG-142/fix-the-retry-bug"): SessionBinding => ({ kind: "linear_issue", issueId, url });
 const THREAD: SessionBinding = { kind: "slack_thread", teamId: "T0TEAM001", channelId: "C0CHAN001", threadTs: "1695500000.000031" };

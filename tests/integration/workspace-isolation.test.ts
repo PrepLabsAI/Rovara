@@ -3,14 +3,14 @@ import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import {
   InMemoryProjectRegistry,
   InMemoryRegistry,
   WorkspaceResolver,
   type AuthenticatedIdentity,
   type ProjectMembership,
-} from "../../packages/broker/src/index.js";
+} from "../../packages/core/src/index.js";
 import { describe, expect, it } from "vitest";
 
 const run = promisify(execFile);

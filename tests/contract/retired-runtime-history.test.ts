@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { WorkspaceInstanceSchema, workspaceRecordFields } from "../../packages/contracts/src/workspace.js";
-import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
-import { parseRuntimeBinding } from "../../packages/broker/src/aws/lambda.js";
+import { createDispatcherHandler } from "../../packages/core/src/aws/dispatcher.js";
+import { parseRuntimeBinding } from "../../packages/core/src/aws/lambda.js";
 import {
   SLACK_CHANNEL, SLACK_TEAM, call, createBroker, ensureWorkspace, loadSlackBroker,
   registerSlackProject, serviceCall,

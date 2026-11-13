@@ -1,2 +1,2 @@
-// Moved to @agentx/testing; this keeps the old path working.
-export * from "@agentx/testing/ports/monitoring-conformance";
+// Moved to @rovara-code/testing; this keeps the old path working.
+export * from "@rovara-code/testing/ports/monitoring-conformance";

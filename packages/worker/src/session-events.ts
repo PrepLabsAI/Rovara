@@ -1,6 +1,6 @@
 // What the worker reads from a Pi session's events, shared by a coding task (run-task.ts) and an agent step
 // (agent-run/run-agent-step.ts): the end of a model turn, whether it failed, and the kind of an event for the log.
-import { MODEL_NOT_ENABLED_CODE, agentXError, type AgentXError, type ModelFailureCode } from "@agentx/contracts";
+import { MODEL_NOT_ENABLED_CODE, agentXError, type AgentXError, type ModelFailureCode } from "@rovara-code/contracts";
 import { budgetExhaustedFromMarker, modelNotAllowedFromMarker } from "@agentx/model-runtime";
 import { redactCredentials } from "./events.js";
 import { describeModelCallNote, modelFailureNextAction, sanitizeModelCallEvent, type ModelCallNote } from "./model-call-monitor.js";

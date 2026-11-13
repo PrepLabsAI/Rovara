@@ -11,7 +11,7 @@ import {
   type InlineExtension,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { DEFERRED_TOOLS_ABOVE } from "@agentx/contracts";
+import { DEFERRED_TOOLS_ABOVE } from "@rovara-code/contracts";
 
 export const TOOL_SEARCH_TOOL_NAME = "tool_search";
 

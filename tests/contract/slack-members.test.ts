@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSlackMemberCheck } from "../../packages/broker/src/aws/slack-members.js";
+import { createSlackMemberCheck } from "../../packages/core/src/aws/slack-members.js";
 
 const human = { id: "U0123456789", is_bot: false, deleted: false };
 

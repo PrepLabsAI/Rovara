@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import type { S3Client } from "@aws-sdk/client-s3";
-import { AgentXError, type ReleaseManifest } from "@agentx/contracts";
+import { AgentXError, type ReleaseManifest } from "@rovara-code/contracts";
 import { beforeAll, describe, expect, it } from "vitest";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest } from "../../packages/cli/src/deploy/deployer.js";
 import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TEST_SERVICES_FILE_SEED_FEATURE, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
+import { TEST_SERVICES_FILE_SEED_FEATURE, WORKER_INVOCATION_FEATURES } from "@rovara-code/contracts";
 import { SEED_FILE_MAX_BYTES, SeedFileError, loadSeedFile, readSeedFile, seedFileContentProblem, seedFileDigest, seedFileLoadArgs, seedRoleStatements } from "../../packages/worker/src/service-seed-file.js";
 import { seedFileApplier } from "../../packages/worker/src/test-services-run.js";
 import { SeedError, runSeeds } from "../../packages/worker/src/service-reset.js";

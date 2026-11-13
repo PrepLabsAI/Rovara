@@ -11,7 +11,7 @@ import {
   type DocumentChange,
   type DocumentChangeFeed,
   type StoredDocument,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { SqliteFailure, storableText, type SqliteDatabase } from "./sqlite-database.js";
 
 export const CHANGE_FEED_SCHEMA = `

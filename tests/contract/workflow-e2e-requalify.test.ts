@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { E2EApplicationSelectionRecordSchema, requalifyHoldKey as holdKeyOf, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_AGENTX_ACTOR_ID, workflowApplicationRetryOffered, workflowSendBackOffered, type WorkflowSnapshot } from "@agentx/contracts";
+import { E2EApplicationSelectionRecordSchema, requalifyHoldKey as holdKeyOf, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_AGENTX_ACTOR_ID, workflowApplicationRetryOffered, workflowSendBackOffered, type WorkflowSnapshot } from "@rovara-code/contracts";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { apiRowKey, startApplicationRound, type RoundBrokerHarness, type RoundOptions } from "../support/e2e-application-round-harness.js";
 import { MAYA } from "../support/developer-task-broker.js";
-import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
+import { workflowDispatchItem } from "../../packages/core/src/aws/broker-shared.js";
 
 // AUTOREQUALIFY (AR-3) on the real broker: new browser and API rounds wait while the test machine is being switched (and are never blocked by it), and a selection refused only because
 // the machine was renewed is approved again once by Rovara itself (the owner's retry still does the same, and anything else that moved still needs the owner).

@@ -6,7 +6,7 @@ import {
   isStaleWorkerAmi,
   readQualifiedWorkerAmi,
   workerQualifiedAmiParameterName,
-} from "../../packages/broker/src/aws/worker-ami.js";
+} from "../../packages/core/src/aws/worker-ami.js";
 
 const NAME = "/agentx/test/worker-qualified-ami";
 const ssmReturning = (outcome: { value?: string; error?: Error }) => ({

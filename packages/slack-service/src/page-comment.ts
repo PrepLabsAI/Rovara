@@ -3,7 +3,7 @@
 // question (no tools; only what the broker says about the task, the comment's place and its thread, all as untrusted
 // data), and is written back to the broker, which shows it on the page as AgentX's reply. Nothing is posted in Slack, and
 // the thread's queued-request count is never touched (the ingress never raised it for this message).
-import type { SlackCommentAnsweredRequest, SlackPageCommentMessage } from "@agentx/contracts";
+import type { SlackCommentAnsweredRequest, SlackPageCommentMessage } from "@rovara-code/contracts";
 import type { ServiceLog } from "./processor.js";
 
 /** The most characters of an answer the broker keeps. */

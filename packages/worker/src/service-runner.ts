@@ -24,7 +24,7 @@ import {
 } from "./service-helpers.js";
 import type { ProvePorts } from "./prove.js";
 import type { DockerCli } from "./swebench/containers.js";
-import type { TestEnvironmentBody } from "@agentx/contracts";
+import type { TestEnvironmentBody } from "@rovara-code/contracts";
 
 export type ServiceRunnerFailure = "unknown_dependency" | "attach_failed" | "reset_unsupported" | "reset_failed" | "not_answering" | "stopped";
 

@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { SecbenchVerdict } from "@agentx/contracts";
+import type { SecbenchVerdict } from "@rovara-code/contracts";
 import { runCollected, type CollectedProcess } from "../collected-process.js";
 import type { ProcessRunner } from "./grade.js";
 

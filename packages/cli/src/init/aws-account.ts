@@ -6,7 +6,7 @@
 import { readFile as readFileFromDisk } from "node:fs/promises";
 import { join } from "node:path";
 import { IAMClient, ListAccountAliasesCommand } from "@aws-sdk/client-iam";
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError } from "@rovara-code/contracts";
 import { cliErrorFor } from "../deploy/commands.js";
 import type { CommandRunner } from "../deploy/cdk-engine.js";
 import type { CallerIdentity } from "../environments/adopt.js";

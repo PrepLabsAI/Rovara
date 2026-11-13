@@ -6,7 +6,7 @@ import {
   OperationStore,
   OutboxConsumer,
   RetryingDispatcher,
-} from "../../packages/broker/src/index.js";
+} from "../../packages/core/src/index.js";
 
 function readyWorkspace() {
   const timestamp = new Date().toISOString();

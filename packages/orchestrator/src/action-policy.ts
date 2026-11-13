@@ -1,4 +1,4 @@
-import { itemPathHolders, itemPathValues, toolPatternMatches, type ActionPolicy, type ActionPolicyRule, type ToolHints } from "@agentx/contracts";
+import { itemPathHolders, itemPathValues, toolPatternMatches, type ActionPolicy, type ActionPolicyRule, type ToolHints } from "@rovara-code/contracts";
 
 /**
  * AgentX's own, vendor-neutral classes (spec 014 D1). A read and a create run; a change runs only

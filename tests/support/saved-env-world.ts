@@ -1,7 +1,7 @@
 // A SavedEnvDeps for tests of the saved environment rules and their wiring (handlers, triggers, panel): the memory store, an image registry made of plain functions, and the registry's own rules.
 import { ImageRegistryError, SavedEnvRegistryAuthSchema, savedEnvRepositoryName, type ImageRegistry, type RegistryImage, type RepositoryState, type SavedEnvManifest } from "../../packages/contracts/src/index.js";
-import type { SavedEnvDeps, SavedEnvImageRecord, SavedEnvState } from "../../packages/broker/src/core/test-env/saved-env.js";
-import type { SavedEnvSessionConfig, SavedEnvSessionPorts } from "../../packages/broker/src/core/test-env/saved-env-session.js";
+import type { SavedEnvDeps, SavedEnvImageRecord, SavedEnvState } from "../../packages/core/src/core/test-env/saved-env.js";
+import type { SavedEnvSessionConfig, SavedEnvSessionPorts } from "../../packages/core/src/core/test-env/saved-env-session.js";
 import { memorySavedEnvStore } from "./memory-saved-env-store.js";
 
 export const DAY = 86_400_000;

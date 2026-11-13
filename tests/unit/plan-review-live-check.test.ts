@@ -2,7 +2,7 @@
 // deployed task page, and the hands-on list it prints for a person to record.
 import { describe, expect, it } from "vitest";
 import { LIVE_CHECKLIST, pageChecks, stateChecks, taskPageLink } from "../../scripts/plan-review-live-check.js";
-import { createTaskWeb, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
+import { createTaskWeb, type TaskDocumentView } from "../../packages/core/src/aws/task-web.js";
 import { planDocument } from "../support/plan-documents.js";
 
 const taskId = "11111111-1111-4111-8111-111111111111";

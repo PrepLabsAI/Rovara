@@ -6,7 +6,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
-import { E2EAgentActionLedgerSchema, readE2EApplicationProjectContract, type E2EModelReceipt, type E2EScenario } from "@agentx/contracts";
+import { E2EAgentActionLedgerSchema, readE2EApplicationProjectContract, type E2EModelReceipt, type E2EScenario } from "@rovara-code/contracts";
 import { createInMemoryE2EDayBudget, type E2EInvoke } from "../../packages/model-runtime/src/e2e-route.js";
 import { e2eApplicationGroupAgentSteps } from "../../packages/verifier/src/application-scenarios.js";
 import { E2E_EXECUTOR_HOST_MODULE_PATH } from "../../packages/verifier/src/executor/host-registry.js";

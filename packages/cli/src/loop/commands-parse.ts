@@ -1,6 +1,6 @@
 // rovara loop (#355): what a comment asks for. Only a comment whose first line starts with `/rovara` is a
 // command; anything else from a collaborator is a reply to the loop running on that issue.
-import { parseRovaraComment } from "@agentx/contracts";
+import { parseRovaraComment } from "@rovara-code/contracts";
 import { LOOPS, skippablePhases, type LoopDefinition } from "./definitions.js";
 
 export type ParsedComment =

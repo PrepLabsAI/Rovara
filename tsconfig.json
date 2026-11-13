@@ -5,7 +5,7 @@
     { "path": "packages/verifier" },
     { "path": "packages/model-runtime" },
     { "path": "packages/gateway" },
-    { "path": "packages/broker" },
+    { "path": "packages/core" },
     { "path": "packages/local-adapters" },
     { "path": "packages/testing" },
     { "path": "packages/aws-adapters" },

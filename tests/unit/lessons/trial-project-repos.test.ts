@@ -2,14 +2,14 @@
 // where tier 0 and the trial are decided, re-checked live at settle and again at go-live. Any other restriction, another project's repository, an unreadable project definition and an absent port keep it restricted.
 // Every other trial rule still applies to it.
 import { describe, expect, it } from "vitest";
-import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { memberCorrectionOf } from "../../../packages/broker/src/lessons/reflect.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { classifyTier as realClassifyTier } from "../../../packages/broker/src/lessons/tier.js";
-import { isPublishable, trialBlockers, type TrialContext } from "../../../packages/broker/src/lessons/trial.js";
-import type { CounterDeps } from "../../../packages/broker/src/lessons/counters.js";
-import type { ApproveDeps } from "../../../packages/broker/src/lessons/approve.js";
-import type { Audience, Lesson } from "../../../packages/broker/src/lessons/types.js";
+import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { memberCorrectionOf } from "../../../packages/core/src/lessons/reflect.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { classifyTier as realClassifyTier } from "../../../packages/core/src/lessons/tier.js";
+import { isPublishable, trialBlockers, type TrialContext } from "../../../packages/core/src/lessons/trial.js";
+import type { CounterDeps } from "../../../packages/core/src/lessons/counters.js";
+import type { ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
+import type { Audience, Lesson } from "../../../packages/core/src/lessons/types.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, allowAllAccess, directory, draft, embedder, facts, lessonRecord, materialFor, settings, verifier } from "./lesson-helpers.js";
 
 const REPO = "github:repo/9";

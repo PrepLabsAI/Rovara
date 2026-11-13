@@ -1,1 +1,1 @@
-export { ImageDigest, ReleaseManifestSchema, type ReleaseManifest } from "@agentx/contracts";
+export { ImageDigest, ReleaseManifestSchema, type ReleaseManifest } from "@rovara-code/contracts";

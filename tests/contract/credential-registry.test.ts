@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CredentialUnavailable } from "@agentx/gateway";
-import type { AuthenticatedIdentity } from "../../packages/broker/src/index.js";
+import type { AuthenticatedIdentity } from "../../packages/core/src/index.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
 const administrator: AuthenticatedIdentity = {
@@ -100,7 +100,7 @@ describe("registry providers", () => {
 
 describe("Secrets Manager source and token cache", () => {
   it("maps a missing secret to undefined and an access denial to CredentialUnavailable", async () => {
-    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const { secretsManagerSource } = await import("../../packages/core/src/aws/credentials.js");
     const failing = (name: string) => ({ send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name }); }) });
     await expect(secretsManagerSource(failing("ResourceNotFoundException")).read("agentx/connectors/x")).resolves.toBeUndefined();
     await expect(secretsManagerSource(failing("AccessDeniedException")).read("agentx/connectors/x")).rejects.toBeInstanceOf(CredentialUnavailable);
@@ -108,7 +108,7 @@ describe("Secrets Manager source and token cache", () => {
   });
 
   it("maps DecryptionFailure, InvalidRequestException and InvalidParameterException to CredentialUnavailable, naming only the secret", async () => {
-    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const { secretsManagerSource } = await import("../../packages/core/src/aws/credentials.js");
     const failing = (name: string) => ({ send: vi.fn(async () => { throw Object.assign(new Error("aws-internal-detail: ciphertext blob invalid"), { name }); }) });
     for (const name of ["DecryptionFailure", "InvalidRequestException", "InvalidParameterException"]) {
       const error = await secretsManagerSource(failing(name)).read("agentx/connectors/x").catch((caught: unknown) => caught);
@@ -119,7 +119,7 @@ describe("Secrets Manager source and token cache", () => {
   });
 
   it("extends the access-denied message to name the KMS key as a possible cause, and the actual configured connector prefix", async () => {
-    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const { secretsManagerSource } = await import("../../packages/core/src/aws/credentials.js");
     const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
     const error = await secretsManagerSource(failing).read("agentx/connectors/x").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(CredentialUnavailable);
@@ -127,7 +127,7 @@ describe("Secrets Manager source and token cache", () => {
   });
 
   it("names an environment's own connector prefix in the access-denied message, when the source is given one", async () => {
-    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const { secretsManagerSource } = await import("../../packages/core/src/aws/credentials.js");
     const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
     const error = await secretsManagerSource(failing, "agentx/staging/connectors/").read("agentx/staging/connectors/x").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(CredentialUnavailable);
@@ -135,7 +135,7 @@ describe("Secrets Manager source and token cache", () => {
   });
 
   it("logs and swallows a token cache write failure without the token", async () => {
-    const { DynamoTokenCache } = await import("../../packages/broker/src/aws/credentials.js");
+    const { DynamoTokenCache } = await import("../../packages/core/src/aws/credentials.js");
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
       const cache = new DynamoTokenCache({ send: vi.fn(async () => { throw new Error("throttled"); }) } as never, "state", "linear");
@@ -165,7 +165,7 @@ describe("registry failure modes", () => {
   });
 
   it("answers CONFIG_INVALID naming only the secret when it cannot be decrypted, not RUNTIME_UNAVAILABLE", async () => {
-    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const { secretsManagerSource } = await import("../../packages/core/src/aws/credentials.js");
     const undecryptable = secretsManagerSource({ send: vi.fn(async () => { throw Object.assign(new Error("aws-internal-detail: ciphertext blob"), { name: "DecryptionFailure" }); }) });
     const { handler } = await createAdminBroker({ connectorCredentials: { secrets: undecryptable, githubApp } });
     const response = await register(handler, "jira-sa", "static-secret", "agentx/connectors/jira-sa");

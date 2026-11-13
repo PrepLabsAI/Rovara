@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import {
   OAuthClientCredentialsSecretSchema, OAuthRefreshTokenSecretSchema, StaticSecretSchema,
   type OAuthClientCredentialsSecret, type OAuthRefreshTokenSecret, type StaticSecret,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { CredentialProvider } from "./types.js";
 import { isObject } from "./util.js";
 

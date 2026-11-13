@@ -2,9 +2,9 @@
 // adapter, binding, link and developer on every call, and charges the workspace to the linked developer.
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { channelLinkKey, conversationOwnerIssuer, conversationSubject } from "@agentx/contracts";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import { releaseFailedPreparation } from "../../packages/broker/src/aws/failed-preparation.js";
+import { channelLinkKey, conversationOwnerIssuer, conversationSubject } from "@rovara-code/contracts";
+import { ownerKeyForSubject } from "../../packages/core/src/aws/lambda.js";
+import { releaseFailedPreparation } from "../../packages/core/src/aws/failed-preparation.js";
 import { SLACK_TEAM, call, createBroker, loadSlackBroker, markReady, orchestratorPrincipal, registerSlackProject, type Handler } from "../support/slack-broker.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 

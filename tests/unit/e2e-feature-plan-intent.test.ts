@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, canonicalJson, portableOperationId, buildE2ESharedView, e2ePlanHasCompleteRequiredCriteria, parsePlanDocument, e2eScenarioBundleDigest, type E2EFeaturePlanIntent, type E2EPolicy, type E2ESourceSnapshot } from "@agentx/contracts";
-import { deriveProjectSetupSourceSmoke } from "../../packages/broker/src/e2e/project-setup-source-smoke.js";
+import { createCandidateManifest, canonicalJson, portableOperationId, buildE2ESharedView, e2ePlanHasCompleteRequiredCriteria, parsePlanDocument, e2eScenarioBundleDigest, type E2EFeaturePlanIntent, type E2EPolicy, type E2ESourceSnapshot } from "@rovara-code/contracts";
+import { deriveProjectSetupSourceSmoke } from "../../packages/core/src/e2e/project-setup-source-smoke.js";
 import { selectE2EExecutionPlan } from "../../packages/contracts/src/e2e-execution-plan.js";
-import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
-import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
+import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, deriveE2EFeaturePortableApprovalBinding } from "../../packages/core/src/e2e/feature-plan-intent.js";
+import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../../packages/core/src/e2e/feature-plan-planning-context.js";
 import { compileE2EScenarios } from "../../packages/verifier/src/scenarios.js";
-import { e2eFeatureVerifierKey } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
+import { e2eFeatureVerifierKey } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
 
 const sha = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 const manifest = Buffer.from(JSON.stringify({ name: "ordinary-orders", type: "module", exports: { ".": "./src/index.mjs" } }));

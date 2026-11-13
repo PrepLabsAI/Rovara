@@ -4,7 +4,7 @@
 import {
   DESIGN_FINDING_SEVERITIES, DESIGN_MERGE_INFO_STRING, DESIGN_REVIEW_FINDINGS_MAX, DESIGN_REVIEW_FINDINGS_PER_REVIEWER_MAX, DESIGN_REVIEW_INFO_STRING, DesignCitationSchema, DesignSectionSchema,
   readDesignMerge, readDesignReview, type ReviewerRole,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { z } from "zod";
 import { DESIGN_REVIEW_LOST_FINDINGS_PROBLEM } from "./design-review.js";
 import { answerSchemaOf, fencedBlock, type AnswerChannelSpec } from "./structured-answer.js";

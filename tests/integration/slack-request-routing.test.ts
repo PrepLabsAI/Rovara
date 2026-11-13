@@ -16,7 +16,7 @@ import {
 import { processGroup, type QueueClient } from "../../packages/slack-service/src/slack-consumer.js";
 import { ROUTE_CARD_FAILED_TEXT, createChoiceOffer, routeSlackRequest } from "../../packages/slack-service/src/request-routing.js";
 import { createHostedRequestRouter } from "../../packages/slack-service/src/runtime.js";
-import { createDynamoWorkflowChoiceStore } from "../../packages/broker/src/aws/slack-workflow-choice.js";
+import { createDynamoWorkflowChoiceStore } from "../../packages/core/src/aws/slack-workflow-choice.js";
 import { createWorkflowE2E } from "../support/workflow-e2e.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";

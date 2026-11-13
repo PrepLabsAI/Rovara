@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { E2EDisplayBaselineSchema, E2EDisplayScenarioSchema, E2EDisplayScenarioV2Schema, E2EDisplayBaselineV2Schema, E2EScenarioResultsSchema } from "@agentx/contracts";
+import { E2EDisplayBaselineSchema, E2EDisplayScenarioSchema, E2EDisplayScenarioV2Schema, E2EDisplayBaselineV2Schema, E2EScenarioResultsSchema } from "@rovara-code/contracts";
 import { row } from "../support/e2e-scenario-results.js";
 import { agentNavigation, agentRow } from "../support/e2e-agent-display.js";
 
@@ -71,8 +71,8 @@ describe("display schema v3 baselines", () => {
 // ---------------------------------------------------------------------------------------------
 import { afterEach, vi } from "vitest";
 import { E2E_AGENT_UNKNOWN_CODES } from "@agentx/verifier";
-import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
-import { baselineOf, buildScenarioRows, scrubScenarioResults, type DisplayGroupInput } from "../../packages/broker/src/e2e/application-display.js";
+import { E2E_OWNER_SENTENCES } from "../../packages/core/src/e2e/owner-sentences.js";
+import { baselineOf, buildScenarioRows, scrubScenarioResults, type DisplayGroupInput } from "../../packages/core/src/e2e/application-display.js";
 
 const caseOf = { caseId: "owner-export-ai-case", scenarioId: "owner-export-ai", targetId: "web-1", accountProfileId: "orders-owner" };
 const group = (overrides: Partial<DisplayGroupInput> = {}): DisplayGroupInput => ({ verdict: "UNKNOWN", reason: "", cases: [caseOf], scenarios: new Map(), result: undefined, observed: new Map(), screenshots: new Map(), ...overrides });
@@ -211,7 +211,7 @@ describe("baselineOf", () => {
 // ---------------------------------------------------------------------------------------------
 // Tests 25, 26 and 30: the badge, the Slack line, the baseline sentences
 // ---------------------------------------------------------------------------------------------
-import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
+import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/core/src/e2e-presentation.js";
 import { results } from "../support/e2e-scenario-results.js";
 
 const artifactPath = (sha256: string) => `/review/11111111-1111-4111-8111-111111111111/task/api/e2e/artifacts/${sha256}`;

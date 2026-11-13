@@ -1,17 +1,17 @@
 // T8 AUTOFIX-WIRING, the unclear browser-and-API fault: each UNKNOWN scenario is settled by its OWN result on the original code (the baseline record of the approved plan). The system moves are
 // replaced by spies here, so this file shows what the runner decides and asks, not how the broker starts a coding run (workflow-autofix-flow.test.ts does that for real).
 import { describe, expect, it, vi } from "vitest";
-import type { WorkflowSnapshot } from "@agentx/contracts";
+import type { WorkflowSnapshot } from "@rovara-code/contracts";
 
 const moves = vi.hoisted(() => ({ sendBack: vi.fn(async () => "STARTED" as const), retryChecks: vi.fn(async () => "STARTED" as const), retryReviews: vi.fn(async () => "STARTED" as const) }));
-vi.mock("../../packages/broker/src/aws/developer-tasks.js", () => ({
+vi.mock("../../packages/core/src/aws/developer-tasks.js", () => ({
   autoSendBackToCodingFromSystem: moves.sendBack, autoRetryChecksFromSystem: moves.retryChecks, autoRetryReviewsFromSystem: moves.retryReviews,
 }));
 
-import { runWorkflowAutofix, type AutofixDependencies } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
-import { AutoFixAskSchema, autoFixCardLines } from "../../packages/broker/src/developer/autofix-messages.js";
-import { autofixDayBudgetNeed } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
-import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
+import { runWorkflowAutofix, type AutofixDependencies } from "../../packages/core/src/aws/workflow-autofix-runner.js";
+import { AutoFixAskSchema, autoFixCardLines } from "../../packages/core/src/developer/autofix-messages.js";
+import { autofixDayBudgetNeed } from "../../packages/core/src/aws/workflow-autofix-runner.js";
+import type { DeveloperTaskRecord } from "../../packages/core/src/developer/task-records.js";
 
 const CONTRACT = "c".repeat(64);
 const TASK = "11111111-1111-4111-8111-111111111111";

@@ -1,13 +1,13 @@
 // An administration-only broker harness: a fake DynamoDB, no Slack, and optional GitHub MCP,
 // connector credential and turn record export dependencies. It mirrors createBroker in slack-control-plane.test.ts.
-import type { ChatGptConnections } from "../../packages/broker/src/chatgpt/connections.js";
+import type { ChatGptConnections } from "../../packages/core/src/chatgpt/connections.js";
 import { randomUUID } from "node:crypto";
 import { vi } from "vitest";
-import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
-import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
-import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
-import type { TurnRecordExport } from "../../packages/broker/src/aws/turns.js";
-import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
+import type { GitHubMcpDependencies } from "../../packages/core/src/github-mcp.js";
+import type { DeveloperApiConfiguration } from "../../packages/core/src/aws/developer-routes.js";
+import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/core/src/aws/credentials.js";
+import type { TurnRecordExport } from "../../packages/core/src/aws/turns.js";
+import { RepositoryGrantService } from "../../packages/core/src/repository-access.js";
 import { FakeDynamoDb, type FakeDynamoDbOptions } from "./fake-dynamodb.js";
 
 export const adminIssuer = "https://identity.example.test";
@@ -40,8 +40,8 @@ function loadBroker(): Promise<BrokerModules> {
       GITHUB_APP_ID: "123",
       GITHUB_APP_INSTALLATION_ID: "456",
     });
-    const broker = await import("../../packages/broker/src/aws/broker.js") as unknown as Pick<BrokerModules, "createAwsBrokerHandler">;
-    const credentials = await import("../../packages/broker/src/aws/credentials.js");
+    const broker = await import("../../packages/core/src/aws/broker.js") as unknown as Pick<BrokerModules, "createAwsBrokerHandler">;
+    const credentials = await import("../../packages/core/src/aws/credentials.js");
     return { createAwsBrokerHandler: broker.createAwsBrokerHandler, CredentialRegistry: credentials.CredentialRegistry };
   })();
   return modules;

@@ -1,12 +1,12 @@
 // The uploads a coding run makes for the browser and API checks, on the document store and object storage: committed source, its build source manifest and the unchanged code.
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, ObjectTooBigError, type DocumentStore, type ObjectStorage } from "@agentx/contracts";
-import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { handleBaselineSource, handleCandidateBuildSource, handleCandidateExport, readCandidateSourceExport } from "../../packages/broker/src/core/e2e/uploads.js";
-import { UPLOAD_CHUNK_BYTES, type UploadOperation, type UploadStores } from "../../packages/broker/src/core/e2e/uploads-chunks.js";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, ObjectTooBigError, type DocumentStore, type ObjectStorage } from "@rovara-code/contracts";
+import { createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { operationKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { handleBaselineSource, handleCandidateBuildSource, handleCandidateExport, readCandidateSourceExport } from "../../packages/core/src/core/e2e/uploads.js";
+import { UPLOAD_CHUNK_BYTES, type UploadOperation, type UploadStores } from "../../packages/core/src/core/e2e/uploads-chunks.js";
 import { createRealCandidate, disposeRealCandidates, type RealCandidate } from "../support/e2e-application-candidate.js";
 
 afterEach(async () => { await disposeRealCandidates(); });

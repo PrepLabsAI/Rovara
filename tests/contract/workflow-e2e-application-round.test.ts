@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2EApplicationSelectionRecordSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, workflowSendBackOffered } from "@agentx/contracts";
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2EApplicationSelectionRecordSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, workflowSendBackOffered } from "@rovara-code/contracts";
 import { e2eApplicationPrivateTransferMaxBytes } from "@agentx/verifier";
-import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { getTaskDocumentView, retryApplicationRoundOnPage, startTaskWorkflowPublicationFromSystem } from "../../packages/broker/src/aws/developer-tasks.js";
+import { developerTaskRouteDependencies } from "../../packages/core/src/aws/developer-routes.js";
+import { getTaskDocumentView, retryApplicationRoundOnPage, startTaskWorkflowPublicationFromSystem } from "../../packages/core/src/aws/developer-tasks.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
 import type { ApplicationGroupEvidence, ObservedApiOutcome } from "../support/e2e-application-evidence-fixture.js";
@@ -55,7 +55,7 @@ const e2eOf = (round: ApplicationRound) => round.workflowNow().e2e as { qualifie
   failedRound?: { status: string; candidateDigest: string; roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string }; currentRoundId?: string; currentGroupRunIds: string[] };
 const operations = (round: ApplicationRound) => round.operationRows(() => true);
 // The broker module reads its environment when it loads, so it is imported only once the harness (which sets that environment up) has started.
-const brokerModule = () => import("../../packages/broker/src/aws/broker.js");
+const brokerModule = () => import("../../packages/core/src/aws/broker.js");
 const loadWorkflowE2EPresentation = async (...args: Parameters<Awaited<ReturnType<typeof brokerModule>>["loadWorkflowE2EPresentation"]>) => (await brokerModule()).loadWorkflowE2EPresentation(...args);
 const loadWorkflowE2EPublicationChecks = async (...args: Parameters<Awaited<ReturnType<typeof brokerModule>>["loadWorkflowE2EPublicationChecks"]>) => (await brokerModule()).loadWorkflowE2EPublicationChecks(...args);
 const presentationOf = (round: ApplicationRound) => loadWorkflowE2EPresentation(round.harness.brokerInput as never, round.taskNow() as never, operations(round), "owner");

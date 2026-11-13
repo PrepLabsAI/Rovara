@@ -2,7 +2,7 @@
 // Here: the PR body word for word (checked, review only, accepted findings), a refused push and its retry, a retry while
 // GitHub lags [LIVE-BUG B4] [R1], the Slack notice failing once, and the branch moving before the open.
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE } from "@agentx/contracts";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE } from "@rovara-code/contracts";
 import { DEV_ISSUER } from "../../support/developer-task-broker.js";
 import { reviewerFindings } from "../../support/model-fixtures.js";
 import { planAnswer } from "../../support/plan-documents.js";

@@ -4,8 +4,8 @@
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { FailureIndexRecordSchema, UsageIndexRecordSchema } from "../../packages/contracts/src/index.js";
-import { indexActivity, type IndexStore } from "../../packages/broker/src/aws/activity-index.js";
-import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
+import { indexActivity, type IndexStore } from "../../packages/core/src/aws/activity-index.js";
+import type { StreamRecord } from "../../packages/core/src/developer/notifications.js";
 
 const WORKSPACE = "22222222-2222-4222-8222-222222222222";
 const OPERATION = "11111111-1111-4111-8111-111111111111";

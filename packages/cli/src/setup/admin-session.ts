@@ -2,7 +2,7 @@
 // browser sign-in (PKCE on 127.0.0.1:8765). Either way the admin route must accept it, so a later
 // step never fails on a bare 403. Your own OIDC provider's token must also carry the admin claim
 // (FR-021); the control plane is what verifies it, this only explains a refusal.
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@rovara-code/contracts";
 import { ADMIN_LISTENER_MESSAGES, tokenStoreKey } from "../auth.js";
 import { listCredentials } from "../admin/credential.js";
 import type { EnvironmentSettings } from "../environments/settings.js";

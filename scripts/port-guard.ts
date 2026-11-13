@@ -27,6 +27,12 @@
 // it is inactive (a note); present with other content but untouched by the range, a warning; changed or removed by the range itself, an accepted-stale
 // finding, and the file is judged on its own merits as if it had no entry.
 //
+// Renames are followed (git -M): a file the range moves is judged as the file it was, as a modified file is. It is not a "new file" (cloud-aws), a file that
+// was already under aws/ stays what it was, and only the lines the move really changed are read as added (private names, secrets, imports). A move INTO an
+// aws/ or Cloud-only place from outside it, and a copy (the original stays), are still new. An accepted entry follows its file to the new path, and holds
+// across a change that only rewrites module specifiers, package names and the own-path header comment (in place or when moved) from the accepted blob;
+// any other edit makes the entry accepted-stale.
+//
 // It checks the range's net diff (merge base to tip) and also every non-merge commit in the range, so a commit that adds a file
 // and a later commit that removes it still fails: the history is pushed too. It prints file:line, the rule and a label for the
 // pattern, never the text it matched. Exit status: 0 clean, 1 findings, 2 the guard could not run (bad range, git or gitleaks missing).
@@ -929,20 +935,94 @@ export function parseRange(cwd: string, text: string): Range {
   return { base: resolve(left!), tip: resolve(right!), text };
 }
 
-interface RawEntry { path: string; newMode: string; newSha: string; /** git's one-letter status (A added, M modified, ...); empty for a merge's combined entries. */ status: string }
+interface RawEntry {
+  path: string;
+  newMode: string;
+  newSha: string;
+  /** git's one-letter status (A added, M modified, R renamed, ...); empty for a merge's combined entries. */
+  status: string;
+  /** For a rename: the path the file had before, the blob it had there and git's similarity score (0-100). */
+  oldPath?: string;
+  oldSha?: string;
+  similarity?: number;
+}
 
-/** The files a diff leaves in place (added, copied, modified, type-changed), with the new file mode. Renames are not followed. */
+/** Renames are followed (git's default 50% similarity); git skips inexact rename pairing above this many files, and an unpaired file is then just an add and a delete (stricter, never looser). */
+const RENAME_LIMIT = 10000;
+/** The flags that make a diff or diff-tree follow renames. */
+const FOLLOW_RENAMES = ["-M", `-l${RENAME_LIMIT}`];
+
+/** The files a diff leaves in place (added, copied, modified, type-changed, renamed), with the new file mode. A rename carries its old path, old blob and similarity. */
 function rawEntries(cwd: string, command: string[]): RawEntry[] {
-  const out = git(cwd, [...command, "--raw", "-z", "--no-abbrev", "--no-renames", "--diff-filter=d"]);
+  const out = git(cwd, [...command, "--raw", "-z", "--no-abbrev", ...FOLLOW_RENAMES, "--diff-filter=d"]);
   const parts = out.split("\0");
   const entries: RawEntry[] = [];
-  for (let i = 0; i + 1 < parts.length; i += 2) {
+  for (let i = 0; i + 1 < parts.length; ) {
     const meta = parts[i]!.split(/\s+/);
+    const status = meta[4] ?? "";
+    if (status.startsWith("R")) {
+      const oldPath = parts[i + 1]!;
+      const path = parts[i + 2] ?? "";
+      i += 3;
+      if (path === "") continue;
+      entries.push({ path, newMode: meta[1] ?? "", newSha: meta[3] ?? "", status: "R", oldPath, oldSha: meta[2] ?? "", similarity: Number(status.slice(1)) });
+      continue;
+    }
     const path = parts[i + 1]!;
+    i += 2;
     if (path === "") continue;
-    entries.push({ path, newMode: meta[1] ?? "", newSha: meta[3] ?? "", status: meta[4] ?? "" });
+    entries.push({ path, newMode: meta[1] ?? "", newSha: meta[3] ?? "", status });
   }
   return entries;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Moves. A file git sees as renamed is judged as the file it was: a move must not re-open what Code already accepted, nor make Code's existing files "new".
+
+/**
+ * How a renamed file differs from what it was:
+ *   pure     the same content (a 100% rename)
+ *   imports  only module specifiers, package names and the own-path header comment differ (a package or folder move that rewrote imports)
+ *   changed  anything else: real new content. The file is still judged as the file it was (as a modified file is) and the lines it changed are read as
+ *            added, but an accepted finding about it no longer holds (it is accepted-stale, as for any edit)
+ */
+export type MoveKind = "pure" | "imports" | "changed";
+
+export interface Move { oldPath: string; newPath: string; oldSha: string; newSha: string; kind: MoveKind }
+
+/** A scoped package name (`@scope/name`, with or without a subpath), quoted or not: wherever a file writes it (imports, package.json, tsconfig paths, comments). */
+const PACKAGE_NAME = /(?<![\w@/.-])@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._/-]*/gi;
+/** A comment line that only names the file's own path (`// packages/x/src/y.ts`), which a move rewrites. */
+const PATH_COMMENT = /^([ \t]*\/\/[ \t]*)[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)+\.[A-Za-z0-9]{1,5}[ \t]*$/gm;
+
+/** The text with every module specifier, package name and own-path comment emptied, so two texts that differ only there become equal. */
+export function maskSpecifiers(source: string): string {
+  let text = source.replace(PATH_COMMENT, "$1").replace(PACKAGE_NAME, "@pkg");
+  for (const pattern of SPECIFIER_PATTERNS) {
+    text = text.replace(new RegExp(pattern.source, pattern.flags), (match: string, ...groups: unknown[]) => {
+      const specifier = typeof groups[1] === "string" ? groups[1] : "";
+      const at = specifier === "" ? -1 : match.lastIndexOf(specifier);
+      return at === -1 ? match : match.slice(0, at) + match.slice(at + specifier.length);
+    });
+  }
+  return text;
+}
+
+/** True when two blobs differ only in module specifiers, package names and the own-path header comment. Never for text that is not clean UTF-8 (a binary file is never "only imports"). */
+function importOnlyChange(cwd: string, oldSha: string, newSha: string): boolean {
+  if (oldSha === "" || newSha === "") return false;
+  if (oldSha === newSha) return true;
+  const before = git(cwd, ["cat-file", "blob", oldSha], true);
+  const after = git(cwd, ["cat-file", "blob", newSha], true);
+  if (before === "" || after === "") return false;
+  for (const text of [before, after]) if (text.includes("\0") || text.includes("\uFFFD")) return false;
+  return maskSpecifiers(before) === maskSpecifiers(after);
+}
+
+function classifyMove(cwd: string, entry: RawEntry): Move {
+  const oldSha = entry.oldSha ?? "";
+  const kind: MoveKind = oldSha === entry.newSha ? "pure" : importOnlyChange(cwd, oldSha, entry.newSha) ? "imports" : "changed";
+  return { oldPath: entry.oldPath ?? "", newPath: entry.path, oldSha, newSha: entry.newSha, kind };
 }
 
 /**
@@ -989,6 +1069,8 @@ class Collector {
   }
   /** The lines the range adds to each file (keyed by a digest of path and text), for the second gitleaks pass. */
   readonly addedText = new Map<string, { path: string; text: string }>();
+  /** The renames of the range's net diff, by new path (read by the accepted list). */
+  readonly moves = new Map<string, Move>();
   /** Merge commit -> the lines its own resolution added (combined diff), for gitleaks to read from stdin. */
   readonly mergePatches = new Map<string, string>();
   private readonly seen = new Set<string>();
@@ -1045,16 +1127,35 @@ function scanChange(collector: Collector, input: ScanInput): void {
   const codeLike = new Set<string>();
   /** Files this range or commit adds (a modified file is judged by its added lines only, an added one also by its name). */
   const newFiles = new Set<string>();
-  for (const { path, newMode, status } of entries) {
+  /** Renamed files, by new path: each is judged as the file it was (as a modified file is), and only the lines it really changed are read as added. */
+  const carried = new Map<string, Move>();
+  for (const entry of entries) {
+    if (entry.oldPath === undefined) continue;
+    const move = classifyMove(cwd, entry);
+    if (input.commit === undefined) collector.moves.set(entry.path, move);
+    carried.set(entry.path, move);
+  }
+  /** The path-based findings (Cloud directory or package, a new file under aws/ or infra/) for one path. */
+  const pathHits = (path: string, isNew: boolean): Array<{ rule: Finding["rule"]; detail: string }> => {
+    const hits: Array<{ rule: Finding["rule"]; detail: string }> = [];
     const pathHit = cloudPathRule(path, collector.names);
-    if (pathHit !== null) add({ rule: pathHit.rule, file: path, line: null, detail: pathHit.detail });
-    if (status === "A") {
-      newFiles.add(path);
-      const addedHit = addedFileRule(path);
-      if (addedHit !== null) add({ rule: addedHit.rule, file: path, line: null, detail: addedHit.detail });
-    }
+    if (pathHit !== null) hits.push({ rule: pathHit.rule, detail: pathHit.detail });
+    const addedHit = isNew ? addedFileRule(path) : null;
+    if (addedHit !== null) hits.push({ rule: addedHit.rule, detail: addedHit.detail });
     // A file or directory named after a prospect or a private host is as public as its contents.
-    for (const detail of lineFindings(path, collector.names)) add({ rule: "private-name", file: path, line: null, detail: `${detail} in a file name` });
+    for (const detail of lineFindings(path, collector.names)) hits.push({ rule: "private-name", detail: `${detail} in a file name` });
+    return hits;
+  };
+  for (const entry of entries) {
+    const { path, newMode } = entry;
+    const status = entry.status;
+    const move = carried.get(path);
+    // A moved file is judged as its old path: what the old path already was (a file Code had, under a name the guard already knew) is not a finding again.
+    const before = move === undefined ? new Set<string>() : new Set(pathHits(move.oldPath, true).map((hit) => `${hit.rule}|${hit.detail}`));
+    if (status === "A") newFiles.add(path);
+    for (const hit of pathHits(path, status === "A" || move !== undefined)) {
+      if (!before.has(`${hit.rule}|${hit.detail}`)) add({ rule: hit.rule, file: path, line: null, detail: hit.detail });
+    }
     const strayHit = strayFileRule(path);
     if (strayHit !== null) add({ rule: strayHit.rule, file: path, line: null, detail: `${strayHit.detail}; remove it from the lane (check git status before every commit)` });
     if (newMode === "120000" || newMode === "160000") {
@@ -1080,7 +1181,8 @@ function scanChange(collector: Collector, input: ScanInput): void {
   }
 
   // --text: a gitattributes `-diff`/`binary` entry or a NUL byte must not turn a file's lines into "Binary files differ".
-  const patch = git(cwd, [...patchCommand, "-p", "-U0", "--text", "--no-color", "--no-ext-diff", "--no-renames", "--diff-filter=d", "--src-prefix=a/", "--dst-prefix=b/"]);
+  // Renames are followed (a merge's combined diff has none), so a moved file shows only the lines it really changed.
+  const patch = git(cwd, [...patchCommand, "-p", "-U0", "--text", "--no-color", "--no-ext-diff", ...(input.merge === true ? ["--no-renames"] : FOLLOW_RENAMES), "--diff-filter=d", "--src-prefix=a/", "--dst-prefix=b/"]);
   if (input.merge === true && input.commit !== undefined) {
     const lines = parse(patch).map((added) => added.text);
     if (lines.length > 0) collector.mergePatches.set(input.commit, lines.join("\n") + "\n");
@@ -1229,17 +1331,32 @@ export interface AcceptedOutcome { findings: Finding[]; notes: string[]; warning
 /**
  * The findings left after the accepted ones. An entry skips findings only when the file at the tip is its exact blob. Otherwise: absent at the tip and
  * untouched by the range, it is inactive (a note); present but different and untouched, a warning; changed or removed by the range, an accepted-stale finding.
+ *
+ * A file the range moves keeps its acceptance: an entry keyed by the old path is read at the new path (the findings are about the new path). And an entry still
+ * holds when the file at the tip is the accepted blob with only its module specifiers, package names and own-path header comment rewritten (the accepted blob
+ * is read from the repository; one that is not there never matches). `moves` are the net diff's renames by new path.
  */
-export function applyAccepted(cwd: string, tip: string, findings: readonly Finding[], accepted: readonly AcceptedFinding[], touched: ReadonlySet<string>): AcceptedOutcome {
+export function applyAccepted(
+  cwd: string,
+  tip: string,
+  findings: readonly Finding[],
+  accepted: readonly AcceptedFinding[],
+  touched: ReadonlySet<string>,
+  moves: ReadonlyMap<string, Move> = new Map(),
+): AcceptedOutcome {
   const fresh = new Set<string>();
   const stale: Finding[] = [];
   const notes: string[] = [];
   const warnings: string[] = [];
+  const movedTo = new Map<string, Move>();
+  for (const move of moves.values()) movedTo.set(move.oldPath, move);
   for (const entry of accepted) {
-    const current = git(cwd, ["rev-parse", "--verify", "--quiet", `${tip}:${entry.path}`], true).trim();
-    if (current === entry.blob) { fresh.add(`${entry.rule}|${entry.path}`); continue; }
-    if (touched.has(entry.path)) {
-      stale.push({ rule: "accepted-stale", file: entry.path, line: null, detail: current === "" ? `the range removes a file with an accepted ${entry.rule} finding; remove the entry` : `the range changes a file with an accepted ${entry.rule} finding, so it is judged as if it had none; review it and remove or update the entry` });
+    // The path the entry's file has at the tip (an entry may name either the old or the new path of a moved file).
+    const target = movedTo.get(entry.path)?.newPath ?? entry.path;
+    const current = git(cwd, ["rev-parse", "--verify", "--quiet", `${tip}:${target}`], true).trim();
+    if (current === entry.blob || (current !== "" && importOnlyChange(cwd, entry.blob, current))) { fresh.add(`${entry.rule}|${target}`); continue; }
+    if (touched.has(entry.path) || touched.has(target)) {
+      stale.push({ rule: "accepted-stale", file: target, line: null, detail: current === "" ? `the range removes a file with an accepted ${entry.rule} finding; remove the entry` : `the range changes a file with an accepted ${entry.rule} finding, so it is judged as if it had none; review it and remove or update the entry` });
     } else if (current === "") {
       notes.push(`${entry.path}: accepted ${entry.rule} entry inactive (the file is not at the tip)`);
     } else {
@@ -1362,7 +1479,7 @@ export function runGuard(options: GuardOptions): GuardResult {
     ...git(options.cwd, ["diff", "--name-only", "--no-renames", mergeBase, range.tip]).split("\n"),
     ...git(options.cwd, ["log", "--name-only", "--no-renames", "--format=", "-m", `${range.base}..${range.tip}`]).split("\n"),
   ].filter((path) => path !== ""));
-  const outcome = applyAccepted(options.cwd, range.tip, collector.findings, options.accepted ?? [], touched);
+  const outcome = applyAccepted(options.cwd, range.tip, collector.findings, options.accepted ?? [], touched, collector.moves);
   return { findings: outcome.findings, commits: commits.length, range, notes: outcome.notes, warnings: outcome.warnings };
 }
 

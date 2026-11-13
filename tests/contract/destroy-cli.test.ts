@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import { lineReader } from "../../packages/cli/src/destroy/cli.js";
 import { destroyProjectFiles } from "../../packages/cli/src/destroy/project-files.js";
 import { writeEnvironmentCache } from "../../packages/cli/src/environments/cache.js";

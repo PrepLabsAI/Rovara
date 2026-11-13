@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { E2EModelReceiptSchema, E2EModelRouteDefinitionSchema, canonicalJson } from "@agentx/contracts";
+import { E2EModelReceiptSchema, E2EModelRouteDefinitionSchema, canonicalJson } from "@rovara-code/contracts";
 import { E2E_AGENT_LEDGER_MAX_BYTES, E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION, type E2EAgentModelEvidence, type E2EAgentTranscriptDigest } from "../application-agent-result.js";
 import { selectAgentTraceUploads, verifiedAgentCaseLedger, type E2EAgentTraceCase } from "../application-agent-traces.js";
 import { agentCaseDirectoryName } from "../executor/evidence-paths.js";

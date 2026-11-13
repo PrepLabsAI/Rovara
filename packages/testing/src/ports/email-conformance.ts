@@ -1,6 +1,6 @@
 // The conformance suite every `email` adapter must pass: the in-memory fake, and Cloud's email-service adapter later (over a fake transport).
 import { describe, expect, it } from "vitest";
-import { EMAIL_SUBJECT_MAX, EmailError, type EmailMessage, type EmailSender } from "@agentx/contracts";
+import { EMAIL_SUBJECT_MAX, EmailError, type EmailMessage, type EmailSender } from "@rovara-code/contracts";
 
 export interface EmailUnderTest {
   sender: EmailSender;

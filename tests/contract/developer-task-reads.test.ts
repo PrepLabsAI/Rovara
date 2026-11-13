@@ -399,10 +399,10 @@ describe("the task list's cursor", () => {
 describe("no developer task code reads the deployment mode (FR-024)", () => {
   const files = (path: string): string[] => statSync(path).isDirectory() ? readdirSync(path).flatMap((name) => files(join(path, name))) : path.endsWith(".ts") ? [path] : [];
   it.each([
-    "packages/broker/src/aws/developer-tasks.ts",
-    "packages/broker/src/aws/developer-task-actions.ts",
-    "packages/broker/src/developer/task-records.ts",
-    "packages/broker/src/developer/limits.ts",
+    "packages/core/src/aws/developer-tasks.ts",
+    "packages/core/src/aws/developer-task-actions.ts",
+    "packages/core/src/developer/task-records.ts",
+    "packages/core/src/developer/limits.ts",
   ])("%s", (path) => {
     expect(readFileSync(path, "utf8")).not.toMatch(/deploymentMode|ec2-ebs|agentcore/i);
   });

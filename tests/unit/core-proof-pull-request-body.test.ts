@@ -7,11 +7,11 @@ import { describe, expect, it } from "vitest";
 import { RiskAssessmentSchema, type VerificationReport } from "../../packages/contracts/src/index.js";
 import { workflowFindingFingerprint } from "../../packages/contracts/src/task-workflow.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
-import { RISK_SENSITIVE_PATH_PATTERNS, assessRisk, isSensitivePath, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
-import { parseChangedFiles } from "../../packages/broker/src/core/proof/changed-files.js";
-import { recomputeRisk, withLinearCloseLine } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
-import { feedbackFixesSection, withFeedbackFixes, withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
+import { RISK_SENSITIVE_PATH_PATTERNS, assessRisk, isSensitivePath, type RiskInput } from "../../packages/core/src/core/proof/risk.js";
+import { parseChangedFiles } from "../../packages/core/src/core/proof/changed-files.js";
+import { recomputeRisk, withLinearCloseLine } from "../../packages/core/src/core/proof/pull-request-body.js";
+import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/core/src/core/proof/workflow-pull-request-body.js";
+import { feedbackFixesSection, withFeedbackFixes, withStatusLines } from "../../packages/core/src/developer/pull-request-feedback-section.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const ownerId = "a".repeat(64);

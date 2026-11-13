@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { ProjectDefinition, StoredProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition, StoredProjectDefinition } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import { assertWorkspaceReady, evaluateReadiness } from "../../packages/worker/src/readiness.js";

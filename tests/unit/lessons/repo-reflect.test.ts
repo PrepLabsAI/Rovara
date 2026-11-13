@@ -2,14 +2,14 @@
 // comments, the human fix-up edits, the merge fact and the title and description as written in the repository. Its subject carries `repoInputs` for that one repository, so marks every draft repo-only by
 // construction. It is gated like every learning call, counts toward the task's Public cap, and is made once per task and change request head.
 import { describe, expect, it } from "vitest";
-import { buildReflectorInput, type EvidenceSpan } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { repoVisibilityOf } from "../../../packages/broker/src/lessons/repo-eligibility.js";
-import { hasRepoCorrection, noteTaskHeld, readTaskHeld, reflectRepoOnly, reserveTaskHeld, repoOnlySubjectOf, repoReflectKey, type PlacedChangeRequest, type RepoChangeRequest, type RepoReflectDeps } from "../../../packages/broker/src/lessons/repo-reflect.js";
-import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
-import { newTaskFailureTally } from "../../../packages/broker/src/lessons/pause.js";
-import type { ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import type { PipelineModel } from "../../../packages/broker/src/lessons/ports.js";
+import { buildReflectorInput, type EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
+import { repoVisibilityOf } from "../../../packages/core/src/lessons/repo-eligibility.js";
+import { hasRepoCorrection, noteTaskHeld, readTaskHeld, reflectRepoOnly, reserveTaskHeld, repoOnlySubjectOf, repoReflectKey, type PlacedChangeRequest, type RepoChangeRequest, type RepoReflectDeps } from "../../../packages/core/src/lessons/repo-reflect.js";
+import { setLearnedLessonsGate } from "../../../packages/core/src/lessons/policy.js";
+import { newTaskFailureTally } from "../../../packages/core/src/lessons/pause.js";
+import type { ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import type { PipelineModel } from "../../../packages/core/src/lessons/ports.js";
 import { afterEach } from "vitest";
 import { Alerts, Audit, BASE, Clock, MERGED, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, candidateJson, embedder, facts, memberSpan, reply, settings, subject, verifier } from "./lesson-helpers.js";
 

@@ -1,6 +1,6 @@
 // The conformance suite every `image-registry` adapter must pass: the in-memory fake, Code's local Docker adapter, and Cloud's hosted registry adapter later.
 import { describe, expect, it } from "vitest";
-import { ImageRegistryError, SavedEnvRegistryAuthSchema, savedEnvRepositoryName, type ImageRegistry } from "@agentx/contracts";
+import { ImageRegistryError, SavedEnvRegistryAuthSchema, savedEnvRepositoryName, type ImageRegistry } from "@rovara-code/contracts";
 
 export interface ImageRegistryUnderTest {
   registry: ImageRegistry;

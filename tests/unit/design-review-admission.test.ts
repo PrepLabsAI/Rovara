@@ -2,13 +2,13 @@
 // not run; the round's reservation is kept on its allocation and given back when the round ends, whichever way it ends (what the keys spent is booked by the proxy's metering, never twice); a round that never starts
 // gives it back too; and a second dispatch racing the first one waits instead of ending the review.
 import { describe, expect, it } from "vitest";
-import { DesignReviewBindingSchema, queryAll, type Admission, type AdmissionRequest, type Cost, type TransactItem } from "@agentx/contracts";
-import { designReviewPartition } from "../../packages/broker/src/core/design-review/packet-store.js";
-import { designNotRunLine } from "../../packages/broker/src/core/design-review/not-run.js";
-import { readSlotAllocationReservation, readSlotCeiling } from "../../packages/broker/src/core/design-review/slot-keys.js";
+import { DesignReviewBindingSchema, queryAll, type Admission, type AdmissionRequest, type Cost, type TransactItem } from "@rovara-code/contracts";
+import { designReviewPartition } from "../../packages/core/src/core/design-review/packet-store.js";
+import { designNotRunLine } from "../../packages/core/src/core/design-review/not-run.js";
+import { readSlotAllocationReservation, readSlotCeiling } from "../../packages/core/src/core/design-review/slot-keys.js";
 import { COMPANY } from "../support/task-flow-harness.js";
-import { claimRound, ROUND_CLAIM_SECONDS } from "../../packages/broker/src/core/design-review/round-start.js";
-import { recordDesignReviewRound, releaseDesignReviewRound } from "../../packages/broker/src/core/design-review/round-record.js";
+import { claimRound, ROUND_CLAIM_SECONDS } from "../../packages/core/src/core/design-review/round-start.js";
+import { recordDesignReviewRound, releaseDesignReviewRound } from "../../packages/core/src/core/design-review/round-record.js";
 import { answerRound, design, finish, mintKeys, nextJob, planned, taskOf, toDesignPhase, toRound, world } from "../support/design-review-flow-world.js";
 
 const isReview = (request: { idempotencyKey: string }): boolean => request.idempotencyKey.startsWith("design-review:");

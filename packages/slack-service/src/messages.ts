@@ -1,4 +1,4 @@
-import { redactAndCap, type WorkspaceLimit } from "@agentx/contracts";
+import { redactAndCap, type WorkspaceLimit } from "@rovara-code/contracts";
 import type { ConversationFormat } from "./conversation-format.js";
 
 // Thread notices follow the reply formatting (spec 014 FR-022): the static texts below contain no

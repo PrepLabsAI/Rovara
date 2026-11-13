@@ -2,9 +2,9 @@
 // code needs: the owner (Priya), a channel member who can use the project (Sam), and a reader outside the channel (Omar).
 import { createHash } from "node:crypto";
 import { vi } from "vitest";
-import { WorkflowSnapshotSchema, canonicalPlanJson, createWorkflowSnapshot, type PlanDocument, type WorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
+import { WorkflowSnapshotSchema, canonicalPlanJson, createWorkflowSnapshot, type PlanDocument, type WorkflowArtifact, type WorkflowSnapshot } from "@rovara-code/contracts";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
+import type { DeveloperTaskRouteDependencies } from "../../packages/core/src/aws/developer-tasks.js";
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 import { planDocument } from "./plan-documents.js";
 import { validatingDocumentClient } from "./validating-document-client.js";

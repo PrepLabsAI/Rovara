@@ -1,4 +1,4 @@
-import type { ConnectorCatalog, ThreadConnector } from "@agentx/contracts";
+import type { ConnectorCatalog, ThreadConnector } from "@rovara-code/contracts";
 
 /** Vendors AgentX can connect, so the model can say plainly which ones this channel lacks. */
 const KNOWN_CONNECTORS = [

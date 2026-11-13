@@ -10,16 +10,16 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
   E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkerInvocationSchema, createCandidateManifest, workflowSendBackOffered, workspaceSessionKey,
   type E2EScenario, type E2ESourceSnapshot, type WorkerInvocation,
-} from "@agentx/contracts";
-import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
-import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
-import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
-import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/broker/src/aws/dispatcher.js";
-import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
-import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
-import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
-import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
+} from "@rovara-code/contracts";
+import { buildFeatureE2EPlanningContext } from "../../packages/core/src/e2e/feature-plan-planning-context.js";
+import { accountRegistryEntriesFromRows } from "../../packages/core/src/e2e/application-account-registry.js";
+import { e2eRegisteredRuntimeKey } from "../../packages/core/src/aws/e2e-runtime-readiness.js";
+import { webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
+import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/core/src/aws/dispatcher.js";
+import { createEc2Delivery } from "../../packages/core/src/aws/ec2-delivery.js";
+import { createOutboxPublisherHandler } from "../../packages/core/src/aws/outbox-publisher.js";
+import { guardTaskDispatch } from "../../packages/core/src/aws/task-dispatch-access.js";
+import { createTaskAuthorityAdmission } from "../../packages/core/src/aws/task-authority-admission.js";
 import { createDockerApplicationHost, createProcessDockerCli, type DockerCli } from "@agentx/verifier";
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/server.js";
@@ -380,7 +380,7 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
       return stored.groupRun.collection.result.cases[0]!.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status]);
     };
     expect(assertionReceipts(checks1.operation), "the one csv assertion is what failed").toEqual([[0, "failed"]]);
-    const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+    const brokerModule = await import("../../packages/core/src/aws/broker.js");
     const operations = () => operationRows(() => true);
     const presentation = () => brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, harness.db.get(taskKey.pk, taskKey.sk) as never, operations(), "owner");
     const publicationChecks = () => brokerModule.loadWorkflowE2EPublicationChecks(harness.brokerInput as never, harness.db.get(taskKey.pk, taskKey.sk) as never, operations());

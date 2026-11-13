@@ -7,7 +7,7 @@
 // These guards cannot protect the older production deployment: for env "production", its
 // /agentx/production/* parameters and alias/agentx/production/invoke-signing pass them. runDestroy
 // refuses that deployment up front (ruling F21); these guards do not.
-import { EnvironmentNameSchema, environmentStackName, STACK_PARTS, type StackPart } from "@agentx/contracts";
+import { EnvironmentNameSchema, environmentStackName, STACK_PARTS, type StackPart } from "@rovara-code/contracts";
 import type { RetainedResource } from "./inventory.js";
 
 export const DELETE_BEFORE_WORKERS: readonly StackPart[] = ["slack", "runtime", "control-plane"];

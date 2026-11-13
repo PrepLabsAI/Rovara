@@ -2,18 +2,18 @@
 // verification run is sent, the checks a task is held to, and what the evidence says about the environment. (The task flow's own start and the plan seam are in test-env-task-flow.test.ts.)
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { describe, expect, it, vi } from "vitest";
-import { TestEnvironmentBodySchema, projectPk, testEnvDigest, type CheckEntry, type StoredDocument, type TransactItem, type OrgId, type TestEnvironment, type TestEnvironmentBody, type ProjectCommand } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { keepEvidence, loadEvidencePack, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
-import { testEnvPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
-import { testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { UNUSED_WORDS, environmentUnusedReason, readTestEnvPin, testEnvPinItem, testEnvironmentForStart, usableTestEnvironment } from "../../packages/broker/src/core/test-env/usable.js";
-import { taskWorkflowCheckPolicy } from "../../packages/broker/src/core/task-flow/check-policy.js";
-import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
-import { createTaskTestEnvironment } from "../../packages/broker/src/core/test-env/seam.js";
+import { TestEnvironmentBodySchema, projectPk, testEnvDigest, type CheckEntry, type StoredDocument, type TransactItem, type OrgId, type TestEnvironment, type TestEnvironmentBody, type ProjectCommand } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createDocumentEvidenceBlobStore } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import { keepEvidence, loadEvidencePack, type KeepEvidenceDeps } from "../../packages/core/src/core/proof/evidence-keep.js";
+import { evidenceEnvironmentOf } from "../../packages/core/src/core/test-env/evidence-line.js";
+import { testEnvPlanFor } from "../../packages/core/src/core/test-env/task-plan.js";
+import { testEnvRevisionKey } from "../../packages/core/src/core/test-env/environment.js";
+import { UNUSED_WORDS, environmentUnusedReason, readTestEnvPin, testEnvPinItem, testEnvironmentForStart, usableTestEnvironment } from "../../packages/core/src/core/test-env/usable.js";
+import { taskWorkflowCheckPolicy } from "../../packages/core/src/core/task-flow/check-policy.js";
+import { MemoryQueueService } from "../../packages/core/src/ports/memory-queue.js";
+import { TASK_FLOW_INDEXES } from "../../packages/core/src/core/task-flow/flow.js";
+import { createTaskTestEnvironment } from "../../packages/core/src/core/test-env/seam.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";

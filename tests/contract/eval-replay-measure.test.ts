@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   GraderMismatchError, LOADED_DIFFERENCE_NEARLY_SAME, REPLAY_REPEATS, blindSheet, buildMeasureReport, importMarks, loadedLessonDifference, readReplayRunRows, renderMeasureReport, wilsonInterval,
   type ReplayRunRow,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const GRADER = { model: "grader-model", version: "2026-11-01" };
 let n = 0;

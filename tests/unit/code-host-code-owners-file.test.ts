@@ -1,6 +1,6 @@
 // Item C4: the CODEOWNERS file syntax lives behind the code host now (`CodeHost.codeOwners()`); these are the parser's own tests, moved with it from the merge core's.
 import { describe, expect, it } from "vitest";
-import { codeOwnerOf, ownersOfPath, parseCodeOwners, readCodeOwnersFile } from "../../packages/broker/src/plugins/code-host/code-owners-file.js";
+import { codeOwnerOf, ownersOfPath, parseCodeOwners, readCodeOwnersFile } from "../../packages/core/src/plugins/code-host/code-owners-file.js";
 
 const rules = (text: string) => parseCodeOwners(text).rules;
 

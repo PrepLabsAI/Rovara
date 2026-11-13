@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { E2EApplicationEvidenceRefSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, ProjectSetupRunnerToolchainSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2ERunBinding } from "@agentx/contracts";
+import { E2EApplicationEvidenceRefSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, ProjectSetupRunnerToolchainSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2ERunBinding } from "@rovara-code/contracts";
 import { bindMockLedgers, type CaseWindow, type ParsedMockLedger } from "./mock-ledger.js";
 import { buildMockProofs } from "./mock-proofs.js";
 import { SINKHOLE_ORIGIN_REF } from "../application-mocks.js";

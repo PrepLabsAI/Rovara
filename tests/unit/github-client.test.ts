@@ -5,12 +5,12 @@
 // DEFERRED-CHECKS entry written by lane L2.
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { githubActionsCheckRunner } from "../../packages/broker/src/plugins/check-runner/github-actions/index.js";
-import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
-import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
-import { githubAppClient } from "../../packages/broker/src/plugins/code-host/github/app-client.js";
-import { missingGitHubProviderMethods } from "../../packages/broker/src/plugins/code-host/github/provider.js";
-import { FakeHostModel } from "@agentx/broker/fakes";
+import { githubActionsCheckRunner } from "../../packages/core/src/plugins/check-runner/github-actions/index.js";
+import { githubCodeHost } from "../../packages/core/src/plugins/code-host/github/index.js";
+import { GitHubAppCredentialProvider } from "../../packages/core/src/plugins/code-host/github/client.js";
+import { githubAppClient } from "../../packages/core/src/plugins/code-host/github/app-client.js";
+import { missingGitHubProviderMethods } from "../../packages/core/src/plugins/code-host/github/provider.js";
+import { FakeHostModel } from "@rovara-code/core/fakes";
 import { checkRunnerChecks, type CheckRunnerWorld } from "../support/ports/check-runner-conformance.js";
 import { codeHostChecks, type CodeHostWorld } from "../support/ports/code-host-conformance.js";
 import { runContract } from "../support/ports/plugin-contract-kit.js";

@@ -3,18 +3,18 @@
 // person's pages hear an ids-only realtime hint. Adapted from the hosted product's attention tests (who is told, how and how often, no leakage, review fixes I1 and N2) plus new cases. Fakes only.
 
 import { describe, expect, it } from "vitest";
-import { EmailError, IMPLICIT_COMPANY_ID, NOTIFY_BATCH_MINUTES, effectiveNotify, isRealtimeNotice, type ConversationRef, type EmailSender, type OrgId } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
-import { createFakeEmailSender, createUnavailableEmailSender } from "../../packages/broker/src/ports/email.js";
-import { createInProcessRealtime } from "../../packages/broker/src/ports/realtime.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionTaskFacts, type SummaryDependencies } from "../../packages/broker/src/core/sessions/index.js";
+import { EmailError, IMPLICIT_COMPANY_ID, NOTIFY_BATCH_MINUTES, effectiveNotify, isRealtimeNotice, type ConversationRef, type EmailSender, type OrgId } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { FakeChannelAdapter } from "../../packages/core/src/ports/fake-channel-adapter.js";
+import { createFakeEmailSender, createUnavailableEmailSender } from "../../packages/core/src/ports/email.js";
+import { createInProcessRealtime } from "../../packages/core/src/ports/realtime.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionTaskFacts, type SummaryDependencies } from "../../packages/core/src/core/sessions/index.js";
 import {
   ATTENTION_RETRY_BASE_MS, ATTENTION_TARGET_TRIES_MAX, EMAIL_TARGET, PENDING_PK, attentionEmail, attentionNotice, dayBefore, deliverAttention, digestSlotDay, holdOf, inQuietHours, localClock, prefsKey, queueAttention, readNotifyPrefs,
   writeNotifyPrefs,
-} from "../../packages/broker/src/core/notify/index.js";
+} from "../../packages/core/src/core/notify/index.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OWNER = localOwnerPrincipal();

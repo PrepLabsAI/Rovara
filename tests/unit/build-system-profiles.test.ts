@@ -18,8 +18,8 @@ import {
   serializeBuildSystemProfiles,
   type BuildSystem,
   type BuildSystemProfile,
-} from "@agentx/contracts";
-import { collectBuildSystemProfiles, createAdapterRegistry, detectorGlobsWithBuildSystems } from "../../packages/broker/src/ports/index.js";
+} from "@rovara-code/contracts";
+import { collectBuildSystemProfiles, createAdapterRegistry, detectorGlobsWithBuildSystems } from "../../packages/core/src/ports/index.js";
 
 const profile = (extra: Partial<BuildSystemProfile> = {}): BuildSystemProfile => BuildSystemProfileSchema.parse({ name: "examplebuild", detectorModule: "@example/detect-examplebuild", setupPrograms: ["examplebuild", "./exb.sh"], ...extra });
 /** A profile with key-file globs, built by hand: the schema refuses them until the saved-environment lane is ported (the helpers below are ready for that day). */

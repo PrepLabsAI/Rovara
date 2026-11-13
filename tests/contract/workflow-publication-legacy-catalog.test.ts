@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createCandidateManifest, WorkflowSnapshotSchema, type WorkflowSnapshot } from "@agentx/contracts";
-import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
-import { startTaskWorkflowPublicationFromSystem, taskPageUrl } from "../../packages/broker/src/aws/developer-tasks.js";
-import type { workflowE2ECurrentAuthorityIsValid as AuthorityIsValid, WorkflowE2EVerificationDiagnostic } from "../../packages/broker/src/aws/broker.js";
+import { createCandidateManifest, WorkflowSnapshotSchema, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { developerTaskIdentity } from "../../packages/core/src/developer/task-records.js";
+import { startTaskWorkflowPublicationFromSystem, taskPageUrl } from "../../packages/core/src/aws/developer-tasks.js";
+import type { workflowE2ECurrentAuthorityIsValid as AuthorityIsValid, WorkflowE2EVerificationDiagnostic } from "../../packages/core/src/aws/broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
-import { createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
+import { createTaskWebApi } from "../../packages/core/src/aws/task-web-api.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound } from "../support/e2e-application-round-harness.js";
 import { DEV_ISSUER, MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
@@ -401,7 +401,7 @@ describe("application-E2E publication authority of a project whose catalog row p
   // The same shared project authority (loadCurrentProjectAuthority) serves the portable and the application checks.
   const catalogFence = (checks: Array<Record<string, unknown>> | undefined) => checks?.find((check) => JSON.stringify(check).includes("PROJECT_CATALOG"));
   const check = async (round: Awaited<ReturnType<typeof startApplicationRound>>) => {
-    const { workflowE2EApplicationAuthorityIsValid } = await import("../../packages/broker/src/aws/broker.js");
+    const { workflowE2EApplicationAuthorityIsValid } = await import("../../packages/core/src/aws/broker.js");
     const diagnostic: { reason?: string; authorityChecks?: Array<Record<string, unknown>> } = {};
     const valid = await workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, round.taskNow() as never, round.candidate, round.admission, diagnostic);
     return { valid, reason: diagnostic.reason, authorityChecks: diagnostic.authorityChecks };

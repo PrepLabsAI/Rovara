@@ -1,11 +1,11 @@
 // What the plan decision does with a work breakdown digest (spec 059): the subject derives the graph's digest from the checked document through its `breakdown` hook; a digest a surface sent must be that one;
 // without the hook a digest cannot be checked and is refused; a refusal of the hook refuses the decision; a repeat keeps the digest it was recorded with.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, createWorkflowSnapshot, submitWorkflowArtifact, type JsonValue, type WorkflowSnapshot } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createWorkflowDocumentSubject, workflowTaskKey, type WorkflowSubjectOptions } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../packages/broker/src/developer/workflow-actions.js";
+import { IMPLICIT_COMPANY_ID, createWorkflowSnapshot, submitWorkflowArtifact, type JsonValue, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createWorkflowDocumentSubject, workflowTaskKey, type WorkflowSubjectOptions } from "../../packages/core/src/core/decisions/workflow-subject.js";
+import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../packages/core/src/developer/workflow-actions.js";
 
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const DIGEST = "a".repeat(64);

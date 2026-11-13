@@ -32,7 +32,7 @@ const answer = (values: Record<string, string>) => ssmSend.mockImplementation(as
 
 describe("the session steps' read of the worker settings", () => {
   const launch = async () => {
-    const { handler } = await import("../../packages/broker/src/aws/session-steps.js");
+    const { handler } = await import("../../packages/core/src/aws/session-steps.js");
     return handler({ action: "launchConfiguration", workspaceId: randomUUID(), generation: 1, volumeId: "vol-0123456789abcdef0", expectNewVolume: false }) as Promise<{ userData: string }>;
   };
 
@@ -81,7 +81,7 @@ describe("the session steps' read of the worker settings", () => {
     expect(chunkParameterNames(Object.values(WORKER_SETTING_PARAMETERS)).every((names) => names.length <= 10)).toBe(true);
     expect(chunkParameterNames(Object.values(WORKER_SETTING_PARAMETERS)).flat()).toEqual(Object.values(WORKER_SETTING_PARAMETERS));
     expect(chunkParameterNames([])).toEqual([]);
-    for (const file of ["packages/broker/src/aws/session-steps.ts", "scripts/test-qualify-runtime.ts", "scripts/ec2-preflight.ts"]) {
+    for (const file of ["packages/core/src/aws/session-steps.ts", "scripts/test-qualify-runtime.ts", "scripts/ec2-preflight.ts"]) {
       const source = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
       expect(source, file).toContain("chunkParameterNames(");
       expect(source, file).not.toMatch(/Names: Object\.values\(\w*[nN]ames\)/);

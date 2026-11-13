@@ -1,7 +1,7 @@
 // Port lane L3: reading a plug-in's block of the config file (`PluginContext.settings`). The config is owner-controlled, but a typo in
 // it should be named, not ignored, so unknown settings are refused. No secret is ever read here.
 import { isAbsolute, resolve } from "node:path";
-import type { JsonObject, JsonValue } from "@agentx/contracts";
+import type { JsonObject, JsonValue } from "@rovara-code/contracts";
 
 export class SettingsError extends Error {
   constructor(message: string) {

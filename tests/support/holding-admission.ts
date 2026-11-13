@@ -1,6 +1,6 @@
 // An `Admission` that really holds what it is asked for: each reservation is held until it is settled or released, once. A second resolution, or one for an id it never gave, is a violation; a test reads
 // `open()` to see what is still held (a leak) and `settled`/`released` to see which way each went.
-import type { Admission, AdmissionRequest } from "@agentx/contracts";
+import type { Admission, AdmissionRequest } from "@rovara-code/contracts";
 
 export function holdingAdmission() {
   const asked: AdmissionRequest[] = [];

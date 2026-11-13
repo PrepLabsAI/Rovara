@@ -3,11 +3,11 @@
 import {
   CoverageMapSchema, TestEnvironmentBodySchema, projectMetaKey, projectPk, testEnvDigest,
   type CoverageMapData, type DueSchedule, type TestEnvironmentBody,
-} from "@agentx/contracts";
-import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
-import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { coverageMapDigest, nightlySlotId, type MapStore, type NightlyDeps } from "../../packages/broker/src/core/test-env/nightly.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+} from "@rovara-code/contracts";
+import { documentOf } from "../../packages/core/src/core/test-env/deps.js";
+import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/core/src/core/test-env/environment.js";
+import { coverageMapDigest, nightlySlotId, type MapStore, type NightlyDeps } from "../../packages/core/src/core/test-env/nightly.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 export const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as const;
 export const PROJECT = "partner-service";

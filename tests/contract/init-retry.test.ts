@@ -2,7 +2,7 @@
 // Q7: a check that fails on the page asks to be run again; without a page it fails exactly as it
 // always has, asking nothing.
 import { describe, expect, it } from "vitest";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { checkWithChangeOnPage, problemText, retryOnPage } from "../../packages/cli/src/init/retry.js";
 import { isOperatorStop } from "../../packages/cli/src/init/stop.js";
 import { scriptedPrompter } from "../support/init-fakes.js";

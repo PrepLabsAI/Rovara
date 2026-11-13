@@ -6,7 +6,7 @@ import { networkInterfaces, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { FixtureSetSchema, fixtureEntry, fixtureSetDigest, ServiceMockFixtureSetSchema, serviceMockFixtureSetDigest, type E2EApiMockFixture, type FixtureEntry, type FixtureSet } from "@agentx/contracts";
+import { FixtureSetSchema, fixtureEntry, fixtureSetDigest, ServiceMockFixtureSetSchema, serviceMockFixtureSetDigest, type E2EApiMockFixture, type FixtureEntry, type FixtureSet } from "@rovara-code/contracts";
 import { startMockServer } from "../../packages/verifier/src/executor/mock-server.js";
 import {
   FakeServerRefused, FixtureSetRefused, allowedResponseHeaders, assertRunAddress, parseFakeLedger, startFakeFromE2eFixture, startFakeServer, startServiceMock, withholdFakeLedgerCredentials,

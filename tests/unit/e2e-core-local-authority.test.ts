@@ -1,10 +1,10 @@
 // The current authority of an application round on Code's own records: every way the round's footing can move is a refusal with a fixed reason, and an install with no runtime registration
 // to ask judges nothing.
 import { describe, expect, it } from "vitest";
-import { createLocalE2EAuthority, localOwnerAuthority, type LocalAuthorityDeps } from "../../packages/broker/src/core/e2e/local-authority.js";
-import type { E2EVerificationDiagnostic } from "../../packages/broker/src/core/e2e/authority.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
+import { createLocalE2EAuthority, localOwnerAuthority, type LocalAuthorityDeps } from "../../packages/core/src/core/e2e/local-authority.js";
+import type { E2EVerificationDiagnostic } from "../../packages/core/src/core/e2e/authority.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
 
 const COMPANY = "org_00000000000000000000";
 const store = new MemoryDocumentStore();

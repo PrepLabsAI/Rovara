@@ -1,16 +1,16 @@
 // The small parts of lessons on a laptop: the in-process embedder, the learning point's default adapter, the settings items, the model path and what a finished task's record tells.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, learningModeKey, teamRecordPk } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createHashingEmbedder, createLocalLearningAdapter, HASHING_EMBEDDER_DIMENSION } from "../../packages/broker/src/lessons/local-embedder.js";
-import { DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings, documentLearningSettings, writeLearningMode, writeLoadBudget } from "../../packages/broker/src/lessons/document-settings.js";
-import { resolveLearning, setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
-import { cosine } from "../../packages/broker/src/lessons/similarity.js";
-import { createLocalPipelineModel } from "../../packages/broker/src/local/app/lessons-model.js";
-import { LearningRefusal } from "../../packages/broker/src/lessons/pause.js";
-import { createMemoryModelKeyStore } from "../../packages/broker/src/ports/model-key-stores.js";
-import { builtinModelProviderBook } from "../../packages/broker/src/local/model-proxy/index.js";
-import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
+import { IMPLICIT_COMPANY_ID, learningModeKey, teamRecordPk } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createHashingEmbedder, createLocalLearningAdapter, HASHING_EMBEDDER_DIMENSION } from "../../packages/core/src/lessons/local-embedder.js";
+import { DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings, documentLearningSettings, writeLearningMode, writeLoadBudget } from "../../packages/core/src/lessons/document-settings.js";
+import { resolveLearning, setLearnedLessonsGate } from "../../packages/core/src/lessons/policy.js";
+import { cosine } from "../../packages/core/src/lessons/similarity.js";
+import { createLocalPipelineModel } from "../../packages/core/src/local/app/lessons-model.js";
+import { LearningRefusal } from "../../packages/core/src/lessons/pause.js";
+import { createMemoryModelKeyStore } from "../../packages/core/src/ports/model-key-stores.js";
+import { builtinModelProviderBook } from "../../packages/core/src/local/model-proxy/index.js";
+import { createPriceTableMetering } from "../../packages/core/src/ports/policy-defaults.js";
 
 const WS = IMPLICIT_COMPANY_ID;
 
@@ -125,7 +125,7 @@ describe("the learning model path", () => {
   });
 
   it("throws, and marks the attempt's fault final, when the provider answers with an error", async () => {
-    const { withLearningAttempt } = await import("../../packages/broker/src/lessons/learning-deadline.js");
+    const { withLearningAttempt } = await import("../../packages/core/src/lessons/learning-deadline.js");
     const model = createLocalPipelineModel({ choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: key, companyId: WS, providers: builtinModelProviderBook(), fetch: (async () => new Response("{}", { status: 500 })) });
     const attempt = { deadlineAt: Date.now() + 60_000 } as { deadlineAt: number; fault?: "retryable" | "final" };
     await expect(withLearningAttempt(attempt, () => model.complete(request))).rejects.toThrow();

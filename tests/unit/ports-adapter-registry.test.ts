@@ -3,12 +3,12 @@ import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ChannelEventSchema, type ChannelInboundSink, PLUGIN_POINTS, PluginRegistryError, channelEventId, type ChannelEvent, type PluginModule } from "@agentx/contracts";
-import { createAdapterRegistry, createModuleImporter, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
-import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
-import { createAllowAllAdmission, createLocalOwnerApprovers, registerCodeDefaults } from "../../packages/broker/src/ports/policy-defaults.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
+import { ChannelEventSchema, type ChannelInboundSink, PLUGIN_POINTS, PluginRegistryError, channelEventId, type ChannelEvent, type PluginModule } from "@rovara-code/contracts";
+import { createAdapterRegistry, createModuleImporter, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/core/src/ports/adapter-registry.js";
+import { FakeChannelAdapter } from "../../packages/core/src/ports/fake-channel-adapter.js";
+import { createAllowAllAdmission, createLocalOwnerApprovers, registerCodeDefaults } from "../../packages/core/src/ports/policy-defaults.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { MemoryQueueService } from "../../packages/core/src/ports/memory-queue.js";
 
 const pluginName = (loaded: unknown): string => (loaded as { plugin: { name: string } }).plugin.name;
 const config = (plugins: unknown[], extra: Record<string, unknown> = {}) => parsePluginConfig({ version: 1, plugins, ...extra });

@@ -2,7 +2,7 @@
 // person to invite the bot (a bot cannot join a private channel), so the CLI waits for that.
 // Everything here needs only the manifest's channels:read, groups:read and channels:join
 // (SLACK_BOT_SCOPES in init/slack-app.ts). The bot token goes only in the authorization header.
-import { AgentXError, agentXError, errorStatus } from "@agentx/contracts";
+import { AgentXError, agentXError, errorStatus } from "@rovara-code/contracts";
 import { bindSlackChannel } from "../admin/slack.js";
 import type { Prompter } from "../init/prompts.js";
 import type { AdminSession, SetupServices } from "./services.js";

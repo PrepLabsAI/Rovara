@@ -2,22 +2,22 @@
 // The setup agent's stores and rules, on the in-memory document store: the person's commands, the websites a run asks for, the journal, what a proposal's commands become, and the status of a setup check.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, SETUP_JOURNAL_TAIL_BYTES, sanitizeSetupProposal, setupItemsOf, type ProjectCommand, type SetupProposal } from "@agentx/contracts";
-import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
-import { SETUP_COMMAND_SHOWN_MAX, readSetupApply, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
-import { forgetApprovedHost } from "../../packages/broker/src/core/setup-agent/host-ask.js";
-import { orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { SETUP_COMMAND_WORDS, SETUP_PERSON_COMMANDS_MAX, checkPersonCommand, finishSetupCommand, queueSetupCommand, takeSetupCommand } from "../../packages/broker/src/core/setup-agent/command.js";
-import { SETUP_HOST_OPEN_MAX, listHostAsks, refusedCountsOf, requestHostAsk, hostAskSubjectId } from "../../packages/broker/src/core/setup-agent/host-ask.js";
-import { refuseSetupHost } from "../../packages/broker/src/core/setup-agent/host-refusal.js";
-import { appendSetupJournal, readJournalEntry, readSetupJournal } from "../../packages/broker/src/core/setup-agent/journal.js";
-import { refusedCommand } from "../../packages/broker/src/core/setup-agent/refused-command.js";
-import { commandsFromProposal, setupApplyDigest } from "../../packages/broker/src/core/setup-agent/apply.js";
-import { FAILED_REASON_MAX, failedStepOf, setupStateOfCheck } from "../../packages/broker/src/core/setup-agent/check.js";
-import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { setupAgentWireOf } from "../../packages/broker/src/core/setup-agent/agent.js";
+import { IMPLICIT_COMPANY_ID, SETUP_JOURNAL_TAIL_BYTES, sanitizeSetupProposal, setupItemsOf, type ProjectCommand, type SetupProposal } from "@rovara-code/contracts";
+import { createStoreProjectSource } from "../../packages/core/src/core/task-flow/project-source.js";
+import { SETUP_COMMAND_SHOWN_MAX, readSetupApply, setupApplyKey } from "../../packages/core/src/core/setup-agent/apply.js";
+import { forgetApprovedHost } from "../../packages/core/src/core/setup-agent/host-ask.js";
+import { orgProjectCatalogKey, projectRevisionKey } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { SETUP_COMMAND_WORDS, SETUP_PERSON_COMMANDS_MAX, checkPersonCommand, finishSetupCommand, queueSetupCommand, takeSetupCommand } from "../../packages/core/src/core/setup-agent/command.js";
+import { SETUP_HOST_OPEN_MAX, listHostAsks, refusedCountsOf, requestHostAsk, hostAskSubjectId } from "../../packages/core/src/core/setup-agent/host-ask.js";
+import { refuseSetupHost } from "../../packages/core/src/core/setup-agent/host-refusal.js";
+import { appendSetupJournal, readJournalEntry, readSetupJournal } from "../../packages/core/src/core/setup-agent/journal.js";
+import { refusedCommand } from "../../packages/core/src/core/setup-agent/refused-command.js";
+import { commandsFromProposal, setupApplyDigest } from "../../packages/core/src/core/setup-agent/apply.js";
+import { FAILED_REASON_MAX, failedStepOf, setupStateOfCheck } from "../../packages/core/src/core/setup-agent/check.js";
+import { developerIdOf } from "../../packages/core/src/core/sessions/create.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { setupAgentWireOf } from "../../packages/core/src/core/setup-agent/agent.js";
 
 const orgId = IMPLICIT_COMPANY_ID;
 const scope = (taskId = randomUUID()) => ({ orgId, project: "payments", taskId });

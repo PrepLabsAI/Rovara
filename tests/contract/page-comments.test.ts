@@ -2,12 +2,12 @@
 // through conditional writes, and checked against the stored document and the one access rule.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { COMMENT_RATE, NUDGE_WINDOW_MS, TaskCommentSchema, sharedTaskKey, type TaskComment } from "@agentx/contracts";
+import { COMMENT_RATE, NUDGE_WINDOW_MS, TaskCommentSchema, sharedTaskKey, type TaskComment } from "@rovara-code/contracts";
 import {
   createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor, queueCommentAnswer, setSuggestion, takeRate,
-} from "../../packages/broker/src/developer/page-comments.js";
-import { resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+} from "../../packages/core/src/developer/page-comments.js";
+import { resolveTaskAccess } from "../../packages/core/src/developer/task-access.js";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
 import { PRIYA, SAM, pagePlan, pageTask, type PageTaskFixture } from "../support/page-tasks.js";
 
 const access = async (fixture: PageTaskFixture, caller: DeveloperCaller) => ({ ...await resolveTaskAccess(fixture.deps, caller, fixture.taskId), caller });

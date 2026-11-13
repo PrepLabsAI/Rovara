@@ -1,4 +1,4 @@
-import { ASANA_PROJECT_TOOL_ACCESS, OAUTH_AUTHORIZATION_PROFILES } from "@agentx/contracts";
+import { ASANA_PROJECT_TOOL_ACCESS, OAUTH_AUTHORIZATION_PROFILES } from "@rovara-code/contracts";
 import { GuardRejection, type Binder, type ConnectorDefinition, type CredentialProvider, type Guard, type GuardInput } from "./types.js";
 import { isObject, resultText } from "./util.js";
 

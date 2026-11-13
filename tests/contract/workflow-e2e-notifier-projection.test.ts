@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection, workflowE2EDisplayRef } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
-import { handler as notifierLambdaHandler, workflowE2ENotifierBlocks } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "../../packages/broker/src/e2e-presentation.js";
+import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection, workflowE2EDisplayRef } from "../../packages/core/src/aws/workflow-e2e-notifier-projection.js";
+import { handler as notifierLambdaHandler, workflowE2ENotifierBlocks } from "../../packages/core/src/aws/developer-task-notifier.js";
+import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "../../packages/core/src/e2e-presentation.js";
 import { readLegacyWorkflowE2ENotifierProjection } from "../support/legacy-display-v1-reader.js";
 import { failedBaseline, failedViewerRow, results, row } from "../support/e2e-scenario-results.js";
 

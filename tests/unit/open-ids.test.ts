@@ -20,7 +20,7 @@ import {
   type HostComment,
   type RegisteredEventSource,
   type Tracker,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const EXAMPLE: RegisteredEventSource = { source: "examplehost", types: { "item.created": ["label"], "item.assigned": ["assignee"], "alert.firing": [] } };
 

@@ -10,7 +10,7 @@ import {
   type SlackRequestMessage,
   type SlackThread,
   type TurnRecord,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { deterministicUuid } from "./ids.js";
 import { TurnHandedOffError } from "./interrupted-turn.js";
 import { runEvalBatchCommand } from "./eval-batch-command.js";

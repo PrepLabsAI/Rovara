@@ -1,12 +1,12 @@
 // The lesson store contract, run against BOTH stores (the in-memory one and the document-store one over the in-memory fake), then what only the document-store one has to get right: its keys sit where
 // the project erase wipes them, the fence counter stops a commit that read before an erase, a rollback larger than one transaction still lands, a purge leaves nothing that names the lesson, and a
 // staged rollback that does not finish is put back.
-import { queryAll, teamRecordPk, type DocumentStore, type TransactItem } from "@agentx/contracts";
+import { queryAll, teamRecordPk, type DocumentStore, type TransactItem } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
-import { DocumentLessonStore, MAX_COMMIT_WRITES } from "../../../packages/broker/src/lessons/document-store.js";
-import { InMemoryLessonStore, type LessonStore, type LoadManifest } from "../../../packages/broker/src/lessons/store.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
+import { DocumentLessonStore, MAX_COMMIT_WRITES } from "../../../packages/core/src/lessons/document-store.js";
+import { InMemoryLessonStore, type LessonStore, type LoadManifest } from "../../../packages/core/src/lessons/store.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
 import { draft, lessonRecord } from "./lesson-helpers.js";
 
 const ORG_A = "org_aaaaaaaaaaaaaaaaaaaa";

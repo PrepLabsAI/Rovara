@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES, REQUALIFY_DRAIN_KEY_ATTRIBUTES, REQUALIFY_DRAIN_READS, REQUALIFY_DRAIN_READ_ATTRIBUTES, requalifyDrainProjection } from "../../packages/contracts/src/index.js";
-import { requalifyDrainCount, requalifyDrainStatus } from "../../packages/broker/src/e2e/requalify-hold.js";
+import { requalifyDrainCount, requalifyDrainStatus } from "../../packages/core/src/e2e/requalify-hold.js";
 import { DRAIN_TABLE_AND_INDEX_KEYS, drainFixtureRows as rows, drainIamClient, type DrainRequest } from "../support/drain-iam-client.js";
 
 import { DRAIN_FIXTURE_NOW as NOW } from "../support/drain-iam-client.js";
@@ -62,7 +62,7 @@ describe("the drain reads only what the narrowed DrainRead statement allows (DRA
 
   it("makes a read of an attribute the code did not project fail loudly, not skip the item (a fail-open the count tests might miss)", async () => {
     // The broker module reads the contracts package as built (dist), not the source file the rest of this test imports: mutate the object it really uses.
-    const reads = (await import("@agentx/contracts")).REQUALIFY_DRAIN_READS as unknown as { operations: string[] };
+    const reads = (await import("@rovara-code/contracts")).REQUALIFY_DRAIN_READS as unknown as { operations: string[] };
     const original = reads.operations;
     reads.operations = original.filter((attribute) => attribute !== "workflowMode");
     try {

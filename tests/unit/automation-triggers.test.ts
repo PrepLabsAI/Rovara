@@ -5,11 +5,11 @@
 //   4. a trigger whose target no longer qualifies is turned off, not run;
 //   5. a schedule fire is one start per slot, never overlaps the work it last started, and its late fires follow the trigger's `missed` rule.
 import { describe, expect, it } from "vitest";
-import { ORG_MAX_AUTONOMOUS_RUNS_PER_DAY, type TriggerEvent } from "@agentx/contracts";
-import { dispatchTriggerEvent, requestIdFor, eventIdentity } from "../../packages/broker/src/core/triggers/dispatch.js";
-import { createTrigger, enableTrigger, recheckTriggersForTarget, triggerEnableRequest, turnOffTrigger, updateTrigger } from "../../packages/broker/src/core/triggers/lifecycle.js";
-import { handleScheduleFire, triggerScheduleHandler } from "../../packages/broker/src/core/triggers/schedules.js";
-import { scheduleWhen } from "../../packages/broker/src/core/triggers/schedule-spec.js";
+import { ORG_MAX_AUTONOMOUS_RUNS_PER_DAY, type TriggerEvent } from "@rovara-code/contracts";
+import { dispatchTriggerEvent, requestIdFor, eventIdentity } from "../../packages/core/src/core/triggers/dispatch.js";
+import { createTrigger, enableTrigger, recheckTriggersForTarget, triggerEnableRequest, turnOffTrigger, updateTrigger } from "../../packages/core/src/core/triggers/lifecycle.js";
+import { handleScheduleFire, triggerScheduleHandler } from "../../packages/core/src/core/triggers/schedules.js";
+import { scheduleWhen } from "../../packages/core/src/core/triggers/schedule-spec.js";
 import { COMPANY, OWNER, PROJECT, createAutomationWorld, publishAgent, publishChain, type AutomationWorld } from "../support/automation-world.js";
 
 const PR = { kind: "event", source: "github", type: "pull_request.opened" } as const;
@@ -105,8 +105,8 @@ describe("dispatching an event", () => {
     const world = createAutomationWorld();
     const { agentId } = await onTrigger(world);
     await dispatchTriggerEvent(world.dispatch, COMPANY, event());
-    const { resolveAgentForAutonomousRun } = await import("../../packages/broker/src/core/agents/roster.js");
-    const { recipeDigest } = await import("@agentx/contracts");
+    const { resolveAgentForAutonomousRun } = await import("../../packages/core/src/core/agents/roster.js");
+    const { recipeDigest } = await import("@rovara-code/contracts");
     const frozen = await resolveAgentForAutonomousRun(world.roster, { orgId: COMPANY, project: PROJECT, agentId });
     expect(world.starts[0]?.recipeDigest).toBe(recipeDigest(frozen.recipe));
   });

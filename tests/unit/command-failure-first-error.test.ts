@@ -1,6 +1,6 @@
 // Bug F: a setup failure showed only the last lines, so a "not found" line above them (the useful one) was lost behind the
 // tail of an installer's chatter. The first error-looking line is shown too, when the tail does not already show it.
-import { DEVELOPER_FAILURE_MESSAGE_MAX, type ProjectCommand } from "@agentx/contracts";
+import { DEVELOPER_FAILURE_MESSAGE_MAX, type ProjectCommand } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 import { describeCommandFailure } from "../../packages/worker/src/command-failure.js";
 

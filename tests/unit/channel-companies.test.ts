@@ -2,13 +2,13 @@
 // tenant; every channel path (bindings, conversations, links, routing of what is heard, cards and decisions, commands and the directory) keeps them apart, and a
 // host's explicit-member rule decides whether a linked person is served. The adapters are fakes and no chat tool is named.
 import { describe, expect, it } from "vitest";
-import { ChannelCommandFailed, type ActorRef, type ChannelCommand, type ChannelDecision, type ConversationRef, type InboundMessage, type OrgId } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
+import { ChannelCommandFailed, type ActorRef, type ChannelCommand, type ChannelDecision, type ConversationRef, type InboundMessage, type OrgId } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/core/src/ports/fake-channel-adapter.js";
 import {
   bindChannelSpace, createChannelSink, directoryUser, directoryUserByEmail, issueChannelLinkCode, linkedPerson, listAllChannelBindings, postApprovalCard, readApprovalCard, readChannelBinding, readTaskThread,
   recordTaskThread, redeemChannelLinkCode, sendChannelCommand, unbindChannelSpace, previewChannelLinkCode, type ChannelMemberRule, type ChannelWork,
-} from "../../packages/broker/src/core/channel/index.js";
+} from "../../packages/core/src/core/channel/index.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;

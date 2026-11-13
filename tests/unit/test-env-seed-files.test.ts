@@ -1,8 +1,8 @@
 // A seed FILE is approved as the content the proposal's check loaded: the approval binds its hash, and a file the check did not load (or loaded with other content) is not approved.
  
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, type TestEnvironmentBody } from "@agentx/contracts";
-import { SEED_FILE_UNCHECKED, boundSeedFilesOf, readApprovedSeedFiles } from "../../packages/broker/src/core/test-env/environment.js";
+import { TestEnvironmentBodySchema, type TestEnvironmentBody } from "@rovara-code/contracts";
+import { SEED_FILE_UNCHECKED, boundSeedFilesOf, readApprovedSeedFiles } from "../../packages/core/src/core/test-env/environment.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
 
 const PROJECT = "service";

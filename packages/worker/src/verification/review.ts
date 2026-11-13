@@ -29,11 +29,11 @@ import {
   specReviewFindings,
   type WorkflowReviewFeedback,
   type WorkflowReviewFinding,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { ArtifactSink } from "../artifacts.js";
 import { assistantText } from "./extension.js";
 import { readCandidateRepositories } from "./candidate.js";
-import { WORKFLOW_REVIEW_MODEL_FAILURE_PATTERN, nextSecondReviewModel, secondReviewModelKey, secondReviewTryOutcome, type SecondReviewContext, type SecondReviewResult, type SecondReviewTry, downgradeSourceOnlyFindings, parseWorkflowReviewerResponse, reviewerFocus, reviewJsonShape, unfence } from "@agentx/contracts";
+import { WORKFLOW_REVIEW_MODEL_FAILURE_PATTERN, nextSecondReviewModel, secondReviewModelKey, secondReviewTryOutcome, type SecondReviewContext, type SecondReviewResult, type SecondReviewTry, downgradeSourceOnlyFindings, parseWorkflowReviewerResponse, reviewerFocus, reviewJsonShape, unfence } from "@rovara-code/contracts";
 import { describeModelCallNote, sanitizeModelCallEvent } from "../model-call-monitor.js";
 import { candidateChanges, candidateDiff, type CandidateChange } from "./diff.js";
 import type { FileOpsTarget } from "../file-ops-exec.js";
@@ -41,7 +41,7 @@ import type { AgentSkillFile } from "../agent-step.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { assertFileToolsContained, createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { withIsolatedGit } from "../isolated-git.js";
-import type { LoadedKnowledgeManifest } from "@agentx/contracts";
+import type { LoadedKnowledgeManifest } from "@rovara-code/contracts";
 import { isRuleFilesUnverified } from "../repository-context.js";
 import { isTestPath } from "./test-paths.js";
 import { z } from "zod";

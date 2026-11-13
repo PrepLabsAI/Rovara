@@ -1,6 +1,6 @@
 // Proof and test environment E2 (Java): the Maven and Gradle detector. Commands prefer the project's wrapper, report and coverage locations are cited, and a multi-module or ambiguous build is listed or asked about, never guessed.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema } from "@agentx/contracts";
+import { TestEnvironmentBodySchema } from "@rovara-code/contracts";
 import { boundedReader, buildEnvironmentDraft, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 
 type Files = Record<string, string>;

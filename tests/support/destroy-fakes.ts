@@ -1,7 +1,7 @@
 // An AWS account in memory for agentx destroy: stacks that take simulated minutes to delete,
 // worker instances and volumes, retained resources with tags, and secrets. Every mutating call is
 // recorded in order in `calls`.
-import { environmentStackName, type StackPart } from "@agentx/contracts";
+import { environmentStackName, type StackPart } from "@rovara-code/contracts";
 import type { DestroyApi, DestroyStack } from "../../packages/cli/src/destroy/aws.js";
 import type { RetainedResource } from "../../packages/cli/src/destroy/inventory.js";
 import { isSecretId } from "../../packages/cli/src/destroy/names.js";

@@ -2,8 +2,8 @@
 // (`session-token`, mode 0600) into its state folder; this reads both, the way `rovara open` does. `--env local` names it: `rovara --env local session start ...`, `rovara --env local mcp`.
 import { join } from "node:path";
 import { LOCAL_ENVIRONMENT } from "../developer/config.js";
-import { agentXError } from "@agentx/contracts";
-import { SERVER_FILE_NAME, SESSION_TOKEN_FILE_NAME, defaultStateDirectory, readOwnerFile } from "@agentx/broker/local";
+import { agentXError } from "@rovara-code/contracts";
+import { SERVER_FILE_NAME, SESSION_TOKEN_FILE_NAME, defaultStateDirectory, readOwnerFile } from "@rovara-code/core/local";
 
 export { LOCAL_ENVIRONMENT };
 

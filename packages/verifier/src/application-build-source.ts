@@ -6,7 +6,7 @@ import { dirname, relative, resolve, sep } from "node:path";
 import { canonicalJson, CandidateManifestSchema, E2EApplicationBuildBindingSchema,
   E2EApplicationBuildSourceManifestSchema, E2EApplicationBuildSourceRefSchema,
   copyBoundedE2ESourceBytes, verifyE2ESourceSnapshot, type CandidateManifest, type E2EApplicationBuildBinding,
-  type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2ESourceSnapshot } from "@agentx/contracts";
+  type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2ESourceSnapshot } from "@rovara-code/contracts";
 
 const chunkSize = 64 * 1024;
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -63,7 +63,7 @@ function requireSafePath(path: string): boolean {
   // The contract implementation remains the single source of truth for blocked names.
   return safeSourcePath(path);
 }
-import { isSafeE2ESourcePath as safeSourcePath } from "@agentx/contracts";
+import { isSafeE2ESourcePath as safeSourcePath } from "@rovara-code/contracts";
 
 export function encodeE2EApplicationBuildSourceArchive(files: readonly E2EApplicationBuildArchiveFile[]): E2EApplicationBuildSourceArchive {
   const { text, files: normalized } = canonicalArchive(files);

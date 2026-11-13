@@ -2,16 +2,16 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, TestEnvironmentBodySchema, projectMetaKey, testEnvDigest, type Approvers, type TestEnvironmentBody } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createDecisionGate, type DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
+import { IMPLICIT_COMPANY_ID, TestEnvironmentBodySchema, projectMetaKey, testEnvDigest, type Approvers, type TestEnvironmentBody } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createDecisionGate, type DecisionAttempt } from "../../packages/core/src/core/decisions/approval-gate.js";
 import {
   TEST_ENVIRONMENT_KIND, TEST_ENV_PROPOSAL_TTL_MS, createTestEnvironmentSubject, proposeTestEnvironment, readApprovedBy, readApprovedTestEnvironment, readProposal, recordTestEnvProveReport,
   testEnvLatestKey, testEnvRevisionKey, testEnvironmentSubjectId,
-} from "../../packages/broker/src/core/test-env/environment.js";
-import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
-import { testEnvProposalKey } from "../../packages/broker/src/core/test-env/environment.js";
+} from "../../packages/core/src/core/test-env/environment.js";
+import { documentOf, type TestEnvDeps } from "../../packages/core/src/core/test-env/deps.js";
+import { testEnvProposalKey } from "../../packages/core/src/core/test-env/environment.js";
 
 const ORG = IMPLICIT_COMPANY_ID;
 const OWNER = localOwnerPrincipal();

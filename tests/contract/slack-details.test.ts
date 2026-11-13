@@ -30,9 +30,9 @@ import {
   detailsActionHandler,
   detailsExpiredText,
   dynamoTurnDetailsReader,
-} from "../../packages/broker/src/aws/slack-details.js";
-import type { SlackModalView } from "../../packages/broker/src/aws/slack-details-view.js";
-import { CLICK_FAILED_TEXT, createAwsSlackInteractivityHandler, createSlackInteractivityHandler, slackApi } from "../../packages/broker/src/aws/slack-interactivity.js";
+} from "../../packages/core/src/aws/slack-details.js";
+import type { SlackModalView } from "../../packages/core/src/aws/slack-details-view.js";
+import { CLICK_FAILED_TEXT, createAwsSlackInteractivityHandler, createSlackInteractivityHandler, slackApi } from "../../packages/core/src/aws/slack-interactivity.js";
 
 const signingSecret = "8f742231b10e8888abcd99yyyzzz85a5";
 const requester = "U0123456789";
@@ -361,7 +361,7 @@ describe("the Details view (spec 014 FR-024, FR-025)", () => {
   });
 
   it("is registered on the ingress Lambda's interactivity endpoint with the turn record table and views.open", () => {
-    const source = readFileSync("packages/broker/src/aws/slack-interactivity.ts", "utf8");
+    const source = readFileSync("packages/core/src/aws/slack-interactivity.ts", "utf8");
     expect(source).toContain("detailsActionHandler({");
     // Optional (fix round 1): a missing variable must not break Approve/Cancel on the same endpoint.
     expect(source).not.toContain('requiredEnvironment("TURN_RECORDS_TABLE_NAME")');

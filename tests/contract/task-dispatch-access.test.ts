@@ -2,12 +2,12 @@ import { randomUUID } from "node:crypto";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { agentXError } from "../../packages/contracts/src/index.js";
-import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
-import { guardTaskDispatch, isTaskDispatchGuardRetryError, resumeTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
-import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
-import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
-import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
-import type { ProjectAuthorityWitness } from "../../packages/broker/src/developer/task-project-access.js";
+import type { Ec2OutboxRecord } from "../../packages/core/src/aws/lambda.js";
+import { guardTaskDispatch, isTaskDispatchGuardRetryError, resumeTaskDispatch } from "../../packages/core/src/aws/task-dispatch-access.js";
+import { createTaskAuthorityAdmission } from "../../packages/core/src/aws/task-authority-admission.js";
+import type { DeveloperTaskRecord } from "../../packages/core/src/developer/task-records.js";
+import { taskOwnerKey } from "../../packages/core/src/developer/task-records.js";
+import type { ProjectAuthorityWitness } from "../../packages/core/src/developer/task-project-access.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";

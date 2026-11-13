@@ -4,13 +4,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, createCandidateManifest, workflowAutoActionRequestId, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
-import { createTaskWeb } from "../../packages/broker/src/aws/task-web.js";
-import { AutoFixAskSchema } from "../../packages/broker/src/developer/autofix-messages.js";
-import { autofixConfigFromEnvironment, postponeAutofixRow, recordAutofixGiveUpAsk } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
-import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
-import { getTaskDocumentView, publicWorkflowDecision } from "../../packages/broker/src/aws/developer-tasks.js";
+} from "@rovara-code/contracts";
+import { workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
+import { createTaskWeb } from "../../packages/core/src/aws/task-web.js";
+import { AutoFixAskSchema } from "../../packages/core/src/developer/autofix-messages.js";
+import { autofixConfigFromEnvironment, postponeAutofixRow, recordAutofixGiveUpAsk } from "../../packages/core/src/aws/workflow-autofix-runner.js";
+import { workflowDispatchItem } from "../../packages/core/src/aws/broker-shared.js";
+import { getTaskDocumentView, publicWorkflowDecision } from "../../packages/core/src/aws/developer-tasks.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
 

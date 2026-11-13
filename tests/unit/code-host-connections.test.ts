@@ -1,13 +1,13 @@
 // Port lane P2, item C2 (decision 60): several code host connections of one provider, each with a name, and ONE default connection per provider used when a repository names none.
 import { describe, expect, it } from "vitest";
-import { ProjectDefinitionSchema, type CodeHost } from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
-import { AMBIGUOUS_CONNECTION_MESSAGE, TWO_DEFAULT_CONNECTIONS_MESSAGE, connectionProblems, defaultConnectionOf, providerOf } from "../../packages/broker/src/plugins/code-host/connections.js";
-import { AMBIGUOUS_REPOSITORY_HOST_MESSAGE, NO_HOST_MESSAGE, assertRepositoryHostsKnown, codeHostForKind, codeHostForRecord, codeHostForRepositoryAddress } from "../../packages/broker/src/plugins/routing.js";
-import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
-import { githubCodeHostPlugin } from "../../packages/broker/src/plugins/code-host/github/plugin.js";
-import { registryRepositoryResolver } from "../../packages/broker/src/core/merge/resolver.js";
-import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
+import { ProjectDefinitionSchema, type CodeHost } from "@rovara-code/contracts";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/core/src/ports/adapter-registry.js";
+import { AMBIGUOUS_CONNECTION_MESSAGE, TWO_DEFAULT_CONNECTIONS_MESSAGE, connectionProblems, defaultConnectionOf, providerOf } from "../../packages/core/src/plugins/code-host/connections.js";
+import { AMBIGUOUS_REPOSITORY_HOST_MESSAGE, NO_HOST_MESSAGE, assertRepositoryHostsKnown, codeHostForKind, codeHostForRecord, codeHostForRepositoryAddress } from "../../packages/core/src/plugins/routing.js";
+import { githubCodeHost } from "../../packages/core/src/plugins/code-host/github/index.js";
+import { githubCodeHostPlugin } from "../../packages/core/src/plugins/code-host/github/plugin.js";
+import { registryRepositoryResolver } from "../../packages/core/src/core/merge/resolver.js";
+import { FakeCodeHost, FakeHostModel } from "@rovara-code/core/fakes";
 import { GITHUB_REPO_URL, GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
 
 const fakeModel = () => new FakeHostModel({ url: "https://git.examplehost.test/acme/app", id: "1", fullName: "acme/app" });

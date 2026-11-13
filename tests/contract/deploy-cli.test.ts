@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { environmentStackName } from "@agentx/contracts";
+import { environmentStackName } from "@rovara-code/contracts";
 import { CDK_CONSTRUCT_IDS, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { CallerIdentity } from "../../packages/cli/src/environments/adopt.js";

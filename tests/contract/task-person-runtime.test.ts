@@ -1,12 +1,12 @@
 import { GetCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { SLACK_OIDC_ISSUER } from "@agentx/contracts";
+import { SLACK_OIDC_ISSUER } from "@rovara-code/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
-import { createTaskPersonRuntime, TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES, type TaskPersonRuntimePorts } from "../../packages/broker/src/aws/task-person-runtime.js";
-import { checkTaskPersonIdentity } from "../../packages/broker/src/developer/task-person-identity.js";
-import { taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { ownerKeyForSubject } from "../../packages/core/src/aws/lambda.js";
+import { createTaskAuthorityAdmission } from "../../packages/core/src/aws/task-authority-admission.js";
+import { createTaskPersonRuntime, TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES, type TaskPersonRuntimePorts } from "../../packages/core/src/aws/task-person-runtime.js";
+import { checkTaskPersonIdentity } from "../../packages/core/src/developer/task-person-identity.js";
+import { taskOwnerKey, type DeveloperTaskRecord } from "../../packages/core/src/developer/task-records.js";
 
 const taskId = "11111111-1111-4111-8111-111111111111";
 const slackUserId = "U0123456789";

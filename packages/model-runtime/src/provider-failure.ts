@@ -1,4 +1,4 @@
-import { E2E_MODEL_FAILURE_SIGNAL_PATTERN, MODEL_NOT_ENABLED_CODE, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { E2E_MODEL_FAILURE_SIGNAL_PATTERN, MODEL_NOT_ENABLED_CODE, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@rovara-code/contracts";
 
 /**
  * Provider-neutral failure classes (M1.4 Task 4.10B, plan D-5). One pure function from what a failed provider call showed (an HTTP status, the error's own name or code, a network

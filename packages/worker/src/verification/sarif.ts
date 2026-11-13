@@ -5,7 +5,7 @@
 // Fail closed and bounded: a file that is not SARIF, is too large, or lists too many results is "not read" (no finding is claimed, and no scan is ever shown as clean because its file was unreadable). The
 // comparison needs both sides: without a baseline there is no "new", so nothing is reported. A finding's message is data from the tool: it is redacted, made one plain line and cut, and for a rule that is about
 // secrets the quoted text in it (which may be the secret) is removed.
-import { redactText, type EvidenceRaw, EVIDENCE_FINDINGS_MAX, type ProjectCommand } from "@agentx/contracts";
+import { redactText, type EvidenceRaw, EVIDENCE_FINDINGS_MAX, type ProjectCommand } from "@rovara-code/contracts";
 import { isAbsolute, normalize, relative, sep } from "node:path";
 import { plainPath } from "./cobertura-lcov-coverage.js";
 

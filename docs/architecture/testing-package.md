@@ -1,4 +1,4 @@
-# @agentx/testing
+# @rovara-code/testing
 
 What a provider package runs against its adapter before it is trusted. Step 0 of the modularization plan: a new adapter (a code host, a tracker, a check runner, a chat tool) is
 accepted when the same suites that the in-repo fakes and the shipped adapters pass also pass on it, and when the isolation kit shows it keeps companies apart.
@@ -7,19 +7,19 @@ accepted when the same suites that the in-repo fakes and the shipped adapters pa
 
 | Entry | What it holds |
 | --- | --- |
-| `@agentx/testing` | everything below, re-exported |
-| `@agentx/testing/ports/<name>` | one conformance suite per port: a list of named checks over a "world" (`runContract` registers one test per check) |
-| `@agentx/testing/fakes` | the fakes the suites run on (code host, tracker, check runner, channel and the memory ports) |
-| `@agentx/testing/channel` | the channel suite, a world for the fake adapter, and a world for the real Slack adapter over a fake network |
-| `@agentx/testing/isolation` | the two-company isolation kit and the worlds that apply it |
+| `@rovara-code/testing` | everything below, re-exported |
+| `@rovara-code/testing/ports/<name>` | one conformance suite per port: a list of named checks over a "world" (`runContract` registers one test per check) |
+| `@rovara-code/testing/fakes` | the fakes the suites run on (code host, tracker, check runner, channel and the memory ports) |
+| `@rovara-code/testing/channel` | the channel suite, a world for the fake adapter, and a world for the real Slack adapter over a fake network |
+| `@rovara-code/testing/isolation` | the two-company isolation kit and the worlds that apply it |
 
 ## Running a suite on a new adapter
 
 Build a world for the adapter (the adapter, a driver that puts the host's state in place, and the raw ids it uses), then:
 
 ```ts
-import { runContract } from "@agentx/testing/ports/plugin-contract-kit";
-import { codeHostChecks } from "@agentx/testing/ports/code-host-conformance";
+import { runContract } from "@rovara-code/testing/ports/plugin-contract-kit";
+import { codeHostChecks } from "@rovara-code/testing/ports/code-host-conformance";
 runContract("MyHost passes the CodeHost contract", codeHostChecks, () => myHostWorld());
 ```
 
@@ -35,7 +35,7 @@ for exactly the card's request, a request for changes with the person's own word
 
 ## The isolation kit
 
-`@agentx/testing/isolation` proves that data, events, secrets and approvals of company A never reach company B through a port implementation that serves both.
+`@rovara-code/testing/isolation` proves that data, events, secrets and approvals of company A never reach company B through a port implementation that serves both.
 
 - An `IsolationSurface` is one thing a company can put in and get out of an adapter. `plant(me)` puts a marked thing in through the port under raw ids both companies share;
   `observe(as)` does what that company can do and returns what it saw. The kit plants for both, observes as each, and fails when an observation holds the other company's marker or

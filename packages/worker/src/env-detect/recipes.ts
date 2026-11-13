@@ -15,7 +15,7 @@
 import {
   DEFAULT_AGENT_ALLOW_DOMAINS, ProjectCommandSchema, RecipeHostSchema, SETUP_FINGERPRINT_MAX_HOSTS, SETUP_RECIPE_OFFERS_MAX, SetupRecipeBodySchema, formatCommandLine, markerFilesOf, parseSetupRecipeSource, recipeFits, remoteCodeReason,
   setupRecipeSource, type ProjectCommand, type RecipeCommand, type SetupRecipeBody, type SetupRecipeOffer,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { emptyDetection, type DetectedCheck, type DetectedSource, type Detection, type RepositoryReader } from "./types.js";
 
 /** One recipe the broker offered to the project: its id and revision (the value source) and its body. */

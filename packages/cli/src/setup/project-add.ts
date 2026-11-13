@@ -8,11 +8,11 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
-import { verifyE2ESetupProposal } from "@agentx/broker/e2e/discovery";
+import { verifyE2ESetupProposal } from "@rovara-code/core/e2e/discovery";
 import {
   AdminProjectsResponseSchema, AgentXError, AgentXErrorCodeSchema, ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, canonicalJson, environmentStackName,
   type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition, type E2EPolicy, type E2ESetupProposal,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { listCredentials } from "../admin/credential.js";
 import { cliRuntimeBinding, registerProject } from "../admin/register.js";
 import { readJsonResponse, serverError } from "../admin/http.js";

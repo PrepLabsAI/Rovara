@@ -1,7 +1,7 @@
 // Port lane L9a: the conformance suite every `object-storage` adapter must pass (provisional, owner decision 58): the document-store adapter,
 // the folder adapter, and later Cloud's S3 adapter.
 import { describe, expect, it } from "vitest";
-import { ObjectConflictError, ObjectKeyError, ObjectMetaError, ObjectTooBigError, type ObjectMeta, type ObjectStorage } from "@agentx/contracts";
+import { ObjectConflictError, ObjectKeyError, ObjectMetaError, ObjectTooBigError, type ObjectMeta, type ObjectStorage } from "@rovara-code/contracts";
 
 export interface ObjectStorageUnderTest {
   store: ObjectStorage;

@@ -3,10 +3,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProjectDefinitionSchema } from "../../packages/contracts/src/index.js";
 import { CredentialUnavailable } from "../../packages/gateway/src/index.js";
-import { mcpConnectorType } from "../../packages/broker/src/aws/connector-presets.js";
-import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
-import { CredentialRegistry, hostPinProblem } from "../../packages/broker/src/aws/credentials.js";
-import { credentialRefusals } from "../../packages/broker/src/aws/registration-preflight.js";
+import { mcpConnectorType } from "../../packages/core/src/aws/connector-presets.js";
+import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors } from "../../packages/core/src/aws/connector-types.js";
+import { CredentialRegistry, hostPinProblem } from "../../packages/core/src/aws/credentials.js";
+import { credentialRefusals } from "../../packages/core/src/aws/registration-preflight.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const TEAM = "c408e946-78aa-4db8-923e-f78053dd954f";

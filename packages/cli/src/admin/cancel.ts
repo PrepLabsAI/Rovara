@@ -1,4 +1,4 @@
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 /** Cancels a workspace's running coding task as an administrator (#126). */
 export async function cancelWorkspaceTask(

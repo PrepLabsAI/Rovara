@@ -1,7 +1,7 @@
 // Decisions D2: the document-store form of the decision store keeps the evidence-opened record per person, card, tab and digest, and writes a decision once per request id.
 import { describe, expect, it } from "vitest";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { documentDecisionStore, DECISION_EVIDENCE_OPEN_TTL_MS } from "../../packages/broker/src/core/decisions/store.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { documentDecisionStore, DECISION_EVIDENCE_OPEN_TTL_MS } from "../../packages/core/src/core/decisions/store.js";
 
 describe("documentDecisionStore", () => {
   const who = { orgId: "org1", developerId: "dev1" };

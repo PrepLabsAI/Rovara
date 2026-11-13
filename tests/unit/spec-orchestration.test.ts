@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { SpecTargetSchema, type SpecFile, type SpecTarget } from "@agentx/contracts";
-import { createSpecHooks, specStateItem, type SpecStore, type SpecTaskRef, type SpecWorld, type TransactItem } from "../../packages/broker/src/core/spec/hooks.js";
-import { specOperationEndItems, type SpecEndEnvironment } from "../../packages/broker/src/core/spec/end-items.js";
-import { specIsDue } from "../../packages/broker/src/core/spec/due.js";
-import { specLinkLine, specPullRequestBody, withSpecLink } from "../../packages/broker/src/core/spec/link.js";
-import { buildSpecWriteRequest } from "../../packages/broker/src/core/spec/write-request.js";
+import { SpecTargetSchema, type SpecFile, type SpecTarget } from "@rovara-code/contracts";
+import { createSpecHooks, specStateItem, type SpecStore, type SpecTaskRef, type SpecWorld, type TransactItem } from "../../packages/core/src/core/spec/hooks.js";
+import { specOperationEndItems, type SpecEndEnvironment } from "../../packages/core/src/core/spec/end-items.js";
+import { specIsDue } from "../../packages/core/src/core/spec/due.js";
+import { specLinkLine, specPullRequestBody, withSpecLink } from "../../packages/core/src/core/spec/link.js";
+import { buildSpecWriteRequest } from "../../packages/core/src/core/spec/write-request.js";
 import {
   SPEC_ATTEMPTS_MAX, approved, continueWithoutSpec, edited, keepEdited, newSpecState, publishFailed, publishSucceeded, replanEdited, retry, specGate, specBranchName, startWriting, stepFailed, writeSucceeded,
   type SpecPullRequest, type SpecState,
-} from "../../packages/broker/src/core/spec/state.js";
+} from "../../packages/core/src/core/spec/state.js";
 
 const TASK = randomUUID();
 const PLAN = "a".repeat(64);

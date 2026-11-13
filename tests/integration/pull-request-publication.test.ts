@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { AgentXError, agentXError, createCandidateManifest, type WorkerInvocation, type WorkflowFeedbackBundleRef } from "@agentx/contracts";
+import { AgentXError, agentXError, createCandidateManifest, type WorkerInvocation, type WorkflowFeedbackBundleRef } from "@rovara-code/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js";
 import { publishWorkspace, runReadinessChecks } from "../../packages/worker/src/publish.js";

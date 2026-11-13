@@ -31,7 +31,7 @@ import {
   type FixtureSet,
   type ServiceMockFault,
   type ServiceMockUsage,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { createSyntheticGenerator } from "../data-guard.js";
 import { callerAddress, clip, readBoundedBody, startCore, type CoreAnswer, type CoreRefusal, type CoreRequest, type CoreStrategy, type RunningCore } from "./fake-core.js";
 import { FixtureSetRefused, sagemakerEndpointOfPath } from "./fixture-set.js";

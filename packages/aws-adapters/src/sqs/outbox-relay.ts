@@ -8,7 +8,7 @@
 // Both are at least once and idempotent: a row handed over twice reaches a queue with duplicate suppression once, and any other queue
 // with its `outboxId` attribute; the consumer is idempotent on its operation (dispatch claims it conditionally and drops an ended or running one). Neither promises order across calls: two relays running
 // together may hand over two messages of one ordered group in either order, so nothing may rely on the outbox for order.
-import type { DocumentChange, OutboxRelayReport, TransactionalOutbox } from "@agentx/contracts";
+import type { DocumentChange, OutboxRelayReport, TransactionalOutbox } from "@rovara-code/contracts";
 
 /** The outbox pieces the triggers read from a row. */
 export interface PendingOutboxRow {

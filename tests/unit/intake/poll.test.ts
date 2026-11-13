@@ -1,13 +1,13 @@
 // the generic poll over a tracker's search. It decides WHEN to ask (2 minutes by default, at most 60 reads an hour, both settings), never starts a ticket twice,
 // backs off when asking fails and tells the maintainers after an hour; the intake engine decides what each ticket becomes. No tracker is named here: the adapter is the test's own.
 import { describe, expect, it } from "vitest";
-import { agentXError, change, intakeSourceKey, type IntakeChannelRef, type OrgId } from "@agentx/contracts";
-import type { IntakePorts } from "../../../packages/broker/src/core/intake/engine.js";
-import { listWaitingIntakeItems } from "../../../packages/broker/src/core/intake/store.js";
-import { listIntakeSources, replaceIntakeSources } from "../../../packages/broker/src/core/intake/sources.js";
+import { agentXError, change, intakeSourceKey, type IntakeChannelRef, type OrgId } from "@rovara-code/contracts";
+import type { IntakePorts } from "../../../packages/core/src/core/intake/engine.js";
+import { listWaitingIntakeItems } from "../../../packages/core/src/core/intake/store.js";
+import { listIntakeSources, replaceIntakeSources } from "../../../packages/core/src/core/intake/sources.js";
 import {
   INTAKE_BACKOFF_MAX_MS, INTAKE_NOTICE_AFTER_MS, INTAKE_TICK_BUDGET_MS, INTAKE_NOTICE_EVERY_MS, pollIntakeSource, runIntakePoll, type IntakeNotice, type IntakePollDependencies, type IntakeSearch, type IntakeSearchItem,
-} from "../../../packages/broker/src/core/intake/poll.js";
+} from "../../../packages/core/src/core/intake/poll.js";
 import { RecordingStore } from "../../support/intake-world.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;

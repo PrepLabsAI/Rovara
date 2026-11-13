@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { runtimeInstallChallengeDigest, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
-import type { RuntimeInstallationDependencies } from "../../packages/broker/src/aws/runtime-installation.js";
+import type { RuntimeInstallationDependencies } from "../../packages/core/src/aws/runtime-installation.js";
 
 /**
  * An in-memory datastore and object store for the runtime registrar: the items, the retained objects and every transaction it sent, with the

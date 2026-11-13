@@ -1,6 +1,6 @@
 // The nightly run as a health check: every rule in its order, plus the fail-closed paths.
 import { describe, expect, it } from "vitest";
-import { NIGHTLY_ENVIRONMENT_CAUSES, NIGHTLY_HEALTH_SETUP_STEPS, NIGHTLY_HEALTH_TEST_STEPS, classifyNightlyHealth, nightlyHealthShownAs } from "../../packages/broker/src/core/test-env/nightly-health.js";
+import { NIGHTLY_ENVIRONMENT_CAUSES, NIGHTLY_HEALTH_SETUP_STEPS, NIGHTLY_HEALTH_TEST_STEPS, classifyNightlyHealth, nightlyHealthShownAs } from "../../packages/core/src/core/test-env/nightly-health.js";
 
 type Over = Record<string, unknown>;
 const okCheck = { runsTests: true, started: true, timedOut: false, reportApproved: true, reportWritten: true, testsCollected: 100 };

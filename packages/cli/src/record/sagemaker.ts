@@ -32,7 +32,7 @@ import {
   type SageMakerRecordingFile,
   type SageMakerResponse,
   type SageMakerRule,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { isSafeCliValue, type InvokeFailure, type InvokeRequest, type SageMakerInvoker } from "./invoker.js";
 
 export const RECORD_MAX_INPUTS = SAGEMAKER_RECORDING_MAX_PAIRS;

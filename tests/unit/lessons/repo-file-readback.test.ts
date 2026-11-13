@@ -1,16 +1,16 @@
 // Lessons in the repo: read-back, file -> Rovara, one way, by id. The team's edits of the merged `.rovara/lessons.md` are taken into Rovara by the weekly pass:
 // changed text = a correction, a removed id = retired by the team, a bullet with no id = a new person-approved lesson. Nothing is ever retired or changed on a read that failed, and an erased id is never brought back.
 import { afterEach, describe, expect, it } from "vitest";
-import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
-import { applyFileChanges, bodyHashOf, parseLessonsFile } from "../../../packages/broker/src/lessons/repo-file-format.js";
-import { readBackFile, scopeOfHeading } from "../../../packages/broker/src/lessons/repo-file-readback.js";
-import { lessonDeletionPort } from "../../../packages/broker/src/lessons/deletion.js";
-import { noticesOf, rowOf } from "../../../packages/broker/src/lessons/repo-file-pr.js";
+import { setLearnedLessonsGate } from "../../../packages/core/src/lessons/policy.js";
+import { applyFileChanges, bodyHashOf, parseLessonsFile } from "../../../packages/core/src/lessons/repo-file-format.js";
+import { readBackFile, scopeOfHeading } from "../../../packages/core/src/lessons/repo-file-readback.js";
+import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
+import { noticesOf, rowOf } from "../../../packages/core/src/lessons/repo-file-pr.js";
 import { settings } from "./lesson-helpers.js";
 import { DAY, FILE, passSetup, repoLesson } from "./repo-file-helpers.js";
-import { lessonsRepoFileJob, type RepoFileRuntime } from "../../../packages/broker/src/lessons/repo-file-job.js";
-import { sweepProject } from "../../../packages/broker/src/lessons/repo-file-sweep.js";
-import { newRepoFileState } from "../../../packages/broker/src/lessons/repo-file-state.js";
+import { lessonsRepoFileJob, type RepoFileRuntime } from "../../../packages/core/src/lessons/repo-file-job.js";
+import { sweepProject } from "../../../packages/core/src/lessons/repo-file-sweep.js";
+import { newRepoFileState } from "../../../packages/core/src/lessons/repo-file-state.js";
 
 afterEach(() => { setLearnedLessonsGate(undefined); });
 type W = ReturnType<typeof passSetup>;

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import type { SwebenchRunnerConfig, SwebenchRunResult } from "@agentx/contracts";
+import type { SwebenchRunnerConfig, SwebenchRunResult } from "@rovara-code/contracts";
 import type { PiSessionAdapter, PiSessionHandle, WorkspaceModelConfiguration } from "../../packages/worker/src/pi-session.js";
 import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
 import { startTaskContainer, type DockerCli } from "../../packages/worker/src/swebench/containers.js";

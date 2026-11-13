@@ -26,7 +26,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   AWS_PLAN_SERVICES_MAX, CATALOG_FIXED_ARGS, CatalogEntrySchema, FIXTURE_SET_MAX_BYTES, TEST_ENV_RESERVED_ALIASES, TestEnvDependencyIdSchema, agentXError, catalogFixedArgv, catalogIdName, normaliseAwsServiceKey,
   type CatalogEntry,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { DOCKER_CALL_TIMEOUT_MS } from "./setup-network.js";
 import { sweepServicesNetworks, type ServicesNetwork } from "./run-network.js";
 import type { DockerCli } from "./swebench/containers.js";

@@ -1,8 +1,8 @@
 // Item C1 (decision 59): the GitHub side of `CodeHost.commitFiles` and `deleteBranch`, copied from Cloud's lessons repo file lane. These tests run it against a small in-memory stand-in for GitHub's
 // git data API, so the rules the code states in its header are proved by what GitHub would be asked: branch names, paths, a branch nobody has, a head that moved, a symbolic link.
 import { describe, expect, it } from "vitest";
-import { commitFilesOn, deleteBranchOn, checkedRepositoryPath, type GithubWriteContext } from "../../packages/broker/src/plugins/code-host/github/commit-files.js";
-import { COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE } from "@agentx/contracts";
+import { commitFilesOn, deleteBranchOn, checkedRepositoryPath, type GithubWriteContext } from "../../packages/core/src/plugins/code-host/github/commit-files.js";
+import { COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE } from "@rovara-code/contracts";
 
 type Entry = { type: "file"; text: string } | { type: "symlink" } | { type: "dir" };
 interface Commit { tree: Map<string, Entry>; parent?: string }

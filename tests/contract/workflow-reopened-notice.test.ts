@@ -1,9 +1,9 @@
 // D3: a reopened pull request is named by its repository and number, so two repositories' pull requests that share a
 // number are never confused.
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_BLOCK_REASONS, type WorkflowSnapshot } from "@agentx/contracts";
-import { noticesOf } from "../../packages/broker/src/developer/notifications.js";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { WORKFLOW_BLOCK_REASONS, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { noticesOf } from "../../packages/core/src/developer/notifications.js";
+import { workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
 import { visibleSlackText } from "../support/strict-slack.js";
 
 const taskId = "11111111-2222-4333-8444-555555555555";

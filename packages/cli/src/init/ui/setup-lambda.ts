@@ -6,7 +6,7 @@
 import { CloudFormationClient, DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient } from "@aws-sdk/client-kms";
-import { environmentStackName } from "@agentx/contracts";
+import { environmentStackName } from "@rovara-code/contracts";
 import { kmsTokenSeal, type SetupIdentity } from "./setup-auth.js";
 import { setupPageHandler, type SetupPageAuth, type SetupRequest, type SetupResponse } from "./setup-handler.js";
 import { dynamoSetupStore, type SetupStore } from "./setup-store.js";

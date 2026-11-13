@@ -2,7 +2,7 @@ import { ClassifierError, createModelClassifier, usableClassifierTimeout } from 
 import { createGateSession, type ActionClassifier, type GateDecision } from "@agentx/orchestrator/action-gate";
 import { createOrchestratorRuntime, type OrchestratorOptions } from "@agentx/orchestrator/orchestrator";
 import { createModelRequestRouter, type RequestRouter } from "@agentx/orchestrator/request-router";
-import { TURN_GATE_REASON_LIMIT, redactAndCap } from "@agentx/contracts";
+import { TURN_GATE_REASON_LIMIT, redactAndCap } from "@rovara-code/contracts";
 import type { ServiceLog, TurnInput } from "./processor.js";
 
 export interface HostedRuntimeOptions extends Pick<OrchestratorOptions, "stateDirectory" | "api" | "model" | "sessionFile" | "onConnectorUnavailable" | "onExtensionError" | "onModelFallback" | "modelRuntime"> {

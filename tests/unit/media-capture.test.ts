@@ -13,9 +13,9 @@ import { MEDIA_DIR, MEDIA_LISTING_FILE, MEDIA_VIDEO_MAX_BYTES, MEDIA_TRACE_MAX_B
 import { TRACE_BLANKED, scrubTraceLines, scrubTraceZip } from "../../packages/verifier/src/executor/trace-scrub.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { finishWebCaseMedia, startWebCaseTrace, type E2EWebMediaPorts } from "../../packages/verifier/src/web-runtime.js";
-import type { RevocationReport } from "../../packages/broker/src/e2e/run-scoped-accounts.js";
-import { attachMedia, prepareMediaArtifacts, publicationMediaFor } from "../../packages/broker/src/e2e/media-evidence.js";
-import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence-pack.js";
+import type { RevocationReport } from "../../packages/core/src/e2e/run-scoped-accounts.js";
+import { attachMedia, prepareMediaArtifacts, publicationMediaFor } from "../../packages/core/src/e2e/media-evidence.js";
+import { buildEvidencePack } from "../../packages/core/src/core/proof/evidence-pack.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const roots: string[] = [];

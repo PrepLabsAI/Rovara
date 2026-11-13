@@ -5,12 +5,12 @@ import { describe, expect, it } from "vitest";
 import {
   configuredSecondReviewMode, narrowedSecondReviewModels, secondReviewDidNotRunLine, secondReviewModelKey, TaskUsageTelemetrySchema, createTaskUsageTelemetry,
   type ModelIdentifier, type SecondReviewReplayCase, type SecondReviewReplayRun, type SecondReviewVerdict, type WorkflowReviewReport,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { createCandidateManifest } from "../../packages/contracts/src/task-workflow-node.js";
-import { acceptSecondReport, planSecondReview, secondOpinionUnavailable, secondReviewAcknowledgement, secondReviewUnavailableDecision, type SecondReviewPlanInput } from "../../packages/broker/src/core/second-review/plan.js";
-import { noticeWhyText } from "../../packages/broker/src/core/second-review/notice.js";
-import { defaultModelLine, secondReviewPicker, secondReviewTrackRecord } from "../../packages/broker/src/core/second-review/picker.js";
-import { secondReviewMergeWait } from "../../packages/broker/src/core/second-review/store.js";
+import { acceptSecondReport, planSecondReview, secondOpinionUnavailable, secondReviewAcknowledgement, secondReviewUnavailableDecision, type SecondReviewPlanInput } from "../../packages/core/src/core/second-review/plan.js";
+import { noticeWhyText } from "../../packages/core/src/core/second-review/notice.js";
+import { defaultModelLine, secondReviewPicker, secondReviewTrackRecord } from "../../packages/core/src/core/second-review/picker.js";
+import { secondReviewMergeWait } from "../../packages/core/src/core/second-review/store.js";
 import { reviewUsageArtifactName } from "../../packages/worker/src/usage.js";
 
 const NOW = "2026-11-02T12:00:00.000Z";

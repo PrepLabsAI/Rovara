@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ConnectorConfigSchema } from "../../packages/contracts/src/connectors-node.js";
-import { BUILT_IN_CONNECTOR_TYPES, githubConnectorType, resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
-import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
+import { BUILT_IN_CONNECTOR_TYPES, githubConnectorType, resolveConnectors } from "../../packages/core/src/aws/connector-types.js";
+import { CredentialRegistry } from "../../packages/core/src/aws/credentials.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { TRACKER_ENDPOINT, trackerConnectorType } from "../support/tracker-connector.js";
 

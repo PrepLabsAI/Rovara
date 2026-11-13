@@ -2,7 +2,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OUTBOX_PENDING_INDEX } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX } from "@rovara-code/contracts";
 import { SqliteDocumentStore } from "../../../packages/local-adapters/src/index.js";
 import { CONFORMANCE_INDEXES, type DocumentStoreHarness, type DocumentStoreUnderTest } from "./document-store-conformance.js";
 

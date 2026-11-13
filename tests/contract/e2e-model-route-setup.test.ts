@@ -2,15 +2,15 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { E2EPolicySchema, E2E_DEFAULT_LIMITS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, e2ePolicyDigest, type E2EApplicationPlanIntent } from "@agentx/contracts";
+import { E2EPolicySchema, E2E_DEFAULT_LIMITS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, e2ePolicyDigest, type E2EApplicationPlanIntent } from "@rovara-code/contracts";
 import { STALE_RUN_SWEEP_AGE_MS } from "../../packages/verifier/src/host/docker-application-host.js";
 import { e2eApplicationModelUseWithinRound } from "../../packages/verifier/src/application-result-adapter.js";
 import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/config.js";
-import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
+import { ApplicationDispatchRefusal } from "../../packages/core/src/e2e/application-dispatch-check.js";
 import {
   E2E_MODEL_ROUTE_PARTITION, approveE2EAgentRoute, checkE2EAgentRouteCurrent, e2eAgentInstallationFromParameters, planE2EAgentRoute, type E2EAgentInstallation,
-} from "../../packages/broker/src/e2e/model-route-registry.js";
-import { describeFeatureE2EExecutableKinds } from "../../packages/broker/src/e2e/feature-plan-executable-kinds.js";
+} from "../../packages/core/src/e2e/model-route-registry.js";
+import { describeFeatureE2EExecutableKinds } from "../../packages/core/src/e2e/feature-plan-executable-kinds.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { call, loadSlackBroker } from "../support/slack-broker.js";
 import { contractSnapshot } from "../support/e2e-application-plan-fixtures.js";
@@ -386,7 +386,7 @@ describe("dispatch re-derives the route before an AI navigation round starts", (
 describe("the dispatch wiring in broker.ts", () => {
   // The pre-warm-up site is exercised end to end (tests/unit/workflow-e2e-application-planning.test.ts); the admission site runs only past a committed candidate export, which no
   // agent-capable harness has, so its presence is pinned here: the route check, and the agentSteps flag on the reference that makes delivery demand the worker feature.
-  const source = readFileSync(new URL("../../packages/broker/src/aws/broker.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../packages/core/src/aws/broker.ts", import.meta.url), "utf8");
 
   it("checks the route both before compute is woken and when the round is admitted", () => {
     const calls = source.split("\n").filter((line) => line.includes("await requireAgentRouteStillCurrent("));

@@ -3,13 +3,13 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_ARTIFACT_RETENTION, EVIDENCE_RETENTION_DAYS, INDEX_EXPIRY_ATTRIBUTE, buildApiSample, type EvidenceView } from "../../packages/contracts/src/index.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { DOCUMENT_BLOB_MAX_BYTES, EvidenceObjectTooBigError, createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { DOCUMENT_BLOB_MAX_BYTES, EvidenceObjectTooBigError, createDocumentEvidenceBlobStore } from "../../packages/core/src/core/proof/evidence-blob-store.js";
 import {
   deleteEvidenceArtifacts, evidenceArtifactKey, evidenceBytesAreKind, readEvidenceArtifact, statEvidenceArtifacts, storeEvidenceArtifacts, type EvidenceReadDependencies,
-} from "../../packages/broker/src/core/proof/evidence-artifacts.js";
-import { evidenceViewOf } from "../../packages/broker/src/core/proof/evidence-pack.js";
-import { eraseTaskEvidence, eraseWorkspaceEvidence, evidencePrefixesOf } from "../../packages/broker/src/core/proof/evidence-erase.js";
+} from "../../packages/core/src/core/proof/evidence-artifacts.js";
+import { evidenceViewOf } from "../../packages/core/src/core/proof/evidence-pack.js";
+import { eraseTaskEvidence, eraseWorkspaceEvidence, evidencePrefixesOf } from "../../packages/core/src/core/proof/evidence-erase.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(500, 3)]);

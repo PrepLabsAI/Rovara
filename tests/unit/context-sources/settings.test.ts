@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ContextSourceSchema } from "@agentx/contracts";
-import { confirmSourceChange, proposeSourceChange, readContextSources, rejectSourceChange, validateContextSource, type SettingsActor, type SettingsDependencies } from "../../../packages/broker/src/context-sources/settings.js";
-import { documentContextSourceStore } from "../../../packages/broker/src/context-sources/store.js";
-import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../../packages/broker/src/core/task-flow/flow.js";
+import { ContextSourceSchema } from "@rovara-code/contracts";
+import { confirmSourceChange, proposeSourceChange, readContextSources, rejectSourceChange, validateContextSource, type SettingsActor, type SettingsDependencies } from "../../../packages/core/src/context-sources/settings.js";
+import { documentContextSourceStore } from "../../../packages/core/src/context-sources/store.js";
+import { INDEX_EXPIRY_ATTRIBUTE } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../../packages/core/src/core/task-flow/flow.js";
 import { CONNECTION, GET_TOOL, NOW, ORG, PLAIN_TOOL, SEARCH_TOOL, WRITE_TOOL, environment, source } from "./fixtures.js";
 
 const admin = (developerId: string, orgRole = "admin"): SettingsActor => ({ orgId: ORG, developerId, orgRole });

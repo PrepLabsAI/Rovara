@@ -7,7 +7,7 @@
 // shows as the bare `agentx` command, not as the universally-working `npx` suggestion that a
 // persisted (not live) hint still falls back to when it was never told.
 import { realpathSync } from "node:fs";
-import { CLI_COMMAND_NAME, CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_COMMAND_NAME, CLI_PACKAGE_NAME } from "@rovara-code/contracts";
 import { RELEASE_VERSION } from "../version.js";
 
 export interface CliInvocation {

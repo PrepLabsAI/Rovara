@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
-import { WORKFLOW_REVIEW_FAILURE_REASONS, taskGraphDigest, workflowFindingFingerprint, type DeveloperTaskView } from "@agentx/contracts";
+import { WORKFLOW_REVIEW_FAILURE_REASONS, taskGraphDigest, workflowFindingFingerprint, type DeveloperTaskView } from "@rovara-code/contracts";
 import {
   DEVELOPER_TOOLS, NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient,
   type ControlPlaneClient, type ToolContext,

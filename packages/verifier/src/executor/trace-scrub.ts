@@ -1,5 +1,5 @@
 import { crc32 as zlibCrc32, deflateRawSync, inflateRawSync } from "node:zlib";
-import { e2eSecretSpellings } from "@agentx/contracts";
+import { e2eSecretSpellings } from "@rovara-code/contracts";
 
 /**
  * Proof and evidence B4 (and fix round 1, Opus review C2): a Playwright trace is a ZIP of JSON-lines files (`trace.trace`, `trace.network`, `trace.stacks`), screencast images and blobs (`resources/`: response

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { E2E_DEFAULT_MODEL_ROUTE_ID, e2eModelRouteRevision } from "@agentx/contracts";
+import { E2E_DEFAULT_MODEL_ROUTE_ID, e2eModelRouteRevision } from "@rovara-code/contracts";
 import {
   approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest, e2eModelRouteCanaryKey, e2eModelRouteLatestKey, e2eModelRouteRevisionKey,
   planE2EAgentRoute, readAdmittedE2EModelRoute, readE2EModelRouteLatest, type E2EAgentInstallation,
-} from "../../packages/broker/src/e2e/model-route-registry.js";
+} from "../../packages/core/src/e2e/model-route-registry.js";
 import { deriveE2EAgentRouteForModel } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { SECRET_ARN, drivingTestRow } from "../support/e2e-model-fixtures.js";

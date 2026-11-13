@@ -1,7 +1,7 @@
 // Spec 062 FR-020, FR-024: registering channel adapters and binding their spaces, administrators only.
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { verifyWebhook, webhookHeaders } from "@agentx/contracts";
-import { registerChannelAdapter } from "../../packages/broker/src/aws/channel-adapters.js";
+import { verifyWebhook, webhookHeaders } from "@rovara-code/contracts";
+import { registerChannelAdapter } from "../../packages/core/src/aws/channel-adapters.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject } from "../support/slack-broker.js";
 

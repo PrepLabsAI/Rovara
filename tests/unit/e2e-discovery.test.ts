@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { canonicalJson, createCandidateManifest, inferNodeWebRecipe, verifyE2ESetupProposal } from "@agentx/contracts";
-import { inspectE2ERepository, proposeE2ESetup, type VerifiedE2ESourceSnapshot } from "../../packages/broker/src/e2e/discovery.js";
+import { canonicalJson, createCandidateManifest, inferNodeWebRecipe, verifyE2ESetupProposal } from "@rovara-code/contracts";
+import { inspectE2ERepository, proposeE2ESetup, type VerifiedE2ESourceSnapshot } from "../../packages/core/src/e2e/discovery.js";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const source = "openapi: 3.0.0\n";

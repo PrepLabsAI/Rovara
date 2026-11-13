@@ -2,7 +2,7 @@
 // closed set of proposals, with every free-text field redacted, one line, inert and short, and a settings change only on the allow-list. Tokens are built at run time.
 import { describe, expect, it } from "vitest";
 import { DIAGNOSIS_PROPOSALS_MAX, DiagnosisProposalSchema } from "../../packages/contracts/src/index.js";
-import { extractJsonObject, proposalCounts, sanitizeDiagnosis } from "../../packages/broker/src/core/diagnosis/sanitize.js";
+import { extractJsonObject, proposalCounts, sanitizeDiagnosis } from "../../packages/core/src/core/diagnosis/sanitize.js";
 
 const TOKEN = `ghp_${"a1B2".repeat(9)}`;
 const SHA = "0123456789abcdef0123456789abcdef01234567";

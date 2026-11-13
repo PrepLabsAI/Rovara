@@ -1,7 +1,7 @@
 // The saved environments switch: on only when exactly "1", and nothing reads the process environment unless the caller gives none.
 import { describe, expect, it } from "vitest";
-import { SAVED_ENVIRONMENTS_VARIABLE } from "../../packages/broker/src/core/test-env/switch.js";
-import { savedEnvEnabled } from "../../packages/broker/src/core/test-env/saved-env-switch.js";
+import { SAVED_ENVIRONMENTS_VARIABLE } from "../../packages/core/src/core/test-env/switch.js";
+import { savedEnvEnabled } from "../../packages/core/src/core/test-env/saved-env-switch.js";
 
 describe("the saved environments switch", () => {
   it("is on only for exactly 1", () => {

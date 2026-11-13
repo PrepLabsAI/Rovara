@@ -1,14 +1,14 @@
 // Test services: the Prove of an environment with dependencies. The two new steps ("start dependencies", "dependency usage check") are derived by the broker from the usage record the candidate check
 // reported; a check with no record proves nothing about them; an environment with dependencies is proved only when both passed; the record is kept, validated, on the candidate check; the plan for the check is pinned.
 import { describe, expect, it } from "vitest";
-import { INDEX_EXPIRY_ATTRIBUTE, TEST_ENV_REFUSALS, projectRevisionKey, TestEnvironmentBodySchema, TestEnvProveReportSchema, testEnvDigest, testEnvIsProved, type OrgId, type TestServicesUsageRecord } from "@agentx/contracts";
-import { candidateDependencyPlan } from "../../packages/broker/src/core/test-env/candidate-plan.js";
-import { CANDIDATE_CHECK_ENTITY, candidateCheckKey, readCandidateCheck, recordCandidateUsage } from "../../packages/broker/src/core/test-env/candidate-check.js";
-import { BACKING_PLACES } from "../../packages/broker/src/core/test-env/backing-choice.js";
-import { DEPENDENCY_PLAN_REFUSAL_WORDS } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import { TEST_ENV_REFUSAL_WORDS, dependencyStepsOf, proveReportFromSetupCheck } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
+import { INDEX_EXPIRY_ATTRIBUTE, TEST_ENV_REFUSALS, projectRevisionKey, TestEnvironmentBodySchema, TestEnvProveReportSchema, testEnvDigest, testEnvIsProved, type OrgId, type TestServicesUsageRecord } from "@rovara-code/contracts";
+import { candidateDependencyPlan } from "../../packages/core/src/core/test-env/candidate-plan.js";
+import { CANDIDATE_CHECK_ENTITY, candidateCheckKey, readCandidateCheck, recordCandidateUsage } from "../../packages/core/src/core/test-env/candidate-check.js";
+import { BACKING_PLACES } from "../../packages/core/src/core/test-env/backing-choice.js";
+import { DEPENDENCY_PLAN_REFUSAL_WORDS } from "../../packages/core/src/core/test-env/dependency-plan.js";
+import { TEST_ENV_REFUSAL_WORDS, dependencyStepsOf, proveReportFromSetupCheck } from "../../packages/core/src/core/test-env/prove-from-setup-check.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const fresh = (): MemoryDocumentStore => new MemoryDocumentStore();

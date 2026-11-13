@@ -76,7 +76,7 @@ describe("Step 0: the pinned dependencies", () => {
   });
 
   it("keeps ai out of the worker's module graph: no import of the verifier executor, and nothing reachable from the verifier's root loads ai", () => {
-    const workerLike = ["packages/worker", "packages/model-runtime", "packages/broker", "packages/cli"].flatMap((dir) => sourceFiles(`${dir}/src`));
+    const workerLike = ["packages/worker", "packages/model-runtime", "packages/core", "packages/cli"].flatMap((dir) => sourceFiles(`${dir}/src`));
     const executorImports = workerLike.flatMap((file) => specifiersOf(file).filter((specifier) => /^@agentx\/verifier\/executor(?:\/|$)|verifier\/src\/executor|verifier\/dist\/executor/.test(specifier)).map((specifier) => `${file}: ${specifier}`));
     expect(executorImports).toEqual([]);
     const verifierSrc = new URL("packages/verifier/src/", root).pathname;

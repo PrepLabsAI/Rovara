@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, canonicalJson, canonicalPlanJson, readCanonicalPlan } from "@agentx/contracts";
+import { E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, canonicalJson, canonicalPlanJson, readCanonicalPlan } from "@rovara-code/contracts";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { planDocument } from "../support/plan-documents.js";
 import { sha, startApplicationRound, type ApplicationRound } from "../support/e2e-application-round-harness.js";
-import { applicationIntentDigest, applicationRoundIntent } from "../../packages/broker/src/e2e/application-plan-approval.js";
+import { applicationIntentDigest, applicationRoundIntent } from "../../packages/core/src/e2e/application-plan-approval.js";
 
 // The plan a planner writes leaves out what its schema makes optional (portableOperationRefs, mockFixtureRefs, unavailableTargetRefs). The broker stores that plan as it is,
 // and the admission it builds holds the intent derived for the round, with those members written out as empty lists. Verification must hold the stored plan to that
@@ -12,7 +12,7 @@ import { applicationIntentDigest, applicationRoundIntent } from "../../packages/
 
 afterEach(disposeRealCandidates);
 // The broker module reads its environment when it loads, so it is imported only once the harness (which sets that environment up) has started.
-const brokerModule = () => import("../../packages/broker/src/aws/broker.js");
+const brokerModule = () => import("../../packages/core/src/aws/broker.js");
 
 type StoredTask = { ownerKey: string; workflow: Record<string, unknown> & { artifacts: Array<Record<string, unknown>>; decisions: Array<Record<string, unknown>>; e2e: Record<string, unknown> } };
 

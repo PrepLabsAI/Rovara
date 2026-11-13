@@ -16,7 +16,7 @@ import {
   planDocumentMarkdown, portableOperationId, WorkflowSnapshotSchema, workflowSendBackOffered, sendBackProblems,
   ProjectDefinitionSchema, workerInvokeToken, workerInvokeTokenPayload, workspaceSessionKey, type WorkerInvokeTokenClaims,
   type DeveloperTaskView, type E2EPolicy, type E2ESourceSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { developerTokenKey, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
 import { realExec, type Exec } from "../../packages/cli/src/loop/exec.js";
@@ -27,19 +27,19 @@ import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 import { createAgentXMcpServer } from "../../packages/mcp/src/index.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
 import { call, createBroker, issuer, loadSlackBroker } from "../support/slack-broker.js";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import { ownerKeyForSubject } from "../../packages/core/src/aws/lambda.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
 import { beforeAll, vi } from "vitest";
-import { GitHubAppCredentialProvider } from "../../packages/broker/src/github-app.js";
-import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/broker/src/aws/dispatcher.js";
-import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
-import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
-import { createProjectSetupBindingReader, createProjectSetupDispatchGuard, createProjectSetupDispatchLifecycle } from "../../packages/broker/src/aws/dispatcher.js";
-import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
-import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
+import { GitHubAppCredentialProvider } from "../../packages/core/src/github-app.js";
+import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/core/src/aws/dispatcher.js";
+import { createEc2Delivery } from "../../packages/core/src/aws/ec2-delivery.js";
+import { createOutboxPublisherHandler } from "../../packages/core/src/aws/outbox-publisher.js";
+import { createProjectSetupBindingReader, createProjectSetupDispatchGuard, createProjectSetupDispatchLifecycle } from "../../packages/core/src/aws/dispatcher.js";
+import { guardTaskDispatch } from "../../packages/core/src/aws/task-dispatch-access.js";
+import { createTaskAuthorityAdmission } from "../../packages/core/src/aws/task-authority-admission.js";
 import { TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { ProjectSetupSessionManager } from "../../packages/broker/src/aws/sessions.js";
-import { issueProjectSetupCapability } from "../../packages/broker/src/aws/project-setup-capability.js";
+import { ProjectSetupSessionManager } from "../../packages/core/src/aws/sessions.js";
+import { issueProjectSetupCapability } from "../../packages/core/src/aws/project-setup-capability.js";
 
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
@@ -54,14 +54,14 @@ import { postProjectSetupTerminalResult } from "../../packages/worker/src/projec
 import { publishWorkspace } from "../../packages/worker/src/publish.js";
 import { createRepositoryCredentialProvider } from "../../packages/worker/src/repository-credentials.js";
 import { marshall } from "@aws-sdk/util-dynamodb";
-import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
-import { deriveProjectSetupSourceSmoke } from "../../packages/broker/src/e2e/project-setup-source-smoke.js";
-import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
-import { e2eFeatureVerifierKey, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
-import { readWorkflowE2ENotifierProjection } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
-import { renderE2ENotifierSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
-import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
+import { inspectE2ERepository } from "../../packages/core/src/e2e/discovery.js";
+import { deriveProjectSetupSourceSmoke } from "../../packages/core/src/e2e/project-setup-source-smoke.js";
+import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/core/src/e2e/feature-plan-intent.js";
+import { e2eFeatureVerifierKey, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
+import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/core/src/aws/project-setup-runtime-catalog.js";
+import { readWorkflowE2ENotifierProjection } from "../../packages/core/src/aws/workflow-e2e-notifier-projection.js";
+import { renderE2ENotifierSlackBlocks } from "../../packages/core/src/e2e-presentation.js";
+import { selectE2EExecutionPlan } from "../../packages/core/src/e2e/execution-plan.js";
 import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies-node.js";
 import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
@@ -658,8 +658,8 @@ describe("P0 normal project onboarding journey", () => {
     const strictSlack = new StrictSlackWeb({ briefLimit: 1_200 });
     const notifierPosts: Array<{ channel: string; threadTs?: string; text: string; blocks?: unknown[] }> = [];
     const notifierLogs: Array<Record<string, unknown>> = [];
-    const { createNotifierHandler } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
-    const { loadWorkflowE2EPresentation } = await import("../../packages/broker/src/aws/broker.js");
+    const { createNotifierHandler } = await import("../../packages/core/src/aws/developer-task-notifier.js");
+    const { loadWorkflowE2EPresentation } = await import("../../packages/core/src/aws/broker.js");
     let notifierE2EBlocks: unknown[] | undefined;
     const notifierHandler = createNotifierHandler({
       documentClient: broker.db, tableName: "state", enqueue: async () => undefined, retryLater: async () => undefined,

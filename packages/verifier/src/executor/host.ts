@@ -3,7 +3,7 @@ import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join, sep } from "node:path";
 import { z } from "zod";
-import { E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, canonicalJson } from "@agentx/contracts";
+import { E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, canonicalJson } from "@rovara-code/contracts";
 import type { BrowserContext } from "playwright-core";
 import { createAPIApplicationCliHost, type E2EApiRuntimePorts } from "../api-runtime.js";
 import { createWebApplicationCliHost, type E2EWebRuntimePorts } from "../web-runtime.js";

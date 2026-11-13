@@ -4,7 +4,7 @@
 // tool may hold. `use` only makes the verified commands a candidate and starts the check on a fresh workspace; the approval is on the page.
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { Command } from "commander";
 import type { TextWriter } from "../init/prompts.js";
 import { terminalSafe } from "../session/app-request.js";

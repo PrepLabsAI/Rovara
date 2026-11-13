@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { fauxAssistantMessage, getCurrentSystemPrompt, type TranscriptContext } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, AGENT_STEP_PREAMBLE, STANDING_INSTRUCTIONS_FEATURE, WORKER_INVOCATION_FEATURES } from "../../packages/contracts/src/index.js";
-import { READ_ONLY_TOOLS } from "@agentx/contracts";
+import { READ_ONLY_TOOLS } from "@rovara-code/contracts";
 import { DESIGN_REVIEW_MAX_OUTPUT_TOKENS, createReviewSessionOpener } from "../../packages/worker/src/design-review-sessions.js";
 import { agentStepSystemPrompt } from "../../packages/worker/src/agent-run/run-agent-step.js";
 import { materializeSkills, skillsPromptSection, type AgentSkillFile } from "../../packages/worker/src/agent-step.js";

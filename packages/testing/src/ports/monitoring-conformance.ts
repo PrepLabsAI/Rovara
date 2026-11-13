@@ -1,7 +1,7 @@
 // The conformance suite every `monitoring` adapter must pass: the fake, each adapter Code ships, and a hosted install's own adapters later. The harness says how the
 // vendor answers (a fetch for "works", one for "refused") and which origin the check may reach.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PluginNameSchema, SecretValue, type JsonObject, type MonitoringAdapter } from "@agentx/contracts";
+import { PluginNameSchema, SecretValue, type JsonObject, type MonitoringAdapter } from "@rovara-code/contracts";
 
 export interface MonitoringUnderTest {
   adapter: MonitoringAdapter;

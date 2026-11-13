@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { Citation } from "@agentx/contracts";
-import { RESULT_RETENTION_SECONDS, citationViews, decideQuote, documentResultStore, registerContextSourceCleanup, type QuoteDependencies } from "../../../packages/broker/src/context-sources/quotes.js";
-import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../../packages/broker/src/core/task-flow/flow.js";
+import type { Citation } from "@rovara-code/contracts";
+import { RESULT_RETENTION_SECONDS, citationViews, decideQuote, documentResultStore, registerContextSourceCleanup, type QuoteDependencies } from "../../../packages/core/src/context-sources/quotes.js";
+import { INDEX_EXPIRY_ATTRIBUTE } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../../packages/core/src/core/task-flow/flow.js";
 import { NOW, ORG, source } from "./fixtures.js";
 
 const handlers: Array<(event: { orgId: typeof ORG; taskId: string }) => Promise<void>> = [];

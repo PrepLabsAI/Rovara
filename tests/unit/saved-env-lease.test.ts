@@ -2,8 +2,8 @@
 // preparation made for that job only; nothing about the registry is told to the worker beyond one sentence.
 import { beforeEach, describe, expect, it } from "vitest";
 import { HostedSavedEnvRegistryAuthSchema, SavedEnvBuildResultSchema } from "../../packages/contracts/src/index.js";
-import { checkRebuild, leaseForDispatch } from "../../packages/broker/src/core/test-env/saved-env.js";
-import { SAVED_ENV_PUSH_LOGIN_MAX_PER_OPERATION, savedEnvFallbackCore, savedEnvPushLoginCore, savedEnvResultCore, type SavedEnvLeaseContext } from "../../packages/broker/src/core/test-env/saved-env-lease.js";
+import { checkRebuild, leaseForDispatch } from "../../packages/core/src/core/test-env/saved-env.js";
+import { SAVED_ENV_PUSH_LOGIN_MAX_PER_OPERATION, savedEnvFallbackCore, savedEnvPushLoginCore, savedEnvResultCore, type SavedEnvLeaseContext } from "../../packages/core/src/core/test-env/saved-env-lease.js";
 import { COMMIT, KEY, dig, imageOf, manifestOf, savedEnvWorld } from "../support/saved-env-world.js";
 
 const WS = "11111111-1111-4111-8111-111111111111";

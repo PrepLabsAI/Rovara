@@ -1,11 +1,11 @@
 // a seed command DETECTED UNCHANGED from the repository's own script, run only on Rovara's sealed test database, is MEDIUM (one maintainer approves); anything else stays HIGH.
 // The broker locks it from the repository itself (never the worker's word), stores its own checks with the proposal, and the approval reads them again from the store.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, projectPk, seedScriptLockOf, testEnvApprovalRisk, testEnvLessSafeChanges, type OrgId, type TestEnvironmentBody } from "@agentx/contracts";
-import { TEST_ENVIRONMENT_KIND, proposalSeedTrust, proposeTestEnvironment, testEnvironmentSubjectId } from "../../packages/broker/src/core/test-env/environment.js";
-import { lockLookSeeds, seedCardLinesOf, seedRisksOf, seedTrustOf, treeReader, type SeedRepoSources } from "../../packages/broker/src/core/test-env/seed-lock.js";
-import { taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import { TaskDependencyPlanSchema } from "@agentx/contracts";
+import { TestEnvironmentBodySchema, projectPk, seedScriptLockOf, testEnvApprovalRisk, testEnvLessSafeChanges, type OrgId, type TestEnvironmentBody } from "@rovara-code/contracts";
+import { TEST_ENVIRONMENT_KIND, proposalSeedTrust, proposeTestEnvironment, testEnvironmentSubjectId } from "../../packages/core/src/core/test-env/environment.js";
+import { lockLookSeeds, seedCardLinesOf, seedRisksOf, seedTrustOf, treeReader, type SeedRepoSources } from "../../packages/core/src/core/test-env/seed-lock.js";
+import { taskDependencyPlansOf } from "../../packages/core/src/core/test-env/dependency-plan.js";
+import { TaskDependencyPlanSchema } from "@rovara-code/contracts";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
 

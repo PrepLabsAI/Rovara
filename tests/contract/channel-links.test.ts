@@ -1,7 +1,7 @@
 // Spec 062 FR-030, FR-031: one-time, expiring link codes bound to the actor that asked; links under actor and developer.
 import { describe, expect, it } from "vitest";
-import { linkCodeHash } from "@agentx/contracts";
-import { issueLinkCode, linkedDeveloper, listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink } from "../../packages/broker/src/aws/channel-links.js";
+import { linkCodeHash } from "@rovara-code/contracts";
+import { issueLinkCode, linkedDeveloper, listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink } from "../../packages/core/src/aws/channel-links.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const actor = { channel: "whatsapp", tenant: "+14155550100", userId: "+919876544821" };

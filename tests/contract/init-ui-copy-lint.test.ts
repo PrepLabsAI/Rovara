@@ -2,7 +2,7 @@
 // Spec 048 FR-081 and SC-011: the copy-lint rules. Each rule is proven by a seeded example that
 // must fail it, and good copy must pass every rule. Task 17 runs the rules over the whole journey.
 import { describe, expect, it } from "vitest";
-import { environmentStackName } from "@agentx/contracts";
+import { environmentStackName } from "@rovara-code/contracts";
 import { WAITING_STEP_PLAIN } from "../../packages/cli/src/init/commands.js";
 import type { WizardQuestion } from "../../packages/cli/src/init/ui/protocol.js";
 import { settingsFields } from "../../packages/cli/src/init/settings-form.js";

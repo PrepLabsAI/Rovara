@@ -6,9 +6,9 @@ import { canonicalJson, createCandidateManifest,
   E2EApplicationLaunchTargetSchema, E2EApplicationPlanIntentSchema, E2ERoundSchema, E2ERunBindingSchema, E2ERegisteredRuntimeSchema,
   E2ERuntimeCapabilityDescriptorSchema, projectE2EApplicationPortableSelection, proposeE2ESetup,
   selectE2EApplicationExecutionPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "../../packages/contracts/src/index.js";
-import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
-import { deriveE2EApplicationApprovalBinding } from "../../packages/broker/src/e2e/application-plan-binding.js";
-import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
+import { inspectE2ERepository } from "../../packages/core/src/e2e/discovery.js";
+import { deriveE2EApplicationApprovalBinding } from "../../packages/core/src/e2e/application-plan-binding.js";
+import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/core/src/e2e/feature-plan-intent.js";
 import { compileE2EScenarios } from "../../packages/verifier/src/scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../../packages/verifier/src/application-build-source.js";
 import { E2E_APPLICATION_DECLARATION_PATH } from "../../packages/verifier/src/application-templates.js";
