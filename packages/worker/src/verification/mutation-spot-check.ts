@@ -62,23 +62,25 @@ function selectedCommand(selection: MutationSelection, path: string): { command:
   return { command: commandWithSelection(selection.command, template, tests), method: "affected", tests };
 }
 
-async function execute(runners: CheckRunners, command: ProjectCommand, ms: number, parent: AbortSignal, clock: () => number): Promise<{ outcome?: MutationOutcome; exitCode?: number | null }> {
+async function execute(runners: CheckRunners, command: ProjectCommand, ms: number, parent: AbortSignal, clock: () => number): Promise<{ outcome?: MutationOutcome; exitCode?: number | null; unconfirmedStop?: boolean }> {
   const started = clock(); const abort = new AbortController(); let expired = false;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  let stop: () => void = () => undefined;
-  const timed = new Promise<undefined>((resolve) => {
-    stop = () => { expired = true; abort.abort(); resolve(undefined); };
-    timeout = setTimeout(stop, ms);
-    parent.addEventListener("abort", stop, { once: true });
-  });
+  const stop = () => { expired = true; abort.abort(); };
+  const timeout = setTimeout(stop, ms);
+  parent.addEventListener("abort", stop, { once: true });
   try {
     if (parent.aborted) stop();
-    const returned = await Promise.race([
-      Promise.resolve().then(() => abort.signal.aborted ? undefined : runners.runProjectCommand({ ...command, timeoutSeconds: Math.max(1, Math.ceil(ms / 1_000)) }, abort.signal)).catch(() => undefined), timed,
-    ]);
-    if (expired || parent.aborted || clock() - started >= ms || returned?.timedOut === true) { abort.abort(); return { outcome: "timed_out" }; }
+    // Await the runner's settlement after abort. The pinned runner can still settle before child
+    // exit, so an aborted/timed-out result is NEVER a workspace-trust acknowledgement.
+    const returned = abort.signal.aborted ? undefined : await runners.runProjectCommand({ ...command, timeoutSeconds: Math.max(1, Math.ceil(ms / 1_000)) }, abort.signal);
+    if (expired || parent.aborted || returned?.timedOut === true) return { outcome: "timed_out", unconfirmedStop: true };
+    if (clock() - started >= ms) return { outcome: "timed_out" };
     if (returned === undefined) return { outcome: "not_run" };
     return { exitCode: returned.exitCode };
+  } catch (error) {
+    // The runner-owner error carries quarantine state. It must reach the hook unchanged.
+    if (error instanceof Error && (error.name === "RunnerKillUnconfirmedError" || error.constructor.name === "RunnerKillUnconfirmedError")) throw error;
+    if (expired || parent.aborted) return { outcome: "timed_out", unconfirmedStop: true };
+    throw error;
   } finally { clearTimeout(timeout); parent.removeEventListener("abort", stop); }
 }
 
@@ -101,6 +103,7 @@ export async function runMutationSpotCheck(options: MutationSpotOptions): Promis
   const work = async (): Promise<MutationSpotResult> => {
     const before: CandidateSnapshot[] = [];
     let reason: MutationReason | undefined;
+    let unconfirmedStop = false;
     let runDir: string | undefined;
     try {
       checkpoint();
@@ -154,14 +157,19 @@ export async function runMutationSpotCheck(options: MutationSpotOptions): Promis
             let timedOut = false;
             try {
               const runners = options.runners(copy.directory, owner.index);
+              const executeInCopy = async (command: ProjectCommand, ms: number) => {
+                try { return await execute(runners, command, ms, abort.signal, clock); }
+                catch (error) { timedOut = true; unconfirmedStop = true; throw error; }
+              };
               if (mutate) {
                 const original = files.find((file) => file.path === mutant.path)!.text;
                 await writeScratchMutant(copy, { ...mutant, path: owner.path }, original);
                 if (mutationLanguage(owner.path) === "python") {
                   // Isolated Python ignores PYTHONPYCACHEPREFIX/site hooks; py_compile writes only in the copy.
                   const parseCommand: ProjectCommand = { cwd: ".", executable: "python3", args: ["-I", "-S", "-m", "py_compile", owner.path], timeoutSeconds: 30 };
-                  const parsed = await execute(runners, parseCommand, remaining(parseCommand), abort.signal, clock);
+                  const parsed = await executeInCopy(parseCommand, remaining(parseCommand));
                   timedOut = parsed.outcome === "timed_out";
+                  unconfirmedStop ||= parsed.unconfirmedStop === true;
                   if (parsed.outcome !== undefined || parsed.exitCode !== 0) return { outcome: parsed.outcome ?? "invalid", tests: [] };
                 } else {
                   const extension = extname(owner.path).slice(1);
@@ -174,8 +182,9 @@ export async function runMutationSpotCheck(options: MutationSpotOptions): Promis
               await clearScratchReport(copy, selected.command.cwd, spec.argument);
               const ms = remaining(selected.command);
               const notBeforeMs = Date.now();
-              const ran = await execute(runners, selected.command, ms, abort.signal, clock);
+              const ran = await executeInCopy(selected.command, ms);
               timedOut = ran.outcome === "timed_out";
+              unconfirmedStop ||= ran.unconfirmedStop === true;
               if (ran.outcome !== undefined) return { ...ran, tests: [] };
               checkpoint();
               const read = await readReportPartsFile({ root: copy.directory, cwd: selected.command.cwd, argument: spec.argument, notBeforeMs });
@@ -187,6 +196,10 @@ export async function runMutationSpotCheck(options: MutationSpotOptions): Promis
               if (!timedOut) await discardMutationCopy(copy);
             }
           };
+          const cleanControl = (ran: Awaited<ReturnType<typeof runCopy>>, expected: Set<string>): boolean =>
+            ran.outcome === undefined && ran.exitCode === 0 && ran.tests.length === expected.size &&
+            new Set(ran.tests.map(identity)).size === expected.size &&
+            ran.tests.every((test) => test.status === "passed" && expected.has(identity(test)));
           const controls = new Map<string, Set<string>>();
           // All selected commands must pass on fresh, unmutated copies BEFORE the first mutation.
           for (const entry of planned) {
@@ -202,7 +215,12 @@ export async function runMutationSpotCheck(options: MutationSpotOptions): Promis
             const baseline = controls.get(entry.key)!;
             let outcome: MutationOutcome = ran.outcome ?? "invalid";
             if (ran.outcome === undefined && new Set(ran.tests.map(identity)).size === ran.tests.length) {
-              if (ran.tests.some((test) => test.status === "failed" && baseline.has(identity(test)))) outcome = "caught";
+              if (ran.tests.some((test) => test.status === "failed" && baseline.has(identity(test)))) {
+                // Re-run the same selected command on another pristine copy. Source-independent
+                // failures must not become catches merely because one earlier control passed.
+                const recheck = await runCopy(entry, false);
+                outcome = recheck.outcome ?? (cleanControl(recheck, baseline) ? "caught" : "invalid");
+              }
               else if (ran.exitCode === 0 && ran.tests.length === baseline.size && ran.tests.every((test) => test.status === "passed" && baseline.has(identity(test))) && new Set(ran.tests.map(identity)).size === baseline.size) outcome = "survived";
             }
             result.mutants.push({ line: entry.mutant.line, operator: entry.mutant.operator, outcome, method: entry.selected.method });
@@ -212,7 +230,9 @@ export async function runMutationSpotCheck(options: MutationSpotOptions): Promis
           }
         }
       }
-    } catch (error) { reason = error instanceof BudgetExpired ? "timed_out" : error instanceof MutationCopyTooLarge ? "repo_too_large" : "unreadable"; }
+    } catch (error) {
+      if (error instanceof Error && (error.name === "RunnerKillUnconfirmedError" || error.constructor.name === "RunnerKillUnconfirmedError")) throw error;
+      reason = error instanceof BudgetExpired ? "timed_out" : error instanceof MutationCopyTooLarge ? "repo_too_large" : "unreadable"; }
     finally { if (runDir !== undefined) await rmdir(runDir).catch(() => undefined); }
     // No command or mutation is possible before every initial snapshot succeeds.
     if (before.length !== options.repositories.length || before.length === 0) return { ...result, reason: reason ?? "unreadable", trustedAfter: true };
@@ -222,7 +242,8 @@ export async function runMutationSpotCheck(options: MutationSpotOptions): Promis
         const after = await snapshotCandidate(options.repositories[index]!.directory, integrityCheckpoint);
         if (after.digest !== before[index]!.digest || after.status !== before[index]!.status) throw new Error("candidate changed");
       }
-      result.trustedAfter = true;
+      result.trustedAfter = !unconfirmedStop;
+      if (unconfirmedStop) reason = "timed_out";
     } catch (error) { result.trustedAfter = false; reason = error instanceof BudgetExpired ? "timed_out" : "candidate_changed"; }
     if (!result.trustedAfter) { result.caught = 0; result.counted = 0; }
     result.status = result.trustedAfter && result.counted > 0 && reason !== "unreadable" ? "completed" : "not_run";

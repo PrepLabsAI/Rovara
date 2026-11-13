@@ -79,9 +79,9 @@ it("cleans settled copies including untracked environment files", async () => {
   await writeFile(join(f.directory, ".env"), "FIXTURE=yes\n");
   const result = await run(f, async (directory) => {
     copies.push(directory); expect(await readFile(join(directory, ".env"), "utf8")).toBe("FIXTURE=yes\n");
-    await writeFile(join(directory, "report.json"), report(copies.length === 1 ? "passed" : "failed")); return { ...ok, exitCode: copies.length === 1 ? 0 : 1 };
+    await writeFile(join(directory, "report.json"), report((await readFile(join(directory, "value.ts"), "utf8")).includes("= true") ? "passed" : "failed")); return { ...ok, exitCode: copies.length === 2 ? 1 : 0 };
   });
-  expect(result.counted).toBe(1); expect(copies).toHaveLength(2);
+  expect(result.counted).toBe(1); expect(copies).toHaveLength(3);
   for (const directory of copies) await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readdir(f.scratchRoot)).toEqual([]);
 });
@@ -89,8 +89,8 @@ it("retains completed counts when the next mutant exhausts its work budget", asy
   const f = await setup({ "value.ts": "const a = true;\nconst b = false;\n" }); let now = 0; let calls = 0; let abandoned = "";
   const result = await run(f, async (directory, command) => {
     calls += 1;
-    if (calls === 3) { expect(command.timeoutSeconds).toBe(10); now = 10_000; abandoned = directory; }
-    await writeFile(join(directory, "report.json"), report(calls === 1 ? "passed" : "failed")); return { ...ok, exitCode: calls === 1 ? 0 : 1 };
+    if (calls === 4) { expect(command.timeoutSeconds).toBe(10); now = 10_000; abandoned = directory; }
+    await writeFile(join(directory, "report.json"), report((await readFile(join(directory, "value.ts"), "utf8")) === "const a = true;\nconst b = false;\n" ? "passed" : "failed")); return { ...ok, exitCode: calls === 2 || calls === 4 ? 1 : 0 };
   }, { clock: () => now, limits: { totalTimeMs: 20_000 } });
   expect(result).toMatchObject({ status: "completed", reason: "partial", trustedAfter: true, caught: 1, counted: 1, mutants: [{ outcome: "caught" }, { outcome: "timed_out" }] });
   expect((await lstat(abandoned)).isDirectory()).toBe(true);
@@ -136,7 +136,7 @@ it("copy entries over the cap report repo too large and clean the incomplete cop
 });
 it("checks supported changes alongside a README", async () => {
   const f = await setup({ "value.ts": "const yes = true;\n", "README.md": "fixture\n" }); let calls = 0;
-  expect(await run(f, async (directory) => { calls += 1; await writeFile(join(directory, "report.json"), report(calls === 1 ? "passed" : "failed")); return { ...ok, exitCode: calls === 1 ? 0 : 1 }; })).toMatchObject({ caught: 1, counted: 1, skippedLanguageFiles: 1 });
+  expect(await run(f, async (directory) => { calls += 1; await writeFile(join(directory, "report.json"), report((await readFile(join(directory, "value.ts"), "utf8")) === "const yes = true;\n" ? "passed" : "failed")); return { ...ok, exitCode: calls === 2 || calls === 4 ? 1 : 0 }; })).toMatchObject({ caught: 1, counted: 1, skippedLanguageFiles: 1 });
 });
 it.each(["ts", "js", "py"])("rejects syntax-invalid %s mutants before the test command", async (extension) => {
   const text = extension === "py" ? "value = True\nbad =\n" : "export const value = true;\nconst broken = ;\n";
@@ -160,10 +160,10 @@ it("normalizes absolute test paths across baseline and mutant copies", async () 
   const f = await setup(); let calls = 0;
   const result = await run(f, async (directory) => {
     calls += 1;
-    await writeFile(join(directory, "report.json"), report(calls === 1 ? "passed" : "failed").replace("test.ts", join(directory, "test.ts")));
-    return { ...ok, exitCode: calls === 1 ? 0 : 1 };
+    await writeFile(join(directory, "report.json"), report((await readFile(join(directory, "value.ts"), "utf8")) === "export const value = true;\n" ? "passed" : "failed").replace("test.ts", join(directory, "test.ts")));
+    return { ...ok, exitCode: calls === 2 || calls === 4 ? 1 : 0 };
   });
-  expect(result).toMatchObject({ caught: 1, counted: 1 }); expect(calls).toBe(2);
+  expect(result).toMatchObject({ caught: 1, counted: 1 }); expect(calls).toBe(3);
 });
 it("excludes a flaky-looking mutant report with conflicting retries of the same test", async () => {
   const f = await setup(); let calls = 0;

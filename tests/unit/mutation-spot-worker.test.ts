@@ -15,10 +15,11 @@ const ok = { exitCode: 0, timedOut: false, stdout: "", stderr: "" };
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 
 async function run(f: Awaited<ReturnType<typeof fixture>>, body: (directory: string, command: Parameters<ReturnType<MutationSpotOptions["runners"]>["runProjectCommand"]>[0], signal: AbortSignal) => Promise<typeof ok> = async (directory) => { await writeFile(join(directory, "report.json"), report("failed")); return { ...ok, exitCode: 1 }; }, extra: Partial<MutationSpotOptions> = {}) {
-  let baseline = true;
+  const originals = await Promise.all(f.git("ls-files", "-z").split("\0").filter((path) => /\.(?:[cm]?[jt]sx?|py)$/u.test(path)).map(async (path) => ({ path, bytes: await readFile(join(f.directory, path)).catch(() => undefined) })));
   return runMutationSpotCheck({ repositories: [f.repository], selection: f.selection, seed: f.repository.candidateTreeSha, scratchRoot: f.scratchRoot,
     runners: (directory) => ({ runProjectCommand: async (command, signal) => {
-      if (baseline) { baseline = false; await writeFile(join(directory, "report.json"), report("passed")); return ok; }
+      const pristine = (await Promise.all(originals.map(async ({ path, bytes }) => bytes !== undefined && bytes.equals(await readFile(join(directory, path)).catch(() => Buffer.alloc(0)))))).every(Boolean);
+      if (pristine) { await writeFile(join(directory, "report.json"), report("passed")); return ok; }
       return body(directory, command, signal);
     }, runAgentCommand: async () => { throw new Error("no agent replays"); } }), ...extra });
 }

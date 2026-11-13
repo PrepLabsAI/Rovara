@@ -44,7 +44,7 @@ it("a real SIGTERM-resistant child writes after abort only in its disposable cop
       limits: { perMutantTimeMs: 1_000, totalTimeMs: 30_000 }, runners: (directory) => { copied = directory; return createCheckRunners({ rootPath: directory, local: true }); } });
     await until(async () => (await readFile(ready, "utf8").catch(() => "")) !== "");
     pid = Number(await readFile(ready, "utf8")); expect(alive(pid)).toBe(true);
-    expect(await running).toMatchObject({ trustedAfter: true, counted: 0, caught: 0, mutants: [{ outcome: "timed_out" }] });
+    expect(await running).toMatchObject({ trustedAfter: false, counted: 0, caught: 0, mutants: [{ outcome: "timed_out" }] });
     expect(alive(pid)).toBe(true); // positive control: abort really did leave a live writer
     expect(await snapshotCandidate(f.directory)).toEqual(before);
     await writeFile(release, "go");

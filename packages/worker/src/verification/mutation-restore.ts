@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, readdir, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { mutationPathRefused, type SpotMutant } from "@agentx/contracts";
 import { candidateWriteStep, openDirectory, removeIn, type HeldDirectory } from "../candidate-fs.js";
 import { withIsolatedRepository } from "../isolated-repository.js";
@@ -17,6 +17,10 @@ import { withIsolatedRepository } from "../isolated-repository.js";
 const COPY_FILE_BYTES = 32 * 1024 * 1024;
 const COPY_TOTAL_BYTES = 512 * 1024 * 1024;
 const COPY_ENTRIES = 20_000;
+// Ignored dependency inputs have their own bounded allowance; never consume the source budget.
+const DEPENDENCY_ENTRIES = 100_000;
+const DEPENDENCY_BYTES = 512 * 1024 * 1024;
+const DEPENDENCY_NAMES = new Set(["node_modules", ".venv", "venv", ".tox", "vendor"]);
 export class MutationCopyTooLarge extends Error {}
 const REFUSED = "mutation copy refused";
 export type Checkpoint = () => void;
@@ -45,16 +49,16 @@ async function parentOf(root: string, path: string): Promise<{ directory: HeldDi
   } catch (error) { await directory.close(); throw error; }
 }
 
-async function readPlain(root: string, path: string, cap: number, checkpoint: Checkpoint): Promise<{ bytes: Buffer; mode: number }> {
+async function readPlain(root: string, path: string, cap: number, checkpoint: Checkpoint, dependency = false): Promise<{ bytes: Buffer; mode: number }> {
   checkpoint();
   const { directory, name } = await parentOf(root, path);
   let handle;
   try {
     const before = await lstat(directory.entry(name));
-    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1 || before.size > cap) throw new Error(REFUSED);
+    if (before.isSymbolicLink() || !before.isFile() || (!dependency && before.nlink !== 1) || before.size > cap) throw new Error(REFUSED);
     handle = await open(directory.entry(name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const info = await handle.stat();
-    if (!info.isFile() || info.nlink !== 1 || info.dev !== before.dev || info.ino !== before.ino || info.size > cap) throw new Error(REFUSED);
+    if (!info.isFile() || (!dependency && info.nlink !== 1) || info.dev !== before.dev || info.ino !== before.ino || info.size > cap) throw new Error(REFUSED);
     const bytes = Buffer.alloc(info.size + 1);
     let length = 0;
     while (length < bytes.length) {
@@ -64,7 +68,7 @@ async function readPlain(root: string, path: string, cap: number, checkpoint: Ch
       length += bytesRead;
     }
     const after = await handle.stat();
-    if (length !== info.size || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs || after.nlink !== 1) throw new Error(REFUSED);
+    if (length !== info.size || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs || after.nlink !== info.nlink) throw new Error(REFUSED);
     checkpoint();
     return { bytes: bytes.subarray(0, length), mode: info.mode & 0o7777 };
   } finally { await handle?.close(); await directory.close(); }
@@ -101,17 +105,42 @@ export async function snapshotCandidate(root: string, checkpoint: Checkpoint = n
   return { digest: hash.digest("hex"), status: listing.status };
 }
 
-/** Copy files independently and retain only links resolving wholly inside the finished copy.
- * Links are never traversed, so dependency aliases do not count their target entries twice. */
+/** Copy independent files, including ignored dependency hard links (read-only at the source).
+ * Relative links must resolve inside the copy. Absolute Python interpreter links in ignored
+ * dependency trees become independent regular files, NEVER external write-through capabilities.
+ * Nothing is shared/mounted from the candidate; runner isolation remains the caller's duty. */
 export async function createMutationCopy(candidate: string, runDir: string, checkpoint: Checkpoint = noDeadline): Promise<MutationCopy> {
   checkpoint();
   const source = await realpath(candidate); const scratch = await realpath(runDir);
   const rel = relative(source, scratch);
   if (rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))) throw new Error(REFUSED);
+  const listing = await withIsolatedRepository(source, "read", { index: "work" }, async (git) => ({
+    ignored: await git.text(["--literal-pathspecs", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], { index: "work", timeout: 10_000, maxBuffer: 8 * 1024 * 1024 }),
+    tracked: await git.text(["--literal-pathspecs", "ls-files", "--cached", "-z"], { index: "work", timeout: 10_000, maxBuffer: 8 * 1024 * 1024 }),
+  }));
+  const ignored = new Set(listing.ignored.split("\0").filter((path) => path.endsWith("/")));
+  const trackedParents = new Set<string>();
+  for (const path of listing.tracked.split("\0").filter(Boolean)) {
+    const parts = components(path);
+    for (let i = 1; i <= parts.length; i += 1) trackedParents.add(parts.slice(0, i).join("/"));
+  }
+  const isIgnoredDependency = (path: string, name: string) => DEPENDENCY_NAMES.has(name) && !trackedParents.has(path) &&
+    path.split("/").some((_part, i, parts) => ignored.has(`${parts.slice(0, i + 1).join("/")}/`));
   const directory = await mkdtemp(join(scratch, "copy-"));
-  let total = 0; let entries = 0;
+  let total = 0; let entries = 0; let dependencyEntries = 0; let dependencyBytes = 0;
+  const copyPlain = async (root: string, path: string, child: string, dependency: boolean) => {
+    const file = await readPlain(root, path, COPY_FILE_BYTES, checkpoint, dependency);
+    if (dependency) {
+      dependencyBytes += file.bytes.length;
+      if (dependencyBytes > DEPENDENCY_BYTES) throw new MutationCopyTooLarge();
+    } else {
+      total += file.bytes.length;
+      if (total > COPY_TOTAL_BYTES) throw new MutationCopyTooLarge();
+    }
+    await writeFile(join(directory, child), file.bytes, { flag: "wx", mode: file.mode & 0o777 });
+  };
   const links: string[] = [];
-  const walk = async (path: string, depth: number): Promise<void> => {
+  const walk = async (path: string, depth: number, dependency = false): Promise<void> => {
     checkpoint();
     if (depth > 64) throw new Error(REFUSED);
     const held = await openDirectory(path === "" ? source : join(source, path));
@@ -121,21 +150,28 @@ export async function createMutationCopy(candidate: string, runDir: string, chec
         if (path === "" && name === ".git") continue;
         const child = path === "" ? name : `${path}/${name}`;
         components(child);
-        entries += 1;
-        if (entries > COPY_ENTRIES) throw new MutationCopyTooLarge();
         const info = await lstat(held.entry(name));
+        const input = dependency || (info.isDirectory() && isIgnoredDependency(child, name));
+        if (input) {
+          dependencyEntries += 1;
+          if (dependencyEntries > DEPENDENCY_ENTRIES) throw new MutationCopyTooLarge();
+        } else {
+          entries += 1;
+          if (entries > COPY_ENTRIES) throw new MutationCopyTooLarge();
+        }
         if (info.isSymbolicLink()) {
           const target = await readlink(held.entry(name));
-          // Absolute links back to the candidate are aliases, never copied as capabilities.
-          if (isAbsolute(target)) throw new Error(REFUSED);
-          await symlink(target, join(directory, child)); links.push(child);
-        } else if (info.isDirectory()) { await mkdir(join(directory, child), { mode: 0o700 }); await walk(child, depth + 1); }
-        else {
-          const file = await readPlain(source, child, COPY_FILE_BYTES, checkpoint);
-          total += file.bytes.length;
-          if (total > COPY_TOTAL_BYTES) throw new Error(REFUSED);
-          await writeFile(join(directory, child), file.bytes, { flag: "wx", mode: file.mode & 0o777 });
-        }
+          if (isAbsolute(target)) {
+            // A real venv uses an absolute system interpreter. Materialize only that narrow
+            // case; reject directories, candidate aliases and arbitrary external dependency links.
+            if (!input || !/(?:^|\/)(?:\.venv|venv|\.tox)\/(?:[^/]+\/)*bin\/python[0-9.]*$/u.test(child)) throw new Error(REFUSED);
+            const resolved = await realpath(target);
+            const fromCandidate = relative(source, resolved);
+            if (fromCandidate === "" || (!isAbsolute(fromCandidate) && fromCandidate !== ".." && !fromCandidate.startsWith(`..${sep}`))) throw new Error(REFUSED);
+            await copyPlain(dirname(resolved), basename(resolved), child, true);
+          } else { await symlink(target, join(directory, child)); links.push(child); }
+        } else if (info.isDirectory()) { await mkdir(join(directory, child), { mode: 0o700 }); await walk(child, depth + 1, input); }
+        else await copyPlain(source, child, child, input);
       }
     } finally { await held.close(); }
   };
