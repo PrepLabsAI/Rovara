@@ -2,7 +2,7 @@
 // confidential client's secret is made here and only its SHA-256 goes to Rovara, so no record or log ever holds it.
 import { createHash, randomBytes } from "node:crypto";
 import {
-  SignInClientIdSchema, SignInClientRegistrationSchema, SignInClientViewSchema, agentXError,
+  CLIENT_SCOPES, SignInClientIdSchema, SignInClientRegistrationSchema, SignInClientViewSchema, agentXError,
   type SignInClientRegistration, type SignInClientView,
 } from "@agentx/contracts";
 import { adminResponseBody } from "./http.js";
@@ -13,6 +13,8 @@ export interface SignInClientAddOptions {
   redirect?: string[];
   loopback?: boolean;
   confidential?: boolean;
+  /** Spec 065: comma-separated scopes. */
+  scope?: string;
 }
 
 /** A client ID, refused with what a valid one looks like. */
@@ -36,10 +38,13 @@ export function signInClientRegistration(clientId: string, options: SignInClient
     redirectUris: options.redirect ?? [],
     loopback: options.loopback === true,
     ...(secretHash === undefined ? {} : { secretHash }),
+    // Spec 065: what it may do as the signed-in person, comma-separated.
+    ...(options.scope === undefined ? {} : { scopes: options.scope.split(",").map((scope) => scope.trim()).filter((scope) => scope !== "") }),
   });
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
-    const where = issue?.path[0] === "audience" ? "--audience" : issue?.path[0] === "redirectUris" ? "--redirect" : issue?.path[0] === "name" ? "--name" : "the client";
+    const where = issue?.path[0] === "audience" ? "--audience" : issue?.path[0] === "redirectUris" ? "--redirect" : issue?.path[0] === "name" ? "--name"
+      : issue?.path[0] === "scopes" ? `--scope (one or more of ${CLIENT_SCOPES.join(", ")})` : "the client";
     throw agentXError("CONFIG_INVALID", `${where}: ${issue?.message ?? "invalid"}`);
   }
   return parsed.data;

@@ -26,6 +26,9 @@ agentx admin sign-in-client add scheduler \
   (mode 600) instead of printing it. Each `add --confidential` makes a new secret, so running it again rotates the
   secret.
 
+- `--scope`: what the service may do on Rovara as the signed-in person, comma-separated (see
+  [Act as the signed-in person](#act-as-the-signed-in-person)). None by default.
+
 Running `add` again for the same ID replaces the client.
 
 ## List and remove
@@ -77,4 +80,26 @@ Rovara reads the person's sign-in and grants on every call. An ended sign-in, a 
 answers 401. If Slack can't be reached, `notices` contains `slack_unavailable` and projects that come only from a
 channel are left out.
 
-See the [spec](../specs/063-sign-in-clients/spec.md).
+## Act as the signed-in person
+
+A service registered with `--scope` asks for those scopes when it starts a sign-in (`scope=projects:members` on
+`/v1/auth/authorize`, space-separated). Its tokens then carry the scopes it asked for that its registration allows, as
+`scope`. A scope it may not use is dropped, not refused. Removing a scope from the registration ends it at the next
+token refresh.
+
+With such a token, the `/v1/dev/client/*` routes act as the signed-in person, within their own rights:
+
+| Scope | Route | Does |
+| --- | --- | --- |
+| `projects:members` | `GET /v1/dev/client/projects/{project}/members` | Lists the people granted the project |
+| `projects:members` | `PUT /v1/dev/client/projects/{project}/members/{who}` | Grants the project, as `agentx admin project grant` does; `who` is an email address or a developer ID |
+| `projects:members` | `DELETE /v1/dev/client/projects/{project}/members/{who}` | Revokes a grant |
+
+Only the project's administrators, or a Rovara administrator (company sign-in with the administrator claim), may use
+the member routes. A token without the scope gets 403, and any other token (the CLI's, another service's, an ended
+sign-in) gets 401. Each change records the person and the service that made it.
+
+The member list shows grants made once this release is in. A grant made before it is listed once it is made again.
+
+See the specs: [sign-in clients](../specs/063-sign-in-clients/spec.md) and
+[scoped actions](../specs/065-client-scopes/spec.md).

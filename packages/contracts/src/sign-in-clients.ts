@@ -17,6 +17,21 @@ export const SignInRedirectUriSchema = z.string().max(2_048).superRefine((value,
 });
 
 /** What an administrator registers. `secretHash` (SHA-256, hex) makes it confidential; the secret itself is never sent. */
+/**
+ * Spec 065: what a sign-in client may do on Rovara as the signed-in person, beyond the access check. An administrator
+ * names them when registering the client; the client asks for them at sign-in and its tokens carry the allowed ones.
+ */
+export const CLIENT_SCOPES = ["projects:members", "projects:create"] as const;
+export const ClientScopeSchema = z.enum(CLIENT_SCOPES);
+export type ClientScope = z.infer<typeof ClientScopeSchema>;
+const ClientScopesSchema = z.array(ClientScopeSchema).max(CLIENT_SCOPES.length).refine((scopes) => new Set(scopes).size === scopes.length, "scopes must be unique");
+
+/** The scopes a token's space-separated `scope` claim names, keeping only known ones. */
+export function scopesOf(claim: unknown): ClientScope[] {
+  if (typeof claim !== "string") return [];
+  return claim.split(" ").filter((scope): scope is ClientScope => ClientScopeSchema.safeParse(scope).success);
+}
+
 export const SignInClientRegistrationSchema = z.object({
   name: z.string().trim().min(1).max(80),
   audience: SignInClientAudienceSchema,
@@ -24,6 +39,8 @@ export const SignInClientRegistrationSchema = z.object({
   /** It may sign people in from a terminal, with a loopback redirect, as `agentx login` does. */
   loopback: z.boolean(),
   secretHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  /** Spec 065: what it may do as the signed-in person; none when absent. */
+  scopes: ClientScopesSchema.optional(),
 }).strict().refine((registration) => registration.loopback || registration.redirectUris.length > 0, "a client needs a redirect URL, a loopback redirect, or both");
 export type SignInClientRegistration = z.infer<typeof SignInClientRegistrationSchema>;
 
@@ -34,6 +51,7 @@ export const SignInClientRecordSchema = z.object({
   redirectUris: z.array(z.string().max(2_048)).max(10),
   loopback: z.boolean(),
   secretHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  scopes: ClientScopesSchema.optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   updatedBy: z.string().min(1).max(512),
@@ -80,3 +98,19 @@ export type ListSignInClientsRequest = z.infer<typeof ListSignInClientsRequestSc
 export type SignInClientsResponse =
   | { ok: true; clients?: SignInClientView[]; removed?: boolean }
   | { ok: false; error: "invalid_request" | "unavailable" };
+
+// ---- Spec 065: a sign-in client's routes, /v1/dev/client/*, each acting as the signed-in person ----
+
+/** `GET /v1/dev/client/projects/{project}/members` (projects:members). */
+export interface ClientProjectMembersResponse {
+  project: string;
+  members: Array<{ developerId: string; name: string; role: "administrator" | "developer"; grantedAt: string | null }>;
+}
+
+/** `PUT` or `DELETE /v1/dev/client/projects/{project}/members/{developer}` (projects:members). */
+export interface ClientProjectMemberChangeResponse {
+  project: string;
+  developerId: string;
+  /** PUT: granted (or already was); DELETE: revoked, or was not a member. */
+  outcome: "granted" | "already_member" | "revoked" | "not_member";
+}

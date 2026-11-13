@@ -17,6 +17,7 @@ import {
   MODEL_PROVIDERS,
   agentXError,
   type ProjectDefinition,
+  CLIENT_SCOPES,
 } from "@agentx/contracts";
 import { DEFAULT_DIRECT_MODELS } from "@agentx/model-runtime/config";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
@@ -648,6 +649,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--loopback", "it may sign people in from a terminal with a loopback redirect, as agentx login does")
     .option("--confidential", "it signs in with a secret of its own; a new one is made and shown once (each add makes a new one)")
     .option("--secret-file <path>", "with --confidential, write the secret to this new file (mode 600) instead of printing it")
+    .option("--scope <scopes>", `what it may do as the signed-in person, comma-separated: ${CLIENT_SCOPES.join(", ")}; none by default`)
     .option("--yes", "apply without asking; the change is still printed", false)
     .action(async (id: string, options: SignInClientAddOptions & { secretFile?: string; yes: boolean }, command: Command) => {
       const globals = globalOptions(command);
