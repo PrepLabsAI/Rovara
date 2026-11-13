@@ -39,7 +39,7 @@ describe("workflowWriteOps", () => {
     const { blockReason: _gone, ...without } = { ...current, blockReason: "x" };
     void _gone;
     expect(workflowWriteOps({ ...current, blockReason: "x" }, without as WorkflowSnapshot).ops).toEqual([change.remove(["workflow", "blockReason"])]);
-    expect(workflowWriteOps(current, { ...current, updatedAt: "2026-11-09T11:00:00.000Z" }).ops.map((op) => (op as { path: string[] }).path.join("."))).toEqual(["workflow.updatedAt"]);
+    expect(workflowWriteOps(current, { ...current, updatedAt: "2026-11-09T11:00:00.000Z" }).ops.map((op) => (op as unknown as { path: readonly string[] }).path.join("."))).toEqual(["workflow.updatedAt"]);
   });
   it("sets `flow` under a fence on the record read only when the writer owns it and changed it", () => {
     const current = { ...waiting(), flow: flowWith("a") };
