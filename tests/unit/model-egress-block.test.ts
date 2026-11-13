@@ -127,23 +127,37 @@ describe("findRedirectEscapes", () => {
     expect(findRedirectEscapes(block, hostile)).toEqual([]);
     expect(findRedirectEscapes(block, [...hostile, "openrouter.ai"]).map((escape) => escape.sentence)).toEqual([redirectEscapeSentence("openrouter.ai")]);
   });
-  it("is fast on a million observations, and its time grows linearly with the input", () => {
-    const make = (length: number): string[] => Array.from({ length }, (_, index) => (index % 1000 === 0 ? "openrouter.ai" : "a.example.com"));
-    // Best of three runs: a wall-clock limit alone flaked on a loaded machine (2013 ms and 2524 ms against 2000 ms), so the limit is generous and the real check is the scaling.
-    const best = (observed: string[]): number => {
-      let fastest = Number.POSITIVE_INFINITY;
-      for (let run = 0; run < 3; run += 1) {
-        const started = performance.now();
-        expect(findRedirectEscapes(block, observed)).toHaveLength(1);
-        fastest = Math.min(fastest, performance.now() - started);
-      }
-      return fastest;
+  it("counts rejected observations too, without changing findings", () => {
+    const observed = [null, 42, "x".repeat(2049), "bad host", "openrouter.ai", "mine.openai.azure.com", "openrouter.ai"];
+    const options = { hostSuffixes: modelHostSuffixBlockList(rows) };
+    let steps = 0;
+    const counted = findRedirectEscapes(block, observed, options, () => { steps += 1; });
+    expect(counted).toEqual(findRedirectEscapes(block, observed, options));
+    expect(steps).toBe(observed.length);
+    expect(counted.map((escape) => escape.host)).toEqual(["mine.openai.azure.com", "openrouter.ai"]);
+  });
+  it("uses linear normalization work on a million observations", () => {
+    const measure = (length: number): number => {
+      const observed = Array.from({ length }, (_, index) => (index % 1000 === 0 ? "openrouter.ai" : "a.example.com"));
+      let steps = 0;
+      const countWork = (): void => {
+        steps += 1;
+        // Abort excessive work immediately: a quadratic mutant must fail without doing a trillion operations.
+        if (steps > 2 * length) throw new Error("normalization work exceeded two steps per observation");
+      };
+      const started = performance.now();
+      expect(findRedirectEscapes(block, observed, {}, countWork)).toEqual([
+        { host: "openrouter.ai", kind: "ignored_redirect", sentence: redirectEscapeSentence("openrouter.ai") },
+      ]);
+      expect(performance.now() - started).toBeLessThan(10_000);
+      // A missing/disconnected counter must not make the scaling check vacuously pass.
+      expect(steps).toBeGreaterThanOrEqual(length);
+      expect(steps).toBeLessThanOrEqual(2 * length);
+      return steps;
     };
-    const small = best(make(250_000));
-    const large = best(make(1_000_000));
-    expect(large).toBeLessThan(10_000);
-    // 4x the input may cost at most 6x the time (a quadratic scan would cost 16x). The 5 ms floor keeps a near-zero small run from making the ratio meaningless.
-    expect(large).toBeLessThanOrEqual(6 * Math.max(small, 5));
+    const small = measure(250_000);
+    const large = measure(1_000_000);
+    expect(large).toBeLessThanOrEqual(4.5 * small);
   });
 });
 
