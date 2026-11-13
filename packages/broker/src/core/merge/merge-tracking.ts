@@ -87,6 +87,17 @@ export function ciAllowsReady(ci: MergeTrackingItem["ci"], mode: ProjectCiMode):
   if (ci === "none" || ci === "unreadable") return mode === "sandbox_only";
   return false;
 }
+/**
+ * Whether CI counts as a pass where a pass is needed for something Rovara decides on its own: an approval of the head before a clean sync carries over, and the task page says "Ready to merge". Passing, or no CI
+ * only where the project's mode says it does not rely on CI (`sandbox_only`). Unreadable CI never counts.
+ */
+export const ciCountsAsPassing = (ci: MergeTrackingItem["ci"], mode: ProjectCiMode): boolean => ci === "passing" || (ci === "none" && mode === "sandbox_only");
+/** The wait for unreadable checks, kept for the head it was seen on only: a new head's checks are a new read. Shared by the tracking pass and the press. */
+export function unreadableSinceOf(item: Pick<MergeTrackingItem, "headSha" | "ciUnreadableSince"> | undefined, head: string): number | undefined {
+  if (item === undefined || item.headSha !== head || item.ciUnreadableSince === undefined) return undefined;
+  const since = Date.parse(item.ciUnreadableSince);
+  return Number.isFinite(since) ? since : undefined;
+}
 /** Whether a person may press Merge for a pull request with this CI state, and whether an approval of an earlier head carries over a clean sync. `none` is allowed (it is printed, and the person decides); `unreadable` never is. */
 export const ciAllowsMerge = (ci: MergeTrackingItem["ci"]): boolean => ci === "passing" || ci === "none";
 
@@ -324,8 +335,7 @@ export function deriveTrackingFields(input: TrackingInputs): Omit<MergeTrackingI
     : prior?.lastRovaraPushAt === undefined ? undefined : Date.parse(prior.lastRovaraPushAt);
   const checksEverSeen = prior?.checksEverSeen === true || status.checks.length > 0;
   // The wait for unreadable checks is kept on the row, for this head only: a new head's checks are a new read.
-  const unreadableSince = prior !== undefined && prior.headSha === status.headRevision && prior.ciUnreadableSince !== undefined ? Date.parse(prior.ciUnreadableSince) : undefined;
-  const ci = readCi(status, { checksEverSeen, lastRovaraPushAt, now, unreadableSince: Number.isFinite(unreadableSince) ? unreadableSince : undefined });
+  const ci = readCi(status, { checksEverSeen, lastRovaraPushAt, now, unreadableSince: unreadableSinceOf(prior, status.headRevision) });
   const today = new Date(now).toISOString().slice(0, 10);
   const reAsked = (prior?.review === "changes_requested" || prior?.review === "approved") && input.reviews.review === "requested";
   return {
@@ -574,7 +584,9 @@ async function trackOne(
   // GitHub refusing one of the two (a missing permission, an error) leaves that step undone and the item still written; a rate limit or a spent allowance goes on up.
   // Only while the task waits for the merge with nothing being changed or checked: a pull request whose code is being fixed, or merged with its base and not yet checked and reviewed again (lane L10, owner
   // decision b), is not called ready, whatever its CI says.
-  const wantsReady = status.state === "open" && early.readyAt === undefined && early.headByRovara && ciAllowsReady(ci.ci, ciMode)
+  const wantsReady = status.state === "open" && early.readyAt === undefined && early.headByRovara
+    // A draft is taken out of draft only where the mode allows it; a pull request that is not a draft (the host refuses drafts, or a person marked it ready) cannot be kept back, so it gets its reviewers on passing CI or no CI.
+    && (status.draft ? ciAllowsReady(ci.ci, ciMode) : ciAllowsMerge(ci.ci))
     && task.workflow.stage === "WAIT_FOR_MERGE" && task.workflow.state === "WAITING";
   let readyNow = false;
   let asked = false;
@@ -638,7 +650,7 @@ async function trackOne(
     const known = new Map<string, RepositoryPermission>();
     for (const reviewer of reviewers) known.set(reviewer.login, await permission(reviewer.login));
     const counted = humanApprovalOf({
-      reviews: approvalReviews, headSha: status.headRevision, syncedFrom: pullRequest.syncedFrom, ciPassingOnHead: ciAllowsMerge(ci.ci), permissions: known,
+      reviews: approvalReviews, headSha: status.headRevision, syncedFrom: pullRequest.syncedFrom, ciPassingOnHead: ciCountsAsPassing(ci.ci, ciMode), permissions: known,
       requesterHostUserIds: await requesterHostIds(deps.people, task.orgId, task), linkedHostUserIds: await linkedAmong(deps.people, task.orgId, reviewers.map((reviewer) => reviewer.hostUserId)),
       excludedHostUserIds: await nonWritersAmong(deps.people, task.orgId, reviewers.map((reviewer) => reviewer.hostUserId)),
       allowSelfApproval: settings.allowSelfApproval,

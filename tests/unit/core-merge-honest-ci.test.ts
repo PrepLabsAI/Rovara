@@ -9,6 +9,9 @@ import { mergeReadiness, type MergePullRequestFacts, type ReadinessInput } from 
 import {
   CI_UNREADABLE_AFTER_MS, DEFAULT_CI_MODE, NO_CI_GRACE_MS, ciAllowsReady, readCi, readMergeTracking, trackPullRequest, trackingItemOf, type ProjectCiMode,
 } from "../../packages/broker/src/core/merge/index.js";
+import { readyToMerge } from "../../packages/broker/src/local/app/attention.js";
+import { ciCountsAsPassing, unreadableSinceOf, mergeViewOf } from "../../packages/broker/src/core/merge/index.js";
+import { nextFor } from "../../packages/mcp/src/tools.js";
 import { ORG, TASK_ID, githubShapedHost, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
 const HEAD = "a".repeat(40);
@@ -257,10 +260,9 @@ describe("what the person reads", () => {
     }
     expect(cardOfItem(merge("passing"), {})!.card.recommended.why).toContain("The checks passed");
   });
-  it("a pull request whose CI is not readable or that has no CI is not 'ready to merge' on the task page unless a person's rule says so (none: yes, a person decides; unreadable: no)", async () => {
+  it("a pull request whose CI is unreadable is not 'ready to merge' on the task page", async () => {
     const { readyToMerge } = await import("../../packages/broker/src/local/app/attention.js");
     const item = { state: "open" as const, draft: false, review: "approved" as const, branch: "up_to_date" as const, headByRovara: true };
-    expect(readyToMerge({ ...item, ci: "none" })).toBe(true);
     expect(readyToMerge({ ...item, ci: "unreadable" })).toBe(false);
     expect(readyToMerge({ ...item, ci: "pending" })).toBe(false);
   });
@@ -269,5 +271,104 @@ describe("what the person reads", () => {
     expect(ciEvidenceLevel("unreadable")).toBe("ci_not_readable");
     expect(ciEvidenceLevel("passing")).toBe("their_ci");
     expect(ciEvidenceLevel("pending")).toBeUndefined();
+  });
+});
+
+// ---- review fixes (M1, M2, L1, L3)
+describe("M1: a pull request that was never a draft", () => {
+  const withReviewers = (world: MergeWorld, mode?: ProjectCiMode) => ({
+    ...world.tracking, settings: { read: async () => ({ allowSelfApproval: true, mergeMethod: "squash" as const, codeReviewers: ["lead"], revision: 1 }) },
+    ...(mode === undefined ? {} : { ciMode: () => mode }),
+  });
+  async function nonDraftNoCi(mode?: ProjectCiMode) {
+    const world = await mergeWorld();
+    const pr = world.prs[0]!;
+    pr.model.setChecks(pr.head, []);
+    pr.model.setAccount("lead", "write");
+    const deps = withReviewers(world, mode);
+    await trackPullRequest(deps, TASK_ID);
+    world.now.value += NO_CI_GRACE_MS;
+    await trackPullRequest(deps, TASK_ID);
+    return { world, pr };
+  }
+  it("a non-draft no-CI pull request still gets its reviewers and readyAt in the default mode (the draft is the only thing kept back)", async () => {
+    const { world, pr } = await nonDraftNoCi();
+    expect(await world.trackingOf(pr)).toMatchObject({ ci: "none", draft: false });
+    expect(pr.model.getChangeRequest(String(pr.number)).requestedReviewers).toContain("lead");
+    expect(await world.trackingOf(pr)).toHaveProperty("readyAt");
+  });
+  it("and a draft no-CI pull request in the default mode still gets no reviewers", async () => {
+    const world = await mergeWorld();
+    const pr = world.prs[0]!;
+    pr.model.setChecks(pr.head, []);
+    pr.model.getChangeRequest(String(pr.number)).draft = true;
+    pr.model.setAccount("lead", "write");
+    const deps = withReviewers(world);
+    await trackPullRequest(deps, TASK_ID);
+    world.now.value += NO_CI_GRACE_MS;
+    await trackPullRequest(deps, TASK_ID);
+    expect(pr.model.getChangeRequest(String(pr.number)).requestedReviewers).not.toContain("lead");
+  });
+  it("the task page says 'Ready to merge' only for passing CI, or no CI in sandbox_only", () => {
+    const item = { state: "open" as const, draft: false, review: "approved" as const, branch: "up_to_date" as const, headByRovara: true };
+    expect(readyToMerge({ ...item, ci: "passing" })).toBe(true);
+    expect(readyToMerge({ ...item, ci: "none" })).toBe(false);
+    expect(readyToMerge({ ...item, ci: "none" }, "their_ci_fix")).toBe(false);
+    expect(readyToMerge({ ...item, ci: "none" }, "sandbox_only")).toBe(true);
+    expect(readyToMerge({ ...item, ci: "unreadable" }, "sandbox_only")).toBe(false);
+  });
+});
+
+describe("M2: the MCP words", () => {
+  const task = (ci: string[] | undefined) => ({
+    workflow: { stage: "WAIT_FOR_MERGE", state: "WAITING", revision: 3 }, merge: { ready: true },
+    ...(ci === undefined ? {} : { mergeTracking: ci.map((value) => ({ ci: value })) }),
+  }) as never;
+  it("says its checks passed only when every tracked pull request's checks passed; no CI is said as no CI", () => {
+    expect(nextFor(task(["passing"]))).toContain("its checks passed");
+    const none = nextFor(task(["passing", "none"]));
+    expect(none).not.toContain("checks passed");
+    expect(none).toContain(CI_STATE_WORDS.none);
+    expect(nextFor(task(undefined))).not.toContain("checks passed");
+  });
+});
+
+describe("L1: an approval of an earlier head carries over a clean sync only on passing CI (or no CI in sandbox_only)", () => {
+  it("the predicate", () => {
+    expect(ciCountsAsPassing("passing", "their_ci_fix")).toBe(true);
+    for (const mode of MODES) {
+      expect(ciCountsAsPassing("none", mode)).toBe(mode === "sandbox_only");
+      expect(ciCountsAsPassing("unreadable", mode)).toBe(false);
+      expect(ciCountsAsPassing("pending", mode)).toBe(false);
+      expect(ciCountsAsPassing("failing", mode)).toBe(false);
+    }
+  });
+  it("through the task page's merge view: a no-CI approval of the head before a sync counts in sandbox_only and not in the default mode", async () => {
+    const OLD = "1".repeat(40);
+    const world = await mergeWorld();
+    const pr = world.prs[0]!;
+    const entry = (await world.task()).workflow.pullRequests![0]!;
+    await world.setWorkflow({ pullRequests: [{ ...entry, syncedFrom: OLD }] });
+    await world.seedTracking({ ci: "none", approval: { hostUserId: pr.model.accounts.get("priya")!.hostUserId, login: "priya", commitId: OLD } });
+    const items = await readMergeTracking(world.store, TASK_ID, ORG);
+    const task = await world.task();
+    const view = async (mode?: ProjectCiMode) => mergeViewOf({ ...world.deps, ...(mode === undefined ? {} : { ciMode: () => mode }) }, task, items, undefined);
+    expect(await view()).toMatchObject({ ready: false, message: M.staleApproval });
+    expect(await view("their_ci_fix")).toMatchObject({ ready: false, message: M.staleApproval });
+    expect(await view("sandbox_only")).toMatchObject({ ready: true });
+    // Positive control: passing CI carries it in every mode.
+    await world.seedTracking({ ci: "passing", approval: { hostUserId: pr.model.accounts.get("priya")!.hostUserId, login: "priya", commitId: OLD } });
+    expect(await mergeViewOf(world.deps, task, await readMergeTracking(world.store, TASK_ID, ORG), undefined)).toMatchObject({ ready: true });
+  });
+});
+
+describe("L3: the unreadable wait is kept for the head it was seen on only (press path and tracking use one rule)", () => {
+  const item = (head: string, since: string | undefined) => ({ headSha: head, ...(since === undefined ? {} : { ciUnreadableSince: since }) });
+  it("returns the start for the same head, nothing for another head, nothing for no start or a start that is not a time", () => {
+    const since = "2026-11-09T09:00:00.000Z";
+    expect(unreadableSinceOf(item(HEAD, since), HEAD)).toBe(Date.parse(since));
+    expect(unreadableSinceOf(item("b".repeat(40), since), HEAD)).toBeUndefined();
+    expect(unreadableSinceOf(item(HEAD, undefined), HEAD)).toBeUndefined();
+    expect(unreadableSinceOf(undefined, HEAD)).toBeUndefined();
   });
 });
