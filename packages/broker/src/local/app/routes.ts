@@ -266,7 +266,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         }
         if (action === "workflow/review-findings" && request.method === "POST") {
           // The owner answers each blocking review finding (accept with a reason, or fix): the move re-checks who they are, the revision and the code they saw, and the money of any fix (`core/task-flow/review-findings.ts`).
-          await taskActions.resolveFindings(caller, taskId, bodyOf(request));
+          await taskActions.resolveFindings(caller, taskId, bodyOf(request), "api-token");
           return json(200, { task: await viewOf(caller, taskId) });
         }
         if (action === "design-review" && request.method === "GET") {

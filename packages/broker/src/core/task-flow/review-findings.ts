@@ -16,8 +16,9 @@ import {
 import { stageAudit } from "./admission.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem } from "./dispatch-rows.js";
+import { findingAcceptItem, type FindingAcceptMethod } from "./finding-accept.js";
 import { ownerNoteItem } from "./owner-note.js";
-import { CLOSED_TASK, NEVER_STARTED_TASK, admitRound, loadTaskAsOwner, parseBody, requireMayStartWork, type TaskActionsOptions } from "./owner-round.js";
+import { CLOSED_TASK, NEVER_STARTED_TASK, WAITING_FOR_SPEND, admitRound, loadTaskAsOwner, ownerWords, parseBody, requireMayStartWork, waitingForSpend, type TaskActionsOptions } from "./owner-round.js";
 import { readTask, taskViewOf, type TaskView } from "./reads.js";
 import { commitWorkflow, readWorkspace, runDispatchRow } from "./stage-machine.js";
 import { iso, log } from "./support.js";
@@ -28,7 +29,11 @@ export const REQUEST_ID_USED = "this request ID was already used for another dec
 /** The step the answers made due, if any. */
 type Due = "IMPLEMENT" | "REVIEW" | "PUBLISH";
 
-export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskActionsOptions, caller: TaskCaller, taskId: string, value: unknown): Promise<TaskView> {
+/**
+ * `via` is how the answer reached Rovara, recorded with the person for every finding accepted (DECISIONS 201: a tool holding the API token may accept, with a reason, as the person; the pull request says so).
+ * A surface says what it is: the laptop's token route is `api-token`, the task's own page `page`.
+ */
+export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskActionsOptions, caller: TaskCaller, taskId: string, value: unknown, via: FindingAcceptMethod = "api-token"): Promise<TaskView> {
   const request = parseBody(WorkflowResolveFindingsInputSchema, value);
   const { task, acting } = await loadTaskAsOwner(deps, caller, taskId);
   if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
@@ -40,6 +45,8 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     if (prior.source !== "FINDINGS" || prior.workflowRevision !== request.expectedRevision || !sameAnswers(workflow, request, prior.reason)) throw agentXError("IDEMPOTENCY_CONFLICT", REQUEST_ID_USED);
     return taskViewOf(deps, task);
   }
+  // A person's move never skips an approval of more spend.
+  if (waitingForSpend(workflow)) throw agentXError("CONFIG_INVALID", WAITING_FOR_SPEND);
   if (request.expectedRevision !== workflow.revision || workflow.candidate?.digest !== request.candidateDigest) throw agentXError("IDEMPOTENCY_CONFLICT", FINDINGS_OUT_OF_DATE);
   const now = iso(deps);
   let next: WorkflowSnapshot;
@@ -63,11 +70,13 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
   else if (due !== undefined) await requireMayStartWork(deps, task);
   const committed = await commitWorkflow(deps, task, next, [
     ...(due === undefined ? [] : [dispatchRowItem(deps, task.taskId, next.revision, due, now)]),
+    ...(acting.items ?? []),
+    ...(accepts === 0 ? [] : [findingAcceptItem({ taskId: task.taskId, requestId: request.requestId, person: caller.principal, method: via, fingerprints: request.resolutions.filter((resolution) => resolution.action === "ACCEPT").map((resolution) => resolution.findingId), at: now, now: deps.now?.() ?? new Date() })]),
     ...(fixes === 0 ? [] : [ownerNoteItem({ taskId: task.taskId, requestId: request.requestId, text: fixInstructions(workflow, next, request), now: deps.now?.() ?? new Date() })]),
     ...stageAudit(deps, {
       eventId: `task.findings_resolved:${task.taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.findings_resolved", subject: { type: "task", id: task.taskId },
       // Counts only: the findings' text is reviewer output and the reasons are the owner's words, kept on the workflow.
-      details: { project: task.project, revision: workflow.revision, accepted: accepts, toFix: fixes, securityAccepted: acceptedOfRole(workflow, request, "SECURITY") },
+      details: { project: task.project, revision: workflow.revision, accepted: accepts, toFix: fixes, securityAccepted: acceptedOfRole(workflow, request, "SECURITY"), method: via },
     }),
   ]);
   if (!committed) {
@@ -106,7 +115,8 @@ function fixInstructions(before: WorkflowSnapshot, next: WorkflowSnapshot, reque
   const lines: string[] = [];
   sendBackProblems(next).forEach((problem, index) => {
     const finding = toFix.find((candidate) => { const listed = workflowFindingProblem(candidate.role, candidate); return listed.source === problem.source && listed.text === problem.text; });
-    const note = finding === undefined ? "" : answers.get(finding.findingId)?.note ?? "";
+    // The owner's words, redacted of anything key-shaped like every other kept instruction.
+    const note = finding === undefined ? "" : ownerWords(answers.get(finding.findingId)?.note ?? "");
     if (note !== "") lines.push(`${index + 1}. ${note}`);
   });
   return lines.length === 0

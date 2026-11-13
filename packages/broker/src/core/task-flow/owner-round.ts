@@ -13,6 +13,7 @@ import {
   isRunLimitBlockReason,
   redactText,
   type Principal,
+  type TransactItem,
   type WorkflowOwnerAuthority,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -22,6 +23,7 @@ import { admit, releaseAdmission } from "./admission.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import { loadOwnedTask } from "./reads.js";
 import type { TaskRecord } from "./records.js";
+import { newId } from "./support.js";
 
 /** The `Admission` action name of one more round of work on a task a person asked for. Cloud's adapter answers it; Code's default allows it. */
 export const OWNER_ROUND_ADMISSION_ACTION = "task.round";
@@ -45,7 +47,7 @@ export interface TaskActionsOptions {
 }
 
 /** The person acting as the task's owner, as the workflow engine will check them. */
-export interface OwnerActing { actorId: string; authority?: WorkflowOwnerAuthority }
+export interface OwnerActing { actorId: string; authority?: WorkflowOwnerAuthority; /** Steps the move adds to its own transaction (the live access fence). */ items?: readonly TransactItem[] }
 
 /**
  * The task, when the caller is its owner or a co-owner, and who the engine records as acting. A task the caller may not act on is "no such task" (the task flow's own answer); a caller who may act on it but is
@@ -101,7 +103,8 @@ export async function admitRound(deps: TaskFlowDeps, options: TaskActionsOptions
   await requireMayStartWork(deps, task);
   await requireRoomUnderCap(options, task);
   const admitted = await admit(deps, {
-    idempotencyKey: `${OWNER_ROUND_ADMISSION_ACTION}:${task.taskId}:${input.requestId}`, action: OWNER_ROUND_ADMISSION_ACTION, actor: caller.principal, projectName: task.project,
+    // Each ask has a key of its own: an adapter answers one key one way for good, so a refusal under the request id would refuse every retry of it. A repeat of a move that was accepted never gets here (it is answered first).
+    idempotencyKey: `${OWNER_ROUND_ADMISSION_ACTION}:${task.taskId}:${input.requestId}:${newId(deps)}`, action: OWNER_ROUND_ADMISSION_ACTION, actor: caller.principal, projectName: task.project,
     subject: { type: "task", id: task.taskId },
   });
   if ("refusal" in admitted) throw admitted.refusal;

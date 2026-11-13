@@ -6,15 +6,17 @@
 //   5. the change tier is carried, never reset.
 import { describe, expect, it } from "vitest";
 import type { Admission, AdmissionRequest } from "@agentx/contracts";
-import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, queryAll } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, queryAll, when } from "@agentx/contracts";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import { OWNER_ROUND_ADMISSION_ACTION } from "../../packages/broker/src/core/task-flow/owner-round.js";
 import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
+import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
+import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { COMPANY } from "../support/task-flow-harness.js";
 import {
-  REQUEST_A, REQUEST_B, TASK_ID, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, promptOf, report, seed, stateOf, taskOf,
+  OWNER_KEY, REQUEST_A, REQUEST_B, TASK_ID, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, promptOf, report, seed, stateOf, taskOf,
 } from "../support/task-actions-world.js";
 
 const body = (expectedRevision: number | undefined, instructions = "Keep the footer line, and add a test for it.", requestId = REQUEST_A) => ({ requestId, instructions, ...(expectedRevision === undefined ? {} : { expectedRevision }) });
@@ -148,11 +150,61 @@ describe("send back to coding", () => {
     const before = await stateOf(refused.h);
     await expect(createTaskActions(refused.h.deps).sendBack(refused.caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", message: expect.stringContaining("monthly budget") as string });
     expect(await stateOf(refused.h)).toEqual(before);
-    expect(asked[0]).toMatchObject({ action: OWNER_ROUND_ADMISSION_ACTION, projectName: "payments", subject: { type: "task", id: TASK_ID }, idempotencyKey: `task.round:${TASK_ID}:${REQUEST_A}` });
+    expect(asked[0]).toMatchObject({ action: OWNER_ROUND_ADMISSION_ACTION, projectName: "payments", subject: { type: "task", id: TASK_ID }, idempotencyKey: expect.stringMatching(new RegExp(`^task\\.round:${TASK_ID}:${REQUEST_A}:`, "u")) as string });
     const holding: Admission = { ...createAllowAllAdmission(), async admit() { return { allowed: true, reservationId: "res-1" }; }, async release(id) { released.push(id); } };
     const held = await seed({ harness: { admission: holding } });
     await createTaskActions(held.h.deps).sendBack(held.caller, TASK_ID, body(6));
     expect(released).toEqual(["res-1"]);
+  });
+
+  it("does not cache an admission refusal under the request id: a retry of the same request asks again", async () => {
+    const decided = new Map<string, boolean>();
+    let calls = 0;
+    // An adapter that answers one key one way for good, and refuses the first thing it is asked.
+    const caching: Admission = { ...createAllowAllAdmission(), async admit(request) {
+      calls += 1;
+      const allowed = decided.get(request.idempotencyKey) ?? calls > 1;
+      decided.set(request.idempotencyKey, allowed);
+      return allowed ? { allowed: true } : { allowed: false, code: "budget_exhausted", message: "The monthly budget is used up." };
+    } };
+    const { h, caller } = await seed({ harness: { admission: caching } });
+    const actions = createTaskActions(h.deps);
+    await expect(actions.sendBack(caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    expect(await codingOperations(h)).toHaveLength(0);
+    // The budget was raised meanwhile: the same request, sent again, is asked again and goes ahead.
+    await actions.sendBack(caller, TASK_ID, body(6));
+    expect(await codingOperations(h)).toHaveLength(1);
+    expect(calls).toBe(2);
+  });
+
+  it("is the real gate when the access seam is wider and has no owner rule of its own: an owner role or the task's own person acts, no one else", async () => {
+    const wide = (): ReturnType<typeof createOwnerTaskAccess> => ({ ...createOwnerTaskAccess(), canAct: async () => true });
+    const stranger = { companyId: COMPANY, personId: "someone-else", displayName: "Someone", roles: [] as string[], provider: "local-owner" };
+    const own = { ...stranger, personId: "local-owner", displayName: "Local owner" };
+    const refused = await seed({ access: wide() });
+    const before = await stateOf(refused.h);
+    await expect(createTaskActions(refused.h.deps).sendBack({ principal: stranger }, TASK_ID, body(6))).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(await stateOf(refused.h)).toEqual(before);
+    const allowed = await seed({ access: wide() });
+    await createTaskActions(allowed.h.deps).sendBack({ principal: own }, TASK_ID, body(6));
+    expect(await codingOperations(allowed.h)).toHaveLength(1);
+    expect((await taskOf(allowed.h)).workflow!.decisions.at(-1)).toMatchObject({ source: "SEND_BACK", actorId: OWNER_KEY });
+  });
+
+  it("commits the steps the access seam asks for with the move, and a fence that no longer holds refuses it with nothing written", async () => {
+    const fence = (): TaskFlowDeps["access"] => ({ ...createOwnerTaskAccess(), ownerActing: async (_principal, task) => ({ actorId: task.ownerKey, items: [{ kind: "put", item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" }, condition: when.absent() }] }) });
+    const holds = await seed({ access: fence() });
+    await createTaskActions(holds.h.deps).sendBack(holds.caller, TASK_ID, body(6));
+    expect(await holds.h.store.get({ pk: "ACCESS_FENCE#payments", sk: "META" })).toBeDefined();
+    expect(await codingOperations(holds.h)).toHaveLength(1);
+    // The people changed between the check and the commit: the fence item fails, and the whole move with it.
+    const broken = await seed({ access: fence() });
+    await broken.h.store.put({ item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" } });
+    const before = await stateOf(broken.h);
+    await expect(createTaskActions(broken.h.deps).sendBack(broken.caller, TASK_ID, body(6))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    // (The test sink counts an audit line when it is staged, committed or not; the store holds none.)
+    expect(await stateOf(broken.h)).toEqual({ ...before, audit: expect.any(Number) as number });
+    expect(await queryAll(broken.h.store, { pk: `AUDIT#${COMPANY}`, sk: { op: "beginsWith", prefix: "EVENT#" } })).toHaveLength(0);
   });
 
   it("does not skip an approval of more spend, and refuses an archived project and a person who may no longer have work run", async () => {
