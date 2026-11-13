@@ -285,6 +285,8 @@ export * from "./model-family-common.js";
 export * from "./model-family-gemini.js";
 export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
+// TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
+export * from "./model-egress/index.js";
 export * from "./model-serve.js";
 export * from "./test-account.js";
 export * from "./context-sources.js";
