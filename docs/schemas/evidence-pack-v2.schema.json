@@ -212,7 +212,7 @@
               "not_rerun"
             ]
           },
-          "producer": {
+          "runBy": {
             "type": "string",
             "enum": [
               "rovara",

@@ -2,11 +2,11 @@
 // come from here, so both editions say the same thing in the same words. It is PURE (a pack in, text out; no clock, no network, no storage) and it has NO CALLERS yet: the broker still writes and prints v1 (TE-A2b/TE-A2-cl switch it).
 // Every word that a repository, a person or an agent wrote (a check label, a dependency name, a not-tested reason) is made inert here (no hidden characters, mention, link, image, issue reference, closing key or HTML), and every
 // list and line is bounded, with the rest counted ("and 52 more checks"), so the block stays inside a pull request description however large the pack is. Browser-safe: nothing here imports a Node module.
-import { PROOF_BASES, EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, checkKindWords, trustLabelWords, type ProofBasis, type EvidenceTrustClass } from "./check-kinds.js";
-import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS} from "./evidence.js";
-import { hasNewerEvidence, noNewerEvidence, type EvidencePackV2, type EvidencePackV2Read, type EvidenceRead, type NewerEvidence } from "./evidence.js";
+import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, PROOF_BASES, SCRIPTED_AI_PROOF_WORDS, checkKindWords, trustLabelWords, type ProofBasis, type EvidenceTrustClass } from "./check-kinds.js";
+import { inertEvidenceText } from "./evidence-inert.js";
+import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
+import { hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
 import { NEWER_EVIDENCE_WORDS } from "./forward-reader.js";
-import { redactText } from "./redaction.js";
 
 export const EVIDENCE_RENDER_LIMITS = { lineMax: 300, bulletMax: 200, textMax: 9_000, checksListed: 12, dependenciesListed: 8, notTestedListed: 10, measuresListed: 3 } as const;
 
@@ -21,10 +21,13 @@ export const EVIDENCE_RESULT_WORDS: Record<(typeof EVIDENCE_RESULTS)[number], st
 export const EVIDENCE_LEVEL_WORDS: Record<(typeof EVIDENCE_LEVELS)[number], string> = {
   rovara_real_run: "Real run by Rovara",
   their_ci: "Checked by your CI",
-  sandbox_only: "Sandbox only, not a real run",
+  sandbox_only: "Sandbox only, no sealed run",
   no_ci: "No CI to check against",
   ci_not_readable: "Your CI results could not be read",
 };
+/** The level words for a pack that claims a real run but ran somewhere that is not a sealed round, or whose proof rests on scripted AI replies (DECISIONS 156: never "Real"). */
+const NOT_SEALED_LEVEL_WORDS = "Run by Rovara, not sealed";
+const SCRIPTED_AI_LEVEL_WORDS = "Run against scripted AI replies";
 /** Where the checks ran (O26, O44). */
 export const EVIDENCE_PRODUCER_WORDS = {
   developer_machine: "Ran on a developer machine",
@@ -58,32 +61,12 @@ const cut = (text: string, max: number) => {
   const points = Array.from(text);
   return points.length <= max ? text : `${points.slice(0, max - 1).join("")}…`;
 };
-const number = (count: number) => count.toLocaleString("en-US");
+/** A count for a line. Anything that is not a finite number prints "?" (a reader's data is checked, but the renderer never trusts a value to be a number). */
+const number = (count: number) => (typeof count === "number" && Number.isFinite(count) ? count.toLocaleString("en-US") : "?");
 const plural = (count: number, one: string, many = `${one}s`) => `${number(count)} ${count === 1 ? one : many}`;
+const dollars = (amount: number) => (typeof amount === "number" && Number.isFinite(amount) ? `$${amount.toFixed(2)}` : "$?");
 
-/**
- * One line of untrusted text made inert for a pull request description: redacted; control and format characters and line breaks gone; `&` and `<` written as entities; images dropped, links reduced to their text, tags dropped;
- * a joiner after every `@`, `://`, `www` and `#` before a digit (no mention, link or issue reference); a Linear issue key (`ENG-42`) broken so "Fixes ENG-42" closes nothing; cut to `max` code points.
- */
-export function inertEvidenceText(text: string, max: number): string {
-  const plain = redactText(text).replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim();
-  const inert = plain
-    .replaceAll("&", "&amp;")
-    .replace(/!\[[^\]]*\]\([^)]*\)/gu, "")
-    .replace(/\[([^\]]*)\]\([^)]*\)/gu, "$1")
-    .replace(/<((?:https?|mailto):[^>]*)>/giu, "$1")
-    .replace(/<[^>]*>/gu, "")
-    .replaceAll("<", "&lt;")
-    .replaceAll("@", "@‍")
-    .replaceAll("://", "://‍")
-    .replace(/\bwww\./giu, (match) => `${match.slice(0, 3)}‍.`)
-    .replace(/#(?=\d)/gu, "#‍")
-    .replace(/\b([A-Za-z][A-Za-z0-9]{0,9})-(?=\d)/gu, "$1-‍")
-    .replace(/\s+/gu, " ")
-    .trim();
-  return cut(inert, max);
-}
-const inert = (text: string, max: number) => inertEvidenceText(text, max);
+const inert = inertEvidenceText;
 const line = (text: string) => cut(text, EVIDENCE_RENDER_LIMITS.lineMax);
 const bullet = (text: string) => `- ${cut(text, EVIDENCE_RENDER_LIMITS.bulletMax)}`;
 
@@ -109,9 +92,9 @@ function checkLine(check: Check): string {
     details.push(plural(tests.total, "test") + (tests.newTests.length > 0 ? ` (${number(tests.newTests.length)} new)` : ""));
     if (tests.failed + tests.errored > 0) details.push(`${number(tests.failed + tests.errored)} failed`);
   }
-  if (check.coverage !== undefined && check.coverage.linesChanged > 0) details.push(`${String(Math.round((check.coverage.linesCovered / check.coverage.linesChanged) * 100))}% of changed lines covered`);
+  if (check.coverage !== undefined && check.coverage.linesChanged > 0) details.push(`${number(Math.round((check.coverage.linesCovered / check.coverage.linesChanged) * 100))}% of changed lines covered`);
   for (const measure of (check.measures ?? []).slice(0, EVIDENCE_RENDER_LIMITS.measuresListed)) {
-    const round = (value: number) => String(Number(value.toFixed(2)));
+    const round = (value: number) => (typeof value === "number" && Number.isFinite(value) ? String(Number(value.toFixed(2))) : "?");
     details.push(`${inert(measure.name, 40)} ${round(measure.head)} ${inert(measure.unit, 10)} (was ${round(measure.base)} ${inert(measure.unit, 10)})`);
   }
   if ((check.measures?.length ?? 0) > EVIDENCE_RENDER_LIMITS.measuresListed) details.push(`and ${number(check.measures!.length - EVIDENCE_RENDER_LIMITS.measuresListed)} more measures`);
@@ -129,7 +112,7 @@ function checksLines(checks: readonly Check[]): string[] {
     const count = checks.filter((check) => check.after === outcome).length;
     return count === 0 ? [] : [`${number(count)} ${OUTCOME_WORDS[outcome]}`];
   });
-  const other = checks.filter((check) => !OUTCOME_ORDER.includes(check.after)).length;
+  const other = checks.filter((check) => !(OUTCOME_ORDER as readonly string[]).includes(check.after)).length;
   if (other > 0) counts.push(`${number(other)} ${NEWER_EVIDENCE_WORDS.toLowerCase()}`);
   const listed = checks.slice(0, EVIDENCE_RENDER_LIMITS.checksListed).map(checkLine);
   const more = checks.length - listed.length;
@@ -171,8 +154,8 @@ function dependencyLines(dependencies: readonly Dependency[]): string[] {
   return [line(`Dependencies: ${classes.join(" · ")}`), ...listed, ...(more > 0 ? [bullet(`and ${plural(more, "more dependency", "more dependencies")}`)] : [])];
 }
 
-function proofLines(proof: NonNullable<EvidencePackV2Read["proof"]>): string[] {
-  const lines = [line(`Change proof: ${number(proof.provenCount)} proven${proof.loadFailureOnOld > 0 ? `, ${number(proof.loadFailureOnOld)} could not load on the old code` : ""}`)];
+function proofLines(proof: NonNullable<EvidencePackV2Read["proof"]>, scripted: boolean): string[] {
+  const lines = [line(`Change proof: ${number(proof.provenCount)} ${scripted ? SCRIPTED_AI_PROOF_WORDS : "proven"}${proof.loadFailureOnOld > 0 ? `, ${number(proof.loadFailureOnOld)} could not load on the old code` : ""}`)];
   if (proof.heldDraft) lines.push("Held as a draft until the change is proven");
   if (proof.override !== undefined) lines.push(line(`Marked ready anyway by ${inert(proof.override.actorId, 60)}${proof.override.reason === undefined ? "" : `: ${inert(proof.override.reason, 120)}`}`));
   return lines;
@@ -195,11 +178,14 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
   const pack = input as EvidencePackV2Read;
   const isolation = pack.producer.isolation as string;
   const weakest = pack.level.weakest;
+  const scripted = pack.checks.some((entry) => entry.proofBasis !== undefined);
+  // The first line is never better than where the checks ran: a "real run" claimed by a pack that ran in the sandbox, on a laptop or elsewhere, or whose proof rests on scripted AI replies, is worded as what it was.
+  const level = pack.level.reached === "rovara_real_run" && scripted ? SCRIPTED_AI_LEVEL_WORDS : pack.level.reached === "rovara_real_run" && isolation !== "sealed" ? NOT_SEALED_LEVEL_WORDS : wordOf(EVIDENCE_LEVEL_WORDS, pack.level.reached);
   const firstLine = line([
     wordOf(EVIDENCE_RESULT_WORDS, pack.result),
-    wordOf(EVIDENCE_LEVEL_WORDS, pack.level.reached),
+    level,
     ...(weakest === undefined ? [] : [`weakest: ${inert(weakest.words, 100)}`]),
-    ...(isolation === "sandbox" ? ["not sealed"] : []),
+    ...(isolation === "sandbox" && !level.includes("not sealed") ? ["not sealed"] : []),
   ].join(" · "));
   const producerLine = wordOf(EVIDENCE_PRODUCER_WORDS, isolation);
   const slot = (text: string | undefined) => (text === undefined || inert(text, 1).length === 0 ? [] : [line(inert(text, EVIDENCE_RENDER_LIMITS.lineMax))]);
@@ -210,10 +196,10 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
     ...slot(options.rovaraProblemLine),
     ...slot(options.timeTargetLine),
     ...checksLines(pack.checks),
-    ...(pack.proof === undefined ? [] : proofLines(pack.proof)),
+    ...(pack.proof === undefined ? [] : proofLines(pack.proof, scripted)),
     ...(pack.weakening === undefined ? [] : weakeningLine(pack.weakening) === undefined ? [] : [weakeningLine(pack.weakening)!]),
     ...dependencyLines(pack.dependencies ?? []),
-    ...(pack.meters === undefined ? [] : [line(`Spent: $${pack.meters.modelUsd.toFixed(2)} model, ${plural(pack.meters.machineMinutes, "machine minute")} ($${pack.meters.machineUsd.toFixed(2)})`)]),
+    ...(pack.meters === undefined ? [] : [line(`Spent: ${dollars(pack.meters.modelUsd)} model, ${plural(pack.meters.machineMinutes, "machine minute")} (${dollars(pack.meters.machineUsd)})`)]),
     ...(notTested.length === 0 ? [] : [
       "Not tested:",
       ...notTested.slice(0, EVIDENCE_RENDER_LIMITS.notTestedListed).map((entry) => bullet(`${inert(entry.what, 120)} (${inert(entry.reason, 60)})`)),
@@ -228,7 +214,7 @@ export function renderEvidence(input: EvidencePackV2 | EvidencePackV2Read, optio
  * What to print for whatever `readEvidencePack` gave. A v2 pack is rendered; a v1 pack has no level or producer, so only says it is older (the broker's own v1 lines are unchanged); a later version and a pack that
  * cannot be read say so, and send the reader to Rovara.
  */
-export function renderEvidenceRead(read: EvidenceRead, options: EvidenceRenderOptions = {}): EvidenceRendering {
+export function renderEvidenceRead(read: EvidencePackRead, options: EvidenceRenderOptions = {}): EvidenceRendering {
   if (read.status === "v2") return renderEvidence(read.pack, { ...options, newer: read.newer });
   const firstLine =
     read.status === "newer" ? NEWER_EVIDENCE_WORDS
