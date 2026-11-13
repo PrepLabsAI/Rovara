@@ -74,6 +74,11 @@ export interface PullRequestBodyContext {
    * pack it is the v1 description. The caller chooses the version (in Cloud, by the TE-A1 company gate).
    */
   evidenceWriter?: 1 | 2 | undefined;
+  /**
+   * TE-A2b (B12 review M2): the repository is KNOWN to be private. The Evidence block carries check labels, test names and not-tested reasons, which a repository's own words and an address can reach, and a description
+   * is read by everyone who can see the repository, so, like the lessons' titles, the block is printed only when this is true. Absent (unknown) or false (public): no block, the v1 lines. The caller sets it from the code host.
+   */
+  repositoryKnownPrivate?: boolean | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
@@ -251,7 +256,7 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
   const flags = weakeningBlock(context.changedFiles?.files ?? [], boundEvidence(context.proof?.evidence, workflow.candidate?.digest), weakeningProof);
   // TE-A2b: with the v2 writer and a v2 pack for this code, the shared renderer's block comes first and carries the same flags (once) and the same "could not compare" line. It shrinks to its compact form with the lists.
   const notCompared = weakeningProof === undefined ? undefined : notComparedReason(weakeningProof.testProof, weakeningProof.candidateDigest);
-  const evidenceBlock = (level: number): string[] | undefined => (context.evidenceWriter === 2 ? evidenceV2Lines(context.proof?.evidence, workflow.candidate?.digest, context.changedFiles?.files, level, notCompared) : undefined);
+  const evidenceBlock = (level: number): string[] | undefined => (context.evidenceWriter === 2 && context.repositoryKnownPrivate === true ? evidenceV2Lines(context.proof?.evidence, workflow.candidate?.digest, context.changedFiles?.files, level, notCompared) : undefined);
   // The Proof section shrinks with the lists: its evidence text first, then its proven and passed rows, never a failed row or a not-tested item. One more step after the lists are empty shortens it again.
   const steps = [...LIST_LIMITS.map((limit, index) => ({ limit, proofLevel: Math.min(index, 3) })), { limit: 0, proofLevel: PROOF_LEVEL_LAST }];
   for (const [level, { limit, proofLevel }] of steps.entries()) {

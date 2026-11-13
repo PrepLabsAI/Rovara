@@ -29,7 +29,7 @@ const v2Read = (pack = v1Pack(), w: EvidenceV2Writer = writer): EvidencePackRead
 };
 const ORIGIN = "https://rovara.example";
 const evidence = (over: Record<string, unknown> = {}) => ({ pack: v1Pack(), mode: "link" as const, origin: ORIGIN, taskUrl: `${ORIGIN}/tasks/1`, ...over });
-const context = (over: Partial<PullRequestBodyContext> = {}, evidenceOver: Record<string, unknown> = {}): PullRequestBodyContext => ({ proof: { evidence: evidence({ read: v2Read(), ...evidenceOver }) }, changedFiles: { files: [{ repository: "app", path: "src/a.ts", added: 2, removed: 1 }], complete: true }, ...over });
+const context = (over: Partial<PullRequestBodyContext> = {}, evidenceOver: Record<string, unknown> = {}): PullRequestBodyContext => ({ proof: { evidence: evidence({ read: v2Read(), ...evidenceOver }) }, changedFiles: { files: [{ repository: "app", path: "src/a.ts", added: 2, removed: 1 }], complete: true }, repositoryKnownPrivate: true, ...over });
 const status = (ctx: PullRequestBodyContext) => rovaraStatusLines(workflow(), ctx, () => ["- no findings"]);
 const body = (ctx: PullRequestBodyContext) => rovaraPullRequestBody({ summary: ["Retry the payment"], fallbackTitle: "t", workflow: workflow(), context: ctx, reviewLines: () => ["- no findings"], pageUrl: undefined });
 
@@ -110,6 +110,25 @@ describe("the flags and the weakening words are the shared ones, once", () => {
     const withAbsent: EvidencePack = { ...pack, checks: [{ ...pack.checks[0]!, tests }] };
     const text = status(context({ evidenceWriter: 2 }, { pack: withAbsent, read: v2Read(withAbsent) })).join("\n");
     expect(text).toContain("1 test ran before and not now: t.py::gone");
+  });
+});
+
+describe("the Evidence block is printed only where the repository is known to be private (B12 review M2)", () => {
+  const withNames = (over: Partial<PullRequestBodyContext>) => {
+    const pack = v1Pack("pytest -q for jane.doe@example.com");
+    return { ...context({ evidenceWriter: 2, ...over }, { pack, read: v2Read(pack) }) };
+  };
+  it("a private repository gets the block", () => {
+    expect(status(withNames({ repositoryKnownPrivate: true })).join("\n")).toContain("## Evidence");
+  });
+  it.each([["public", false], ["unknown", undefined]])("a %s repository gets no block, no check label and no v2 text: the description is the v1 one", (_name, known) => {
+    const ctx = withNames({ repositoryKnownPrivate: known });
+    const text = status(ctx).join("\n");
+    expect(text).not.toContain("## Evidence");
+    expect(text).not.toContain("jane.doe");
+    expect(text).not.toContain("Run by Rovara, not sealed");
+    expect(status(ctx)).toEqual(status({ ...ctx, evidenceWriter: 1 }));
+    expect(body(ctx)).not.toContain("## Evidence");
   });
 });
 
