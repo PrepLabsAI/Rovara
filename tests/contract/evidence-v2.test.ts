@@ -5,11 +5,11 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   EVIDENCE_CHECKS_MAX, EVIDENCE_V2_MAX_BYTES, EvidencePackSchema, EvidencePackV2ReaderSchema, EvidencePackV2Schema, NEWER_EVIDENCE_WORDS, evidencePackV1ToV2, evidencePackV2ToV1, readEvidencePack, readEvidencePackText,
-  unknownKeysOf, type EvidencePackV2,
+  unknownKeysOf, type EvidencePackV2, type EvidenceV2Context,
 } from "../../packages/contracts/src/index.js";
 import { DIGEST, SHA, v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
 
-const UPGRADE = { producer: { edition: "code", isolation: "developer_machine" }, level: { reached: "their_ci", required: [] }, result: "verified" } as const;
+const UPGRADE: EvidenceV2Context = { producer: { edition: "code", isolation: "developer_machine" }, level: { reached: "their_ci", required: [] }, result: "verified" };
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 describe("v1 is unchanged", () => {
