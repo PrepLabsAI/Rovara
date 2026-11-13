@@ -41,6 +41,17 @@ export function buildSideBySideJudgeCall(items: ReadonlyArray<{ readonly id: str
   return Object.freeze({ role: SIDE_BY_SIDE_JUDGE_ROLE, cases: Object.freeze(cases) });
 }
 
+/** The fixed delimiters around each case in the text the judge is sent. */
+export const SIDE_BY_SIDE_JUDGE_CASE_OPEN = "<<<begin case>>>";
+export const SIDE_BY_SIDE_JUDGE_CASE_CLOSE = "<<<end case>>>";
+/**
+ * The ONE way the judge's input becomes text (a real judge adapter must use it, so the text the judge sees is the text that was pinned): the role, then each case as one line of JSON (the answers are JSON-escaped, so an answer cannot hold a
+ * line break, a quote or a delimiter that closes its own case) between the fixed delimiters. The scoring-prompt hash covers this format together with the role (side-by-side-judge-pin.ts).
+ */
+export function serializeSideBySideJudgeInput(call: SideBySideJudgeCall): string {
+  return [call.role, ...call.cases.map((item) => `${SIDE_BY_SIDE_JUDGE_CASE_OPEN}\n${JSON.stringify({ caseId: item.caseId, a: item.a, b: item.b }).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029")}\n${SIDE_BY_SIDE_JUDGE_CASE_CLOSE}`)].join("\n");
+}
+
 export const SIDE_BY_SIDE_JUDGE_VERDICTS = ["same", "a_better", "b_better", "different_unclear"] as const;
 export type SideBySideJudgeVerdict = (typeof SIDE_BY_SIDE_JUDGE_VERDICTS)[number];
 /** The longest answer read. A verdict for five cases is about 300 characters. */

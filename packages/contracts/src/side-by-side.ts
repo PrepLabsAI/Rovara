@@ -12,7 +12,7 @@ import type { SideBySideJudgeIdentity } from "./side-by-side-judge-pin.js";
 
 export const SIDE_BY_SIDE_SCHEMA_VERSION = 1;
 /** The id of the check kind in the registry (`check-kinds.ts`). */
-export const SIDE_BY_SIDE_CHECK_KIND = "side_by_side";
+export const SIDE_BY_SIDE_CHECK_KIND = "prompt_side_by_side";
 /** The most cases ever compared (a ceiling; the count asked for is data). */
 export const SIDE_BY_SIDE_MAX_CASES = 5;
 /** The default per-task limit on calls through the product key (two per case, five cases): defence in depth next to the meter's cap. */
@@ -122,8 +122,8 @@ export function sideBySideIsOn(report: PromptChangeReport, policy: SideBySidePol
 
 /** What happened to one selected case. A case a pairing rule refused is never selected; it is counted. */
 export type SideBySideCaseOutcome =
-  | { readonly caseId: string; readonly status: "judged"; readonly verdict: SideBySideVerdict; readonly oldText: string; readonly newText: string }
-  | { readonly caseId: string; readonly status: "judge_not_run"; readonly reason: string; readonly oldText: string; readonly newText: string }
+  | { readonly caseId: string; readonly status: "judged"; readonly verdict: SideBySideVerdict; readonly oldText: string; readonly newText: string; readonly possiblySteering?: true }
+  | { readonly caseId: string; readonly status: "judge_not_run"; readonly reason: string; readonly oldText: string; readonly newText: string; readonly possiblySteering?: true }
   | { readonly caseId: string; readonly status: "not_run"; readonly side: "old" | "new"; readonly sentence: string }
   | { readonly caseId: string; readonly status: "call_failed"; readonly side: "old" | "new"; readonly sentence: string };
 
@@ -138,6 +138,8 @@ export interface SideBySideCounts {
   readonly callFailed: number;
   readonly judgeNotRun: number;
   readonly refused: number;
+  /** Cases where an answer holds words that could steer the judge (a verdict word, "judge", "verdict" or a case label). The judge still judged them; a person should read them. */
+  readonly possiblySteering: number;
 }
 export interface SideBySideMeter {
   readonly calls: number;

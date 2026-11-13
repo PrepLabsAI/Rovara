@@ -7,12 +7,12 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { PIN, RUN_DEFAULTS, COMPANY_A, recordingJudge, reportNeeded, sbsWorld, source, verdictText } from "../support/side-by-side-world.js";
 
-const base = { pin: PIN, taskStartedAt: RUN_DEFAULTS.taskStartedAt, productModelFamily: "gemini" } as const;
-const human = (over: Partial<SideBySideHumanCheck> = {}): SideBySideHumanCheck => ({ labelSetId: "labels-1", agreement: 0.9, sampleSize: 25, checkedAt: "2026-10-30T00:00:00Z", ...over });
+const base = { pin: PIN, taskStartedAt: RUN_DEFAULTS.taskStartedAt, productModelFamily: "gemini", codingModelFamily: "openai" } as const;
+const human = (over: Partial<SideBySideHumanCheck> = {}): SideBySideHumanCheck => ({ labelSetId: "labels-1", model: PIN.model, version: PIN.version, scoringPromptSha256: PIN.scoringPromptSha256, agreement: 0.9, sampleSize: 25, checkedAt: "2026-11-02T00:00:00Z", ...over });
 
 describe("the pin predates the task", () => {
   it("accepts a pin made before the task started", () => {
-    expect(checkSideBySideJudgePin(base)).toMatchObject({ ok: true, identity: { model: "claude-judge", version: "2026-10-01", family: "claude", independence: "different_family" } });
+    expect(checkSideBySideJudgePin(base)).toMatchObject({ ok: true, identity: { model: "claude-judge", version: "2026-10-01", family: "anthropic", independence: "different_family" } });
   });
   it.each([
     ["at the same second", RUN_DEFAULTS.taskStartedAt],
@@ -21,7 +21,7 @@ describe("the pin predates the task", () => {
   ])("refuses a pin made %s", (_name, pinnedAt) => {
     expect(checkSideBySideJudgePin({ ...base, pin: { ...PIN, pinnedAt } })).toEqual({ ok: false, reason: "judge_pinned_after_task" });
   });
-  it.each(["2026-11-01", "2026-11-01T00:00:00.5Z", "2026-11-01T00:00:00+02:00", "yesterday", "", "2026-13-01T00:00:00Z"])("refuses a pin time that is not exact UTC text: %s", (pinnedAt) => {
+  it.each(["2026-11-01", "2026-11-01T00:00:00+02:00", "yesterday", "", "2026-13-01T00:00:00Z"])("refuses a pin time that is not exact UTC text: %s", (pinnedAt) => {
     expect(checkSideBySideJudgePin({ ...base, pin: { ...PIN, pinnedAt } })).toEqual({ ok: false, reason: "judge_pin_invalid" });
   });
 });
@@ -51,7 +51,7 @@ describe("a different family, or a spot check", () => {
   });
   it("cannot tell the family when the product's is unknown, so it needs the spot check", () => {
     expect(checkSideBySideJudgePin({ ...base, productModelFamily: "" })).toEqual({ ok: false, reason: "judge_same_family_unchecked" });
-    expect(checkSideBySideJudgePin({ ...base, productModelFamily: "" , humanCheck: human() })).toMatchObject({ ok: true });
+    expect(checkSideBySideJudgePin({ ...base, productModelFamily: "", humanCheck: human() })).toMatchObject({ ok: true });
   });
   it("accepts a same-family judge that was spot-checked against human labels, and records that", () => {
     const outcome = checkSideBySideJudgePin({ ...base, productModelFamily: "claude", humanCheck: human() });
@@ -103,11 +103,12 @@ describe("the judge's identity is in the evidence", () => {
     return result.summary;
   }
   it("is in the summary: model, version, family, scoring prompt hash, pin time and why it is independent", async () => {
-    expect((await summary()).judge).toEqual({ ...PIN, independence: "different_family" });
+    // The pin time is kept normalised to the millisecond.
+    expect((await summary()).judge).toEqual({ ...PIN, pinnedAt: "2026-11-01T00:00:00.000Z", family: "anthropic", independence: "different_family", productFamily: "google", codingFamily: "openai" });
   });
   it("is printed in both renderings, and for a spot-checked judge the rendering says so with the numbers", async () => {
     const plain = await summary();
-    for (const mode of ["public", "full"] as const) expect(renderSideBySide(plain, { mode })).toContain("Judge: claude-judge 2026-10-01 (claude family), pinned before the task, from a different model family");
+    for (const mode of ["public", "full"] as const) expect(renderSideBySide(plain, { mode })).toContain("Judge: claude-judge 2026-10-01 (anthropic family), pinned before the task, from a different model family");
     const checked = await summary({ productModelFamily: "claude", humanCheck: human() });
     for (const mode of ["public", "full"] as const) expect(renderSideBySide(checked, { mode })).toContain("same model family as the product or coding model, so spot-checked against human labels (90% agreement on 25 cases)");
     expect(judgeIdentityWords(checked.judge)).not.toMatch(/different model family/u);
@@ -129,6 +130,6 @@ describe("side-by-side is evidence shown to people, never a proof label", () => 
     expect(sideBySidePairsPart(result.summary, { mode: "full" }, () => undefined).label).not.toMatch(/Proven|No regression|Improved on eval/iu);
     expect(JSON.stringify(result.summary)).not.toMatch(/"(?:trust|proofBasis|label|proven)"/u);
     expect(result.summary.evidence.countsTowardProof).toBe(false);
-    expect(checkKindInfo("side_by_side")?.countsTowardProof).toBe(false);
+    expect(checkKindInfo("prompt_side_by_side")?.countsTowardProof).toBe(false);
   });
 });

@@ -70,7 +70,7 @@ describe("a normal run", () => {
     const world = sbsWorld();
     world.answers(...Array.from({ length: 10 }, (_, index) => `answer ${String(index)}`));
     const summary = ran(await runSideBySide(input(world)));
-    expect(summary.evidence).toEqual({ kind: "side_by_side", countsTowardProof: false });
+    expect(summary.evidence).toEqual({ kind: "prompt_side_by_side", countsTowardProof: false });
     const text = JSON.stringify(summary);
     expect(text).not.toMatch(/"(?:trust|proofBasis)"/u);
     expect(text).not.toMatch(/real|proves_change|scripted_ai_replies/iu);

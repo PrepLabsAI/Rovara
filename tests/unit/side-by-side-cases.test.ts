@@ -104,8 +104,8 @@ describe("when the layer is on", () => {
 
 describe("the check kind", () => {
   it("is registered additively, carries pairs only, and never counts toward the proof that a change works", () => {
-    expect(SIDE_BY_SIDE_CHECK_KIND).toBe("side_by_side");
-    expect(checkKindInfo(SIDE_BY_SIDE_CHECK_KIND)).toMatchObject({ id: "side_by_side", parts: ["pairs"], countsTowardProof: false });
+    expect(SIDE_BY_SIDE_CHECK_KIND).toBe("prompt_side_by_side");
+    expect(checkKindInfo(SIDE_BY_SIDE_CHECK_KIND)).toMatchObject({ id: "prompt_side_by_side", parts: ["pairs"], countsTowardProof: false });
   });
   it("leaves the cases helper deterministic: the source has no randomness", async () => {
     expect(ids(await source(COMPANY_A, 9).cases())).toEqual(evalCases(9).map((item) => item.caseId));

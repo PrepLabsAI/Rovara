@@ -2,6 +2,7 @@
 // mixed with the product key's). Each case is judged alone, so an answer that tries to talk to the judge can reach no other case's verdict. A call that did not run says why in F1-a's own sentence ("not run", never "failed");
 // after a call that settled over the cap no further call is made (DECISIONS 165/165a: over by at most one call); a per-task call limit is the defence in depth. No real call is made here: the port is whatever the caller hands in.
 // Pure apart from the calls it is given: no clock, no randomness, no file, no socket of its own. No callers yet.
+import { randomBytes } from "node:crypto";
 import type { ModelEgress, ModelEgressScope, ModelEgressSettle } from "./ports/model-egress.js";
 import { capSentence, NOT_RUN_CLASSES, NOT_RUN_SENTENCES, type ModelEgressNotRunClass } from "./model-egress/classify.js";
 import { MODEL_EGRESS_OVERRUN_SENTENCE } from "./model-egress/cost.js";
@@ -79,13 +80,19 @@ export interface SideBySideRunInput {
   /** F4's report: it says whether the layer is needed and whether the change is a model change. It is not given to the judge. */
   readonly report: PromptChangeReport;
   readonly policy: SideBySidePolicy;
-  /** Seeds the choice of cases and the A/B order. */
+  /** Seeds the choice of cases (deterministic: the same cases for the same seed). */
   readonly seed: string;
+  /**
+   * Seeds the A/B order the judge sees. By default a fresh random seed for this run, which nothing outside the run can read. If a caller passes one (a replay, a test), it is a REQUIREMENT on the caller that it comes from a source the
+   * agent that wrote the change cannot read, and that it is not the selection seed: an agent that can predict which answer is shown first can write answers for the judge's position instead of for the reader.
+   */
+  readonly orderSeed?: string | undefined;
   /** When the task started, UTC `YYYY-MM-DDTHH:MM:SSZ`: the judge's pin (and any spot check) must predate it (DECISIONS 170). */
   readonly taskStartedAt: string;
   /** The model family of the product model under test, and of the coding model if one wrote the change: the judge must be from a different family, or be spot-checked against human labels. */
   readonly productModelFamily: string;
-  readonly codingModelFamily?: string | undefined;
+  /** REQUIRED: the family of the model that wrote the change. An unknown family needs the human spot check. */
+  readonly codingModelFamily: string;
   readonly humanCheck?: SideBySideHumanCheck | undefined;
   /** Cases to compare (data; at most five). */
   readonly maxCases?: number;
@@ -106,6 +113,8 @@ const limitOf = (value: number | undefined, fallback: number): number => (typeof
 const NOT_RUN_BY_CLASS: ReadonlySet<string> = new Set<string>(NOT_RUN_CLASSES);
 const sentenceOfClass = (cls: ModelEgressNotRunClass): string => (cls === "cap" ? capSentence() : NOT_RUN_SENTENCES[cls]);
 const JUDGE_NOT_RUN = "judge not run";
+/** Words that could steer the judge. Linear: no nesting, and the answers it reads are cut to 8,000 characters. */
+const STEERING = /a_better|b_better|different_unclear|verdict|judge|case-\d/iu;
 
 type Stop = "overrun" | "cap" | "call_limit";
 type Side = "old" | "new";
@@ -116,6 +125,13 @@ export async function runSideBySide(input: SideBySideRunInput): Promise<SideBySi
   if (!on.on) return { status: "off", reason: on.reason };
   if (typeof input.company !== "string" || input.company === "" || input.source.company !== input.company || input.judge.company !== input.company) return { status: "refused", reason: "company_mismatch" };
 
+  // The product key's scope must be for this company when it says which one (an opaque scope that names no company cannot be checked here: the adapter's own capability binds it, DEFERRED for the F1-e wiring). One that cannot be read is refused.
+  try {
+    const scopeCompany = (input.scope as unknown as { company?: unknown } | undefined)?.company;
+    if (input.scope === undefined || (scopeCompany !== undefined && scopeCompany !== input.company)) return { status: "refused", reason: "company_mismatch" };
+  } catch {
+    return { status: "refused", reason: "company_mismatch" };
+  }
   // The judge is pinned and independent, or nothing runs: no call is made for a judge that breaks DECISIONS 170's rules.
   const checked = checkSideBySideJudgePin({ pin: input.judge.pin, taskStartedAt: input.taskStartedAt, productModelFamily: input.productModelFamily, codingModelFamily: input.codingModelFamily, humanCheck: input.humanCheck });
   if (!checked.ok) return { status: "refused", reason: checked.reason };
@@ -129,6 +145,7 @@ export async function runSideBySide(input: SideBySideRunInput): Promise<SideBySi
   const pairing = pairSideBySideCases(offered, { modelChange: input.report.counts.model_name > 0 });
   const chosen = selectSideBySideCases(pairing.paired, { seed: input.seed, max: input.maxCases });
 
+  const orderSeed = input.orderSeed ?? randomBytes(16).toString("hex");
   const callLimit = limitOf(input.maxProductCalls, SIDE_BY_SIDE_DEFAULT_CALL_CAP);
   const judgeLimit = limitOf(input.maxJudgeCalls, SIDE_BY_SIDE_DEFAULT_CALL_CAP);
   const product = { calls: 0, costMicros: 0 };
@@ -199,13 +216,14 @@ export async function runSideBySide(input: SideBySideRunInput): Promise<SideBySi
     }
 
     judgeIndex += 1;
-    const base = { caseId: item.caseId, oldText: before.text, newText: after.text };
+    // An answer that talks to the judge (a verdict word, "judge", a case label) is flagged for a person to read; the judge still judges it.
+    const base = { caseId: item.caseId, oldText: before.text, newText: after.text, ...(STEERING.test(before.text) || STEERING.test(after.text) ? { possiblySteering: true as const } : {}) };
     if (rovara.calls >= judgeLimit) {
       outcomes.push({ ...base, status: "judge_not_run", reason: `${JUDGE_NOT_RUN}: judge call limit reached` });
       continue;
     }
     const id = `case-${String(judgeIndex)}`;
-    const order = sideBySideOrder(input.seed, item.caseId);
+    const order = sideBySideOrder(orderSeed, item.caseId);
     rovara.calls += 1;
     let answer: Awaited<ReturnType<SideBySideJudge["judge"]>> | undefined;
     try {
@@ -235,16 +253,18 @@ export async function runSideBySide(input: SideBySideRunInput): Promise<SideBySi
     callFailed: outcomes.filter((item) => item.status === "call_failed").length,
     judgeNotRun: outcomes.filter((item) => item.status === "judge_not_run").length,
     refused: pairing.refused.length,
+    possiblySteering: outcomes.filter((item) => (item.status === "judged" || item.status === "judge_not_run") && item.possiblySteering === true).length,
   };
   const meter = (held: { calls: number; costMicros: number }): SideBySideMeter => ({ calls: held.calls, costMicros: held.costMicros });
-  const summary: SideBySideSummary = {
+  // Everything the result holds is frozen: a caller that holds it (or a renderer) cannot change a verdict or the judge's identity after the run.
+  const summary: SideBySideSummary = Object.freeze({
     schemaVersion: SIDE_BY_SIDE_SCHEMA_VERSION,
-    evidence: { kind: SIDE_BY_SIDE_CHECK_KIND, countsTowardProof: false },
+    evidence: Object.freeze({ kind: SIDE_BY_SIDE_CHECK_KIND, countsTowardProof: false as const }),
     judge: checked.identity,
-    counts,
-    cases: outcomes,
-    meters: { product: meter(product), rovara: meter(rovara) },
+    counts: Object.freeze(counts),
+    cases: Object.freeze(outcomes.map((item) => Object.freeze(item))),
+    meters: Object.freeze({ product: Object.freeze(meter(product)), rovara: Object.freeze(meter(rovara)) }),
     ...(state.stop === undefined ? {} : { stoppedBy: state.stop }),
-  };
+  });
   return { status: "ran", summary };
 }

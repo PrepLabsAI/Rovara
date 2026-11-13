@@ -104,7 +104,7 @@ describe("mapping A/B back to old and new", () => {
     const cases = evalCases(5);
     world.answers(...cases.flatMap((_, index) => [`old text ${String(index)}`, `new text ${String(index)}`]));
     const judge = recordingJudge(COMPANY_A, (call) => verdictText(call, "a_better"));
-    const result = await runSideBySide({ ...RUN_DEFAULTS, company: COMPANY_A.orgId, egress: world.egress, scope: world.scope, source: source(COMPANY_A, 5), judge, report: reportNeeded(), policy, seed });
+    const result = await runSideBySide({ ...RUN_DEFAULTS, company: COMPANY_A.orgId, egress: world.egress, scope: world.scope, source: source(COMPANY_A, 5), judge, report: reportNeeded(), policy, seed, orderSeed: seed });
     expect(result.status).toBe("ran");
     if (result.status !== "ran") return;
     const outcomes = result.summary.cases.filter((item) => item.status === "judged");

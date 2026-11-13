@@ -39,7 +39,7 @@ const REGISTRY_ROWS: CheckKindInfo[] = [
   { id: "benchmark", words: "Benchmark", parts: ["measures"], countsTowardProof: false },
   { id: "visual", words: "Visual check", parts: ["pairs"], countsTowardProof: false },
   // TE-F10: old vs new prompt answers on the same inputs, judged by an independent judge. It shows a difference; it never proves that a change works.
-  { id: "side_by_side", words: "Old vs new prompt", parts: ["pairs"], countsTowardProof: false },
+  { id: "prompt_side_by_side", words: "Old vs new prompt", parts: ["pairs"], countsTowardProof: false },
   { id: "other", words: "Check", parts: ALL_PARTS, countsTowardProof: false },
 ];
 export const CHECK_KIND_REGISTRY: readonly CheckKindInfo[] = Object.freeze(REGISTRY_ROWS.map((info) => Object.freeze(info)));

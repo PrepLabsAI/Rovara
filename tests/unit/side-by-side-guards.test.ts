@@ -46,7 +46,13 @@ describe("no callers yet", () => {
 describe("the modules use no effectful API", () => {
   it.each(FILES)("%s has no clock, randomness, file, process, child process, network or dynamic import", (file) => {
     const code = read(file).replace(/\/\/.*$/gmu, "").replace(/\/\*[\s\S]*?\*\//gu, "");
-    expect(code).not.toMatch(/node:(?:fs|http|https|net|child_process|dns|tls|os)|\bprocess\.|\bDate\b|\bMath\.random|\bperformance\b|\beval\(|new Function|\bimport\(|\bfetch\(|\bsetTimeout\b|crypto\.randomUUID|randomBytes/u);
+    expect(code).not.toMatch(/node:(?:fs|http|https|net|child_process|dns|tls|os)|\bprocess\.|\bDate\b|\bMath\.random|\bperformance\b|\beval\(|new Function|\bimport\(|\bfetch\(|\bsetTimeout\b|crypto\.randomUUID/u);
+    // The one randomness the lane has: the run-scoped default of the A/B order seed, in the runner only.
+    if (file !== "side-by-side-run") expect(code).not.toMatch(/randomBytes/u);
+  });
+  it("draws randomness in exactly one place: the default A/B order seed of a run", () => {
+    expect([...read("side-by-side-run").matchAll(/randomBytes\(/gu)]).toHaveLength(1);
+    expect(read("side-by-side-run")).toMatch(/input\.orderSeed \?\? randomBytes\(16\)/u);
   });
   it("seeds its choices from a hash only", () => {
     expect(read("side-by-side")).toMatch(/createHash\("sha256"\)/u);

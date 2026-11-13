@@ -42,8 +42,8 @@ export function source(company: IsolationCompany, count: number, options: { pref
 
 /** The judge's pin: made before the task, from a different family than the product (Gemini). */
 export const PIN: SideBySideJudgePin = { model: "claude-judge", version: "2026-10-01", family: "claude", scoringPromptSha256: sideBySideScoringPromptSha256(), pinnedAt: "2026-11-01T00:00:00Z" };
-/** What every run is also given: when the task started and the model family of the product under test. */
-export const RUN_DEFAULTS = { taskStartedAt: "2026-11-13T09:00:00Z", productModelFamily: "gemini" } as const;
+/** What every run is also given: when the task started, the model families of the product under test and of the coding model, and a fixed order seed (a real run leaves it out and gets a random one). */
+export const RUN_DEFAULTS = { taskStartedAt: "2026-11-13T09:00:00Z", productModelFamily: "gemini", codingModelFamily: "openai", orderSeed: "order-seed-fixed" } as const;
 
 /** A judge for a company that records exactly what it was handed (a deep copy) and answers with `answer`. */
 export function recordingJudge(company: IsolationCompany, answer: (call: SideBySideJudgeCall, index: number) => string | { text: string; costMicros: number }, pin: SideBySideJudgePin = PIN): SideBySideJudge & { readonly received: unknown[] } {

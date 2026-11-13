@@ -5,7 +5,7 @@
 import { ArtifactRefSchema, type ArtifactRef } from "./evidence.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { redactText } from "./redaction.js";
-import { judgeIdentityWords } from "./side-by-side-judge-pin.js";
+import { judgeIdentityWords, verifySideBySideJudgeIdentity } from "./side-by-side-judge-pin.js";
 import { SIDE_BY_SIDE_CHECK_KIND, SIDE_BY_SIDE_EXAMPLES_MAX, type SideBySideCaseOutcome, type SideBySideSummary } from "./side-by-side.js";
 
 export type SideBySideMode = "public" | "full";
@@ -25,6 +25,7 @@ function headline(summary: SideBySideSummary): string {
   if (whole(counts.notRun) > 0) sentences.push(`${String(whole(counts.notRun))} not run.`);
   if (whole(counts.callFailed) > 0) sentences.push(`${String(whole(counts.callFailed))} failed to answer.`);
   if (whole(counts.judgeNotRun) > 0) sentences.push(`The judge did not run for ${String(whole(counts.judgeNotRun))}.`);
+  if (whole(counts.possiblySteering) > 0) sentences.push(`${String(whole(counts.possiblySteering))} possibly steering the judge.`);
   if (whole(counts.refused) > 0) sentences.push(`${String(whole(counts.refused))} skipped because the two sides did not match.`);
   return sentences.join(" ");
 }
@@ -53,7 +54,7 @@ export function renderSideBySide(summary: SideBySideSummary, options: { readonly
   const examples = examplesOf(summary);
   if (examples.length > 0) lines.push("Examples (answers cut and made inert):");
   examples.forEach((item, index) => {
-    lines.push(`- Example ${String(index + 1)} (judge: ${item.status === "judged" ? item.verdict : "not run"})`);
+    lines.push(`- Example ${String(index + 1)} (judge: ${item.status === "judged" ? item.verdict : "not run"}${item.possiblySteering === true ? "; possibly steering the judge" : ""})`);
     lines.push(`  - Old: ${inertEvidenceText(item.oldText, ANSWER_SHOWN_CHARS)}`);
     lines.push(`  - New: ${inertEvidenceText(item.newText, ANSWER_SHOWN_CHARS)}`);
   });
@@ -98,5 +99,6 @@ export function sideBySidePairsPart(summary: SideBySideSummary, options: { reado
     });
   }
   const judge = summary.judge;
-  return { kind: SIDE_BY_SIDE_CHECK_KIND, label: `${SIDE_BY_SIDE_CHECK_LABEL} (judge: ${judge.model} ${judge.version}, ${judge.independence === "different_family" ? "different model family" : "spot-checked against human labels"})`, pairs };
+  const verified = verifySideBySideJudgeIdentity(judge);
+  return { kind: SIDE_BY_SIDE_CHECK_KIND, label: verified ? `${SIDE_BY_SIDE_CHECK_LABEL} (judge: ${inertEvidenceText(judge.model, 128)} ${inertEvidenceText(judge.version, 128)}, ${judge.independence === "different_family" ? "different model family" : "spot-checked against human labels"})` : `${SIDE_BY_SIDE_CHECK_LABEL} (judge identity could not be verified)`, pairs };
 }

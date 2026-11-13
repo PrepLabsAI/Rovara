@@ -7,7 +7,7 @@ import { v2Pack } from "../support/evidence-v2-fixtures.js";
 import { PIN, RUN_DEFAULTS, canary, COMPANY_A, recordingJudge, reportNeeded, sbsWorld, source, verdictText } from "../support/side-by-side-world.js";
 
 const policy = { preset: "careful", aiPilot: false, optIn: false } as const;
-const JUDGE_WORDS = "Judge: claude-judge 2026-10-01 (claude family), pinned before the task, from a different model family than the product and coding models.";
+const JUDGE_WORDS = "Judge: claude-judge 2026-10-01 (anthropic family), pinned before the task, from a different model family than the product and coding models.";
 const ZERO = { calls: 0, costMicros: 0 };
 
 function judged(caseId: string, verdict: "same" | "better" | "worse" | "unclear", oldText: string, newText: string): SideBySideCaseOutcome {
@@ -17,11 +17,11 @@ function summaryOf(cases: SideBySideCaseOutcome[], extra: Partial<SideBySideSumm
   const count = (verdict: string) => cases.filter((item) => item.status === "judged" && item.verdict === verdict).length;
   return {
     schemaVersion: 1,
-    evidence: { kind: "side_by_side", countsTowardProof: false },
-    judge: { ...PIN, independence: "different_family" },
+    evidence: { kind: "prompt_side_by_side", countsTowardProof: false },
+    judge: { ...PIN, family: "anthropic", independence: "different_family", productFamily: "google", codingFamily: "openai" },
     counts: {
       planned: cases.length, judged: cases.filter((item) => item.status === "judged").length, same: count("same"), better: count("better"), worse: count("worse"), unclear: count("unclear"),
-      notRun: cases.filter((item) => item.status === "not_run").length, callFailed: cases.filter((item) => item.status === "call_failed").length, judgeNotRun: cases.filter((item) => item.status === "judge_not_run").length, refused: 0, ...extra,
+      notRun: cases.filter((item) => item.status === "not_run").length, callFailed: cases.filter((item) => item.status === "call_failed").length, judgeNotRun: cases.filter((item) => item.status === "judge_not_run").length, refused: 0, possiblySteering: 0, ...extra,
     },
     cases,
     meters: { product: ZERO, rovara: ZERO },
@@ -130,7 +130,7 @@ describe("the evidence seam", () => {
       stored.push(`${pairId}/${side}/${text}`);
       return ref("log_txt", side === "old" ? "a" : "b");
     });
-    expect(part.kind).toBe("side_by_side");
+    expect(part.kind).toBe("prompt_side_by_side");
     expect(part.pairs).toHaveLength(3);
     expect(part.pairs.map((pair) => pair.id)).toEqual(["pair-1", "pair-2", "pair-3"]);
     expect(stored.some((item) => item.includes("old five"))).toBe(true);
@@ -151,10 +151,10 @@ describe("the evidence seam", () => {
     expect(EvidencePackV2Schema.safeParse(withCheck).success).toBe(true);
     const withTests = { ...pack, checks: [...pack.checks, { ...check, tests: { total: 1, passed: 1, failed: 0, skipped: 0, errored: 0, names: [], newTests: [] } }] };
     expect(EvidencePackV2Schema.safeParse(withTests).success).toBe(false);
-    expect(partsOutsideKind("side_by_side", ["pairs", "measures"])).toEqual(["measures"]);
+    expect(partsOutsideKind("prompt_side_by_side", ["pairs", "measures"])).toEqual(["measures"]);
   });
   it("leaves old evidence alone: v1's kind list is unchanged and does not hold the new kind", () => {
     expect([...CHECK_KINDS]).toEqual(["test", "lint", "typecheck", "security", "migration", "build", "smoke", "other"]);
-    expect([...CHECK_KINDS]).not.toContain("side_by_side");
+    expect([...CHECK_KINDS]).not.toContain("prompt_side_by_side");
   });
 });
