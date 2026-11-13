@@ -22,18 +22,20 @@ export interface CheckKindInfo {
 }
 
 const ALL_PARTS: readonly CheckPart[] = CHECK_PARTS;
+/** The parts a v1 pack's check can carry. The v1 builder attaches tests, coverage, findings and migrations by what the check's report held, whatever its kind (core/proof/evidence-pack.ts), so every v1 kind allows every one. */
+const V1_PARTS: readonly CheckPart[] = ["tests", "coverage", "findings", "migrations"];
 
 /** Replaces: the v1 pack's closed kind list (`CHECK_KINDS` in evidence.ts stays, and every one of its kinds is a row here). */
 const REGISTRY_ROWS: CheckKindInfo[] = [
-  { id: "test", words: "Tests", parts: ["tests", "coverage", "measures"], countsTowardProof: true },
+  { id: "test", words: "Tests", parts: [...V1_PARTS, "measures"], countsTowardProof: true },
   { id: "e2e", words: "End-to-end tests", parts: ["tests", "pairs", "measures"], countsTowardProof: true },
   { id: "eval", words: "Eval", parts: ["tests", "measures"], countsTowardProof: true },
-  { id: "lint", words: "Lint", parts: ["findings"], countsTowardProof: false },
-  { id: "typecheck", words: "Type check", parts: ["findings"], countsTowardProof: false },
-  { id: "security", words: "Security scan", parts: ["findings"], countsTowardProof: false },
-  { id: "migration", words: "Migrations", parts: ["migrations"], countsTowardProof: false },
-  { id: "build", words: "Build", parts: [], countsTowardProof: false },
-  { id: "smoke", words: "Smoke test", parts: ["tests", "pairs"], countsTowardProof: false },
+  { id: "lint", words: "Lint", parts: V1_PARTS, countsTowardProof: false },
+  { id: "typecheck", words: "Type check", parts: V1_PARTS, countsTowardProof: false },
+  { id: "security", words: "Security scan", parts: V1_PARTS, countsTowardProof: false },
+  { id: "migration", words: "Migrations", parts: V1_PARTS, countsTowardProof: false },
+  { id: "build", words: "Build", parts: V1_PARTS, countsTowardProof: false },
+  { id: "smoke", words: "Smoke test", parts: [...V1_PARTS, "pairs"], countsTowardProof: false },
   { id: "benchmark", words: "Benchmark", parts: ["measures"], countsTowardProof: false },
   { id: "visual", words: "Visual check", parts: ["pairs"], countsTowardProof: false },
   { id: "other", words: "Check", parts: ALL_PARTS, countsTowardProof: false },

@@ -25,9 +25,14 @@ describe("the registry", () => {
 
   it("says which parts a kind may carry", () => {
     expect(partsOutsideKind("lint", ["findings"])).toEqual([]);
-    expect(partsOutsideKind("lint", ["tests", "findings", "measures"])).toEqual(["tests", "measures"]);
+    expect(partsOutsideKind("lint", ["tests", "coverage", "findings", "migrations", "measures", "pairs"])).toEqual(["measures", "pairs"]);
+    expect(partsOutsideKind("benchmark", ["tests"])).toEqual(["tests"]);
     expect(partsOutsideKind("benchmark", ["measures"])).toEqual([]);
     expect(partsOutsideKind("other", [...CHECK_PARTS])).toEqual([]);
+  });
+
+  it("lets every v1 kind carry every v1 part, because the v1 builder attaches them by what a check's report held, whatever its kind", () => {
+    for (const kind of CHECK_KINDS) expect(partsOutsideKind(kind, ["tests", "coverage", "findings", "migrations"]), kind).toEqual([]);
   });
 
   it("does not know an unregistered kind, and gives it generic words rather than failing", () => {

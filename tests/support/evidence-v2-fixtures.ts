@@ -39,12 +39,12 @@ export function v2Pack(overrides: Record<string, unknown> = {}): EvidencePackV2 
     result: "verified",
     checks: [
       {
-        id: "unit", kind: "test", label: "pytest -q", command: "pytest -q", stage: "sealed", before: "failed", after: "passed", class: "fixed", producer: "rovara", durationMs: 4_000, exitCode: 0, attribution: "per_test",
+        id: "unit", kind: "test", label: "pytest -q", command: "pytest -q", stage: "sealed", before: "failed", after: "passed", class: "fixed", runBy: "rovara", durationMs: 4_000, exitCode: 0, attribution: "per_test",
         tests: { total: 3, passed: 3, failed: 0, skipped: 0, errored: 0, names: [{ name: "tests/a.py::one", status: "passed" }], newTests: ["tests/a.py::one"] },
         coverage: { linesChanged: 10, linesCovered: 9, files: [{ path: "src/a.py", uncovered: [4] }] },
       },
       {
-        id: "bench", kind: "benchmark", label: "render time", stage: "confirm", before: "passed", after: "passed", class: "passing", producer: "rovara", durationMs: 9_000,
+        id: "bench", kind: "benchmark", label: "render time", stage: "confirm", before: "passed", after: "passed", class: "passing", runBy: "rovara", durationMs: 9_000,
         measures: [{ name: "p95", unit: "ms", base: 120, head: 118, spread: 4, direction: "down_good" }],
       },
     ],
