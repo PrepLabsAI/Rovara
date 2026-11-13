@@ -137,15 +137,15 @@ function cutOff(context: FailureContext): ModelAnswer | undefined {
   const reply: ModelReply = { text: FAILURE_PACK_TEXT, finish: "stop", usage: { inputTokens: 12, outputTokens: 36 } };
   const full = renderModelReply(reply, renderContext(context));
   if (full === undefined) return undefined;
-  if (context.stream === "sse") return { status: 200, headers: { "content-type": SSE_CONTENT_TYPE }, body: cutSse(full.body, context.lineEnding) };
+  if (context.stream === "sse") return { status: 200, truncated: true, headers: { "content-type": SSE_CONTENT_TYPE }, body: cutSse(full.body, context.lineEnding) };
   if (context.stream === "json_array") {
     // `[{...},\n{...},\n{...}]`: keep the first half of the elements and an unclosed piece of the next; the closing `]` never comes.
     const parts = full.body.slice(1, -1).split(",\n");
     const keep = Math.floor(parts.length / 2);
     const next = parts[keep] ?? "";
-    return { status: 200, headers: { "content-type": JSON_CONTENT_TYPE }, body: `[${[...parts.slice(0, keep), next.slice(0, Math.max(1, Math.floor(next.length / 2)))].join(",\n")}` };
+    return { status: 200, truncated: true, headers: { "content-type": JSON_CONTENT_TYPE }, body: `[${[...parts.slice(0, keep), next.slice(0, Math.max(1, Math.floor(next.length / 2)))].join(",\n")}` };
   }
-  return { status: 200, headers: { "content-type": JSON_CONTENT_TYPE }, body: full.body.slice(0, Math.max(1, Math.floor(full.body.length / 2))) };
+  return { status: 200, truncated: true, headers: { "content-type": JSON_CONTENT_TYPE }, body: full.body.slice(0, Math.max(1, Math.floor(full.body.length / 2))) };
 }
 
 function tokenLimit(spec: FailureSpec, context: FailureContext): ModelAnswer {

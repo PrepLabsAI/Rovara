@@ -22,6 +22,8 @@ export interface ModelAnswer {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: string;
+  /** Failure-pack dropped connection: send these partial bytes without completing HTTP framing. */
+  readonly truncated?: true;
 }
 
 export interface RenderContext {
