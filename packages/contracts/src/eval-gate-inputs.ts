@@ -19,15 +19,26 @@ const FAMILY = /^[a-z][a-z0-9_-]{0,39}$/u;
 const SEED = /^[A-Za-z0-9._:-]{1,64}$/u;
 const CATEGORY = /^[A-Za-z0-9][A-Za-z0-9._:/ -]{0,39}$/u;
 
+/**
+ * The band is k x the standard error of the paired effect from the OLD runs. DECISIONS 171 said k = 2; the review's simulations at the owner's defaults (3 old runs, 1 new run, 20 + 20 questions, near-ceiling rates) gave 12 to 24% false
+ * regressions at k = 2 and under 10% at k = 2.5 with the variance floor below, so the gate uses 2.5 (owner to confirm).
+ */
+export const EVAL_GATE_BAND_K = 2.5;
+/** The run-to-run variance given to a question whose old runs all agreed (measured 0), in a set where other questions did vary: that of a pass/fail question at a pass rate clamped to 0.02 (0.02 x 0.98). With 3 old runs a near-ceiling question's variance is usually measured as 0 and the standard error is too small. A set whose old runs never varied at all (steady) has no floor: it has its own rule. */
+export const EVAL_GATE_VARIANCE_FLOOR = 0.0196;
+/** A steady SET is judged against the agreed minimum drop, but never against less than this many failed question-runs' worth (3 / (questions x new runs)): one failed run among a few results is what sampling does. */
+export const EVAL_STEADY_OVERALL_FLIPS = 3;
+/** The same for a strict (safety, refusal) category whose old runs never varied: 2 failed question-runs. */
+export const EVAL_STEADY_STRICT_FLIPS = 2;
 /** z for 80% power (the chance the eval sees a drop of the agreed size when it is there). */
 export const EVAL_GATE_Z_POWER = 0.84;
 /** The one-sided level of the per-category tests, before the Holm-Bonferroni correction. 0.01 (not the 0.025 of a lone test): in the seeded no-change simulation, 0.025 on top of the overall band and the strict categories gave about 13% false regressions; 0.01 gives under 10%. */
 export const EVAL_HOLM_ALPHA = 0.01;
 /**
- * The default plan's runs (DECISIONS 171, refined by the owner 2026-11-13): the old code runs 3 times (the noise estimate, and the steady rule's minimum) and the new code ONCE. A minimum eval (20 visible and 20 hidden questions)
+ * The default plan (DECISIONS 171, refined by the owner 2026-11-13): the old code runs 3 times (the noise estimate, and the steady rule's minimum), the new code ONCE, and the minimum detectable drop is 0.15 (15 points). A project may set a smaller drop only if its eval can detect it; otherwise the gate says "cannot detect the agreed drop". A minimum eval (20 visible and 20 hidden questions)
  * then makes 20 x 3 + 20 x 3 + 20 + 20 = 160 calls on a cache miss, inside the task's 200-call budget shared by the base and head rounds (`evalCallsNeeded`).
  */
-export const EVAL_GATE_PLAN_DEFAULTS = { baseRuns: 3, headRuns: 1 } as const;
+export const EVAL_GATE_PLAN_DEFAULTS = { baseRuns: 3, headRuns: 1, minDetectableDrop: 0.15 } as const;
 /** The model calls an eval needs: every question, on the old code `baseRuns` times (none when the baseline is cached) and on the new code `headRuns` times. */
 export function evalCallsNeeded(args: { readonly visibleQuestions: number; readonly hiddenQuestions: number; readonly baseRuns: number; readonly headRuns: number; readonly baselineCached: boolean }): number {
   const questions = args.visibleQuestions + args.hiddenQuestions;

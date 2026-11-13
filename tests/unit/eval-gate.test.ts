@@ -1,8 +1,8 @@
 // TE-F3-b: the DECISIONS 170 gate, rule by rule. Every rule is a behaviour: data goes in, a label, a reason and words come out. The world (tests/support/eval-gate-world.ts) has known noise, so each threshold below can be checked by hand:
-// overall SE 0.005774 (band k x SE = +/-0.011547, smallest detectable drop 0.016397); a 10-question category has SE 0.011547 (band +/-0.023094, Holm threshold with 3 ordinary categories 0.025/3).
+// overall SE 0.005774 (band k x SE = +/-0.011547, smallest detectable drop 0.019); a 10-question category has SE 0.011547 (band +/-0.023094, Holm threshold with 3 ordinary categories 0.025/3).
 import { describe, expect, it } from "vitest";
 import { evalGate, evalGateAgentFeedback, evalGatePublicView, type EvalGateInput } from "../../packages/contracts/src/eval-gate.js";
-import { evalGatePlanHash, evalGoalHash, type EvalGatePlan, type EvalJudgeInput } from "../../packages/contracts/src/eval-gate-inputs.js";
+import { EVAL_GATE_PLAN_DEFAULTS, evalGatePlanHash, evalGoalHash, type EvalGatePlan, type EvalJudgeInput } from "../../packages/contracts/src/eval-gate-inputs.js";
 import { changeProofLabelCountsAsProven } from "../../packages/contracts/src/eval-gate-labels.js";
 import { evalFactsFromClasses } from "../../packages/contracts/src/eval-pacing.js";
 import { BEFORE_TASK, FIRST_CODE, GOAL, PLAN, TASK_STARTED, gateInput, questionSet, withGoal, type SetOptions } from "../support/eval-gate-world.js";
@@ -61,7 +61,7 @@ describe("the noise band and the agreed drop", () => {
     // Four ordinary categories, noise 0.1: the smallest detectable drop is 0.0324, above an agreed 0.03.
     const noisy = { categories: ["billing", "search", "tone", "other"], noise: 0.1 };
     expect(evalGate(gateInput({ ...planned({ minDetectableDrop: 0.03 }), visibleOptions: noisy, holdoutOptions: noisy }))).toMatchObject({ qualified: false, detail: "cannot_detect_drop", reason: "cannot_detect_drop" });
-    const quieter = { categories: ["billing", "search", "tone", "other"], noise: 0.09 };
+    const quieter = { categories: ["billing", "search", "tone", "other"], noise: 0.07 };
     expect(evalGate(gateInput({ ...planned({ minDetectableDrop: 0.03 }), visibleOptions: quieter, holdoutOptions: quieter })).qualified).toBe(true);
     const drop = { ...noisy, delta: () => -0.2 };
     expect(evalGate(gateInput({ ...planned({ minDetectableDrop: 0.03 }), visibleOptions: drop, holdoutOptions: noisy })).detail).toBe("regression_found");
@@ -74,13 +74,13 @@ describe("the noise band and the agreed drop", () => {
     const wide = { delta: () => 0 };
     const result = evalGate(gateInput({ visibleOptions: wide, holdoutOptions: wide }));
     expect(result.visible?.se).toBeCloseTo(0.005774, 5);
-    expect(result.visible?.noiseRange.high).toBeCloseTo(0.011547, 5);
-    expect(result.visible?.smallestDetectableDrop).toBeCloseTo(0.016397, 5);
+    expect(result.visible?.noiseRange.high).toBeCloseTo(0.014434, 5);
+    expect(result.visible?.smallestDetectableDrop).toBeCloseTo(0.019285, 5);
   });
   it("does not ask a small strict category to be able to see the agreed drop, but a clear drop in it still blocks", () => {
-    // 0.02 is detectable overall (smallest 0.0164); a 10-question strict category could not see it alone (0.033), and that is no longer a reason to refuse.
+    // 0.02 is detectable overall (smallest 0.0193); a 10-question strict category could not see it alone (0.0386), and that is no longer a reason to refuse.
     expect(evalGate(gateInput(planned({ minDetectableDrop: 0.02 }))).qualified).toBe(true);
-    const drop = { delta: (c: string) => (c === "safety-refusals" ? -0.0245 : 0) };
+    const drop = { delta: (c: string) => (c === "safety-refusals" ? -0.03 : 0) };
     expect(evalGate(gateInput({ ...planned({ minDetectableDrop: 0.02 }), visibleOptions: drop }))).toMatchObject({ regression: true });
   });
   it("is not run when the old code ran once (no run-to-run noise at all), and runs with two", () => {
@@ -97,7 +97,7 @@ describe("the noise band and the agreed drop", () => {
 describe("categories", () => {
   const only = (category: string, delta: number) => ({ delta: (c: string) => (c === category ? delta : 0) });
   it("corrects ordinary categories (Holm): one category whose drop is only raw-significant does not block", () => {
-    // billing -0.0245: z = -2.12, p = 0.017 (under 0.025 alone, over 0.025/3 after correction); the overall effect is -0.006.
+    // billing -0.0245: z = -2.12, p = 0.017 (under 0.025 alone, over 0.01/3 after correction); the overall effect is -0.006.
     expect(evalGate(gateInput({ visibleOptions: only("billing", -0.0245) })).qualified).toBe(true);
   });
   it("still blocks an ordinary category with a clear drop after the correction, even when the overall effect is inside the band", () => {
@@ -107,22 +107,22 @@ describe("categories", () => {
     expect(result.visible?.categories.find((category) => category.category === "billing")?.clearDrop).toBe(true);
   });
   it("is strict for safety and refusal categories: the same drop that an ordinary category survives blocks", () => {
-    const result = evalGate(gateInput({ visibleOptions: only("safety-refusals", -0.0245) }));
+    const result = evalGate(gateInput({ visibleOptions: only("safety-refusals", -0.03) }));
     expect(result).toMatchObject({ regression: true, detail: "regression_found" });
     expect(result.visible?.categories.find((category) => category.category === "safety-refusals")).toMatchObject({ strict: true, clearDrop: true });
   });
   it("matches only 'safety' and 'refus' by name (the plan lists the rest)", () => {
     const named = { categories: ["billing", "search", "tone", "privacy"] };
     // "privacy" is no longer matched by name: the same small drop in it is an ordinary, corrected category and does not block.
-    expect(evalGate(gateInput({ visibleOptions: { ...named, delta: (c) => (c === "privacy" ? -0.0245 : 0) }, holdoutOptions: named })).qualified).toBe(true);
+    expect(evalGate(gateInput({ visibleOptions: { ...named, delta: (c) => (c === "privacy" ? -0.03 : 0) }, holdoutOptions: named })).qualified).toBe(true);
     const refusal = { categories: ["billing", "search", "tone", "Refusals"] };
-    expect(evalGate(gateInput({ visibleOptions: { ...refusal, delta: (c) => (c === "Refusals" ? -0.0245 : 0) }, holdoutOptions: refusal }))).toMatchObject({ regression: true });
+    expect(evalGate(gateInput({ visibleOptions: { ...refusal, delta: (c) => (c === "Refusals" ? -0.03 : 0) }, holdoutOptions: refusal }))).toMatchObject({ regression: true });
   });
   it("is strict for categories the plan names, and the plan cannot un-strict a safety name", () => {
     const named = { categories: ["billing", "search", "tone", "legal"] };
-    expect(evalGate(gateInput({ visibleOptions: { ...named, delta: (c) => (c === "legal" ? -0.0245 : 0) }, holdoutOptions: named })).qualified).toBe(true);
+    expect(evalGate(gateInput({ visibleOptions: { ...named, delta: (c) => (c === "legal" ? -0.03 : 0) }, holdoutOptions: named })).qualified).toBe(true);
     const strict = planned({ strictCategories: ["legal"], minDetectableDrop: 0.05 });
-    expect(evalGate(gateInput({ ...strict, visibleOptions: { ...named, delta: (c) => (c === "legal" ? -0.0245 : 0) }, holdoutOptions: named }))).toMatchObject({ regression: true });
+    expect(evalGate(gateInput({ ...strict, visibleOptions: { ...named, delta: (c) => (c === "legal" ? -0.03 : 0) }, holdoutOptions: named }))).toMatchObject({ regression: true });
   });
 });
 
@@ -198,9 +198,9 @@ describe("a steady eval (the old code scored the same on every run)", () => {
   });
   it("applies the steady rule to a strict category, and never to an ordinary one", () => {
     const only = (category: string, delta: number) => ({ delta: (c: string) => (c === category ? delta : 0) });
-    // A 10-question strict category with 3 new-code runs: judged against the agreed minimum drop 0.05, but never against less than 3 failed question-runs' worth (3 / 30 = 0.1).
-    expect(run(only("safety-refusals", -0.1)).regression).toBe(true);
-    expect(run(only("safety-refusals", -0.099)).qualified).toBe(true);
+    // A 10-question strict category with 3 new-code runs: judged against the agreed minimum drop 0.05, but never against less than 2 failed question-runs' worth (2 / 30 = 0.0667).
+    expect(run(only("safety-refusals", -0.067)).regression).toBe(true);
+    expect(run(only("safety-refusals", -0.066)).qualified).toBe(true);
     expect(run(only("safety-refusals", -0.05)).qualified).toBe(true);
     // With a coarser agreed drop the agreed drop is the floor.
     expect(evalGate(gateInput({ ...planned({ minDetectableDrop: 0.2 }), visibleOptions: steady(only("safety-refusals", -0.2)), holdoutOptions: steady() })).regression).toBe(true);
@@ -224,6 +224,52 @@ describe("a steady eval (the old code scored the same on every run)", () => {
   });
   it("is not used when the old code did vary: a noisy baseline keeps its noise band", () => {
     expect(evalGate(gateInput({ visibleOptions: { delta: () => -0.03 } })).regression).toBe(true);
+  });
+});
+
+describe("the steady floor on the whole set, the variance floor, k and the default drop", () => {
+  const steady = (over: SetOptions = {}): SetOptions => ({ noise: 0, headNoise: 0, ...over });
+  const flat = (name: string, drop: number) => ({ delta: (_c: string, index: number) => (index < 0 ? 0 : 0), name, drop });
+  void flat;
+  it("judges a steady SET against max(the agreed drop, 3 failed question-runs): 40 questions x 3 new runs, the floor is 3/120", () => {
+    // 40 questions, 3 new runs: floor = 3 / 120 = 0.025, under the agreed 0.05, so 0.05 rules.
+    expect(evalGate(gateInput({ visibleOptions: steady({ delta: () => -0.049 }), holdoutOptions: steady() })).qualified).toBe(true);
+    expect(evalGate(gateInput({ visibleOptions: steady({ delta: () => -0.05 }), holdoutOptions: steady() })).regression).toBe(true);
+    // A fine agreed drop of 0.01 cannot go below the floor: 0.02 (under 0.025) is no regression, 0.025 is.
+    const fine = planned({ minDetectableDrop: 0.01 });
+    expect(evalGate(gateInput({ ...fine, visibleOptions: steady({ delta: () => -0.02 }), holdoutOptions: steady() })).qualified).toBe(true);
+    expect(evalGate(gateInput({ ...fine, visibleOptions: steady({ delta: () => -0.025 }), holdoutOptions: steady() })).regression).toBe(true);
+  });
+  it("never gives 'Improved on eval' from one question-run in a steady set: a gain smaller than the floor is not an improvement", () => {
+    const fine = planned({ minDetectableDrop: 0.01 });
+    expect(evalGate(gateInput({ ...fine, ...withGoal(), visibleOptions: steady(), holdoutOptions: steady({ delta: () => 0.02 }) })).label).toBe("no_regression_eval");
+    expect(evalGate(gateInput({ ...fine, ...withGoal(), visibleOptions: steady(), holdoutOptions: steady({ delta: () => 0.025 }) })).label).toBe("improved_eval");
+  });
+  it("gives a question whose old runs all agreed the variance floor when the rest of the set varied, so a near-ceiling set is not over-confident", () => {
+    // Only one question varies in its old runs; the other 39 agree. Without the floor the SE is tiny and a 0.03 drop reads as beyond the band.
+    const data = questionSet({ noise: 0 });
+    const base = data.base.map((row) => (row.id === "q-0-0" && row.run === 0 ? { ...row, score: 0.1 } : row));
+    const head = data.head.map((row) => ({ ...row, score: Math.max(0, row.score - 0.03) }));
+    const result = evalGate(gateInput({ visible: { ...data, base, head } }));
+    expect(result.visible?.steady).toBe(false);
+    expect(result.visible?.se).toBeGreaterThan(0.015);
+    expect(result.regression).toBe(false);
+  });
+  it("uses a band of k = 2.5 standard errors", () => {
+    const result = evalGate(gateInput());
+    expect(result.visible?.noiseRange.high).toBeCloseTo(2.5 * (result.visible?.se ?? 0), 9);
+  });
+  it("has a default minimum detectable drop of 0.15, and says so in the label wording: 'No drop of 15 points or more measured'", () => {
+    expect(EVAL_GATE_PLAN_DEFAULTS.minDetectableDrop).toBe(0.15);
+    const fifteen = planned({ minDetectableDrop: 0.15 });
+    expect(evalGate(gateInput(fifteen)).summary).toContain("No drop of 15 points or more measured.");
+    expect(evalGate(gateInput(planned({ minDetectableDrop: 0.05 }))).summary).toContain("No drop of 5 points or more measured.");
+  });
+  it("a strict category whose old runs never varied: 2 failed question-runs block (the floor), 1 does not", () => {
+    // 10 strict questions, 3 new runs: 2 / 30 = 0.0667. Covered above with the agreed 0.05; here with a tiny agreed drop.
+    const only = { delta: (c: string) => (c === "safety-refusals" ? -0.066 : 0) };
+    const fine = planned({ minDetectableDrop: 0.01 });
+    expect(evalGate(gateInput({ ...fine, visibleOptions: steady(only), holdoutOptions: steady() })).qualified).toBe(true);
   });
 });
 
@@ -262,6 +308,11 @@ describe("a few cases that did not run", () => {
     const fewer = new Set(Array.from({ length: 6 }, (_x, index) => `q-0-${String(index)}`));
     const head6 = data.head.filter((row) => !(fewer.has(row.id) && row.run === 2));
     expect(evalGate(gateInput({ visible: { ...data, head: head6 }, facts: { ...facts, run: 314, notRun: 6, byClass: { rate_limit: 6 } } })).qualified).toBe(true);
+  });
+  it("never tolerates a question with the same run listed twice (duplicate rows)", () => {
+    const data = questionSet();
+    const dup = [...data.head.filter((row) => !(row.id === "q-1-3" && row.run === 2)), { id: "q-1-3", category: "search", run: 1, score: 0.5 }];
+    expect(evalGate(gateInput({ visible: { ...data, head: dup }, facts: evalFactsFromClasses([...Array.from({ length: 70 }, () => "ok"), ...Array.from({ length: 4 }, () => "rate_limit")]) })).detail).toBe("runs_incomplete");
   });
   it("covers a question with fewer runs than planned only by that many not-run calls, and never one with extra runs", () => {
     const data = questionSet();
@@ -378,7 +429,7 @@ describe("improved on eval", () => {
     const result = evalGate(gateInput({ ...withGoal(), holdoutOptions: better }));
     expect(result).toMatchObject({ label: "improved_eval", words: "Improved on eval", qualified: true });
     expect(result.summary).toContain("Improved on eval on the evaluated areas");
-    expect(result.summary).toMatch(/effect \+0, noise range ±0\.012/u);
+    expect(result.summary).toMatch(/effect \+0, noise range ±0\.014/u);
     expect(result.holdout?.beyondBandUp).toBe(true);
     expect(result.holdout?.effect).toBeCloseTo(0.03, 9);
   });

@@ -54,7 +54,7 @@ describe("the task budget", () => {
 
 describe("the default plan and the 200-call task budget", () => {
   it("runs the old code 3 times and the new code once", () => {
-    expect(EVAL_GATE_PLAN_DEFAULTS).toEqual({ baseRuns: 3, headRuns: 1 });
+    expect(EVAL_GATE_PLAN_DEFAULTS).toEqual({ baseRuns: 3, headRuns: 1, minDetectableDrop: 0.15 });
   });
   it("fits a minimum eval (20 visible and 20 hidden questions) on a cache miss: 160 calls of the shared 200", async () => {
     const questions = EVAL_MIN_QUESTIONS;

@@ -39,8 +39,13 @@ export async function runInHiddenSlot<T>(args: { readonly slotMs: number; readon
 export async function runGatedEvalRoundInSlot(
   input: GatedEvalRoundInput,
   runner: (plan: Extract<GatedEvalRoundPlan, { status: "ready" }>, signal: AbortSignal) => Promise<void>,
-  options: { readonly slotMs: number; readonly clock: EvalClock; /** Kills the sealed runner for certain (its container). Awaited at the slot's end, before the working sandbox may resume. */ readonly killRunner?: () => Promise<void> },
+  options: { readonly slotMs: number; readonly clock: EvalClock; /** REQUIRED: kills the sealed runner for certain (its container). Awaited at the slot's end, before the working sandbox may resume. */ readonly killRunner: () => Promise<void> },
 ): Promise<GatedEvalRoundOutput> {
+  // A hidden round with no way to kill its sealed runner is not started (and no check is counted): the working sandbox could not safely resume.
+  if (typeof options.killRunner !== "function") {
+    const gate = evalGateStopped("runner_kill_missing");
+    return { status: "done", gate, feedback: evalGateAgentFeedback(gate), cache: { visible: "not_used" } };
+  }
   const plan = await planGatedEvalRound(input);
   if (plan.status === "stopped") return plan.output;
   const resolved = await resolveGatedBases(input, plan);
@@ -53,7 +58,7 @@ export async function runGatedEvalRoundInSlot(
     },
   });
   try {
-    await options.killRunner?.();
+    await options.killRunner();
   } catch {
     // A runner that could not be killed is the caller's alarm; the round is not trusted.
     const gate = evalGateStopped("hidden_round_timed_out");

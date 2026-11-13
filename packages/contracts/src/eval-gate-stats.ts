@@ -4,7 +4,7 @@
 //   - NOISE: from REPEATED OLD-CODE RUNS only. Question q's run-to-run variance s2_q comes from the old code's runs (n-1 denominator). The standard error of the effect is
 //       SE = sqrt( sum_q s2_q x (1/oldRuns + 1/newRuns) ) / n.
 //     The spread BETWEEN questions never enters it (that is what pairing removes).
-//   - BAND: +/- k x SE with k = 2 (DECISIONS 171: "2x the run-to-run spread, from repeated OLD-code runs only"). A change is "beyond the band" only when it is strictly outside it.
+//   - BAND: +/- k x SE with k = 2.5 (`EVAL_GATE_BAND_K`; DECISIONS 171 said 2, tightened after the review's no-change simulations), from repeated OLD-code runs only. A question whose old runs all agreed (measured variance exactly 0) is not proven noise-free: when the rest of the set did vary it is given `EVAL_GATE_VARIANCE_FLOOR`. A change is "beyond the band" only when it is strictly outside it.
 //   - STEADY: when the old code scored exactly the same on every run (zero spread) and ran at least 3 times, there is no band: the effect is judged against the agreed minimum drop (a drop of at least that is worse). With fewer runs there is no noise estimate.
 //   - DETECTABLE: the smallest drop the eval could see with 80% power is (k + 0.84) x SE (`EVAL_GATE_Z_POWER`). If that is more than the agreed minimum drop, the eval cannot detect the agreed drop.
 //   - CATEGORIES: each ordinary category gets a one-sided test for a drop (tail `EVAL_HOLM_ALPHA` = 0.01), and the Holm-Bonferroni step-down correction decides which of them are clear drops. Strict (safety and refusal)
@@ -75,7 +75,7 @@ const sampleVariance = (values: readonly number[]): number => {
 };
 
 /** The paired effect of a set of questions, or undefined when there are none or a question has fewer than two old runs (no noise estimate) or no new run. */
-export function pairedEffect(questions: readonly PairedQuestion[]): PairedEffect | undefined {
+export function pairedEffect(questions: readonly PairedQuestion[], varianceFloor = 0): PairedEffect | undefined {
   if (questions.length === 0) return undefined;
   let diffSum = 0;
   let varianceSum = 0;
@@ -88,7 +88,7 @@ export function pairedEffect(questions: readonly PairedQuestion[]): PairedEffect
     diffSum += headMean - baseMean;
     baseSum += baseMean;
     headSum += headMean;
-    varianceSum += sampleVariance(question.baseRuns) * (1 / question.baseRuns.length + 1 / question.headRuns.length);
+    varianceSum += (sampleVariance(question.baseRuns) || varianceFloor) * (1 / question.baseRuns.length + 1 / question.headRuns.length);
   }
   const n = questions.length;
   return { n, effect: diffSum / n, se: Math.sqrt(varianceSum) / n, baseMean: baseSum / n, headMean: headSum / n };

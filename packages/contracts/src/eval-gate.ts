@@ -7,11 +7,11 @@
 // What is printed: `summary` is the public text (PR, task page). It holds fixed words and numbers only: the visible set's effect size and noise range, and WORDS for the holdout ("within the noise band", "clearly better"), never a
 // holdout score, count, category name or question id. `ownerDetail` carries every number, including the holdout's, and every run; it is for the owner's page and is never given to the coding agent. The agent's own feedback is
 // `evalGateAgentFeedback`: pass, fail or not run, and nothing else (eval-holdout.ts has the per-task limit and the rotation).
-import { EVAL_MIN_QUESTIONS, EVAL_NOISE_K } from "./eval-check.js";
+import { EVAL_MIN_QUESTIONS } from "./eval-check.js";
 import { EVAL_NOT_RUN_FRACTION_MAX, type EvalRoundFacts } from "./eval-pacing.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import {
-  EVAL_GATE_Z_POWER, EVAL_HOLM_ALPHA, EVAL_STEADY_MIN_RUNS, EVAL_UTC, checkEvalBaseline, checkEvalGatePlan, checkEvalGoal, checkEvalJudge, evalCoverageCount, isStrictCategory,
+  EVAL_GATE_BAND_K, EVAL_GATE_VARIANCE_FLOOR, EVAL_GATE_Z_POWER, EVAL_HOLM_ALPHA, EVAL_STEADY_MIN_RUNS, EVAL_STEADY_OVERALL_FLIPS, EVAL_STEADY_STRICT_FLIPS, EVAL_UTC, checkEvalBaseline, checkEvalGatePlan, checkEvalGoal, checkEvalJudge, evalCoverageCount, isStrictCategory,
   type EvalBaselineFacts, type EvalCoverage, type EvalEdits, type EvalGatePlan, type EvalGoal, type EvalJudgeInput,
 } from "./eval-gate-inputs.js";
 import { EVAL_NOT_QUALIFIED_REASON_WORDS, evalProofLabel, type ChangeProofLabel, type EvalNotQualifiedReason } from "./eval-gate-labels.js";
@@ -21,7 +21,7 @@ import type { EvalQuestionResult } from "./measures-file.js";
 /** Why a result is not qualified, finer than A3's reasons (each maps to one of A3's). */
 export const EVAL_GATE_DETAILS = [
   "plan_not_fixed", "cannot_detect_drop", "judge_not_pinned", "replies_not_independent", "questions_edited_by_change", "edits_unknown", "baseline_too_old", "no_holdout", "holdout_checks_used_up", "runs_incomplete",
-  "too_few_questions", "cap_hit", "provider_outage", "regression_found", "no_coverage_evidence", "inputs_unreadable", "base_round_unattested", "hidden_round_timed_out",
+  "too_few_questions", "cap_hit", "provider_outage", "regression_found", "no_coverage_evidence", "inputs_unreadable", "base_round_unattested", "hidden_round_timed_out", "runner_kill_missing",
 ] as const;
 export type EvalGateDetail = (typeof EVAL_GATE_DETAILS)[number];
 
@@ -43,6 +43,7 @@ export const EVAL_GATE_DETAIL_ROWS: Readonly<Record<EvalGateDetail, { readonly r
   regression_found: { reason: "not_gated", words: "the eval shows a drop beyond the noise band" },
   no_coverage_evidence: { reason: "no_coverage_evidence", words: EVAL_NOT_QUALIFIED_REASON_WORDS.no_coverage_evidence },
   inputs_unreadable: { reason: "not_gated", words: "the gate could not read its inputs" },
+  runner_kill_missing: { reason: "not_gated", words: "the hidden round has no way to stop its runner" },
   hidden_round_timed_out: { reason: "not_gated", words: "the hidden round did not finish in its time slot" },
   base_round_unattested: { reason: "baseline_too_old", words: "the old-code round was not confirmed to run alone on a clean checkout" },
 };
@@ -141,8 +142,6 @@ export interface EvalGateResult {
 
 /** Float residue: two numbers closer than this are equal (0.5 - 0.45 is 0.04999999999999999). */
 const EPS = 1e-12;
-/** A strict category whose old runs never varied has no noise estimate. Its new-code results are judged against the agreed minimum drop, but never against less than this many failed question-runs' worth: a few random failures among n x runs results are what sampling alone does. */
-const STEADY_STRICT_FLIPS = 3;
 const SUMMARY_PREFIX = "Eval (gated): ";
 const inert = (text: string): string => inertEvidenceText(typeof text === "string" ? text : "", 40);
 const sign = (value: number): string => `${value < 0 ? "-" : "+"}${Math.abs(Number(value.toFixed(3)))}`;
@@ -216,7 +215,7 @@ function analyseSet(set: "visible" | "holdout", data: EvalGateSetData, args: { p
     const wantHead = Array.from({ length: plan.headRuns }, (_x, index) => index);
     if (question.baseIndexes.join() !== wantBase.join() || question.headIndexes.join() !== wantHead.join()) {
       excluded.incomplete += 1;
-      const lacking = (want: readonly number[], have: readonly number[]): number => (have.every((index) => want.includes(index)) ? want.filter((index) => !have.includes(index)).length : Number.POSITIVE_INFINITY);
+      const lacking = (want: readonly number[], have: readonly number[]): number => (new Set(have).size === have.length && have.every((index) => want.includes(index)) ? want.filter((index) => !have.includes(index)).length : Number.POSITIVE_INFINITY);
       missingRuns += lacking(wantBase, question.baseIndexes) + lacking(wantHead, question.headIndexes);
       continue;
     }
@@ -229,15 +228,18 @@ function analyseSet(set: "visible" | "holdout", data: EvalGateSetData, args: { p
     if (excluded.notIndependent > 0 && usable.length + excluded.notIndependent >= args.minQuestions) return { ok: false, detail: "replies_not_independent" };
     return { ok: false, detail: excluded.edited > 0 && usable.length + excluded.edited >= args.minQuestions ? "questions_edited_by_change" : "too_few_questions" };
   }
-  // The band is EVAL_NOISE_K (2) x the standard error of the effect, from the old code's repeated runs only (DECISIONS 171).
-  const zBand = EVAL_NOISE_K;
+  // The band is EVAL_GATE_BAND_K x the standard error of the effect, from the old code's repeated runs only. A set that did vary gets a variance floor per question; a set that never varied is steady.
+  const zBand = EVAL_GATE_BAND_K;
   const delta = plan.minDetectableDrop;
-  const overall = pairedEffect(usable);
-  if (overall === undefined) return { ok: false, detail: "inputs_unreadable" };
+  const raw = pairedEffect(usable);
+  if (raw === undefined) return { ok: false, detail: "inputs_unreadable" };
+  const overall = raw.se === 0 ? raw : (pairedEffect(usable, EVAL_GATE_VARIANCE_FLOOR) ?? raw);
   // A steady eval: the old code's runs never varied, over the WHOLE set. It is judged against the agreed minimum drop (a drop of at least that is worse). With fewer than 3 old runs there is still no way to say "no regression"
   // (not detectable), but a big drop is a drop all the same, so it is measured and reported ahead of "cannot detect".
   const steady = overall.se === 0;
-  const band = steady ? delta : zBand * overall.se;
+  // The steady floor: never less than EVAL_STEADY_OVERALL_FLIPS failed question-runs' worth.
+  const steadyDrop = Math.max(delta, EVAL_STEADY_OVERALL_FLIPS / (overall.n * plan.headRuns));
+  const band = steady ? steadyDrop : zBand * overall.se;
   const mde = steady ? 0 : (zBand + EVAL_GATE_Z_POWER) * overall.se;
   const effect = Math.abs(overall.effect) < 1e-12 ? 0 : overall.effect;
   const detectable = steady ? plan.baseRuns >= EVAL_STEADY_MIN_RUNS : norm(mde) <= norm(delta);
@@ -248,11 +250,12 @@ function analyseSet(set: "visible" | "holdout", data: EvalGateSetData, args: { p
   const categories: EvalGateCategoryReport[] = [];
   let strictDrop = false;
   for (const [category, group] of byCategory) {
-    const found = pairedEffect(group);
-    if (found === undefined) return { ok: false, detail: "inputs_unreadable" };
+    const rawCat = pairedEffect(group);
+    if (rawCat === undefined) return { ok: false, detail: "inputs_unreadable" };
+    const found = rawCat.se === 0 ? rawCat : (pairedEffect(group, EVAL_GATE_VARIANCE_FLOOR) ?? rawCat);
     if (isStrictCategory(category, plan)) {
       // Strict: no correction; any drop beyond the category's own band is clear. A strict category whose old runs never varied is judged against the agreed minimum drop.
-      const drop = found.se === 0 ? found.effect + Math.max(delta, STEADY_STRICT_FLIPS / (found.n * plan.headRuns)) <= EPS : norm(found.effect + zBand * found.se) < -EPS && Math.abs(found.effect) >= 1e-12;
+      const drop = found.se === 0 ? found.effect + Math.max(delta, EVAL_STEADY_STRICT_FLIPS / (found.n * plan.headRuns)) <= EPS : norm(found.effect + zBand * found.se) < -EPS && Math.abs(found.effect) >= 1e-12;
       strictDrop ||= drop;
       categories.push({ category, strict: true, questions: found.n, effect: found.effect, clearDrop: drop });
     } else ordinary.push({ category, effect: found });
@@ -269,11 +272,11 @@ function analyseSet(set: "visible" | "holdout", data: EvalGateSetData, args: { p
       runs.push({ side, index, mean: scores.reduce((sum, value) => sum + value, 0) / scores.length, questions: scores.length });
     }
   }
-  const dropBeyondBand = steady ? effect + delta <= EPS : norm(effect + band) < -EPS;
+  const dropBeyondBand = steady ? effect + steadyDrop <= EPS : norm(effect + band) < -EPS;
   const clearDrop = dropBeyondBand || strictDrop || categories.some((category) => !category.strict && category.clearDrop);
   const report: EvalGateSetReport = {
     set, questions: usable.length, excluded, baseMean: overall.baseMean, headMean: overall.headMean, effect, se: overall.se,
-    noiseRange: { low: norm(-band), high: norm(band) }, smallestDetectableDrop: mde, detectable, steady, dropBeyondBand, beyondBandUp: steady ? effect - delta >= -EPS : norm(effect - band) > EPS, categories, runs, clearDrop,
+    noiseRange: { low: norm(-band), high: norm(band) }, smallestDetectableDrop: mde, detectable, steady, dropBeyondBand, beyondBandUp: steady ? effect - steadyDrop >= -EPS : norm(effect - band) > EPS, categories, runs, clearDrop,
   };
   return { ok: true, report };
 }
@@ -352,9 +355,11 @@ export function evalGate(input: EvalGateInput): EvalGateResult {
     const leftOut = visible.report.excluded.incomplete > 0 ? " Some questions could not be run and were left out." : "";
     const holdoutWords = improved ? "Holdout: clearly better, beyond the noise band." : "Holdout: within the noise band.";
     const runsWords = `Visible runs: old ${visible.report.runs.filter((run) => run.side === "base").map((run) => two(run.mean)).join(" ")}; new ${visible.report.runs.filter((run) => run.side === "head").map((run) => two(run.mean)).join(" ")}.`;
+    const points = String(Number((plan.minDetectableDrop * 100).toFixed(1)));
+    const sizeWords = `No drop of ${points} points or more measured.`;
     return {
       kind: "eval_gate", label: label.label, qualified: true, regression: false, words: label.words, coverage, ...(improvedNotClaimed === undefined ? {} : { improvedNotClaimed }), visible: visible.report, holdout: holdout.report,
-      summary: `${SUMMARY_PREFIX}${label.words} ${area}. ${visibleNumbers} ${holdoutWords} ${runsWords}${leftOut}${measuresOnly === undefined ? "" : ` ${measuresOnly}`}`,
+      summary: `${SUMMARY_PREFIX}${label.words} ${area}. ${sizeWords} ${visibleNumbers} ${holdoutWords} ${runsWords}${leftOut}${measuresOnly === undefined ? "" : ` ${measuresOnly}`}`,
       ownerDetail: ownerLines(visible.report), holdoutOwnerDetail: ownerLines(holdout.report),
     };
   } catch {

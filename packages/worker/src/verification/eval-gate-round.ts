@@ -11,7 +11,7 @@
 // It runs no model call (it is handed the facts of the calls) and mounts nothing (the mount spec goes back to the caller, for the sealed check sandbox's plan only). The hidden round must run on a throwaway copy of the workspace with
 // the working sandbox paused, and its runner logs never go back to the agent: that is the caller's wiring (see the PR body).
 import {
-  EVAL_BASE_ROUND_KINDS, EVAL_MIN_QUESTIONS, EVAL_NOISE_K, evalBaseCacheKey, evalGate, evalGateAgentFeedback, evalGateStopped, evalSettingsFingerprint, normalizedQuestions, rotateHoldout,
+  EVAL_BASE_ROUND_KINDS, EVAL_GATE_BAND_K, EVAL_MIN_QUESTIONS, evalBaseCacheKey, evalGate, evalGateAgentFeedback, evalGateStopped, evalSettingsFingerprint, normalizedQuestions, rotateHoldout,
   type BaseScoreCache, type EvalBaseAttestation, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalBaselineFacts, type EvalGateAgentFeedback, type EvalGateInput, type EvalGateMeasuresOnly, type EvalGateResult, type EvalGateSetData,
   type EvalRoundFacts, type EvalRoundKind, type EvalSettings, type EvalTaskBudget, type HiddenEvalMount, type HiddenEvalSetSource, type HoldoutLedger, type MeasuresFile,
 } from "@agentx/contracts";
@@ -162,7 +162,7 @@ export async function resolveGatedBases(input: GatedEvalRoundInput, plan: Extrac
   const today = input.today();
   let settingsFingerprint: string;
   try {
-    const settings: EvalSettings = { runs: gatePlan.headRuns, seed: gatePlan.seed, repeats: gatePlan.baseRuns, k: EVAL_NOISE_K, minQuestions: EVAL_MIN_QUESTIONS, imageDigest: input.settings.imageDigest, route: input.settings.route };
+    const settings: EvalSettings = { runs: gatePlan.headRuns, seed: gatePlan.seed, repeats: gatePlan.baseRuns, k: EVAL_GATE_BAND_K, minQuestions: EVAL_MIN_QUESTIONS, imageDigest: input.settings.imageDigest, route: input.settings.route };
     settingsFingerprint = evalSettingsFingerprint(settings);
   } catch {
     return unreadable();
