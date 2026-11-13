@@ -569,9 +569,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         if (payload.testEnvDetect !== undefined && (payload.workflowMode !== "SETUP_DRAFT" || payload.diagnosis !== undefined)) {
           context.addIssue({ code: "custom", path: ["testEnvDetect"], message: "test environment detection requires the setup draft mode and is not a diagnosis" });
         }
-        // Test services (slice 1): a coding run carries the plan too, but only one with dependencies (the working sandbox gets them while the agent codes); every other mode is as it was.
-        if (payload.testEnvironment !== undefined && payload.workflowMode !== "CHECKS" && !(payload.workflowMode === "IMPLEMENT" && (payload.testEnvironment.dependencies?.length ?? 0) > 0)) {
-          context.addIssue({ code: "custom", path: ["testEnvironment"], message: "a test environment plan requires the verification (checks) mode, or a coding run with dependencies" });
+        // Test services (slice 1): a coding run carries the plan too, but only one with dependencies (the working sandbox gets them while the agent codes); every other mode is as it was. TE-C6: or one that asks for the flaky rerun (`flakyRerun`), which the coding run's settle round reads.
+        if (payload.testEnvironment !== undefined && payload.workflowMode !== "CHECKS" && !(payload.workflowMode === "IMPLEMENT" && ((payload.testEnvironment.dependencies?.length ?? 0) > 0 || payload.testEnvironment.flakyRerun === true))) {
+          context.addIssue({ code: "custom", path: ["testEnvironment"], message: "a test environment plan requires the verification (checks) mode, or a coding run with dependencies or the flaky rerun" });
         }
         if (payload.ownerRedirect !== undefined && payload.workflowMode !== "IMPLEMENT") {
           context.addIssue({ code: "custom", path: ["ownerRedirect"], message: "an owner redirect requires implementation mode" });
