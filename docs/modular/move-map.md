@@ -148,6 +148,11 @@ the broker mechanically. The measurements are from the import graph of `packages
    three plug-in files and 17 root files). That cuts several folders in two, which is not what the target table describes. So this step moved the whole
    broker and called it core.
 
+   Phase 2b has since cut this down: one type import
+   (`aws/e2e-runtime-readiness.ts` taking `TransactItems` from `aws/developer-task-actions.ts`) carried 122 of the 211 extra files, and removing it makes the closure 556
+   files. `tests/contract/engine-boundary.test.ts` now holds the engine to a committed file set (`engine-boundary-files.txt` plus `core/`, `services/` and `ports/`)
+   and fails on any import that leaves it.
+
 2. **`local/` needs 196 distinct engine files** (152 in `core/`, 6 in `services/`, 8 in `plugins/`, 7 in `context-sources/`, and others). If `local/`
    becomes its own package (phase 2b) and the engine is a separate package, `local/` can import only named entries, so the engine would need about 196
    entries, or `local/` would have to import through a few barrels. This needs a decision in 2b: it is the real cost of the split. For now `local/` lives in

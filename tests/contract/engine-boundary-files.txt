@@ -20,6 +20,7 @@ callbacks.ts
 connections/endpoint-check.ts
 connections/local-secrets.ts
 connections/org-secrets.ts
+connections/owner-files.ts
 connections/pinned-endpoint.ts
 connections/private-endpoints.ts
 connections/registry.ts
@@ -30,6 +31,7 @@ connectors/native/datadog-connector-type.ts
 connectors/native/datadog.ts
 connectors/native/grafana-connector-type.ts
 connectors/native/grafana.ts
+connectors/native/keys.ts
 connectors/native/pagerduty-connector-type.ts
 connectors/native/pagerduty.ts
 connectors/native/runtime.ts
@@ -74,6 +76,7 @@ developer/plan-self-check.ts
 developer/prompt-text.ts
 developer/pull-request-feedback-section.ts
 developer/share.ts
+developer/task-plan-document.ts
 developer/task-records.ts
 developer/test-proof-lines.ts
 developer/workflow-actions.ts
@@ -100,9 +103,9 @@ e2e/replay-round.ts
 e2e/stored-artifacts.ts
 e2e/verdict.ts
 events.ts
+github-mcp.ts
 handler.ts
 lifecycle.ts
-local/state-directory.ts
 monitoring/native-adapters.ts
 operations.ts
 plugins/aws-identity.ts
@@ -110,6 +113,7 @@ plugins/check-runner/codebuild/index.ts
 plugins/check-runner/codebuild/plugin.ts
 plugins/code-host/code-owners-file.ts
 plugins/code-host/connections.ts
+plugins/code-host/github-repository.ts
 plugins/code-host/github/signature.ts
 plugins/fake/check-runner.ts
 plugins/fake/code-host.ts

@@ -1,11 +1,12 @@
-// The engine boundary (phase 2b, step 1: report only; step 4 makes it fail). The engine is the set of files that `@rovara-code/core` becomes once the laptop app, the GitHub and Slack plug-ins and the hosted
+// The engine boundary (phase 2b, step 4). The engine is the set of files that `@rovara-code/core` becomes once the laptop app, the GitHub and Slack plug-ins and the hosted
 // control plane leave it: every file under `core/`, `services/` and `ports/` plus the helpers named in `engine-boundary-files.txt`. A file of that set may import only files of
 // that set (and packages). So the engine never reaches `local/`, `lessons/`, the GitHub or Slack plug-in, or the AWS control plane, and the package split stays possible.
 //
 // The check reads every relative import of every engine file with the TypeScript parser: `import`, `export ... from`, `import()` with a string, and `import type`. Types count,
 // because a type import is how one file once carried 122 AWS control-plane files into the engine (`TransactItems`). It does not type-check and does not see string module ids.
 //
-// For now it only reports, so the engine's edges out can be seen and cut one by one. Step 4 turns the report into a failing check.
+// When this test fails on a new import, either keep the code inside the engine (move or copy the small helper, or take it as a parameter), or, if the helper really belongs to
+// the engine, add its file to `engine-boundary-files.txt` in the same change. Do not add an entry to PENDING: those are the known edges the later steps remove.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import ts from "typescript";
@@ -14,6 +15,19 @@ import { describe, expect, it } from "vitest";
 const SOURCE = resolve("packages/core/src");
 const LIST = resolve("tests/contract/engine-boundary-files.txt");
 const ENGINE_FOLDERS = ["core", "services", "ports"];
+
+/**
+ * Edges that exist today and that a later step of phase 2b removes (`from -> to`, paths under packages/core/src, no line numbers). Each one fails the test if it stops
+ * existing, so this list can only shrink.
+ */
+const PENDING: ReadonlyArray<{ edge: string; removedBy: string }> = [
+  { edge: "plugins/index.ts -> plugins/code-host/github/index.ts", removedBy: "step 10: the GitHub package" },
+  { edge: "plugins/index.ts -> plugins/code-host/github/plugin.ts", removedBy: "step 10: the GitHub package" },
+  { edge: "plugins/index.ts -> plugins/code-host/github/provider.ts", removedBy: "step 10: the GitHub package" },
+  { edge: "plugins/index.ts -> plugins/check-runner/github-actions/index.ts", removedBy: "step 10: the GitHub package" },
+  { edge: "plugins/index.ts -> plugins/check-runner/github-actions/plugin.ts", removedBy: "step 10: the GitHub package" },
+  { edge: "plugins/index.ts -> plugins/channel/slack/index.ts", removedBy: "step 9: the Slack package" },
+];
 
 interface Edge { from: string; line: number; to: string; typeOnly: boolean }
 
@@ -95,10 +109,20 @@ describe("the engine boundary", () => {
     expect(folderEntries, "files under core/, services/ and ports/ belong to the engine by folder; do not list them").toEqual([]);
   });
 
-  it("reports every import from an engine file to a file outside the engine (report only: it does not fail)", () => {
-    const edges = edgesOut(files);
-    const lines = edges.map((edge) => `  ${edge.from}:${edge.line} -> ${edge.to}${edge.typeOnly ? " (type only)" : ""}`);
-    console.info(`engine boundary: ${files.size} files, ${edges.length} imports out of the engine\n${lines.join("\n")}`);
-    expect(files.size).toBeGreaterThan(0);
+  it("has no import from an engine file to a file outside the engine", () => {
+    const pending = new Map(PENDING.map((entry) => [entry.edge, entry]));
+    const seen = new Set<string>();
+    const fresh: string[] = [];
+    for (const edge of edgesOut(files)) {
+      seen.add(edgeKey(edge));
+      if (pending.has(edgeKey(edge))) continue;
+      fresh.push(`  ${edge.from}:${edge.line} imports ${edge.to}${edge.typeOnly ? " (type only)" : ""}`);
+    }
+    expect(fresh, [
+      "An engine file imports a file outside the engine boundary. The engine (core/, services/, ports/ and the files in tests/contract/engine-boundary-files.txt) may import only itself.",
+      "Keep the code inside the engine, or add the target to engine-boundary-files.txt if it really belongs there. The new edges follow",
+    ].join("\n")).toEqual([]);
+    const gone = PENDING.filter((entry) => !seen.has(entry.edge)).map((entry) => `  ${entry.edge} (${entry.removedBy})`);
+    expect(gone, "These known edges no longer exist, so remove them from PENDING in tests/contract/engine-boundary.test.ts").toEqual([]);
   });
 });
