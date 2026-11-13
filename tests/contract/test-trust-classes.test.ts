@@ -96,13 +96,14 @@ describe("a v2 pack's dependency trust is the one its label earns (the writer's 
   it("refuses a label that does not belong to its backing", () => {
     expect(accepted(dep({ label: "real", backing: "fake", trust: "real" })).success).toBe(false);
   });
-  const made = (over: Record<string, unknown> = {}) => dep({ label: "rovara_made_fake", trust: "made_by_rovara", recordedOn: undefined, mock: { setId: "payments-mocks", version: 2, branch: "main", madeIn: "this_task", store: "rovara" }, ...over });
+  const mock = { setId: "payments-mocks", version: 2, branch: "main", madeIn: "this_task", store: "rovara" };
+  const made = (over: Record<string, unknown> = {}) => dep({ label: "rovara_made_fake", trust: "made_by_rovara", recordedOn: undefined, mock, ...over });
   it("requires a Rovara-made fake to name its stored mock set, and allows a mock on no other label (review M2)", () => {
     expect(accepted(made()).success).toBe(true);
     expect(accepted(made({ mock: undefined })).success).toBe(false);
-    expect(accepted(dep({ mock: made().mock })).success).toBe(false);
-    expect(accepted(dep({ label: "real", backing: "local", trust: "real", recordedOn: undefined, mock: made().mock })).success).toBe(false);
-    expect(accepted(dep({ label: "hand_written_fake", trust: "simulated", recordedOn: undefined, mock: made().mock })).success).toBe(false);
+    expect(accepted(dep({ mock: mock })).success).toBe(false);
+    expect(accepted(dep({ label: "real", backing: "local", trust: "real", recordedOn: undefined, mock: mock })).success).toBe(false);
+    expect(accepted(dep({ label: "hand_written_fake", trust: "simulated", recordedOn: undefined, mock: mock })).success).toBe(false);
   });
   it("allows a recording or a recorded day only on a Recorded answer (review M2)", () => {
     expect(accepted(dep({ recordedOn: undefined, recording: { store: "rovara", recordedOn: "2026-11-12" } })).success).toBe(true);
@@ -112,7 +113,7 @@ describe("a v2 pack's dependency trust is the one its label earns (the writer's 
     expect(accepted(dep({ label: "hand_written_fake", trust: "simulated", recordedOn: undefined, recording: { store: "rovara", recordedOn: "2026-11-12" } })).success).toBe(false);
   });
   it("still reads a pack with those fields on any label (readers are tolerant; only the writer refuses)", () => {
-    const odd = v2Pack({ dependencies: [dep({ label: "real", backing: "local", trust: "real", recordedOn: "2026-11-12", mock: made().mock })] });
+    const odd = v2Pack({ dependencies: [dep({ label: "real", backing: "local", trust: "real", recordedOn: "2026-11-12", mock: mock })] });
     expect(readEvidencePack(odd).status).toBe("v2");
     // and an old pack whose dependencies carry no mock or recording at all still passes the writer's rules
     expect(EvidencePackV2Schema.safeParse(v2Pack()).success).toBe(true);
@@ -369,8 +370,9 @@ describe("a dependency that nothing answered, in the pack's text (review Low)", 
     expect(text).toContain("- mock: Simulated");
   });
   it("does not say so for a label this build does not know", () => {
-    const pack = v2Pack({ dependencies: [{ name: "x", kind: "http_api", backing: "none", label: "from_the_future", trust: "simulated" }] });
-    expect(renderEvidence(readEvidencePack(pack as never).status === "v2" ? (readEvidencePack(pack as never) as { pack: never }).pack : pack).text).not.toContain("not available");
+    const read = readEvidencePack(v2Pack({ dependencies: [{ name: "x", kind: "http_api", backing: "none", label: "from_the_future", trust: "simulated" }] }));
+    expect(read.status).toBe("v2");
+    if (read.status === "v2") expect(renderEvidence(read.pack).text).not.toContain("not available");
   });
 });
 
