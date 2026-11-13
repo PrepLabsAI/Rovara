@@ -612,7 +612,14 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (event.kind === "put-sign-in-client") {
         const parsed = PutSignInClientRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
-        await store.putClient(parsed.data.client);
+        let client = parsed.data.client;
+        // An update that keeps the secret: only this server holds the hash, so it carries it over.
+        if (parsed.data.keepSecret === true) {
+          const current = await store.getClient(client.clientId);
+          if (current?.secretHash === undefined) return { ok: false, error: "no_secret" };
+          client = { ...client, secretHash: current.secretHash };
+        }
+        await store.putClient(client);
         deps.log({ event: "signin.client_registered", clientId: parsed.data.client.clientId });
         return { ok: true };
       }

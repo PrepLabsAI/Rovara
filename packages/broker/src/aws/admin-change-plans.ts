@@ -418,23 +418,31 @@ const planRegisterSignInClient: Planner = async (deps, identity, input) => {
   const current = clients.find((client) => client.clientId === input.clientId);
   const { registration } = input;
   const clash = clients.find((client) => client.clientId !== input.clientId && client.audience === registration.audience);
+  // An update that keeps the secret carries the stored hash over; the CLI never sees it.
+  if (registration.keepSecret === true && current?.confidential !== true) {
+    throw agentXError("CONFIG_INVALID", `sign-in client ${input.clientId} has no secret to keep; give it a new one with --rotate-secret`);
+  }
+  const { keepSecret, ...settings } = registration;
+  const confidential = keepSecret === true || settings.secretHash !== undefined;
   if (clash !== undefined) throw agentXError("CONFIG_INVALID", `sign-in client ${clash.clientId} already uses the audience ${registration.audience}; give each client its own`);
   const where = [
     ...(registration.redirectUris.length === 0 ? [] : [`a browser returning to ${registration.redirectUris.join(", ")}`]),
     ...(registration.loopback ? ["a terminal (a loopback redirect, as agentx login uses)"] : []),
   ].join(" and ");
-  const secret = registration.secretHash === undefined ? "" : " It is confidential: it signs in with its own secret, which AgentX keeps only as a hash.";
+  const secret = !confidential ? "" : keepSecret === true
+    ? " It is confidential, and keeps its current secret."
+    : " It is confidential: it signs in with its own secret, which AgentX keeps only as a hash.";
   const replaced = current === undefined ? "" : " Its people stay signed in until they next refresh, which then follows these settings.";
   // Spec 065: what it may then do as the signed-in person, beyond reading who they are.
   const scopes = registration.scopes ?? [];
   const actions = scopes.length === 0 ? "" : ` As the signed-in person, and within their own rights, it may: ${scopes.join(", ")}.`;
   return {
     effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}, which AgentX's own API never accepts.${secret}${replaced}${actions}`,
-    details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential: registration.secretHash !== undefined, scopes },
+    details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential, keepsSecret: keepSecret === true, scopes },
     snapshot: { client: current ?? null },
     apply: async (applier) => {
       const at = new Date(deps.actions.now()).toISOString();
-      await registry.put({ clientId: input.clientId, ...registration, createdAt: current?.createdAt ?? at, updatedAt: at, updatedBy: applier.ownerKey });
+      await registry.put({ clientId: input.clientId, ...settings, createdAt: current?.createdAt ?? at, updatedAt: at, updatedBy: applier.ownerKey }, keepSecret === true ? { keepSecret } : {});
       return { clientId: input.clientId, registered: true };
     },
   };
