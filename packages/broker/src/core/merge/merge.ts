@@ -54,7 +54,7 @@ import {
 } from "@agentx/contracts";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import {
-  canonicalPatchText, needsReviewerFloor, patchDigestOf, planningLevelOf, raiseTier, recordGrowth, recordTier, reviewerFloorRecorded, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel,
+  canonicalPatchText, needsReviewerFloor, patchDigestOf, planningLevelOf, skippedPlanning, raiseTier, recordGrowth, recordTier, reviewerFloorRecorded, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel,
 } from "../decisions/change-tier.js";
 import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { inertLine } from "../proof/inert-text.js";
@@ -237,11 +237,6 @@ export interface MergeDependencies {
   requirePresserAccount?: boolean;
   /** The words of a refusal while something outside the merge core holds the merge (a second review that did not run and waits for the owner). Absent: nothing waits. */
   mergeWait?(task: MergeTask): string | undefined;
-  /**
-   * The model-based floor of the change tier: `required` (the default) refuses a merge of a small change to code or documents until the one strongest-available reviewer's questions are on the record for the current head
-   * (`recordReviewerFloor`); `off` leaves the deterministic tier alone (an install that does not run that reviewer).
-   */
-  tierFloor?: "required" | "off";
   /** TE-B2: the project's real-check mode (see `ProjectCiMode`); `DEFAULT_CI_MODE` when absent. It decides whether an approval of the head before a clean sync carries over on "No CI". */
   ciMode?(task: MergeTask): Promise<ProjectCiMode> | ProjectCiMode;
 }
@@ -579,7 +574,7 @@ const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code ho
  * in plain words naming what grew, when the result is higher than EITHER the tier the person approved at (`shown`; none recorded counts as small) OR the tier the planning steps were chosen at (the estimate, when steps were skipped).
  * A growth is STICKY: it is recorded (`grewAfterBuild`), and from then on the merge needs the review steps of the higher tier to have run on the CURRENT head (`tierReviewRecorded`); a second press does not clear it, and a push
  * makes the record stale. The record is written under `flowIs`, so a lost race is refused, and a whole-workflow writer that read the task earlier carries the stored record forward (flow-guard.ts). A host that cannot be read
- * refuses the merge too, and records nothing. A small change to code or documents also needs the reviewer's questions on the record for the current head (`tierFloor`).
+ * refuses the merge too, and records nothing. When the lighter flow skipped planning steps (`flow.skippedSteps`), a small change also needs the reviewer's questions on the record for the current head and patch; a task that ran the whole plan does not.
  */
 /** Exported for the tests of its refusals (a head that cannot be bound); `pressMerge` is the one caller. */
 export async function tierGate(
@@ -623,7 +618,7 @@ export async function tierGate(
     const covered = tierReviewRecorded(flow, raised.level, bound.headSha);
     const grew = !covered && (tierGrew(approvedAt, raised) || (planned !== undefined && tierGrew(planned, raised)));
     const owed = !covered && !grew && flow?.grewAfterBuild !== undefined && !tierReviewRecorded(flow, flow.grewAfterBuild.to, bound.headSha);
-    const floor = !grew && !owed && deps.tierFloor !== "off" && needsReviewerFloor(raised) && !reviewerFloorRecorded(flow, bound.headSha, patchDigest);
+    const floor = !grew && !owed && skippedPlanning(flow) && needsReviewerFloor(raised) && !reviewerFloorRecorded(flow, bound.headSha, patchDigest);
     verdict = grew ? "grew" : owed ? "owed" : floor ? "floor" : "ok";
     const recorded = recordTier(flow, { ...fresh, source: "merge" });
     const from: TierLevel = planned !== undefined && tierRank(planned) < tierRank(approvedAt) ? planned : approvedAt;

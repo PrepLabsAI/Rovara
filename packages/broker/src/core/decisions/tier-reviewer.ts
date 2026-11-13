@@ -45,7 +45,7 @@ export const REVIEW_TIMEOUT_MS = 120_000;
 export const REVIEW_PATCH_MAX_CHARS = 200_000;
 
 /** Text made safe to put in a prompt as data: every control and format character (zero-width, direction, tag, soft hyphen) is written out as a visible escape, so it cannot hide or reorder anything. */
-export const escapedForPrompt = (text: string): string => text.replace(/[\p{Cc}\p{Cf}]/gu, (char) => (char === "\n" || char === "\t" ? char : `\\u{${char.codePointAt(0)!.toString(16)}}`));
+export const escapedForPrompt = (text: string): string => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => (char === "\n" || char === "\t" ? char : `\\u{${char.codePointAt(0)!.toString(16)}}`));
 
 /**
  * The text a reviewer is given: the fixed questions and how to answer, then the files and the patch as DATA. The data is one JSON value between two lines that carry a boundary made fresh for this call (the author of the patch
