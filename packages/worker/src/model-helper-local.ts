@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelCatalogRow, ServableRow } from "@agentx/contracts";
 import { modelHelperArgs } from "./model-helper-args.js";
+import { writeDummyAdc } from "./model-helper-adc.js";
 import { laptopModelEnvironment } from "./model-helper-env.js";
 import { summarizeModelLedgerFile } from "./model-helper-ledger.js";
 import { removeModelHelperRunFiles, writeModelHelperRunFiles, type ModelHelperRoundPlan, type ModelHelperRoundResult, type StartedModelHelper } from "./model-helper-round.js";
@@ -37,7 +38,8 @@ export interface LocalModelHelperInput {
   readonly entry?: string;
   readonly spawn?: SpawnSeam;
   readonly load?: LoadOptions;
-  readonly onResult?: (result: ModelHelperRoundResult) => void;
+  /** REQUIRED: the round's summary and evidence (an escape is `not_run`); see `ModelHelperRoundPlan.onResult`. */
+  readonly onResult: (result: ModelHelperRoundResult) => void;
   /** F0a's `modelHostBlockList(...)`. */
   readonly blockList: readonly string[];
 }
@@ -48,7 +50,7 @@ const servable = (row: ModelCatalogRow): ServableRow => ({ id: row.id, family: r
 export function localModelHelperPlan(input: LocalModelHelperInput): ModelHelperRoundPlan {
   return {
     blockList: input.blockList,
-    ...(input.onResult === undefined ? {} : { onResult: input.onResult }),
+    onResult: input.onResult,
     async start(signal) {
       const loaded = await loadModelReplySets(input.source, signal, input.load);
       if (loaded.sets.length === 0) return undefined;
@@ -68,12 +70,15 @@ export function localModelHelperPlan(input: LocalModelHelperInput): ModelHelperR
         child = run(process.execPath, [input.entry ?? defaultModelHelperEntry(), ...args], { env: { ...LOCAL_HELPER_CHILD_ENVIRONMENT }, stdio: ["ignore", "pipe", "ignore"] });
         const listening = await readListeningLine(child, signal);
         const baseUrl = `http://127.0.0.1:${String(listening.port)}`;
+        if (listening.metaPort === null) throw new Error("the model helper has no metadata port");
+        const adc = await writeDummyAdc({ dir: files.dir, tokenUri: `http://127.0.0.1:${String(listening.metaPort)}/token`, projectId: input.projectId });
         const environment = laptopModelEnvironment({
           rows: input.catalogRows, rowIds: input.rowIds, baseUrl, projectId: input.projectId,
-          metadataHostPort: listening.metaPort === null ? undefined : `127.0.0.1:${String(listening.metaPort)}`,
+          metadataHostPort: `127.0.0.1:${String(listening.metaPort)}`, adc,
         });
         if (!environment.ok) throw new Error("the model rows cannot be pointed at one helper");
         const started: StartedModelHelper = {
+          pinnedDigest: files.digest,
           commandEnvironment: environment.environment,
           readSummary: () => Promise.resolve(summarizeModelLedgerFile(ledger)),
           stop,

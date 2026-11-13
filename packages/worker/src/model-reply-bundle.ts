@@ -2,7 +2,7 @@
 // helper serves, only what routing needs) and `replies.json` (the RESOLVED reply sets, one per family, each reply already stamped with the provenance the WORKER decided). The helper parses both strictly, and serves a bundle
 // only when its bytes hash to the digest in its arguments (`--digest`): a file that is not the one the worker pinned is refused and nothing listens. PURE apart from `node:crypto` (through `sha256HexOf`).
 import { z } from "zod";
-import { MODEL_FAMILIES, ModelReplySetSchema, SERVED_MODEL_FAMILIES, canonicalJson, sha256HexOf, type ModelReplySet, type ServableRow, type ServedModelFamily } from "@agentx/contracts";
+import { MODEL_FAMILIES, ModelReplySetSchema, SERVED_MODEL_FAMILIES, canonicalJson, sha256HexOf, type ModelReplySet, type ServableRow, type ServedModelFamily } from "@agentx/contracts/model-helper";
 
 export const MODEL_REPLY_BUNDLE_VERSION = 1;
 export const MODEL_REPLY_BUNDLE_MAX_BYTES = 24 * 1024 * 1024;

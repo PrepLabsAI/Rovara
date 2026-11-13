@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { builtinModelCatalog, modelHostBlockList } from "../../packages/contracts/src/index.js";
 import { createCheckRunners } from "../../packages/worker/src/verification/checks.js";
-import { MODEL_DUMMY_KEY, laptopModelEnvironment, modelFailureBaseUrl, modelKeyVariables, modelRowBaseUrl } from "../../packages/worker/src/model-helper-env.js";
+import { MODEL_DUMMY_KEY, laptopModelEnvironment, modelFailureBaseUrl, modelKeyVariables, modelRowBaseUrl, isSecretShapedVariable } from "../../packages/worker/src/model-helper-env.js";
 import { LOCAL_HELPER_CHILD_ENVIRONMENT, localModelHelperPlan, type SpawnSeam } from "../../packages/worker/src/model-helper-local.js";
 import { withModelHelperRound, type ModelHelperRoundResult } from "../../packages/worker/src/model-helper-round.js";
 import { createRepoReplySetSource } from "../../packages/worker/src/model-reply-set-load.js";
@@ -17,6 +17,7 @@ import { createRepoReplySetSource } from "../../packages/worker/src/model-reply-
 const CATALOG = builtinModelCatalog().rows;
 const BLOCK = modelHostBlockList(CATALOG, []);
 const ENTRY = join(dirname(fileURLToPath(import.meta.url)), "../../packages/worker/dist/model-helper.js");
+const ADC = { credentialsFile: "/run/adc.json", cloudsdkConfigDir: "/run/cloudsdk" };
 const dirs: string[] = [];
 const saved: Record<string, string | undefined> = {};
 afterEach(() => {
@@ -39,13 +40,29 @@ const setEnv = (name: string, value: string): void => {
 const realLookingKey = (): string => ["sk", "proj", "A1b2C3d4E5f6G7h8", String(Date.now()), "Zq9Xw8Vu7Ts6"].join("-");
 
 describe("the variables", () => {
+  it("M2: every credential-shaped variable the user's shell holds is blanked or replaced, by a rule and by an explicit list", () => {
+    const secret = realLookingKey();
+    const inherited: Record<string, string> = {
+      ANTHROPIC_AUTH_TOKEN: secret, AZURE_OPENAI_AD_TOKEN: secret, OPENAI_ADMIN_KEY: secret, HF_TOKEN: secret, AWS_ACCESS_KEY_ID: secret, AWS_SECRET_ACCESS_KEY: secret, AWS_SESSION_TOKEN: secret, AWS_PROFILE: "prod",
+      SOME_NEW_VENDOR_KEY: secret, ACME_SERVICE_TOKEN: secret, DB_SECRET: secret, MY_CREDENTIALS: secret, UNRELATED: "keep", PATH: "/usr/bin",
+    };
+    const result = laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai"], baseUrl: "http://h:1", adc: ADC, inherited });
+    const env = result.ok ? result.environment : {};
+    for (const name of ["ANTHROPIC_AUTH_TOKEN", "AZURE_OPENAI_AD_TOKEN", "OPENAI_ADMIN_KEY", "HF_TOKEN"]) expect(env[name], name).toBe(MODEL_DUMMY_KEY);
+    for (const name of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "SOME_NEW_VENDOR_KEY", "ACME_SERVICE_TOKEN", "DB_SECRET", "MY_CREDENTIALS"]) expect(env[name], name).toBe("");
+    expect(env.UNRELATED).toBeUndefined();
+    expect(env.PATH).toBeUndefined();
+    expect(JSON.stringify(env)).not.toContain(secret);
+    expect(["X_KEY", "X_TOKEN", "X_SECRET", "X_CREDENTIALS", "X_API_KEY", "X_PASSWORD"].every(isSecretShapedVariable)).toBe(true);
+    expect(["KEYBOARD", "TOKENIZER", "PATH", "HOME", "X_KEYS"].some(isSecretShapedVariable)).toBe(false);
+  });
   it("point the row's client at the helper, add the companions, and override EVERY key variable with the dummy; Vertex gets the metadata server and an emptied key-file path", () => {
-    const gemini = laptopModelEnvironment({ rows: CATALOG, rowIds: ["gemini", "vertex"], baseUrl: "http://127.0.0.1:5555", metadataHostPort: "127.0.0.1:5556", projectId: "rovara-test-project" });
+    const gemini = laptopModelEnvironment({ rows: CATALOG, rowIds: ["gemini", "vertex"], baseUrl: "http://127.0.0.1:5555", metadataHostPort: "127.0.0.1:5556", projectId: "rovara-test-project", adc: ADC, inherited: {} });
     expect(gemini.ok).toBe(true);
     const env = gemini.ok ? gemini.environment : {};
     expect(env).toMatchObject({
       GOOGLE_GEMINI_BASE_URL: "http://127.0.0.1:5555/p/gemini", GOOGLE_VERTEX_BASE_URL: "http://127.0.0.1:5555/p/vertex", GCE_METADATA_HOST: "127.0.0.1:5556", GCE_METADATA_IP: "127.0.0.1:5556",
-      GOOGLE_CLOUD_PROJECT: "rovara-test-project", GOOGLE_CLOUD_LOCATION: "us-central1", GOOGLE_APPLICATION_CREDENTIALS: "",
+      GOOGLE_CLOUD_PROJECT: "rovara-test-project", GOOGLE_CLOUD_LOCATION: "us-central1", GOOGLE_APPLICATION_CREDENTIALS: ADC.credentialsFile, CLOUDSDK_CONFIG: ADC.cloudsdkConfigDir,
     });
     for (const name of ["GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CO_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY"]) expect(env[name], name).toBe(MODEL_DUMMY_KEY);
     expect(modelKeyVariables(CATALOG)).toEqual(expect.arrayContaining(["GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]));
@@ -55,8 +72,8 @@ describe("the variables", () => {
     const viaGoogle = CATALOG.find((row) => row.id === "gemini-openai") as (typeof CATALOG)[number];
     expect(modelRowBaseUrl(openai, "http://h:1/")).toBe("http://h:1/p/openai/v1");
     expect(modelRowBaseUrl(viaGoogle, "http://h:1")).toBe("http://h:1/p/gemini-openai/v1beta/openai");
-    expect(laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai", "gemini-openai"], baseUrl: "http://h:1" })).toEqual({ ok: false, reason: "conflict" });
-    expect(laptopModelEnvironment({ rows: CATALOG, rowIds: ["nope"], baseUrl: "http://h:1" })).toEqual({ ok: false, reason: "unknown_row" });
+    expect(laptopModelEnvironment({ rows: CATALOG, rowIds: ["openai", "gemini-openai"], baseUrl: "http://h:1", adc: ADC, inherited: {} })).toEqual({ ok: false, reason: "conflict" });
+    expect(laptopModelEnvironment({ rows: CATALOG, rowIds: ["nope"], baseUrl: "http://h:1", adc: ADC, inherited: {} })).toEqual({ ok: false, reason: "unknown_row" });
   });
   it("the failure base URL is a pure function of the row, the mode and afterCalls", () => {
     const openai = CATALOG.find((row) => row.id === "openai") as (typeof CATALOG)[number];
@@ -91,7 +108,7 @@ describe("the loopback child", () => {
       childEnv = options.env;
       return spawn(command, args as string[], options);
     };
-    const plan = localModelHelperPlan({ catalogRows: CATALOG, rowIds: ["openai"], source, blockList: BLOCK, entry: ENTRY, spawn: seam, scratchRoot: tmp() });
+    const plan = localModelHelperPlan({ catalogRows: CATALOG, rowIds: ["openai"], source, blockList: BLOCK, entry: ENTRY, spawn: seam, scratchRoot: tmp(), onResult: () => undefined });
     const started = await plan.start(new AbortController().signal);
     try {
       expect(childEnv).toEqual({ ...LOCAL_HELPER_CHILD_ENVIRONMENT });
@@ -126,7 +143,7 @@ describe("the loopback child", () => {
     expect(out.status).toBe(200);
     expect(out.key).toBe(MODEL_DUMMY_KEY);
     expect(out.gemini).toBe(MODEL_DUMMY_KEY);
-    expect(out.creds).toBe("");
+    expect(out.creds).toMatch(/adc\.json$/u);
     expect(out.text).toContain("Hello from the laptop script.");
     expect(result.stdout).not.toContain(key);
     expect(results).toHaveLength(1);
@@ -141,7 +158,7 @@ describe("the loopback child", () => {
     const root = tmp();
     const source = createRepoReplySetSource({ repositoryRoot: root, baseCommit: "1".repeat(40), workingRoot: root, scratchRoot: tmp() });
     let started = false;
-    const plan = localModelHelperPlan({ catalogRows: CATALOG, rowIds: ["openai"], source, blockList: BLOCK, entry: ENTRY, spawn: (...args) => { started = true; return spawn(args[0], args[1] as string[], args[2]); }, scratchRoot: tmp() });
+    const plan = localModelHelperPlan({ catalogRows: CATALOG, rowIds: ["openai"], source, blockList: BLOCK, entry: ENTRY, spawn: (...args) => { started = true; return spawn(args[0], args[1] as string[], args[2]); }, scratchRoot: tmp(), onResult: () => undefined });
     expect(await plan.start(new AbortController().signal)).toBeUndefined();
     expect(started).toBe(false);
   });

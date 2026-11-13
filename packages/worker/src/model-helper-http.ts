@@ -28,7 +28,7 @@ import {
   type ServableRow,
   type ServeState,
   type ServedModelFamily,
-} from "@agentx/contracts";
+} from "@agentx/contracts/model-helper";
 import { MODEL_ESCAPE_READ_MAX_BYTES, MODEL_ESCAPE_READ_TIMEOUT_MS, type ModelEscapePort, type ModelHostRecorderPort } from "./model-helper-recorder-port.js";
 import type { ModelLedgerRow, ModelLedgerWriter, ModelRefusalReason } from "./model-helper-ledger.js";
 import type { ModelHelperMode } from "./model-helper-args.js";
@@ -42,6 +42,10 @@ export const MODEL_HELPER_LIMITS = {
   totalMs: 10 * 60 * 1000,
   chunkBytes: 1024 * 1024,
   targetChars: 2048,
+  /** The time one request has to send its whole body once its headers are in. */
+  bodyReadMs: 30_000,
+  /** Sockets the main listener holds at once (one sandbox is the only caller; a flood is dropped, not queued). */
+  maxConnections: 256,
 } as const;
 
 /** What the helper says when real, record or replay is asked and no backend is wired (F1-c's `ModelBackend` is not there yet, or the round is not a fresh check sandbox). */
@@ -178,6 +182,8 @@ export interface ModelHelperLoopOptions {
   /** Bind 443 and 80 on `listen` and call the recorder (hosted). `ports` is for tests (443 and 80 are privileged). */
   readonly escapes?: { readonly recorder: ModelHostRecorderPort; readonly ports?: { readonly tls: number; readonly plain: number } } | undefined;
   readonly now?: (() => number) | undefined;
+  /** Tests: shorter limits. */
+  readonly limits?: { readonly bodyReadMs?: number; readonly maxConnections?: number } | undefined;
 }
 export interface RunningModelHelperLoop {
   readonly port: number;
@@ -242,15 +248,28 @@ export async function startModelHelperLoop(options: ModelHelperLoopOptions): Pro
     sendFixed(res, status, REFUSAL_BODY, { "x-rovara-model-helper": "refused" });
   };
 
-  async function readBody(req: IncomingMessage): Promise<Buffer | undefined> {
+  async function readBody(req: IncomingMessage): Promise<Buffer | "too_large" | "timeout"> {
     const chunks: Buffer[] = [];
     let total = 0;
-    for await (const chunk of req as AsyncIterable<Buffer>) {
-      total += chunk.length;
-      if (total > MODEL_HELPER_LIMITS.bodyBytes) return undefined;
-      chunks.push(chunk);
+    let timedOut = false;
+    // The whole body must arrive within the body timeout (a stalled or trickling client is cut, not waited for).
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // answer first, then drop the connection (a destroy before the write is flushed would lose the answer)
+      req.socket.end("HTTP/1.1 408 Request Timeout\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", () => req.destroy());
+    }, options.limits?.bodyReadMs ?? MODEL_HELPER_LIMITS.bodyReadMs);
+    try {
+      for await (const chunk of req as AsyncIterable<Buffer>) {
+        total += chunk.length;
+        if (total > MODEL_HELPER_LIMITS.bodyBytes) return "too_large";
+        chunks.push(chunk);
+      }
+    } catch {
+      return timedOut ? "timeout" : "too_large";
+    } finally {
+      clearTimeout(timer);
     }
-    return Buffer.concat(chunks);
+    return timedOut ? "timeout" : Buffer.concat(chunks);
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -265,8 +284,12 @@ export async function startModelHelperLoop(options: ModelHelperLoopOptions): Pro
     const { target } = parsed;
     if (!options.ledger.open) return sendFixed(res, 503, REFUSAL_BODY, { "x-rovara-model-helper": "refused" });
     // 3. The body, bounded.
-    const body = await readBody(req).catch(() => undefined);
-    if (body === undefined) return writeRefusal(res, "too_large", 413);
+    const body = await readBody(req);
+    if (body === "timeout") {
+      options.ledger.append(refusedRow("timeout", 408));
+      return;
+    }
+    if (body === "too_large") return writeRefusal(res, "too_large", 413);
     calls += 1;
 
     // 4. The modes that are not scripted are F1-c's.
@@ -349,6 +372,7 @@ export async function startModelHelperLoop(options: ModelHelperLoopOptions): Pro
     } else socket.destroy();
   });
 
+  main.maxConnections = options.limits?.maxConnections ?? MODEL_HELPER_LIMITS.maxConnections;
   const servers: Array<Server | NetServer> = [main];
   const port = await listenOn(main, options.port, options.listen);
 
@@ -373,6 +397,8 @@ export async function startModelHelperLoop(options: ModelHelperLoopOptions): Pro
           socket.destroy();
           return;
         }
+        // The connection IS the escape: it is in the ledger now, before anything is read (a client that sends nothing, or that is killed, is still counted).
+        options.ledger.append({ t: now(), kind: "escape", status: 0 });
         let settled = false;
         const chunks: Buffer[] = [];
         let size = 0;
@@ -388,7 +414,7 @@ export async function startModelHelperLoop(options: ModelHelperLoopOptions): Pro
           } catch {
             host = undefined;
           }
-          options.ledger.append({ t: now(), kind: "escape", status: 0, ...(host === undefined ? {} : { host }) });
+          if (host !== undefined) options.ledger.append({ t: now(), kind: "escape_host", status: 0, host });
           if (escapePort === 80) socket.end("HTTP/1.1 421 Misdirected Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
           else socket.destroy();
         };

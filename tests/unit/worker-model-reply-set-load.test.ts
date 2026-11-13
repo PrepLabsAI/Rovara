@@ -2,13 +2,15 @@
 //   a reply equal to the base commit's is `before_task`; an edited one, a new one, or any reply whose base file is absent, unreadable or invalid is `task_made`; the working tree and the candidate's own commits never raise a
 //   reply's provenance; a file that carries a provenance or origin field is refused (it is not a reply-set file); a symlink is unreadable; the failure pack never counts.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { deflateSync } from "node:zlib";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 // The worker reads the contracts through the package name: the constructor must come from the same module copy (its registry is module-private).
 import { createRovaraIndependentDecision, modelReplyEntrySha256, parseModelReplySetFileBytes, replyCountsTowardProof, type ModelReplyFileEntry } from "@agentx/contracts";
-import { loadModelReplySets, modelReplyFilePath, createRepoReplySetSource, readFileAtCommit, type ReplyFileRead, type ReplySetSource } from "../../packages/worker/src/model-reply-set-load.js";
+import { loadModelReplySets, modelReplyFilePath, createRepoReplySetSource, readFileAtCommit, readFileInWorkingTree, type ReplyFileRead, type ReplySetSource } from "../../packages/worker/src/model-reply-set-load.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -48,7 +50,7 @@ describe("provenance from the base commit", () => {
     const loaded = await loadModelReplySets(sourceOf(r), signal);
     const set = loaded.sets.find((entry) => entry.family === FAMILY);
     expect(set?.replies.map((reply) => [reply.id, reply.provenance])).toEqual([["keep", "before_task"], ["edit", "task_made"], ["fresh", "task_made"]]);
-    expect(set?.replies[0]).toMatchObject({ origin: "customer_written" });
+    expect(set?.replies[0]).toMatchObject({ origin: "repo_file_at_base" });
     expect(set?.replies.map((reply) => replyCountsTowardProof(reply.provenance))).toEqual([true, false, false]);
   });
   it("reads the BASE COMMIT, not the working tree: the agent editing the file and committing it cannot make its edit before_task", async () => {
@@ -131,5 +133,85 @@ describe("provenance from the base commit", () => {
     expect(await withSeam(sound)).toBe("independent");
     expect(await withSeam(forged)).toBe("task_made");
     expect(modelReplyEntrySha256(reply)).toMatch(/^[0-9a-f]{64}$/u);
+  });
+  // H1: the blob id comes from the tree; the bytes must hash to it (a swapped loose or packed object under the base id is refused)
+  const forged = file([{ id: "a", response: { text: "FORGED", finish: "stop" } }]);
+  const blobIdOf = (root: string): string => git(root, "rev-parse", `HEAD:${modelReplyFilePath(FAMILY)}`);
+  it("a swapped LOOSE blob under the base id is refused: the agent's identical replies are task_made, never before_task", async () => {
+    const r = repoWithBase(file([{ id: "a", response: { text: "original", finish: "stop" } }]));
+    const id = blobIdOf(r.root);
+    // the object store now holds the FORGED bytes under the base blob's id (valid zlib, valid header, wrong hash)
+    const loose = join(r.root, ".git/objects", id.slice(0, 2), id.slice(2));
+    rmSync(loose, { force: true });
+    writeFileSync(loose, deflateSync(Buffer.concat([Buffer.from(`blob ${String(Buffer.byteLength(forged))}\0`), Buffer.from(forged)])), { mode: 0o444 });
+    // the candidate (working tree) carries the same forged reply: only the swapped base would make it before_task
+    write(r.root, forged);
+    expect(await readFileAtCommit({ repositoryRoot: r.root, commitSha: r.base, path: modelReplyFilePath(FAMILY), scratchRoot: r.scratch, maxBytes: 1_000_000, signal })).toEqual({ kind: "unreadable" });
+    expect(await counts(sourceOf(r))).toEqual({ before_task: 0, independent: 0, task_made: 1 });
+  });
+  it("a swapped PACKED blob under the base id is refused too", async () => {
+    const r = repoWithBase(file([{ id: "a", response: { text: "original", finish: "stop" } }]));
+    const id = blobIdOf(r.root);
+    // the commit and the tree stay as they are; only the blob's own loose object is replaced by a pack that holds the forged bytes under the same id
+    const packDir = join(r.root, ".git/objects/pack");
+    mkdirSync(packDir, { recursive: true });
+    rmSync(join(r.root, ".git/objects", id.slice(0, 2), id.slice(2)), { force: true });
+    const body = deflateSync(Buffer.from(forged));
+    const size = Buffer.byteLength(forged);
+    const head: number[] = [(3 << 4) | (size & 15)];
+    let rest = size >> 4;
+    while (rest > 0) { head[head.length - 1] = (head.at(-1) as number) | 0x80; head.push(rest & 0x7f); rest >>= 7; }
+    const objects = Buffer.concat([Buffer.from(head), body]);
+    const packHead = Buffer.alloc(12);
+    packHead.write("PACK", 0);
+    packHead.writeUInt32BE(2, 4);
+    packHead.writeUInt32BE(1, 8);
+    const packNoSum = Buffer.concat([packHead, objects]);
+    const packSum = createHash("sha1").update(packNoSum).digest();
+    const fan = Buffer.alloc(256 * 4);
+    const first = Number.parseInt(id.slice(0, 2), 16);
+    for (let i = first; i < 256; i += 1) fan.writeUInt32BE(1, i * 4);
+    const idxBody = Buffer.concat([Buffer.from([0xff, 0x74, 0x4f, 0x63, 0, 0, 0, 2]), fan, Buffer.from(id, "hex"), Buffer.alloc(4), Buffer.from([0, 0, 0, 12]), packSum]);
+    const idx = Buffer.concat([idxBody, createHash("sha1").update(idxBody).digest()]);
+    writeFileSync(join(packDir, "pack-forged.pack"), Buffer.concat([packNoSum, packSum]));
+    writeFileSync(join(packDir, "pack-forged.idx"), idx);
+    // the forged pack really answers for the base id (a control: git itself returns the forged bytes), and the reader still refuses it
+    expect(git(r.root, "cat-file", "blob", id)).toContain("FORGED");
+    write(r.root, forged);
+    expect(await readFileAtCommit({ repositoryRoot: r.root, commitSha: r.base, path: modelReplyFilePath(FAMILY), scratchRoot: r.scratch, maxBytes: 1_000_000, signal })).toEqual({ kind: "unreadable" });
+    expect(await counts(sourceOf(r))).toEqual({ before_task: 0, independent: 0, task_made: 1 });
+  });
+  it("an honest object still reads (the recomputed id matches)", async () => {
+    const r = repoWithBase(file([{ id: "a" }]));
+    expect((await sourceOf(r).readBase(FAMILY, signal)).kind).toBe("file");
+  });
+  it("a LINKED WORKTREE (.git is a file with gitdir) reads the base commit's objects from the main repository's store", async () => {
+    const r = repoWithBase(file([{ id: "a", response: { text: "original", finish: "stop" } }]));
+    const worktree = join(tmp(), "wt");
+    git(r.root, "worktree", "add", "--quiet", "-b", "agent", worktree);
+    write(worktree, file([{ id: "a", response: { text: "original", finish: "stop" } }, { id: "mine" }]));
+    const source = createRepoReplySetSource({ repositoryRoot: worktree, baseCommit: r.base, workingRoot: worktree, scratchRoot: r.scratch });
+    expect(await counts(source)).toEqual({ before_task: 1, independent: 0, task_made: 1 });
+    // a .git file that points nowhere, or names a path with a NUL, is unreadable
+    const bad = tmp();
+    writeFileSync(join(bad, ".git"), "gitdir: /nonexistent/place\n");
+    expect(await readFileAtCommit({ repositoryRoot: bad, commitSha: r.base, path: modelReplyFilePath(FAMILY), scratchRoot: r.scratch, maxBytes: 1000, signal })).toEqual({ kind: "unreadable" });
+  });
+  it("L5: a file swapped for another (or for a symlink) between the check and the open is refused", async () => {
+    const root = tmp();
+    mkdirSync(join(root, ".rovara/mocks/model"), { recursive: true });
+    const target = join(root, modelReplyFilePath(FAMILY));
+    writeFileSync(target, file([{ id: "a" }]));
+    const other = join(root, "other.json");
+    // a different file (a different inode) takes the path after lstat
+    const swapped = await readFileInWorkingTree(root, modelReplyFilePath(FAMILY), 1_000_000, { beforeOpen: () => { rmSync(target); writeFileSync(other, file([{ id: "b" }])); renameSync(other, target); } });
+    expect(swapped).toEqual({ kind: "unreadable" });
+    // a symlink takes the path after lstat: O_NOFOLLOW refuses it
+    writeFileSync(target, file([{ id: "a" }]));
+    const linked = await readFileInWorkingTree(root, modelReplyFilePath(FAMILY), 1_000_000, { beforeOpen: () => { rmSync(target); symlinkSync(other, target); } });
+    expect(linked).toEqual({ kind: "unreadable" });
+    rmSync(target);
+    writeFileSync(target, file([{ id: "a" }]));
+    expect((await readFileInWorkingTree(root, modelReplyFilePath(FAMILY), 1_000_000)).kind).toBe("file");
   });
 });

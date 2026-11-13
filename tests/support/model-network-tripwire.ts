@@ -3,7 +3,9 @@
 //     be bound in a test); the dial is logged by name and port;
 //   - any other connect, DNS lookup, `http(s).request` or `fetch` to a non-loopback name or address is REFUSED (it throws) and recorded in `refused`: the test fails if `refused` is not empty;
 //   - every socket that is really opened is opened to a loopback address (asserted at the lowest door).
+import dgram from "node:dgram";
 import dns from "node:dns";
+import http2 from "node:http2";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -13,7 +15,7 @@ export interface TripwireDial {
   readonly port: number;
 }
 export interface TripwireRefusal {
-  readonly door: "socket" | "dns" | "http" | "https" | "fetch";
+  readonly door: "socket" | "dns" | "http" | "https" | "http2" | "udp" | "fetch";
   readonly target: string;
 }
 export interface ModelNetworkTripwire {
@@ -75,6 +77,39 @@ export function installModelNetworkTripwire(input: { readonly resolver: Readonly
     return Reflect.apply(originalLookup, dns, [host, ...rest]) as unknown;
   });
 
+  // every other way to resolve a name or reach a host: dns.resolve*, dns.promises.*, UDP and HTTP/2
+  const dnsRestorers: Array<() => void> = [];
+  const wrapDns = (target: Record<string, unknown>, names: readonly string[]): void => {
+    for (const name of names) {
+      const original = target[name];
+      if (typeof original !== "function") continue;
+      target[name] = (host: unknown, ...rest: unknown[]) => {
+        if (typeof host === "string" && !isLoopback(host) && !input.resolver.has(host)) refuse("dns", host);
+        return Reflect.apply(original, target, [host, ...rest]) as unknown;
+      };
+      dnsRestorers.push(() => {
+        target[name] = original;
+      });
+    }
+  };
+  const RESOLVERS = ["resolve", "resolve4", "resolve6", "resolveAny", "resolveCname", "resolveMx", "resolveNs", "resolveSrv", "resolveTxt", "resolvePtr", "resolveNaptr", "resolveSoa", "resolveCaa", "reverse"] as const;
+  wrapDns(dns, RESOLVERS);
+  wrapDns(dns.promises, [...RESOLVERS, "lookup"]);
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- put back as it was
+  const originalSend = dgram.Socket.prototype.send;
+  (dgram.Socket.prototype as unknown as { send: unknown }).send = function patchedSend(this: dgram.Socket, ...args: unknown[]) {
+    const address = args.find((value, index) => typeof value === "string" && index > 0 && !/^[0-9]+$/u.test(value) && index >= 2);
+    if (typeof address === "string" && !isLoopback(address)) refuse("udp", address);
+    return Reflect.apply(originalSend, this, args) as unknown;
+  };
+   
+  const originalHttp2Connect = http2.connect;
+  (http2 as unknown as { connect: unknown }).connect = (authority: unknown, ...rest: unknown[]) => {
+    const host = hostOf([authority]);
+    if (!isLoopback(host) && !input.resolver.has(host)) refuse("http2", host);
+    return Reflect.apply(originalHttp2Connect, http2, [authority, ...rest]) as unknown;
+  };
+
   const hostOf = (args: unknown[]): string => {
     const value = args[0];
     if (typeof value === "string") {
@@ -119,6 +154,9 @@ export function installModelNetworkTripwire(input: { readonly resolver: Readonly
     restore() {
       net.Socket.prototype.connect = originalConnect;
       (dns as { lookup: unknown }).lookup = originalLookup;
+      for (const restoreOne of dnsRestorers) restoreOne();
+      (dgram.Socket.prototype as unknown as { send: unknown }).send = originalSend;
+      (http2 as unknown as { connect: unknown }).connect = originalHttp2Connect;
       for (const restoreOne of restorers) restoreOne();
       globalThis.fetch = originalFetch;
     },

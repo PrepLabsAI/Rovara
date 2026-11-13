@@ -7,16 +7,16 @@
 // two headers, a row past a bound or an overflow marker is UNTRUSTED: its summary says nothing (all zero) and the evidence says "not run". A summary that cannot be read is `undefined`, never "no calls".
 import { appendFileSync, readFileSync } from "node:fs";
 import { z } from "zod";
-import { FAILURE_MODES, MODEL_ECHO_PATTERN, REPLY_PROVENANCES, SERVED_MODEL_FAMILIES, checkModelHost, replyCountsTowardProof } from "@agentx/contracts";
+import { FAILURE_MODES, MODEL_ECHO_PATTERN, REPLY_PROVENANCES, SERVED_MODEL_FAMILIES, checkModelHost, replyCountsTowardProof } from "@agentx/contracts/model-helper";
 import { MODEL_BLOCK_STATES, MODEL_HELPER_MODES } from "./model-helper-args.js";
 
 export const MODEL_LEDGER_MAX_ROWS = 10_000;
 export const MODEL_LEDGER_MAX_BYTES = 8 * 1024 * 1024;
 export const MODEL_SUMMARY_MAX_ESCAPE_HOSTS = 256;
-export const MODEL_LEDGER_KINDS = ["scripted", "failure_pack", "unmatched", "refused", "not_served", "backend", "escape"] as const;
+export const MODEL_LEDGER_KINDS = ["scripted", "failure_pack", "unmatched", "refused", "not_served", "backend", "escape", "escape_host"] as const;
 export type ModelLedgerKind = (typeof MODEL_LEDGER_KINDS)[number];
 /** Why a call was refused before it reached a row: the fixed words, never the refused text. */
-export const MODEL_REFUSAL_REASONS = ["caller", "connect", "upgrade", "target", "headers", "too_large", "ledger_full", "mode"] as const;
+export const MODEL_REFUSAL_REASONS = ["caller", "connect", "upgrade", "target", "headers", "too_large", "ledger_full", "mode", "timeout"] as const;
 export type ModelRefusalReason = (typeof MODEL_REFUSAL_REASONS)[number];
 
 const Hex64 = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -170,7 +170,7 @@ export function summarizeModelLedgerBytes(bytes: Uint8Array): ModelHelperSummary
     let backend = 0;
     let proof = 0;
     let escapeCount = 0;
-    let unreadable = 0;
+    let named = 0;
     const hosts = new Set<string>();
     for (const line of lines.slice(1)) {
       const value: unknown = JSON.parse(line);
@@ -202,9 +202,18 @@ export function summarizeModelLedgerBytes(bytes: Uint8Array): ModelHelperSummary
           backend += 1;
           break;
         case "escape":
+          // written when the connection is accepted (a client that sends nothing is still an escape); a name, when one is read, comes as a later `escape_host` row
           escapeCount += 1;
-          if (entry.host === undefined) unreadable += 1;
-          else if (hosts.size < MODEL_SUMMARY_MAX_ESCAPE_HOSTS) hosts.add(entry.host);
+          if (entry.host !== undefined) {
+            named += 1;
+            if (hosts.size < MODEL_SUMMARY_MAX_ESCAPE_HOSTS) hosts.add(entry.host);
+          }
+          break;
+        case "escape_host":
+          // names one connection already counted: a name with no connection before it is a ledger that cannot be trusted
+          if (entry.host === undefined || named >= escapeCount) return UNTRUSTED_MODEL_SUMMARY;
+          named += 1;
+          if (hosts.size < MODEL_SUMMARY_MAX_ESCAPE_HOSTS) hosts.add(entry.host);
           break;
       }
     }
@@ -221,7 +230,7 @@ export function summarizeModelLedgerBytes(bytes: Uint8Array): ModelHelperSummary
       refused,
       notServed,
       backend,
-      escapes: { count: escapeCount, hosts: [...hosts].sort(), unreadable },
+      escapes: { count: escapeCount, hosts: [...hosts].sort(), unreadable: Math.max(0, escapeCount - named) },
     };
   } catch {
     return UNTRUSTED_MODEL_SUMMARY;

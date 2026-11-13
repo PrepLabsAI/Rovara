@@ -11,9 +11,11 @@
 // reply agent R2 are separate lanes). `IndependentReplySource` below is the typed seam where R1 will plug in; with none, nothing is `independent`.
 // A family whose candidate file is absent, unreadable or invalid has NO set: every call answers "unmatched" (fail closed).
 import { spawn } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { decideFromBase, parseModelReplySetFileBytes, stampReplyProvenance, SERVED_MODEL_FAMILIES, MODEL_REPLY_SET_MAX_BYTES, type IndependentReplyDecision, type ModelReplyFileEntry, type ModelReplySet, type ModelReplySetFile, type ReplyProvenanceDecision, type ServedModelFamily } from "@agentx/contracts";
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
+import { decideFromBase, parseModelReplySetFileBytes, stampReplyProvenance, SERVED_MODEL_FAMILIES, MODEL_REPLY_SET_MAX_BYTES, type BeforeTaskOrigin, type IndependentReplyDecision, type ModelReplyFileEntry, type ModelReplySet, type ModelReplySetFile, type ReplyProvenanceDecision, type ServedModelFamily } from "@agentx/contracts";
 import { candidateGitEnvironment } from "./e2e-candidate-source.js";
 
 export const MODEL_REPLY_FILE_DIR = ".rovara/mocks/model";
@@ -46,8 +48,12 @@ export interface LoadedReplySets {
 export interface LoadOptions {
   /** R1's seam; absent: nothing is `independent`. */
   readonly independent?: IndependentReplySource | undefined;
-  /** The sub-origin recorded for a `before_task` reply of a repo file (the file form cannot say; default `customer_written`). */
-  readonly beforeTaskOrigin?: "customer_written" | "setup_agent_from_fakes" | "real_recording_capped" | "prompt_and_expected_shape";
+  /**
+   * The sub-origin recorded for a `before_task` reply of a repo file. The file form cannot say who wrote a reply, and a reply merged from an EARLIER task's agent is in the base commit too, so the honest default is
+   * `repo_file_at_base`, never `customer_written`. Such a reply counts as `before_task` only because it is in the base commit; until R1's store records the real provenance of merged task-made replies (DECISIONS 166), that
+   * is the most this loader can know.
+   */
+  readonly beforeTaskOrigin?: BeforeTaskOrigin;
 }
 
 function parseFile(read: ReplyFileRead, family: ServedModelFamily): { status: ReplyFileStatus; file?: ModelReplySetFile } {
@@ -59,7 +65,7 @@ function parseFile(read: ReplyFileRead, family: ServedModelFamily): { status: Re
 
 /** The resolved reply sets of a task: the candidate's files, each reply stamped with the provenance the worker decided from the BASE commit's file. Never throws for a file it cannot read. */
 export async function loadModelReplySets(source: ReplySetSource, signal: AbortSignal, options: LoadOptions = {}): Promise<LoadedReplySets> {
-  const origin = options.beforeTaskOrigin ?? "customer_written";
+  const origin = options.beforeTaskOrigin ?? "repo_file_at_base";
   const sets: ModelReplySet[] = [];
   const families: LoadedFamily[] = [];
   for (const family of SERVED_MODEL_FAMILIES) {
@@ -136,18 +142,40 @@ function runGit(args: readonly string[], options: { cwd: string; signal: AbortSi
 }
 
 /**
+ * The object directory of a repository: a plain `.git` directory, or a LINKED WORKTREE (`.git` is a file `gitdir: <path>`, whose `commondir` names the main repository's git directory, where the objects live). Every directory
+ * on the way must be a real directory (no symlink). Undefined when it is neither.
+ */
+async function objectsDirectoryOf(repositoryRoot: string): Promise<string | undefined> {
+  const realRepository = await realpath(repositoryRoot);
+  const dotGit = join(realRepository, ".git");
+  const stat = await lstat(dotGit);
+  let gitDirectory = dotGit;
+  if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= 4096) {
+    const match = /^gitdir: (.+)\n?$/u.exec(await readFile(dotGit, "utf8"));
+    if (match === null || (match[1] as string).includes("\0")) return undefined;
+    gitDirectory = await realpath(resolve(realRepository, match[1] as string));
+    await plainDirectory(gitDirectory);
+    const common = await readFile(join(gitDirectory, "commondir"), "utf8").then((text) => text.trim(), () => undefined);
+    if (common !== undefined) {
+      if (common === "" || common.includes("\0")) return undefined;
+      gitDirectory = await realpath(isAbsolute(common) ? common : resolve(gitDirectory, common));
+    }
+  }
+  const objects = join(gitDirectory, "objects");
+  await plainDirectory(gitDirectory);
+  await plainDirectory(objects);
+  return objects.includes("\n") ? undefined : objects;
+}
+
+/**
  * One file of a commit, read from the git OBJECT in a throwaway bare repository this worker owns (empty template, no refs, `objects/info/alternates` naming only the repository's object directory): nothing of the repository
  * except its objects is read by git. A path that is not a regular file in the commit's tree (a symlink, a directory, a submodule) is `unreadable`; a path that is not in the tree is `absent`.
  */
 export async function readFileAtCommit(input: { repositoryRoot: string; commitSha: string; path: string; scratchRoot: string; maxBytes: number; signal: AbortSignal }): Promise<ReplyFileRead> {
   if (!SHA1.test(input.commitSha)) return { kind: "unreadable" };
   try {
-    const realRepository = await realpath(input.repositoryRoot);
-    const gitDirectory = join(realRepository, ".git");
-    const objects = join(gitDirectory, "objects");
-    await plainDirectory(gitDirectory);
-    await plainDirectory(objects);
-    if (objects.includes("\n")) return { kind: "unreadable" };
+    const objects = await objectsDirectoryOf(input.repositoryRoot);
+    if (objects === undefined) return { kind: "unreadable" };
     await mkdir(input.scratchRoot, { recursive: true, mode: 0o700 });
     const work = await mkdtemp(join(input.scratchRoot, "git-"));
     try {
@@ -163,6 +191,8 @@ export async function readFileAtCommit(input: { repositoryRoot: string; commitSh
       const size = Number((await runGit([`--git-dir=${gitDir}`, "cat-file", "-s", sha], { cwd: work, signal: input.signal, maxBytes: 64 })).toString("utf8").trim());
       if (!Number.isSafeInteger(size) || size < 0 || size > input.maxBytes) return { kind: "unreadable" };
       const bytes = await runGit([`--git-dir=${gitDir}`, "cat-file", "blob", sha], { cwd: work, signal: input.signal, maxBytes: input.maxBytes });
+      // The object database answered for this id; the id is RECOMPUTED, so a loose or packed object swapped in under the base id cannot pass (as e2e-candidate-source.ts does for the candidate's blobs).
+      if (bytes.length !== size || createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${String(bytes.length)}\0`), bytes])).digest("hex") !== sha) return { kind: "unreadable" };
       return { kind: "file", bytes };
     } finally {
       await rm(work, { recursive: true, force: true });
@@ -173,10 +203,11 @@ export async function readFileAtCommit(input: { repositoryRoot: string; commitSh
 }
 
 /** One file of the working tree, without following a symlink (not the file, not any folder on the way), contained in the root, at most `maxBytes`. */
-export async function readFileInWorkingTree(root: string, path: string, maxBytes: number): Promise<ReplyFileRead> {
+export async function readFileInWorkingTree(root: string, path: string, maxBytes: number, hooks: { readonly beforeOpen?: () => void | Promise<void> } = {}): Promise<ReplyFileRead> {
   try {
     let current = await realpath(root);
     const parts = path.split("/");
+    let leaf: Awaited<ReturnType<typeof lstat>> | undefined;
     for (const [index, part] of parts.entries()) {
       current = join(current, part);
       const stat = await lstat(current).catch((error: NodeJS.ErrnoException) => (error.code === "ENOENT" || error.code === "ENOTDIR" ? undefined : null));
@@ -184,8 +215,25 @@ export async function readFileInWorkingTree(root: string, path: string, maxBytes
       if (stat === undefined) return { kind: "absent" };
       if (stat.isSymbolicLink()) return { kind: "unreadable" };
       if (index < parts.length - 1 ? !stat.isDirectory() : !stat.isFile() || stat.size > maxBytes) return { kind: "unreadable" };
+      leaf = stat;
     }
-    return { kind: "file", bytes: await readFile(current) };
+    // Read through the descriptor of the file that was checked: opened without following a link, and the same inode as the one lstat saw (a swap between the check and the open is refused).
+    await hooks.beforeOpen?.();
+    const handle = await open(current, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.size > maxBytes || leaf === undefined || opened.ino !== leaf.ino || opened.dev !== leaf.dev) return { kind: "unreadable" };
+      const bytes = Buffer.alloc(opened.size);
+      let read = 0;
+      while (read < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, read, bytes.length - read, read);
+        if (bytesRead === 0) break;
+        read += bytesRead;
+      }
+      return read === bytes.length ? { kind: "file", bytes } : { kind: "unreadable" };
+    } finally {
+      await handle.close();
+    }
   } catch {
     return { kind: "unreadable" };
   }

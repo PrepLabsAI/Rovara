@@ -5,7 +5,11 @@
 //   - nothing was refused by the tripwire, every real socket went to loopback, and the program's own files import nothing that could open an outbound socket.
 // The Linux and staging layers are F1-b's script and F1-g's canary.
 import { readFileSync } from "node:fs";
+import dgram from "node:dgram";
+import dns from "node:dns";
 import http from "node:http";
+import http2 from "node:http2";
+import net from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import tls from "node:tls";
@@ -119,6 +123,29 @@ describe("no request reaches a real model host during a scripted-replies run", (
     expect(tripwire.opened).toEqual([]);
   });
 
+  it("L3: the tripwire also refuses dns.resolve*, dns.promises, UDP and HTTP/2 to a host the block does not cover", async () => {
+    const tripwire = installModelNetworkTripwire({ resolver: new Set(), ports: { 443: 1, 80: 1 } });
+    const attempt = async (body: () => unknown): Promise<void> => {
+      try {
+        await body();
+      } catch {
+        // refused: recorded by the tripwire
+      }
+    };
+    try {
+      await attempt(() => dns.resolve4("api.openai.com", () => undefined));
+      await attempt(() => dns.promises.resolve("generativelanguage.googleapis.com"));
+      await attempt(() => dns.promises.lookup("api.anthropic.com"));
+      await attempt(() => dns.reverse("8.8.8.8", () => undefined));
+      await attempt(() => { const socket = dgram.createSocket("udp4"); socket.on("error", () => undefined); try { socket.send(Buffer.from("x"), 53, "8.8.8.8"); } finally { socket.close(); } });
+      await attempt(() => http2.connect("https://api.cohere.com"));
+    } finally {
+      tripwire.restore();
+    }
+    expect(new Set(tripwire.refused.map((entry) => entry.door))).toEqual(new Set(["dns", "udp", "http2"]));
+    expect(tripwire.refused.length).toBeGreaterThanOrEqual(6);
+  });
+
   it("a client that ignores its redirect on a connection the recorder cannot name is still an escape: not run (host unreadable)", async () => {
     const world = await startWorld({ sets: [SET], escapes: { recorder: { observe: () => ({ host: undefined }) }, ports: { tls: 0, plain: 0 } } });
     const ports = world.loop.escapePorts as { tls: number; plain: number };
@@ -134,6 +161,18 @@ describe("no request reaches a real model host during a scripted-replies run", (
     const evidence = modelHelperEvidence(summary, BLOCK_LIST);
     expect(evidence.result).toBe("not_run");
     expect(evidence.lines).toContain("not run: client ignored the redirect (host unreadable)");
+  });
+
+  it("L1: a connection that never sends a byte is in the ledger as an escape the moment it is accepted (not after the read times out)", async () => {
+    const world = await startWorld({ sets: [SET], escapes: { recorder: nameReadingRecorder, ports: { tls: 0, plain: 0 } } });
+    const ports = world.loop.escapePorts as { tls: number; plain: number };
+    const socket = net.connect(ports.tls, "127.0.0.1");
+    await new Promise<void>((done) => socket.on("connect", () => done()));
+    // well inside the 3 s read timeout: the row was written on accept
+    await new Promise((done) => setTimeout(done, 300));
+    expect(world.summary().escapes).toMatchObject({ count: 1, unreadable: 1 });
+    socket.destroy();
+    await world.close();
   });
 
   it("a name the recorder returns that is not a plain public host (a path, an address, a URL with userinfo) is not written: the escape is unreadable, never repeated", async () => {

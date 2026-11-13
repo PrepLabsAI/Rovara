@@ -183,6 +183,26 @@ describe("refusals", () => {
     expect(reply.status).toBe(431);
     expect(w.summary().refused).toBeGreaterThanOrEqual(1);
   });
+  it("L4: a body that stalls is cut after the body timeout, refused and counted (a slow client cannot hold a connection)", async () => {
+    const w = await world({ sets: [OPENAI_SET], limits: { bodyReadMs: 300 } });
+    const answer = await new Promise<string>((resolveRaw) => {
+      const socket = net.connect(w.loop.port, "127.0.0.1", () => socket.write("POST /p/openai/v1/chat/completions HTTP/1.1\r\nhost: x\r\ncontent-length: 1000\r\n\r\n{\"model\""));
+      let data = "";
+      socket.on("data", (chunk) => (data += chunk.toString()));
+      socket.on("close", () => resolveRaw(data));
+    });
+    expect(answer.startsWith("HTTP/1.1 408")).toBe(true);
+    expect(w.summary()).toMatchObject({ refused: 1, scripted: { before_task: 0 } });
+  });
+  it("L4: the server holds at most maxConnections sockets; the rest are dropped", async () => {
+    const w = await world({ sets: [OPENAI_SET], limits: { maxConnections: 4 } });
+    const sockets = await Promise.all(Array.from({ length: 10 }, () => new Promise<net.Socket>((done) => { const socket = net.connect(w.loop.port, "127.0.0.1"); socket.on("error", () => undefined); socket.on("connect", () => done(socket)); })));
+    await new Promise((done) => setTimeout(done, 300));
+    const alive = sockets.filter((socket) => !socket.destroyed).length;
+    for (const socket of sockets) socket.destroy();
+    expect(alive).toBeLessThanOrEqual(4);
+    expect(MODEL_HELPER_LIMITS.maxConnections).toBeGreaterThanOrEqual(16);
+  });
   it("a client that sends no complete header block in 10 s is dropped (limit configured)", async () => {
     const w = await world({ sets: [OPENAI_SET] });
     expect(MODEL_HELPER_LIMITS).toMatchObject({ headerBytes: 16384, bodyBytes: 5 * 1024 * 1024, headerReadMs: 10_000, totalMs: 600_000, chunkBytes: 1024 * 1024 });

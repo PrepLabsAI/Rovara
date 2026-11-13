@@ -17,7 +17,7 @@ import {
   type ServableRow,
 } from "@agentx/contracts";
 import { CheckNotRunError, type CheckRunners } from "./verification/checks.js";
-import type { ModelHelperSummary } from "./model-helper-ledger.js";
+import { UNTRUSTED_MODEL_SUMMARY, type ModelHelperSummary } from "./model-helper-ledger.js";
 import { buildModelReplyBundle, modelReplyBundleBytes, modelReplyBundleDigest } from "./model-reply-bundle.js";
 
 export type ModelRoundResult = "ran" | "not_run";
@@ -83,6 +83,8 @@ export const removeModelHelperRunFiles = (files: ModelHelperRunFiles): Promise<v
 
 /** A helper that is up for a round. The laptop's is a loopback child (model-helper-local.ts); F1-b's launch returns one for the hosted container (its `readSummary` is the `docker exec ... --summarize` read). */
 export interface StartedModelHelper {
+  /** The digest the worker pinned in `--digest`: a summary whose `replySetDigest` is another one is untrusted (it was not written by a helper serving the files the worker wrote). */
+  readonly pinnedDigest: string;
   /** Variables the round's project commands get (the laptop's: the redirect, the dummy keys). Empty for a hosted helper, whose variables reach the sandbox through F1-b's env file. */
   readonly commandEnvironment: Readonly<Record<string, string>>;
   /** The summary, or undefined when it cannot be read: never "no calls". */
@@ -100,8 +102,11 @@ export interface ModelHelperRoundPlan {
   /** F0a's `modelHostBlockList(rows, gateways)`. */
   readonly blockList: readonly string[];
   readonly hostSuffixes?: readonly string[];
-  /** The round is over: its summary and evidence. */
-  onResult?(result: ModelHelperRoundResult): void;
+  /**
+   * REQUIRED, and MUST BE WIRED: the round is over, here are its summary and evidence. An escape (a client that ignored its redirect) and an unreadable record make the round `not_run`; THIS callback is the only place that
+   * fact is delivered, so whoever supplies it (TE-B5/TE-A3's evidence and check statuses) must turn `evidence.result === "not_run"` into "not run" check results, never a pass. `withModelHelperRound` refuses a plan without it.
+   */
+  onResult(result: ModelHelperRoundResult): void;
 }
 
 export const MODEL_HELPER_START_FAILED_SENTENCE = "not run: the model helper could not start";
@@ -116,6 +121,8 @@ export function modelHelperPlanFor(source: ModelHelperRoundSource | undefined, c
 /** `runners` for a round with the model helper, or the same object for one without. */
 export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, runners: CheckRunners): CheckRunners {
   if (plan === undefined) return runners;
+  // An escape reaches only `onResult`: a plan with no consumer would let a round that called a real model host pass in silence.
+  if (typeof (plan as { onResult?: unknown }).onResult !== "function") throw new TypeError("a model helper plan needs an onResult consumer that turns an escape into 'not run' checks (TE-B5/TE-A3)");
   let helper: Promise<StartedModelHelper | undefined> | undefined;
   const ensure = (signal: AbortSignal): Promise<StartedModelHelper | undefined> => {
     helper ??= plan.start(signal).catch((): never => {
@@ -142,9 +149,11 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
       try {
         const started = current === undefined ? undefined : await current.catch(() => undefined);
         if (started !== undefined) {
-          const summary = await started.readSummary().catch(() => undefined);
+          const read = await started.readSummary().catch(() => undefined);
+          // The record must be the one of the files the worker pinned; any other digest is a record nobody can vouch for.
+          const summary = read !== undefined && read.trusted && read.replySetDigest !== started.pinnedDigest ? UNTRUSTED_MODEL_SUMMARY : read;
           try {
-            plan.onResult?.({ summary, evidence: modelHelperEvidence(summary, plan.blockList, plan.hostSuffixes === undefined ? {} : { hostSuffixes: plan.hostSuffixes }) });
+            plan.onResult({ summary, evidence: modelHelperEvidence(summary, plan.blockList, plan.hostSuffixes === undefined ? {} : { hostSuffixes: plan.hostSuffixes }) });
           } catch {
             // a sink that throws must not keep the helper up or the round open
           }

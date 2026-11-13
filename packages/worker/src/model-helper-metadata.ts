@@ -1,10 +1,10 @@
 // TE-F2 part B (M2, release 0.5.19; te-f1 design 4.5; the redirect check 1b): the GCE metadata server beside the helper's loop, on `--meta-port`. Vertex's Application Default Credentials ask it for a project and a token before the first model call
 // (Python needs GCE_METADATA_HOST and GCE_METADATA_IP, JS needs GCE_METADATA_HOST). The routes and answers are F0a's pure table (`serveMetadataRequest`): every answer carries `Metadata-Flavor: Google`, a request without that request
 // header is refused (403), a method other than GET is 405, anything else is 404; the token is a fixed dummy built at run time. This server answers only the helper's `--caller`, refuses CONNECT and upgrades, takes no body, and
-// never echoes or forwards a bearer token that arrives (it reads no header but `Metadata-Flavor`). The project id is the connected project's (plain, not secret); absent, the project route answers 500, never a made-up id.
+// never echoes or forwards a bearer token that arrives (it reads no header but `Metadata-Flavor`). It also answers `POST /token`, the OAuth route of the round's dummy service-account file (model-helper-adc.ts). The project id is the connected project's (plain, not secret); absent, the project route answers 500, never a made-up id.
 // Like the loop it makes no outbound connection: `createServer` only.
 import { createServer, type Server } from "node:http";
-import { serveMetadataRequest } from "@agentx/contracts";
+import { GCE_DUMMY_TOKEN, serveMetadataRequest } from "@agentx/contracts/model-helper";
 
 const REFUSAL_BODY = '{"error":{"code":"refused","message":"the model helper does not answer this caller"}}';
 const normalizeAddress = (address: string | undefined): string => (address ?? "").replace(/^::ffff:/iu, "");
@@ -17,6 +17,8 @@ export function createModelMetadataServer(input: { readonly caller: string; read
       res.end(body);
     };
     if (normalizeAddress(req.socket.remoteAddress) !== input.caller) return fixed(403, REFUSAL_BODY);
+    // The OAuth token route of the dummy service-account file (model-helper-adc.ts): `POST /token` answers the dummy token, whatever was posted (the body is discarded, never read as text, never echoed or logged).
+    if (req.method === "POST" && (req.url === "/token" || req.url?.startsWith("/token?") === true)) return fixed(200, JSON.stringify({ access_token: GCE_DUMMY_TOKEN, expires_in: 3600, token_type: "Bearer" }));
     const url = typeof req.url === "string" && req.url.length <= 400 && req.url.startsWith("/") && !req.url.startsWith("//") ? req.url : undefined;
     if (url === undefined || (url.match(/\?/gu) ?? []).length > 1) return fixed(404, "");
     const [path = "/", query = ""] = url.split("?");

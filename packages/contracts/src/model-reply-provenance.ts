@@ -14,8 +14,8 @@ export type ReplyProvenance = (typeof REPLY_PROVENANCES)[number];
 /** What a served call is classed as in the ledger and the evidence. */
 export const REPLY_RESULT_CLASSES = ["before_task", "independent", "task_made", "failure_pack", "unmatched", "not_served"] as const;
 export type ReplyResultClass = (typeof REPLY_RESULT_CLASSES)[number];
-/** The sub-origin of a `before_task` reply (kept as a field: the plan's O71 and DECISIONS 161 list these four). */
-export const BEFORE_TASK_ORIGINS = ["customer_written", "setup_agent_from_fakes", "real_recording_capped", "prompt_and_expected_shape"] as const;
+/** The sub-origin of a `before_task` reply (kept as a field: the plan's O71 and DECISIONS 161 list the first four). `repo_file_at_base`: the reply is in a repo file of the task's BASE COMMIT and nothing more is known of who wrote it (the honest default of Part B's loader: a repo file cannot say whether the customer or an earlier task wrote it). */
+export const BEFORE_TASK_ORIGINS = ["customer_written", "setup_agent_from_fakes", "real_recording_capped", "prompt_and_expected_shape", "repo_file_at_base"] as const;
 export type BeforeTaskOrigin = (typeof BEFORE_TASK_ORIGINS)[number];
 
 const PROVENANCE_SET: ReadonlySet<string> = new Set(REPLY_PROVENANCES);

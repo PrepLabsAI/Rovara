@@ -12,6 +12,14 @@ describe("summarizing a ledger", () => {
     const summary = summarizeModelLedgerBytes(bytes(HEADER, row(), row({ provenance: "task_made" }), row({ kind: "failure_pack", provenance: undefined, status: 429, failureMode: "rate_limit" }), row({ kind: "unmatched", provenance: undefined, status: 400 }), row({ kind: "escape", provenance: undefined, status: 0, host: "api.openai.com" }), row({ kind: "escape", provenance: undefined, status: 0 })));
     expect(summary).toMatchObject({ trusted: true, scripted: { before_task: 1, task_made: 1, independent: 0 }, countsTowardProof: 1, failurePack: 1, unmatched: 1, escapes: { count: 2, hosts: ["api.openai.com"], unreadable: 1 } });
   });
+  it("L1: an escape is counted when the connection is accepted (one `escape` row); a later `escape_host` row names it without counting again", () => {
+    const accepted = summarizeModelLedgerBytes(bytes(HEADER, row({ kind: "escape", provenance: undefined, status: 0 })));
+    expect(accepted.escapes).toEqual({ count: 1, hosts: [], unreadable: 1 });
+    const named = summarizeModelLedgerBytes(bytes(HEADER, row({ kind: "escape", provenance: undefined, status: 0 }), row({ kind: "escape_host", provenance: undefined, status: 0, host: "api.openai.com" })));
+    expect(named.escapes).toEqual({ count: 1, hosts: ["api.openai.com"], unreadable: 0 });
+    // a name with no connection row before it is not an escape that was counted: untrusted
+    expect(summarizeModelLedgerBytes(bytes(HEADER, row({ kind: "escape_host", provenance: undefined, status: 0, host: "api.openai.com" })))).toEqual(UNTRUSTED_MODEL_SUMMARY);
+  });
   it("a scripted row with no provenance is task_made and never counted", () => {
     const summary = summarizeModelLedgerBytes(bytes(HEADER, row({ provenance: undefined })));
     expect(summary).toMatchObject({ scripted: { task_made: 1, before_task: 0 }, countsTowardProof: 0 });
