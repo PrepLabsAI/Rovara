@@ -52,11 +52,12 @@ describe("admin change infrastructure", () => {
     expect(JSON.stringify(named.toJSON())).toContain("MCP_CONFIRM_ELICITATION");
   });
 
-  it("changes nothing in the legacy template", () => {
+  it("gives the legacy template only the sign-in client changes' audit records (spec 064)", () => {
     expect(legacy.toJSON().Parameters).not.toHaveProperty("McpConfirmElicitation");
+    // No Slack confirm presses and no AI-tool pop-up: its changes are confirmed in the CLI.
     expect(JSON.stringify(legacy.toJSON())).not.toContain("ADMIN_CHANGE");
-    // Spec 064: the legacy deployment's sign-in reads EMAIL# (it is the sign-in table's index), but it has no admin changes.
-    for (const absent of ["MCP_CONFIRM_ELICITATION", "CHANGE#*"]) expect(JSON.stringify(legacy.toJSON())).not.toContain(absent);
+    expect(JSON.stringify(legacy.toJSON())).not.toContain("MCP_CONFIRM_ELICITATION");
+    expect(JSON.stringify(legacy.toJSON())).toContain("CHANGE#*");
   });
 
   // Task 10 additions: the exact shape of each new statement, and where each variable goes.

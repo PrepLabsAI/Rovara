@@ -54,6 +54,18 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
   return { ...signIn, tasks };
 }
 
+/**
+ * Spec 025 E3: admin change audit records, only under CHANGE#. Written once, then stepped forward by the broker alone;
+ * no delete, and no route edits them (FR-051).
+ */
+function adminChangeAudit(turnRecords: dynamodb.Table): iam.PolicyStatement {
+  return new iam.PolicyStatement({
+    actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"],
+    resources: [turnRecords.tableArn],
+    conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } },
+  });
+}
+
 export interface DeveloperSignInProps {
   naming: AgentXNaming;
   env: string;
@@ -204,9 +216,13 @@ export class DeveloperSignIn extends Construct {
       resources: [table.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"] } },
     }));
-    // The output first: the rest is for developer tasks and admin changes, which the legacy deployment does not have.
+    // The output first: the rest is for developer tasks and admin changes. Spec 064: the legacy deployment takes the
+    // sign-in client changes, so it gets their audit records (below) and none of the task grants.
     new CfnOutput(stack, "DeveloperSignInIssuer", { value: issuer });
-    if (tasks === undefined) return;
+    if (tasks === undefined) {
+      broker.addToRolePolicy(adminChangeAudit(props.turnRecords));
+      return;
+    }
 
     // The workflow E2E terminal authority transaction also condition-checks the original creator
     // record. Keep that cross-table fence to developer identity rows only.
@@ -226,12 +242,6 @@ export class DeveloperSignIn extends Construct {
       resources: [props.turnRecords.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TASK#*"] } },
     }));
-    // Spec 025 E3: admin change audit records, only under CHANGE#. Written once, then stepped forward
-    // by the broker alone; no delete, and no route edits them (FR-051).
-    broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"],
-      resources: [props.turnRecords.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } },
-    }));
+    broker.addToRolePolicy(adminChangeAudit(props.turnRecords));
   }
 }

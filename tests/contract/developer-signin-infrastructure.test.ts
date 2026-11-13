@@ -302,11 +302,13 @@ describe("the legacy deployment (R3, spec 064)", () => {
     const broker = legacy.Resources[functionId(legacy, "Broker")]!;
     const brokerEnvironment = (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
     expect(brokerEnvironment).toMatchObject({ AGENTX_ENV: "production", DEVELOPER_API_SCOPE: "linking" });
-    // No developer-task or admin-change grants: no TurnRecords writes and no cross-table condition check.
+    // No developer-task grants: no TASK# turn records and no cross-table condition check. Spec 064: the sign-in client
+    // admin changes are audited under CHANGE#.
     const brokerRole = ((broker.Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
     const brokerStatements = grants(legacy).filter(({ role }) => role === brokerRole).map(({ statement }) => statement);
     expect(brokerStatements.some((statement) => allows(statement, "dynamodb:ConditionCheckItem") && JSON.stringify(statement.Resource).includes("DeveloperSignInTable"))).toBe(false);
-    expect(JSON.stringify(brokerStatements)).not.toMatch(/TASK#\*|CHANGE#\*/);
+    expect(JSON.stringify(brokerStatements)).not.toMatch(/TASK#\*/);
+    expect(JSON.stringify(brokerStatements)).toContain("CHANGE#*");
     // The routes and their throttle, as in named environments; still only the one admin JWT authorizer.
     expect(ofType(legacy, "AWS::ApiGatewayV2::Route").map(([, r]) => r.Properties.RouteKey)).toEqual(expect.arrayContaining(["ANY /v1/auth/{proxy+}", "ANY /v1/dev/{proxy+}", "ANY /review/{proxy+}"]));
     expect(ofType(legacy, "AWS::ApiGatewayV2::Authorizer")).toHaveLength(1);

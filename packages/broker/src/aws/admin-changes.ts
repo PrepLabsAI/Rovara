@@ -33,6 +33,11 @@ export interface AdminChangeDependencies {
   slackTeamId?: string;
   /** E16, FR-041: the methods this environment allows. */
   confirm: { elicitation: boolean; slack: boolean };
+  /**
+   * Spec 064: the only change kinds this deployment takes; any other is refused before it is planned. Absent: every
+   * kind (named environments). The legacy deployment, whose sign-in is for linking only, takes the sign-in client ones.
+   */
+  kinds?: ReadonlySet<string>;
   now: () => number;
   newId: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -284,6 +289,10 @@ async function propose(deps: AdminChangeDependencies, identity: AuthenticatedIde
     throw agentXError("CONFIG_INVALID", `invalid change request: ${issue?.path.join(".") || "request"}: ${issue?.message ?? "invalid"}; fix it and send it again`);
   }
   const request = parsed.data;
+  if (deps.kinds !== undefined && !deps.kinds.has(request.change.kind)) {
+    deps.log({ event: "admin_change.kind_unavailable", traceId, kind: request.change.kind });
+    throw agentXError("NOT_FOUND", `${request.change.kind} changes are not available in this deployment`);
+  }
   const changeHash = changeHashOf(request.change);
   const now = deps.now();
   const proposedAt = iso(now);

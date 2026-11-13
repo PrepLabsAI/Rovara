@@ -17,8 +17,20 @@
 | Phase | What | Production effect |
 | --- | --- | --- |
 | 064a | Sign-in and the adapter registry in the legacy templates; the broker serves only the linking part of the developer API there | New resources, off by default; the template check shows nothing removed or replaced |
-| 064b | Adapter admin changes in the legacy deployment, and the CLI against it | None until an adapter is registered |
+| 064b | The sign-in client admin changes in the legacy deployment, confirmed in the CLI (adapters need none: their commands use `/v1/admin/channels`, served once `ChannelAdapters` is on) | None until a client is registered |
 | 064c | Turn on: set the sign-in parameters (Cognito) and `ChannelAdapters=enabled`, register a test adapter, link, and prove #437 and #438 | Adapters live |
+
+## 064c as done (2026-11-13)
+
+`agentx signin enable` refuses the legacy deployment, so sign-in was set up by hand:
+
+1. Cognito group `rovara-developers`, and app client `rovara-developer-signin` in production's pool, with a secret, the
+   `code` flow, scopes `openid email profile`, and callback `<api>/v1/auth/callback/oidc`.
+2. Its secret in `agentx/production/developer-oidc` as `{"clientSecret": ...}`.
+3. One change set on `AgentXControlPlane`: `DeveloperOidcIssuer` (the pool), `DeveloperOidcClientId`,
+   `DeveloperOidcRequiredClaim=cognito:groups`, `DeveloperOidcRequiredValues=["agentx-admin","rovara-developers"]` (the
+   pool allows self sign-up; this keeps self-made accounts out), `DeveloperOidcDisplayName`, `DeveloperOidcSince`, and
+   `ChannelAdapters=enabled`.
 
 ## Decisions
 

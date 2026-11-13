@@ -1383,6 +1383,27 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               },
             },
             {
+              "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:GetItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "CHANGE#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "TurnRecords69ECFCD9",
+                  "Arn",
+                ],
+              },
+            },
+            {
               "Action": "states:StartExecution",
               "Effect": "Allow",
               "Resource": {

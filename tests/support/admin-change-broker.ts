@@ -41,6 +41,8 @@ export async function createAdminChangeBroker(options: {
   slackLookupDown?: boolean;
   /** Spec 063: the sign-in client registry the broker changes through DeveloperIdentity. */
   signInClients?: SignInClientRegistry;
+  /** Spec 064: the legacy deployment, whose sign-in is for account linking only. */
+  linkingOnly?: boolean;
 } = {}): Promise<AdminChangeHarness> {
   let now = Date.now();
   const clock = { now: () => now, advance: (ms: number) => { now += ms; } };
@@ -55,6 +57,7 @@ export async function createAdminChangeBroker(options: {
   const endedSessions: EndDeveloperSessionsRequest[] = [];
   const slackUserByEmail = async () => (options.slackLookupDown === true ? { ok: false as const, error: "slack_unavailable" as const } : options.slackLinked === false ? { ok: true as const } : { ok: true as const, userId: ADMIN_SLACK });
   const harness = await createAdminReadBroker({
+    ...(options.linkingOnly === true ? { linkingOnly: true } : {}),
     ...(options.channelInfo === undefined ? {} : { channelInfo: options.channelInfo }),
     ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
     developerExtra: {
