@@ -367,5 +367,5 @@ const BriefSchema = z
 export function parseReplyBrief(value: unknown): { readonly ok: true; readonly brief: ReplyBrief } | { readonly ok: false } {
   const parsed = BriefSchema.safeParse(value);
   if (!parsed.success || utf8Bytes(JSON.stringify(parsed.data)) > REPLY_BRIEF_MAX_BYTES) return { ok: false };
-  return { ok: true, brief: register(parsed.data as ReplyBrief) };
+  return { ok: true, brief: register(parsed.data) };
 }

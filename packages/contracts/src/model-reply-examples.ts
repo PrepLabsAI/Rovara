@@ -41,8 +41,7 @@ export function pickExamples(headEntries: readonly ReplySetHeadEntry[], bodies: 
     if (!parsed.success || modelReplyEntrySha256(parsed.data) !== entry.entrySha256) return;
     const { match, response } = parsed.data;
     if (match.operation !== undefined && match.operation !== brief.operation) return;
-    const { usage: _usage, ...withoutUsage } = response;
-    const trimmed: ModelReplyResponse = withoutUsage;
+    const trimmed: ModelReplyResponse = { text: response.text, ...(response.toolCalls === undefined ? {} : { toolCalls: response.toolCalls }), finish: response.finish };
     if (!checkReplyShape(brief, trimmed)) return;
     const hint = match.promptContains === undefined ? undefined : redactText(match.promptContains);
     const example: ReplyExample = { id: entry.id, ...(hint === undefined ? {} : { promptContains: hint }), response: trimmed };

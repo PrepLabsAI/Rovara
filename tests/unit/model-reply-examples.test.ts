@@ -38,9 +38,14 @@ describe("pickExamples", () => {
     ]);
     expect(pickExamples(entries, bodies, brief()).map((example) => example.id)).toEqual(["bt"]);
   });
+  it("even a malformed head entry that carries an origin but says task_made or independent is not an example (the provenance field alone decides)", () => {
+    const { entries, bodies } = head([["task_made", reply("tm", "x1 coding agent")], ["independent", reply("ind", "x2 independent")]]);
+    const lying = entries.map((entry) => ({ ...entry, origin: "customer_written" as const })) as unknown as ReplySetHeadEntry[];
+    expect(pickExamples(lying, bodies, brief())).toEqual([]);
+  });
   it("a before_task entry with no origin is not trusted; a body that no longer hashes to its key is skipped", () => {
     const { entries, bodies } = head([["before_task", reply("bt", "x1 customer")], ["before_task", reply("bt2", "x2 customer")]]);
-    const noOrigin = entries.map((entry, index) => (index === 0 ? { id: entry.id, entrySha256: entry.entrySha256, provenance: "before_task" as const } : entry)) as ReplySetHeadEntry[];
+    const noOrigin = entries.map((entry, index) => (index === 0 ? { id: entry.id, entrySha256: entry.entrySha256, provenance: "before_task" as const } : entry));
     bodies.set(entries[1]!.entrySha256, { id: "bt2", match: {}, response: { text: "tampered", finish: "stop" } });
     expect(pickExamples(noOrigin, bodies, brief())).toEqual([]);
   });

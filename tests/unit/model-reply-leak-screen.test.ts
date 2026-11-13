@@ -1,6 +1,6 @@
 // TE-R2 part A: the leak screens. Each refusal, golden, in TS, Python and Go styles; a clean prompt passes; a changed input with no expectation passes; 1 MB-class input is fast. The screens are heuristics (what they miss is stated in the file).
 import { describe, expect, it } from "vitest";
-import { buildTaskLeakFacts, extractReplyBrief, screenBrief, NO_TASK_LEAK_FACTS, type ReplyBrief, type TaskLeakFacts } from "@agentx/contracts";
+import { buildTaskLeakFacts, extractReplyBrief, screenBrief, NO_TASK_LEAK_FACTS, type ReplyBrief } from "@agentx/contracts";
 
 const briefFor = (prompt: string, extra: Record<string, unknown> = {}): ReplyBrief => {
   const result = extractReplyBrief("openai_compatible", "chat_completions", JSON.stringify({ model: "m", messages: [{ role: "user", content: prompt }], ...extra }));
