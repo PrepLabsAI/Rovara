@@ -343,3 +343,8 @@ export * from "./work-event.js";
 export * from "./work-event-node.js";
 
 export * from "./measures-file.js";
+// TE-F3 (M2/M3a): the eval check. Pure and additive: the verdict and noise band, the base score cache, pacing, the hidden eval set rules. Nothing outside tests and the worker's eval round calls these yet.
+export * from "./eval-hidden-set.js";
+export * from "./eval-pacing.js";
+export * from "./eval-base-cache.js";
+export * from "./eval-check.js";

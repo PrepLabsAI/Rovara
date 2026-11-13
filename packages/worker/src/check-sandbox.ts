@@ -77,7 +77,7 @@ import { isIP } from "node:net";
 import { realpathSync } from "node:fs";
 import { chmod, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { HIDDEN_EVAL_MOUNT_PATH, agentXError } from "@agentx/contracts";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, type ServicesNetwork } from "./run-network.js";
 import { SEALED_DNS_TABLE_MAX } from "./setup-dns-watch.js";
 import type { DockerCli } from "./swebench/containers.js";
@@ -143,6 +143,11 @@ export interface CheckSandboxInput {
   sinkholeIp: string;
   /** The working sandbox's container name (.3), which the round detaches from the services network (`detachWorkingSandbox`). Default: `<network name>-work`. */
   workingSandboxName?: string;
+  /**
+   * TE-F3: where the project's hidden eval set is on the worker. When set, the sealed sandbox (and no other sandbox: only this plan reads it) gets it as a FOURTH, read-only mount at `HIDDEN_EVAL_MOUNT_PATH`. It must be a plain
+   * absolute path outside the workspace (or under a masked folder), so the working sandbox cannot see it through the workspace mount. Set only for a sealed round that has a hidden set (`planEvalRound`, eval-round.ts).
+   */
+  hiddenEvalSetPath?: string;
 }
 
 export interface CheckSandboxPlan {
@@ -174,6 +179,8 @@ export interface CheckSandboxPlan {
   /** The working sandbox's container name and its address on the services network (.3), for `detachWorkingSandbox` and `reattachWorkingSandbox`. */
   workingSandboxName: string;
   workingSandboxIp: string;
+  /** The hidden eval set's path on the worker, when the plan mounts it (read-only, at `HIDDEN_EVAL_MOUNT_PATH`). */
+  hiddenEvalSetPath?: string;
   /** What `startCheckSandbox` checks `sandboxRunArgs` against once more (checkSandboxArgProblems). */
   rootPath: string;
   image: string;
@@ -252,6 +259,8 @@ export interface CheckSandboxArgPaths {
   rootPath: string;
   image: string;
   maskedPaths: readonly string[];
+  /** The hidden eval set's path when the plan mounts it (a fourth, read-only mount); absent: exactly three mounts. */
+  hiddenEvalSetPath?: string;
 }
 
 /**
@@ -329,8 +338,8 @@ export function checkSandboxArgProblems(args: readonly string[], net: Pick<Check
   }
   if (of("--memory").length !== of("--memory-swap").length || (of("--memory")[0] !== undefined && of("--memory")[0] !== of("--memory-swap")[0])) problems.push("does not hold memory and swap at one limit");
   const volumes = of("--volume");
-  const expected = [`${paths.rootPath}:${paths.rootPath}`, `${paths.resolvConfPath}:/etc/resolv.conf:ro`, `${paths.hostsPath}:/etc/hosts:ro`];
-  if (volumes.length !== 3 || !expected.every((volume) => volumes.filter((found) => found === volume).length === 1)) problems.push("does not hold exactly the workspace, resolv.conf and hosts mounts");
+  const expected = [`${paths.rootPath}:${paths.rootPath}`, `${paths.resolvConfPath}:/etc/resolv.conf:ro`, `${paths.hostsPath}:/etc/hosts:ro`, ...(paths.hiddenEvalSetPath === undefined ? [] : [`${paths.hiddenEvalSetPath}:${HIDDEN_EVAL_MOUNT_PATH}:ro`])];
+  if (volumes.length !== expected.length || !expected.every((volume) => volumes.filter((found) => found === volume).length === 1)) problems.push("does not hold exactly the workspace, resolv.conf and hosts mounts (and the hidden eval set's read-only mount only when the plan has one)");
   const wantedMasks = paths.maskedPaths.map((path) => `${path}:${MASK_OPTIONS}`).sort();
   const masks = [...of("--tmpfs")].sort();
   if (masks.length !== wantedMasks.length || masks.some((mask, index) => mask !== wantedMasks[index])) problems.push("does not hold exactly the task sandbox's masked folders as its tmpfs mounts");
@@ -409,6 +418,17 @@ function assertNetwork(net: CheckSandboxNetwork): void {
   assertAllLabels(net.labelArgs());
 }
 
+/**
+ * The hidden eval set's path (TE-F3): a plain absolute path, not a docker socket, not one of the run's own files, and OUTSIDE the workspace (or under a masked folder): the working sandbox mounts the workspace read-write, so a hidden
+ * set inside it would be visible there, which is the one thing the set must never be. Throws CONFIG_INVALID.
+ */
+function assertHiddenEvalSetPath(path: string, files: { resolvConfPath: string; hostsPath: string }, rootPath: string, maskedPaths: readonly string[]): void {
+  assertHostPath(path);
+  if (FORBIDDEN_MOUNT_SUBSTRINGS.some((part) => path.includes(part))) throw agentXError("CONFIG_INVALID", "the hidden eval set's path names a docker socket");
+  if (path === files.resolvConfPath || path === files.hostsPath) throw agentXError("CONFIG_INVALID", "the hidden eval set cannot be one of the run's own files");
+  assertFilesOutsideWorkspace([path], rootPath, maskedPaths);
+}
+
 /** The arguments of the sealed check sandbox. Throws when the result would not pass `checkSandboxArgProblems`. */
 export function checkSandboxRunArgs(input: CheckSandboxInput, files: { resolvConfPath: string; hostsPath: string }): string[] {
   assertNetwork(input.net);
@@ -416,6 +436,7 @@ export function checkSandboxRunArgs(input: CheckSandboxInput, files: { resolvCon
   assertHostPath(files.hostsPath);
   if (files.resolvConfPath === files.hostsPath) throw agentXError("CONFIG_INVALID", "the run's two files have two paths");
   assertFilesOutsideWorkspace([files.resolvConfPath, files.hostsPath], input.rootPath, input.maskedPaths);
+  if (input.hiddenEvalSetPath !== undefined) assertHiddenEvalSetPath(input.hiddenEvalSetPath, files, input.rootPath, input.maskedPaths);
   const base = taskSandboxRunArgs({
     name: `${input.net.name}-check`, taskId: input.taskId, image: input.image, rootPath: input.rootPath, maskedPaths: input.maskedPaths,
     ...(input.hostCpus === undefined ? {} : { hostCpus: input.hostCpus }), ...(input.hostMemoryBytes === undefined ? {} : { hostMemoryBytes: input.hostMemoryBytes }),
@@ -426,9 +447,10 @@ export function checkSandboxRunArgs(input: CheckSandboxInput, files: { resolvCon
   if (tail[0] !== "--entrypoint" || tail[2] !== input.image || tail[3] !== "--") throw agentXError("CONFIG_INVALID", "the task sandbox's arguments changed shape");
   const args = [
     ...base.slice(0, -6), "--hostname", CHECK_SANDBOX_HOSTNAME, ...input.net.labelArgs(),
-    "--volume", `${files.resolvConfPath}:/etc/resolv.conf:ro`, "--volume", `${files.hostsPath}:/etc/hosts:ro`, ...tail,
+    "--volume", `${files.resolvConfPath}:/etc/resolv.conf:ro`, "--volume", `${files.hostsPath}:/etc/hosts:ro`,
+    ...(input.hiddenEvalSetPath === undefined ? [] : ["--volume", `${input.hiddenEvalSetPath}:${HIDDEN_EVAL_MOUNT_PATH}:ro`]), ...tail,
   ];
-  const problems = checkSandboxArgProblems(args, input.net, { ...files, rootPath: input.rootPath, image: input.image, maskedPaths: input.maskedPaths });
+  const problems = checkSandboxArgProblems(args, input.net, { ...files, rootPath: input.rootPath, image: input.image, maskedPaths: input.maskedPaths, ...(input.hiddenEvalSetPath === undefined ? {} : { hiddenEvalSetPath: input.hiddenEvalSetPath }) });
   if (problems.length > 0) throw agentXError("CONFIG_INVALID", `the sealed check sandbox's arguments are unsound: ${problems.join("; ")}`);
   return args;
 }
@@ -557,6 +579,7 @@ export function checkSandboxPlan(input: CheckSandboxInput): CheckSandboxPlan {
   const resolvConfPath = join(input.filesDir, "resolv.conf");
   const hostsPath = join(input.filesDir, "hosts");
   return {
+    ...(input.hiddenEvalSetPath === undefined ? {} : { hiddenEvalSetPath: input.hiddenEvalSetPath }),
     sandboxName: `${input.net.name}-check`, dnsHelperName: `${input.net.name}-dns`,
     network: { name: input.net.name, ip: input.net.checkSandboxIp },
     names, resolvConf: checkSandboxResolvConf(input.net.dnsHelperIp), hosts: checkSandboxHostsFile(input.net.checkSandboxIp, names),
@@ -705,7 +728,7 @@ export async function startCheckSandbox(docker: DockerCli, plan: CheckSandboxPla
   }
   // The plan is plain data, so its arguments are checked once more here, against the plan's own network, workspace and image: a hand-built or edited plan is refused.
   const problems = checkSandboxArgProblems(plan.sandboxRunArgs, { name: plan.network.name, checkSandboxIp: plan.network.ip }, {
-    resolvConfPath: plan.resolvConfPath, hostsPath: plan.hostsPath, rootPath: plan.rootPath, image: plan.image, maskedPaths: plan.maskedPaths,
+    resolvConfPath: plan.resolvConfPath, hostsPath: plan.hostsPath, rootPath: plan.rootPath, image: plan.image, maskedPaths: plan.maskedPaths, ...(plan.hiddenEvalSetPath === undefined ? {} : { hiddenEvalSetPath: plan.hiddenEvalSetPath }),
   });
   if (problems.length > 0) throw agentXError("CONFIG_INVALID", `the sealed check sandbox's arguments are unsound: ${problems.join("; ")}`);
   // The resolver guard's arguments are checked before anything starts, for the same reason: the plan is data. The guard's image is the plan's `guardImage` (the worker's own), checked on its own; it is not `plan.image`.
