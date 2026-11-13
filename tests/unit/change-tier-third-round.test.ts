@@ -297,3 +297,40 @@ describe("the size of the docs route", () => {
     expect(over.reasons.map((reason) => reason.code)).toContain("docs_large");
   });
 });
+
+describe("each content rule on its own (the review's cases overlap, these do not)", () => {
+  const level = (c: C) => tierFromDiff({ files: c.files, complete: true }, { ...ctx, ...(c.head === undefined ? {} : { head: c.head }) });
+  const noDocs = (e: { file: TierFile; text: [string, string] }, path = e.file.path) => level({ id: "x", name: "x", files: [e.file], head: headOf([[path, e.text[1]]]), expect: "small" });
+
+  it("KEY=value alone keeps a line off the docs route", () => {
+    const tier = noDocs(docEdit("docs/guide.md", ["# Guide", ""], ["Set DEBUG=1 before you run it."]));
+    expect(tier.kinds).not.toContain("docs");
+    expect(tier.level).toBe("standard");
+  });
+  it("a plain line inside an existing HTML block is not docs: the block it sits in is read", () => {
+    const tier = noDocs(docEdit("docs/guide.md", ["# Guide", "", "<script>"], ["Plain words."], ["</script>"]));
+    expect(tier.kinds).not.toContain("docs");
+    expect(tier.level).toBe("risky");
+  });
+  it("a plain line inside a fenced block of commands is not docs", () => {
+    const tier = noDocs(docEdit("docs/guide.md", ["# Guide", "", "```", "npm install thing"], ["Plain words."], ["```"]));
+    expect(tier.kinds).not.toContain("docs");
+  });
+  it("a repository that builds a documentation site does not get docs, whatever the line says", () => {
+    const e = docEdit("docs/guide.md", ["# Guide", ""], ["Plain words only."]);
+    const tier = tierFromDiff({ files: [e.file], complete: true }, { ...ctx, head: headOf([e.text], { docsSite: true }) });
+    expect(tier.kinds).not.toContain("docs");
+    expect(tier.level).toBe("standard");
+    expect(tier.reasons.map((reason) => reason.code)).toContain("docs_site_build");
+  });
+  it("a package source in a .props file that no manifest rule names is read as configuration", () => {
+    const tier = tierFromDiff({ files: [f("build/Common.props", added("    <RestoreSources>https://nuget.evil.example/v3/index.json</RestoreSources>"))], complete: true }, ctx);
+    expect(tier.level).toBe("risky");
+    expect(tier.reasons.map((reason) => reason.code)).toContain("package_source_setting");
+  });
+  it("the setup of a documentation build is not an ordinary file even when the change looks harmless", () => {
+    const tier = tierFromDiff({ files: [f("mkdocs.yml", chg(["theme: material"], ["theme: readthedocs"]))], complete: true }, ctx);
+    expect(tier.level).toBe("standard");
+    expect(tier.reasons.map((reason) => reason.code)).toContain("docs_build_config");
+  });
+});
