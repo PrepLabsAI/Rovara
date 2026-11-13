@@ -47,6 +47,43 @@ const gateways = (): CompanyGatewayRow[] => {
 };
 
 describe("modelHostBlockList", () => {
+  it.each([
+    ["OpenAI residency", ["eu.api.openai.com", "us.api.openai.com"]],
+    ["Codestral", ["codestral.mistral.ai"]],
+    ["Vertex location", ["us-west8-aiplatform.googleapis.com", "us-west8-aiplatform.mtls.googleapis.com"]],
+  ])("blocks every verified Round 2 %s host", (_group, hosts) => {
+    const block = modelHostBlockList(rows, []);
+    for (const host of hosts) {
+      expect(block, host).toContain(host);
+      expect(findRedirectEscapes(block, [host])).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+  });
+  it("blocks all documented Vertex REP names without expanding to other Google APIs", () => {
+    // Independent provider-doc inventory; northamerica-south1 REP is not documented.
+    const locations = "africa-south1 asia-east1 asia-east2 asia-northeast1 asia-northeast2 asia-northeast3 asia-south1 asia-south2 asia-southeast1 asia-southeast2 australia-southeast1 australia-southeast2 eu europe-central2 europe-north1 europe-north2 europe-southwest1 europe-west1 europe-west10 europe-west12 europe-west2 europe-west3 europe-west4 europe-west6 europe-west8 europe-west9 me-central1 me-central2 me-west1 northamerica-northeast1 northamerica-northeast2 southamerica-east1 southamerica-west1 us us-central1 us-east1 us-east4 us-east5 us-south1 us-west1 us-west2 us-west3 us-west4 us-west8".split(" ");
+    const block = modelHostBlockList(rows, []);
+    for (const location of locations) {
+      for (const domain of ["googleapis.com", "mtls.googleapis.com"]) {
+        const host = `aiplatform.${location}.rep.${domain}`;
+        expect(block, host).toContain(host);
+        expect(findRedirectEscapes(block, [host])).toMatchObject([{ host, kind: "ignored_redirect" }]);
+      }
+    }
+    const allowed = ["storage.googleapis.com", "bigquery.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com", "storage.us-central1.rep.googleapis.com", "bigquery.us-central1.rep.googleapis.com"];
+    for (const host of allowed) expect(block).not.toContain(host);
+    expect(findRedirectEscapes(block, allowed, { hostSuffixes: modelHostSuffixBlockList(rows) })).toEqual([]);
+    expect(modelHostSuffixBlockList(rows).some((suffix) => suffix.endsWith("googleapis.com"))).toBe(false);
+  });
+  it.each(["cognitiveservices.azure.com", "services.ai.azure.com"])("blocks the Azure %s suffix with DNS label boundaries", (suffix) => {
+    const block = modelHostBlockList(rows, []);
+    const suffixes = modelHostSuffixBlockList(rows);
+    expect(suffixes).toContain(suffix);
+    for (const host of [`resource.${suffix}`, `nested.resource.${suffix}`]) {
+      expect(findRedirectEscapes(block, [host], { hostSuffixes: suffixes })).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+    expect(findRedirectEscapes(block, [`not${suffix}`, `${suffix}.example.com`], { hostSuffixes: suffixes })).toEqual([]);
+  });
+
   it("holds every model host and every company gateway host, sorted and without duplicates", () => {
     const list = modelHostBlockList(rows, gateways());
     expect([...list]).toEqual([...new Set(list)].sort());
@@ -73,7 +110,7 @@ describe("modelHostBlockList", () => {
     for (const host of ["api.openai.com", "api.anthropic.com", "api.cohere.com", "api.cohere.ai", "api.mistral.ai", "api.groq.com", "api.together.xyz", "europe-west10-aiplatform.googleapis.com", "asia-south2-aiplatform.googleapis.com", "northamerica-south1-aiplatform.googleapis.com", "europe-north2-aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", "us-central1-aiplatform.mtls.googleapis.com", "generativelanguage.mtls.googleapis.com"]) {
       expect(list, host).toContain(host);
     }
-    expect(modelHostSuffixBlockList(rows)).toEqual(["openai.azure.com"]);
+    expect(modelHostSuffixBlockList(rows)).toEqual(["cognitiveservices.azure.com", "openai.azure.com", "services.ai.azure.com"]);
     expect(list.some((host) => host.endsWith("openai.azure.com"))).toBe(false);
   });
   it("never lists a wildcard, so Cloud Storage's *.googleapis.com is not caught", () => {
