@@ -341,10 +341,13 @@ export interface RecordedDependencyFields {
   /** The words to show: "Recorded on 13 Nov (this task)". */
   readonly labelText: string;
 }
-/** The dependency fields for a summary (or just a day), for A2b's writer. A day that is not `YYYY-MM-DD` is replaced by `today`, never invented. */
-export function recordedDependencyFor(summary: { readonly recordedOn?: string; readonly store?: RecordingStoreWord }, today: string): RecordedDependencyFields {
-  const valid = (day: string | undefined): day is string => day !== undefined && shortDayOf(day) !== undefined;
-  const recordedOn = valid(summary.recordedOn) ? summary.recordedOn : valid(today) ? today : "1970-01-01";
+/**
+ * The dependency fields for a summary, for A2b's writer; `undefined` when the summary has no usable `recordedOn` day (`YYYY-MM-DD`). A recording states when it was recorded or it is not described as one: no day is ever
+ * invented, neither today's nor a placeholder.
+ */
+export function recordedDependencyFor(summary: { readonly recordedOn?: string; readonly store?: RecordingStoreWord }): RecordedDependencyFields | undefined {
+  const recordedOn = summary.recordedOn;
+  if (recordedOn === undefined || shortDayOf(recordedOn) === undefined) return undefined;
   const store = summary.store ?? RECORDING_STORE_TASK_CACHE;
   return { trust: "recorded", recordedOn, recording: { store, recordedOn }, labelText: recordedLabel(recordedOn, store === RECORDING_STORE_TASK_CACHE ? "task" : "project") };
 }

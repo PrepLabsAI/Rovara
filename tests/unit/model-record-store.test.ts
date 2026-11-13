@@ -2,7 +2,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   RECORDING_ANSWER_BYTES_MAX, RECORDING_REPO_WARNING, RECORDING_ROVARA_STORAGE_WARNING, RECORDING_STORE_TASK_CACHE, RECORDING_STORE_WORDS, RECORDING_TASK_ENTRIES_MAX, RECORDING_TTL_MS_DEFAULT, RECORDING_TTL_MS_MAX, RECORDING_UNAVAILABLE_ACTION, RECORDING_UNAVAILABLE_SENTENCE,
   checkRecordingScope, createMemoryRecordingStore, entryFromFileText, recordedDependencyFor, recordedLabel, recordingPlacement, shortDayOf, type RecordingEntry, type RecordingScope, type RecordingStore,
@@ -169,6 +169,12 @@ describe("the task file store on disk", () => {
       await store.put(A, entry(1));
       expect(mode(fileOf(A, 1))).toBe(0o600);
       expect(mode(join(root, recordingCompanyDirName(A.companyId)))).toBe(0o700);
+      // A umask that takes owner bits away would leave the file at 0400 if the mode were not set on the open handle.
+      if (previous !== undefined) {
+        process.umask(0o277);
+        await store.put(A, entry(2));
+        expect(mode(fileOf(A, 2))).toBe(0o600);
+      }
     } finally {
       if (previous !== undefined) process.umask(previous);
     }
@@ -197,7 +203,7 @@ describe("the task file store on disk", () => {
   it("does not follow a link: the link is removed and its target is left alone", async () => {
     await store.put(A, entry(1));
     const outside = join(tempRoot(), "outside.txt");
-    writeFileSync(outside, readFileSync(fileOf(A, 1)));
+    writeFileSync(outside, readFileSync(fileOf(A, 1)), { mode: 0o600 });
     rmSync(fileOf(A, 1));
     symlinkSync(outside, fileOf(A, 1));
     expect(await store.get(A, keyN(1))).toBeUndefined();
@@ -245,6 +251,43 @@ describe("the task file store on disk", () => {
     expect(existsSync(young) && existsSync(foreign)).toBe(true);
     expect((await store.list(A)).map((row) => row.key)).toEqual([keyN(2)]);
     expect(existsSync(join(root, recordingCompanyDirName(B.companyId)))).toBe(false);
+  });
+
+  it("markReplayed never brings a deleted task back", async () => {
+    await store.put(A, entry(1));
+    await store.deleteTask(A);
+    expect(await store.markReplayed(A, keyN(1))).toBe(0);
+    expect(existsSync(join(root, recordingCompanyDirName(A.companyId), recordingTaskDirName(A.taskId)))).toBe(false);
+    // And one racing a delete: the entry was read, the directory goes, the rewrite fails and recreates nothing.
+    await store.put(A, entry(2));
+    const pending = store.markReplayed(A, keyN(2));
+    await store.deleteTask(A);
+    await pending;
+    expect(existsSync(join(root, recordingCompanyDirName(A.companyId), recordingTaskDirName(A.taskId)))).toBe(false);
+  });
+
+  it("will not write into, or read from, a directory or file owned by someone else", async () => {
+    await store.put(A, entry(1));
+    const real = process.getuid!();
+    const spy = vi.spyOn(process, "getuid").mockReturnValue(real + 1);
+    try {
+      await expect(store.put(A, entry(2))).rejects.toThrow(/not a directory of ours/u);
+      expect(await store.get(A, keyN(1))).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("sweep removes an empty directory but never a directory that is not empty", async () => {
+    await store.put(A, entry(1, { expiresAtMs: T0 + 1000 }));
+    const taskDir = join(root, recordingCompanyDirName(A.companyId), recordingTaskDirName(A.taskId));
+    writeFileSync(join(taskDir, "keep-me.txt"), "not ours", { mode: 0o600 });
+    clock.now = T0 + 2000;
+    await store.sweep();
+    expect(existsSync(join(taskDir, "keep-me.txt"))).toBe(true);
+    rmSync(join(taskDir, "keep-me.txt"));
+    await store.sweep();
+    expect(existsSync(taskDir)).toBe(false);
   });
 
   it("a root that does not exist yet is fine for list, delete and sweep (nothing recorded)", async () => {
@@ -311,15 +354,16 @@ describe("the label and the evidence seam", () => {
     expect(shortDayOf("2026-11-32")).toBeUndefined();
   });
   it("recordedDependencyFor gives the v2 dependency fields: trust `recorded`, the day, the store word", () => {
-    const fields = recordedDependencyFor({ recordedOn: "2026-11-13" }, "2026-11-14");
+    const fields = recordedDependencyFor({ recordedOn: "2026-11-13" });
     expect(fields).toEqual({ trust: "recorded", recordedOn: "2026-11-13", recording: { store: "task_cache", recordedOn: "2026-11-13" }, labelText: "Recorded on 13 Nov (this task)" });
     expect(JSON.stringify(fields)).not.toMatch(/real/iu);
-    expect(recordedDependencyFor({ store: "customer_bucket", recordedOn: "2026-11-13" }, "2026-11-14").labelText).toBe("Recorded on 13 Nov");
+    expect(recordedDependencyFor({ store: "customer_bucket", recordedOn: "2026-11-13" })?.labelText).toBe("Recorded on 13 Nov");
   });
-  it("takes today's date when the summary has no usable day, and never invents one", () => {
-    expect(recordedDependencyFor({}, "2026-11-14").recordedOn).toBe("2026-11-14");
-    expect(recordedDependencyFor({ recordedOn: "garbage" }, "2026-11-14").recordedOn).toBe("2026-11-14");
-    expect(recordedDependencyFor({}, "garbage").recordedOn).toBe("1970-01-01");
+  it("gives nothing when the summary has no usable day: no today, no 1970, no invented date", () => {
+    expect(recordedDependencyFor({})).toBeUndefined();
+    expect(recordedDependencyFor({ recordedOn: "garbage" })).toBeUndefined();
+    expect(recordedDependencyFor({ recordedOn: "2026-13-40" })).toBeUndefined();
+    expect(recordedDependencyFor({ store: "task_cache" })).toBeUndefined();
   });
   it("adds its word to the four evidence store words, additively", () => {
     expect(RECORDING_STORE_TASK_CACHE).toBe("task_cache");

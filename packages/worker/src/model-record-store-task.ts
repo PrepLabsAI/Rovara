@@ -9,7 +9,9 @@
 // miss. A file that is a link, is not a regular file, has group or world permission bits, is too large, or does not parse as exactly an entry is removed and is a miss. An expired entry is removed and is a miss.
 import { createHash, randomBytes } from "node:crypto";
 import type { Stats } from "node:fs";
-import { chmod, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, open, readdir, rename, rm, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
   RECORDING_ANSWER_BYTES_MAX, RECORDING_STORE_TASK_CACHE, RECORDING_TASK_ENTRIES_MAX, checkRecordingEntry, checkRecordingScope, entryFromFileText, entryToFile, indexRowOf, type RecordingEntry, type RecordingIndexRow, type RecordingScope,
@@ -37,6 +39,12 @@ export interface TaskRecordingStoreOptions {
   readonly word?: RecordingStoreWord;
 }
 
+/** True when the file belongs to the user running this process (always true where the platform has no user ids). */
+function ownedByUs(info: Pick<Stats, "uid">): boolean {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  return uid === undefined || info.uid === uid;
+}
+
 async function safeStat(path: string): Promise<Stats | undefined> {
   try {
     return await lstat(path);
@@ -49,7 +57,8 @@ async function safeStat(path: string): Promise<Stats | undefined> {
 async function ensureDir(path: string): Promise<void> {
   const held = await safeStat(path);
   if (held !== undefined) {
-    if (!held.isDirectory()) throw new Error("the recording store path is not a directory");
+    // A directory we did not make (a link, or one owned by someone else) is not a place to put a recording.
+    if (!held.isDirectory() || !ownedByUs(held)) throw new Error("the recording store path is not a directory of ours");
     return;
   }
   await mkdir(path, { mode: DIR_MODE });
@@ -71,40 +80,80 @@ export function createTaskRecordingStore(options: TaskRecordingStoreOptions): Re
 
   async function readEntry(scope: RecordingScope, key: string, remove: boolean): Promise<RecordingEntry | undefined> {
     const path = join(dirsOf(scope).task, `${key}.rec`);
-    const info = await safeStat(path);
-    if (info === undefined) return undefined;
     const drop = async (): Promise<undefined> => {
       if (remove) await rm(path, { force: true });
       return undefined;
     };
-    // A link, a directory, a world-readable file or a huge one is not ours: remove it, never read it.
-    if (!info.isFile() || (info.mode & 0o077) !== 0 || info.size > FILE_BYTES_MAX) return drop();
-    let text: string;
+    // Open without following a link, then judge the OPEN file (not the path, which can change between a look and a read) and read from the same handle.
+    let handle: FileHandle;
     try {
-      text = await readFile(path, "utf8");
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      return code === "ELOOP" || code === "EMLINK" ? drop() : undefined;
+    }
+    let text: string | undefined;
+    let trusted = false;
+    try {
+      const info = await handle.stat();
+      trusted = info.isFile() && (info.mode & 0o077) === 0 && info.size <= FILE_BYTES_MAX && ownedByUs(info);
+      if (trusted) text = await handle.readFile("utf8");
     } catch {
       return undefined;
+    } finally {
+      await handle.close().catch(() => undefined);
     }
+    // A link, a directory, a world-readable file, someone else's file or a huge one is not ours: remove it.
+    if (!trusted || text === undefined) return drop();
     const parsed = entryFromFileText(text);
     if (parsed === undefined || parsed.scope.companyId !== scope.companyId || parsed.scope.taskId !== scope.taskId || parsed.entry.key !== key) return drop();
     if (parsed.entry.expiresAtMs <= now()) return drop();
     return parsed.entry;
   }
 
-  async function writeEntry(scope: RecordingScope, entry: RecordingEntry): Promise<void> {
+  /** Writes a temp file through its own handle (mode set on the handle, never on a path), then renames it into place. With `create` false a missing task directory is a failure, so a deleted task is never brought back. */
+  async function writeEntry(scope: RecordingScope, entry: RecordingEntry, create: boolean): Promise<void> {
     const { company, task } = dirsOf(scope);
-    await ensureDir(root);
-    await ensureDir(company);
-    await ensureDir(task);
+    if (create) {
+      await ensureDir(root);
+      await ensureDir(company);
+      await ensureDir(task);
+    }
     const final = join(task, `${entry.key}.rec`);
     const temp = `${final}.${randomBytes(8).toString("hex")}.tmp`;
-    await writeFile(temp, JSON.stringify(entryToFile(scope, entry)), { mode: FILE_MODE, flag: "wx" });
+    const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, FILE_MODE);
     try {
-      await chmod(temp, FILE_MODE);
+      await handle.chmod(FILE_MODE);
+      await handle.writeFile(JSON.stringify(entryToFile(scope, entry)));
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await rm(temp, { force: true });
+      throw error;
+    }
+    await handle.close();
+    try {
       await rename(temp, final);
     } catch (error) {
       await rm(temp, { force: true });
       throw error;
+    }
+  }
+
+  async function readSweepEntry(path: string, info: Stats): Promise<ReturnType<typeof entryFromFileText>> {
+    if (!info.isFile() || (info.mode & 0o077) !== 0 || info.size > FILE_BYTES_MAX) return undefined;
+    let handle: FileHandle;
+    try {
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch {
+      return undefined;
+    }
+    try {
+      const held = await handle.stat();
+      return held.isFile() && (held.mode & 0o077) === 0 && held.size <= FILE_BYTES_MAX && ownedByUs(held) ? entryFromFileText(await handle.readFile("utf8")) : undefined;
+    } catch {
+      return undefined;
+    } finally {
+      await handle.close().catch(() => undefined);
     }
   }
 
@@ -143,7 +192,7 @@ export function createTaskRecordingStore(options: TaskRecordingStoreOptions): Re
       if (refused !== undefined) throw new Error(`recording refused: ${refused}`);
       const held = await entryNames(dirsOf(scope).task);
       if (!held.includes(`${entry.key}.rec`) && held.length >= RECORDING_TASK_ENTRIES_MAX) throw new Error("recording refused: too_many");
-      await writeEntry(scope, entry);
+      await writeEntry(scope, entry, true);
     },
     async list(scopeValue) {
       const scope = checked(scopeValue);
@@ -159,7 +208,12 @@ export function createTaskRecordingStore(options: TaskRecordingStoreOptions): Re
       if (!validKey(key)) return 0;
       const entry = await readEntry(scope, key, true);
       if (entry === undefined) return 0;
-      await writeEntry(scope, { ...entry, replayCount: entry.replayCount + 1 });
+      try {
+        // Never brings a deleted task back: a missing directory is a failure, and the count stays 0.
+        await writeEntry(scope, { ...entry, replayCount: entry.replayCount + 1 }, false);
+      } catch {
+        return 0;
+      }
       return entry.replayCount + 1;
     },
     async deleteTask(scopeValue) {
@@ -211,17 +265,17 @@ export function createTaskRecordingStore(options: TaskRecordingStoreOptions): Re
                 removed += 1;
               }
             } else if (ENTRY_NAME.test(name)) {
-              const text = info.isFile() && info.size <= FILE_BYTES_MAX && (info.mode & 0o077) === 0 ? await readFile(path, "utf8").catch(() => undefined) : undefined;
-              const parsed = text === undefined ? undefined : entryFromFileText(text);
+              const parsed = await readSweepEntry(path, info);
               if (parsed === undefined || parsed.entry.expiresAtMs <= now()) {
                 await rm(path, { force: true });
                 removed += 1;
               }
             }
           }
-          if ((await readdir(taskDir).catch(() => ["x"])).length === 0) await rm(taskDir, { recursive: true, force: true });
+          // Non-recursive: a directory that is not empty (a write began meanwhile, or a file that is not ours) stays.
+          await rmdir(taskDir).catch(() => undefined);
         }
-        if ((await readdir(companyDir).catch(() => ["x"])).length === 0) await rm(companyDir, { recursive: true, force: true });
+        await rmdir(companyDir).catch(() => undefined);
       }
       return removed;
     },

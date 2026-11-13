@@ -17,6 +17,7 @@ import { modelPromptSegments, type ModelRequestView } from "./model-record-key.j
 
 export const RECORDING_NOT_RUN_INCOMPLETE = "not run: the prompt changes could not be read fully";
 export const RECORDING_NOT_RUN_UNREADABLE = "not run: the prompt changes could not be read";
+export const RECORDING_NOT_RUN_ENDED = "not run: this task has ended, so its recordings are gone";
 export const RECORDING_NOT_RUN_MISS = "not run: no recording for this request";
 export const RECORDING_NOT_RUN_SCOPE = "not run: the recording scope could not be read";
 export const RECORDING_NOT_RUN_STORE = "not run: the recording store could not be read";

@@ -284,10 +284,10 @@ describe.each(["memory", "file"] as StoreKind[])("record and replay on the %s st
       // The defective adapter hands every provider header back: the engine's own pass over the head must still keep them out of the store.
       const leaky = makeRig(kind, { report: two(), mutation: "unfiltered_headers" });
       try {
-        leaky.world.provider.script({ headers: [["content-type", "application/json"], ["openai-organization", "org-secret-name"], ["set-cookie", "s=1"], ["x-request-id", "req-1"]] });
+        leaky.world.provider.script({ headers: [["content-type", "application/json"], ["openai-organization", "org-secret-name"], ["set-cookie", "s=1"], ["x-request-id", "req-1"], ["request-id", "req-2"]] });
         await drain(await leaky.engine().serve(chatFrame(leaky.world, { system: SYSTEM_TEXT, headers: [["content-type", "application/json"], ["authorization", "Bearer client-supplied"], ["x-trace", "t-9"]] })));
         const entry = (await leaky.store.get(leaky.scope, (await leaky.store.list(leaky.scope))[0]!.key))!;
-        expect(entry.answer.headers.map(([name]) => name).sort()).toEqual(["content-type", "x-request-id"]);
+        expect(entry.answer.headers.map(([name]) => name).sort()).toEqual(["content-type"]);
         const dump = [...storedText(leaky), JSON.stringify(entry.answer.headers)].join("\n");
         for (const absent of [SYSTEM_TEXT, USER_TEXT, "client-supplied", "org-secret-name", "set-cookie", "x-trace"]) expect(dump.includes(absent), absent).toBe(false);
       } finally {

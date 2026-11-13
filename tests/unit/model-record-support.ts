@@ -109,6 +109,7 @@ export function makeRig(kind: StoreKind, opts: { mutation?: ModelEgressMutation;
       return createRecordReplay({
         egress: world.adapter,
         egressScope: world.scope(company, world.rows[rowKey ?? "openai"]!.id),
+        egressCompanyOf: (scope) => (scope as unknown as { company?: string }).company,
         store,
         scope: () => ({ companyId: company.orgId, taskId: taskId ?? "task-1" }),
         plan,
