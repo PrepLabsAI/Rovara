@@ -88,7 +88,7 @@ describe("evidence lines", () => {
     for (const ledger of [null, undefined, "x", 5, true, [], () => 1, { classes: null, blockList: null, observedHosts: null, hostSuffixes: null }]) {
       for (const round of [null, undefined, "working", "check_sealed", 7, {}, "check_unsealed"]) {
         let lines: string[] = [];
-        expect(() => { lines = evidenceLinesFor(round as never, ledger as never); }, `${String(round)} / ${JSON.stringify(ledger)}`).not.toThrow();
+        expect(() => { lines = evidenceLinesFor(round as never, ledger as never); }, `${typeof round} / ${JSON.stringify(ledger)}`).not.toThrow();
         // A round that is not the sealed one always carries the residual line.
         if (round !== "check_sealed") expect(lines[0]).toBe(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE);
         for (const line of lines) expect(UNSAID.test(line)).toBe(false);

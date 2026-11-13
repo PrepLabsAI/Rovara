@@ -502,11 +502,12 @@ describe("cost", () => {
       expect(dec(refusalResponse("gemini", "cap", { capMicros: 2_000_000 }).body)).not.toContain("exceeded by one call");
     });
     it("injects the row's default maximum output when the request sets none, and leaves one it set alone", () => {
-      const parse = (bytes: Uint8Array) => JSON.parse(dec(bytes)) as Record<string, any>;
+      const parse = (bytes: Uint8Array) => JSON.parse(dec(bytes)) as Record<string, unknown>;
+      const at2 = (bytes: Uint8Array, ...keys: string[]) => at(JSON.parse(dec(bytes)), ...keys);
       const inject = (family: ModelEgressFamily, operation: string, body: unknown) => withDefaultMaxOutput(family, operation, enc(JSON.stringify(body)), 777);
       expect(parse(inject("openai_compatible", "chat/completions", { model: "m", messages: [] }).body).max_tokens).toBe(777);
       expect(parse(inject("openai_compatible", "responses", { model: "m", input: "x" }).body).max_output_tokens).toBe(777);
-      expect(parse(inject("gemini", "generateContent", { contents: [] }).body).generationConfig.maxOutputTokens).toBe(777);
+      expect(at2(inject("gemini", "generateContent", { contents: [] }).body, "generationConfig", "maxOutputTokens")).toBe(777);
       expect(parse(inject("vertex", "streamGenerateContent", { contents: [], generationConfig: { temperature: 0.2 } }).body).generationConfig).toEqual({ temperature: 0.2, maxOutputTokens: 777 });
       expect(parse(inject("cohere", "chat", { model: "m", messages: [] }).body).max_tokens).toBe(777);
       for (const [family, operation, body, field] of [

@@ -55,7 +55,7 @@ describe("the suite fails on an adapter with one defect", () => {
     const check = modelEgressChecks.find((entry) => /fails closed when the company cannot be resolved/u.test(entry.name))!;
     const two = { ...fakeModelEgressWorld(), brokenScope: undefined };
     await expect(check.run(two)).rejects.toThrow(/must supply brokenScope/u);
-    const { isolation: _dropped, ...oneCompany } = { ...fakeModelEgressWorld(), brokenScope: undefined };
+    const oneCompany = { ...fakeModelEgressWorld(), brokenScope: undefined, isolation: undefined };
     await expect(check.run(oneCompany)).resolves.toBeUndefined();
   });
   it("passes every check on the honest adapter, so each failure above is the defect's", async () => {
