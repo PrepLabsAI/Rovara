@@ -25,7 +25,7 @@ describe("TE-F8 has no callers yet", () => {
   it("nothing in packages, scripts, infra, local or vendor imports its modules or names its exports, apart from its own files and the contracts barrel", () => {
     const outside: string[] = [];
     for (const directory of ["packages", "scripts", "infra", "local", "vendor"]) {
-      let files: string[] = [];
+      let files: string[];
       try {
         files = walk(join(root, directory));
       } catch {

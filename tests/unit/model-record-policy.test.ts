@@ -63,7 +63,7 @@ describe("matchChangedItems (attribution goldens)", () => {
   });
 
   it("is not thrown by whitespace, line wraps and invisible format characters in the request", () => {
-    const messy = `  Answer in one short\n sentence   about​ trains.  `;
+    const messy = `  Answer in one short\n sentence   about\u200b trains.  `;
     expect(match(plan, chatFrame(world, { system: messy, model: "fixture-small" }))).toEqual([system]);
   });
 

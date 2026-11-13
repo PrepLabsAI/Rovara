@@ -2,7 +2,7 @@
 // companies, plus the proof that the kit FAILS on a store that keys by task alone and on an engine that falls back to a company it saw before.
 import { afterEach, describe, expect, it } from "vitest";
 import { createMemoryRecordingStore, type RecordingStore, type RecordReplay, type RecordReplayServe } from "@agentx/contracts";
-import { COMPANY_A, COMPANY_B, TWO_COMPANIES, assertFailsClosed, assertSurfacesIsolated, attempt, type FailClosedProbe, type IsolationCompany, type IsolationSurface } from "../../packages/testing/src/isolation/two-company.js";
+import { COMPANY_A, COMPANY_B, assertFailsClosed, assertSurfacesIsolated, type FailClosedProbe, type IsolationCompany, type IsolationSurface } from "../../packages/testing/src/isolation/two-company.js";
 import { SYSTEM_TEXT, T0, changedReport, chatFrame, drain, makeRig, type Rig, type StoreKind } from "./model-record-support.js";
 
 const rigs: Rig[] = [];
@@ -113,24 +113,15 @@ describe.each(["memory", "file"] as StoreKind[])("two companies on the %s store"
   it("the kit FAILS on an engine that falls back to the last company it served when the resolver breaks", async () => {
     const rig = make();
     const defective: FailClosedProbe[] = (() => {
-      let last = { companyId: COMPANY_A.orgId, taskId: "task-1" };
-      let mode: "ok" | "throws" | "undefined" = "ok";
-      const engine = rig.engine({
-        company: COMPANY_A,
-        mode: "replay_only",
-        scope: () => {
-          if (mode === "ok") return last;
-          return last; // fail open: the last good company
-        },
-      });
+      const last = { companyId: COMPANY_A.orgId, taskId: "task-1" };
+      const engine = rig.engine({ company: COMPANY_A, mode: "replay_only", scope: () => last /* fail open: the last good company, whatever the resolver says */ });
       return [{
         name: "fail-open",
         async prepare() {
           rig.world.provider.script({ body: answerBody(COMPANY_A.canary) });
           if ((await rig.store.list(last)).length === 0) await drain(await rig.engine({ company: COMPANY_A }).serve(chatFrame(rig.world, { system: SYSTEM_TEXT })));
         },
-        async attempt(m) {
-          mode = m;
+        async attempt() {
           const served = await engine.serve(chatFrame(rig.world, { system: SYSTEM_TEXT }));
           if (served.kind !== "stream") throw new Error("refused");
           return (await drain(served)).body;

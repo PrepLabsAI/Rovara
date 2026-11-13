@@ -214,7 +214,7 @@ describe.each(["memory", "file"] as StoreKind[])("record and replay on the %s st
       ["no scope", () => undefined],
       ["a scope with an unsafe id", () => ({ companyId: "../other", taskId: "t" })],
     ])("%s: not run, no call, nothing stored", async (_name, scope) => {
-      const engine = rig.engine({ scope: scope as never });
+      const engine = rig.engine({ scope });
       expect(await engine.serve(MATCHING(rig))).toEqual({ kind: "not_run", reason: "scope", sentence: RECORDING_NOT_RUN_SCOPE });
       expect(calls(rig)).toBe(0);
       await expect(engine.endTask()).rejects.toThrow(/scope/u);
@@ -280,13 +280,19 @@ describe.each(["memory", "file"] as StoreKind[])("record and replay on the %s st
       expect((await engine.summary()).items.every((item) => /^[a-f0-9]{64}$/u.test(item.id) && item.keys.every((key) => /^[a-f0-9]{64}$/u.test(key)))).toBe(true);
     });
 
-    it("stores no request header, no request body and no provider account header", async () => {
-      rig.world.provider.script({ headers: [["content-type", "application/json"], ["openai-organization", "org-secret-name"], ["set-cookie", "s=1"], ["x-request-id", "req-1"]] });
-      await drain(await rig.engine().serve(chatFrame(rig.world, { system: SYSTEM_TEXT, headers: [["content-type", "application/json"], ["authorization", "Bearer client-supplied"], ["x-trace", "t-9"]] })));
-      const entry = (await rig.store.get(rig.scope, (await rig.store.list(rig.scope))[0]!.key))!;
-      expect(entry.answer.headers.map(([name]) => name).sort()).toEqual(["content-type", "x-request-id"]);
-      const dump = [...storedText(rig), JSON.stringify(entry.answer.headers)].join("\n");
-      for (const absent of [SYSTEM_TEXT, USER_TEXT, "client-supplied", "org-secret-name", "set-cookie", "x-trace"]) expect(dump.includes(absent), absent).toBe(false);
+    it("stores no request header, no request body and no provider account header, even when the adapter forgets to strip them", async () => {
+      // The defective adapter hands every provider header back: the engine's own pass over the head must still keep them out of the store.
+      const leaky = makeRig(kind, { report: two(), mutation: "unfiltered_headers" });
+      try {
+        leaky.world.provider.script({ headers: [["content-type", "application/json"], ["openai-organization", "org-secret-name"], ["set-cookie", "s=1"], ["x-request-id", "req-1"]] });
+        await drain(await leaky.engine().serve(chatFrame(leaky.world, { system: SYSTEM_TEXT, headers: [["content-type", "application/json"], ["authorization", "Bearer client-supplied"], ["x-trace", "t-9"]] })));
+        const entry = (await leaky.store.get(leaky.scope, (await leaky.store.list(leaky.scope))[0]!.key))!;
+        expect(entry.answer.headers.map(([name]) => name).sort()).toEqual(["content-type", "x-request-id"]);
+        const dump = [...storedText(leaky), JSON.stringify(entry.answer.headers)].join("\n");
+        for (const absent of [SYSTEM_TEXT, USER_TEXT, "client-supplied", "org-secret-name", "set-cookie", "x-trace"]) expect(dump.includes(absent), absent).toBe(false);
+      } finally {
+        leaky.cleanup();
+      }
     });
   });
 

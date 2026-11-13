@@ -38,9 +38,12 @@ describe("modelRecordKey", () => {
     expect(keyOf({ ...base, query: "key=abc123" })).toBe(keyOf(base));
   });
 
-  it.each(Object.entries(MODEL_RECORD_VOLATILE_FIELDS).filter(([family]) => family === "openai_compatible"))("ignores each volatile field of %s", (_family, fields) => {
-    const plain = keyOf(chatFrame(world));
-    for (const field of fields) expect(keyOf(chatFrame(world, { extra: { [field]: "value-" + field } })), field).toBe(plain);
+  it.each(["user", "metadata", "safety_identifier", "prompt_cache_key", "service_tier", "store", "request_id"])("ignores the volatile field `%s` (listed here, not read from the code under test)", (field) => {
+    expect(keyOf(chatFrame(world, { extra: { [field]: "value-" + field } }))).toBe(keyOf(chatFrame(world)));
+  });
+
+  it("does not treat `stream`, `model`, `temperature` or `messages` as volatile", () => {
+    for (const field of ["stream", "model", "temperature", "messages", "tools", "system"]) expect(MODEL_RECORD_VOLATILE_FIELDS.openai_compatible).not.toContain(field);
   });
 
   it("ignores the volatile fields of Anthropic and Gemini requests too", () => {
