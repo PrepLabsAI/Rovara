@@ -29,7 +29,23 @@ agentx admin sign-in-client add scheduler \
 - `--scope`: what the service may do on Rovara as the signed-in person, comma-separated (see
   [Act as the signed-in person](#act-as-the-signed-in-person)). None by default.
 
-Running `add` again for the same ID replaces the client.
+Running `add` again for the same ID replaces the whole client, and `--confidential` makes a new secret. To change a
+registered client, use `update`.
+
+## Change a service
+
+```sh
+agentx admin sign-in-client update rovara-cloud --scope projects:members
+```
+
+`update` changes only the settings you give and keeps everything else, its secret included:
+
+- `--name`, `--audience`, `--loopback` or `--no-loopback`.
+- `--redirect <url>` (repeat for more) replaces its redirect URLs; `--clear-redirects` removes them all.
+- `--scope a,b` replaces its scopes; `--scope none` removes them all.
+- `--rotate-secret` gives it a new secret, shown once (or written with `--secret-file`); the old one stops working.
+
+The person who runs it never sees the stored secret: Rovara carries it over.
 
 ## List and remove
 

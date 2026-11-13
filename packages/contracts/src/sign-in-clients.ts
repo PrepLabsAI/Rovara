@@ -41,7 +41,14 @@ export const SignInClientRegistrationSchema = z.object({
   secretHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   /** Spec 065: what it may do as the signed-in person; none when absent. */
   scopes: ClientScopesSchema.optional(),
-}).strict().refine((registration) => registration.loopback || registration.redirectUris.length > 0, "a client needs a redirect URL, a loopback redirect, or both");
+  /**
+   * An update that keeps the client's secret: Rovara carries the stored hash over (the CLI never sees it). Never with a
+   * new `secretHash`, and refused for a client that has no secret.
+   */
+  keepSecret: z.literal(true).optional(),
+}).strict()
+  .refine((registration) => registration.loopback || registration.redirectUris.length > 0, "a client needs a redirect URL, a loopback redirect, or both")
+  .refine((registration) => registration.keepSecret === undefined || registration.secretHash === undefined, "keep the secret or give a new one, not both");
 export type SignInClientRegistration = z.infer<typeof SignInClientRegistrationSchema>;
 
 export const SignInClientRecordSchema = z.object({
@@ -89,7 +96,8 @@ export interface AccessCheckResponse {
 
 // ---- The broker's requests to the sign-in Lambda, which owns the registry ----
 
-export const PutSignInClientRequestSchema = z.object({ kind: z.literal("put-sign-in-client"), client: SignInClientRecordSchema }).strict();
+/** `keepSecret`: carry the stored client's secret hash over, which only the sign-in server holds. */
+export const PutSignInClientRequestSchema = z.object({ kind: z.literal("put-sign-in-client"), client: SignInClientRecordSchema, keepSecret: z.literal(true).optional() }).strict();
 export type PutSignInClientRequest = z.infer<typeof PutSignInClientRequestSchema>;
 export const RemoveSignInClientRequestSchema = z.object({ kind: z.literal("remove-sign-in-client"), clientId: SignInClientIdSchema }).strict();
 export type RemoveSignInClientRequest = z.infer<typeof RemoveSignInClientRequestSchema>;

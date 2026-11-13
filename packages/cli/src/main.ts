@@ -18,6 +18,8 @@ import {
   agentXError,
   type ProjectDefinition,
   CLIENT_SCOPES,
+  type SignInClientRegistration,
+  type SignInClientView,
 } from "@agentx/contracts";
 import { DEFAULT_DIRECT_MODELS } from "@agentx/model-runtime/config";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
@@ -35,7 +37,7 @@ import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { showTaskE2EReplays, startTaskE2EReplay } from "./admin/task-e2e-replay.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
-import { describeSignInClient, listSignInClients, newClientSecret, signInClientId, signInClientRegistration, type SignInClientAddOptions } from "./admin/sign-in-clients.js";
+import { describeSignInClient, listSignInClients, newClientSecret, signInClientId, signInClientRegistration, signInClientUpdate, type SignInClientAddOptions, type SignInClientUpdateOptions } from "./admin/sign-in-clients.js";
 import { batchResultsOutput, evalBatchShowText, evalBatchStartText, fetchEvalBatchResults, showEvalBatch, startEvalBatch, stopEvalBatch } from "./admin/eval-batch.js";
 import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
@@ -639,6 +641,43 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   }
 
   // Spec 063 FR-001: services that sign Rovara users in. A change shows its effect and asks first, as grant does.
+  /**
+   * Registers or changes a sign-in client as an admin change. A new secret, when there is one, is written or shown only
+   * once the change applies; the secret file is written first, so an unwritable path never leaves a hash nobody holds.
+   */
+  async function applySignInClient(
+    command: Command, clientId: string, build: (current: () => Promise<SignInClientView | undefined>) => Promise<SignInClientRegistration>,
+    secret: { secret: string; secretHash: string } | undefined, options: { secretFile?: string; yes: boolean },
+  ): Promise<void> {
+    const globals = globalOptions(command);
+    const confirm = changeConfirmer(options.yes);
+    const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+    // Read only by an update, which keeps what it does not name.
+    const current = async () => (await listSignInClients({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, services.fetchImplementation)).find((client) => client.clientId === clientId);
+    const registration = await build(current);
+    if (secret !== undefined && options.secretFile !== undefined) await writeFile(options.secretFile, `${secret.secret}\n`, { mode: 0o600, flag: "wx" });
+    let result: Awaited<ReturnType<typeof runCliChange>>;
+    try {
+      result = await runCliChange({
+        controlPlaneUrl: settings.controlPlaneUrl, accessToken, cliVersion: CLI_VERSION,
+        change: { kind: "register_sign_in_client", clientId, registration },
+        confirm: () => confirm("Apply this change?"),
+        write: (line) => { services.stderr.write(`${line}\n`); },
+      }, services.fetchImplementation);
+    } catch (error) {
+      if (options.secretFile !== undefined && secret !== undefined) services.stderr.write(`${options.secretFile} keeps the client secret in case the change applied; delete it if agentx admin changes says it did not.\n`);
+      throw error;
+    }
+    const applied = secret !== undefined && result.outcome === "applied";
+    if (secret !== undefined && options.secretFile !== undefined) {
+      if (applied) services.stderr.write(`Wrote the client secret to ${options.secretFile}. Give it to the service; Rovara keeps only its hash.\n`);
+      else await rm(options.secretFile, { force: true });
+    } else if (applied && !globals.json) {
+      services.stderr.write(`Client secret (shown once; give it to the service, Rovara keeps only its hash):\n${secret.secret}\n`);
+    }
+    const printedSecret = !applied ? {} : options.secretFile !== undefined ? { clientSecretFile: options.secretFile } : globals.json ? { clientSecret: secret.secret } : {};
+    services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, clientId, ...printedSecret }, globals.json));
+  }
   const adminSignInClient = admin.command("sign-in-client").description("services that sign Rovara users in and get tokens of their own, which Rovara's API refuses");
   adminSignInClient
     .command("add <client-id>")
@@ -652,36 +691,33 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--scope <scopes>", `what it may do as the signed-in person, comma-separated: ${CLIENT_SCOPES.join(", ")}; none by default`)
     .option("--yes", "apply without asking; the change is still printed", false)
     .action(async (id: string, options: SignInClientAddOptions & { secretFile?: string; yes: boolean }, command: Command) => {
-      const globals = globalOptions(command);
       const clientId = signInClientId(id);
       if (options.secretFile !== undefined && options.confidential !== true) throw agentXError("CONFIG_INVALID", "--secret-file only goes with --confidential");
       const secret = options.confidential === true ? newClientSecret() : undefined;
-      const registration = signInClientRegistration(clientId, options, secret?.secretHash);
-      const confirm = changeConfirmer(options.yes);
-      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      // The secret file is written before anything applies, so an unwritable path never leaves a hash nobody holds.
-      if (secret !== undefined && options.secretFile !== undefined) await writeFile(options.secretFile, `${secret.secret}\n`, { mode: 0o600, flag: "wx" });
-      let result: Awaited<ReturnType<typeof runCliChange>>;
-      try {
-        result = await runCliChange({
-          controlPlaneUrl: settings.controlPlaneUrl, accessToken, cliVersion: CLI_VERSION,
-          change: { kind: "register_sign_in_client", clientId, registration },
-          confirm: () => confirm("Apply this change?"),
-          write: (line) => { services.stderr.write(`${line}\n`); },
-        }, services.fetchImplementation);
-      } catch (error) {
-        if (options.secretFile !== undefined && secret !== undefined) services.stderr.write(`${options.secretFile} keeps the client secret in case the change applied; delete it if agentx admin changes says it did not.\n`);
-        throw error;
-      }
-      const applied = secret !== undefined && result.outcome === "applied";
-      if (secret !== undefined && options.secretFile !== undefined) {
-        if (applied) services.stderr.write(`Wrote the client secret to ${options.secretFile}. Give it to the service; Rovara keeps only its hash.\n`);
-        else await rm(options.secretFile, { force: true });
-      } else if (applied && !globals.json) {
-        services.stderr.write(`Client secret (shown once; give it to the service, Rovara keeps only its hash):\n${secret.secret}\n`);
-      }
-      const printedSecret = !applied ? {} : options.secretFile !== undefined ? { clientSecretFile: options.secretFile } : globals.json ? { clientSecret: secret.secret } : {};
-      services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, clientId, ...printedSecret }, globals.json));
+      await applySignInClient(command, clientId, async () => signInClientRegistration(clientId, options, secret?.secretHash), secret, options);
+    });
+  adminSignInClient
+    .command("update <client-id>")
+    .description("change a sign-in client's settings, keeping its secret and everything not named; shows the change and asks first")
+    .option("--name <name>", "the name people see")
+    .option("--audience <audience>", "the audience its tokens carry")
+    .option("--redirect <url>", "replace its redirect URLs with these (repeat for more, at most 10)", (value: string, previous: string[] = []) => [...previous, value])
+    .option("--clear-redirects", "remove all its redirect URLs")
+    .option("--loopback", "it may sign people in from a terminal with a loopback redirect")
+    .option("--no-loopback", "it may not use a loopback redirect")
+    .option("--scope <scopes>", `replace what it may do as the signed-in person, comma-separated: ${CLIENT_SCOPES.join(", ")}; none removes them all`)
+    .option("--rotate-secret", "give it a new secret (shown once, or written with --secret-file); the old one stops working")
+    .option("--secret-file <path>", "with --rotate-secret, write the new secret to this new file (mode 600) instead of printing it")
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (id: string, options: SignInClientUpdateOptions & { rotateSecret?: boolean; secretFile?: string; yes: boolean }, command: Command) => {
+      const clientId = signInClientId(id);
+      if (options.secretFile !== undefined && options.rotateSecret !== true) throw agentXError("CONFIG_INVALID", "--secret-file only goes with --rotate-secret");
+      const secret = options.rotateSecret === true ? newClientSecret() : undefined;
+      await applySignInClient(command, clientId, async (read) => {
+        const current = await read();
+        if (current === undefined) throw agentXError("NOT_FOUND", `sign-in client ${clientId} is not registered; register it with agentx admin sign-in-client add`);
+        return signInClientUpdate(current, options, secret?.secretHash);
+      }, secret, options);
     });
   adminSignInClient
     .command("list")

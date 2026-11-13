@@ -325,7 +325,8 @@ export function endDeveloperSessionsThroughLambda(invoke: (payload: Uint8Array) 
 
 /** Spec 063: the sign-in clients' registry, through the sign-in Lambda that owns it. Throws when it cannot be reached. */
 export interface SignInClientRegistry {
-  put(client: SignInClientRecord): Promise<void>;
+  /** `keepSecret`: keep the stored client's secret, which only the sign-in server can read. */
+  put(client: SignInClientRecord, options?: { keepSecret?: true }): Promise<void>;
   remove(clientId: string): Promise<boolean>;
   list(): Promise<SignInClientView[]>;
 }
@@ -339,7 +340,7 @@ export function signInClientsThroughLambda(invoke: (payload: Uint8Array) => Prom
     return answer as T;
   };
   return {
-    async put(client) { await ask({ kind: "put-sign-in-client", client }, () => true); },
+    async put(client, options) { await ask({ kind: "put-sign-in-client", client, ...(options?.keepSecret === true ? { keepSecret: true as const } : {}) }, () => true); },
     remove: (clientId) => ask({ kind: "remove-sign-in-client", clientId }, (reply) => reply.removed === true),
     list: () => ask({ kind: "list-sign-in-clients" }, (reply) => {
       const parsed = z.array(SignInClientViewSchema).safeParse(reply.clients);
