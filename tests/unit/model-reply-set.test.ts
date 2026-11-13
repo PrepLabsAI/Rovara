@@ -5,6 +5,8 @@ import {
   MODEL_REPLY_SET_MAX_REPLIES,
   ModelReplySetFileSchema,
   ModelReplySetSchema,
+  type IndependentReplyDecision,
+  type ReplyProvenanceDecision,
   createRovaraIndependentDecision,
   modelReplyContentSha256,
   modelReplyEntrySha256,
@@ -13,8 +15,6 @@ import {
   parseModelReplySetBytes,
   selectModelReply,
   stampReplyProvenance,
-  type IndependentReplyDecision,
-  type ReplyProvenanceDecision,
 } from "../../packages/contracts/src/model-reply-set.js";
 import { REPLY_PROVENANCES } from "../../packages/contracts/src/model-reply-provenance.js";
 
