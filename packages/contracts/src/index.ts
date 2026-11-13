@@ -225,6 +225,7 @@ export * from "./outcomes.js";
 export * from "./check-kinds.js";
 export * from "./evidence.js";
 export * from "./evidence-inert.js";
+export * from "./evidence-public.js";
 export * from "./evidence-render.js";
 export * from "./evidence-weakening.js";
 export * from "./api-samples.js";
