@@ -165,6 +165,22 @@ const F2A_FILES: ReadonlySet<string> = new Set([...F2A_SOURCES.map((name) => `pa
 // TE-F2 part B (the helper program, stacked on part A): its worker files, its narrow contracts entry and its tests and support are the callers; its own guards (tests/unit/model-replies-contracts-guard.test.ts and worker-model-helper-import-graph.test.ts) pin what they may reach.
 const F2B_FILE = /^(?:packages\/worker\/src\/model-(?:helper|reply|failure)|packages\/contracts\/src\/model-helper-entry\.ts$|tests\/unit\/worker-model-|tests\/support\/model-)/u;
 
+// TE-SDK-COMPAT: these exact tests exercise only the loopback helper and its offline safety checks.
+const SDK_COMPAT_TESTS: ReadonlySet<string> = new Set([
+  "tests/unit/model-sdk-compat.test.ts",
+  "tests/unit/model-sdk-compat-ctypes.test.ts",
+  "tests/unit/model-sdk-compat-cutoff.test.ts",
+  "tests/unit/model-sdk-compat-live.test.ts",
+  "tests/unit/model-sdk-compat-pins.test.ts",
+  "tests/unit/model-sdk-compat-process.test.ts",
+  "tests/unit/model-sdk-compat-review.test.ts",
+  "tests/unit/model-sdk-compat-sandbox.test.ts",
+  "tests/unit/model-sdk-compat-sandbox-probe.test.ts",
+  "tests/unit/model-sdk-compat-stream-usage.test.ts",
+  "tests/unit/model-sdk-compat-tripwire.test.ts",
+  "tests/unit/model-sdk-compat-version.test.ts",
+]);
+
 describe("no callers yet", () => {
   const NEW_MODULES = ["model-catalog", "model-catalog-rows", "model-catalog-digest", "model-family-common", "model-family-gemini", "model-family-openai", "model-egress-block", "model-serve"];
   const walk = (directory: string): string[] =>
@@ -179,7 +195,7 @@ describe("no callers yet", () => {
     for (const root of ["packages", "tests", "scripts"]) {
       for (const file of walk(root)) {
         // TE-F2 part A stacks on this lane: exactly these files are allowed to import F0a's modules (its own pure contracts and its tests); its guard (model-replies-contracts-guard.test.ts) proves nothing else calls them.
-        if (own.has(file) || file === "packages/contracts/src/index.ts" || F2A_FILES.has(file) || F2B_FILE.test(file) || /^tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
+        if (own.has(file) || file === "packages/contracts/src/index.ts" || F2A_FILES.has(file) || F2B_FILE.test(file) || SDK_COMPAT_TESTS.has(file) || /^tests\/unit\/model-(catalog|family-gemini|egress-block)\.test\.ts$/u.test(file)) continue;
         const text = readFileSync(file, "utf8");
         if (NEW_MODULES.some((name) => new RegExp(`(?:from|import\\()\\s*["'][^"']*\\/${name}\\.js["']`, "u").test(text))) importers.push(file);
       }
@@ -191,7 +207,7 @@ describe("no callers yet", () => {
     const pattern = names.join("|");
     const search = (): string => {
       try {
-        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!packages/worker/src/model-helper*", ":!packages/worker/src/model-reply*", ":!packages/worker/src/model-failure*", ":!tests/unit/worker-model-*", ":!tests/support/model-*", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ...F2A_TESTS.map((file) => `:!${file}`)], { encoding: "utf8" });
+        return execFileSync("git", ["grep", "-lE", pattern, "--", "packages", "scripts", "tests", ":!packages/contracts/src", ":!packages/worker/src/model-helper*", ":!packages/worker/src/model-reply*", ":!packages/worker/src/model-failure*", ":!tests/unit/worker-model-*", ":!tests/support/model-*", ":!tests/unit/model-catalog.test.ts", ":!tests/unit/model-family-gemini.test.ts", ":!tests/unit/model-egress-block.test.ts", ...F2A_TESTS.map((file) => `:!${file}`), ...[...SDK_COMPAT_TESTS].map((file) => `:!${file}`)], { encoding: "utf8" });
       } catch (error) {
         if ((error as { status?: number }).status === 1) return ""; // git grep exits 1 when nothing matches; any other failure is a failure
         throw error;

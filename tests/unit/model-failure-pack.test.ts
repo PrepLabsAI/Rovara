@@ -251,7 +251,7 @@ describe("bad_tool_json", () => {
     const stream = answer("bad_tool_json", { wire: "openai", operation: "chat_completions", stream: "sse" }).body;
     expect(stream).not.toContain("rovara_bad_tool_json");
     const args = parseSseText(stream, { requireSpace: true });
-    const pieces = args.ok ? args.events.filter((event) => event !== "[DONE]").map((event) => JSON.parse(event).choices[0].delta.tool_calls?.[0]?.function?.arguments).filter((piece): piece is string => typeof piece === "string") : [];
+    const pieces = args.ok ? args.events.filter((event) => event !== "[DONE]").map((event) => JSON.parse(event).choices[0]?.delta?.tool_calls?.[0]?.function?.arguments).filter((piece): piece is string => typeof piece === "string") : [];
     expect(pieces.length).toBeGreaterThan(0);
     expect(() => JSON.parse(pieces.join(""))).toThrow();
   });

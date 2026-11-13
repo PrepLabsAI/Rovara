@@ -21,7 +21,7 @@ import { buildChatCompletion } from "./model-family-openai.js";
 import { buildOpenAiResponse, openAiResponseStreamBody } from "./model-family-openai-ops.js";
 import { anthropicErrorBody } from "./model-family-anthropic.js";
 import { cohereErrorBody } from "./model-family-cohere.js";
-import { JSON_CONTENT_TYPE, SSE_CONTENT_TYPE, isChatOperation, jsonAnswer, renderModelReply, type ModelAnswer, type ModelStreamKind, type ModelWire, type RenderContext } from "./model-render.js";
+import { appendOpenAiStreamUsage, JSON_CONTENT_TYPE, SSE_CONTENT_TYPE, isChatOperation, jsonAnswer, renderModelReply, type ModelAnswer, type ModelStreamKind, type ModelWire, type RenderContext } from "./model-render.js";
 import type { ServedModelFamily } from "./model-served-family.js";
 import { UNMATCHED_SENTENCE } from "./model-served-family.js";
 
@@ -137,15 +137,15 @@ function cutOff(context: FailureContext): ModelAnswer | undefined {
   const reply: ModelReply = { text: FAILURE_PACK_TEXT, finish: "stop", usage: { inputTokens: 12, outputTokens: 36 } };
   const full = renderModelReply(reply, renderContext(context));
   if (full === undefined) return undefined;
-  if (context.stream === "sse") return { status: 200, headers: { "content-type": SSE_CONTENT_TYPE }, body: cutSse(full.body, context.lineEnding) };
+  if (context.stream === "sse") return { status: 200, truncated: true, headers: { "content-type": SSE_CONTENT_TYPE }, body: cutSse(full.body, context.lineEnding) };
   if (context.stream === "json_array") {
     // `[{...},\n{...},\n{...}]`: keep the first half of the elements and an unclosed piece of the next; the closing `]` never comes.
     const parts = full.body.slice(1, -1).split(",\n");
     const keep = Math.floor(parts.length / 2);
     const next = parts[keep] ?? "";
-    return { status: 200, headers: { "content-type": JSON_CONTENT_TYPE }, body: `[${[...parts.slice(0, keep), next.slice(0, Math.max(1, Math.floor(next.length / 2)))].join(",\n")}` };
+    return { status: 200, truncated: true, headers: { "content-type": JSON_CONTENT_TYPE }, body: `[${[...parts.slice(0, keep), next.slice(0, Math.max(1, Math.floor(next.length / 2)))].join(",\n")}` };
   }
-  return { status: 200, headers: { "content-type": JSON_CONTENT_TYPE }, body: full.body.slice(0, Math.max(1, Math.floor(full.body.length / 2))) };
+  return { status: 200, truncated: true, headers: { "content-type": JSON_CONTENT_TYPE }, body: full.body.slice(0, Math.max(1, Math.floor(full.body.length / 2))) };
 }
 
 function tokenLimit(spec: FailureSpec, context: FailureContext): ModelAnswer {
@@ -168,7 +168,7 @@ function openAiChatRefusal(spec: FailureSpec, context: FailureContext): ModelAns
   const payloads = filter
     ? [chunk({ role: "assistant", content: "" }, null), chunk({}, "content_filter"), "[DONE]"]
     : [chunk({ role: "assistant", content: null }, null), chunk({ refusal: FAILURE_REFUSAL_TEXT }, null), chunk({}, "stop"), "[DONE]"];
-  return { status: 200, headers: { "content-type": SSE_CONTENT_TYPE }, body: sseBody(payloads, context.lineEnding) };
+  return { status: 200, headers: { "content-type": SSE_CONTENT_TYPE }, body: appendOpenAiStreamUsage(sseBody(payloads, context.lineEnding), { text: "", finish: "stop", usage: { inputTokens: 12, outputTokens: 8 } }, context) };
 }
 
 function refusal(spec: FailureSpec, context: FailureContext): ModelAnswer {

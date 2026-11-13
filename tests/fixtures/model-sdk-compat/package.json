@@ -1,0 +1,16 @@
+{
+  "name": "rovara-model-sdk-compat",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "dependencies": {
+    "openai": "7.56.0",
+    "@anthropic-ai/sdk": "1.8.0",
+    "@google/genai": "3.3.0",
+    "@google/generative-ai": "0.24.1",
+    "ai": "7.0.172",
+    "@ai-sdk/openai": "4.0.117",
+    "@ai-sdk/google": "4.0.120",
+    "cohere-ai": "8.3.1"
+  }
+}
