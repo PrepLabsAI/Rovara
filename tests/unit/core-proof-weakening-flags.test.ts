@@ -352,7 +352,7 @@ describe("M3: a proof that could not compare says so", () => {
     const lines = (proof: Record<string, unknown> | undefined) => rovaraStatusLines(wf, { changedFiles: { files: [], complete: true }, ...(proof === undefined ? {} : { proof }) }, () => []).join("\n");
     expect(lines(undefined)).not.toContain("Test weakening");
     expect(lines({ plan: undefined })).not.toContain("Test weakening");
-    expect(lines({ testProof: { ...proofOf({ weakening: [compared] }), candidateDigest: candidate.digest } })).not.toContain("Test weakening");
-    expect(lines({ testProof: { ...proofOf({ status: "not_checked", note: "stopped" }), candidateDigest: candidate.digest } })).toContain("- Test weakening: could not compare (the run was stopped)");
+    expect(lines({ testProof: { ...(proofOf({ weakening: [compared] }) as Record<string, unknown>), candidateDigest: candidate.digest } })).not.toContain("Test weakening");
+    expect(lines({ testProof: { ...(proofOf({ status: "not_checked", note: "stopped" }) as Record<string, unknown>), candidateDigest: candidate.digest } })).toContain("- Test weakening: could not compare (the run was stopped)");
   });
 });
