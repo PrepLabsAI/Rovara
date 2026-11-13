@@ -5,7 +5,7 @@
 import { EVIDENCE_TRUST_CLASSES, EVIDENCE_TRUST_CLASS_WORDS, PROOF_BASES, SCRIPTED_AI_PROOF_WORDS, checkKindWords, trustLabelWords, type ProofBasis, type EvidenceTrustClass } from "./check-kinds.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import type { EVIDENCE_LEVELS, EVIDENCE_RESULTS } from "./evidence.js";
-import { hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
+import { EVIDENCE_DEPENDENCY_LABEL_WORDS, hasNewerEvidence, noNewerEvidence, type EvidencePackRead, type EvidencePackV2, type EvidencePackV2Read, type NewerEvidence } from "./evidence.js";
 import { weakeningLines } from "./evidence-weakening.js";
 import { NEWER_EVIDENCE_WORDS } from "./forward-reader.js";
 
@@ -140,6 +140,8 @@ function recordedOnOf(entry: Dependency): string | undefined {
 function dependencyWords(entry: Dependency): string {
   const trust = trustOf(entry);
   if (trust === undefined) return NEWER_EVIDENCE_WORDS;
+  // Nothing answered a dependency that was not available: its class stays Simulated (the weakest), but its own line says what happened.
+  if (entry.label === "not_available") return EVIDENCE_DEPENDENCY_LABEL_WORDS.not_available;
   const recorded = recordedOnOf(entry);
   return trust === "recorded" && recorded !== undefined ? `${EVIDENCE_TRUST_CLASS_WORDS.recorded} (${dayWords(recorded)})` : EVIDENCE_TRUST_CLASS_WORDS[trust];
 }

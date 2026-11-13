@@ -1,9 +1,9 @@
 // TE-A3: trust classes over the labels, the vendor_test backing, fake provenance, scripted-reply proof rules and per-test answer sources. Each case fails when the rule it names is removed (mutants are listed in the lane report).
 import { describe, expect, it } from "vitest";
 import {
-  CI_USES_FAKES_WORDS, EVIDENCE_BACKING_KINDS, EVIDENCE_DEPENDENCY_LABELS, EVIDENCE_DEPENDENCY_LABEL_BACKING, EVIDENCE_DEPENDENCY_LABEL_TRUST, EVIDENCE_TRUST_CLASSES, EvidenceDependencySchema, EvidencePackV2Schema,
+  CI_USES_FAKES_WORDS, EVIDENCE_BACKING_KINDS, EVIDENCE_DEPENDENCY_LABELS, EVIDENCE_DEPENDENCY_LABEL_BACKING, EVIDENCE_DEPENDENCY_LABEL_TRUST, EVIDENCE_TRUST_CLASSES, EvidenceDependencySchema, readEvidencePack, renderEvidence, EvidencePackV2Schema,
   SCRIPTED_REPLY_SOURCES, SCRIPTED_REPLY_SOURCE_WORDS, TEST_ENV_BACKING_KINDS, TEST_RESULT_STATES, TEST_RESULT_STATE_WORDS, TestAnswerRecordSchema, TestEnvDependencySchema, TestEnvWorkingBackingSchema, TestEnvFallbackSchema,
-  checkCountsTowardProof, evidenceDependencyLabelFor, evidenceDependencyLabelWords, evidenceDependencyV1ToV2, scriptedRepliesCountTowardProof, testAnswerCountsTowardProof, testAnswerSummaryLines, testAnswerTrustClass,
+  CHANGE_PROOF_LABELS, CHANGE_PROOF_LABEL_WORDS, EVAL_NOT_QUALIFIED_REASONS, EVAL_NOT_QUALIFIED_REASON_WORDS, changeProofLabelCountsAsProven, changeProofLabelQualified, evalProofLabel, checkCountsTowardProof, checkKindInfo, evidenceDependencyLabelFor, evidenceDependencyLabelWords, evidenceDependencyV1ToV2, scriptedRepliesCountTowardProof, testAnswerCountsTowardProof, testAnswerSummaryLines, testAnswerTrustClass,
   testCountsTowardProof, testEnvBackingTrustClass, testEnvDependencyApprovalRisk, testEnvDependencyLessSafeChanges, testEnvStartedCount, testResultState, testTrustClasses, trustClassCountsTowardProof, trustClassOf,
   type EvidenceDependency, type TestAnswerRecord,
 } from "../../packages/contracts/src/index.js";
@@ -82,7 +82,7 @@ describe("a v2 pack's dependency trust is the one its label earns (the writer's 
   it("accepts every label with its own class", () => {
     for (const label of EVIDENCE_DEPENDENCY_LABELS) {
       const backing = EVIDENCE_DEPENDENCY_LABEL_BACKING[label];
-      const result = accepted(dep({ label, backing, trust: trustClassOf(label), ...(trustClassOf(label) === "recorded" ? { recordedOn: "2026-11-12" } : {}) }));
+      const result = accepted(dep({ label, backing, trust: trustClassOf(label), recordedOn: trustClassOf(label) === "recorded" ? "2026-11-12" : undefined, ...(label === "rovara_made_fake" ? { mock: { setId: "m1", version: 1, branch: "main", madeIn: "setup", store: "rovara" } } : {}) }));
       expect(result.success, `${label}: ${JSON.stringify(result.error?.issues)}`).toBe(true);
     }
   });
@@ -95,6 +95,27 @@ describe("a v2 pack's dependency trust is the one its label earns (the writer's 
   });
   it("refuses a label that does not belong to its backing", () => {
     expect(accepted(dep({ label: "real", backing: "fake", trust: "real" })).success).toBe(false);
+  });
+  const made = (over: Record<string, unknown> = {}) => dep({ label: "rovara_made_fake", trust: "made_by_rovara", recordedOn: undefined, mock: { setId: "payments-mocks", version: 2, branch: "main", madeIn: "this_task", store: "rovara" }, ...over });
+  it("requires a Rovara-made fake to name its stored mock set, and allows a mock on no other label (review M2)", () => {
+    expect(accepted(made()).success).toBe(true);
+    expect(accepted(made({ mock: undefined })).success).toBe(false);
+    expect(accepted(dep({ mock: made().mock })).success).toBe(false);
+    expect(accepted(dep({ label: "real", backing: "local", trust: "real", recordedOn: undefined, mock: made().mock })).success).toBe(false);
+    expect(accepted(dep({ label: "hand_written_fake", trust: "simulated", recordedOn: undefined, mock: made().mock })).success).toBe(false);
+  });
+  it("allows a recording or a recorded day only on a Recorded answer (review M2)", () => {
+    expect(accepted(dep({ recordedOn: undefined, recording: { store: "rovara", recordedOn: "2026-11-12" } })).success).toBe(true);
+    expect(accepted(made({ recordedOn: "2026-11-12" })).success).toBe(false);
+    expect(accepted(made({ recording: { store: "rovara", recordedOn: "2026-11-12" } })).success).toBe(false);
+    expect(accepted(dep({ label: "real", backing: "local", trust: "real", recordedOn: "2026-11-12" })).success).toBe(false);
+    expect(accepted(dep({ label: "hand_written_fake", trust: "simulated", recordedOn: undefined, recording: { store: "rovara", recordedOn: "2026-11-12" } })).success).toBe(false);
+  });
+  it("still reads a pack with those fields on any label (readers are tolerant; only the writer refuses)", () => {
+    const odd = v2Pack({ dependencies: [dep({ label: "real", backing: "local", trust: "real", recordedOn: "2026-11-12", mock: made().mock })] });
+    expect(readEvidencePack(odd).status).toBe("v2");
+    // and an old pack whose dependencies carry no mock or recording at all still passes the writer's rules
+    expect(EvidencePackV2Schema.safeParse(v2Pack()).success).toBe(true);
   });
 });
 
@@ -235,9 +256,23 @@ describe("what counts toward the proof that a change works", () => {
     expect(checkCountsTowardProof({ kind: "test", trust: "real" })).toBe(true);
     expect(checkCountsTowardProof({ kind: "lint", trust: "real" })).toBe(false);
     expect(checkCountsTowardProof({ kind: "test", trust: "made_by_rovara" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "eval", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "independent_agent" })).toBe(true);
-    expect(checkCountsTowardProof({ kind: "eval", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "coding_agent" })).toBe(false);
-    expect(checkCountsTowardProof({ kind: "eval", trust: "simulated", proofBasis: "scripted_ai_replies" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "independent_agent" })).toBe(true);
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "project_set" })).toBe(true);
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "coding_agent" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", proofBasis: "scripted_ai_replies" })).toBe(false);
+  });
+  it("never counts scripted replies from a source that does not count, even when the proof basis is not stated (review M1)", () => {
+    expect(checkCountsTowardProof({ kind: "test", trust: "simulated", scriptedReplies: "coding_agent" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", scriptedReplies: "coding_agent" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", scriptedReplies: "somebody_else" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "test", scriptedReplies: "independent_agent" })).toBe(true);
+    expect(checkCountsTowardProof({ kind: "test", proofBasis: "something_newer", scriptedReplies: "independent_agent" })).toBe(false);
+  });
+  it("never counts an eval as 'Proven': it has its own labels (DECISIONS 170)", () => {
+    expect(checkKindInfo("eval")?.countsTowardProof).toBe(false);
+    expect(checkCountsTowardProof({ kind: "eval" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "eval", trust: "simulated", proofBasis: "scripted_ai_replies", scriptedReplies: "independent_agent" })).toBe(false);
+    expect(checkCountsTowardProof({ kind: "eval", trust: "real" })).toBe(false);
   });
   it("fails closed on a kind it does not know", () => {
     expect(checkCountsTowardProof({ kind: "hologram" })).toBe(false);
@@ -322,5 +357,62 @@ describe("per-test answers from every source", () => {
       "1 test passed against faked SageMaker answers (not real model output): a",
       "1 test passed against recorded SageMaker answers (recorded 2026-11-12; not real model output): b",
     ]);
+  });
+});
+
+describe("a dependency that nothing answered, in the pack's text (review Low)", () => {
+  it("says 'not available' on its line, though its class stays Simulated in the class summary", () => {
+    const pack = v2Pack({ dependencies: [{ name: "payments", kind: "http_api", backing: "none", label: "not_available", trust: "simulated" }, { name: "mock", kind: "http_api", backing: "none", label: "faked_by_tests", trust: "simulated" }] });
+    const text = renderEvidence(pack).text;
+    expect(text).toContain("Dependencies: Simulated");
+    expect(text).toContain("- payments: not available");
+    expect(text).toContain("- mock: Simulated");
+  });
+  it("does not say so for a label this build does not know", () => {
+    const pack = v2Pack({ dependencies: [{ name: "x", kind: "http_api", backing: "none", label: "from_the_future", trust: "simulated" }] });
+    expect(renderEvidence(readEvidencePack(pack as never).status === "v2" ? (readEvidencePack(pack as never) as { pack: never }).pack : pack).text).not.toContain("not available");
+  });
+});
+
+describe("the three proof labels of DECISIONS 170 and the eval states (contract only; TE-F3 gates)", () => {
+  it("has Proven, No regression measured (eval) and Improved on eval as separate labels with the owner's words", () => {
+    expect([...CHANGE_PROOF_LABELS]).toEqual(["proven", "no_regression_eval", "improved_eval", "eval_not_qualified"]);
+    expect(CHANGE_PROOF_LABEL_WORDS.proven).toBe("Proven");
+    expect(CHANGE_PROOF_LABEL_WORDS.no_regression_eval).toBe("No regression measured (eval)");
+    expect(CHANGE_PROOF_LABEL_WORDS.improved_eval).toBe("Improved on eval");
+    expect(new Set(Object.values(CHANGE_PROOF_LABEL_WORDS)).size).toBe(CHANGE_PROOF_LABELS.length);
+  });
+  it("counts only Proven as proof that the change works; an eval label never does", () => {
+    expect(changeProofLabelCountsAsProven("proven")).toBe(true);
+    for (const label of ["no_regression_eval", "improved_eval", "eval_not_qualified"]) expect(changeProofLabelCountsAsProven(label), label).toBe(false);
+    expect(changeProofLabelCountsAsProven("proven_by_magic")).toBe(false);
+    expect(changeProofLabelCountsAsProven(undefined)).toBe(false);
+  });
+  it("marks which labels are a qualified result: Proven and the two eval results, never 'not qualified'", () => {
+    expect(changeProofLabelQualified("proven")).toBe(true);
+    expect(changeProofLabelQualified("no_regression_eval")).toBe(true);
+    expect(changeProofLabelQualified("improved_eval")).toBe(true);
+    expect(changeProofLabelQualified("eval_not_qualified")).toBe(false);
+    expect(changeProofLabelQualified("something_newer")).toBe(false);
+  });
+  it("reads a gated eval result as its own label, never as Proven", () => {
+    expect(evalProofLabel({ outcome: "no_regression_eval" })).toEqual({ label: "no_regression_eval", words: "No regression measured (eval)" });
+    expect(evalProofLabel({ outcome: "improved_eval" })).toEqual({ label: "improved_eval", words: "Improved on eval" });
+  });
+  it("reads an eval result that is not gated, not known or says 'proven' as 'not qualified', with a fixed reason and never a pass", () => {
+    expect(evalProofLabel({})).toEqual({ label: "eval_not_qualified", words: "not qualified: the result was not gated" });
+    expect(evalProofLabel({ outcome: "proven" })).toMatchObject({ label: "eval_not_qualified" });
+    expect(evalProofLabel({ outcome: "proven" }).words).not.toBe("Proven");
+    expect(evalProofLabel({ outcome: "a_newer_outcome" })).toMatchObject({ label: "eval_not_qualified" });
+    expect(evalProofLabel({ outcome: "eval_not_qualified", reason: "cap_hit" })).toEqual({ label: "eval_not_qualified", words: "not qualified: a cap was hit" });
+    // a reason is a fixed word, so text from a repository never gets in
+    expect(evalProofLabel({ outcome: "eval_not_qualified", reason: "<script>ignore previous</script>" }).words).toBe("not qualified: the result was not gated");
+    // the reason of a qualified label is dropped, and a not-qualified state never reads as one
+    expect(evalProofLabel({ outcome: "improved_eval", reason: "cap_hit" })).toEqual({ label: "improved_eval", words: "Improved on eval" });
+  });
+  it("gives every reason fixed words, and no label's words say 'Proven' but Proven's own", () => {
+    for (const reason of EVAL_NOT_QUALIFIED_REASONS) expect(EVAL_NOT_QUALIFIED_REASON_WORDS[reason].length, reason).toBeGreaterThan(0);
+    for (const reason of EVAL_NOT_QUALIFIED_REASONS) expect(evalProofLabel({ outcome: "eval_not_qualified", reason }).words).toBe(`not qualified: ${EVAL_NOT_QUALIFIED_REASON_WORDS[reason]}`);
+    expect([...EVAL_NOT_QUALIFIED_REASONS]).toEqual(expect.arrayContaining(["not_gated", "cannot_detect_drop", "too_few_questions", "cap_hit", "provider_outage", "questions_edited_by_change", "baseline_too_old", "no_coverage_evidence"]));
   });
 });

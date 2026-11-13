@@ -17,7 +17,7 @@ export interface PinnedDependency {
   /** `emulated` only: the AWS services the plan asked Rovara local AWS for (the broker's own; the worker's ledger is judged against them). */
   awsServices?: readonly string[];
   /** `fake` only: what the broker's fixture store says about the set the plan pinned (never the worker's words). `recordedAt` is the set's own, and only a recorded set has one. */
-  fake?: { origin: "recorded" | "hand_written"; revision?: number; recordedAt?: string };
+  fake?: { origin: "recorded" | "hand_written"; revision?: number; recordedAt?: string; madeByRovara?: boolean };
 }
 
 export const BLOCKED_CALLS_ITEM_ID = "blocked-calls";
@@ -42,8 +42,10 @@ const plain = (text: string, max: number): string => inertLine(text, max);
 function fakeRow(dependency: PinnedDependency, name: string, startedMs: number, usage: RawUsage): EvidenceDependency {
   const set = dependency.fake;
   // A recorded fake states when it was recorded; one whose date is not known is shown as the less trusted word.
-  const recorded = set?.origin === "recorded" && set.recordedAt !== undefined;
-  const label = evidenceDependencyLabelFor({ backing: "fake", recorded });
+  const madeByRovara = set?.madeByRovara === true;
+  // A fake Rovara made is never a recording, so it states no recording day and carries the "made by Rovara" label, whatever the store's origin says.
+  const recorded = !madeByRovara && set?.origin === "recorded" && set.recordedAt !== undefined;
+  const label = evidenceDependencyLabelFor({ backing: "fake", recorded, madeByRovara });
   const counts = usage?.fakes?.find((entry) => entry.id === dependency.id);
   const read = counts?.ledger === "read" ? counts : undefined;
   return {

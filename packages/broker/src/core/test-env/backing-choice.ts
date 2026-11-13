@@ -46,8 +46,9 @@ export interface AllowedBackings {
  */
 export const DEFAULT_ALLOWED_BACKINGS: AllowedBackings = { real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: true };
 /**
- * The setting as it shipped before TE-A3. A company whose setting is already stored keeps its own answer, and a stored setting that says nothing about made-up answers was written when they were off, so it reads as off:
- * the new default is for a company that has no stored setting, and only a person changes a stored one (O11, plan 6.1 item 5). A migration that stores today's settings writes this.
+ * The setting as it shipped before TE-A3, for a stored setting that never said anything about made-up answers. The default is ON for every company (owner decision 169): nothing stores a company's setting yet, and every
+ * caller passes `undefined`, which is a company with no setting. A setting that IS stored (an object, even an empty `{}`) is a company's own saved choice, and a box it leaves out is what that box was when it was saved,
+ * which for made-up answers was off: only a person turns it on, so `{}` is not the same as no setting. A migration that stores today's settings writes this.
  */
 export const LEGACY_ALLOWED_BACKINGS: AllowedBackings = { ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false };
 const ALLOWED_KEYS = Object.keys(DEFAULT_ALLOWED_BACKINGS) as Array<keyof AllowedBackings>;
@@ -57,7 +58,7 @@ const ALLOWED_KEYS = Object.keys(DEFAULT_ALLOWED_BACKINGS) as Array<keyof Allowe
  * turn a box OFF: a box it leaves out, or turns on, changes nothing. A value that is not exactly `false` or `true` is read as off (a mistake errs on the safe side). The order of the narrower layers does not matter.
  */
 export function effectiveAllowedBackings(company: Partial<AllowedBackings> | undefined, ...narrower: ReadonlyArray<Partial<AllowedBackings> | undefined>): AllowedBackings {
-  // A company with no stored setting gets the shipped defaults; one that has a setting keeps what it stored, and a box it never stored is what that box was before TE-A3.
+  // No setting at all (`undefined`) gets the shipped defaults. A stored setting, even an empty `{}`, keeps what it stored, and a box it never stored is what that box was before TE-A3 (`LEGACY_ALLOWED_BACKINGS`).
   const result = { ...(company === undefined ? DEFAULT_ALLOWED_BACKINGS : LEGACY_ALLOWED_BACKINGS) };
   for (const key of ALLOWED_KEYS) {
     const set = company?.[key];

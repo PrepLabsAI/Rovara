@@ -241,6 +241,13 @@ describe("effectiveAllowedBackings: a lock can only be stricter", () => {
     expect(effectiveAllowedBackings(undefined, { fakeMakesUpAnswers: false }).fakeMakesUpAnswers).toBe(false);
     expect(effectiveAllowedBackings({ fakeMakesUpAnswers: false }, { fakeMakesUpAnswers: true }).fakeMakesUpAnswers).toBe(false);
   });
+  it("tells an empty stored setting from no setting at all: {} is a saved setting that says nothing, so it keeps the old answer, and undefined gets the default (review Low)", () => {
+    expect(effectiveAllowedBackings({})).toEqual(LEGACY_ALLOWED_BACKINGS);
+    expect(effectiveAllowedBackings(undefined)).toEqual(DEFAULT_ALLOWED_BACKINGS);
+    expect(effectiveAllowedBackings({})).not.toEqual(effectiveAllowedBackings(undefined));
+    // null is not a setting a caller can hold, but it must never read as the wider default.
+    expect(effectiveAllowedBackings(null as unknown as undefined).fakeMakesUpAnswers).toBe(false);
+  });
   it("changes nothing else a setting says", () => {
     expect(LEGACY_ALLOWED_BACKINGS).toEqual({ ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false });
     expect({ ...DEFAULT_ALLOWED_BACKINGS, fakeMakesUpAnswers: false }).toEqual({ real: true, emulated: true, projectImages: false, testAccounts: true, fakes: true, fakeMakesUpAnswers: false });

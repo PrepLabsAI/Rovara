@@ -691,6 +691,11 @@ function evidencePackV2Schemas(mode: Mode) {
       // TE-A3 (O11, O51): the class is the one the label earns, and the label belongs to the backing that ran, so a recording can never be written as Real and a fake never as real software.
       if (EVIDENCE_DEPENDENCY_LABEL_BACKING[entry.label] !== entry.backing) context.addIssue({ code: "custom", path: ["label"], message: "the label belongs to the backing that ran" });
       if (entry.trust !== trustClassOf(entry.label)) context.addIssue({ code: "custom", path: ["trust"], message: "the trust class is the one the label earns" });
+      // Where an answer's facts may be stated: a mock set only for a fake Rovara made (and one is required), a recording and its day only for a recorded answer.
+      if (entry.label === "rovara_made_fake" && entry.mock === undefined) context.addIssue({ code: "custom", path: ["mock"], message: "a fake made by Rovara names its stored mock set" });
+      if (entry.label !== "rovara_made_fake" && entry.mock !== undefined) context.addIssue({ code: "custom", path: ["mock"], message: "only a fake made by Rovara has a mock set" });
+      if (entry.trust !== "recorded" && entry.recordedOn !== undefined) context.addIssue({ code: "custom", path: ["recordedOn"], message: "only a recorded answer was recorded" });
+      if (entry.trust !== "recorded" && entry.recording !== undefined) context.addIssue({ code: "custom", path: ["recording"], message: "only a recorded answer has a recording" });
       if (entry.trust === "recorded" && entry.recordedOn === undefined && entry.recording === undefined) context.addIssue({ code: "custom", path: ["recordedOn"], message: "a recorded answer states when it was recorded" });
     })
     : dependency;

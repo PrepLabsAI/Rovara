@@ -29,7 +29,8 @@ const V1_PARTS: readonly CheckPart[] = ["tests", "coverage", "findings", "migrat
 const REGISTRY_ROWS: CheckKindInfo[] = [
   { id: "test", words: "Tests", parts: [...V1_PARTS, "measures"], countsTowardProof: true },
   { id: "e2e", words: "End-to-end tests", parts: ["tests", "pairs", "measures"], countsTowardProof: true },
-  { id: "eval", words: "Eval", parts: ["tests", "measures"], countsTowardProof: true },
+  // An eval is never "Proven" (DECISIONS 170): its own labels are "No regression measured (eval)" and "Improved on eval" (see `evalProofLabel`), so it never counts toward the change proof.
+  { id: "eval", words: "Eval", parts: ["tests", "measures"], countsTowardProof: false },
   { id: "lint", words: "Lint", parts: V1_PARTS, countsTowardProof: false },
   { id: "typecheck", words: "Type check", parts: V1_PARTS, countsTowardProof: false },
   { id: "security", words: "Security scan", parts: V1_PARTS, countsTowardProof: false },
@@ -127,6 +128,60 @@ export function trustClassCountsTowardProof(trust: string | undefined): boolean 
 export function checkCountsTowardProof(check: { kind: string; trust?: string | undefined; proofBasis?: string | undefined; scriptedReplies?: string | undefined }): boolean {
   if (BY_ID.get(check.kind)?.countsTowardProof !== true) return false;
   if (check.trust !== undefined && !trustClassCountsTowardProof(check.trust)) return false;
-  if (check.proofBasis !== undefined) return check.proofBasis === "scripted_ai_replies" && scriptedRepliesCountTowardProof(check.scriptedReplies);
+  // Scripted replies from a source that does not count never prove a change, whether or not the proof basis is stated; a proof basis this build does not know does not count either.
+  if (check.proofBasis !== undefined && !(check.proofBasis === "scripted_ai_replies" && scriptedRepliesCountTowardProof(check.scriptedReplies))) return false;
+  if (check.scriptedReplies !== undefined && !scriptedRepliesCountTowardProof(check.scriptedReplies)) return false;
   return true;
+}
+
+// ---- the proof labels (DECISIONS 170; contract only, TE-F3 does the gating)
+
+/**
+ * The words a change's proof can carry. "Proven" is a test that fails before the change and passes after. An eval can never yield it: a passing eval is "No regression measured (eval)" or "Improved on eval" (the last
+ * shown with its effect size and noise range), and an eval result that does not qualify is shown with its score and a reason, never as a pass.
+ */
+export const CHANGE_PROOF_LABELS = ["proven", "no_regression_eval", "improved_eval", "eval_not_qualified"] as const;
+export type ChangeProofLabel = (typeof CHANGE_PROOF_LABELS)[number];
+export const CHANGE_PROOF_LABEL_WORDS: Record<ChangeProofLabel, string> = {
+  proven: "Proven",
+  no_regression_eval: "No regression measured (eval)",
+  improved_eval: "Improved on eval",
+  eval_not_qualified: "Eval not qualified",
+};
+
+/** Whether a label says the change was shown to work. Only "Proven": an eval label never does. A label this build does not know, or none, does not. */
+export function changeProofLabelCountsAsProven(label: string | undefined): boolean {
+  return label === "proven";
+}
+/** Whether a label is a qualified result (one that passed every guard of DECISIONS 170 A or B, or an ordinary proof). "Not qualified", and any label this build does not know, is not. */
+export function changeProofLabelQualified(label: string | undefined): boolean {
+  return label === "proven" || label === "no_regression_eval" || label === "improved_eval";
+}
+
+/** Why an eval result does not qualify, in fixed words (never text from a repository or a provider). TE-F3 picks the reason; "not_gated" is what a result with no gate reads as. */
+export const EVAL_NOT_QUALIFIED_REASONS = [
+  "not_gated", "cannot_detect_drop", "too_few_questions", "cap_hit", "provider_outage", "questions_edited_by_change", "baseline_too_old", "no_coverage_evidence", "judge_not_pinned", "replies_not_independent",
+] as const;
+export type EvalNotQualifiedReason = (typeof EVAL_NOT_QUALIFIED_REASONS)[number];
+export const EVAL_NOT_QUALIFIED_REASON_WORDS: Record<EvalNotQualifiedReason, string> = {
+  not_gated: "the result was not gated",
+  cannot_detect_drop: "the eval cannot detect the agreed drop",
+  too_few_questions: "too few questions",
+  cap_hit: "a cap was hit",
+  provider_outage: "the provider was unavailable",
+  questions_edited_by_change: "the change edited the eval questions, scoring or thresholds",
+  baseline_too_old: "the baseline is too old or from another model version",
+  no_coverage_evidence: "nothing shows the eval exercised the changed code",
+  judge_not_pinned: "the judge is not pinned from before the task",
+  replies_not_independent: "the questions or scoring are not independent of the change",
+};
+
+/**
+ * The label of an eval result, from what the gate (TE-F3) says. A gated "no regression" or "improved" is its own label and never "Proven". Anything else, including a result that claims "proven", an outcome this build
+ * does not know and a result with no gate, is "not qualified" with a fixed reason: the score is still shown, but never as a pass.
+ */
+export function evalProofLabel(input: { outcome?: string | undefined; reason?: string | undefined }): { label: ChangeProofLabel; words: string } {
+  if (input.outcome === "no_regression_eval" || input.outcome === "improved_eval") return { label: input.outcome, words: CHANGE_PROOF_LABEL_WORDS[input.outcome] };
+  const reason = (EVAL_NOT_QUALIFIED_REASONS as readonly string[]).includes(input.reason as string) ? (input.reason as EvalNotQualifiedReason) : "not_gated";
+  return { label: "eval_not_qualified", words: `not qualified: ${EVAL_NOT_QUALIFIED_REASON_WORDS[reason]}` };
 }
