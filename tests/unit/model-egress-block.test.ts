@@ -47,16 +47,26 @@ const gateways = (): CompanyGatewayRow[] => {
 };
 
 describe("modelHostBlockList", () => {
-  it("holds every catalog host, every auth host and every company gateway host, sorted and without duplicates", () => {
+  it("holds every model host and every company gateway host, sorted and without duplicates", () => {
     const list = modelHostBlockList(rows, gateways());
     expect([...list]).toEqual([...new Set(list)].sort());
-    for (const host of ["generativelanguage.googleapis.com", "aiplatform.googleapis.com", "us-central1-aiplatform.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com", "openrouter.ai", "gateway.ai.cloudflare.com", "ai-gateway.vercel.sh", "api.portkey.ai", "llm.corp-gateway.example.com"]) {
+    for (const host of ["generativelanguage.googleapis.com", "aiplatform.googleapis.com", "us-central1-aiplatform.googleapis.com", "firebasevertexai.googleapis.com", "aiplatform.us-central1.rep.googleapis.com", "aiplatform.us-central1.rep.mtls.googleapis.com", "openrouter.ai", "gateway.ai.cloudflare.com", "ai-gateway.vercel.sh", "api.portkey.ai", "llm.corp-gateway.example.com"]) {
       expect(list, host).toContain(host);
     }
-    const every = rows.flatMap((row) => [...row.hosts, ...row.authHosts]);
+    const every = rows.flatMap((row) => row.hosts);
     for (const host of every) expect(list).toContain(host);
     // generativelanguage.googleapis.com is two rows' host and is listed once.
     expect(list.filter((host) => host === "generativelanguage.googleapis.com")).toHaveLength(1);
+  });
+  it("keeps Google token hosts out of every block list and escape finding", () => {
+    const tokenHosts = ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"];
+    for (const catalogRows of [rows, rows.filter((row) => row.id === "openai")]) {
+      const list = modelHostBlockList(catalogRows, gateways());
+      for (const host of tokenHosts) expect(list).not.toContain(host);
+      expect(findRedirectEscapes(list, tokenHosts)).toEqual([]);
+      expect(list).toContain("api.openai.com");
+    }
+    expect(modelHostBlockList([{ hosts: ["api.example.com"], authHosts: ["auth.example.com"] }], [])).toEqual(["api.example.com"]);
   });
   it("holds every direct provider, and the Azure suffix is in the suffix list", () => {
     const list = modelHostBlockList(rows, []);
@@ -82,17 +92,24 @@ describe("findRedirectEscapes", () => {
     const escapes = findRedirectEscapes(block, ["127.0.0.1", "registry.npmjs.org", "generativelanguage.googleapis.com"]);
     expect(escapes).toEqual([{ host: "generativelanguage.googleapis.com", kind: "ignored_redirect", sentence: "not run: client ignored the redirect (called generativelanguage.googleapis.com)" }]);
   });
+  it("finds Firebase AI Logic and regional Vertex endpoints even before a catalog update", () => {
+    for (const host of ["firebasevertexai.googleapis.com", "aiplatform.us-central1.rep.googleapis.com", "aiplatform.us-central1.rep.mtls.googleapis.com"]) {
+      expect(findRedirectEscapes([], [host])).toEqual([{ host, kind: "unlisted_model_host", sentence: unlistedModelHostSentence(host) }]);
+      expect(findRedirectEscapes(block, [host])).toEqual([{ host, kind: "ignored_redirect", sentence: redirectEscapeSentence(host) }]);
+      expect(findRedirectEscapes([], [`${host}.evil.example.com`])).toEqual([]);
+    }
+  });
   it("is clean when no model host was observed", () => {
     expect(findRedirectEscapes(block, ["127.0.0.1", "registry.npmjs.org", "rovara-models"])).toEqual([]);
     expect(findRedirectEscapes(block, [])).toEqual([]);
   });
   it("reads a host in any spelling the evidence might carry: case, a port, a trailing dot", () => {
-    const escapes = findRedirectEscapes(block, ["OpenRouter.AI:443", "oauth2.googleapis.com.", " api.portkey.ai "]);
-    expect(escapes.map((escape) => escape.host)).toEqual(["api.portkey.ai", "oauth2.googleapis.com", "openrouter.ai"]);
+    const escapes = findRedirectEscapes(block, ["OpenRouter.AI:443", "api.openai.com.", " api.portkey.ai "]);
+    expect(escapes.map((escape) => escape.host)).toEqual(["api.openai.com", "api.portkey.ai", "openrouter.ai"]);
   });
   it("reads URL forms, bracketed hosts, a port with a trailing dot and doubled dots through the strict host checker", () => {
-    const forms = ["https://OpenRouter.ai/api/v1/chat?x=1", "[api.portkey.ai]:443", "oauth2.googleapis.com:443.", "ai-gateway.vercel.sh..", "api.groq.com...", "api.mistral.ai:443..", "https://user:pw@api.openai.com:443/x", "HTTP://API.GROQ.COM", "wss://api.mistral.ai#frag"];
-    expect(findRedirectEscapes(block, forms).map((escape) => escape.host)).toEqual(["ai-gateway.vercel.sh", "api.groq.com", "api.mistral.ai", "api.openai.com", "api.portkey.ai", "oauth2.googleapis.com", "openrouter.ai"]);
+    const forms = ["https://OpenRouter.ai/api/v1/chat?x=1", "[api.portkey.ai]:443", "api.openai.com:443.", "ai-gateway.vercel.sh..", "api.groq.com...", "api.mistral.ai:443..", "https://user:pw@api.openai.com:443/x", "HTTP://API.GROQ.COM", "wss://api.mistral.ai#frag"];
+    expect(findRedirectEscapes(block, forms).map((escape) => escape.host)).toEqual(["ai-gateway.vercel.sh", "api.groq.com", "api.mistral.ai", "api.openai.com", "api.portkey.ai", "openrouter.ai"]);
   });
   it("reads each odd trailing form on its own", () => {
     for (const form of ["api.together.xyz:443..", "api.together.xyz...", "api.together.xyz:443.", "[api.together.xyz]:443.", "api.together.xyz.:443"]) {
@@ -152,7 +169,7 @@ describe("the fixed sentences", () => {
     expect(redirectEscapeSentence("api.openai.com")).toBe("not run: client ignored the redirect (called api.openai.com)");
     expect(unlistedModelHostSentence("x.googleapis.com")).toBe("not run: unlisted model host (called x.googleapis.com)");
     expect(MODEL_HOSTS_NOT_BLOCKED_SENTENCE).toBe("model hosts not blocked on this machine");
-    expect(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE).toBe("not sealed; model hosts blocked by name only");
+    expect(NOT_SEALED_BLOCKED_BY_NAME_SENTENCE).toBe("not sealed; model hosts blocked by name only; a Google service that runs an AI model inside it (for example BigQuery AI functions) is not blocked");
     expect(NOT_SEALED_SENTENCE).toBe("not sealed");
   });
 });

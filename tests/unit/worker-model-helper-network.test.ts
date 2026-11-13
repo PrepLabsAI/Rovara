@@ -368,7 +368,8 @@ describe("the working sandbox is dual-homed; the fresh check sandbox is on a new
     expect(pairs).toContain(`api.openai.com:${helper.helperIp}`);
     expect(pairs).toContain(`generativelanguage.googleapis.com:${helper.helperIp}`);
     expect(pairs).toContain(`us-central1-aiplatform.googleapis.com:${helper.helperIp}`);
-    expect(pairs).toContain(`oauth2.googleapis.com:${helper.helperIp}`);
+    for (const host of ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"]) expect(pairs).not.toContain(`${host}:${helper.helperIp}`);
+    expect(pairs).toContain(`firebasevertexai.googleapis.com:${helper.helperIp}`);
     expect(pairs.every((pair) => pair.endsWith(`:${helper.helperIp}`))).toBe(true);
     expect(run[run.indexOf("--network") + 1]).toBe(TASK_SANDBOX_NETWORK);
     expect(daemon.calls).toContainEqual(["network", "connect", "--ip", helper.network.workingSandboxIp, helper.network.name, expect.stringMatching(/^agentx-task-/u) as unknown as string]);

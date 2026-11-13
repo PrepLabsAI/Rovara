@@ -2,7 +2,7 @@
 // is pointed, in the sandbox's own hosts file (`docker run --add-host <host>:<address>`; the sandbox user is not root and cannot change Docker's bind-mounted /etc/hosts), at the model helper (.9 of the task's helper network), where
 // a client that ignored its base-URL variable is recorded by name and closed (model-helper-recorder.ts); or, for a project with no model row and behind the company gate, at the dropped address 10.255.255.1.
 //
-// The list is GENERATED from the catalog (F0a's `modelHostBlockList`: every row's hosts and auth hosts, every company gateway host), plus Google's three token hosts. No host list is written by hand anywhere else, so a catalog row
+// The list is GENERATED from the catalog (F0a's `modelHostBlockList`: every row's model hosts and every company gateway host). Google token hosts are shared by other APIs and are never blocked. No host list is written by hand anywhere else, so a catalog row
 // cannot exist without a block entry, and the sealed DNS table (`sealedModelHostPairs`) is made from the same list. A host that is not one exact lower-case public DNS name (a wildcard such as `*.googleapis.com`, which
 // would take in Cloud Storage; an address; a scheme; a path) is refused wherever it comes from.
 //
@@ -15,8 +15,6 @@
 import { agentXError, builtinModelCatalog, checkModelHost, modelHostBlockList, modelHostSuffixBlockList, type CompanyGatewayRow, type ModelCatalogRow } from "@agentx/contracts";
 import { MODEL_HELPER_ALIAS, RUN_NETWORK_MODEL_HELPER_OCTET, RUN_NETWORK_SLOTS } from "./run-network.js";
 
-/** Google's token hosts: a Vertex client's auth library calls them (JS ignores `token_uri` and calls oauth2). They are a model host's own, so they are blocked even when a catalog has no Google row. */
-export const GOOGLE_TOKEN_HOSTS: readonly string[] = ["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"];
 /** The address a non-AI project's model names point at: inside `10.0.0.0/8`, which the `rvb` wall drops, so a call to it fails fast and reaches nothing. No helper is started for such a project. */
 export const MODEL_BLACKHOLE_ADDRESS = "10.255.255.1";
 /**
@@ -38,9 +36,9 @@ export function isModelHelperAddress(address: unknown): address is string {
   return matched !== null && Number(matched[1]) <= RUN_NETWORK_SLOTS;
 }
 
-/** The names of a project's model-host block: the catalog's rows (all of them, not only the project's) and the project's company gateway rows, plus Google's token hosts. Sorted, no duplicates. Every name is checked. */
+/** The names of a project's model-host block: the catalog's rows (all of them, not only the project's) and the project's company gateway rows. Authentication hosts are excluded. Sorted, no duplicates. Every name is checked. */
 export function modelBlockHosts(rows: readonly Pick<ModelCatalogRow, "hosts" | "authHosts">[], gatewayRows: readonly Pick<CompanyGatewayRow, "host">[]): string[] {
-  const hosts = [...new Set([...modelHostBlockList(rows, gatewayRows), ...GOOGLE_TOKEN_HOSTS])].sort();
+  const hosts = modelHostBlockList(rows, gatewayRows);
   for (const host of hosts) if (!checkModelHost(host).ok) refuse("a model host name");
   return hosts;
 }

@@ -15,16 +15,28 @@ const VERTEX_LOCATIONS = [
   "me-central2", "me-west1", "africa-south1", "europe-west10", "asia-south2", "northamerica-south1", "europe-north2",
 ] as const;
 
+/** Exact REP locations verified 2026-11-13: https://docs.cloud.google.com/docs/security/compliance/restrict-endpoint-usage */
+const VERTEX_REP_LOCATIONS = [
+  "africa-south1", "asia-east1", "asia-east2", "asia-northeast1", "asia-northeast2", "asia-northeast3",
+  "asia-south1", "asia-south2", "asia-southeast1", "asia-southeast2", "australia-southeast1", "australia-southeast2",
+  "eu", "europe-central2", "europe-north1", "europe-north2", "europe-southwest1", "europe-west1",
+  "europe-west10", "europe-west12", "europe-west2", "europe-west3", "europe-west4", "europe-west6",
+  "europe-west8", "europe-west9", "me-central1", "me-central2", "me-west1", "northamerica-northeast1",
+  "northamerica-northeast2", "southamerica-east1", "southamerica-west1", "us", "us-central1", "us-east1",
+  "us-east4", "us-east5", "us-south1", "us-west1", "us-west2", "us-west3",
+  "us-west4", "us-west8",
+] as const;
+
 const GOOGLE_DUMMY_KEY_VARS = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
 
 const BUILTIN_ROWS_DATA = {
   schemaVersion: 1,
-  revision: 2,
+  revision: 3,
   rows: [
     {
       id: "gemini",
       kind: "provider",
-      hosts: ["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com"],
+      hosts: ["generativelanguage.googleapis.com", "generativelanguage.mtls.googleapis.com", "firebasevertexai.googleapis.com"],
       authHosts: [],
       family: "gemini",
       auth: [{ scheme: "header", name: "x-goog-api-key" }],
@@ -47,13 +59,14 @@ const BUILTIN_ROWS_DATA = {
         "UNVERIFIED: enum-as-int (enum-encoding=int) answers. The test used the string form 'STOP' and the legacy client parsed it; the integer form is built but not proven.",
         "UNVERIFIED: the Live API (WebSocket) cannot be redirected to plain http and is treated as not redirectable.",
         "UNVERIFIED: the Interactions API (/v1beta/interactions?alt=sse) is not served; whether customers use it is unknown.",
+        "Firebase AI Logic host verified 2026-11-13: https://firebase.google.com/docs/reference/js/ai.requestoptions . Its SDK redirect is not verified by the redirect check.",
         "Two probes (the AI SDK and LangChain JS variables) sent a fake key to the real endpoint: this is why every host here is also blocked at the network, not only redirected.",
       ],
     },
     {
       id: "vertex",
       kind: "provider",
-      hosts: ["aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", ...VERTEX_LOCATIONS.flatMap((location) => [`${location}-aiplatform.googleapis.com`, `${location}-aiplatform.mtls.googleapis.com`])],
+      hosts: ["aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", ...VERTEX_LOCATIONS.flatMap((location) => [`${location}-aiplatform.googleapis.com`, `${location}-aiplatform.mtls.googleapis.com`]), ...VERTEX_REP_LOCATIONS.flatMap((location) => [`aiplatform.${location}.rep.googleapis.com`, `aiplatform.${location}.rep.mtls.googleapis.com`])],
       authHosts: ["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"],
       family: "vertex",
       auth: [{ scheme: "gcp_oauth" }, { scheme: "header", name: "x-goog-api-key" }],
@@ -64,7 +77,7 @@ const BUILTIN_ROWS_DATA = {
         { kind: "sdk_option", client: "langchain-google-vertexai (Python)", option: "ChatVertexAI(base_url=..., api_transport='rest', credentials=...)", needsRestTransport: true, verified: true, note: "ChatVertexAI is deprecated; ChatGoogleGenerativeAI(vertexai=True) rides google-genai and should follow the first row (UNVERIFIED)." },
         { kind: "env_var", client: "OpenAI SDK against Vertex's OpenAI endpoint", names: ["OPENAI_BASE_URL"], companion: [], verified: false, note: "UNVERIFIED: no Vertex-style customer snippet was run. The customer's own code still fetches the OAuth token through google.auth, so the metadata variables apply." },
         { kind: "none", client: "vertexai / google-cloud-aiplatform on its default gRPC transport", verified: false, note: "UNVERIFIED beyond the docs: gRPC to plain http is not a viable redirect; set api_transport='rest'." },
-        { kind: "none", client: "any client with GOOGLE_APPLICATION_CREDENTIALS set to a real key file", verified: true, note: "JS ignores token_uri and calls oauth2.googleapis.com: reported 'client ignored the redirect (called oauth2.googleapis.com)'." },
+        { kind: "none", client: "any client with GOOGLE_APPLICATION_CREDENTIALS set to a real key file", verified: true, note: "A real key file mints a real token with the customer's own credential; the model call still goes to the helper, which drops the bearer. This credential setting needs no redirect." },
       ],
       streaming: ["sse", "json_array"],
       errors: errorIds("vertex"),
@@ -72,7 +85,7 @@ const BUILTIN_ROWS_DATA = {
         "Source: gemini-redirect-check-2026-11-13.md sections 1, 3, 4 and 5; te-f1-model-proxy-design-2026-11-13.md section 4.5 (metadata emulation).",
         "Paths seen: /v1beta1/publishers/google/models/<m>:generateContent (express), /v1beta1/projects/<p>/locations/<l>/publishers/google/models/<m>:generateContent, /v1/projects/... (vertexai REST). Any version prefix.",
         "Express mode sends x-goog-api-key; project and location mode sends Authorization: Bearer <token>, plus x-goog-user-project only when the credentials carry a quota project.",
-        "Google's token hosts (oauth2, sts, iamcredentials) are authHosts: blocked, never served. The helper answers as the GCE metadata server so the library finds a dummy token.",
+        "Google's token hosts (oauth2, sts, iamcredentials) are authHosts, NOT blocked: they serve every Google API; the helper drops any bearer. Only Vertex rounds without a project credential use the metadata stand-in.",
         "UNVERIFIED: the list of Vertex locations, and the mtls hosts (aiplatform.mtls.googleapis.com and the regional ones), are not checked against Google's current list. Hosts are listed by name, never as *.googleapis.com; a catalog release adds a location.",
         "A client that calls a Google AI host that is not listed is reported 'unlisted model host' by findRedirectEscapes, never silently let through.",
         "UNVERIFIED: enum-as-int answers for the ?$alt=json;enum-encoding=int clients (same as the gemini row).",
