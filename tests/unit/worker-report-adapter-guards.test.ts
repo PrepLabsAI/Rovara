@@ -14,7 +14,7 @@ describe("adapter boundaries", () => {
   it("routes measures before generic JSON and never claims they are tests", () => {
     expect(parseReportParts(fixture("measures.json"))).toMatchObject({ format: "measures", measures: { schemaVersion: 1, measures: [{ value: 0.9, count: 10 }] } });
     expect(parseTestReport(fixture("measures.json"))).toBeUndefined();
-    expect(parseReportParts('{"schemaVersion":2,"measures":[]}')).toEqual({ format: "measures", newer: true });
+    expect(parseReportParts('{"schemaVersion":3,"measures":[]}')).toEqual({ format: "measures", newer: true });
   });
   it("routes Go and CTRF before generic JSON; honours explicit formats without falling through malformed formats", () => {
     expect(parseReportParts(fixture("go.jsonl"), "json")?.format).toBe("gotest");

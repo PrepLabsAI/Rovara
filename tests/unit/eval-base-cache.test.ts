@@ -144,7 +144,7 @@ describe("the cache service over the document store", () => {
     const key = { pk: `${COMPANY_KEY_PREFIX}org_aaaaaaaaaaaaaaaaaaaa#EVALBASE`, sk: `K#${evalBaseCacheKey(parts())}` };
     const good = (await store.get(key))!;
     for (const broken of [{ record: "not json" }, { record: { schemaVersion: 1 } }, { record: { ...record(), measures: [{ name: "a", unit: "u", value: "NaN", direction: "up_good" }] } }, { record: null }, { company: "org_other" }]) {
-      await store.put({ item: { ...good, ...broken } });
+      await store.put({ item: { ...good, ...broken } as never });
       expect(await mine.read(parts()), JSON.stringify(broken)).toBeUndefined();
     }
     await store.put({ item: good });
