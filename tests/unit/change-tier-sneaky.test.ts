@@ -437,6 +437,9 @@ describe("the second adversarial review set", () => {
       expect(importsOf("AGENTS.md", text), text).toContain("docs/rules.md");
     }
     expect(importsOf("docs/AGENTS.md", "see ../README.md")).toContain("readme.md");
+    // Links to a path that is not a document name are found by the link forms alone.
+    expect(importsOf("AGENTS.md", "Follow [the rules][r].\n\n[r]: docs/rules")).toContain("docs/rules");
+    expect(importsOf("AGENTS.md", 'Follow <a href="docs/rules">the rules</a>.')).toContain("docs/rules");
   });
   it("a path too long to list makes the reader's list incomplete", () => {
     expect(tierFilesOfRead("app", { files: [{ path: `docs/${"a/".repeat(2050)}x.md`, status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" }], complete: true }).complete).toBe(false);
@@ -465,7 +468,8 @@ const OWN: Adversarial2[] = [
   { id: "Y17", name: "a host-unchecked path is risky", files: [f("src/a.ts")], atLeast: "risky", reason: "link_kind_unknown", head: { unchecked: new Set([factKey(undefined, "src/a.ts")]) } },
   { id: "Y18", name: ".npmignore changed", files: [f(".npmignore", chg(["secrets/"], []))], atLeast: "standard" },
   { id: "Y19", name: "a long total in one file across short lines is standard", files: [f("src/data.ts", added(...Array.from({ length: 90 }, (_, index) => `export const v${index} = "${"c".repeat(95)}";`)))], atLeast: "standard", reason: "long_lines" },
-  { id: "Y20", name: "diff-wide: many small files that add 21 KB together", files: Array.from({ length: 3 }, (_, n) => f(`src/m${n}.ts`, added(...Array.from({ length: 70 }, (_, index) => `export const v${index} = "${"d".repeat(95)}";`)))), atLeast: "standard" },
+  { id: "Y20", name: "diff-wide: three files of 30 long lines that add 21 KB together, each under the per-file limit", files: Array.from({ length: 3 }, (_, n) => f(`src/m${n}.ts`, added(...Array.from({ length: 30 }, (_, index) => `export const v${index} = "${"d".repeat(220)}";`)))), atLeast: "standard", reason: "long_lines" },
+  { id: "Y21", name: "a husky block in package.json (not a script line)", files: [f("package.json", added('  "husky": {'))], atLeast: "risky", reason: "install_script" },
 ];
 describe("the controller's additions", () => {
   it.each(OWN)("$id $name", (entry) => {
