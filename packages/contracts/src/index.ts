@@ -222,7 +222,10 @@ export * from "./ports/index.js";
 export * from "./outcomes.js";
 
 // Proof and evidence (W4/W5): the evidence pack, decision cards, the test environment and service mocks.
+export * from "./check-kinds.js";
 export * from "./evidence.js";
+export * from "./evidence-inert.js";
+export * from "./evidence-render.js";
 export * from "./api-samples.js";
 export * from "./media-gate.js";
 
@@ -288,6 +291,14 @@ export * from "./model-family-common.js";
 export * from "./model-family-gemini.js";
 export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
+// TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
+export * from "./model-egress/index.js";
+// TE-F10 (0.5.20): old vs new prompt outputs side by side, with an independent judge (additive; no callers).
+export * from "./side-by-side.js";
+export * from "./side-by-side-judge.js";
+export * from "./side-by-side-judge-pin.js";
+export * from "./side-by-side-run.js";
+export * from "./side-by-side-render.js";
 export * from "./model-serve.js";
 export * from "./test-account.js";
 export * from "./context-sources.js";
