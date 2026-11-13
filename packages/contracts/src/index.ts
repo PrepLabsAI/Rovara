@@ -288,6 +288,8 @@ export * from "./model-family-common.js";
 export * from "./model-family-gemini.js";
 export * from "./model-family-openai.js";
 export * from "./model-egress-block.js";
+// TE-F1a (M2): the model-egress contracts and pure core (the `model-egress` port is in ports/model-egress.ts). Additive; depends on TE-F0a.
+export * from "./model-egress/index.js";
 export * from "./model-serve.js";
 export * from "./test-account.js";
 export * from "./context-sources.js";
@@ -338,3 +340,8 @@ export * from "./task-status.js";
 export * from "./notification-prefs.js";
 export * from "./work-event.js";
 export * from "./work-event-node.js";
+// TE-F8 (M2, 0.5.19): record-then-replay for changed prompts. Additive, no callers; depends on TE-F1a (model-egress) and TE-F4 (prompt-change).
+export * from "./model-record-key.js";
+export * from "./model-record-policy.js";
+export * from "./model-recording-store.js";
+export * from "./model-record-replay.js";
