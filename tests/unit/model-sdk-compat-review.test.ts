@@ -36,7 +36,7 @@ it("wraps either runtime in sandbox-exec and fails the run on sandbox_apply exit
     expect(invocation.command).toBe("/usr/bin/sandbox-exec");
     expect(invocation.args.slice(-3)).toEqual(["/runtime/python", "-I", "/scratch/client.py"]);
     expect(invocation.args).toContain("PRIVATE_HOME=/private-home");
-    expect(invocation.args).toContain("(version 1)(allow default)(deny network*)(allow network* (remote ip \"localhost:*\"))(allow network* (local ip \"localhost:*\"))(deny file-read* (subpath (param \"PRIVATE_HOME\")))(allow file-read* (subpath (param \"RUNTIME\")))(allow file-read* (subpath (param \"SCRATCH\")))");
+    expect(invocation.args).toContain("(version 1)(allow default)(deny network*)(allow network-outbound (remote ip \"localhost:*\"))(allow network-bind (local ip \"localhost:*\"))(allow network-inbound (local ip \"localhost:*\"))(deny file-read* (subpath (param \"PRIVATE_HOME\")))(allow file-read* (subpath (param \"RUNTIME\")))(allow file-read* (subpath (param \"SCRATCH\")))");
     const dir = mkdtempSync(join(tmpdir(), "sdk-compat-"));
     const env = { SDK_TRIPWIRE_LOG: join(dir, "tripwire") };
     const run = vi.fn<typeof runner.runSdkChild>().mockImplementation(async () => {

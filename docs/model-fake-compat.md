@@ -1,6 +1,6 @@
 # Model fake SDK compatibility
 
-**Round 2 validation pending:** the table below preserves the Round 1 measurements. It has not been rerun with the new mandatory macOS sandbox or tightened cutoff oracle. Per the agreed split, 9d must run `ROVARA_SANDBOX_TESTS=1` against `model-sdk-compat-sandbox.test.ts` and then the live suite outside Codex. No Round 2 live pass is claimed here.
+**Round 3 validation pending:** the table below preserves the Round 1 measurements. Round 2 sandbox validation failed because a broad local-IP allowance permitted external traffic; the live suite did not run. Round 3 narrows the profile to directional loopback allowances and gives the external TCP probe a two-second deadline. Per the agreed split, 9d must rerun `ROVARA_SANDBOX_TESTS=1` against `model-sdk-compat-sandbox.test.ts` and then the live suite outside Codex. No Round 2 or Round 3 live pass is claimed here.
 
 **Table provenance:** the 20 `FIXED` labels and their fix notes were applied by hand to measured passing cells; the legacy Python gRPC `UNVERIFIED` row was added by hand. The six Vertex normal text/stream rows and the Vertex afterCalls row are measured runner output, not handwritten results. The table was assembled from Round 1 `results.json` outputs; rerendering a fresh run alone does not recreate the manual annotations.
 

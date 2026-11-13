@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { SDK_EXTERNAL_TCP_PROBE } from "../support/model-sdk-compat-sandbox-probe.js";
 import { sdkSandboxInvocation } from "../support/model-sdk-compat-policy.js";
 import { runSdkChild } from "../support/model-sdk-compat-runner.js";
 
@@ -30,7 +31,7 @@ describe.skipIf(process.env.ROVARA_SANDBOX_TESTS !== "1")("real macOS SDK sandbo
             const program = `
 import net from 'node:net'; import dgram from 'node:dgram'; import {readFileSync} from 'node:fs';
 await new Promise((resolve,reject)=>{const s=net.connect(${String(address.port)},'127.0.0.1',()=>{s.destroy();resolve();});s.on('error',reject);});
-await new Promise((resolve,reject)=>{const s=net.connect(9,'192.0.2.1',()=>reject(new Error('escaped')));s.on('error',e=>{s.destroy();['EPERM','EACCES'].includes(e.code)?resolve():reject(new Error('wrong-refusal'));});});
+${SDK_EXTERNAL_TCP_PROBE}
 await new Promise((resolve,reject)=>{const s=dgram.createSocket('udp4');s.send('canary',9,'192.0.2.1',e=>{s.close();e&&['EPERM','EACCES'].includes(e.code)?resolve():reject(new Error('escaped'));});});
 try{readFileSync(${JSON.stringify(join(dir, "private/sentinel"))});throw new Error('file-escaped');}catch(e){if(!['EPERM','EACCES'].includes(e.code))throw e;}
 console.log('loopback-ok;external-refused;private-refused');`;

@@ -29,7 +29,7 @@ export function assertSdkCanary(path: string): void {
 }
 export interface SdkSandboxPaths { privateHome: string; runtime: string; scratch: string }
 export function sdkSandboxInvocation(command: string, args: readonly string[], paths: SdkSandboxPaths): { command: string; args: string[] } {
-    const profile = '(version 1)(allow default)(deny network*)(allow network* (remote ip "localhost:*"))(allow network* (local ip "localhost:*"))(deny file-read* (subpath (param "PRIVATE_HOME")))(allow file-read* (subpath (param "RUNTIME")))(allow file-read* (subpath (param "SCRATCH")))';
+    const profile = '(version 1)(allow default)(deny network*)(allow network-outbound (remote ip "localhost:*"))(allow network-bind (local ip "localhost:*"))(allow network-inbound (local ip "localhost:*"))(deny file-read* (subpath (param "PRIVATE_HOME")))(allow file-read* (subpath (param "RUNTIME")))(allow file-read* (subpath (param "SCRATCH")))';
     return { command: "/usr/bin/sandbox-exec", args: ["-D", `PRIVATE_HOME=${paths.privateHome}`, "-D", `RUNTIME=${paths.runtime}`, "-D", `SCRATCH=${paths.scratch}`, "-p", profile, command, ...args] };
 }
 export function assertNoEscapes(path: string): void {
