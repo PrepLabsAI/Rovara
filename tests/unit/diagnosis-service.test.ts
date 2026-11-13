@@ -6,16 +6,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DIAGNOSIS_RATE, ErrorRefSchema, IMPLICIT_COMPANY_ID, diagnosisByPersonKey, diagnosisKey, diagnosisOpenKey, diagnosisRateKey, errorRefKey, workflowBlockErrorRef,
   type Admission, type AdmissionRequest, type AuditEvent, type DiagnosisRecord, type ErrorRef, type OrgId, type Principal,
-} from "@agentx/contracts";
-import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
+} from "@rovara-code/contracts";
+import { developerIdOf } from "../../packages/core/src/core/sessions/create.js";
 import {
   DIAGNOSIS_LAPTOP_FAILURE_WORDS, DIAGNOSIS_LAPTOP_REFUSALS, DiagnosisModelProblem, admitDiagnosis, createDiagnosis, readDiagnosisRecord, readDiagnosisRequest,
   type DiagnosisAnswerer, type DiagnosisTaskView,
-} from "../../packages/broker/src/core/diagnosis/index.js";
-import type { TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
+} from "../../packages/core/src/core/diagnosis/index.js";
+import type { TaskRecord } from "../../packages/core/src/core/task-flow/records.js";
 import { holdingAdmission } from "../support/holding-admission.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OWNER = localOwnerPrincipal();

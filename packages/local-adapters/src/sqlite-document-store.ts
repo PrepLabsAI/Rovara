@@ -36,7 +36,7 @@ import {
   type TransactResult,
   type UpdateRequest,
   type WriteResult,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { CHANGE_FEED_SCHEMA, SqliteChangeFeed, consumersRegistered, logChanges, translateFailure, type LoggedChange, type SqliteChangeFeedOptions } from "./sqlite-change-feed.js";
 import { SqliteDatabase, storableText, type SqliteDatabaseOptions, type SqliteValue } from "./sqlite-database.js";
 

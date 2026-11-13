@@ -6,7 +6,7 @@ export { CLOUD_READABLE_NUMBER_MAX, UnrepresentableValueError, assertCloudReadab
 export { ExpressionBuilder } from "./dynamodb/expressions.js";
 export { STATE_TABLE_INDEXES, STATE_TABLE_KEY, STATE_TABLE_PLANNED_INDEXES } from "./dynamodb/state-table.js";
 export { createDynamoStoreFromSettings, indexesOfSettings } from "./dynamodb/plugin.js";
-// Lane A3: S3 objects and Secrets Manager secrets. Their plug-in modules (which give them an AWS identity) are in the broker: `@agentx/broker/plugins/object-storage-s3`, `@agentx/broker/plugins/secrets-aws`.
+// Lane A3: S3 objects and Secrets Manager secrets. Their plug-in modules (which give them an AWS identity) are in the broker: `@rovara-code/core/plugins/object-storage-s3`, `@rovara-code/core/plugins/secrets-aws`.
 export * from "./s3/index.js";
 export * from "./secrets-manager/index.js";
 export { DEAD_LETTER_ATTRIBUTE, MAX_MESSAGE_ATTRIBUTES, SQS_LIMITS, SqsQueueError, SqsQueueService, encodeBody, type SqsCommand, type SqsQueueDeclaration, type SqsQueueServiceOptions, type SqsSender } from "./sqs/sqs-queue.js";

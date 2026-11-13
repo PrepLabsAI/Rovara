@@ -1,7 +1,7 @@
 // Setup and test health SH31 (Go): the Go detector. Values are cited, a nested module or an unreadable workspace is asked about and never guessed, a JUnit report is proposed only when go.mod itself names gotestsum,
 // and no per-test selection is proposed (go test takes packages; the selection template is filled with test files).
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema } from "@agentx/contracts";
+import { TestEnvironmentBodySchema } from "@rovara-code/contracts";
 import { boundedReader, buildEnvironmentDraft, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { goDirectives, readGoModuleRoots } from "../../packages/worker/src/env-detect/go.js";
 

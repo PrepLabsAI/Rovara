@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TaskDependencyPlanSchema, WORKER_INVOCATION_FEATURES, type ProjectCommand, type ServiceCatalog, type TaskDependencyPlan } from "@agentx/contracts";
+import { TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TaskDependencyPlanSchema, WORKER_INVOCATION_FEATURES, type ProjectCommand, type ServiceCatalog, type TaskDependencyPlan } from "@rovara-code/contracts";
 import { withDetachedWorking } from "../../packages/worker/src/check-sandbox.js";
 import { forgetWorkerStartSweeps } from "../../packages/worker/src/service-runner.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";

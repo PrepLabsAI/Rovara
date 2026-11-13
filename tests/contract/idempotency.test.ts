@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryRegistry, OperationStore } from "../../packages/broker/src/index.js";
+import { InMemoryRegistry, OperationStore } from "../../packages/core/src/index.js";
 
 function workspace(ownerKey = "alice-owner-key-0000") {
   const timestamp = new Date().toISOString();

@@ -13,7 +13,7 @@ import {
   SwebenchStartRequestSchema,
   SwebenchStartResultSchema,
   type SlackThread,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { EvalBatchStartApi } from "./eval-batch-command.js";
 import type { EvalBatchWatchApi } from "./eval-batch-watcher.js";
 import type { ThreadServiceApi } from "./processor.js";

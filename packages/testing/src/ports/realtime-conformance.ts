@@ -1,6 +1,6 @@
 // The conformance suite every `realtime` adapter must pass: Code's in-process adapter (also the fake), and Cloud's events-service adapter later (over a fake transport).
 import { describe, expect, it } from "vitest";
-import { REALTIME_BATCH_MAX, type RealtimeAudience, type RealtimeEntry, type RealtimePublisher } from "@agentx/contracts";
+import { REALTIME_BATCH_MAX, type RealtimeAudience, type RealtimeEntry, type RealtimePublisher } from "@rovara-code/contracts";
 
 /** What the transport carried, as the harness can see it (a listener, a fake transport's requests). */
 export interface HeardEntry extends RealtimeEntry {

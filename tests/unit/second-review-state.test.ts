@@ -1,12 +1,12 @@
 // The second review's stored side on the document store: the settings (the shared key layout), the mode writer (raise at once, lower through the approvers port), the evidence writers, the notice, the
 // track record and the owner's acknowledgement. Run on the memory store and the policy seams.
 import { describe, expect, it } from "vitest";
-import { SecondOpinionSchema, secondReviewModelKey, workflowFindingFingerprint, type DocumentChange, type SecondOpinion } from "@agentx/contracts";
+import { SecondOpinionSchema, secondReviewModelKey, workflowFindingFingerprint, type DocumentChange, type SecondOpinion } from "@rovara-code/contracts";
 import {
   TRACK_RECORD_DAYS, applyTrackChange, fileHash, findingKey, modeApprovalRequest, noteQualification, noticeLines, observationOf, planSecondReview, readNotice, readSecondReviewSettings, readTrackRecord,
   secondReviewPartition, secondReviewSettingsKey, trackChangeOf, verdictHoldsFor, trackRowKey, type TrackChange,
-} from "../../packages/broker/src/core/second-review/index.js";
-import { prepareVerdict, commitVerdict, withdrawVerdict } from "../../packages/broker/src/core/second-review/evidence.js";
+} from "../../packages/core/src/core/second-review/index.js";
+import { prepareVerdict, commitVerdict, withdrawVerdict } from "../../packages/core/src/core/second-review/evidence.js";
 import { BASELINE, COMPANY, recordingAudit, GEMINI, GPT, MEMBER, OPUS, OTHER, OWNER, SONNET, createWorld, passingCases, proofFor, replayRun, secondPersonApprovers, plain } from "../support/second-review-world.js";
 
 const KEY = secondReviewModelKey(GPT);
@@ -479,7 +479,7 @@ describe("the track record", () => {
     expect((await readTrackRecord(world.store, COMPANY, KEY, { from: "2026-10-01T00:00:00.000Z", to: "2026-10-31T00:00:00.000Z" })).reviews).toBe(1);
     const failing = { ...world.store, put: async () => { throw Object.assign(new Error("nope"), { name: "Down" }); } } as unknown as typeof world.store;
     const logs: Array<Record<string, unknown>> = [];
-    const { indexSecondReviewTrack } = await import("../../packages/broker/src/core/second-review/index.js");
+    const { indexSecondReviewTrack } = await import("../../packages/core/src/core/second-review/index.js");
     expect(await indexSecondReviewTrack(changes, failing, (entry) => logs.push(entry), COMPANY)).toMatchObject({ failed: 1 });
     expect(JSON.stringify(logs)).toContain("Down");
   });

@@ -3,11 +3,11 @@
 // reaches the network, the token goes to api.github.com only, the credential's expiry, what a token that cannot push gets, and how Rovara's own replies are told from a person's.
 import { randomBytes } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { HostRateLimitError, SecretValue, hostRateLimitRetryAt } from "@agentx/contracts";
-import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
-import { GITHUB_CODE_HOST_PROVIDER_METHODS, type GitHubCodeHostProvider } from "../../packages/broker/src/plugins/code-host/github/provider.js";
-import { PERSONAL_CREDENTIAL_LIFETIME_MS, PERSONAL_REPLY_MARKER, boundToCompany, forwardGuarded, foldRequest, githubTokenClient, githubTokenReach, tokenExpirationOf } from "../../packages/broker/src/plugins/code-host/github/token-client.js";
-import { FakeHostModel } from "@agentx/broker/fakes";
+import { HostRateLimitError, SecretValue, hostRateLimitRetryAt } from "@rovara-code/contracts";
+import { githubCodeHost } from "../../packages/core/src/plugins/code-host/github/index.js";
+import { GITHUB_CODE_HOST_PROVIDER_METHODS, type GitHubCodeHostProvider } from "../../packages/core/src/plugins/code-host/github/provider.js";
+import { PERSONAL_CREDENTIAL_LIFETIME_MS, PERSONAL_REPLY_MARKER, boundToCompany, forwardGuarded, foldRequest, githubTokenClient, githubTokenReach, tokenExpirationOf } from "../../packages/core/src/plugins/code-host/github/token-client.js";
+import { FakeHostModel } from "@rovara-code/core/fakes";
 import { codeHostChecks, type CodeHostWorld } from "../support/ports/code-host-conformance.js";
 import { runContract } from "../support/ports/plugin-contract-kit.js";
 import { githubClientChecks, runGitHubClientConformance, RecordingNetwork, TenantBinding, operationsForProbe, type GitHubClientWorld } from "../support/ports/github-client-conformance.js";

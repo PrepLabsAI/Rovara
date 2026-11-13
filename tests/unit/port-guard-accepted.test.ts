@@ -52,7 +52,7 @@ class Lane {
   }
 }
 
-const HANDLER = "packages/broker/src/aws/handler.ts";
+const HANDLER = "packages/core/src/aws/handler.ts";
 const entry = (lane: Lane, path = HANDLER, rule: AcceptedFinding["rule"] = "cloud-aws"): AcceptedFinding => ({ path, rule, blob: lane.blob(path), reason: "owner decision 2026-11-12: already public" });
 const rules = (findings: Finding[]) => findings.map((finding) => `${finding.rule} ${finding.file}`);
 
@@ -79,9 +79,9 @@ describe("accepted findings", () => {
   it("flag a new file under aws/ that no entry names, while the accepted one stays skipped", () => {
     const lane = new Lane();
     lane.write(HANDLER, "export const handler = 1;\n");
-    lane.write("packages/broker/src/aws/other.ts", "export const other = 1;\n");
+    lane.write("packages/core/src/aws/other.ts", "export const other = 1;\n");
     lane.commit();
-    expect(rules(lane.guard([entry(lane)]))).toEqual(["cloud-aws packages/broker/src/aws/other.ts"]);
+    expect(rules(lane.guard([entry(lane)]))).toEqual(["cloud-aws packages/core/src/aws/other.ts"]);
   });
 
   it("do not cover another rule on the same file", () => {
@@ -93,11 +93,11 @@ describe("accepted findings", () => {
 
   it("treat an entry whose file is not at the tip and not touched by the range as inactive: it skips nothing and fails nothing, with a note", () => {
     const lane = new Lane();
-    lane.write("packages/broker/src/aws/other.ts", "export const other = 1;\n");
+    lane.write("packages/core/src/aws/other.ts", "export const other = 1;\n");
     lane.commit();
     const absent: AcceptedFinding = { path: HANDLER, rule: "cloud-aws", blob: "a".repeat(40), reason: "owner decision 2026-11-12: already public" };
     const result = lane.run([absent]);
-    expect(rules(result.findings)).toEqual(["cloud-aws packages/broker/src/aws/other.ts"]);
+    expect(rules(result.findings)).toEqual(["cloud-aws packages/core/src/aws/other.ts"]);
     expect(result.notes).toEqual([expect.stringContaining(`${HANDLER}: accepted cloud-aws entry inactive`)]);
     expect(result.warnings).toEqual([]);
   });
@@ -151,8 +151,8 @@ describe("accepted findings", () => {
 describe("the accepted-findings data", () => {
   const one = (overrides: Record<string, unknown>) => JSON.stringify({ version: 1, accepted: [{ path: HANDLER, rule: "cloud-aws", blob: "a".repeat(40), reason: "a reason that is long", ...overrides }] });
   it.each([
-    ["a wildcard", { path: "packages/broker/src/aws/*.ts" }],
-    ["a directory", { path: "packages/broker/src/aws/" }],
+    ["a wildcard", { path: "packages/core/src/aws/*.ts" }],
+    ["a directory", { path: "packages/core/src/aws/" }],
     ["a parent step", { path: "packages/../aws/x.ts" }],
     ["another rule", { rule: "guard-files" }],
     ["a short blob", { blob: "abc" }],

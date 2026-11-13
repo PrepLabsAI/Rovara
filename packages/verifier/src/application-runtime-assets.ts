@@ -3,7 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import type { E2ECompiledApplicationSuite, E2EApplicationCompiledShard } from "./application-scenarios.js";
 import { E2E_APPLICATION_DECLARATION_PATH, E2E_APPLICATION_GENERATED_CONFIG_PATH, E2E_APPLICATION_SELECTION_PACKET_PATH } from "./application-templates.js";
 

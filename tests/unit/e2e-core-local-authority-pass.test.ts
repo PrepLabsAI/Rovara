@@ -3,25 +3,25 @@
 // Runs on the pinned Node (22.23.2), like every suite built on the application evidence fixture, which signs the toolchain version into the evidence: run it with `vt`, not under another patch version.
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2EApplicationPlanIntentSchema, IMPLICIT_COMPANY_ID, OrgIdSchema, change, deriveE2EApplicationRuntimeAccountRef, e2eApplicationMetadataSourceRefs, orgProjectCatalogKey, projectRevisionKey, type E2EScenario, type StoredDocument, type TransactItem } from "@agentx/contracts";
+import { E2EApplicationPlanIntentSchema, IMPLICIT_COMPANY_ID, OrgIdSchema, change, deriveE2EApplicationRuntimeAccountRef, e2eApplicationMetadataSourceRefs, orgProjectCatalogKey, projectRevisionKey, type E2EScenario, type StoredDocument, type TransactItem } from "@rovara-code/contracts";
 import { decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
-import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission } from "../../packages/broker/src/e2e/application-admission.js";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { e2eAccountLatestKey } from "../../packages/broker/src/e2e/application-account-registry.js";
-import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/core/e2e/runtime-readiness.js";
-import { candidateSourceObjectKey } from "../../packages/broker/src/core/e2e/uploads.js";
-import { createLocalE2EAuthority, localOwnerAuthority, type CurrentSelection, type LocalAuthorityDeps } from "../../packages/broker/src/core/e2e/local-authority.js";
-import type { E2EVerificationDiagnostic } from "../../packages/broker/src/core/e2e/authority.js";
+import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission } from "../../packages/core/src/e2e/application-admission.js";
+import { evaluateApplicationPlanApproval } from "../../packages/core/src/e2e/application-plan-approval.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import { e2eAccountLatestKey } from "../../packages/core/src/e2e/application-account-registry.js";
+import { e2eRegisteredRuntimeKey } from "../../packages/core/src/core/e2e/runtime-readiness.js";
+import { candidateSourceObjectKey } from "../../packages/core/src/core/e2e/uploads.js";
+import { createLocalE2EAuthority, localOwnerAuthority, type CurrentSelection, type LocalAuthorityDeps } from "../../packages/core/src/core/e2e/local-authority.js";
+import type { E2EVerificationDiagnostic } from "../../packages/core/src/core/e2e/authority.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { ordersManifestWith, registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { PROFILE, approvedSetup, binding, csvScenario, snapshotOf, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
 // The approved plan's document and the owner's decision are the plan lane's; here they are handed over as already read, so the test is about what the authority does with them.
 const plan: { intent: unknown } = vi.hoisted(() => ({ intent: undefined }));
-vi.mock("../../packages/broker/src/developer/plan-document-reader.js", () => ({ loadWorkflowDocument: async () => ({ format: "structured", plan: { e2e: plan.intent } }) }));
-vi.mock("../../packages/broker/src/aws/workflow-e2e-current-authority.js", () => ({ resolveWorkflowE2ECanonicalApproval: () => ({ artifactId: "feature-plan", artifactDigest: "1".repeat(64), graphDigest: null, runId: null, workflowRevision: 3, actorId: "owner-1" }) }));
+vi.mock("../../packages/core/src/developer/plan-document-reader.js", () => ({ loadWorkflowDocument: async () => ({ format: "structured", plan: { e2e: plan.intent } }) }));
+vi.mock("../../packages/core/src/aws/workflow-e2e-current-authority.js", () => ({ resolveWorkflowE2ECanonicalApproval: () => ({ artifactId: "feature-plan", artifactDigest: "1".repeat(64), graphDigest: null, runId: null, workflowRevision: 3, actorId: "owner-1" }) }));
 
 afterEach(disposeRealCandidates);
 

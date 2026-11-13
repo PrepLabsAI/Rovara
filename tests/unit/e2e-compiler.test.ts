@@ -3,9 +3,9 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { list } from "e2e/runner";
-import { canonicalJson, createCandidateManifest, e2eExecutionPlanDigest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, E2ERoundSchema, E2ERunBindingSchema, inspectE2EPortableSource, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, e2EPortableApprovalBindingDigest, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, resolveE2EPortableRegistration, type E2EPolicy, type E2EPortableApprovalBinding, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
-import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
-import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
+import { canonicalJson, createCandidateManifest, e2eExecutionPlanDigest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, E2ERoundSchema, E2ERunBindingSchema, inspectE2EPortableSource, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, e2EPortableApprovalBindingDigest, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, resolveE2EPortableRegistration, type E2EPolicy, type E2EPortableApprovalBinding, type E2EScenario, type E2ESourceSnapshot } from "@rovara-code/contracts";
+import { inspectE2ERepository } from "../../packages/core/src/e2e/discovery.js";
+import { selectE2EExecutionPlan } from "../../packages/core/src/e2e/execution-plan.js";
 import { compileE2EScenarios, validateE2ECompiledRuntimeAdmission, type E2EImmutableCompilationContext } from "../../packages/verifier/src/scenarios.js";
 import { e2ePortableOperationDescriptorDigest } from "../../packages/verifier/src/templates.js";
 import { compareE2EPublicList, createE2ESelectionPacket, type E2ESelectionPacket } from "../../packages/verifier/src/selection.js";

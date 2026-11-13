@@ -8,22 +8,22 @@ import {
   WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, portableOperationId, type E2EApplicationPlanIntent,
   selectE2EApplicationExecutionPlan, E2EScenarioSchema, e2eAnonymousRuntimeAccountRef, E2E_APPLICATION_ADMISSION_SCHEMA_V2,
   type E2EScenario, type E2ESourceSnapshot,
-} from "@agentx/contracts";
-import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
+} from "@rovara-code/contracts";
+import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/core/src/e2e/application-feature-plan-intent.js";
+import { evaluateApplicationPlanApproval } from "../../packages/core/src/e2e/application-plan-approval.js";
 import { buildFeatureE2EPlanningContext, describeFeatureE2EExecutableKinds }
-  from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
-import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
-import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { planDocumentInstructions, workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
-import { portableFeatureIntentOf } from "../../packages/broker/src/e2e/portable-feature-intent.js";
-import { createApplicationPlanNegotiationRecorder } from "../../packages/broker/src/aws/dispatcher.js";
-import { decideTaskWorkflow, taskPageStage } from "../../packages/broker/src/aws/developer-tasks.js";
-import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import * as routes from "../../packages/broker/src/aws/developer-routes.js";
+  from "../../packages/core/src/e2e/feature-plan-planning-context.js";
+import { e2eRegisteredRuntimeKey } from "../../packages/core/src/aws/e2e-runtime-readiness.js";
+import { webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
+import { planDocumentInstructions, workflowDispatchItem } from "../../packages/core/src/aws/broker-shared.js";
+import { portableFeatureIntentOf } from "../../packages/core/src/e2e/portable-feature-intent.js";
+import { createApplicationPlanNegotiationRecorder } from "../../packages/core/src/aws/dispatcher.js";
+import { decideTaskWorkflow, taskPageStage } from "../../packages/core/src/aws/developer-tasks.js";
+import { developerTaskRouteDependencies } from "../../packages/core/src/aws/developer-routes.js";
+import * as routes from "../../packages/core/src/aws/developer-routes.js";
 import { decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
-import { E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, isE2EPlanCorrectionBlockReason } from "../../packages/broker/src/developer/task-records.js";
-import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
+import { E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, isE2EPlanCorrectionBlockReason } from "../../packages/core/src/developer/task-records.js";
+import { accountRegistryEntriesFromRows } from "../../packages/core/src/e2e/application-account-registry.js";
 import { ordersManifestWith, registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { createSingleAnswerPlanBroker, MAYA } from "../support/developer-task-broker.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
@@ -1726,7 +1726,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
         it("keeps the commit fenced on the account pointer: an approval that read revision 1 does not commit once revision 2 is registered", async () => {
           const planned = await plannedWithApplicationIntent();
           const dispatched = await atApplicationDispatch(planned);
-          const fence = (await import("../../packages/broker/src/aws/e2e-account-registry.js")).accountRegistryFences;
+          const fence = (await import("../../packages/core/src/aws/e2e-account-registry.js")).accountRegistryFences;
           const entries = accountRegistryEntriesFromRows(TEST_ORG, "payments", planned.harness.db.find((row) => row.pk === testProjectPk("payments")));
           const items = fence({ orgId: TEST_ORG, tableName: "state", projectId: "payments", refs: selectionOf(planned).accountRefs, entries });
           expect(items).toHaveLength(1);

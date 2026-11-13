@@ -20,10 +20,10 @@ import {
   DESIGN_REVIEW_TIERS, filterReviewerCitations, lightCriticWritesParaphrase, mergeDesignFindings, readDesignReview, reviewerMessagesOf,
   type DesignFinding, type DesignReviewTier, type RawDesignFinding, type ReviewerRole,
 } from "../../../packages/contracts/src/index.js";
-import { TIER_HAS_MERGE_MODEL, reviewersForRound } from "../../../packages/broker/src/core/design-review/estimate.js";
-import { ownDesignFindings, withOwnFindings } from "../../../packages/broker/src/core/design-review/own-findings.js";
-import { buildReviewerPacket, type PacketReaders } from "../../../packages/broker/src/core/design-review/packet.js";
-import { designSourcesOf, requirementIdsOf } from "../../../packages/broker/src/core/design-review/round-inputs.js";
+import { TIER_HAS_MERGE_MODEL, reviewersForRound } from "../../../packages/core/src/core/design-review/estimate.js";
+import { ownDesignFindings, withOwnFindings } from "../../../packages/core/src/core/design-review/own-findings.js";
+import { buildReviewerPacket, type PacketReaders } from "../../../packages/core/src/core/design-review/packet.js";
+import { designSourcesOf, requirementIdsOf } from "../../../packages/core/src/core/design-review/round-inputs.js";
 import { DESIGN_REVIEW_EVAL_CASES, type DesignReviewEvalCase, type PlantedDefect } from "./cases.js";
 
 /** The pinned commit every case's repository is read at. */

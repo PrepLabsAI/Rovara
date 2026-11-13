@@ -1,6 +1,6 @@
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { SignatureV4 } from "@smithy/signature-v4";
-import { cleanDisplayName, conversationSubject, slackThreadSubject, type ConversationRef, type SlackThread } from "@agentx/contracts";
+import { cleanDisplayName, conversationSubject, slackThreadSubject, type ConversationRef, type SlackThread } from "@rovara-code/contracts";
 
 type Credentials = ConstructorParameters<typeof SignatureV4>[0]["credentials"];
 

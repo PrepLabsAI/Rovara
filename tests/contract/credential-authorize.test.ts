@@ -4,7 +4,7 @@ import { Server } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { GetSecretValueCommand, PutSecretValueCommand, TagResourceCommand } from "@aws-sdk/client-secrets-manager";
-import { OAUTH_AUTHORIZATION_PROFILES } from "@agentx/contracts";
+import { OAUTH_AUTHORIZATION_PROFILES } from "@rovara-code/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { authorizeCredential, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "../../packages/cli/src/admin/authorize.js";
 import { tokenStoreKey } from "../../packages/cli/src/auth.js";

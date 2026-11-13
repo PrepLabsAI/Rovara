@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
-import { isSafeE2ESourcePath } from "@agentx/contracts";
+import { isSafeE2ESourcePath } from "@rovara-code/contracts";
 
 const SHA1 = /^[a-f0-9]{40}$/;
 const STDERR_TAIL_BYTES = 2048;

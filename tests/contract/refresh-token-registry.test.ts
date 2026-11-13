@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PutSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { CredentialUnavailable } from "@agentx/gateway";
-import { DynamoRefreshLease, DynamoTokenCache, secretsManagerSource } from "../../packages/broker/src/aws/credentials.js";
+import { DynamoRefreshLease, DynamoTokenCache, secretsManagerSource } from "../../packages/core/src/aws/credentials.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { fakeTokenEndpoint, memorySecretStore } from "../support/refresh-token-fakes.js";

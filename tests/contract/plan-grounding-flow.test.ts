@@ -2,19 +2,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { beforeAll, describe, expect, it } from "vitest";
-import { groundingScenarioIds, planQualityFinding, type PlanDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { groundingScenarioIds, planQualityFinding, type PlanDocument, type WorkflowSnapshot } from "@rovara-code/contracts";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { csvScenario, planFixture } from "../support/e2e-application-plan-fixtures.js";
-import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
-import { agentXError } from "@agentx/contracts";
-import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
-import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
-import type { finishPlanGrounding as FinishPlanGrounding, startPlanGroundingRound } from "../../packages/broker/src/aws/broker.js";
+import { issueCapability } from "../../packages/core/src/aws/cancellation.js";
+import { agentXError } from "@rovara-code/contracts";
+import { failOutboxOperation } from "../../packages/core/src/aws/outbox-failure.js";
+import type { DurableOutboxRecord } from "../../packages/core/src/aws/lambda.js";
+import type { finishPlanGrounding as FinishPlanGrounding, startPlanGroundingRound } from "../../packages/core/src/aws/broker.js";
 import { loadSlackBroker } from "../support/slack-broker.js";
-import { groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, requestWorkflowE2EGroundingRound } from "../../packages/broker/src/aws/workflow-e2e-grounding.js";
-import { PLAN_GROUNDING_HOLD_LINE, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
-import { PlanSelfCheckRecordSchema } from "../../packages/broker/src/developer/plan-self-check.js";
+import { groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, requestWorkflowE2EGroundingRound } from "../../packages/core/src/aws/workflow-e2e-grounding.js";
+import { PLAN_GROUNDING_HOLD_LINE, workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
+import { PlanSelfCheckRecordSchema } from "../../packages/core/src/developer/plan-self-check.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
 type Mode = "start" | "unavailable" | "throw";

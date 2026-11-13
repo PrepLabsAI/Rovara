@@ -7,7 +7,7 @@
 // - memory, for tests and for the meta-repo contract stub (stub-meta.ts).
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, agentXError } from "@agentx/contracts";
+import { WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, agentXError } from "@rovara-code/contracts";
 import { runFileOp } from "../sandbox-file-ops.js";
 import {
   BaseObjectsUnverified,

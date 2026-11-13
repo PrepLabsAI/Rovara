@@ -1,7 +1,7 @@
 import { createHmac, hkdfSync, randomUUID } from "node:crypto";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { WorkerInvocation } from "../../packages/contracts/src/index.js";
-import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
+import { RepositoryGrantService } from "../../packages/core/src/repository-access.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 import {
   SLACK_CHANNEL, SLACK_TEAM, call, createBroker, ensureWorkspace, finishOperation,

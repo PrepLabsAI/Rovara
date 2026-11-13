@@ -7,11 +7,11 @@ import {
   WORKFLOW_PATH_QUICK_ACTION, builtInAdapterRecord, createCandidateManifest, createWorkflowSnapshot, generateWebhookSecret, webhookHeaders, WorkflowSnapshotSchema,
   type ChannelAction, type ChannelQueueItem,
 } from "../../packages/contracts/src/index.js";
-import { createChannelIngressHandler } from "../../packages/broker/src/aws/channel-ingress.js";
-import { channelPressTransport, slackPressOfChannelAction } from "../../packages/broker/src/aws/slack-channel-presses.js";
-import { createSlackInteractivityHandler, createSlackPressDispatcher, workflowSlackHandlers, type SlackBlockAction } from "../../packages/broker/src/aws/slack-interactivity.js";
-import type { SlackNoticeChannel } from "../../packages/broker/src/aws/slack-notice-channel.js";
-import { ROUTED_SLACK_PRESSES, channelActionOfPress } from "../../packages/broker/src/aws/slack-press-routing.js";
+import { createChannelIngressHandler } from "../../packages/core/src/aws/channel-ingress.js";
+import { channelPressTransport, slackPressOfChannelAction } from "../../packages/core/src/aws/slack-channel-presses.js";
+import { createSlackInteractivityHandler, createSlackPressDispatcher, workflowSlackHandlers, type SlackBlockAction } from "../../packages/core/src/aws/slack-interactivity.js";
+import type { SlackNoticeChannel } from "../../packages/core/src/aws/slack-notice-channel.js";
+import { ROUTED_SLACK_PRESSES, channelActionOfPress } from "../../packages/core/src/aws/slack-press-routing.js";
 
 const nowSeconds = 1_758_657_600;
 const NOW = nowSeconds * 1_000;

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { AgentSkillFile } from "./agent-step.js";
 
 /** The sentence the model gets for a name that is not one of this operation's skills. */

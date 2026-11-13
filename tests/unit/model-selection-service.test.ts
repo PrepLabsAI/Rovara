@@ -4,14 +4,14 @@ import { describe, expect, it } from "vitest";
 import {
   ModelSelectionStateSchema, canonicalModelName, modelSelectionLines, orgSettingsKey,
   type Approvers, type AuditEvent, type ModelProviderAdapter, type AuditSink, type InvocationModelRoute, type ModelIdentifier, type OrgId, type Principal,
-} from "@agentx/contracts";
-import { createModelPrices, type CatalogPrices } from "../../packages/broker/src/core/cost/price-table.js";
-import { createModelSelection, type ModelSelectionSeams } from "../../packages/broker/src/core/model-selection/service.js";
-import { MODEL_USABILITY_KEY, createUsableModels, withoutUnusable } from "../../packages/broker/src/core/model-selection/usable-models.js";
-import { learnModelNotEnabled, modelsNotEnabled } from "../../packages/broker/src/core/model-selection/learn-not-enabled.js";
-import { readModelSelectionPolicy } from "../../packages/broker/src/core/model-selection/policy-store.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+} from "@rovara-code/contracts";
+import { createModelPrices, type CatalogPrices } from "../../packages/core/src/core/cost/price-table.js";
+import { createModelSelection, type ModelSelectionSeams } from "../../packages/core/src/core/model-selection/service.js";
+import { MODEL_USABILITY_KEY, createUsableModels, withoutUnusable } from "../../packages/core/src/core/model-selection/usable-models.js";
+import { learnModelNotEnabled, modelsNotEnabled } from "../../packages/core/src/core/model-selection/learn-not-enabled.js";
+import { readModelSelectionPolicy } from "../../packages/core/src/core/model-selection/policy-store.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 
 const ORG = "org_00000000000000000000" as OrgId;
 const owner: Principal = localOwnerPrincipal({ companyId: ORG });

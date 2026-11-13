@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { EMPTY_TURN_OBSERVATION } from "../../packages/contracts/src/turns.js";
-import { TurnRecordExport, dynamoTurnRecordSource, type TurnRecordSource } from "../../packages/broker/src/aws/turns.js";
+import { TurnRecordExport, dynamoTurnRecordSource, type TurnRecordSource } from "../../packages/core/src/aws/turns.js";
 
 const now = Date.parse("2026-09-30T12:00:00.000Z");
 const TASK = "33333333-3333-4333-8333-333333333333";

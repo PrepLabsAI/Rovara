@@ -63,7 +63,7 @@ describe("planTestDeploy", () => {
       Extract<DeployStep, { kind: "execute-change-set" }>,
       Extract<DeployStep, { kind: "verify-lambda-code" }>,
     ];
-    expect(build).toMatchObject({ logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker.ts" });
+    expect(build).toMatchObject({ logicalId: "BrokerE1355FD6", entry: "packages/core/src/aws/broker.ts" });
     // Code goes to the access stack's versioned artifact bucket, not the control-plane stack's unversioned one.
     expect(upload).toMatchObject({ bucketFromStack: "access", logicalId: "BrokerE1355FD6", from: build.id });
     expect(changeSet).toMatchObject({
@@ -804,7 +804,7 @@ describe("the control-plane-code unit", () => {
 
   it("copies boot.sh beside the session steps handler, as the release bundle does", () => {
     const sessionsSteps = builds.find((build) => build.logicalId === "SessionsSteps3B98DD2B");
-    expect(sessionsSteps).toMatchObject({ entry: "packages/broker/src/aws/session-steps.ts", extraFiles: [{ from: "packages/worker/ec2/boot.sh", name: "boot.sh" }] });
+    expect(sessionsSteps).toMatchObject({ entry: "packages/core/src/aws/session-steps.ts", extraFiles: [{ from: "packages/worker/ec2/boot.sh", name: "boot.sh" }] });
     expect(builds.filter((build) => build.extraFiles !== undefined)).toHaveLength(1);
   });
 
@@ -828,7 +828,7 @@ describe("the control-plane-code unit", () => {
     // The setup page belongs to the installer stack, which test-deploy never changes.
     entries.delete("packages/cli/src/init/ui/setup-lambda.ts");
     // The automatic renewal's Lambda exists only where agentx:autoRequalify is on and is added by the requalify-infra unit; AR-5 registers its code unit here.
-    entries.delete("packages/broker/src/aws/runtime-requalify-handler.ts");
+    entries.delete("packages/core/src/aws/runtime-requalify-handler.ts");
     expect([...entries].sort()).toEqual(Object.values(CONTROL_PLANE_LAMBDAS).map((lambda) => lambda.entry).sort());
   });
 

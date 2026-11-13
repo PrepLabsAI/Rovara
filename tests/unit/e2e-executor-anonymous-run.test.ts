@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef } from "@agentx/contracts";
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef } from "@rovara-code/contracts";
 import { E2E_EXECUTOR_HOST_MODULE_PATH } from "../../packages/verifier/src/executor/host-registry.js";
 import { runE2EExecutorSerially as runE2EExecutor } from "../support/executor-run-lock.js";
 import { resolveE2EExecutorSuite } from "../../packages/verifier/src/executor/suite.js";

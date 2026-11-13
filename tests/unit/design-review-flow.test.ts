@@ -2,12 +2,12 @@
 // reviewers (their packets and keys are the broker's), the planner's answer to their findings, a second round, and ends at the owner's approval card: nothing here approves anything, the approval gate does that.
 // The worker is simulated by recording results directly; what the broker keeps (packets, slot budgets, key rows) is checked in the store.
 import { describe, expect, it } from "vitest";
-import { DesignReviewBindingSchema } from "@agentx/contracts";
-import { designReviewPartition, readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
-import { readSlotCeiling } from "../../packages/broker/src/core/design-review/slot-keys.js";
+import { DesignReviewBindingSchema } from "@rovara-code/contracts";
+import { designReviewPartition, readSlotPacket } from "../../packages/core/src/core/design-review/packet-store.js";
+import { readSlotCeiling } from "../../packages/core/src/core/design-review/slot-keys.js";
 import { COMPANY } from "../support/task-flow-harness.js";
 import { answerRound, approve, design, finish, mintKeys, nextJob, planned, taskOf, toDesignPhase, toRound, world } from "../support/design-review-flow-world.js";
-import { queryAll } from "@agentx/contracts";
+import { queryAll } from "@rovara-code/contracts";
 
 describe("the design review stage, end to end on the task flow", () => {
   it("runs a design through two rounds of fresh reviewers and the planner's answer, then waits for the owner", async () => {

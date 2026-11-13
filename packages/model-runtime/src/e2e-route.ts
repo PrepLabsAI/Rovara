@@ -14,7 +14,7 @@ import {
   type E2EModelFailure,
   type E2EModelReceipt,
   type E2EModelRouteDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 /**
  * The governed model route for e2e `agent` steps (M1.4 Task 4.1).

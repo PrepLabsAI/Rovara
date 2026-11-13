@@ -3,7 +3,7 @@
 // `path` absent: `company-instructions.md` in the state folder the install runs from (`~/.rovara` by default). A relative path is relative to the folder the process runs in. `rovara up` registers this adapter as the default.
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { COMPANY_INSTRUCTIONS_FILE_NAME, type PluginModule } from "@agentx/contracts";
+import { COMPANY_INSTRUCTIONS_FILE_NAME, type PluginModule } from "@rovara-code/contracts";
 import { FileCompanyInstructions } from "./company-instructions-file.js";
 import { allowOnly, SettingsError } from "./settings.js";
 

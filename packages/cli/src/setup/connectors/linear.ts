@@ -1,7 +1,7 @@
 // agentx connector add linear (FR-036 to FR-039), from docs/connectors/linear.md. The key's own
 // team list is the test read (FR-038), and the engineer picks the team from it. The key never
 // appears in a log, an error or the project file: only a Secrets Manager reference does.
-import { agentXError, type ConnectorConfig } from "@agentx/contracts";
+import { agentXError, type ConnectorConfig } from "@rovara-code/contracts";
 import { registerCredential } from "../../admin/credential.js";
 import { secretFromSource } from "../../init/prompts.js";
 import { addConnectorRevision, connectorRerun, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";

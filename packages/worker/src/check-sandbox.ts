@@ -77,7 +77,7 @@ import { isIP } from "node:net";
 import { realpathSync } from "node:fs";
 import { chmod, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, type ServicesNetwork } from "./run-network.js";
 import { SEALED_DNS_TABLE_MAX } from "./setup-dns-watch.js";
 import type { DockerCli } from "./swebench/containers.js";

@@ -1,7 +1,7 @@
 // Issue #438: what a finished turn in an adapter's conversation did, as typed events: a `pr` event for each pull
 // request it opened or changed, a `check_report` for each worker task's checks and for each publication's checks on
 // the commit it pushed, and the `done` event's outcome. An adapter can act on these without parsing display text.
-import { checksReplyPrefix, type ChannelEvent, type TurnDisposition } from "@agentx/contracts";
+import { checksReplyPrefix, type ChannelEvent, type TurnDisposition } from "@rovara-code/contracts";
 import type { TurnPullRequest } from "@agentx/orchestrator";
 import type { FinishedTurn } from "./processor.js";
 

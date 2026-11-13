@@ -1,0 +1,1926 @@
+// Spec 025 FR-032, FR-034, C7 to C9: the DeveloperTaskNotifier, the only new reader of the Slack
+// secret. The state table's stream (filtered in infra) brings changes, which become notices on the
+// notifier's own queue; the queue brings each notice back, and it is posted once. Logs carry event
+// names, IDs, notice kinds and Slack error codes only: never a token, a post's text or a task's text.
+// Spec 025 E13: it also posts an admin change's Slack Confirm message, and edits it when the change ends.
+import { chatGptFallbackText } from "../chatgpt/fallback-notice.js";
+import { developerIdForSlackUser } from "./admin-actions.js";
+import { createHash } from "node:crypto";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, taskGraphDigest, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
+import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
+import { PLAN_UNREADABLE_CATEGORIES, planCheckSummary, planUnreadableCategory } from "../developer/plan-check-summary.js";
+import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, planRevisionsUsed, type PlanSelfCheckView } from "../developer/plan-self-check.js";
+import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
+import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, STOPPED_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
+import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
+import { AUTOFIX_CARD_HOLD_MS, AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
+import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
+import { isConditional } from "./broker-shared.js";
+import { requiredEnvironment } from "./lambda.js";
+import { parseSlackSecrets } from "./slack-ingress.js";
+import { runTaskCanvasCloseout, type CanvasCloseoutStore, type TaskCanvasCloseoutTask } from "./developer-task-closeout.js";
+import { slackNoticeChannelFromEnvironment } from "./slack-notice-channel.js";
+import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
+import { readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
+import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "../e2e-presentation.js";
+
+type Client = { send(command: unknown): Promise<unknown> };
+const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
+interface QueueRecord { eventSource: "aws:sqs"; messageId: string; receiptHandle: string; body: string; attributes?: { ApproximateReceiveCount?: string } }
+interface PostInput { channel: string; threadTs?: string; text: string; blocks?: unknown[] }
+interface UpdateInput { channel: string; ts: string; text: string; blocks: unknown[] }
+
+export interface NotifierDependencies {
+  documentClient: Client;
+  tableName: string;
+  enqueue(notices: readonly Notice[]): Promise<void>;
+  retryLater(receiptHandle: string, seconds: number): Promise<void>;
+  /** The answer's channel is the direct message's own ID when the post went to a user (E13). */
+  post(input: PostInput): Promise<{ ts: string; channel?: string }>;
+  /** Reads the plan through its recorded object key; callers verify its digest before linking it. */
+  readArtifact?(key: string): Promise<string>;
+  /** Trusted same-origin API base used for authenticated AgentX task detail links. */
+  reviewUrlBase?: string;
+  /** Creates a channel-readable detail page and returns Slack's verified link. */
+  createPlanCanvas?(input: { channel: string; taskId: string; title: string; version: number; markdown: string }, onCreated?: (canvasId: string) => Promise<void>): Promise<{ canvasId: string; permalink: string }>;
+  closeTaskCanvases?(taskId: string, expectedManifestDigest?: string, expectedWorkflowRevision?: number): Promise<{ status: "COMPLETE" | "ARCHIVE_PENDING"; reason?: string }>;
+  /** Spec 025 E13: chat.update, to edit an admin change's message when it ends. */
+  update?(input: UpdateInput): Promise<void>;
+  /** Task 19: chat.postEphemeral, to tell one member privately, in a thread, why their Slack press was refused. */
+  postEphemeral?(input: { channel: string; threadTs: string; user: string; text: string }): Promise<void>;
+  now(): number;
+  log(entry: Record<string, unknown>): void;
+  /** One `SlackDeliveryFailed` count (spec 015 FR-045's alarm sums it). */
+  deliveryFailed(): void;
+  peopleChangesEnabled?: boolean;
+  /** Revalidates the current CHECKS admission and evidence before adding a read-only Slack projection. */
+  workflowE2EBlocks?(task: DeveloperTaskRecord, operations: readonly unknown[]): Promise<unknown[] | undefined>;
+}
+
+/** The start message is still being posted: a reply waits for its thread (C9). */
+class StartPending extends Error {
+  constructor() {
+    super("the start message is not posted yet");
+    this.name = "StartPending";
+  }
+}
+
+class CanvasCloseoutPending extends Error {
+  constructor(readonly reason: string) { super("task Canvas closeout remains pending"); this.name = "CanvasCloseoutPending"; }
+}
+
+/** 30, 60, 120, 240, 480, then 900 seconds, by the delivery attempt that failed. */
+export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
+
+const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal", "comment_nudge", "people_dm", "chatgpt_fallback"]);
+
+class PeopleDeliveryRetry extends Error {
+  constructor(readonly attempt: number) { super("People notification delivery should retry"); this.name = "PeopleDeliveryRetry"; }
+}
+
+async function deliverPeopleNotification(deps: NotifierDependencies, notice: Notice): Promise<string> {
+  if (notice.taskId === undefined || notice.peopleRequestId === undefined) return "invalid";
+  const key = { pk: `DEVTASK#${notice.taskId}`, sk: `PEOPLE_NOTIFY#${notice.peopleRequestId}` };
+  const row = await getItem<Record<string, unknown>>(deps, key);
+  if (row === undefined || row.entityType !== "TASK_PEOPLE_NOTIFICATION" || row.taskId !== notice.taskId || row.requestId !== notice.peopleRequestId
+    || typeof row.slackUserId !== "string" || typeof row.targetDeveloperId !== "string" || typeof row.role !== "string"
+    || typeof row.attempts !== "number" || typeof row.status !== "string") return "invalid";
+  if (row.status === "SENT" || row.status === "UNKNOWN" || row.status === "CANCELLED") return row.status.toLowerCase();
+  if (deps.peopleChangesEnabled !== true) {
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :cancelled", ConditionExpression: "#status = :status", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":cancelled": "CANCELLED", ":status": row.status } })).catch(() => undefined);
+    return "suppressed";
+  }
+  const people = await getItem<{ revision?: number; people?: Array<{ developerId?: string; role?: string }> }>(deps, { pk: `DEVTASK#${notice.taskId}`, sk: "PEOPLE" });
+  if (!Array.isArray(people?.people) || !people.people.some((person) => person.developerId === row.targetDeveloperId && person.role === row.role && row.role !== "denied")) {
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :cancelled", ConditionExpression: "#status = :status", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":cancelled": "CANCELLED", ":status": row.status } })).catch(() => undefined);
+    return "cancelled";
+  }
+  if (row.status === "SENDING") {
+    if (typeof row.claimUntil === "number" && row.claimUntil >= deps.now()) return "claimed";
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :unknown", ConditionExpression: "#status = :sending", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":unknown": "UNKNOWN", ":sending": "SENDING" } })).catch(() => undefined);
+    return "unknown";
+  }
+  const attempt = row.attempts + 1;
+  if (attempt > 3) return "failed";
+  await deps.documentClient.send(new UpdateCommand({
+    TableName: deps.tableName, Key: key,
+    UpdateExpression: "SET #status = :sending, attempts = :attempt, claimUntil = :until",
+    ConditionExpression: "#status = :expected AND attempts = :previous",
+    ExpressionAttributeNames: { "#status": "status" },
+    ExpressionAttributeValues: { ":sending": "SENDING", ":expected": row.status, ":attempt": attempt, ":previous": row.attempts, ":until": deps.now() + 30_000 },
+  }));
+  const base = deps.reviewUrlBase;
+  const taskUrl = base === undefined ? undefined : new URL(`/review/${notice.taskId}/task`, base).href;
+  const text = `You now have the ${row.role} role on an AgentX task.${taskUrl === undefined ? "" : ` ${taskUrl}`}`;
+  try {
+    const posted = await deps.post({ channel: row.slackUserId, text });
+    try {
+      await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key,
+        UpdateExpression: "SET #status = :sent, postedTs = :ts, postedChannel = :channel REMOVE claimUntil",
+        ConditionExpression: "#status = :sending AND attempts = :attempt", ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":sent": "SENT", ":sending": "SENDING", ":attempt": attempt, ":ts": posted.ts, ":channel": posted.channel ?? row.slackUserId } }));
+      return "sent";
+    } catch {
+      await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :unknown REMOVE claimUntil", ConditionExpression: "#status = :sending", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":unknown": "UNKNOWN", ":sending": "SENDING" } })).catch(() => undefined);
+      return "unknown";
+    }
+  } catch (error) {
+    const uncertain = postMayHaveLanded(error);
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :next REMOVE claimUntil", ConditionExpression: "#status = :sending AND attempts = :attempt", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":next": uncertain ? "UNKNOWN" : "FAILED", ":sending": "SENDING", ":attempt": attempt } })).catch(() => undefined);
+    if (uncertain || attempt >= 3) return uncertain ? "unknown" : "failed";
+    throw new PeopleDeliveryRetry(attempt);
+  }
+}
+
+/**
+ * #217: how long after a change's expiry its message is edited. The broker refuses a claim at or
+ * after `expiresAt` by its own clock; the margin keeps a press in the last second, read by a
+ * Lambda whose clock runs a little ahead, from being shown as expired.
+ */
+export const ADMIN_CHANGE_EXPIRY_GRACE_MS = 5_000;
+/** SQS's longest per-message delay. */
+const MAX_DELAY_SECONDS = 900;
+
+/** The most reviewer questions a PR feedback card shows; the rest are on the details page. */
+const FEEDBACK_QUESTIONS_SHOWN = 3;
+/** Each question's visible length on the card, so three fit in a brief message. */
+const FEEDBACK_QUESTION_MAX = 280;
+/** Each check label's visible length in a card's "Updates checks" line (a label is at most 80 characters). */
+const FEEDBACK_CHECK_LABEL_MAX = 100;
+
+/**
+ * One line of the reviewer's words (made inert by cleanLine) at most `limit` characters long once escaped: an escaped
+ * character (`&amp;`, `&lt;`) takes several, so the line is cut shorter until its escaped form fits.
+ */
+function escapedLine(text: string, limit: number): string {
+  let cut = limit;
+  let line = cleanLine(text, cut);
+  while (line.length > limit && cut > 10) {
+    cut = Math.max(10, cut - Math.ceil((line.length - limit) / 5));
+    line = cleanLine(text, cut);
+  }
+  return line;
+}
+
+/**
+ * The card for a complete PR feedback review. When the reviewer left findings to the owner, the card asks their
+ * questions (the reviewer's own words, made inert) and its Request changes button becomes the owner's answer, which
+ * approves the fix it describes. Approve shows only when something is recommended; Dismiss always shows.
+ */
+export function feedbackReviewSlackMessage(input: {
+  taskId: string;
+  revision: number;
+  reviewDigest: string;
+  proposalDigest: string;
+  bundleDigests: string[];
+  totalComments: number;
+  recommendedFindingIds: string[];
+  highestPriority: "MUST_FIX" | "SHOULD_FIX" | "OPTIONAL" | undefined;
+  /** Each finding left to the owner and its question (its proposal's summary, or its rationale), as the reviewer wrote it. */
+  ownerQuestions?: ReadonlyArray<{ findingId: string; question: string }>;
+  /**
+   * The checks each recommended fix changes (labels as the plan and the reviewer wrote them, and every added check's
+   * command): Approve covers them, so the card shows each added command exactly, inert and in code style.
+   */
+  checkChanges?: ReadonlyArray<{ obsolete: readonly string[]; added: ReadonlyArray<{ label: string; command: { cwd: string; executable: string; args: readonly string[] } }> }>;
+  detailUrl: string;
+}): { text: string; blocks: unknown[] } {
+  const url = new URL(input.detailUrl);
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new Error("feedback review link is not a secure AgentX URL");
+  }
+  const priority = input.highestPriority === "MUST_FIX" ? "must fix" : input.highestPriority === "SHOULD_FIX" ? "should fix"
+    : input.highestPriority === "OPTIONAL" ? "optional" : "none recommended";
+  const recommendationSummary = input.recommendedFindingIds.length === 0
+    ? "No fixes are recommended."
+    : `${input.recommendedFindingIds.length} ${input.recommendedFindingIds.length === 1 ? "recommendation" : "recommendations"}.`;
+  const questions = (input.ownerQuestions ?? []).filter(({ question }) => question.trim().length > 0);
+  // The answer is bound to exactly the questions the card shows; the others are answered from the details page.
+  const shownQuestions = questions.slice(0, FEEDBACK_QUESTIONS_SHOWN);
+  const recommended = input.recommendedFindingIds.length;
+  const details = `<${slackText(url.href)}|Open details>.`;
+  const comments = `${input.totalComments} ${input.totalComments === 1 ? "comment" : "comments"}`;
+  // Labels and commands are the plan's and the reviewer's words: each is made inert. A corrected check's command is at
+  // most 300 plain characters with no backtick, so it is shown in full, its spacing kept, in exact code style (a backtick
+  // is still replaced, so none can close it).
+  const code = (text: string) => `\`${slackText(redactText(text)).replaceAll("`", "'")}\``;
+  const label = (text: string) => `\`${escapedLine(text.replaceAll("`", "'"), FEEDBACK_CHECK_LABEL_MAX)}\``;
+  const checkLines = recommended === 0 || input.checkChanges === undefined ? [] : describeWorkflowCheckChanges(input.checkChanges.map((finding) => ({
+    obsolete: finding.obsolete.map(label),
+    added: finding.added.map((check) => ({ label: label(check.label),
+      command: code(workflowCheckCommandText(check.command, Number.POSITIVE_INFINITY)), cwd: code(check.command.cwd) })),
+  })));
+  // The text before the check lines and after them: each check line is its own section, so no split lands inside one.
+  let before: string;
+  let after = "";
+  if (questions.length === 0) {
+    before = checkLines.length === 0
+      ? `PR feedback is ready: ${comments}; ${recommendationSummary} Highest priority: ${priority}. ${details}`
+      : `PR feedback is ready: ${comments}; ${recommendationSummary} Highest priority: ${priority}.`;
+    if (checkLines.length > 0) after = details;
+  } else {
+    const hidden = questions.length - shownQuestions.length;
+    const more = hidden === 0 ? [] : [`(${hidden} more ${hidden === 1 ? "question is" : "questions are"} on the details page; your answer here covers only the ones shown.)`];
+    const several = shownQuestions.length > 1;
+    const scope = recommended === 0 ? ""
+      : ` Your answer covers only the ${several ? "questions" : "question"}. Approve ${recommended} recommended makes only the recommended ${recommended === 1 ? "fix" : "fixes"} and leaves the ${several ? "questions" : "question"} open.`;
+    before = `PR feedback is ready: ${comments}${recommended === 0 ? "" : `; ${recommendationSummary} Highest priority: ${priority}`}.`;
+    after = [
+      "The reviewer needs your answer before changing any code:",
+      ...shownQuestions.map(({ question }) => `> ${escapedLine(question, FEEDBACK_QUESTION_MAX)}`), ...more,
+      `Answer with instructions and I'll make that change.${scope} ${details}`,
+    ].join("\n");
+  }
+  const text = [before, ...checkLines, after].filter((part) => part.length > 0).join("\n");
+  const bundleSetDigest = createHash("sha256").update(JSON.stringify(input.bundleDigests), "utf8").digest("hex");
+  const card = { taskId: input.taskId, expectedRevision: input.revision, reviewDigest: input.reviewDigest, proposalDigest: input.proposalDigest, bundleSetDigest };
+  const binding = JSON.stringify({ ...card, selection: "RECOMMENDED" });
+  const elements: Array<Record<string, unknown>> = [
+    ...(recommended > 0 ? [{ type: "button", action_id: "agentx_feedback_review_recommended", style: "primary",
+      text: { type: "plain_text", text: `Approve ${recommended} recommended` }, value: binding }] : []),
+    questions.length === 0
+      ? { type: "button", action_id: "agentx_feedback_review_changes", text: { type: "plain_text", text: "Request changes" }, value: binding }
+      : { type: "button", action_id: "agentx_feedback_review_changes", ...(recommended === 0 ? { style: "primary" } : {}),
+        text: { type: "plain_text", text: "Answer with instructions" },
+        value: JSON.stringify({ ...card, selection: "ANSWER", findingIds: shownQuestions.map(({ findingId }) => findingId) }) },
+    { type: "button", action_id: "agentx_feedback_review_dismiss", text: { type: "plain_text", text: "Dismiss" }, value: binding },
+  ];
+  // Escaping can make the reviewer's words several times longer than they look, so long text is split across sections;
+  // each check line is a section of its own (a line is at most a few hundred characters), never split.
+  // A check line is verbatim, so Slack never links a URL or turns @channel or @here in it into a mention; the text around
+  // it is not, because it carries the details link.
+  const plain = (parts: string[]) => parts.map((section) => ({ text: section, verbatim: false }));
+  const sections = checkLines.length === 0 ? plain(slackSectionTexts(text))
+    : [...plain(slackSectionTexts(before)), ...checkLines.map((line) => ({ text: line, verbatim: true })), ...(after.length === 0 ? [] : plain(slackSectionTexts(after)))];
+  return {
+    text,
+    blocks: [
+      ...sections.map((section) => ({ type: "section", text: { type: "mrkdwn", text: section.text, ...(section.verbatim ? { verbatim: true } : {}) } })),
+      { type: "actions", elements },
+    ],
+  };
+}
+
+/** #217: the queue delay for a notice the notifier scheduled: until its `notBefore`, within SQS's 15 minutes. */
+export function noticeDelaySeconds(notice: Notice, now: number): number {
+  if (notice.notBefore === undefined) return 0;
+  const seconds = Math.ceil((Date.parse(notice.notBefore) - now) / 1_000);
+  return Number.isNaN(seconds) ? 0 : Math.min(MAX_DELAY_SECONDS, Math.max(0, seconds));
+}
+
+/** #217: the expiry notice came early (a short delay or a fast clock): it is retried. */
+class ExpiryPending extends Error {
+  constructor() {
+    super("the change has not expired yet");
+    this.name = "ExpiryPending";
+  }
+}
+/** The statuses an ended operation can have; only these reach the reply text, which does not escape them. */
+const ENDED_STATUSES = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
+
+function parseNotice(body: string): Notice | undefined {
+  try {
+    const value = JSON.parse(body) as Partial<Notice>;
+    return typeof value.id === "string" && typeof value.at === "string" && !Number.isNaN(Date.parse(value.at)) && typeof value.kind === "string" && NOTICE_KINDS.has(value.kind)
+      && (value.kind !== "canvas_closeout" || (value.manifestDigest === undefined || /^[a-f0-9]{64}$/.test(value.manifestDigest))
+        && (value.expectedWorkflowRevision === undefined || Number.isSafeInteger(value.expectedWorkflowRevision) && value.expectedWorkflowRevision > 0))
+      && (value.workflowRevision === undefined || Number.isSafeInteger(value.workflowRevision) && value.workflowRevision > 0)
+      ? value as Notice
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function getItem<T>(deps: NotifierDependencies, key: { pk: string; sk: string }): Promise<T | undefined> {
+  return ((await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }))) as { Item?: T }).Item;
+}
+
+/**
+ * 25c note 2 (owner answer, 2026-09-30): every NOTICE item carries the State table's TTL attribute,
+ * 30 days on, far past the hour a notice is delivered in. Only named environments run the notifier,
+ * and their State table expires items on this attribute.
+ */
+const noticeExpiry = (deps: NotifierDependencies) => ({ [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(new Date(deps.now()).toISOString()) });
+
+/** A delivered marker replaces a start's posted-but-unrecorded marker, never another delivered one. */
+const MARKER_CONDITION = "attribute_not_exists(pk) OR attribute_not_exists(deliveredAt)";
+
+async function putMarker(deps: NotifierDependencies, marker: { pk: string; sk: string }, details: Partial<NoticeMarker> = {}): Promise<void> {
+  try {
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", ...details, deliveredAt: new Date(deps.now()).toISOString(), ...noticeExpiry(deps) }, ConditionExpression: MARKER_CONDITION }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+  }
+}
+
+const noticeMarker = (taskId: string, noticeId: string) => ({ pk: `DEVTASK#${taskId}`, sk: `NOTICE#${noticeId}` });
+
+/** A workflow notice's revision; notices queued before it was carried name it only at the end of their ID. */
+function noticeWorkflowRevision(notice: Notice): number | undefined {
+  const revision = notice.workflowRevision ?? Number(notice.id.split(":").at(-1));
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : undefined;
+}
+
+/** Slack's answers that pass: the same edit can work on a later try. Any other Slack error would fail again. */
+const PASSING_SLACK_ERRORS = new Set(["ratelimited", "internal_error", "fatal_error", "service_unavailable", "request_timeout", "http_429"]);
+const passingSlackError = (error: unknown) => !(error instanceof SlackPostError) || postMayHaveLanded(error) || PASSING_SLACK_ERRORS.has(error.slackError);
+
+/** The short line an answered approval card shows in place of its buttons. */
+function decisionStatusLine(decision: { decision: string; actorRole: string; answerOverrides?: unknown[] | undefined; commentsIncluded?: number | undefined }, slackUserId: string | undefined): string {
+  const by = decision.actorRole === "TASK_OWNER" && slackUserId !== undefined ? ` by <@${slackUserId}>` : "";
+  const said = decision.decision === "APPROVE" ? `Approved${by}` : decision.decision === "REQUEST_CHANGES" ? `Changes requested${by}` : `Closed${by}`;
+  // FR-038: what a decision changed and sent, when it did; with nothing extra, today's line.
+  const changed = decision.answerOverrides?.length ?? 0;
+  const included = decision.commentsIncluded ?? 0;
+  const extras = [
+    ...(changed > 0 ? [`${changed} ${changed === 1 ? "answer" : "answers"} changed`] : []),
+    ...(included > 0 ? [`${included} ${included === 1 ? "comment" : "comments"} included`] : []),
+  ];
+  return extras.length === 0 ? `${said}.` : [said, ...extras].join(" · ");
+}
+
+/**
+ * Edits the original approval card after the decision is durably recorded: replacing its blocks removes the stale
+ * buttons, and a short status line says what was decided. Gap 10g: best effort. A Slack error that would fail again
+ * (the card was deleted, say) is logged and the next step is still posted; only a passing problem retries the notice.
+ */
+async function updateWorkflowApprovalCard(deps: NotifierDependencies, task: DeveloperTaskRecord, notice: Notice): Promise<void> {
+  if (notice.kind !== "workflow" || deps.update === undefined || task.workflow === undefined) return;
+  const noticeRevision = noticeWorkflowRevision(notice);
+  if (noticeRevision === undefined) return;
+  // The decision update can be followed by a separate task-state write before this notice is
+  // delivered. Match the decision that led to this revision instead of requiring an exact
+  // equality with the current task revision encoded in the notice ID.
+  const decision = (task.workflow.decisions ?? []).filter(entry => entry.workflowRevision + 1 <= noticeRevision).at(-1);
+  if (decision === undefined || decision.artifactDigest === undefined) return;
+  const decisionRevision = decision.workflowRevision + 1;
+  const response = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName,
+    KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+    ExpressionAttributeValues: { ":pk": `DEVTASK#${task.taskId}`, ":prefix": "NOTICE#" },
+    ConsistentRead: true,
+  })) as { Items?: Array<NoticeMarker & { pk: string; sk: string }> };
+  const marker = response.Items?.find(item => item.postedArtifactDigest === decision.artifactDigest && item.postedWorkflowRevision === decision.workflowRevision
+    && typeof item.postedTs === "string" && typeof item.postedChannelId === "string" && typeof item.postedText === "string" && typeof item.deliveredAt === "string");
+  if (marker === undefined || typeof marker.postedTs !== "string" || typeof marker.postedChannelId !== "string"
+    || typeof marker.postedText !== "string" || typeof marker.deliveredAt !== "string") {
+    // Older approval cards were not recorded with message metadata. Keep the workflow notice
+    // deliverable and explain the saved decision in its thread reply instead of retrying forever.
+    deps.log({ event: "developer_notifier.workflow_approval_card_unavailable", taskId: task.taskId, workflowRevision: decision.workflowRevision });
+    return;
+  }
+  if ((marker.workflowDecisionRevision ?? 0) >= decisionRevision) return;
+  // The posted text is kept byte-for-byte, so the card never grows past what Slack took; the status line is its own
+  // context block, and the next workflow notice reports the new step separately.
+  const text = marker.postedText;
+  try {
+    await deps.update({ channel: marker.postedChannelId, ts: marker.postedTs, text, blocks: [
+      ...slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
+      { type: "context", elements: [{ type: "mrkdwn", text: decisionStatusLine(decision, task.slackUserId) }] },
+    ] });
+  } catch (error) {
+    if (passingSlackError(error)) throw error;
+    // Named by the Slack error code only. The card is not tried again: the same edit would fail the same way.
+    deps.log({ event: "developer_notifier.workflow_card_update_failed", taskId: task.taskId, workflowRevision: decision.workflowRevision,
+      error: error instanceof SlackPostError ? error.slackError : errorName(error) });
+  }
+  await deps.documentClient.send(new UpdateCommand({
+    TableName: deps.tableName, Key: { pk: marker.pk, sk: marker.sk },
+    UpdateExpression: "SET workflowDecisionRevision = :revision",
+    ConditionExpression: "deliveredAt = :deliveredAt AND (attribute_not_exists(workflowDecisionRevision) OR workflowDecisionRevision < :revision)",
+    ExpressionAttributeValues: { ":revision": decisionRevision, ":deliveredAt": marker.deliveredAt },
+  }));
+}
+
+const hasButtons = (blocks: unknown[] | undefined): boolean => (blocks ?? []).some((block) => (block as { type?: unknown } | null)?.type === "actions");
+
+/** Task 19: the line a card whose step is over shows in place of its buttons, by where the task is now. */
+function movedOnStatusLine(workflow: WorkflowSnapshot, closed: boolean): string {
+  if (workflow.stage === "MERGED") return "Done. The pull request is merged.";
+  if (closed || workflow.stage === "CLOSED") return "This task is closed.";
+  return "Done. This step moved on.";
+}
+
+/**
+ * Task 19: every card with buttons from a step the task has since left (its revision moved on, by any transition: a
+ * retry, a send-back, a close, a decision made elsewhere) is edited to drop its buttons and say so in one short line.
+ * The text is kept byte for byte, so the card never grows. An approval card whose decision was recorded is the
+ * decision edit's (updateWorkflowApprovalCard). Best effort, as that edit is: a Slack error that would fail again is
+ * logged and the card given up on; only a passing one retries the notice. A press that was refused (busy, out of
+ * date) moves nothing, so its card keeps its buttons. Close task records closedAt without moving the workflow's
+ * revision, so a closed task's cards all go, its current step's card included.
+ */
+async function retireButtonCards(deps: NotifierDependencies, task: DeveloperTaskRecord): Promise<void> {
+  const workflow = task.workflow;
+  if (workflow === undefined || deps.update === undefined) return;
+  const closed = task.closedAt !== undefined;
+  const markers: Array<NoticeMarker & { pk: string; sk: string }> = [];
+  let startKey: Record<string, unknown> | undefined;
+  do {
+    const response = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": `DEVTASK#${task.taskId}`, ":prefix": "NOTICE#" },
+      ConsistentRead: true,
+      ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
+    })) as { Items?: Array<NoticeMarker & { pk: string; sk: string }>; LastEvaluatedKey?: Record<string, unknown> };
+    markers.push(...(response.Items ?? []));
+    startKey = response.LastEvaluatedKey;
+  } while (startKey !== undefined);
+  for (const marker of markers) {
+    if (marker.buttonCard !== true || marker.retiredAt !== undefined || typeof marker.deliveredAt !== "string" || typeof marker.postedTs !== "string"
+      || typeof marker.postedChannelId !== "string" || typeof marker.postedText !== "string" || typeof marker.postedWorkflowRevision !== "number"
+      || (!closed && marker.postedWorkflowRevision >= workflow.revision)) continue;
+    // The decision's own edit says what was decided.
+    // A failed PR feedback review's Retry review stays while that report is still pending, whatever else moved the step on.
+    const pendingReview = workflow.feedbackReview;
+    if (!closed && marker.postedFeedbackReviewDigest !== undefined && pendingReview?.status === "PENDING"
+      && pendingReview.reviewRef.sha256 === marker.postedFeedbackReviewDigest) continue;
+    if (marker.workflowDecisionRevision !== undefined || (marker.postedArtifactDigest !== undefined
+      && (workflow.decisions ?? []).some((decision) => decision.workflowRevision === marker.postedWorkflowRevision && decision.artifactDigest === marker.postedArtifactDigest))) continue;
+    try {
+      await deps.update({ channel: marker.postedChannelId, ts: marker.postedTs, text: marker.postedText,
+        blocks: answeredWorkflowCard(marker.postedText, movedOnStatusLine(workflow, closed)) });
+    } catch (error) {
+      if (passingSlackError(error)) throw error;
+      deps.log({ event: "developer_notifier.button_card_update_failed", taskId: task.taskId, workflowRevision: marker.postedWorkflowRevision,
+        error: error instanceof SlackPostError ? error.slackError : errorName(error) });
+    }
+    try {
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key: { pk: marker.pk, sk: marker.sk },
+        UpdateExpression: "SET retiredAt = :now",
+        ConditionExpression: "deliveredAt = :deliveredAt AND attribute_not_exists(retiredAt)",
+        ExpressionAttributeValues: { ":now": new Date(deps.now()).toISOString(), ":deliveredAt": marker.deliveredAt },
+      }));
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+    }
+  }
+}
+
+async function noticeTask(deps: NotifierDependencies, notice: Notice): Promise<DeveloperTaskRecord | undefined> {
+  let taskId = notice.taskId;
+  if (taskId === undefined && notice.workspaceId !== undefined) taskId = (await getItem<DeveloperTaskPointerRecord>(deps, taskPointerKey(notice.workspaceId)))?.taskId;
+  return taskId === undefined ? undefined : getItem<DeveloperTaskRecord>(deps, taskKey(taskId));
+}
+
+async function operationsOf(deps: NotifierDependencies, workspaceId: string): Promise<Array<Record<string, unknown>>> {
+  const response = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+    ExpressionAttributeValues: { ":pk": `WORKSPACE#${workspaceId}`, ":prefix": "OPERATION#" }, ConsistentRead: true,
+  })) as { Items?: Array<Record<string, unknown>> };
+  return (response.Items ?? []).filter((item) => item.entityType === "OPERATION");
+}
+
+/** The status the start message shows: R4's rule, on the task's current records (US3 scenario 9). */
+async function currentStatus(deps: NotifierDependencies, task: DeveloperTaskRecord): Promise<string> {
+  const [workspace, pointer, operations] = await Promise.all([
+    getItem<{ status: string }>(deps, { pk: `WORKSPACE#${task.workspaceId}`, sk: "META" }),
+    getItem<DeveloperTaskPointerRecord>(deps, taskPointerKey(task.workspaceId)),
+    operationsOf(deps, task.workspaceId),
+  ]);
+  return deriveTaskStatus({ closedAt: task.closedAt, workspaceStatus: workspace?.status ?? "PREPARING", pointer, operations: operations as unknown as OperationFacts[] }).status;
+}
+
+/**
+ * C1, C2: the thread on the task and its record, in ONE transaction, so the close and the share
+ * routes (which condition on the record existing) never find a thread without its record. Retried
+ * on a share change or a close meanwhile; a task closed first gets a closed record at once (C24).
+ */
+async function recordThread(deps: NotifierDependencies, taskId: string, threadTs: string, marker: { pk: string; sk: string }): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const task = await getItem<DeveloperTaskRecord>(deps, taskKey(taskId));
+    if (task?.share === undefined) return;
+    if (task.share.threadTs !== undefined) {
+      // Another delivery of this notice, running at the same time, posted too and recorded its
+      // thread first. The first thread stays the thread; this post stays in the channel unrecorded.
+      deps.log({ event: "developer_notifier.start_posted_twice", taskId });
+      await putMarker(deps, marker);
+      return;
+    }
+    const share: TaskShare = { ...task.share, threadTs };
+    const version = task.shareVersion ?? 0;
+    const now = new Date(deps.now()).toISOString();
+    try {
+      await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Update: {
+          TableName: deps.tableName, Key: taskKey(taskId),
+          UpdateExpression: "SET #share = :share, shareVersion = :next, updatedAt = :now",
+          // A close does not move shareVersion, so the close state read here is a condition too.
+          ConditionExpression: task.closedAt === undefined ? "shareVersion = :current AND attribute_not_exists(closedAt)" : "shareVersion = :current",
+          ExpressionAttributeNames: { "#share": "share" },
+          ExpressionAttributeValues: { ":share": share, ":next": version + 1, ":current": version, ":now": now },
+        } },
+        { Put: {
+          TableName: deps.tableName,
+          Item: {
+            ...sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs }), entityType: "SHARED_TASK",
+            taskId, workspaceId: task.workspaceId, ownerKey: task.ownerKey, developerId: task.developerId, developerName: task.developerName,
+            project: task.project, mode: share.mode, sharedAt: share.sharedAt,
+            // C24: a task closed before its start message posted gets a closed thread at once.
+            ...(task.closedAt === undefined ? {} : { closedAt: task.closedAt }),
+          },
+          ConditionExpression: "attribute_not_exists(pk)",
+        } },
+        { Put: { TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: now, ...noticeExpiry(deps) }, ConditionExpression: MARKER_CONDITION } },
+      ] }));
+      return;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+    }
+  }
+  deps.log({ event: "developer_notifier.thread_record_failed", taskId });
+  throw new Error("the shared thread could not be recorded");
+}
+
+/** C9: the start message gave up; the task view then says so (`postFailed`). */
+async function markPostFailed(deps: NotifierDependencies, taskId: string): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const task = await getItem<DeveloperTaskRecord>(deps, taskKey(taskId));
+    if (task?.share === undefined || task.share.threadTs !== undefined) return;
+    const version = task.shareVersion ?? 0;
+    try {
+      await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: {
+        TableName: deps.tableName, Key: taskKey(taskId),
+        UpdateExpression: "SET #share = :share, shareVersion = :next", ConditionExpression: "shareVersion = :current",
+        ExpressionAttributeNames: { "#share": "share" },
+        ExpressionAttributeValues: { ":share": { ...task.share, postFailedAt: new Date(deps.now()).toISOString() }, ":next": version + 1, ":current": version },
+      } }] }));
+      return;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+    }
+  }
+  deps.log({ event: "developer_notifier.mark_conflict", taskId });
+}
+
+async function mutateCanvasLineage(
+  deps: NotifierDependencies,
+  taskId: string,
+  workflowRevision: number,
+  key: string,
+  mutate: (current: WorkflowCanvasLineage | undefined, artifact: WorkflowArtifact, task: DeveloperTaskRecord) => WorkflowCanvasLineage,
+): Promise<WorkflowCanvasLineage | undefined> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const task = await getItem<DeveloperTaskRecord>(deps, taskKey(taskId));
+    const workflow = task?.workflow;
+    if (task === undefined || workflow === undefined || workflow.revision !== workflowRevision || task.closedAt !== undefined) return undefined;
+    const artifact = workflow.artifacts.find((entry) => key.endsWith(`:${entry.id}`));
+    if (artifact === undefined) return undefined;
+    const records = workflow.canvasLineage ?? [];
+    const existing = records.find((entry) => entry.key === key);
+    const updated = mutate(existing, artifact, task);
+    if (updated.key !== key || updated.artifactId !== artifact.id || updated.artifactRef !== artifact.objectKey
+      || updated.artifactDigest !== artifact.sha256) return undefined;
+    // The stored record is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
+    if (existing !== undefined && sameJsonContent(existing, updated)) return existing;
+    const version = task.canvasLineageVersion ?? 0;
+    const next = [...records.filter((entry) => entry.key !== key), updated];
+    const nextWorkflow = { ...workflow, canvasLineage: next, canvasLineageVersion: version + 1, updatedAt: new Date(deps.now()).toISOString() };
+    try {
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key: taskKey(taskId),
+        UpdateExpression: "SET workflow = :workflow, canvasLineageVersion = :next",
+        ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasLineageVersion)" : "canvasLineageVersion = :version"} AND attribute_not_exists(closedAt)`,
+        ExpressionAttributeValues: { ":workflow": nextWorkflow, ":next": version + 1, ":revision": workflowRevision,
+          ...(version === 0 ? {} : { ":version": version }) },
+      }));
+      return updated;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+    }
+  }
+  return undefined;
+}
+
+/** What one notice posts: its text, its blocks, and what makes it the same post as another notice's. */
+interface Reply {
+  text: string;
+  blocks?: unknown[];
+  /**
+   * Two notices that would say the same thing (a refused publication's block and the worker's own
+   * failure of that publication, or a step that left the pull requests as they were) share this key, and post once.
+   */
+  sameAs?: string;
+  /** The approval card's document, recorded with the post so the card can be edited after the decision. */
+  approval?: WorkflowArtifact;
+}
+
+/** The trusted AgentX task page, when the notifier knows its base and it is a plain https origin. */
+function taskPageUrl(deps: NotifierDependencies, taskId: string): string | undefined {
+  return taskPageUrlFromBase(deps.reviewUrlBase, taskId);
+}
+
+function taskPageUrlFromBase(reviewUrlBase: string | undefined, taskId: string): string | undefined {
+  if (reviewUrlBase === undefined) return undefined;
+  try {
+    const base = new URL(reviewUrlBase);
+    if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) return undefined;
+    return new URL(`/review/${encodeURIComponent(taskId)}/task`, base).href;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Slack's answers that mean this workspace cannot create a Canvas at all: the task page is linked instead. */
+const CANVAS_UNAVAILABLE = new Set([
+  "missing_scope", "not_allowed_token_type", "feature_not_enabled", "method_not_supported_for_channel_type",
+  "canvas_disabled_user_team", "canvas_disabled_file_team", "canvas_globally_disabled",
+  "free_teams_cannot_create_standalone_canvases", "team_tier_cannot_create_channel_canvases",
+]);
+
+/** The most claims a plan may have to be a tiny one, whose card lists every claim. */
+const TINY_PLAN_CLAIMS = 3;
+
+/** What a structured document's card shows: the top claims (all of them, children indented, for a tiny plan) and the counts. */
+function structuredCardClaims(plan: PlanDocument, selfCheck: PlanSelfCheckView): NonNullable<WorkflowMessageContext["structured"]> {
+  const claimCount = planClaimCount(plan);
+  const tiny = claimCount <= TINY_PLAN_CLAIMS && plan.decisions.length === 0;
+  const everyClaim = (claims: PlanClaim[], depth: number): string[] => {
+    const lines = planSummaryLines({ ...plan, claims }, claims.length);
+    return claims.flatMap((claim, index) => [`${"  ".repeat(depth)}${lines[index]!}`, ...everyClaim(claim.children ?? [], depth + 1)]);
+  };
+  // PLANVIEW: the answers an Approve here uses, the checks the plan adds and what AgentX's plan check stored of it, in plain words.
+  const summary = planCheckSummary(plan, { selfCheck });
+  return { claims: tiny ? everyClaim(plan.claims, 0) : planSummaryLines(plan), claimCount, decisionCount: plan.decisions.length, tiny,
+    decisions: summary.decisions, checkLines: summary.lines, selfCheckLines: summary.selfCheckLines };
+}
+
+/**
+ * The approval card's link and summary: the document is read through its recorded key and its digest checked; then a
+ * Canvas holds the full text (recorded before and after it is created, so a retry never makes a second one). When no
+ * Canvas can be linked, the task page is. A document whose digest does not match is neither summarised nor linked
+ * (it returns nothing), and the card then links the task page itself, so the owner can still reach the plan.
+ */
+async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot): Promise<{ url?: string; summary?: string[]; structured?: NonNullable<WorkflowMessageContext["structured"]>; workBreakdownDigest?: string }> {
+  const unavailable = (reason: string) => deps.log({ event: "developer_notifier.document_link_unavailable", taskId: task.taskId, workflowRevision: workflow.revision, reason });
+  const plan = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
+  if (plan === undefined || deps.readArtifact === undefined) {
+    unavailable(plan === undefined ? "document_missing" : "reader_unconfigured");
+    return {};
+  }
+  const read = deps.readArtifact.bind(deps);
+  const loaded = await loadWorkflowDocument((key) => read(key), plan, {});
+  if (loaded === undefined) {
+    unavailable("integrity_check_failed");
+    return {};
+  }
+  const fallback = taskPageUrl(deps, task.taskId);
+  // A structured plan is read on the task page, never in a Canvas: the card carries its top claims and a link that opens
+  // the page at this document and version.
+  if (loaded.format === "structured") {
+    if (fallback === undefined) unavailable("task_page_unconfigured");
+    // What the plan self-check stored beside this document; a document it cannot be read for is "not checked", never "no problems". Only a coding plan was ever checked.
+    const selfCheck = plan.type === "plan" ? await loadPlanSelfCheck(async (key) => read(key), plan) : SELF_CHECK_NOT_APPLICABLE;
+    return { structured: structuredCardClaims(loaded.plan, selfCheck), ...(loaded.plan.workBreakdown === undefined ? {} : { workBreakdownDigest: taskGraphDigest(loaded.plan.workBreakdown) }),
+      ...(fallback === undefined ? {} : { url: planReviewLink(fallback, workflow, plan.version) }) };
+  }
+  const markdown = loaded.markdown;
+  const summary = documentSummaryLines(markdown);
+  const linkOr = (reason: string, url: string | undefined = fallback) => {
+    if (url === fallback) unavailable(reason);
+    return { summary, ...(url === undefined ? {} : { url }) };
+  };
+  if (deps.createPlanCanvas === undefined) return linkOr("canvas_unconfigured");
+  const canvasKey = `${workflow.stage}:${workflow.revision}:${plan.id}`;
+  const prior = workflow.canvasLineage?.find((entry) => entry.key === canvasKey);
+  // Whether Slack created this Canvas is unknown: an administrator reconciles its exact ID; another would be a duplicate.
+  if (prior?.state === "CREATE_OUTCOME_UNKNOWN") return linkOr("canvas_outcome_unknown");
+  if (prior?.state === "CREATED") return prior.permalink !== undefined ? linkOr("", prior.permalink) : linkOr("canvas_link_unconfirmed");
+  const prepared = await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+    key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+    artifactRef: artifact.objectKey, artifactDigest: artifact.sha256,
+    state: "PREPARED", createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+  }));
+  if (prepared === undefined) throw new Error("Canvas creation intent could not be recorded");
+  if (prepared.state === "CREATE_OUTCOME_UNKNOWN") return linkOr("canvas_outcome_unknown");
+  const attempting = await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+    key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+    artifactRef: artifact.objectKey, artifactDigest: artifact.sha256,
+    state: "CREATE_OUTCOME_UNKNOWN", createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+  }));
+  if (attempting === undefined || attempting.state !== "CREATE_OUTCOME_UNKNOWN") throw new Error("Canvas create attempt could not be fenced");
+  let canvas: { canvasId: string; permalink: string };
+  try {
+    canvas = await deps.createPlanCanvas({ channel: task.share.channelId, taskId: task.taskId, title: task.title, version: plan.version, markdown }, async (canvasId) => {
+      const recorded = await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+        key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+        artifactRef: artifact.objectKey, artifactDigest: artifact.sha256, state: "CREATED", canvasId,
+        createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+      }));
+      if (recorded?.canvasId !== canvasId || recorded.state !== "CREATED") throw new Error("created Canvas ID could not be persisted");
+    });
+  } catch (error) {
+    const latest = await getItem<DeveloperTaskRecord>(deps, taskKey(task.taskId));
+    const created = latest?.workflow?.canvasLineage?.find((entry) => entry.key === canvasKey);
+    if (created?.state !== "CREATED") {
+      const mayHaveLanded = postMayHaveLanded(error);
+      await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+        key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+        artifactRef: artifact.objectKey, artifactDigest: artifact.sha256,
+        state: mayHaveLanded ? "CREATE_OUTCOME_UNKNOWN" : "CREATE_FAILED", createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+        ...(!mayHaveLanded && error instanceof SlackPostError ? { errorCategory: error.slackError } : {}),
+      }));
+    }
+    // A long document is never pasted into the thread: the card stays brief and links the task page.
+    if (error instanceof SlackPostError && CANVAS_UNAVAILABLE.has(error.slackError)) return linkOr("canvas_unavailable");
+    throw error;
+  }
+  const linked = await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+    key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+    artifactRef: artifact.objectKey, artifactDigest: artifact.sha256, state: "CREATED", canvasId: canvas.canvasId,
+    permalink: canvas.permalink, createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+  }));
+  if (linked?.state !== "CREATED" || linked.permalink === undefined) throw new Error("Canvas permalink could not be persisted");
+  return { summary, url: canvas.permalink };
+}
+
+/** How many thread replies are saved and not yet given to a step: the next step includes them. */
+async function newThreadReplies(deps: NotifierDependencies, task: DeveloperTaskRecord): Promise<number> {
+  const since = task.threadNotesFedThrough ?? "";
+  let count = 0;
+  let start: Record<string, unknown> | undefined;
+  do {
+    const page = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :note)",
+      ExpressionAttributeValues: { ":pk": `DEVTASK#${task.taskId}`, ":note": "NOTE#" }, ProjectionExpression: "receivedAt, answeredAt", ConsistentRead: true,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: Array<{ receivedAt?: unknown; answeredAt?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
+    count += (page.Items ?? []).filter((item) => typeof item.receivedAt === "string" && item.receivedAt > since && item.answeredAt === undefined).length;
+    start = page.LastEvaluatedKey;
+  } while (start !== undefined);
+  return count;
+}
+
+/** The saved document types in the order the steps write them. */
+const DOCUMENT_ORDER = ["requirements", "design", "plan"] as const;
+const DOCUMENT_NAMES: Record<(typeof DOCUMENT_ORDER)[number], "requirements" | "design" | "coding plan"> = { requirements: "requirements", design: "design", plan: "coding plan" };
+
+/**
+ * After Request changes that sent comments on the version before `approval`: how many of those comments the planner
+ * answered in `approval` (each answer is a reply with an ID made from the comment and this version). For the first version of
+ * a document, the same for the comments sent with the Approve of the document before it.
+ */
+async function commentAnswersFor(deps: NotifierDependencies, task: DeveloperTaskRecord, workflow: WorkflowSnapshot, approval: WorkflowArtifact): Promise<WorkflowMessageContext["commentAnswers"]> {
+  const previous = workflow.artifacts.find((artifact) => artifact.type === approval.type && artifact.version === approval.version - 1);
+  const before = DOCUMENT_ORDER[DOCUMENT_ORDER.indexOf(approval.type as (typeof DOCUMENT_ORDER)[number]) - 1];
+  let decision: WorkflowSnapshot["decisions"][number] | undefined;
+  if (previous !== undefined) {
+    decision = [...workflow.decisions].reverse().find((entry) => entry.artifactDigest === previous.sha256 && (entry.source ?? "GATE") === "GATE");
+    if (decision?.decision !== "REQUEST_CHANGES") return undefined;
+  } else if (before !== undefined) {
+    const digests = new Set(workflow.artifacts.filter((artifact) => artifact.type === before).map((artifact) => artifact.sha256));
+    decision = [...workflow.decisions].reverse().find((entry) => (entry.source ?? "GATE") === "GATE" && entry.decision === "APPROVE" && entry.artifactDigest !== undefined && digests.has(entry.artifactDigest));
+  }
+  if (decision === undefined || (decision.commentsIncluded ?? 0) === 0) return undefined;
+  const detail = await getItem<{ includedCommentIds?: unknown }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `DECISION#${decision.requestId}` });
+  const ids = Array.isArray(detail?.includedCommentIds) ? detail.includedCommentIds.filter((id): id is string => typeof id === "string") : [];
+  if (ids.length === 0) return undefined;
+  // What the planner answered is recorded with the plan itself, so it is there whenever the card is built. A plan stored
+  // before that has no record, and its card says nothing about replies.
+  const recorded = await getItem<{ answered?: unknown }>(deps, plannerRepliesKey(task.taskId, approval.id));
+  if (recorded === undefined || !Array.isArray(recorded.answered)) return undefined;
+  const answers = recorded.answered.flatMap((entry) => (typeof (entry as { commentId?: unknown } | null)?.commentId === "string" ? [(entry as { commentId: string }).commentId] : []));
+  const answered = answers.length;
+  if (previous !== undefined) return { answered, total: ids.length, fromVersion: previous.version };
+  // Sent with an Approve: the page's comments of that document, with a link to the first one the planner answered.
+  const first = answers[0];
+  const sent = await Promise.all(ids.map((id) => getItem<{ author?: { owner?: unknown } }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${id}` })));
+  return {
+    answered, total: ids.length, fromVersion: 0,
+    approvedOn: { document: DOCUMENT_NAMES[before!], ...(first === undefined ? {} : { commentId: first }), allOwners: sent.every((item) => item?.author?.owner === true) },
+  };
+}
+
+/** The reopened pull requests a notice names (repository and number); a malformed entry is left out. */
+function reopenedOf(value: unknown): Array<{ repositoryId: string; number: number }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const record = entry as { repositoryId?: unknown; number?: unknown } | null;
+    return record !== null && typeof record === "object" && typeof record.repositoryId === "string" && Number.isSafeInteger(record.number)
+      ? [{ repositoryId: record.repositoryId, number: record.number as number }] : [];
+  });
+}
+
+/** Whether a browser and API test round has started for the workflow's current candidate. */
+function e2eRoundStarted(workflow: WorkflowSnapshot): boolean {
+  const { e2e, candidate } = workflow;
+  if (e2e === undefined || candidate === undefined) return false;
+  return e2e.currentRoundId !== undefined || e2e.qualifiedRound?.candidateDigest === candidate.digest || e2e.failedRound?.candidateDigest === candidate.digest;
+}
+
+/** The automatic revisions the plan self-check has spent on the document being written (each one revision on): the planning run's later revisions are the same run. */
+function planAutoRevisionsOf(task: DeveloperTaskRecord, workflow: WorkflowSnapshot): number {
+  if (workflow.stage !== "PLAN" || workflow.state !== "RUNNING") return 0;
+  const artifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements" : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+  return planRevisionsUsed(task.planSelfCheck, artifactType, workflow.artifacts.filter((entry) => entry.type === artifactType).length + 1);
+}
+
+async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot, reopenedPullRequests?: ReadonlyArray<{ repositoryId: string; number: number }>): Promise<Reply | undefined> {
+  // A task closed in Slack has its own closed reply; a second "closed" line would say it twice.
+  if (workflow.stage === "CLOSED" && task.closedAt !== undefined) return undefined;
+  const page = taskPageUrl(deps, task.taskId);
+  // A reopened pull request is said once per reopening (its step's revision), even though its merge step was said before.
+  const reopened = reopenedPullRequests !== undefined && workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING";
+  const context: WorkflowMessageContext = { taskId: task.taskId, ownerSlackUserId: task.slackUserId, workflow, peopleEnabled: deps.peopleChangesEnabled === true,
+    ...(page === undefined ? {} : { findingsUrl: `${page}#findings`, taskPageUrl: page }), ...(reopened ? { pullRequestReopened: reopenedPullRequests } : {}) };
+  let approval: WorkflowArtifact | undefined;
+  if (workflow.stage === "PLAN" && workflow.state === "RUNNING" && task.planGrounding !== undefined && task.planGroundingAbandoned !== task.planGrounding.artifactSha256) context.planGroundingHeld = true;
+  if (workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
+    const document = await prepareDocumentLink(deps, task, workflow);
+    context.documentSummary = document.summary;
+    context.structured = document.structured;
+    context.workBreakdownDigest = document.workBreakdownDigest;
+    if (document.url !== undefined) context.documentLink = { url: document.url };
+    context.newReplies = await newThreadReplies(deps, task);
+    approval = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
+    if (approval !== undefined) {
+      const answered = await commentAnswersFor(deps, task, workflow, approval).catch((error: unknown) => {
+        deps.log({ event: "developer_notifier.comment_answers_unavailable", taskId: task.taskId, error: errorName(error) });
+        return undefined;
+      });
+      if (answered !== undefined) context.commentAnswers = answered;
+    }
+  } else if (workflow.state === "BLOCKED" || (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING")) {
+    // Replies that came in after the plan and that no step has taken: said, with where to read them.
+    context.newReplies = await newThreadReplies(deps, task);
+    // AUTOFIX: what Rovara already tried and why it asks, from its decisions and the ask record kept for this blocked revision (nothing is added when it never acted).
+    if (workflow.state === "BLOCKED" && (workflow.stage === "VERIFY" || workflow.stage === "REVIEW")) {
+      // Rovara is still looking at this block (its row is not resolved): the card waits, so it can carry what Rovara tried and why it asks. After the hold the card is posted as it is,
+      // and the ask follows as its own post when it is written.
+      // The wait is a courtesy: a lookup that cannot be read (a missing grant, a throttled table) posts the card without it, so a blocked step is never lost to the hold.
+      const looking = await getItem<{ kind?: unknown; createdAt?: unknown }>(deps, { pk: "WORKFLOW_DISPATCH", sk: `${task.taskId}#${workflow.revision}` }).catch((error: unknown) => {
+        deps.log({ event: "developer_notifier.autofix_hold_unreadable", taskId: task.taskId, error: errorName(error) });
+        return undefined;
+      });
+      if (looking?.kind === "AUTOFIX" && typeof looking.createdAt === "string" && deps.now() - Date.parse(looking.createdAt) < AUTOFIX_CARD_HOLD_MS) throw new AutofixPending();
+      const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
+      context.autoFix = { ask: ask.success ? ask.data : undefined };
+    }
+    // PLANREADMSG: why the plan could not be read, as a fixed category (the stored problems quote the model and are never shown).
+    if (workflow.stage === "PLAN" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable && task.planUnreadable?.workflowRevision === workflow.revision) {
+      // The category the broker stored (a fixed set); a record from before it was stored is read from the problems.
+      const stored = task.planUnreadable.category;
+      context.planUnreadableCategory = stored !== undefined && PLAN_UNREADABLE_CATEGORIES.includes(stored) ? stored : planUnreadableCategory(task.planUnreadable.errors);
+      if (task.planUnreadable.autoRetried === true) context.planUnreadableAutoRetried = true;
+    }
+  }
+  const message = workflowMessage(context);
+  if (message === undefined) return undefined;
+  const e2eBlocks = workflow.e2e?.required === true && deps.workflowE2EBlocks !== undefined
+    ? await deps.workflowE2EBlocks(task, await operationsOf(deps, task.workspaceId)).catch((error: unknown) => {
+      deps.log({ event: "developer_notifier.e2e_projection_unavailable", taskId: task.taskId, error: errorName(error) });
+      return undefined;
+    })
+    : undefined;
+  const unavailableE2E = workflow.e2e?.required === true && e2eBlocks === undefined
+    ? [renderE2EUnavailableSlackBlock(context.taskPageUrl, e2eRoundStarted(workflow))]
+    : [];
+  const blocks = e2eBlocks === undefined
+    ? [...(message.blocks ?? []), ...unavailableE2E].slice(0, 50)
+    : [...(message.blocks ?? []), ...e2eBlocks].slice(0, 50);
+  return { ...message, ...(blocks === undefined ? {} : { blocks }), sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow, { planAutoRevisions: context.planGroundingHeld === true ? 0 : planAutoRevisionsOf(task, workflow) }), ...(approval === undefined ? {} : { approval }) };
+}
+
+async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<Reply | undefined> {
+  const operation = async () => (notice.workspaceId === undefined || notice.operationId === undefined
+    ? undefined
+    : getItem<{ id: string; kind: string; status: string; error?: string; result?: unknown }>(deps, { pk: `WORKSPACE#${notice.workspaceId}`, sk: `OPERATION#${notice.operationId}` }));
+  const said = (text: string | undefined): Reply | undefined => (text === undefined ? undefined : { text });
+  switch (notice.kind) {
+    // Decision 134: a task its owner stopped during setup closes instead of running; the thread hears that, not "running".
+    case "ready": return said(task.stopRequest === undefined ? READY_REPLY : STOPPED_REPLY);
+    case "cancelled": return said(CANCELLED_REPLY);
+    case "closed": return said(CLOSED_REPLY);
+    // A change a later one replaced is not said: the later notice says the current mode.
+    case "mode": return notice.mode === task.share.mode ? said(modeReply(task.share.mode)) : undefined;
+    case "setup_failed": return said(setupFailedReply((await operation())?.error));
+    case "pull_request": {
+      // A workflow task's pull request is said by its merge step, with the step's own words.
+      if (task.workflow !== undefined) return undefined;
+      const published = PullRequestResultSchema.safeParse((await operation())?.result);
+      return published.success ? said(pullRequestReply(published.data.url)) : undefined;
+    }
+    case "workflow": if (notice.id.includes(":autofix:")) return autofixFollowUp(deps, task);
+      return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow, notice.pullRequestReopened === true ? reopenedOf(notice.reopenedPullRequests) : undefined);
+    case "ended": {
+      const ended = await operation();
+      if (ended === undefined || !ENDED_STATUSES.has(ended.status)) return undefined;
+      const workflow = task.workflow;
+      if (workflow !== undefined) {
+        // A workflow task's steps are said by its workflow notices, never as "the task ended" with the model's words.
+        // The one exception: AgentX's own draft pull request did not open, and the owner retries it from this post.
+        if (ended.kind !== "publish" || ended.status === "SUCCEEDED" || !workflowPublicationRetryable(workflow)) return undefined;
+        const message = workflowMessage({ taskId: task.taskId, ownerSlackUserId: task.slackUserId, workflow, publishFailure: {
+          category: failureCategory(ended.kind, ended.status, ended.error),
+          codeChanged: ended.error?.includes(WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE) === true,
+        } });
+        // Blocked by the refused publication, the step's own notice offers the same retry: the two post once.
+        return message === undefined ? undefined : { ...message, ...(workflow.state === "BLOCKED" ? { sameAs: `revision:${workflow.revision}` } : {}) };
+      }
+      const failed = ended.status === "FAILED" || ended.status === "INTERRUPTED";
+      let summary: string | undefined;
+      if (ended.kind === "task") {
+        const events = await deps.documentClient.send(new QueryCommand({
+          TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+          ExpressionAttributeValues: { ":pk": `OPERATION#${ended.id}`, ":prefix": "EVENT#" }, ScanIndexForward: false, Limit: 500, ConsistentRead: true,
+        })) as { Items?: Array<{ entityType?: string; payload: unknown }> };
+        summary = lastAssistantResponse((events.Items ?? []).filter((item) => item.entityType === "EVENT").reverse());
+      }
+      // The status and the category are fixed values, placed unescaped; the message and summary are redacted and escaped there.
+      return said(endedReply({
+        kind: ended.kind,
+        status: ended.status,
+        ...(failed ? { failure: { category: failureCategory(ended.kind, ended.status, ended.error), message: ended.error ?? `the ${ended.kind} operation ended ${ended.status}` } } : {}),
+        ...(summary === undefined ? {} : { summary }),
+      }));
+    }
+    default: return undefined;
+  }
+}
+
+async function feedbackReviewNotification(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice) {
+  const workflow = task.workflow;
+  const review = workflow?.feedbackReview;
+  const reviewRef = review?.reviewRef;
+  if (notice.kind !== "github_feedback" || review?.status !== "PENDING" || reviewRef === undefined || reviewRef.sha256 !== notice.feedbackReviewDigest) return undefined;
+  if (reviewRef.status !== "COMPLETE") {
+    // Said from the report's own reference: its stored reason is AgentX's words only, and is shown in plain words.
+    const opened = workflow!.pullRequests ?? [];
+    return feedbackReviewFailedMessage({ taskId: task.taskId, revision: workflow!.revision, reviewDigest: reviewRef.sha256, status: reviewRef.status, blockReason: reviewRef.blockReason,
+      pullRequests: review.bundleRefs.map((bundle) => ({ number: bundle.number,
+        url: opened.find((pullRequest) => pullRequest.repositoryId === bundle.repositoryId && pullRequest.number === bundle.number)?.url ?? "" })) });
+  }
+  if (reviewRef.status !== "COMPLETE") return undefined;
+  if (deps.readArtifact === undefined || deps.reviewUrlBase === undefined) throw new Error("feedback review notice is not configured");
+  const bytes = await deps.readArtifact(reviewRef.objectKey);
+  if (createHash("sha256").update(bytes, "utf8").digest("hex") !== reviewRef.sha256) throw new Error("feedback review artifact integrity check failed");
+  const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(bytes));
+  if (report.taskId !== task.taskId || report.status !== "COMPLETE" || report.proposalDigest !== reviewRef.proposalDigest
+    || JSON.stringify(report.bundleDigests) !== JSON.stringify(review.bundleRefs.map(bundle => bundle.sha256))) {
+    throw new Error("feedback review artifact binding failed");
+  }
+  const base = new URL(deps.reviewUrlBase);
+  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) throw new Error("feedback review base URL is invalid");
+  const findings = report.findings;
+  const highestPriority = findings.some(finding => finding.recommended && finding.priority === "MUST_FIX") ? "MUST_FIX"
+    : findings.some(finding => finding.recommended && finding.priority === "SHOULD_FIX") ? "SHOULD_FIX"
+      : findings.some(finding => finding.recommended && finding.priority === "OPTIONAL") ? "OPTIONAL" : undefined;
+  return feedbackReviewSlackMessage({
+    taskId: task.taskId, revision: workflow!.revision, reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest,
+    bundleDigests: review.bundleRefs.map(bundle => bundle.sha256),
+    totalComments: review.bundleRefs.reduce((total, bundle) => total + bundle.comments.length, 0),
+    recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), highestPriority,
+    // The reviewer is told to put its question and options in the proposal's summary; its rationale stands in when it gave none.
+    ownerQuestions: findings.filter(finding => finding.proposedDisposition === "OWNER_DECISION")
+      .map(finding => ({ findingId: finding.id, question: finding.fixProposal?.summary ?? finding.rationale })),
+    checkChanges: feedbackCardCheckChanges(workflow!.checkPolicy, findings.filter(finding => finding.recommended)),
+    detailUrl: new URL(`/review/${encodeURIComponent(task.taskId)}`, base).href,
+  });
+}
+
+/**
+ * The check changes a card says for its recommended fixes: exactly what Approve applies for them together
+ * (workflowFeedbackCheckChanges, which the approval uses too), split by the finding each change comes from.
+ */
+export function feedbackCardCheckChanges(
+  policy: Parameters<typeof workflowFeedbackCheckChanges>[0],
+  findings: Parameters<typeof workflowFeedbackCheckChanges>[1],
+): Array<{ obsolete: string[]; added: Array<{ label: string; command: WorkflowCheck["command"] }> }> {
+  return workflowFeedbackCheckChanges(policy, findings).byFinding.map(entry => ({
+    obsolete: entry.obsolete.map(check => check.label), added: entry.added.map(check => ({ label: check.label, command: check.command })),
+  }));
+}
+
+type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale" | "scheduled" | "skipped";
+
+/** Another delivery of an admin change's message holds the claim: this one is retried (C9). */
+class DmPending extends Error {
+  constructor() {
+    super("the admin change's message is being posted");
+    this.name = "DmPending";
+  }
+}
+
+/** A claim older than this was left by a delivery that died between claiming and posting; longer than a post's timeout. */
+const DM_CLAIM_MS = 60_000;
+
+/** The stored change, read strictly as the broker reads it; an unreadable one is named by its ID only. */
+async function readChange(deps: NotifierDependencies, changeId: string): Promise<PendingChange | undefined> {
+  const item = await getItem<Record<string, unknown>>(deps, adminChangeKey(changeId));
+  if (item === undefined) return undefined;
+  const parsed = AdminChangePendingRecordSchema.safeParse(item);
+  if (!parsed.success) {
+    deps.log({ event: "admin_change.unreadable", changeId });
+    return undefined;
+  }
+  return parsed.data;
+}
+
+/**
+ * Spec 025 E13: posts the change's Confirm message once, to the planning admin's own linked Slack
+ * user, and edits it once the change has ended. Every write conditions on the item existing, so a
+ * change the TTL removed meanwhile is never recreated as a fragment.
+ */
+async function deliverAdminChange(deps: NotifierDependencies, notice: Notice): Promise<Outcome> {
+  if (notice.changeId === undefined) return "stale";
+  const key = adminChangeKey(notice.changeId);
+  const change = await readChange(deps, notice.changeId);
+  if (change === undefined) return "stale";
+  if (notice.kind === "admin_change_expiry") return editExpired(deps, change);
+  if (notice.kind === "admin_change_outcome") {
+    // No message to edit: nothing was posted, so there is nothing to deliver.
+    if (change.dm === undefined) return "stale";
+    if (change.dmEditedAt !== undefined) return "delivered";
+    if (deps.update === undefined) return "stale";
+    // Only a stored end edits the message: a still-pending change keeps its buttons (C13).
+    const message = adminChangeOutcomeMessage(change);
+    if (message === undefined) return "stale";
+    await deps.update({ channel: change.dm.channel, ts: change.dm.ts, ...message });
+    try {
+      // Ruling B2: a top-level attribute, so the fake and DynamoDB agree on it.
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key: key, UpdateExpression: "SET dmEditedAt = :now",
+        ConditionExpression: "attribute_exists(pk) AND attribute_exists(dm) AND attribute_not_exists(dmEditedAt)",
+        ExpressionAttributeValues: { ":now": new Date(deps.now()).toISOString() },
+      }));
+    } catch (error) {
+      // Another delivery edited it too, with the same text; or the TTL removed the change.
+      if (!isConditional(error)) throw error;
+    }
+    deps.log({ event: "admin_change.dm_edited", changeId: change.changeId, traceId: change.traceId, status: change.status });
+    return "posted";
+  }
+  if (change.dm !== undefined) {
+    // #217: a repeated delivery schedules the expiry edit again, so a schedule lost to a failure
+    // after the post is made good; the edit itself happens at most once.
+    if (change.status === "pending" && change.dmEditedAt === undefined) await scheduleExpiry(deps, change);
+    return "delivered";
+  }
+  if (change.status !== "pending" || deps.now() >= Date.parse(change.expiresAt) || change.slackUserId === undefined) return "stale";
+  const claimedAt = new Date(deps.now()).toISOString();
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: key, UpdateExpression: "SET dmClaimedAt = :now",
+      ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(dm) AND (attribute_not_exists(dmClaimedAt) OR dmClaimedAt < :stale)",
+      ExpressionAttributeValues: { ":now": claimedAt, ":stale": new Date(deps.now() - DM_CLAIM_MS).toISOString() },
+    }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    // Another delivery is posting it now; this one is retried and then finds it delivered.
+    throw new DmPending();
+  }
+  // 25c note 3, as for the start message: a claim taken over from a delivery that died, or a post
+  // that may have landed, can mean a second message. Logged with the IDs and the error's name only.
+  if (change.dmClaimedAt !== undefined) deps.log({ event: "admin_change.dm_post_uncertain", reason: "claim_lapsed", changeId: change.changeId, traceId: change.traceId });
+  let posted: { ts: string; channel?: string };
+  try {
+    posted = await deps.post({ channel: change.slackUserId, ...adminChangeMessage(change, deps.now()) });
+  } catch (error) {
+    if (postMayHaveLanded(error)) deps.log({ event: "admin_change.dm_post_uncertain", reason: "post_error", changeId: change.changeId, traceId: change.traceId, error: errorName(error) });
+    // Gives the claim back at once, so the retry need not wait for it to lapse. Best effort.
+    try {
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key: key, UpdateExpression: "REMOVE dmClaimedAt", ConditionExpression: "dmClaimedAt = :mine",
+        ExpressionAttributeValues: { ":mine": claimedAt },
+      }));
+    } catch (releaseError) {
+      deps.log({ event: "admin_change.dm_release_failed", changeId: change.changeId, traceId: change.traceId, error: errorName(releaseError) });
+    }
+    throw error;
+  }
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: key, UpdateExpression: "SET dm = :dm",
+      ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(dm)",
+      ExpressionAttributeValues: { ":dm": { channel: posted.channel ?? change.slackUserId, ts: posted.ts, postedAt: new Date(deps.now()).toISOString() } },
+    }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    // The TTL removed the change while it posted: the message stays, and a press answers not found.
+    deps.log({ event: "admin_change.dm_unrecorded", changeId: change.changeId, traceId: change.traceId });
+    return "stale";
+  }
+  // FR-052: the notifier's step, with the change and trace IDs.
+  deps.log({ event: "admin_change.dm_posted", changeId: change.changeId, traceId: change.traceId });
+  // A failure here retries the notice, which finds the message posted and schedules the edit again.
+  await scheduleExpiry(deps, change);
+  return "posted";
+}
+
+/** #217: queues the edit of the change's message for just after it expires. */
+async function scheduleExpiry(deps: NotifierDependencies, change: PendingChange): Promise<void> {
+  const notBefore = new Date(Date.parse(change.expiresAt) + ADMIN_CHANGE_EXPIRY_GRACE_MS).toISOString();
+  await deps.enqueue([{ id: `${change.changeId}:expiry`, kind: "admin_change_expiry", changeId: change.changeId, at: new Date(deps.now()).toISOString(), notBefore }]);
+}
+
+/** Records that the message was edited; false when it already was, or the change is no longer `status`. */
+async function markEdited(deps: NotifierDependencies, changeId: string, status?: string): Promise<boolean> {
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: adminChangeKey(changeId), UpdateExpression: "SET dmEditedAt = :now",
+      ConditionExpression: `attribute_exists(pk) AND attribute_exists(dm) AND attribute_not_exists(dmEditedAt)${status === undefined ? "" : " AND #status = :status"}`,
+      ...(status === undefined ? {} : { ExpressionAttributeNames: { "#status": "status" } }),
+      ExpressionAttributeValues: { ":now": new Date(deps.now()).toISOString(), ...(status === undefined ? {} : { ":status": status }) },
+    }));
+    return true;
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    return false;
+  }
+}
+
+/**
+ * #217: a change nobody answered keeps live buttons until someone presses one, so at its expiry
+ * the notifier edits its message to say it expired, with no buttons. The broker records the
+ * expiry on the change's next touch, as before (E3); that outcome then edits nothing more. A
+ * change answered meanwhile is left to its own outcome edit.
+ */
+async function editExpired(deps: NotifierDependencies, change: PendingChange): Promise<Outcome> {
+  if (change.dm === undefined) return "stale";
+  if (change.dmEditedAt !== undefined) return "delivered";
+  if (change.status !== "pending" || deps.update === undefined) return "stale";
+  if (deps.now() < Date.parse(change.expiresAt) + ADMIN_CHANGE_EXPIRY_GRACE_MS) throw new ExpiryPending();
+  await deps.update({ channel: change.dm.channel, ts: change.dm.ts, ...adminChangeExpiredMessage(change) });
+  if (await markEdited(deps, change.changeId, "pending")) {
+    deps.log({ event: "admin_change.dm_expired", changeId: change.changeId, traceId: change.traceId });
+    return "posted";
+  }
+  // Answered while this edit was made: the stored outcome wins, even over an outcome edit that
+  // landed between this delivery's read and its expiry edit. Reaching here needs the broker to
+  // accept a claim after this Lambda's expiresAt + grace, so only a clock skew over the grace.
+  const current = await readChange(deps, change.changeId);
+  if (current?.dm === undefined) return "delivered";
+  if (current.status === "expired") {
+    // A press recorded the expiry meanwhile: the message already says so, so its outcome edits nothing more.
+    await markEdited(deps, current.changeId);
+    return "posted";
+  }
+  const outcome = adminChangeOutcomeMessage(current);
+  if (outcome === undefined) return "delivered";
+  await deps.update({ channel: current.dm.channel, ts: current.dm.ts, ...outcome });
+  await markEdited(deps, current.changeId);
+  deps.log({ event: "admin_change.dm_edited", changeId: current.changeId, traceId: current.traceId, status: current.status });
+  return "posted";
+}
+
+/** How long one delivery holds the start message's post (final review M3); longer than a post's timeout. */
+const START_LEASE_MS = 60_000;
+
+/**
+ * Final review M3: claims the start message's post, so two deliveries running at the same time
+ * cannot both post a top-level message (the second would start a thread with no record). True when
+ * this delivery may post; false when another delivery holds a live claim, or already posted.
+ */
+async function claimStart(deps: NotifierDependencies, marker: { pk: string; sk: string }, until: number): Promise<boolean> {
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: marker,
+      UpdateExpression: "SET entityType = :notice, postingUntil = :until, #expires = :expires",
+      ConditionExpression: "attribute_not_exists(deliveredAt) AND attribute_not_exists(postedTs) AND (attribute_not_exists(postingUntil) OR postingUntil < :now)",
+      ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },
+      ExpressionAttributeValues: { ":notice": "NOTICE", ":until": until, ":now": deps.now(), ":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },
+    }));
+    return true;
+  } catch (error) {
+    if (isConditional(error)) return false;
+    throw error;
+  }
+}
+
+/** Gives a failed post's claim back at once, so the retry need not wait for it to lapse. Best effort. */
+async function releaseStart(deps: NotifierDependencies, marker: { pk: string; sk: string }, until: number): Promise<void> {
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: marker, UpdateExpression: "REMOVE postingUntil", ConditionExpression: "postingUntil = :until",
+      ExpressionAttributeValues: { ":until": until },
+    }));
+  } catch (error) {
+    deps.log({ event: "developer_notifier.start_release_failed", error: errorName(error) });
+  }
+}
+
+interface NoticeMarker {
+  deliveredAt?: string; postedTs?: string; postingUntil?: number;
+  postedArtifactDigest?: string; postedWorkflowRevision?: number; postedText?: string; postedChannelId?: string;
+  workflowDecisionRevision?: number;
+  /** Task 19: the post carried buttons, which go once the task moves past `postedWorkflowRevision`. */
+  buttonCard?: boolean;
+  /** Task 19: when the card's buttons were taken away (or given up on). */
+  retiredAt?: string;
+  /** A failed PR feedback review's card: its Retry review stays while this report is still the pending one. */
+  postedFeedbackReviewDigest?: string;
+}
+
+/**
+ * C1: a start message posted but not recorded keeps its ts on the notice's marker, so the next
+ * delivery records that thread instead of posting a second start message. Best effort: when this
+ * write fails too, the next delivery posts again, and the record keeps the first thread it gets.
+ */
+async function keepPostedTs(deps: NotifierDependencies, marker: { pk: string; sk: string }, ts: string): Promise<void> {
+  try {
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", postedTs: ts, ...noticeExpiry(deps) } }));
+  } catch (error) {
+    deps.log({ event: "developer_notifier.posted_ts_lost", error: errorName(error) });
+  }
+}
+
+/**
+ * Task 19: a refused Slack press, told privately to whoever pressed, in the thread they pressed in. Its words are the
+ * broker's own fixed sentences. Marked delivered after the post, so a redelivered notice says it once.
+ */
+async function deliverRefusal(deps: NotifierDependencies, notice: Notice): Promise<Outcome> {
+  const taskId = notice.taskId;
+  const prefix = `${taskId ?? ""}:refusal:`;
+  if (taskId === undefined || !notice.id.startsWith(prefix)) return "stale";
+  const marker = noticeMarker(taskId, notice.id);
+  if ((await getItem<NoticeMarker>(deps, marker))?.deliveredAt !== undefined) return "delivered";
+  const refusal = await getItem<Record<string, unknown>>(deps, { pk: `DEVTASK#${taskId}`, sk: notice.id.slice(prefix.length) });
+  if (refusal?.entityType !== "WORKFLOW_ACTION_REFUSAL" || typeof refusal.channelId !== "string" || typeof refusal.threadTs !== "string"
+    || typeof refusal.slackUserId !== "string" || typeof refusal.message !== "string") return "stale";
+  if (deps.postEphemeral === undefined) {
+    deps.log({ event: "developer_notifier.refusal_not_configured", taskId });
+    return "stale";
+  }
+  await deps.postEphemeral({ channel: refusal.channelId, threadTs: refusal.threadTs, user: refusal.slackUserId, text: refusal.message });
+  await putMarker(deps, marker);
+  return "posted";
+}
+
+const NUDGE_DOCUMENTS: Record<string, { label: string; anchor: string }> = {
+  requirements: { label: "Requirements", anchor: "requirements" }, design: { label: "Design", anchor: "design" }, plan: { label: "Coding plan", anchor: "coding-plan" },
+};
+
+/**
+ * Spec 061 FR-044: one batched nudge per commenter per 10-minute window, in the task's thread. It names the person and
+ * how many comments and replies they left on which document versions (AgentX's items and deleted comments never count),
+ * never what they said, and links the task page. Delivered early, it is held again until the window ends; with nothing
+ * left to count (all deleted), nothing is posted.
+ */
+async function deliverNudge(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<Outcome> {
+  const prefix = `${task.taskId}:nudge:`;
+  if (!notice.id.startsWith(prefix)) return "stale";
+  const share = task.share;
+  if (share.threadTs === undefined) return share.postFailedAt !== undefined ? "no_thread" : "not_shared";
+  const marker = noticeMarker(task.taskId, notice.id);
+  if ((await getItem<NoticeMarker>(deps, marker))?.deliveredAt !== undefined) return "delivered";
+  const first = await getItem<Record<string, unknown>>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${notice.id.slice(prefix.length)}` });
+  const author = first?.author as { kind?: unknown; developerId?: unknown; name?: unknown } | undefined;
+  const windowStart = typeof first?.createdAt === "string" ? Date.parse(first.createdAt) : Number.NaN;
+  if (first?.entityType !== "TASK_COMMENT" || author?.kind !== "person" || typeof author.developerId !== "string" || Number.isNaN(windowStart)) return "stale";
+  const dueAt = windowStart + NUDGE_WINDOW_MS;
+  if (deps.now() < dueAt) {
+    await deps.enqueue([{ ...notice, notBefore: new Date(dueAt).toISOString() }]);
+    return "scheduled";
+  }
+  const counts = new Map<string, number>();
+  let start: Record<string, unknown> | undefined;
+  do {
+    const page = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": `DEVTASK#${task.taskId}`, ":prefix": "COMMENT#" }, ConsistentRead: true,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+    for (const item of page.Items ?? []) {
+      const by = item.author as { kind?: unknown; developerId?: unknown } | undefined;
+      const at = typeof item.createdAt === "string" ? Date.parse(item.createdAt) : Number.NaN;
+      if (by?.kind !== "person" || by.developerId !== author.developerId || item.deletedAt !== undefined || !(at >= windowStart && at < dueAt)) continue;
+      const document = NUDGE_DOCUMENTS[String(item.document)];
+      if (document === undefined || typeof item.version !== "number") continue;
+      const key = `${String(item.document)}#${item.version}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    start = page.LastEvaluatedKey;
+  } while (start !== undefined);
+  const total = [...counts.values()].reduce((sum, count) => sum + count, 0);
+  if (total === 0) {
+    await putMarker(deps, marker);
+    return "stale";
+  }
+  const places = [...counts.keys()].map((key) => { const [document, version] = key.split("#"); return { document: NUDGE_DOCUMENTS[document!]!, version: Number(version) }; })
+    .sort((left, right) => left.document.label.localeCompare(right.document.label) || left.version - right.version);
+  const where = places.map((place) => `${place.document.label} v${place.version}`);
+  const joined = where.length === 1 ? where[0]! : `${where.slice(0, -1).join(", ")} and ${where.at(-1)!}`;
+  const name = escapedLine(typeof author.name === "string" && author.name.trim() !== "" ? author.name : "A teammate", 80);
+  const page = taskPageUrl(deps, task.taskId);
+  const anchor = places[0]!.document.anchor;
+  const link = page === undefined ? "" : ` <${slackText(`${page}?doc=${anchor}#${anchor}`)}|Open review>`;
+  await deps.post({ channel: share.channelId, threadTs: share.threadTs, text: `${name} left ${total === 1 ? "a comment" : `${total} comments`} on ${joined}.${link}` });
+  await putMarker(deps, marker);
+  return "posted";
+}
+
+/** #342: told once per operation; put after the post, so a failed post is tried again (as a task's notices are). */
+const chatGptNoticeMarker = (operationId: string) => ({ pk: `CHATGPT_NOTICE#${operationId}`, sk: "META" });
+
+/**
+ * #342: a task that left its owner's ChatGPT plan says so in its thread: the Slack thread it was asked from, else its
+ * developer task's shared thread. A task with neither (a private task from an AI tool) has nowhere to say it.
+ */
+async function deliverChatGptFallback(deps: NotifierDependencies, notice: Notice, task: DeveloperTaskRecord | undefined): Promise<Outcome> {
+  if (notice.workspaceId === undefined || notice.operationId === undefined) return "skipped";
+  const operation = await getItem<{ chatgptFallback?: unknown; chatgptDeveloperId?: unknown; chatgptThread?: { channelId?: unknown; threadTs?: unknown }; requestedBy?: { userId?: unknown } }>(
+    deps, { pk: `WORKSPACE#${notice.workspaceId}`, sk: `OPERATION#${notice.operationId}` });
+  const reason = operation?.chatgptFallback;
+  if (reason !== "limit" && reason !== "revoked" && reason !== "model") return "skipped";
+  const marker = chatGptNoticeMarker(notice.operationId);
+  if (await getItem(deps, marker) !== undefined) return "delivered";
+  const ownThread = operation?.chatgptThread;
+  const thread = typeof ownThread?.channelId === "string" && typeof ownThread.threadTs === "string"
+    ? { channel: ownThread.channelId, threadTs: ownThread.threadTs }
+    : task?.share?.threadTs === undefined ? undefined : { channel: task.share.channelId, threadTs: task.share.threadTs };
+  if (thread === undefined) return "not_shared";
+  // The plan's owner: the developer task's owner, or the Slack member who asked from the thread.
+  const owner = operation?.chatgptDeveloperId;
+  const asker = typeof operation?.requestedBy?.userId === "string" ? operation.requestedBy.userId : undefined;
+  const slackUserId = task !== undefined && task.developerId === owner ? task.slackUserId
+    : asker !== undefined && developerIdForSlackUser(asker) === owner ? asker : undefined;
+  await deps.post({ ...thread, text: chatGptFallbackText(reason, slackUserId) });
+  await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString(), ...noticeExpiry(deps) } }));
+  return "posted";
+}
+
+async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outcome> {
+  if (notice.kind === "workflow_refusal") return deliverRefusal(deps, notice);
+  const task = await noticeTask(deps, notice);
+  if (notice.kind === "chatgpt_fallback") return deliverChatGptFallback(deps, notice, task);
+  if (notice.kind === "canvas_closeout") {
+    if (task === undefined || deps.closeTaskCanvases === undefined) throw new Error("Canvas closeout service is unavailable");
+    const result = await deps.closeTaskCanvases(task.taskId, notice.manifestDigest, notice.expectedWorkflowRevision);
+    if (result.status !== "COMPLETE") throw new CanvasCloseoutPending(result.reason ?? "archive_pending");
+    return "recorded";
+  }
+  if (task?.share === undefined) return "not_shared";
+  const share = task.share;
+  // Ruling F7: a notice carries its change's own time to the millisecond, so it compares exactly with the share's.
+  if (notice.kind !== "start" && Date.parse(notice.at) < Date.parse(share.sharedAt)) return "before_share";
+  // Q3: a close posts "closed", then the thread stops.
+  if (notice.kind !== "start" && notice.kind !== "closed" && task.closedAt !== undefined
+    && (Date.parse(notice.at) > Date.parse(task.closedAt) || await getItem(deps, noticeMarker(task.taskId, `${task.taskId}:closed`)) !== undefined)) return "after_close";
+  if (notice.kind === "comment_nudge") return deliverNudge(deps, { ...task, share }, notice);
+  const marker = noticeMarker(task.taskId, notice.id);
+  const delivered = await getItem<NoticeMarker>(deps, marker);
+  if (delivered?.deliveredAt !== undefined) {
+    // The step was posted but the card edit after it met a passing Slack problem: the retry finishes the edit.
+    if (notice.kind === "workflow") await updateWorkflowApprovalCard(deps, task, notice);
+    await retireButtonCards(deps, task);
+    return "delivered";
+  }
+  if (notice.kind === "start") {
+    if (share.threadTs !== undefined) {
+      await putMarker(deps, marker);
+      return "delivered";
+    }
+    if (delivered?.postedTs !== undefined) {
+      await recordThread(deps, task.taskId, delivered.postedTs, marker);
+      return "recorded";
+    }
+    // 25c note 3 (owner answer, 2026-09-30): a start post may have landed without its ts being kept,
+    // so the next post can be a second start message. Left as is; these logs count how often.
+    const lapsed = delivered?.postingUntil !== undefined && delivered.postingUntil < deps.now();
+    const until = deps.now() + START_LEASE_MS;
+    if (!await claimStart(deps, marker, until)) {
+      const current = await getItem<NoticeMarker>(deps, marker);
+      if (current?.deliveredAt !== undefined) return "delivered";
+      if (current?.postedTs !== undefined) {
+        await recordThread(deps, task.taskId, current.postedTs, marker);
+        return "recorded";
+      }
+      // Another delivery is posting it now: this one is retried, and then finds it delivered.
+      throw new StartPending();
+    }
+    // Logged by the delivery that won the claim only, so one lapse is counted once.
+    if (lapsed) deps.log({ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: task.taskId });
+    const status = await currentStatus(deps, task);
+    let ts: string;
+    try {
+      ({ ts } = await deps.post({
+        channel: share.channelId,
+        text: startMessage({ developerName: task.developerName, slackUserId: task.slackUserId, client: task.client, title: task.title, project: task.project, mode: share.mode, status, sharedReason: share.sharedReason }),
+      }));
+    } catch (error) {
+      // Slack's own error code means nothing was posted; a lost or unreadable answer may not.
+      if (postMayHaveLanded(error)) deps.log({ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: task.taskId, error: errorName(error) });
+      await releaseStart(deps, marker, until);
+      throw error;
+    }
+    try {
+      await recordThread(deps, task.taskId, ts, marker);
+    } catch (error) {
+      await keepPostedTs(deps, marker, ts);
+      throw error;
+    }
+    return "posted";
+  }
+  if (share.threadTs === undefined) {
+    // C9: the start message gave up; nothing is posted outside a thread.
+    if (share.postFailedAt !== undefined) return "no_thread";
+    throw new StartPending();
+  }
+  // Gap 5: a workflow notice says its own revision's step only; a later step has its own notice.
+  if (notice.kind === "workflow" && task.workflow !== undefined && noticeWorkflowRevision(notice) !== task.workflow.revision) return "stale";
+  // The previous approval card is edited after this step's own post, so a card that keeps failing never holds it up.
+  const editCard = async () => {
+    await updateWorkflowApprovalCard(deps, { ...task, share }, notice);
+    await retireButtonCards(deps, task);
+  };
+  const feedbackReview = await feedbackReviewNotification(deps, { ...task, share }, notice);
+  const reply: Reply | undefined = feedbackReview ?? await replyText(deps, { ...task, share }, notice);
+  if (reply === undefined) {
+    await editCard();
+    return "stale";
+  }
+  const sameAs = reply.sameAs === undefined ? undefined : noticeMarker(task.taskId, `${task.taskId}:said:${reply.sameAs}`);
+  if (sameAs !== undefined) {
+    const claim = await claimSaid(deps, sameAs, notice.id);
+    if (claim === "said") {
+      await putMarker(deps, marker);
+      await editCard();
+      return "delivered";
+    }
+    // Another notice is posting the same words now: this one is retried, and then finds them said.
+    if (claim === "pending") throw new SaidPending();
+  }
+  // Accepted: a close that commits while this reply is being posted can put this one reply after
+  // "closed". The checks above read the task before the post; at most one reply per notice lands late.
+  let posted: { ts: string };
+  try {
+    posted = await deps.post({ channel: share.channelId, threadTs: share.threadTs, text: reply.text, ...(reply.blocks === undefined ? {} : { blocks: reply.blocks }) });
+  } catch (error) {
+    // Nothing was posted: the words are free for the next delivery. A post that may have landed keeps the claim
+    // until its lease ends, as the start message does.
+    if (sameAs !== undefined && !postMayHaveLanded(error)) await releaseSaid(deps, sameAs, notice.id);
+    throw error;
+  }
+  const buttons = hasButtons(reply.blocks);
+  await putMarker(deps, marker, {
+    postedTs: posted.ts,
+    // Task 19: a card with buttons is kept with its step, so its buttons go once the task moves past that step.
+    ...((reply.approval === undefined && !buttons) || task.workflow === undefined ? {} : {
+      postedWorkflowRevision: task.workflow.revision,
+      postedText: reply.text,
+      postedChannelId: share.channelId,
+    }),
+    ...(reply.approval === undefined || task.workflow === undefined ? {} : { postedArtifactDigest: reply.approval.sha256 }),
+    ...(buttons && task.workflow !== undefined ? { buttonCard: true } : {}),
+    ...(feedbackReview !== undefined && notice.feedbackReviewDigest !== undefined && task.workflow?.feedbackReview?.status === "PENDING"
+      && task.workflow.feedbackReview.reviewRef.status !== "COMPLETE" ? { postedFeedbackReviewDigest: notice.feedbackReviewDigest } : {}),
+  });
+  if (sameAs !== undefined) await putMarker(deps, sameAs);
+  await editCard();
+  return "posted";
+}
+
+/** How long one notice holds the words it is posting; longer than a post's timeout. */
+const SAID_LEASE_MS = 60_000;
+
+/** Rovara is still deciding what to do about the blocked step: its card is retried shortly, so it can say it. */
+class AutofixPending extends Error {
+  constructor() { super("automatic fixing is still looking at this blocked step"); this.name = "AutofixPending"; }
+}
+
+/**
+ * The ask written after the blocked card was posted without it (the look took longer than the hold): its lines as a post of their own, once. Nothing when the card is not posted yet
+ * (it carries the ask itself when it is) or already carries it.
+ */
+async function autofixFollowUp(deps: NotifierDependencies, task: DeveloperTaskRecord): Promise<Reply | undefined> {
+  const workflow = task.workflow;
+  const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
+  if (workflow === undefined || !ask.success || ask.data.workflowRevision !== workflow.revision) return undefined;
+  const card = await getItem<NoticeMarker>(deps, noticeMarker(task.taskId, `${task.taskId}:workflow:${workflow.revision}`));
+  if (card?.deliveredAt === undefined) {
+    // The card's post may be in flight (its words are claimed and not yet delivered): this notice is retried and then finds the card delivered.
+    const claim = await getItem<NoticeMarker & { claimUntil?: number }>(deps, noticeMarker(task.taskId, `${task.taskId}:said:revision:${workflow.revision}`));
+    if (claim !== undefined && claim.deliveredAt === undefined && (claim.claimUntil ?? 0) > deps.now()) throw new SaidPending();
+    return undefined;
+  }
+  if (card.postedText?.includes("Why I'm asking you") === true) return undefined;
+  const lines = autoFixCardLines(workflow, ask.data).map(slackText);
+  return lines.length === 0 ? undefined : { text: `More on the step above:\n${lines.join("\n")}`, sameAs: `autofix:${workflow.revision}` };
+}
+
+/** Another notice holds the claim on the same words: this one is retried (C9). */
+class SaidPending extends Error {
+  constructor() { super("another notice is posting the same message"); this.name = "SaidPending"; }
+}
+
+/**
+ * Claims the words a notice is about to post, so two notices that would say the same thing (delivered by two
+ * Lambdas at once) post once: "claimed" lets this notice post, "said" means they are already in the thread, and
+ * "pending" means another notice holds a live claim. A claim whose lease ended is taken over.
+ */
+async function claimSaid(deps: NotifierDependencies, said: { pk: string; sk: string }, noticeId: string): Promise<"claimed" | "said" | "pending"> {
+  // Read first only to log, as the start message does: a claim still held after its post may have landed (this
+  // notice's own, or another notice's whose lease ended) can mean the words are posted twice. At most once each.
+  const prior = await getItem<NoticeMarker & { claimedBy?: string }>(deps, said);
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: said,
+      UpdateExpression: "SET entityType = :notice, claimedBy = :me, claimUntil = :until, #expires = :expires",
+      ConditionExpression: "attribute_not_exists(deliveredAt) AND (attribute_not_exists(claimedBy) OR claimedBy = :me OR claimUntil < :now)",
+      ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },
+      ExpressionAttributeValues: { ":notice": "NOTICE", ":me": noticeId, ":until": deps.now() + SAID_LEASE_MS, ":now": deps.now(),
+        ":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },
+    }));
+    if (prior?.claimedBy !== undefined && prior.deliveredAt === undefined) {
+      deps.log({ event: "developer_notifier.said_post_uncertain", reason: prior.claimedBy === noticeId ? "claim_retaken" : "claim_lapsed", noticeId });
+    }
+    return "claimed";
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    return (await getItem<NoticeMarker>(deps, said))?.deliveredAt !== undefined ? "said" : "pending";
+  }
+}
+
+/** Gives back a claim whose post never reached Slack, so another notice need not wait for its lease. Best effort. */
+async function releaseSaid(deps: NotifierDependencies, said: { pk: string; sk: string }, noticeId: string): Promise<void> {
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: said, UpdateExpression: "REMOVE claimedBy, claimUntil",
+      ConditionExpression: "claimedBy = :me AND attribute_not_exists(deliveredAt)", ExpressionAttributeValues: { ":me": noticeId },
+    }));
+  } catch (error) {
+    deps.log({ event: "developer_notifier.said_release_failed", noticeId, error: errorName(error) });
+  }
+}
+
+/** How long a task-state card ("workflow" notice) is retried before it is given up on: far longer than the hour of the other notices, and well inside the queue's day of retention and its 100 receives. */
+export const WORKFLOW_CARD_RETRY_WINDOW_MS = 12 * 60 * 60_000;
+
+/** The delivery-failure count the SlackDeliveryFailed alarm watches. An expired notice is dropped whatever happens to its count, so it can never loop. */
+function countDeliveryFailure(deps: NotifierDependencies): void {
+  try {
+    deps.deliveryFailed();
+  } catch (metricError) {
+    deps.log({ event: "developer_notifier.metric_failed", error: errorName(metricError) });
+  }
+}
+
+/** The failure reason kept on a durable record: a fixed code (a Slack error code or an error name), never free text. */
+const failureReasonCode = (reason: string): string => (/^[A-Za-z0-9_.-]{1,64}$/.test(reason) ? reason : "unknown");
+
+/**
+ * A notice that could not be delivered leaves a record next to its task (a NOTICE item, `NOTICE_FAILED#<id>`: when it first failed, a fixed reason, and when it was given up on), so a missing card is
+ * visible after the fact and not only in the logs. "new": this call made the record; "known": an earlier call did; "unrecorded": it could not be written (logged, never thrown).
+ */
+async function recordDeliveryFailure(deps: NotifierDependencies, notice: Notice, reason: string, abandoned: boolean): Promise<"new" | "known" | "unrecorded"> {
+  if (notice.taskId === undefined) return "unrecorded";
+  const key = { pk: `DEVTASK#${notice.taskId}`, sk: `NOTICE_FAILED#${notice.id}` };
+  const at = new Date(deps.now()).toISOString();
+  try {
+    let created = true;
+    try {
+      await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, ConditionExpression: "attribute_not_exists(pk)",
+        Item: { ...key, entityType: "NOTICE", kind: notice.kind, noticeId: notice.id, reason: failureReasonCode(reason), firstFailedAt: at, ...noticeExpiry(deps) } }));
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      created = false;
+    }
+    if (abandoned) {
+      await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET abandonedAt = :at", ExpressionAttributeValues: { ":at": at } }));
+    }
+    return created ? "new" : "known";
+  } catch (error) {
+    deps.log({ event: "developer_notifier.failure_record_failed", noticeId: notice.id, error: errorName(error) });
+    return "unrecorded";
+  }
+}
+
+export function createNotifierHandler(deps: NotifierDependencies) {
+  return async (event: { Records?: unknown[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
+    const records = event.Records ?? [];
+    const queued = records.filter((record): record is QueueRecord => (record as { eventSource?: unknown }).eventSource === "aws:sqs");
+    if (queued.length === 0) {
+      const { notices, skipped } = readStream(records as StreamRecord[]);
+      // Named by event ID and name only: a record's content could hold a task's text.
+      for (const record of skipped) deps.log({ event: "developer_notifier.record_unreadable", ...record });
+      if (notices.length > 0) await deps.enqueue(notices);
+      return { batchItemFailures: [] };
+    }
+    const batchItemFailures: Array<{ itemIdentifier: string }> = [];
+    for (const record of queued) {
+      const notice = parseNotice(record.body);
+      if (notice === undefined) {
+        deps.log({ event: "developer_notifier.notice_unreadable", messageId: record.messageId });
+        continue;
+      }
+      try {
+        const outcome = notice.kind === "people_dm" ? await deliverPeopleNotification(deps, notice)
+          : notice.kind === "admin_change_dm" || notice.kind === "admin_change_outcome" || notice.kind === "admin_change_expiry" ? await deliverAdminChange(deps, notice) : await deliver(deps, notice);
+        deps.log({ event: "developer_notifier.notice", kind: notice.kind, noticeId: notice.id, outcome });
+      } catch (error) {
+        const reason = error instanceof SlackPostError ? error.slackError : errorName(error);
+        if (error instanceof PeopleDeliveryRetry) {
+          try { await deps.retryLater(record.receiptHandle, error.attempt === 1 ? 30 : 60); } catch (delayError) { deps.log({ event: "developer_notifier.delay_failed", error: errorName(delayError) }); }
+          deps.log({ event: "developer_notifier.retry", kind: notice.kind, noticeId: notice.id, attempt: error.attempt, reason });
+          batchItemFailures.push({ itemIdentifier: record.messageId });
+          continue;
+        }
+        const elapsed = deps.now() - Date.parse(notice.at);
+        // A task-state card (a blocked step, a plan to approve) is kept for much longer than the hour: dropping it leaves the owner waiting on a task nobody told them about.
+        const keepRetrying = notice.kind === "canvas_closeout" || elapsed < SHARE_DELIVERY_WINDOW_MS || (notice.kind === "workflow" && elapsed < WORKFLOW_CARD_RETRY_WINDOW_MS);
+        if (keepRetrying) {
+          // Past the hour the failure is counted once (the alarm) and recorded durably; the later tries only retry.
+          if (notice.kind === "workflow" && elapsed >= SHARE_DELIVERY_WINDOW_MS && await recordDeliveryFailure(deps, notice, reason, false) !== "known") {
+            deps.log({ event: "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason: failureReasonCode(reason), retrying: true });
+            countDeliveryFailure(deps);
+          }
+          const attempt = Number(record.attributes?.ApproximateReceiveCount ?? "1");
+          try {
+            await deps.retryLater(record.receiptHandle, retryDelaySeconds(attempt));
+          } catch (delayError) {
+            deps.log({ event: "developer_notifier.delay_failed", error: errorName(delayError) });
+          }
+          deps.log({ event: "developer_notifier.retry", kind: notice.kind, noticeId: notice.id, attempt,
+            ...(error instanceof CanvasCloseoutPending ? { reason: error.reason } : { reason }) });
+          batchItemFailures.push({ itemIdentifier: record.messageId });
+        } else {
+          // A card that was retried past the hour ends here with its own words and the durable record marked; every other notice is dropped as before, with its record.
+          const abandoned = notice.kind === "workflow";
+          deps.log({ event: abandoned ? "developer_notifier.delivery_abandoned" : "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason: abandoned ? failureReasonCode(reason) : reason });
+          await recordDeliveryFailure(deps, notice, reason, true);
+          countDeliveryFailure(deps);
+          if (notice.kind === "start" && notice.taskId !== undefined) {
+            try {
+              await markPostFailed(deps, notice.taskId);
+            } catch (markError) {
+              deps.log({ event: "developer_notifier.mark_failed", taskId: notice.taskId, error: errorName(markError) });
+            }
+          }
+        }
+      }
+    }
+    return { batchItemFailures };
+  };
+}
+
+const SECRET_CACHE_MS = 5 * 60_000;
+/** Slack's answers that mean the token itself is bad: the next post loads it again. */
+const REFUSED_TOKEN = new Set(["invalid_auth", "token_revoked"]);
+
+/** The bot token cached for five minutes, and dropped when Slack refuses it; shared by every Slack call. */
+export function cachedBotToken(loadToken: () => Promise<string>, now: () => number = Date.now): <T>(call: (token: string) => Promise<T>) => Promise<T> {
+  let cached: { value: Promise<string>; loadedAt: number } | undefined;
+  const token = (): Promise<string> => {
+    if (cached === undefined || now() - cached.loadedAt > SECRET_CACHE_MS) {
+      const value = loadToken();
+      const entry = { value, loadedAt: now() };
+      cached = entry;
+      value.catch(() => { if (cached === entry) cached = undefined; });
+    }
+    return cached.value;
+  };
+  return async (call) => {
+    const entry = cached;
+    try {
+      return await call(await token());
+    } catch (error) {
+      if (error instanceof SlackPostError && REFUSED_TOKEN.has(error.slackError) && (entry === undefined || cached === entry)) cached = undefined;
+      throw error;
+    }
+  };
+}
+
+/** chat.postMessage and chat.update on one cached bot token (E13). */
+export function cachedSlackClient(loadToken: () => Promise<string>, now: () => number = Date.now, fetchImplementation: typeof fetch = fetch): {
+  post: (input: PostInput) => Promise<{ ts: string; channel?: string }>;
+  update: (input: UpdateInput) => Promise<void>;
+  postEphemeral: (input: { channel: string; threadTs: string; user: string; text: string }) => Promise<void>;
+} {
+  const withToken = cachedBotToken(loadToken, now);
+  return {
+    post: (input) => withToken((token) => chatPostMessage(token, input, fetchImplementation)),
+    update: (input) => withToken((token) => chatUpdate(token, input, fetchImplementation)),
+    postEphemeral: (input) => withToken((token) => chatPostEphemeral(token, input, fetchImplementation)),
+  };
+}
+
+/** chat.postMessage with the bot token cached for five minutes, and dropped when Slack refuses it. */
+export function cachedSlackPoster(loadToken: () => Promise<string>, now: () => number = Date.now, fetchImplementation: typeof fetch = fetch): (input: PostInput) => Promise<{ ts: string; channel?: string }> {
+  return cachedSlackClient(loadToken, now, fetchImplementation).post;
+}
+
+/** What the Canvas closeout store reads and writes: the State table, the artifact bucket and Slack's Canvas delete. */
+export interface CanvasCloseoutStoreDependencies {
+  documentClient: Pick<DynamoDBDocumentClient, "send">;
+  s3: Pick<S3Client, "send">;
+  tableName(): string;
+  bucketName(): string;
+  deleteCanvas(canvasId: string): Promise<"deleted" | "unknown">;
+  now(): string;
+}
+
+/** The Canvas closeout store over the State table and the artifact bucket (the notifier Lambda's, and the E2E harness's fakes). */
+export function createCanvasCloseoutStore(deps: CanvasCloseoutStoreDependencies): CanvasCloseoutStore {
+  const closeoutStore: CanvasCloseoutStore = {
+    async loadTask(taskId) {
+      const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName(), Key: taskKey(taskId), ConsistentRead: true }));
+      return (result as unknown as { Item?: TaskCanvasCloseoutTask }).Item;
+    },
+    async readArtifact(ref) {
+      const response = await deps.s3.send(new GetObjectCommand({ Bucket: deps.bucketName(), Key: ref.objectKey }));
+      return response.Body?.transformToString("utf8");
+    },
+    async readManifest(key) {
+      const response = await deps.s3.send(new GetObjectCommand({ Bucket: deps.bucketName(), Key: key }));
+      return response.Body?.transformToString("utf8");
+    },
+    async putManifest(key, digest, bytes) {
+      try {
+        await deps.s3.send(new PutObjectCommand({ Bucket: deps.bucketName(), Key: key, Body: bytes,
+          ContentType: "application/json", Metadata: { sha256: digest }, IfNoneMatch: "*" }));
+      } catch (error) {
+        if (error instanceof Error && ["PreconditionFailed", "ConditionalRequestConflict"].includes(error.name)) {
+          const existing = await closeoutStore.readManifest(key);
+          if (existing === bytes) return;
+        }
+        throw error;
+      }
+    },
+    async saveCloseout(taskId, nextCloseout, expectedRevision) {
+      const tableName = deps.tableName();
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const current = await closeoutStore.loadTask(taskId);
+        const workflow = current?.workflow;
+        if (current === undefined || workflow === undefined || workflow.revision !== expectedRevision
+          || (workflow.canvasCloseout !== undefined && workflow.canvasCloseout.manifestDigest !== nextCloseout.manifestDigest)) return false;
+        const priorEntries = new Map((workflow.canvasCloseout?.canvases ?? []).map((canvas) => [canvas.lineageKey, canvas]));
+        const merged = { ...nextCloseout, canvases: nextCloseout.canvases.map((canvas) => {
+          const prior = priorEntries.get(canvas.lineageKey);
+          return prior?.status === "DELETED" ? prior : canvas;
+        }) };
+        const workflowWithoutAttempt = { ...workflow };
+        delete workflowWithoutAttempt.canvasCloseoutAttempt;
+        const mergedWorkflow = { ...workflowWithoutAttempt, canvasCloseout: merged };
+        const version = current.canvasCloseoutVersion ?? 0;
+        try {
+          await deps.documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
+            UpdateExpression: "SET workflow = :workflow, canvasCloseoutVersion = :next",
+            ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
+            ExpressionAttributeValues: { ":workflow": mergedWorkflow, ":next": version + 1, ":revision": expectedRevision,
+              ...(version === 0 ? {} : { ":version": version }) },
+          }));
+          return true;
+        } catch (error) {
+          if (!isConditional(error)) throw error;
+        }
+      }
+      return false;
+    },
+    async saveCloseoutAttempt(taskId, attemptRecord, expectedRevision) {
+      const tableName = deps.tableName();
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const current = await closeoutStore.loadTask(taskId);
+        const workflow = current?.workflow;
+        if (current === undefined || workflow === undefined || workflow.revision !== expectedRevision) return false;
+        const mergedWorkflow = { ...workflow, canvasCloseoutAttempt: attemptRecord };
+        const version = current.canvasCloseoutVersion ?? 0;
+        try {
+          await deps.documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
+            UpdateExpression: "SET workflow = :workflow, canvasCloseoutVersion = :next",
+            ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
+            ExpressionAttributeValues: { ":workflow": mergedWorkflow, ":next": version + 1, ":revision": expectedRevision,
+              ...(version === 0 ? {} : { ":version": version }) },
+          }));
+          return true;
+        } catch (error) {
+          if (!isConditional(error)) throw error;
+        }
+      }
+      return false;
+    },
+    deleteCanvas: (canvasId) => deps.deleteCanvas(canvasId),
+    now: () => deps.now(),
+  };
+  return closeoutStore;
+}
+
+/** The notifier's closeTaskCanvases: runs the closeout on `store`, and logs how it ended. */
+export function canvasCloseoutService(store: CanvasCloseoutStore): NonNullable<NotifierDependencies["closeTaskCanvases"]> {
+  return async (taskId, expectedManifestDigest, expectedWorkflowRevision) => {
+    const result = await runTaskCanvasCloseout(store, { taskId,
+      ...(expectedManifestDigest === undefined ? {} : { expectedManifestDigest }),
+      ...(expectedWorkflowRevision === undefined ? {} : { expectedWorkflowRevision }) });
+    if (result.status === "ARCHIVE_PENDING") {
+      console.log(JSON.stringify({ component: "developer-task-closeout", event: "archive_pending", taskId,
+        reason: "reason" in result ? result.reason : "archive_pending" }));
+      return result;
+    }
+    console.log(JSON.stringify({ component: "developer-task-closeout", event: "closeout_complete", taskId,
+      canvasCount: result.canvases.length, outcomes: result.canvases.map((canvas) => canvas.status) }));
+    return result;
+  };
+}
+
+/** The Lambda's own dependencies, built on first use: the environment is read only then. */
+function createAwsNotifierHandler() {
+  const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
+  const sqs = new SQSClient(awsClientConfiguration);
+  const secretsManager = new SecretsManagerClient(awsClientConfiguration);
+  const s3 = new S3Client(awsClientConfiguration);
+  const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
+  const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+    .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
+  // Spec 062 Phase 7c: with SlackViaChannel on, every post, edit and Canvas goes through the Slack adapter's commands.
+  const viaChannel = slackNoticeChannelFromEnvironment(secretsManager);
+  const closeoutStore = createCanvasCloseoutStore({ documentClient, s3,
+    tableName: () => requiredEnvironment("STATE_TABLE_NAME"), bucketName: () => requiredEnvironment("ARTIFACT_BUCKET_NAME"),
+    async deleteCanvas(canvasId) {
+      if (viaChannel !== undefined) return viaChannel.deleteCanvas(canvasId);
+      const token = await secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+        .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken);
+      return deleteTaskPlanCanvas(token, canvasId);
+    },
+    now: () => new Date().toISOString(),
+  });
+  const reviewUrlBase = process.env.CONTROL_PLANE_URL;
+  return createNotifierHandler({
+    documentClient,
+    tableName: requiredEnvironment("STATE_TABLE_NAME"),
+    async enqueue(notices) {
+      for (let start = 0; start < notices.length; start += 10) {
+        const batch = notices.slice(start, start + 10);
+        const result = await sqs.send(new SendMessageBatchCommand({
+          QueueUrl: queueUrl(),
+          // #217: a notice the notifier scheduled waits in the queue until its time.
+          Entries: batch.map((notice, index) => {
+            const delay = noticeDelaySeconds(notice, Date.now());
+            return { Id: String(index), MessageBody: JSON.stringify(notice), ...(delay === 0 ? {} : { DelaySeconds: delay }) };
+          }),
+        }));
+        // The stream mapping retries the whole batch; a notice queued twice still posts once (C9).
+        if ((result.Failed ?? []).length > 0) throw new Error("some notices could not be queued");
+      }
+    },
+    async retryLater(receiptHandle, seconds) {
+      await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl(), ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
+    },
+    post: viaChannel?.post ?? slack.post,
+    ...(reviewUrlBase === undefined ? {} : { reviewUrlBase }),
+    async readArtifact(key) {
+      const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
+      if (response.Body === undefined) throw new Error("workflow plan artifact has no body");
+      return response.Body.transformToString("utf8");
+    },
+    createPlanCanvas(input, onCreated) {
+      if (viaChannel !== undefined) return viaChannel.createPlanCanvas(input, onCreated);
+      return cachedBotToken(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+        .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken))((token) => createTaskPlanCanvas(token, input, fetch, onCreated));
+    },
+    closeTaskCanvases: canvasCloseoutService(closeoutStore),
+    update: viaChannel?.update ?? slack.update,
+    postEphemeral: viaChannel?.postEphemeral ?? slack.postEphemeral,
+    now: Date.now,
+    log: (entry) => console.log(JSON.stringify({ component: "developer-task-notifier", ...entry })),
+    deliveryFailed: () => console.log(JSON.stringify({
+      _aws: { Timestamp: Date.now(), CloudWatchMetrics: [{ Namespace: requiredEnvironment("AGENTX_METRICS_NAMESPACE"), Dimensions: [[]], Metrics: [{ Name: "SlackDeliveryFailed", Unit: "Count" }] }] },
+      component: "developer-task-notifier", event: "metric", SlackDeliveryFailed: 1,
+    })),
+    peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true",
+    workflowE2EBlocks: async (task, operations) => {
+      void operations;
+      return workflowE2ENotifierBlocks({ task, taskPageUrl: taskPageUrlFromBase(reviewUrlBase, task.taskId),
+        readPrivateObject: async (key, maxBytes) => {
+          if (maxBytes > 262_144 || !/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key)) return undefined;
+          const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
+          const bytes = response.Body === undefined ? undefined : Buffer.from(await response.Body.transformToByteArray());
+          return bytes !== undefined && bytes.byteLength <= maxBytes ? bytes : undefined;
+        } });
+    },
+  });
+}
+
+/**
+ * The Slack blocks of a task's stored E2E display, or undefined when it has none this reader can use (a different round, changed bytes, or a display schema newer than this
+ * code reads), in which case the notifier says "Open the task page" and states no verdict. A display with scenario rows (schema v2, M1.3) reads as the per-scenario summary.
+ */
+export async function workflowE2ENotifierBlocks(input: { task: Pick<DeveloperTaskRecord, "taskId" | "ownerKey" | "workspaceId" | "workflow">; taskPageUrl?: string | undefined;
+  readPrivateObject: (key: string, maxBytes: number) => Promise<Uint8Array | undefined> }): Promise<unknown[] | undefined> {
+  const { task } = input;
+  const progress = task.workflow?.e2e;
+  const candidateDigest = task.workflow?.candidate?.digest;
+  const ref = progress?.displayRef;
+  if (candidateDigest === undefined || progress?.currentRoundId === undefined || ref === undefined) return undefined;
+  const view = await readWorkflowE2ENotifierProjection({ ref, ownerKey: task.ownerKey, workspaceId: task.workspaceId, current: { candidateDigest, roundId: progress.currentRoundId,
+    groupRunIds: progress.currentGroupRunIds, admissionSha256: ref.admissionSha256, evidenceSha256: ref.evidenceSha256 },
+  readPrivateObject: input.readPrivateObject });
+  return view === undefined ? undefined : renderE2ENotifierSlackBlocks(view.view,
+    { candidateDigest: view.candidateDigest, roundId: view.roundId, capturedAt: view.capturedAt, ...(view.scenarioResults === undefined ? {} : { scenarioResults: view.scenarioResults }) }, input.taskPageUrl);
+}
+
+let awsHandler: ReturnType<typeof createNotifierHandler> | undefined;
+
+/** The Lambda entry: the state table's stream and the notice queue both invoke it. */
+export const handler = (event: { Records?: unknown[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
+  awsHandler ??= createAwsNotifierHandler();
+  return awsHandler(event);
+};

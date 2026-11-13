@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError } from "@rovara-code/contracts";
 import type { DeployEvent } from "../../packages/cli/src/deploy/deployer.js";
 import { CDK_CONSTRUCT_IDS, assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { sourceReleaseVersion, synthDeclaredParameters } from "../../packages/cli/src/deploy/cdk-source.js";

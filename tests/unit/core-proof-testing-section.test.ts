@@ -4,9 +4,9 @@ import { describe, expect, it } from "vitest";
 import {
   EvidencePackSchema, TESTING_REASON_TEXT, TestingViewSchema, WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, wholeTaskSpendUsd,
   type AutoFixBudget, type TestingView, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { testingSectionLines, testingViewOf, type TestingViewInput } from "../../packages/broker/src/core/proof/testing-section.js";
-import { rovaraStatusLines, type PullRequestBodyContext } from "../../packages/broker/src/core/proof/pull-request-body.js";
+} from "@rovara-code/contracts";
+import { testingSectionLines, testingViewOf, type TestingViewInput } from "../../packages/core/src/core/proof/testing-section.js";
+import { rovaraStatusLines, type PullRequestBodyContext } from "../../packages/core/src/core/proof/pull-request-body.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const NOW = "2026-11-02T12:00:00.000Z";

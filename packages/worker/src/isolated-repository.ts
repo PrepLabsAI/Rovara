@@ -2,7 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, readdir, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isRefusedForNetwork, isolatedGitEnvironment, networkRefusal } from "./git.js";
 import { commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, removeIn, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
 import { runGitWithCredential, type GitCredential } from "./git-auth.js";

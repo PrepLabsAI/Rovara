@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { builtinFileCheckCommand } from "@agentx/contracts";
+import { builtinFileCheckCommand } from "@rovara-code/contracts";
 import { createProcessDockerCli } from "../../packages/verifier/src/host/docker-application-host.js";
 import { planDryRunSandboxArgs, runPlanDryRun } from "../../packages/worker/src/plan-dry-run.js";
 import { docker, listenOnAllAddresses, reachScript } from "../support/linux-network-walls.js";

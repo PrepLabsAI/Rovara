@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@rovara-code/contracts";
 import { STALE_LOCK_MS, lockParameterName, withEnvironmentLock } from "../../packages/cli/src/environments/lock.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 

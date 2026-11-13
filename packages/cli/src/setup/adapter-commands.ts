@@ -1,7 +1,7 @@
 // Spec 062 FR-051: `agentx adapter add|list|remove|bind|unbind|unlink`, an administrator's tools for channel adapters.
 // `agentx channel add` stays the Slack channel binding it has always been.
 import { writeFile } from "node:fs/promises";
-import { AgentXNameSchema, StepUpKindSchema, agentXError, type ChannelAdapterRecord, type StepUpKind } from "@agentx/contracts";
+import { AgentXNameSchema, StepUpKindSchema, agentXError, type ChannelAdapterRecord, type StepUpKind } from "@rovara-code/contracts";
 import type { Command } from "commander";
 import { bindAdapterSpace, listAdapters, registerAdapter, removeAdapter, unbindAdapterSpace, unlinkAdapterUser } from "../admin/channel-adapters.js";
 import type { SetupCommandContext } from "./command-context.js";

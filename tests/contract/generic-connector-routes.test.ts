@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { githubConnectorType, type ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
+import { githubConnectorType, type ConnectorType } from "../../packages/core/src/aws/connector-types.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
 import { SlackThreadWorkspaceResultSchema } from "../../packages/contracts/src/slack.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";

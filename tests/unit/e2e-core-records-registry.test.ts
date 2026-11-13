@@ -2,19 +2,19 @@
 // a registration that races another writes one revision between them, and a fence refuses once the row it stands on moved.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { E2E_DISPLAY_SCREENSHOT_MAX_BYTES, IMPLICIT_COMPANY_ID, change, OrgIdSchema, projectPk, type E2EWorkflowAdmissionRef, type StoredDocument } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntries } from "../../packages/broker/src/core/e2e/account-registry.js";
-import { E2EAccountRegistryError, e2eAccountDefinitionKey, e2eAccountLatestKey } from "../../packages/broker/src/e2e/application-account-registry.js";
+import { E2E_DISPLAY_SCREENSHOT_MAX_BYTES, IMPLICIT_COMPANY_ID, change, OrgIdSchema, projectPk, type E2EWorkflowAdmissionRef, type StoredDocument } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntries } from "../../packages/core/src/core/e2e/account-registry.js";
+import { E2EAccountRegistryError, e2eAccountDefinitionKey, e2eAccountLatestKey } from "../../packages/core/src/e2e/application-account-registry.js";
 import {
   applicationRuntimeRowFences, e2eRegisteredRuntimeKey, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, runtimeRowReader,
-} from "../../packages/broker/src/core/e2e/runtime-readiness.js";
+} from "../../packages/core/src/core/e2e/runtime-readiness.js";
 import {
   createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionNeedsModelFreeLimitsReader, createWorkflowE2EAdmissionSchemaReader, loadWorkflowE2EArtifact,
   readStoredAdmission, storeWorkflowE2EAdmission, storeWorkflowE2EArtifacts,
-} from "../../packages/broker/src/core/e2e/artifacts.js";
-import { workflowE2EArtifactKey } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
+} from "../../packages/core/src/core/e2e/artifacts.js";
+import { workflowE2EArtifactKey } from "../../packages/core/src/aws/workflow-e2e-notifier-projection.js";
 import { ORDERS_APPLICATION_ID, ordersManifestWith, withOwnerB, withViewerRole } from "../support/e2e-account-registry-fixtures.js";
 import { NOW, PROFILE, binding, snapshotOf, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 

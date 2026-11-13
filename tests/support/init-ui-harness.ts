@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach } from "vitest";
-import { environmentStackName } from "@agentx/contracts";
+import { environmentStackName } from "@rovara-code/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL } from "../../packages/cli/src/init/answers.js";

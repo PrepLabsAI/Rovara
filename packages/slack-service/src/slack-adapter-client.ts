@@ -9,7 +9,7 @@ import {
   type ChannelCommandKind,
   type ChannelCommandResult,
   type SlackThread,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 export interface SlackAdapterClient {
   /** Posts in the thread and answers the message's timestamp. */

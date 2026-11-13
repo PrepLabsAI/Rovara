@@ -3,7 +3,7 @@
 // callback. The journal holds one record per message that was really given to a session (the message's own operation id), so a repeat of the same message is answered from it and never
 // given twice. No log line, event or error holds the message's text.
 import { randomBytes } from "node:crypto";
-import { LIVE_STEER_REAPPROVAL_MARKER, REDIRECT_RESTART_NOTE, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE, agentXError, liveSteerOperationId, type AgentXError, type LiveSteerOutcome, type LiveSteerPayload, type OwnerRedirectInvocation, type WorkerInvocation } from "@agentx/contracts";
+import { LIVE_STEER_REAPPROVAL_MARKER, REDIRECT_RESTART_NOTE, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE, agentXError, liveSteerOperationId, type AgentXError, type LiveSteerOutcome, type LiveSteerPayload, type OwnerRedirectInvocation, type WorkerInvocation } from "@rovara-code/contracts";
 import type { LiveSteerTaken, WorkerCancellationController } from "./cancel.js";
 import type { OperationJournal } from "./journal.js";
 import type { PiSessionHandle } from "./pi-session.js";

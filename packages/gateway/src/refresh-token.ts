@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { OAuthRefreshTokenSecret } from "@agentx/contracts";
+import type { OAuthRefreshTokenSecret } from "@rovara-code/contracts";
 import { CredentialUnavailable, parseConnectorSecret, readLimitedText, type CachedToken, type SecretSource, type TokenCache } from "./credentials.js";
 import type { CredentialProvider } from "./types.js";
 import { isObject } from "./util.js";

@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   SignInClientIdSchema, SignInClientRegistrationSchema, SignInClientViewSchema, agentXError,
   type SignInClientRegistration, type SignInClientView,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { adminResponseBody } from "./http.js";
 
 export interface SignInClientAddOptions {

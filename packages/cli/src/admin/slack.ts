@@ -1,4 +1,4 @@
-import { SlackChannelIdSchema, SlackTeamIdSchema, agentXError } from "@agentx/contracts";
+import { SlackChannelIdSchema, SlackTeamIdSchema, agentXError } from "@rovara-code/contracts";
 import { readJsonResponse, serverError } from "./http.js";
 
 interface SlackChannelInput {

@@ -225,7 +225,7 @@ thread, applies the action gate, and posts the reply. [Working in Slack](docs/sl
 </td>
 <td width="50%">
 
-**Control plane** (`packages/broker`): The API behind everything: projects and revisions,
+**Control plane** (`packages/core`): The API behind everything: projects and revisions,
 workspaces, operations, callbacks, pull requests, CodeBuild gates and turn records, with state in
 DynamoDB. [Production architecture](docs/architecture-production.md)
 

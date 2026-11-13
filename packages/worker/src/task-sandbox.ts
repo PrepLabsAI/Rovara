@@ -4,7 +4,7 @@ import { availableParallelism, totalmem } from "node:os";
 import { lstat, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { openDirectory } from "./candidate-fs.js";
 import { join, resolve } from "node:path";
-import { agentXError, type ProjectCommand } from "@agentx/contracts";
+import { agentXError, type ProjectCommand } from "@rovara-code/contracts";
 import { createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
 import { containerBashOperations, runContainerCommand, type ContainerCommandOptions, type ContainerExec } from "./devcontainer.js";
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";

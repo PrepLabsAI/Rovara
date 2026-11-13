@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readE2EApplicationProjectContract } from "@agentx/contracts";
+import { readE2EApplicationProjectContract } from "@rovara-code/contracts";
 import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
 
 // The Task 3.2 fixture app goes through the real discovery, selection and compiler: three accounts in two tenants become three cases of one group.

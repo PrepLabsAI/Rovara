@@ -4,9 +4,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { OUTBOX_PENDING_INDEX, companyScoped, type QueueService } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX, companyScoped, type QueueService } from "@rovara-code/contracts";
 import { SqliteDatabase, SqliteDocumentStore, SqliteQueueService, QueueStorageError } from "../../packages/local-adapters/src/index.js";
-import { createTransactionalOutbox } from "../../packages/broker/src/ports/transactional-outbox.js";
+import { createTransactionalOutbox } from "../../packages/core/src/ports/transactional-outbox.js";
 import { runOutboxConformance } from "../support/ports/outbox-conformance.js";
 import { runQueueConformance } from "../support/ports/queue-conformance.js";
 

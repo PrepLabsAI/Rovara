@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalJson, type E2EReplayTrace } from "@agentx/contracts";
+import { canonicalJson, type E2EReplayTrace } from "@rovara-code/contracts";
 import { agentRunnable, downloadsOf, executorLog, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { recordingsOf, runReplayCase, type ReplayRun } from "../support/agent-replay-run.js";
 import { allOutputText, observations, readReport } from "../support/e2e-executor-output.js";

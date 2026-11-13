@@ -1,12 +1,12 @@
 // A task's spec state on the document store, at the key Cloud keeps it, and the review walks recorded beside it.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { SpecTargetSchema, queryAll, type SpecFile } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { specStateItem } from "../../packages/broker/src/core/spec/hooks.js";
-import { documentSpecStore } from "../../packages/broker/src/core/spec/store.js";
-import { specRequirementRowsOfTask, specReviewRecordItems } from "../../packages/broker/src/core/spec/review-record.js";
-import { newSpecState, publishSucceeded, specStateKey, startWriting, writeSucceeded, type SpecState } from "../../packages/broker/src/core/spec/state.js";
+import { SpecTargetSchema, queryAll, type SpecFile } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { specStateItem } from "../../packages/core/src/core/spec/hooks.js";
+import { documentSpecStore } from "../../packages/core/src/core/spec/store.js";
+import { specRequirementRowsOfTask, specReviewRecordItems } from "../../packages/core/src/core/spec/review-record.js";
+import { newSpecState, publishSucceeded, specStateKey, startWriting, writeSucceeded, type SpecState } from "../../packages/core/src/core/spec/state.js";
 
 const TASK = randomUUID();
 const NOW = "2026-11-10T10:00:00.000Z";

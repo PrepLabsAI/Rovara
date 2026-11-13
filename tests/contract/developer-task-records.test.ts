@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AiToolTurnRecordSchema } from "../../packages/contracts/src/index.js";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import { ownerKeyForSubject } from "../../packages/core/src/aws/lambda.js";
 import {
   aiToolTurn,
   deriveTaskStatus,
@@ -13,7 +13,7 @@ import {
   type DeveloperTaskRecord,
   type OperationFacts,
   type StoredEvent,
-} from "../../packages/broker/src/developer/task-records.js";
+} from "../../packages/core/src/developer/task-records.js";
 
 const developerId = "d".repeat(64);
 const taskId = "44444444-4444-4444-8444-444444444444";

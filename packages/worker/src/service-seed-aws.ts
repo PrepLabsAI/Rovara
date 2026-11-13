@@ -17,7 +17,7 @@ import { constants as fsConstants } from "node:fs";
 import { open, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
-import { TaskAwsResourcesSchema, awsSeededKinds, type TaskAwsResource } from "@agentx/contracts";
+import { TaskAwsResourcesSchema, awsSeededKinds, type TaskAwsResource } from "@rovara-code/contracts";
 import { EmulatorControlError, emulatorControlCall, type EmulatorControlTarget } from "./emulator-control.js";
 import { boundedReader, ENV_DETECT_MAX_FILE_BYTES } from "./env-detect/index.js";
 import { runDetectorsGuarded, type GuardOptions } from "./env-detect/guarded.js";

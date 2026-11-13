@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { E2EDisplayAgentNavigationSchema, e2eAgentValueDigest, e2eAgentValueKeyId, e2eModelRouteRevision, type E2EModelReceipt } from "@agentx/contracts";
+import { E2EDisplayAgentNavigationSchema, e2eAgentValueDigest, e2eAgentValueKeyId, e2eModelRouteRevision, type E2EModelReceipt } from "@rovara-code/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
-import { agentCaseDirectory, agentNavigationOf } from "../../packages/broker/src/e2e/application-agent-display.js";
+import { agentCaseDirectory, agentNavigationOf } from "../../packages/core/src/e2e/application-agent-display.js";
 
 // M1.4 Task 4.4b: the navigation block of a row comes from the verified action ledger and from nothing else. These tests hold the pure derivation; the end to end (a real executor run,
 // the broker's own display) is in tests/contract/workflow-e2e-agent-evidence.test.ts.
@@ -146,10 +146,10 @@ describe("agentNavigationOf", () => {
 
 // Test 29, at the level of a ledger that typed values: a ledger whose `type` action has `valueLiteral: null` and a known `valueDigest`, a password as the typed value, and a seeded password
 // in the name of an element the page shows. Whatever the model typed, the display, the page, Slack and the stored copy hold none of it.
-import { E2EScenarioResultsSchema } from "@agentx/contracts";
-import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
-import { scrubScenarioResults } from "../../packages/broker/src/e2e/application-display.js";
-import { createWorkflowE2EDisplayObject } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
+import { E2EScenarioResultsSchema } from "@rovara-code/contracts";
+import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/core/src/e2e-presentation.js";
+import { scrubScenarioResults } from "../../packages/core/src/e2e/application-display.js";
+import { createWorkflowE2EDisplayObject } from "../../packages/core/src/aws/workflow-e2e-notifier-projection.js";
 import { row } from "../support/e2e-scenario-results.js";
 
 describe("test 29: nothing the model typed reaches a row, the page, Slack or the stored copy", () => {

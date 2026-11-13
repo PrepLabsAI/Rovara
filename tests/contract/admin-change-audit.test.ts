@@ -3,7 +3,7 @@
 // stepped forward; its outcome is set once and counted once.
 import { describe, expect, it, vi } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { auditStepItem, listAudit, logChangeStep, outcomeMetric, readAudit, recordRefusedAttempt, writeProposal, type AuditStep, type AuditStore } from "../../packages/broker/src/aws/admin-change-audit.js";
+import { auditStepItem, listAudit, logChangeStep, outcomeMetric, readAudit, recordRefusedAttempt, writeProposal, type AuditStep, type AuditStore } from "../../packages/core/src/aws/admin-change-audit.js";
 import { outcomeOfStatus, type AdminChangeAuditRecord } from "../../packages/contracts/src/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 

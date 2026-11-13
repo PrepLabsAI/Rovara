@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { SpecDraftSchema, SpecTargetSchema, earsLine, specDraftStatements, specLine, specMarkdown, specPathProblem, specSlug, type SpecDraft, type SpecTarget } from "@agentx/contracts";
+import { SpecDraftSchema, SpecTargetSchema, earsLine, specDraftStatements, specLine, specMarkdown, specPathProblem, specSlug, type SpecDraft, type SpecTarget } from "@rovara-code/contracts";
 import {
   assertRenderedSpec, KIRO_BUGFIX_SECTIONS, kiroRenderer, nextFolderNumber, registerSpecRenderer, rovaraRenderer, specFormats, specKitRenderer, specRendererFor, teamTemplateRenderer, unregisterSpecRenderer,
   type SpecRenderInput, type SpecRenderer,
-} from "../../packages/broker/src/core/spec/index.js";
+} from "../../packages/core/src/core/spec/index.js";
 
 const planDigest = "a".repeat(64);
 const feature = (): SpecDraft => SpecDraftSchema.parse({

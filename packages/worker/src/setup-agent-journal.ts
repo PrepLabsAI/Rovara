@@ -12,7 +12,7 @@
 import {
   SETUP_AGENT_LIMITS_DEFAULT, SETUP_BLOCKED_HOSTS_MAX, SETUP_JOURNAL_MAX_ENTRIES, SETUP_JOURNAL_TAIL_BYTES, SETUP_HOST_WAIT_MAX_HOURS, SetupAgentLimitsSchema, SetupHostSchema, SetupJournalEntrySchema, SetupRunSummarySchema,
   oneLineText, type SetupAgentLimits, type SetupJournalEntry, type SetupProposal, type SetupRunEndWord, type SetupRunSummary,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { SetupAgentHooks, SetupCommandDecision, SetupCommandRecord, TrackedFilesVerdict } from "./setup-agent.js";
 import { readSetupProposalAnswer, type SetupDraftRepository } from "./setup-draft.js";
 import type { SetupScan } from "./setup-scan.js";

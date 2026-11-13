@@ -1,16 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { WorkerInvocation } from "@agentx/contracts";
+import type { WorkerInvocation } from "@rovara-code/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   adaptHttpApiEvent,
   identityFromJwtClaims,
   parseRuntimeBinding,
-} from "../../packages/broker/src/aws/lambda.js";
-import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
-import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
-import type { Ec2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
-import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
-import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
+} from "../../packages/core/src/aws/lambda.js";
+import { createOutboxPublisherHandler } from "../../packages/core/src/aws/outbox-publisher.js";
+import { createDispatcherHandler } from "../../packages/core/src/aws/dispatcher.js";
+import type { Ec2Delivery } from "../../packages/core/src/aws/ec2-delivery.js";
+import type { Ec2OutboxRecord } from "../../packages/core/src/aws/lambda.js";
+import { RepositoryGrantService } from "../../packages/core/src/repository-access.js";
 
 describe("AWS control-plane handlers", () => {
   it("reads browser cookies from the HTTP API's cookies field, where payload 2.0 puts them", () => {
@@ -229,7 +229,7 @@ describe("AWS control-plane handlers", () => {
       GITHUB_APP_ID: "123",
       GITHUB_APP_INSTALLATION_ID: "456",
     });
-    const { createAwsBrokerHandler } = await import("../../packages/broker/src/aws/broker.js");
+    const { createAwsBrokerHandler } = await import("../../packages/core/src/aws/broker.js");
     // Publication now reaches the control plane only through the hosted Slack orchestrator,
     // so the workspace is owned by its Slack thread.
     const teamId = "T0123456789";

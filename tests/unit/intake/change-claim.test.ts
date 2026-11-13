@@ -1,10 +1,10 @@
 // a Jira change id is used once per COMPANY. A real label-add that a person made, handed to a second project's hook (by someone who holds that hook's secret) must not start a task
 // as that person. The claim is written only after Jira confirmed the change, so a made-up change id cannot use up a real one.
 import { describe, expect, it } from "vitest";
-import { intakeChangeKey, intakeItemIdOf, type CodeIntentRequest, type OrgId } from "@agentx/contracts";
-import { ingestIntake, type IntakeCandidate, type IntakePorts } from "../../../packages/broker/src/core/intake/engine.js";
-import { claimIntakeChange, listWaitingIntakeItems } from "../../../packages/broker/src/core/intake/store.js";
-import { jiraActOf as adapterJiraActOf } from "../../../packages/broker/src/plugins/tracker/jira/index.js";
+import { intakeChangeKey, intakeItemIdOf, type CodeIntentRequest, type OrgId } from "@rovara-code/contracts";
+import { ingestIntake, type IntakeCandidate, type IntakePorts } from "../../../packages/core/src/core/intake/engine.js";
+import { claimIntakeChange, listWaitingIntakeItems } from "../../../packages/core/src/core/intake/store.js";
+import { jiraActOf as adapterJiraActOf } from "../../../packages/core/src/plugins/tracker/jira/index.js";
 
 const jiraActOf = (histories: readonly unknown[], act: { kind: "label" | "assignee"; value: string }) => adapterJiraActOf(histories, act, "https://acme.atlassian.net");
 import { RecordingStore } from "../../support/intake-world.js";

@@ -1,16 +1,16 @@
 // Design review security: the pure parts of N7/M1 (confusable brackets), M6 (the task's own request thread), B2 (the planner-side citation check), the citation link and
 // the merge prompt that comes only from the registry. Each test fails on the code before the round.
 import { describe, expect, it } from "vitest";
-import { defuseFrameTags, frameTagNameAt, neutralizePacketText, renderPacketDocument, type PacketDocument } from "@agentx/contracts";
-import { CODE_CITATION_UNCHECKED, type ContextSource, type DesignCitation, type DesignResolutionDraft } from "@agentx/contracts";
-import { checkPlannerEvidence, citationProblem, codeCitationLinkPath, roundItemsOf, type CitablePacketItem } from "../../packages/broker/src/core/design-review/citations.js";
-import { citationText, designQuestionsItem } from "../../packages/broker/src/core/design-review/card-source.js";
-import { buildReviewerPacket, mcpItemReaderOf, type PacketReaders } from "../../packages/broker/src/core/design-review/packet.js";
-import { isOriginItem, packetMcpCall } from "../../packages/broker/src/core/design-review/mcp-allowlist.js";
-import { DesignReviewBindingSchema, promptDigest } from "@agentx/contracts";
-import { bindingMergePromptDigest, bindingMergeProblem, mergeBindingFor } from "../../packages/broker/src/core/design-review/merge-binding.js";
-import { MERGE_PROMPT } from "../../packages/broker/src/core/design-review/prompts/index.js";
-import { frameResult, neutralizeFrameTags } from "../../packages/broker/src/context-sources/present.js";
+import { defuseFrameTags, frameTagNameAt, neutralizePacketText, renderPacketDocument, type PacketDocument } from "@rovara-code/contracts";
+import { CODE_CITATION_UNCHECKED, type ContextSource, type DesignCitation, type DesignResolutionDraft } from "@rovara-code/contracts";
+import { checkPlannerEvidence, citationProblem, codeCitationLinkPath, roundItemsOf, type CitablePacketItem } from "../../packages/core/src/core/design-review/citations.js";
+import { citationText, designQuestionsItem } from "../../packages/core/src/core/design-review/card-source.js";
+import { buildReviewerPacket, mcpItemReaderOf, type PacketReaders } from "../../packages/core/src/core/design-review/packet.js";
+import { isOriginItem, packetMcpCall } from "../../packages/core/src/core/design-review/mcp-allowlist.js";
+import { DesignReviewBindingSchema, promptDigest } from "@rovara-code/contracts";
+import { bindingMergePromptDigest, bindingMergeProblem, mergeBindingFor } from "../../packages/core/src/core/design-review/merge-binding.js";
+import { MERGE_PROMPT } from "../../packages/core/src/core/design-review/prompts/index.js";
+import { frameResult, neutralizeFrameTags } from "../../packages/core/src/context-sources/present.js";
 
 const mcp = (text: string): PacketDocument => ({ kind: "mcp_item", ref: "tracker:ABC-1", commitOrFetchedAt: "2026-11-03T10:00:00.000Z", text });
 const asciiTags = (rendered: string): string[] => [...rendered.matchAll(/<\s*\/?\s*(source-file|source-result|request-information)[^>]*>/giu)].map((match) => match[0]);

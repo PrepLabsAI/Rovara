@@ -1,11 +1,11 @@
 // A ticket of any tracker that asks for work, by a delivery (a tracker that posts to a hook of ours), through the one intake rule. A delivery is verified by the tracker's adapter, the item is read fresh, and the pair
 // becomes the intake engine's candidate. A laptop has no hook to receive one, so `rovara up` polls instead; an install that does (an adapter's own receiver) calls `startFromTrackerDelivery`.
 import { describe, expect, it, vi } from "vitest";
-import { CodeIntentRequestSchema, intakeItemIdOf, trackerOfCodeIntent, type CodeIntentRequest, type HostScope, type OrgId, type Tracker } from "@agentx/contracts";
-import { type IntakePorts } from "../../../packages/broker/src/core/intake/engine.js";
-import { readIntakeItem } from "../../../packages/broker/src/core/intake/store.js";
-import { intakeCandidateOfTrackerEvent, startFromTrackerDelivery } from "../../../packages/broker/src/core/intake/tracker-events.js";
-import { FAKE_TRACKER_KIND, FakeTracker, fakeTrackerDelivery } from "../../../packages/broker/src/plugins/fake/tracker.js";
+import { CodeIntentRequestSchema, intakeItemIdOf, trackerOfCodeIntent, type CodeIntentRequest, type HostScope, type OrgId, type Tracker } from "@rovara-code/contracts";
+import { type IntakePorts } from "../../../packages/core/src/core/intake/engine.js";
+import { readIntakeItem } from "../../../packages/core/src/core/intake/store.js";
+import { intakeCandidateOfTrackerEvent, startFromTrackerDelivery } from "../../../packages/core/src/core/intake/tracker-events.js";
+import { FAKE_TRACKER_KIND, FakeTracker, fakeTrackerDelivery } from "../../../packages/core/src/plugins/fake/tracker.js";
 import { RecordingStore } from "../../support/intake-world.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;

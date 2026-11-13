@@ -1,7 +1,7 @@
 // Spec 025 A6 (Q5): where the State table has no TTL (the legacy deployment), the reconciler deletes
 // failure and usage index items older than 30 days.
 import { describe, expect, it, vi } from "vitest";
-import { expireIndexDays, indexSweepWanted, INDEX_EXPIRY_DELETES_PER_RUN } from "../../packages/broker/src/aws/index-expiry.js";
+import { expireIndexDays, indexSweepWanted, INDEX_EXPIRY_DELETES_PER_RUN } from "../../packages/core/src/aws/index-expiry.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = new Date("2026-10-31T06:00:00.000Z");

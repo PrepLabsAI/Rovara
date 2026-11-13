@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentError } from "e2e/agent";
-import { canonicalJson, type E2EReplayTrace } from "@agentx/contracts";
+import { canonicalJson, type E2EReplayTrace } from "@rovara-code/contracts";
 import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "../../packages/verifier/src/executor/agent-replay.js";
 import { e2eApplicationAgentConfig } from "../../packages/verifier/src/application-runtime-bootstrap.js";
 import { createRovaraE2EAgentExecutor } from "../../packages/verifier/src/executor/agent-executor.js";

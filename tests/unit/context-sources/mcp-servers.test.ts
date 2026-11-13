@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { MCP_PROBE_FAILURES, orgScoped } from "@agentx/contracts";
-import { type McpServerSecrets, McpProbeError, STDIO_OFF_MESSAGE, allowedTargets, approveMcpServer, disableMcpServer, documentMcpServerStore, listMcpServers, probeLimiter, proposeMcpServer, removeMcpServer, summariseProbe, type McpProber, type McpServerDependencies } from "../../../packages/broker/src/context-sources/mcp-servers.js";
+import { MCP_PROBE_FAILURES, orgScoped } from "@rovara-code/contracts";
+import { type McpServerSecrets, McpProbeError, STDIO_OFF_MESSAGE, allowedTargets, approveMcpServer, disableMcpServer, documentMcpServerStore, listMcpServers, probeLimiter, proposeMcpServer, removeMcpServer, summariseProbe, type McpProber, type McpServerDependencies } from "../../../packages/core/src/context-sources/mcp-servers.js";
 import { routeMcpServers } from "../../support/mcp-server-routes.js";
 import { StatusReply, type AgentCaller } from "../../support/mcp-server-routes.js";
-import { INDEX_EXPIRY_ATTRIBUTE, change } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../../packages/broker/src/core/task-flow/flow.js";
-import type { DiscoveredTool } from "../../../packages/broker/src/context-sources/settings.js";
+import { INDEX_EXPIRY_ATTRIBUTE, change } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../../packages/core/src/core/task-flow/flow.js";
+import type { DiscoveredTool } from "../../../packages/core/src/context-sources/settings.js";
 import { GET_TOOL, NOW, ORG, SEARCH_TOOL } from "./fixtures.js";
 
 const admin = (developerId = "dev1", orgRole = "admin") => ({ orgId: ORG, developerId, orgRole });
@@ -290,7 +290,7 @@ describe("tests of an address are rate limited", () => {
     expect(state.httpProbes).toBe(2);
   });
   it("the default limiter allows ten tests in ten minutes for one org and counts orgs apart", async () => {
-    const { probeLimiter } = await import("../../../packages/broker/src/context-sources/mcp-servers.js");
+    const { probeLimiter } = await import("../../../packages/core/src/context-sources/mcp-servers.js");
     let clock = 0;
     const limit = probeLimiter({ max: 10, windowMs: 600_000, now: () => clock });
     for (let i = 0; i < 10; i += 1) expect(limit(ORG)).toBe(true);
@@ -313,7 +313,7 @@ describe("a stdio package is pinned by its tarball's integrity", () => {
     expect((await approveMcpServer(deps, admin(), entry.serverId)).status).toBe("approved");
   });
   it("accepts an integrity the admin typed, and the stored entry always has one", async () => {
-    const { McpServerEntrySchema, McpStdioSpecSchema, McpStdioProposalSchema } = await import("@agentx/contracts");
+    const { McpServerEntrySchema, McpStdioSpecSchema, McpStdioProposalSchema } = await import("@rovara-code/contracts");
     const { deps, state } = world();
     const typed = { ...STDIO, spec: { ...STDIO.spec, integrity: state.integrity } };
     expect((await proposeMcpServer(deps, admin(), { label: "Wiki", transport: typed })).transport).toMatchObject(typed);

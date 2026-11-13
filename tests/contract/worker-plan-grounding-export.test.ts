@@ -7,7 +7,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { type E2EScenario } from "@agentx/contracts";
+import { type E2EScenario } from "@rovara-code/contracts";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";

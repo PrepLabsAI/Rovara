@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { E2EApiMockFixture } from "@agentx/contracts";
+import type { E2EApiMockFixture } from "@rovara-code/contracts";
 import { SINKHOLE_ORIGIN_REF } from "../application-mocks.js";
 import { MOCK_LEDGER_MAX_LINES, MOCK_UNMOCKED_RESPONSE_DIGEST, MOCK_UNMOCKED_STATUS, mockRequestDigest, mockResponseDigest, type MockLedgerLine } from "../executor/mock-server.js";
 

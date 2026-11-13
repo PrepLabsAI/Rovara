@@ -1,4 +1,4 @@
-import { SWEBENCH_DATASETS, type SwebenchDataset } from "@agentx/contracts";
+import { SWEBENCH_DATASETS, type SwebenchDataset } from "@rovara-code/contracts";
 
 /**
  * The fields of a row the runner reads; the swebench harness gets the whole row. A SWE-Bench Pro row

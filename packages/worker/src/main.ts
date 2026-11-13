@@ -1,5 +1,5 @@
 import {taskFallbackAuthorizer} from "./model-fallback-authority.js";
-import type { WorkerInvocation } from "@agentx/contracts";
+import type { WorkerInvocation } from "@rovara-code/contracts";
 import { CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadiness, type ContainedRuntimeReadiness } from "@agentx/verifier";
 import { OperationJournal } from "./journal.js";
 import { prepareWorkspace, preparedBaseResult } from "./prepare.js";

@@ -3,13 +3,13 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey,
   type E2EApplicationExecutionAdmission, type E2EScenario, type E2ESourceSnapshot, type E2EWorkflowAdmissionRef, E2EWorkflowAdmissionRefSchema,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
-import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
-import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
-import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
-import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
+import { buildFeatureE2EPlanningContext } from "../../packages/core/src/e2e/feature-plan-planning-context.js";
+import { accountRegistryEntriesFromRows } from "../../packages/core/src/e2e/application-account-registry.js";
+import { e2eRegisteredRuntimeKey } from "../../packages/core/src/aws/e2e-runtime-readiness.js";
+import { webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
+import { workflowDispatchItem } from "../../packages/core/src/aws/broker-shared.js";
 import { createSingleAnswerPlanBroker, MAYA, type Developer } from "./developer-task-broker.js";
 import { createRealCandidate } from "./e2e-application-candidate.js";
 import { call, type Handler } from "./slack-broker.js";

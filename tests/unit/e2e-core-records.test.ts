@@ -1,19 +1,19 @@
 // The records of the baseline, replay and grounding rounds on the document store: each state transition, each refused transition, the stored keys and attributes (against the keys Cloud
 // stores), the time to live, and the guards that keep a result from a round that is not the one that was started out of the record.
 import { describe, expect, it } from "vitest";
-import { INDEX_EXPIRY_ATTRIBUTE, indexExpiresAt, type DocumentStore, type TransactItem } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
+import { INDEX_EXPIRY_ATTRIBUTE, indexExpiresAt, type DocumentStore, type TransactItem } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
 import {
   baselineStartItem, markWorkflowE2EBaselineUnavailable, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord, recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound,
-} from "../../packages/broker/src/core/e2e/baseline.js";
+} from "../../packages/core/src/core/e2e/baseline.js";
 import {
   listWorkflowE2EReplayRecords, markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayStartItem, requestWorkflowE2EReplay,
-} from "../../packages/broker/src/core/e2e/replay.js";
+} from "../../packages/core/src/core/e2e/replay.js";
 import {
   groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
-} from "../../packages/broker/src/core/e2e/grounding.js";
-import { E2E_BASELINE_ATTEMPT } from "../../packages/broker/src/aws/workflow-e2e-baseline.js";
+} from "../../packages/core/src/core/e2e/grounding.js";
+import { E2E_BASELINE_ATTEMPT } from "../../packages/core/src/aws/workflow-e2e-baseline.js";
 
 const AT = "2026-11-10T10:00:00.000Z";
 const LATER = "2026-11-10T10:30:00.000Z";
@@ -307,9 +307,9 @@ describe("the stored records equal what the DynamoDB versions write", () => {
   const bare = (item: Record<string, unknown>) => { const { requestedAt: _a, [INDEX_EXPIRY_ATTRIBUTE]: _b, ...rest } = item; void _a; void _b; return rest; };
 
   it("for a baseline, a replay and a grounding request and start", async () => {
-    const legacy = await import("../../packages/broker/src/aws/workflow-e2e-baseline.js");
-    const legacyReplay = await import("../../packages/broker/src/aws/workflow-e2e-replay.js");
-    const legacyGrounding = await import("../../packages/broker/src/aws/workflow-e2e-grounding.js");
+    const legacy = await import("../../packages/core/src/aws/workflow-e2e-baseline.js");
+    const legacyReplay = await import("../../packages/core/src/aws/workflow-e2e-replay.js");
+    const legacyGrounding = await import("../../packages/core/src/aws/workflow-e2e-grounding.js");
     const task = { taskId: "task-1", workflow: { e2e: { required: true, contractDigest: hex("a"), applicationSelection: {} } } } as never;
     const store = new MemoryDocumentStore();
     const deps = { store, now: clock(AT) };

@@ -8,11 +8,11 @@ import {
   SLACK_CONFIRMATION_ACTION_ID, builtInAdapterRecord, generateWebhookSecret, webhookHeaders,
   type ChannelQueueItem, type DirectoryUser, type InboundMessage, type SlackRequestMessage,
 } from "../../packages/contracts/src/index.js";
-import { createChannelIngressHandler, type ChannelIngressDependencies } from "../../packages/broker/src/aws/channel-ingress.js";
-import { confirmationAction, createSlackChannelCommandsHandler, createSlackChannelEventsHandler } from "../../packages/broker/src/aws/slack-adapter.js";
-import { slackChannelTransport } from "../../packages/broker/src/aws/slack-channel-router.js";
-import { createSlackAdapterFront, createSlackMentionRouter, inboundOfSlackMention, slackMentionOfInbound, type SlackMention } from "../../packages/broker/src/aws/slack-ingress.js";
-import type { SlackNoticeChannel } from "../../packages/broker/src/aws/slack-notice-channel.js";
+import { createChannelIngressHandler, type ChannelIngressDependencies } from "../../packages/core/src/aws/channel-ingress.js";
+import { confirmationAction, createSlackChannelCommandsHandler, createSlackChannelEventsHandler } from "../../packages/core/src/aws/slack-adapter.js";
+import { slackChannelTransport } from "../../packages/core/src/aws/slack-channel-router.js";
+import { createSlackAdapterFront, createSlackMentionRouter, inboundOfSlackMention, slackMentionOfInbound, type SlackMention } from "../../packages/core/src/aws/slack-ingress.js";
+import type { SlackNoticeChannel } from "../../packages/core/src/aws/slack-notice-channel.js";
 import { createSlackAdapterClient } from "../../packages/slack-service/src/slack-adapter-client.js";
 import { slackChannelRequests } from "../../packages/slack-service/src/slack-channel.js";
 

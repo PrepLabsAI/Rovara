@@ -1,7 +1,7 @@
 // Sign in with ChatGPT (#341): the task owner's ChatGPT access token, from the control plane through
 // the operation's callback capability. The worker never holds the refresh token; it keeps the access
 // token in memory until shortly before it expires, and asks once at a time.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 /** Asked for again this long before the token expires, so no request carries one about to lapse. */
 export const CHATGPT_TOKEN_MARGIN_MS = 2 * 60_000;

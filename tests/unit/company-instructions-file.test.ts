@@ -12,8 +12,8 @@ import {
   PLUGIN_POINT_CARDINALITY,
   isAllowedModuleSpecifier,
   type CompanyInstructionsSource,
-} from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
+} from "@rovara-code/contracts";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/core/src/ports/adapter-registry.js";
 import { COMPANY_INSTRUCTIONS_FILE_MAX_BYTES, FileCompanyInstructions, companyInstructionsSnapshot, parseCompanyInstructionsText } from "../../packages/local-adapters/src/company-instructions-file.js";
 import * as pluginModule from "../../packages/local-adapters/src/company-instructions-plugin.js";
 import { fakeCompanyInstructionsSource } from "../support/company-instructions-fake.js";

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { canonicalJson, E2ETargetSchema, type E2ERuntimeCapabilityDescriptor, type E2ERuntimeReadinessInput } from "@agentx/contracts";
+import { canonicalJson, E2ETargetSchema, type E2ERuntimeCapabilityDescriptor, type E2ERuntimeReadinessInput } from "@rovara-code/contracts";
 import { E2ERuntimeCapabilityDescriptorSchema, e2eRuntimeCapabilityDigest } from "../../packages/contracts/src/index.js";
-import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
+import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles } from "../../packages/core/src/aws/e2e-runtime-readiness.js";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",

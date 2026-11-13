@@ -2,7 +2,7 @@
 // variants, the feedback page, MCP, the webhook builder and secret rotation, wire mode, and the model fixtures.
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { execFileSync } from "node:child_process";
-import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, parsePlanDocument } from "@agentx/contracts";
+import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, parsePlanDocument } from "@rovara-code/contracts";
 import { fauxProvider, normalizeContext } from "@earendil-works/pi-ai";
 import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
 import { OMAR } from "../support/developer-task-broker.js";

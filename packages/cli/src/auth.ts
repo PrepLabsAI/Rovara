@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { StoredTokens, TokenStore } from "./token-store.js";
 
 const execFileAsync = promisify(execFile);

@@ -1,13 +1,13 @@
 // What `rovara up` does with what a chat adapter hands it after the sink's checks: a start runs only for the owner, and a decision reaches the gate only for the owner and only as a credential of the chat's own method that names
 // the account that pressed. The flow and the gate are stubs; the store is the memory one.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, type ChannelDecision, type OrgId } from "@agentx/contracts";
-import type { ApprovalCard } from "../../packages/broker/src/core/channel/index.js";
-import type { DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { createLocalChat } from "../../packages/broker/src/local/app/chat.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { IMPLICIT_COMPANY_ID, type ChannelDecision, type OrgId } from "@rovara-code/contracts";
+import type { ApprovalCard } from "../../packages/core/src/core/channel/index.js";
+import type { DecisionAttempt } from "../../packages/core/src/core/decisions/approval-gate.js";
+import { developerIdOf } from "../../packages/core/src/core/sessions/create.js";
+import { createLocalChat } from "../../packages/core/src/local/app/chat.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const owner = localOwnerPrincipal();

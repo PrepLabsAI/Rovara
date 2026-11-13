@@ -4,7 +4,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
-import type { DeveloperTaskView, StartDeveloperTaskRequest } from "@agentx/contracts";
+import type { DeveloperTaskView, StartDeveloperTaskRequest } from "@rovara-code/contracts";
 import { DEVELOPER_TOOLS, createAgentXMcpServer, httpControlPlaneClient, type ControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
 
 const TASK = "44444444-4444-4444-8444-444444444444";

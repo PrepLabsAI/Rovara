@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 import {
   AGENTX_PREAMBLE_VERSION, COMPANY_RULES_EXCEED_BUDGET_MESSAGE, COMPANY_RULE_LIMITS, STANDING_INSTRUCTIONS_WORDING, StandingInstructionsPayloadSchema,
   agentxPreambleSha256, assertCompanyRulesWithinBudget, type CompanyInstructionsSnapshot,
-} from "@agentx/contracts";
-import { buildStandingInstructions } from "../../packages/broker/src/core/instructions/standing-block.js";
-import { emptyCompanyInstructionsSource, readCompanyInstructions } from "../../packages/broker/src/core/instructions/company-source.js";
+} from "@rovara-code/contracts";
+import { buildStandingInstructions } from "../../packages/core/src/core/instructions/standing-block.js";
+import { emptyCompanyInstructionsSource, readCompanyInstructions } from "../../packages/core/src/core/instructions/company-source.js";
 import { fakeCompanyInstructionsSource } from "../support/company-instructions-fake.js";
 
 const HEADER = STANDING_INSTRUCTIONS_WORDING.header;

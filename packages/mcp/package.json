@@ -6,8 +6,8 @@
   "exports": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "dependencies": {
-    "@agentx/contracts": "0.1.0",
     "@modelcontextprotocol/sdk": "1.32.0",
+    "@rovara-code/contracts": "0.1.0",
     "zod": "4.6.6"
   }
 }

@@ -5,7 +5,7 @@ import {
   conversationFromSlackThread, conversationOwnerIssuer, conversationSubject, inboundFromSlackRequest,
   parseConversationSubject, parseSlackThreadSubject, readSlackRequestMessage, slackRequestFromInbound,
   slackRequesterOf, slackThreadOf, slackThreadSubject, type ConversationRef, type InboundMessage, type SlackRequestMessage,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const thread = { teamId: "T0123ABCD", channelId: "C0456EFGH", threadTs: "1760000000.000100" };
 const slackRef: ConversationRef = { channel: "slack", tenant: "T0123ABCD", space: "C0456EFGH", thread: "1760000000.000100" };

@@ -3,7 +3,7 @@
 //  - `create` does not make a token itself: a token is a long-lived credential, so it is made on a local page the running `rovara up` opens in your browser (a fresh page session, one form, shown once).
 //    The API login this command holds is the one an AI tool may hold too, so it is refused for making tokens. The page address carries the session and is never printed.
 //  - `list` shows names, hints and states, never a secret. `revoke` ends a token at once.
-import { ScriptTokenListReaderSchema, agentXError } from "@agentx/contracts";
+import { ScriptTokenListReaderSchema, agentXError } from "@rovara-code/contracts";
 import { homedir } from "node:os";
 import type { Command } from "commander";
 import type { TextWriter } from "../init/prompts.js";

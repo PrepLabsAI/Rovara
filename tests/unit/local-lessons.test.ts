@@ -2,23 +2,23 @@
 // checks that they are joined to what `rovara up` has, with the install's one owner, the document store and the queue point.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LEARNED_CONTEXT_FEATURE, change, companyScoped, type ApprovalProof, type Approvers, type ExternalAccountRef, type IdentityProvider } from "@agentx/contracts";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMetering, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createMemoryModelKeyStore } from "../../packages/broker/src/ports/model-key-stores.js";
-import { builtinModelProviderBook } from "../../packages/broker/src/local/model-proxy/index.js";
-import { LESSON_LOAD_DEADLINE_MS, createLocalLessons, type LocalLessons } from "../../packages/broker/src/local/app/lessons.js";
-import { resolveLearning, setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
-import { localLessonsEnabled } from "../../packages/broker/src/lessons/switch.js";
-import { newRepoFileState } from "../../packages/broker/src/lessons/repo-file-state.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import type { CodeMilestoneHandler } from "../../packages/broker/src/core/milestones/milestones.js";
+import { LEARNED_CONTEXT_FEATURE, change, companyScoped, type ApprovalProof, type Approvers, type ExternalAccountRef, type IdentityProvider } from "@rovara-code/contracts";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMetering, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createMemoryModelKeyStore } from "../../packages/core/src/ports/model-key-stores.js";
+import { builtinModelProviderBook } from "../../packages/core/src/local/model-proxy/index.js";
+import { LESSON_LOAD_DEADLINE_MS, createLocalLessons, type LocalLessons } from "../../packages/core/src/local/app/lessons.js";
+import { resolveLearning, setLearnedLessonsGate } from "../../packages/core/src/lessons/policy.js";
+import { localLessonsEnabled } from "../../packages/core/src/lessons/switch.js";
+import { newRepoFileState } from "../../packages/core/src/lessons/repo-file-state.js";
+import { taskKey } from "../../packages/core/src/core/task-flow/keys.js";
+import type { CodeMilestoneHandler } from "../../packages/core/src/core/milestones/milestones.js";
 import { COMPANY, createHarness, definition, type Harness } from "../support/task-flow-harness.js";
 import { draft, lessonRecord } from "./lessons/lesson-helpers.js";
-import { createLessonRoutes } from "../../packages/broker/src/local/app/lessons-routes.js";
-import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
-import type { LessonRepositories, LessonRepository } from "../../packages/broker/src/local/app/lessons-repos.js";
-import type { BrokerRequest } from "../../packages/broker/src/handler.js";
+import { createLessonRoutes } from "../../packages/core/src/local/app/lessons-routes.js";
+import { createLocalLessonSources } from "../../packages/core/src/local/app/lessons-sources.js";
+import type { LessonRepositories, LessonRepository } from "../../packages/core/src/local/app/lessons-repos.js";
+import type { BrokerRequest } from "../../packages/core/src/handler.js";
 
 afterEach(() => setLearnedLessonsGate(undefined));
 
@@ -611,7 +611,7 @@ describe("lessons for local coding tools on a laptop (decision 46b)", () => {
     const w = await world();
     const scopes = w.lessons.repositories.scopes();
     for (const spelling of ["https://github.com/example/demo.git", "git@github.com:example/demo.git", "ssh://git@github.com/Example/Demo"]) {
-      expect(await scopes.byRemote!(COMPANY, "payments", (await import("../../packages/broker/src/lessons/repo-remote.js")).normalizeRemote(spelling)!), spelling).toEqual({ name: "demo", place: "github:repo/77" });
+      expect(await scopes.byRemote!(COMPANY, "payments", (await import("../../packages/core/src/lessons/repo-remote.js")).normalizeRemote(spelling)!), spelling).toEqual({ name: "demo", place: "github:repo/77" });
     }
     expect(await scopes.byRemote!(COMPANY, "payments", "github.com/example/other")).toBeUndefined();
     await expect(scopes.byRemote!(COMPANY, "nope", "github.com/example/demo")).rejects.toThrow();

@@ -13,7 +13,7 @@ import {
   type ConversationRef,
   type QueuedRouting,
   type SlackRequestMessage,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { approvalRequestData, channelTurn, type ConversationQueueItem } from "./channel-requests.js";
 import type { RequestContext } from "./consumer.js";
 import { processSlackRequest, type ProcessorDependencies, type ServiceLog } from "./slack-processor.js";

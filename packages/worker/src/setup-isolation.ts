@@ -5,7 +5,7 @@
 // Where the fact comes from: only the launcher (root) writes it, into a root-owned file under /etc/agentx that neither this container nor a sandbox mounts, and hands its content in as this variable at
 // container start. A task cannot change its worker's environment. Fail closed: on an EC2 named-environment worker anything but the exact word "ready" (no variable, an empty or odd value) refuses the run.
 // Other runtimes (a developer's machine, tests) have no such launcher and are not gated here.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 export const SETUP_ISOLATION_ENVIRONMENT = "AGENTX_SETUP_ISOLATION";
 export const SETUP_ISOLATION_READY = "ready";

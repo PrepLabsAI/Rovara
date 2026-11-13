@@ -9,7 +9,7 @@ import { Type } from "typebox";
 import {
   AGENT_STEP_PREAMBLE, READ_ONLY_TOOLS, SHORTENED_MARKER, agentXError, redactText, createTaskUsageTelemetry,
   type AgentStepGrounding, type AgentStepPayload, type ConnectorCatalog, type ResultContract,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { ArtifactSink } from "../artifacts.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "../cancel.js";
 import { EventBatcher, redactCredentials, type EventBatchSink } from "../events.js";

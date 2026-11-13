@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   E2EApplicationProjectContractSchema, E2EExecutorAccountSchema, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, createE2ESyntheticAccountDefinition, e2eSyntheticAccountContractDigest,
-} from "@agentx/contracts";
-import { planSyntheticAccountWrites, type E2EAccountRegistryEntry } from "../../packages/broker/src/e2e/application-account-registry.js";
+} from "@rovara-code/contracts";
+import { planSyntheticAccountWrites, type E2EAccountRegistryEntry } from "../../packages/core/src/e2e/application-account-registry.js";
 import { ORDERS_APPLICATION_ID, contractOf, ordersManifestWith, shaCanonicalOf } from "../support/e2e-account-registry-fixtures.js";
 
 // Task 3.2: the recipe-declared account seed (`rovara-accounts-file/v1`, `recipe.seed`) and the form login (`rovara-form-login/v1`, `profile.login`) are part of what an account

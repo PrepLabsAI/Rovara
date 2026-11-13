@@ -4,7 +4,7 @@ import {
   DRIVING_TEST_BUDGET, DRIVING_TEST_FIRST_CALL_CASE_ID, E2EModelCheckRequestSchema, E2EModelCheckResultSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHECK_RESULT_SCHEMA,
   e2eAgentModelsFor, e2eModelRouteRevision, isKeyedModelProvider,
   type E2EModelCheckRefusal, type E2EModelCheckRequest, type E2EModelCheckResult, type E2EModelRouteDefinition, type ModelProvider,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import {
   E2EPayloadRefusedError, assertE2EEnvironmentCannotRedirect, assertE2ESharedAwsConfigCannotRedirect, createE2EProviderInvoke, createGovernedE2EModelRoute, deriveE2EAgentRoute,
   deriveE2EAgentRouteForModel, e2eAgentInstallationFromEnvironment, e2eAgentRouteDefinitionDigest, readProviderKey, searchE2EAgentRouteByDigest,

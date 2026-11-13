@@ -2,7 +2,7 @@
 // Spec 048 FR-060: what a failure screen says, kept in plain words, with raw messages, codes and
 // stack names in the technical details.
 import { describe, expect, it } from "vitest";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { askFailureAction, failureScreen, plainReason } from "../../packages/cli/src/init/ui/failure.js";
 import { scriptedPrompter } from "../support/init-fakes.js";
 

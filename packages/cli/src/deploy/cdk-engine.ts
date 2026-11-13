@@ -11,7 +11,7 @@
 // change set), this engine never needs to touch it.
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { DeployRequest, StackDeployer, StackOutputs } from "./deployer.js";
 import { SECRET_PARAMETERS, type DeployPart } from "./parameters.js";

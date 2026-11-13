@@ -1,8 +1,8 @@
 // tests/contract/developer-signin-store.test.ts
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { DeveloperSignInStore, REFRESH_REUSE_GRACE_SECONDS } from "../../packages/broker/src/developer/store.js";
-import { sha256Hex } from "../../packages/broker/src/developer/tokens.js";
+import { DeveloperSignInStore, REFRESH_REUSE_GRACE_SECONDS } from "../../packages/core/src/developer/store.js";
+import { sha256Hex } from "../../packages/core/src/developer/tokens.js";
 import { T0 } from "../support/developer-fakes.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 

@@ -1,7 +1,7 @@
 // agentx doctor's Sign in with ChatGPT checks (#343): the admin's switch, how many people are
 // connected, and whether the control plane reaches OpenAI. The control plane alone knows these, so
 // they are read through this computer's admin sign-in; without one they are skipped, with how to sign in.
-import { CLI_PACKAGE_NAME, ChatGptHealthSchema, type ChatGptHealth } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, ChatGptHealthSchema, type ChatGptHealth } from "@rovara-code/contracts";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 
 export type ChatGptHealthRead = { kind: "health"; health: ChatGptHealth } | { kind: "signed-out" } | { kind: "not-set-up" };

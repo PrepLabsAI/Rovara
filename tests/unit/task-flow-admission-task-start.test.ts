@@ -1,7 +1,7 @@
 // The admission request for task.start says which path the task takes (Quick or Full) and the flow options that matter, so a host can set a different minimum room for each.
 // The field is optional and additive: Code's own admission ignores it.
 import { describe, expect, it } from "vitest";
-import type { Admission, AdmissionRequest, TransactItem } from "@agentx/contracts";
+import type { Admission, AdmissionRequest, TransactItem } from "@rovara-code/contracts";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 
 function capturingAdmission(refuse?: (request: AdmissionRequest) => { code: string; message: string } | undefined): Admission & { requests: AdmissionRequest[] } {

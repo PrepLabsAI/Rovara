@@ -1,10 +1,10 @@
 // the pull login exchange. The worker names nothing; the broker decides from the grant, the running preparation and the digest it recorded with the operation.
 import { describe, expect, it } from "vitest";
-import { HostedSavedEnvRegistryAuthSchema } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { countOperationAttribute, readSavedEnvOperation } from "../../packages/broker/src/core/test-env/saved-env-operations.js";
-import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { SAVED_ENV_LOGIN_MAX_PER_OPERATION, exchangeSavedEnvLoginCore, type SavedEnvLoginContext } from "../../packages/broker/src/core/test-env/saved-env-login.js";
+import { HostedSavedEnvRegistryAuthSchema } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { countOperationAttribute, readSavedEnvOperation } from "../../packages/core/src/core/test-env/saved-env-operations.js";
+import { operationKey, workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { SAVED_ENV_LOGIN_MAX_PER_OPERATION, exchangeSavedEnvLoginCore, type SavedEnvLoginContext } from "../../packages/core/src/core/test-env/saved-env-login.js";
 
 const REGISTRY = "127.0.0.1:5999";
 const REPOSITORY = "rovara-env/test/oaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

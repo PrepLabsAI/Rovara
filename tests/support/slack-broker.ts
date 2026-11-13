@@ -2,11 +2,11 @@
 // optional GitHub MCP, connector type and connector credential dependencies.
 import { randomUUID } from "node:crypto";
 import { vi, type Mock } from "vitest";
-import type { ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
-import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
-import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
-import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
-import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
+import type { ConnectorType } from "../../packages/core/src/aws/connector-types.js";
+import type { DeveloperApiConfiguration } from "../../packages/core/src/aws/developer-routes.js";
+import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/core/src/aws/credentials.js";
+import type { GitHubMcpDependencies } from "../../packages/core/src/github-mcp.js";
+import { RepositoryGrantService } from "../../packages/core/src/repository-access.js";
 import { FakeDynamoDb, type FakeDynamoDbOptions } from "./fake-dynamodb.js";
 
 export const issuer = "https://identity.example.test";
@@ -72,7 +72,7 @@ export async function loadSlackBroker(): Promise<SlackBrokerModule> {
     GITHUB_APP_ID: "123",
     GITHUB_APP_INSTALLATION_ID: "456",
   });
-  loaded = await import("../../packages/broker/src/aws/broker.js") as unknown as SlackBrokerModule;
+  loaded = await import("../../packages/core/src/aws/broker.js") as unknown as SlackBrokerModule;
   return loaded;
 }
 

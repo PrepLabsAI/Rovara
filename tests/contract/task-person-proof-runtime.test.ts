@@ -1,8 +1,8 @@
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TaskDispatchProofRequest } from "@agentx/contracts";
+import type { TaskDispatchProofRequest } from "@rovara-code/contracts";
 
-const runtimeModulePath: string = "../../../packages/broker/src/aws/task-person-proof-runtime.js";
+const runtimeModulePath: string = "../../../packages/core/src/aws/task-person-proof-runtime.js";
 type RuntimeModule = {
   handler(event: unknown, context: { getRemainingTimeInMillis(): number }): Promise<unknown>;
 };

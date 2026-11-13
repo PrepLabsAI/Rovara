@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
+import { createTaskAuthorityAdmission } from "../../packages/core/src/aws/task-authority-admission.js";
 
 describe("task authority admission", () => {
   it("bounds authority by six seconds and reserves two seconds of Lambda time", () => {

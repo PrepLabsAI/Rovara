@@ -10,16 +10,16 @@ import { describe, expect, it } from "vitest";
 import {
   SECOND_REVIEW_RESULT_KEY, WorkflowSnapshotSchema, workflowRequestId, createCandidateManifest, createWorkflowSnapshot, secondReviewModelKey, workflowFindingFingerprint,
   type SecondOpinion, type WorkflowReviewReport, type WorkflowSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { ROUTE_PROVIDER } from "@agentx/model-runtime/catalog";
-import { recordReviewed } from "../../packages/broker/src/core/build-step/results.js";
-import { startReview } from "../../packages/broker/src/core/build-step/start.js";
-import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
-import { closeTask } from "../../packages/broker/src/core/task-flow/close.js";
-import { recordOperationResult } from "../../packages/broker/src/core/task-flow/results.js";
-import { developerCharge, operationKey, operationRequestKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
-import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
+import { recordReviewed } from "../../packages/core/src/core/build-step/results.js";
+import { startReview } from "../../packages/core/src/core/build-step/start.js";
+import { workflowPullRequestBody } from "../../packages/core/src/core/proof/workflow-pull-request-body.js";
+import { closeTask } from "../../packages/core/src/core/task-flow/close.js";
+import { recordOperationResult } from "../../packages/core/src/core/task-flow/results.js";
+import { developerCharge, operationKey, operationRequestKey, taskKey, workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { readTask, workspaceOperations } from "../../packages/core/src/core/task-flow/reads.js";
+import type { OperationRecord } from "../../packages/core/src/core/task-flow/records.js";
 import { createHarness, COMPANY, type Harness } from "../support/task-flow-harness.js";
 import { GPT, OWNER, SONNET, createWorld, type SecondReviewWorld, plain } from "../support/second-review-world.js";
 

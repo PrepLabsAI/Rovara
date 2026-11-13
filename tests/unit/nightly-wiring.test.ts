@@ -1,18 +1,18 @@
 // The nightly joined to the ports: the schedule follows the approved environment, the scheduler's delivery reaches the fire, the run is started through the task flow's seam, and the worker's result goes through
 // the callback rules (the capability's task, the slot, the revision, the commit).
 import { describe, expect, it } from "vitest";
-import { NIGHTLY_RUN_ORIGIN, NIGHTLY_RUN_PURPOSE, NightlyRunPayloadSchema, ROVARA_CODE_AGENT_ID, agentXError, projectPk, type OrgId, type TestEnvironment } from "@agentx/contracts";
-import { taskKey, taskPointerKey } from "../../packages/broker/src/developer/task-records.js";
-import { handleNightlyResultCallback, nightlyRunOfOperation, type NightlyOperation } from "../../packages/broker/src/core/test-env/nightly-callback.js";
-import { isNightlyOperation, nightlyEndItems, nightlyRequestId, nightlyRunPayloadOf, nightlyRunPort, nightlyRunText, skipReasonOf, type NightlyAutomaticRun } from "../../packages/broker/src/core/test-env/nightly-run.js";
-import { nightlyScheduleName, nightlySlotId, readNightlyBaseline } from "../../packages/broker/src/core/test-env/nightly.js";
-import { fireTestEnvNightly, nightlyHooks, subscribeNightly } from "../../packages/broker/src/core/test-env/nightly-wiring.js";
-import { readNightRows } from "../../packages/broker/src/core/test-env/night-status.js";
-import { nightlyRunsOn } from "../../packages/broker/src/core/test-env/health-switch.js";
-import { createFakeScheduler } from "../../packages/broker/src/ports/fake-scheduler.js";
+import { NIGHTLY_RUN_ORIGIN, NIGHTLY_RUN_PURPOSE, NightlyRunPayloadSchema, ROVARA_CODE_AGENT_ID, agentXError, projectPk, type OrgId, type TestEnvironment } from "@rovara-code/contracts";
+import { taskKey, taskPointerKey } from "../../packages/core/src/developer/task-records.js";
+import { handleNightlyResultCallback, nightlyRunOfOperation, type NightlyOperation } from "../../packages/core/src/core/test-env/nightly-callback.js";
+import { isNightlyOperation, nightlyEndItems, nightlyRequestId, nightlyRunPayloadOf, nightlyRunPort, nightlyRunText, skipReasonOf, type NightlyAutomaticRun } from "../../packages/core/src/core/test-env/nightly-run.js";
+import { nightlyScheduleName, nightlySlotId, readNightlyBaseline } from "../../packages/core/src/core/test-env/nightly.js";
+import { fireTestEnvNightly, nightlyHooks, subscribeNightly } from "../../packages/core/src/core/test-env/nightly-wiring.js";
+import { readNightRows } from "../../packages/core/src/core/test-env/night-status.js";
+import { nightlyRunsOn } from "../../packages/core/src/core/test-env/health-switch.js";
+import { createFakeScheduler } from "../../packages/core/src/ports/fake-scheduler.js";
 import { HEAD1, ORG, PROJECT, SCHEDULED, T0, approveForTest, body, nightlyWorld, result, rows } from "../support/nightly-world.js";
-import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
-import { readApprovedTestEnvironment } from "../../packages/broker/src/core/test-env/environment.js";
+import { documentOf } from "../../packages/core/src/core/test-env/deps.js";
+import { readApprovedTestEnvironment } from "../../packages/core/src/core/test-env/environment.js";
 
 const ON = { ROVARA_NIGHTLY_HEALTH: "1" } as NodeJS.ProcessEnv;
 const WORKSPACE = "w-nightly-1";
@@ -195,7 +195,7 @@ describe("who is granted the nightly action", () => {
 describe("the result route", () => {
   async function running(over: { task?: Record<string, unknown>; operation?: Partial<NightlyOperation> } = {}) {
     const h = await nightlyWorld();
-    const fire = await (await import("../../packages/broker/src/core/test-env/nightly.js")).handleNightlyFire(h.deps, h.due());
+    const fire = await (await import("../../packages/core/src/core/test-env/nightly.js")).handleNightlyFire(h.deps, h.due());
     if (fire.outcome !== "started") throw new Error("not started");
     const nightlyRun = { slotId: fire.slotId, envRevision: 1, branch: "main", headSha: HEAD1 };
     await h.store.put({ item: documentOf({ ...taskKey(TASK), entityType: "DEVELOPER_TASK", orgId: ORG, taskId: TASK, project: PROJECT, workspaceId: WORKSPACE, purpose: "nightly_run", nightlyRun, ...over.task }) });
@@ -313,7 +313,7 @@ describe("a later approval", () => {
   it("is the revision the next fire starts for", async () => {
     const h = await nightlyWorld();
     await approveForTest(h.store, body({ cronUtc: "0 7 * * *" }), 2);
-    await (await import("../../packages/broker/src/core/test-env/nightly.js")).handleNightlyFire(h.deps, h.due());
+    await (await import("../../packages/core/src/core/test-env/nightly.js")).handleNightlyFire(h.deps, h.due());
     expect(h.started[0]).toMatchObject({ envRevision: 2 });
   });
 });

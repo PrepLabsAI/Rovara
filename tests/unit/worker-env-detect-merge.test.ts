@@ -1,6 +1,6 @@
 // Proof and test environment E2: several detectors on one repository give ONE coherent detection (no duplicate commands, every citation kept, one copy of each question, the limits held) and a proposal that is valid.
 import { afterEach, describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema } from "@agentx/contracts";
+import { TestEnvironmentBodySchema } from "@rovara-code/contracts";
 import { DETECTORS, boundedReader, buildEnvironmentDraft, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import type { Detector } from "../../packages/worker/src/env-detect/types.js";
 

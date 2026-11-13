@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { TestEnvTaskPlanSchema, type CandidateRepository, type ProjectCommand, type TestEnvTaskPlan } from "@agentx/contracts";
+import { TestEnvTaskPlanSchema, type CandidateRepository, type ProjectCommand, type TestEnvTaskPlan } from "@rovara-code/contracts";
 
 const changes = vi.hoisted(() => ({ byDirectory: new Map<string, Array<{ path: string; status: "ADDED" | "MODIFIED" | "DELETED" | "UNPLACEABLE"; hunks: never[] }>>(), throwFor: new Set<string>() }));
 vi.mock("../../packages/worker/src/verification/diff.js", () => ({

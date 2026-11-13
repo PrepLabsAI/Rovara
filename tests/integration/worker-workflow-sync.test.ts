@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
+import { WorkerInvocationSchema, type WorkerInvocation } from "@rovara-code/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js";
 import { maintainPullRequest } from "../../packages/worker/src/maintain-pull-request.js";

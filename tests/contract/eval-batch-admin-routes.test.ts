@@ -2,7 +2,7 @@
 // the administrator claim and the administrator membership of the channel's project.
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { swebenchDeploymentForTests } from "../support/eval-batch-admin.js";
-import { finalizeBatch, withEvalBatches } from "../../packages/broker/src/aws/eval-batch.js";
+import { finalizeBatch, withEvalBatches } from "../../packages/core/src/aws/eval-batch.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject } from "../support/slack-broker.js";
 
 const administrator = { subject: "admin-subject", admin: true };

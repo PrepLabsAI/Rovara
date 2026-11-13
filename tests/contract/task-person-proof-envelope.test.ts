@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TaskDispatchProofRequestSchema, TaskDispatchProofResponseSchema } from "@agentx/contracts";
+import { TaskDispatchProofRequestSchema, TaskDispatchProofResponseSchema } from "@rovara-code/contracts";
 
 const request = {
   kind: "task-dispatch-person-proof",

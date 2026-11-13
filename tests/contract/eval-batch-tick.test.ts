@@ -3,7 +3,7 @@
 // writes results.csv and summary.json. Offline: FakeDynamoDb, a vi.fn state machine and S3.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { EvalBatchSummarySchema, SWEBENCH_RUN_TIME_LIMIT_SECONDS, summarize } from "@agentx/contracts";
+import { EvalBatchSummarySchema, SWEBENCH_RUN_TIME_LIMIT_SECONDS, summarize } from "@rovara-code/contracts";
 import {
   EVAL_BATCH_RESULTS_COLUMNS,
   createBatch,
@@ -15,9 +15,9 @@ import {
   stopBatch,
   stopBatchForThread,
   topUpBatches,
-} from "../../packages/broker/src/aws/eval-batch.js";
-import { runEvalBatchTick } from "../../packages/broker/src/aws/eval-batch-tick.js";
-import { reconcileSwebenchSlots, startSwebenchRun } from "../../packages/broker/src/aws/swebench.js";
+} from "../../packages/core/src/aws/eval-batch.js";
+import { runEvalBatchTick } from "../../packages/core/src/aws/eval-batch-tick.js";
+import { reconcileSwebenchSlots, startSwebenchRun } from "../../packages/core/src/aws/swebench.js";
 import {
   cheap,
   dear,
@@ -584,7 +584,7 @@ describe("the tick with no batch active", () => {
   });
 
   it("is what the scheduled handler runs, with the Lambda's environment", async () => {
-    const { handler } = await import("../../packages/broker/src/aws/eval-batch-tick.js");
+    const { handler } = await import("../../packages/core/src/aws/eval-batch-tick.js");
     await expect(handler()).rejects.toThrow(/is required/);
     vi.stubEnv("AWS_REGION", "us-east-1");
     vi.stubEnv("STATE_TABLE_NAME", "agentx-state");

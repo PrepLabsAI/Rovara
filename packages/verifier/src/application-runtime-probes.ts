@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_MAX_ACTIONS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, canonicalJson } from "@agentx/contracts";
+import { WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_MAX_ACTIONS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, canonicalJson } from "@rovara-code/contracts";
 
 /** One turn of the scripted model (Task 4.5): tap the node whose accessible name matches the pattern (a regular expression source), or conclude without acting. */
 const agentScriptTurn = z.discriminatedUnion("kind", [

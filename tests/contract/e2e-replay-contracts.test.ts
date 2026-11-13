@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { E2EApplicationExecutionAdmissionSchema, E2EApplicationReplaySchema, E2EExecutorPlanSchema, E2EReplayResultSchema, E2EWorkflowAdmissionRefSchema, E2E_REPLAY_CHECKS_FEATURE,
-  WORKER_INVOCATION_FEATURES, E2E_REPLAY_ATTEMPTS_MAX, E2E_REPLAY_RECORDS_MAX, canonicalJson, e2eExecutorAdmissionDigest, type E2EApplicationExecutionAdmission } from "@agentx/contracts";
+  WORKER_INVOCATION_FEATURES, E2E_REPLAY_ATTEMPTS_MAX, E2E_REPLAY_RECORDS_MAX, canonicalJson, e2eExecutorAdmissionDigest, type E2EApplicationExecutionAdmission } from "@rovara-code/contracts";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 
 // M1.4 Task 4.6b (audit replay): the shapes a replay round is signed with. A replay is an application round of a kind of its own: its reference, its admission and its executor plan say so,

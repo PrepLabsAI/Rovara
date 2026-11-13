@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { EvalBatchFileSchema, SlackChannelIdSchema, SlackTeamIdSchema, agentXError, type EvalBatchSummary } from "@agentx/contracts";
+import { EvalBatchFileSchema, SlackChannelIdSchema, SlackTeamIdSchema, agentXError, type EvalBatchSummary } from "@rovara-code/contracts";
 import YAML from "yaml";
 import { adminResponseBody } from "./http.js";
 

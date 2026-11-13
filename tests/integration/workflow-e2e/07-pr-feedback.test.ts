@@ -8,7 +8,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_BLOCK_REASONS } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS } from "@rovara-code/contracts";
 import type { FauxResponseStep } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { SUPERSEDE_RULE, feedbackBundles, implementWithLowConfidence, ownerDecisionEmptyLists, reviewerHangs, supersedeAwareImplement } from "../../support/model-fixtures.js";

@@ -11,13 +11,13 @@ import {
   recordWorkflowVerification, startWorkflowBranchSync, startWorkflowBranchSyncRun, startWorkflowFix, workflowFollowsOnlyMerge, type WorkflowProgram, type WorkflowSnapshot,
   autoFixDecision, workflowAutomaticRetryDecision, workflowAutoFixCounts, wholeTaskSpendUsd, WORKFLOW_BLOCK_REASONS, BASE_MERGED_RETRY_REASON, BASE_MERGED_RETRIES_PER_DAY, baseMergedRetriesToday,
   WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_ACTION_LIMIT, workflowAutoActionRequestId, holdWorkflowCandidateOnPullRequests, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { MergeTrackingItem } from "../../packages/contracts/src/rovara-code.js";
 import {
   branchSyncRequestId, bumpSyncs, classifySyncFailure, decideBranchSync, decideConflict, isWorkflowFilesRefusal, planBranchSyncOutcome, syncsToday, utcDay,
-} from "../../packages/broker/src/core/branch-sync/branch-sync.js";
-import { baseMergedRechecksItself } from "../../packages/broker/src/core/build-step/maintain.js";
-import { candidateIsOnPullRequest } from "../../packages/broker/src/core/build-step/results.js";
+} from "../../packages/core/src/core/branch-sync/branch-sync.js";
+import { baseMergedRechecksItself } from "../../packages/core/src/core/build-step/maintain.js";
+import { candidateIsOnPullRequest } from "../../packages/core/src/core/build-step/results.js";
 
 const TASK_ID = "00000000-0000-4000-8000-0000000000a1";
 const HEAD_A = "a".repeat(40);

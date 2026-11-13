@@ -1,7 +1,7 @@
 // agentx doctor's shared shapes (FR-050, FR-051): every check says what it found and, when something
 // is wrong, how to fix it. A check never carries a secret value: checks read secrets only to judge
 // their shape, and every message here is built from names and fixed words.
-import type { ReleaseManifest } from "@agentx/contracts";
+import type { ReleaseManifest } from "@rovara-code/contracts";
 import type { StackDescription } from "../environments/adopt.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 import type { GitHubApi } from "../init/github-app.js";

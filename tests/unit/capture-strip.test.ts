@@ -9,9 +9,9 @@ import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, CAPTURE_STRIP_MAX_FRAMES, admitted
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";
 import { finishWebStepCapture } from "../../packages/verifier/src/web-runtime.js";
-import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence-pack.js";
-import { browserEvidenceOf, pairStrips, readCaptureStrips, scenarioStripsOf } from "../../packages/broker/src/e2e/capture-strips.js";
-import { readCaptureScreenshots } from "../../packages/broker/src/e2e/application-display.js";
+import { buildEvidencePack } from "../../packages/core/src/core/proof/evidence-pack.js";
+import { browserEvidenceOf, pairStrips, readCaptureStrips, scenarioStripsOf } from "../../packages/core/src/e2e/capture-strips.js";
+import { readCaptureScreenshots } from "../../packages/core/src/e2e/application-display.js";
 import { fitGroupEvidence, type OperatorEvidence } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");

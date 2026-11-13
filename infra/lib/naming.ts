@@ -8,7 +8,7 @@ import {
   environmentSettingsPrefix,
   environmentStackName,
   type StackPart,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 export interface AgentXNaming {
   /** undefined for legacy naming. */

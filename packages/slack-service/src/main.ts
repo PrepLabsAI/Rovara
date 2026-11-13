@@ -16,7 +16,7 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
   SLACK_CHAT_ATTRIBUTE, SLACK_NOTE_TS_ATTRIBUTE, SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, SLACK_TASK_ID_ATTRIBUTE, channelEventGroupId, confirmationBlocks,
   isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, usableWebhookSecret, type ChannelEvent, type ConversationRef, type SlackRequestMessage, type SlackThread,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { channelRequestHandler, readChannelQueueItem } from "./channel-requests.js";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";

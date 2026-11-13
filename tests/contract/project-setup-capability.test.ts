@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { issueProjectSetupCapability, verifyProjectSetupCapability } from "../../packages/broker/src/aws/project-setup-capability.js";
+import { issueProjectSetupCapability, verifyProjectSetupCapability } from "../../packages/core/src/aws/project-setup-capability.js";
 
 describe("project setup callback capability domain", () => {
   it("authorizes only the exact unexpired setup result subject and rejects task callback tokens", () => {

@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, cp, lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, e2eApplicationRecipeOrigin, generateE2EAgentValueKey, readE2EApplicationProjectContract, redactText,
-  type E2EApplicationExecutionAdmission, type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2EFormLogin, type E2ELease, type E2ERunInput } from "@agentx/contracts";
+  type E2EApplicationExecutionAdmission, type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2EFormLogin, type E2ELease, type E2ERunInput } from "@rovara-code/contracts";
 import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
 import { e2eApplicationGroupUsesModel, validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";

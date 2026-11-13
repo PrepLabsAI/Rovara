@@ -5,10 +5,10 @@ import { describe, expect, it } from "vitest";
 import {
   PLAN_CRITIC_POINTS_MAX, PLAN_CRITIC_REVISIONS_MAX, PLAN_CRITIQUE_INFO_STRING, WorkflowSnapshotSchema, closePlanCritique, createWorkflowSnapshot, decideWorkflow,
   readPlanCritique, submitPlanCritique, submitWorkflowArtifact, type PlanCritique, type WorkflowProgram, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { BUDGET_EXHAUSTED_FAILURE_MESSAGE } from "@agentx/contracts";
-import { criticModelUnusable } from "../../packages/broker/src/rovara-code/critic.js";
-import { critiqueLines, critiqueModelOf } from "../../packages/broker/src/rovara-code/critic.js";
+} from "@rovara-code/contracts";
+import { BUDGET_EXHAUSTED_FAILURE_MESSAGE } from "@rovara-code/contracts";
+import { criticModelUnusable } from "../../packages/core/src/rovara-code/critic.js";
+import { critiqueLines, critiqueModelOf } from "../../packages/core/src/rovara-code/critic.js";
 import { WorkflowCritiqueSchema } from "../../packages/contracts/src/rovara-code.js";
 
 const NOW = "2026-10-25T12:00:00.000Z";

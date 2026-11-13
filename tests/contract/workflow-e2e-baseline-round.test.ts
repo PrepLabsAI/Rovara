@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2E_ARTIFACT_RETENTION_TAG, indexExpiresAt, workflowSendBackOffered } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_TAG, indexExpiresAt, workflowSendBackOffered } from "@rovara-code/contracts";
 import { decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { prepareApplicationRound, startApplicationRound, type RoundCore } from "../support/e2e-application-round-harness.js";
@@ -9,9 +9,9 @@ import { randomUUID } from "node:crypto";
 import { MAYA } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
-import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS } from "@agentx/contracts";
-import { e2eModelBudgetKey } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
+import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS } from "@rovara-code/contracts";
+import { e2eModelBudgetKey } from "../../packages/core/src/e2e/model-route-registry.js";
+import { issueCapability } from "../../packages/core/src/aws/cancellation.js";
 import { assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { TEST_ORG } from "../support/orgs.js";
 
@@ -24,8 +24,8 @@ assumeDrivingTestsPassed();
 
 afterEach(() => { vi.useRealTimers(); return disposeRealCandidates(); });
 
-const brokerModule = () => import("../../packages/broker/src/aws/broker.js");
-const baselineModule = () => import("../../packages/broker/src/aws/workflow-e2e-baseline.js");
+const brokerModule = () => import("../../packages/core/src/aws/broker.js");
+const baselineModule = () => import("../../packages/core/src/aws/workflow-e2e-baseline.js");
 const operations = (round: RoundCore) => round.operationRows(() => true);
 const e2eOf = (round: RoundCore) => round.workflowNow().e2e as { contractDigest: string; qualifiedRound?: unknown; failedRound?: unknown; currentRoundId?: string; displayRef?: unknown };
 const recordKey = (round: { taskId: string; workflowNow: () => { e2e?: Record<string, unknown> } }) => ({ pk: `DEVTASK#${round.taskId}`, sk: `E2E_BASELINE#${String(round.workflowNow().e2e!.contractDigest)}` });

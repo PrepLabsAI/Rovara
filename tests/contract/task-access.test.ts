@@ -1,8 +1,8 @@
 // Who may read, comment, suggest, decide and ask on a task page: one access rule and one table of roles and actions.
 import { describe, expect, it } from "vitest";
-import { TASK_ACTION_ROLES, can, resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
-import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
-import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
+import { TASK_ACTION_ROLES, can, resolveTaskAccess } from "../../packages/core/src/developer/task-access.js";
+import { getTaskDocumentView } from "../../packages/core/src/aws/developer-tasks.js";
+import { taskOwnerKey } from "../../packages/core/src/developer/task-records.js";
 import { OMAR, PRIYA, SAM, pagePlan, pageTask } from "../support/page-tasks.js";
 
 const refusal = async (promise: Promise<unknown>) => {

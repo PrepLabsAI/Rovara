@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   CODEBUILD_CHECK_PROVIDER, CodeBuildGateDefinitionSchema, ExternalCheckSchema, ProjectDefinitionSchema, RepositoryDefinitionSchema, codeBuildGatesOf, externalCheckOfGate, gateOfExternalCheck,
   repositoryExternalChecks, workerProjectDefinition, unrunnableExternalCheck, UNRUNNABLE_EXTERNAL_CHECK_MESSAGE, RUNNABLE_EXTERNAL_CHECK_PROVIDERS,
-} from "@agentx/contracts";
-import { CODEBUILD_RUNNER_KIND } from "../../packages/broker/src/plugins/check-runner/codebuild/index.js";
+} from "@rovara-code/contracts";
+import { CODEBUILD_RUNNER_KIND } from "../../packages/core/src/plugins/check-runner/codebuild/index.js";
 
 const repository = (extra: Record<string, unknown> = {}) => ({ name: "app", url: "https://github.com/acme/app", path: "app", defaultBranch: "main", credentialRef: "git", ...extra });
 const gate = { name: "quality", projectName: "agentx-demo-quality", timeoutMinutes: 30 };

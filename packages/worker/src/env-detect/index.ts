@@ -1,5 +1,5 @@
 // Runs the detectors over a bounded reader and merges what they found. Bounded: a repository with more than 5,000 files is cut (and says so), a file over 256 KiB is not read, and a detection reads at most 4 MiB.
-import type { ProjectCommand } from "@agentx/contracts";
+import type { ProjectCommand } from "@rovara-code/contracts";
 import { detectIacResources } from "./iac-resources.js";
 import { detectTestFakes } from "./test-fakes.js";
 import { detectEnvConfig } from "./env-config.js";

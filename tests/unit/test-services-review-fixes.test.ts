@@ -1,14 +1,14 @@
 // Test services: what the approver sees of seeds, init files and variables; seed commands get the remote-code check; the catalog revision constant follows the catalog fixture; a re-propose keeps what is approved; unreadable settings and a family mismatch are refused.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { INDEX_EXPIRY_ATTRIBUTE, TestEnvironmentBodySchema, projectPk, projectRevisionKey, testEnvApprovalRisk, testEnvDigest, testEnvLessSafeChanges, type OrgId, type TestEnvironmentBody } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, TestEnvironmentBodySchema, projectPk, projectRevisionKey, testEnvApprovalRisk, testEnvDigest, testEnvLessSafeChanges, type OrgId, type TestEnvironmentBody } from "@rovara-code/contracts";
 import { projectStore } from "../support/test-env-world.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { testEnvLatestKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { testEnvChangeLines } from "../../packages/broker/src/core/test-env/change-lines.js";
-import { TEST_SERVICES_MIN_CATALOG_REVISION, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import { dependencyCardLines } from "../../packages/broker/src/core/test-env/dependency-card-lines.js";
-import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS, projectUsesDevcontainer } from "../../packages/broker/src/core/test-env/devcontainer-check.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { testEnvLatestKey } from "../../packages/core/src/core/test-env/environment.js";
+import { testEnvChangeLines } from "../../packages/core/src/core/test-env/change-lines.js";
+import { TEST_SERVICES_MIN_CATALOG_REVISION, taskDependencyPlansOf } from "../../packages/core/src/core/test-env/dependency-plan.js";
+import { dependencyCardLines } from "../../packages/core/src/core/test-env/dependency-card-lines.js";
+import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS, projectUsesDevcontainer } from "../../packages/core/src/core/test-env/devcontainer-check.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
 

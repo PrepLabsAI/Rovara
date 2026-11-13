@@ -7,7 +7,7 @@ import {
   agentXError,
   legacyProjectFields,
   type ProjectDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import YAML from "yaml";
 
 const MAX_CONFIG_BYTES = 1_048_576;

@@ -2,7 +2,7 @@
 // API token against Rovo MCP /v2. The test read is the guide's Step 8: the token must find an issue
 // inside the project before anything is stored. Issues it finds outside the project do not stop it
 // (owner decision 6, 2026-09-28): the connector is saved with a warning naming those projects.
-import { agentXError, type ConnectorConfig } from "@agentx/contracts";
+import { agentXError, type ConnectorConfig } from "@rovara-code/contracts";
 import { registerCredential } from "../../admin/credential.js";
 import { secretFromSource } from "../../init/prompts.js";
 import { addConnectorRevision, connectorRerun, connectorSecretName, errorName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";

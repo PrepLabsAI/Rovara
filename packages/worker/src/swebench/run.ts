@@ -10,7 +10,7 @@ import {
   type SwebenchRunnerConfig,
   type TaskUsageOutcome,
   type TaskUsageTelemetry,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { containerBashOperations } from "../devcontainer.js";
 import { redactCredentials } from "../events.js";
 import { compactCheckReport } from "../verification/extension.js";

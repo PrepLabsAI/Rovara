@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { web } from "@e2e-dev/web";
-import { E2EPolicySchema } from "@agentx/contracts";
+import { E2EPolicySchema } from "@rovara-code/contracts";
 import { PROFILE, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { admitWebEngine } from "../../packages/verifier/src/web-runtime.js";
 import { E2E_WEB_ENGINE_CAPABILITIES, webApiApplicationLaunchTarget } from "../../packages/verifier/src/web-api-launch-target.js";

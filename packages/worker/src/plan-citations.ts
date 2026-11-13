@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { runFileOp } from "./sandbox-file-ops.js";
-import { PLAN_DOCUMENT_INFO_STRING, lastFencedBlock, replaceLastFencedBlock, type PlanClaim, type PlanDocument } from "@agentx/contracts";
+import { PLAN_DOCUMENT_INFO_STRING, lastFencedBlock, replaceLastFencedBlock, type PlanClaim, type PlanDocument } from "@rovara-code/contracts";
 
 /** A cited file is read whole only up to this size; a larger one is only counted, so its anchors are not checked. */
 export const CITED_FILE_MAX_BYTES = 2 * 1024 * 1024;

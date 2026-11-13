@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TestEnvDraftSchema, formatCommandLine, type SetupProposal } from "@agentx/contracts";
+import { TestEnvDraftSchema, formatCommandLine, type SetupProposal } from "@rovara-code/contracts";
 import { detectTestEnvironment } from "../../packages/worker/src/test-env-detect.js";
 
 let root: string;

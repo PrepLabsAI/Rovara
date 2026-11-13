@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { E2E_APPLICATION_ADMISSION_SCHEMA_V1, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2EApplicationExecutionAdmissionSchema, canonicalJson, createCandidateManifest,
-  E2EApplicationBuildSourceManifestSchema, E2EApplicationBuildSourceRefSchema, e2eRuntimeBindingKey, e2eRuntimeBindingOf, isE2EApplicationAdmissionSchemaVersion } from "@agentx/contracts";
+  E2EApplicationBuildSourceManifestSchema, E2EApplicationBuildSourceRefSchema, e2eRuntimeBindingKey, e2eRuntimeBindingOf, isE2EApplicationAdmissionSchemaVersion } from "@rovara-code/contracts";
 import { webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 

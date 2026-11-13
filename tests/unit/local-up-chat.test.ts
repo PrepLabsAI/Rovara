@@ -3,17 +3,17 @@
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, change, createWorkflowSnapshot, submitWorkflowArtifact, type ActorRef, type ChannelDecision, type ConversationRef, type InboundMessage, type JsonValue, type OrgId } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, change, createWorkflowSnapshot, submitWorkflowArtifact, type ActorRef, type ChannelDecision, type ConversationRef, type InboundMessage, type JsonValue, type OrgId } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { issueChannelLinkCode, postApprovalCard, readTaskThread, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/index.js";
-import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
-import { readNotifyPrefs } from "../../packages/broker/src/core/notify/index.js";
-import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
-import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
-import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { issueChannelLinkCode, postApprovalCard, readTaskThread, redeemChannelLinkCode } from "../../packages/core/src/core/channel/index.js";
+import { taskSessionId } from "../../packages/core/src/core/sessions/create.js";
+import { readNotifyPrefs } from "../../packages/core/src/core/notify/index.js";
+import { FakeChannelAdapter } from "../../packages/core/src/ports/fake-channel-adapter.js";
+import { FakeWorkerMachines } from "../../packages/core/src/ports/fake-worker-machines.js";
+import { startLocalRuntime, type LocalRuntime } from "../../packages/core/src/local/runtime.js";
+import { developerIdOf } from "../../packages/core/src/core/sessions/create.js";
+import { workflowTaskKey } from "../../packages/core/src/core/decisions/workflow-subject.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
 

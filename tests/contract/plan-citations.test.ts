@@ -2,7 +2,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PLAN_DOCUMENT_INFO_STRING, type PlanDocument } from "@agentx/contracts";
+import { PLAN_DOCUMENT_INFO_STRING, type PlanDocument } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 import { checkCodeCitations, citedFileReader, withCorrectedRanges, type CitedFile } from "../../packages/worker/src/plan-citations.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";

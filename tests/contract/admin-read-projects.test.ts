@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { registerRevision } from "../support/developer-task-broker.js";
-import { projectKey } from "../../packages/broker/src/aws/project-records.js";
+import { projectKey } from "../../packages/core/src/aws/project-records.js";
 
 describe("GET /v1/admin/projects (FR-038, FR-030)", () => {
   it("lists a project with its latest revision, repositories, mode, connectors and task policy", async () => {

@@ -1,11 +1,11 @@
 // The developer's AgentX tokens on this computer: used as long as they are valid, refreshed once,
 // under a lock file, when they are not (R19). A failed refresh deletes tokens only when the server
 // says the sign-in has ended (R18).
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME } from "@rovara-code/contracts";
 import { chmod, mkdir, open, readFile, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { AGENTX_CLI_CLIENT_ID, DeveloperTokenResponseSchema, agentXError } from "@agentx/contracts";
+import { AGENTX_CLI_CLIENT_ID, DeveloperTokenResponseSchema, agentXError } from "@rovara-code/contracts";
 import { sanitizeServerText } from "../auth.js";
 import type { StoredTokens, TokenStore } from "../token-store.js";
 import { requireLocalRuntime } from "../up/local-runtime.js";

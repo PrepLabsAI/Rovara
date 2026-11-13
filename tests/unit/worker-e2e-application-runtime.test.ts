@@ -249,7 +249,7 @@ describe("the agent step feature as /ping reports it (Task 4.3a: withheld, with 
   const clean = () => cleanRedirectingEnvironment();
 
   it("is a feature this build implements, so only the withholding keeps it off /ping", async () => {
-    const { WORKER_INVOCATION_FEATURES } = await import("@agentx/contracts");
+    const { WORKER_INVOCATION_FEATURES } = await import("@rovara-code/contracts");
     expect(WORKER_INVOCATION_FEATURES).toContain(AGENT);
     const root = await mkdtemp(join(tmpdir(), "agentx-agent-listed-"));
     roots.push(root);

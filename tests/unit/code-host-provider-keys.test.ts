@@ -1,13 +1,13 @@
 // Port lane P2, review L1: repository keys, the head index and the linked change request rows are filed by the connection's PROVIDER, so renaming a connection (or making another the default) orphans nothing, and a GitHub
 // connection that is not called `github` is still a GitHub repository for revert detection and the reverse link.
 import { describe, expect, it } from "vitest";
-import type { CodeHost } from "@agentx/contracts";
-import { findLinkedChangeRequest, linkedChangeRequestKey, linkedChangeRequestStep } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
-import { codeHostRepositoryKey } from "../../packages/broker/src/core/proof/revert/repository-key.js";
-import { pressMerge, prepareMerge, readMergeTracking, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
-import { providerOf } from "../../packages/broker/src/plugins/routing.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { FakeCodeHost } from "@agentx/broker/fakes";
+import type { CodeHost } from "@rovara-code/contracts";
+import { findLinkedChangeRequest, linkedChangeRequestKey, linkedChangeRequestStep } from "../../packages/core/src/core/proof/revert/linked-change-requests.js";
+import { codeHostRepositoryKey } from "../../packages/core/src/core/proof/revert/repository-key.js";
+import { pressMerge, prepareMerge, readMergeTracking, trackPullRequest } from "../../packages/core/src/core/merge/index.js";
+import { providerOf } from "../../packages/core/src/plugins/routing.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { FakeCodeHost } from "@rovara-code/core/fakes";
 import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
 
 /** The fake host as a GitHub connection under another name: `github-main`, of provider `github`. */

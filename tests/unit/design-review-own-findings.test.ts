@@ -1,7 +1,7 @@
 // Design review stage: findings the broker makes itself, no model involved.
 import { describe, expect, it } from "vitest";
-import { DesignFindingSchema, DESIGN_TEXT_MAX_BYTES, designFindingFingerprint, type DesignFinding } from "@agentx/contracts";
-import { designSectionThree, ownDesignFindings, requirementsMissingFromDesign, withOwnFindings } from "../../packages/broker/src/core/design-review/own-findings.js";
+import { DesignFindingSchema, DESIGN_TEXT_MAX_BYTES, designFindingFingerprint, type DesignFinding } from "@rovara-code/contracts";
+import { designSectionThree, ownDesignFindings, requirementsMissingFromDesign, withOwnFindings } from "../../packages/core/src/core/design-review/own-findings.js";
 
 const design = (three: string, extra = ""): string => `# Design\n\n## §1 Problem and goal\nCovers R1, R2 and R3.\n\n## §2 Current system\nR4 is old.\n\n## §3 Proposed design\n${three}\n\n## §4 Alternatives\nNone. ${extra}\n\n## §5 Risks\nR5 fails.\n`;
 

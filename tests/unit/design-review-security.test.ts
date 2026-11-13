@@ -1,23 +1,23 @@
 // The security rules of the design review in Code's own wiring: the packet route (who may read which reviewer's packet), the one-shot model key of a reviewer's slot, the rule that a design-review operation never gets a key of
 // its own, the blocker-reason rule and its record, the tier a reviewed design is approved at, the hold nobody can answer, and a flow with the switch off. Each test names the rule it holds; a change that loosens a rule fails one of them.
 import { describe, expect, it } from "vitest";
-import { DesignReviewBindingSchema, WORKER_INVOCATION_FEATURES, type PlanDocument } from "@agentx/contracts";
-import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
-import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../packages/broker/src/core/design-review/packet-route.js";
-import { readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
-import { readSlotKeyRecord } from "../../packages/broker/src/core/design-review/slot-keys.js";
-import { checkDesignApproval, designApprovalRecordItems, designRiskOf, gradeApprovalRisk } from "../../packages/broker/src/core/design-review/decision.js";
-import { SubjectRefusal } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { gradePlanRisk } from "../../packages/broker/src/core/decisions/plan-risk.js";
-import { NO_LESSONS_USED } from "../../packages/broker/src/core/build-step/changed-files.js";
-import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
-import { proofDesignOf } from "../../packages/broker/src/core/design-review/design-proof.js";
-import { designNotRunLine } from "../../packages/broker/src/core/design-review/not-run.js";
-import { designProofLine } from "../../packages/broker/src/core/design-review/proof-line.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { DesignReviewBindingSchema, WORKER_INVOCATION_FEATURES, type PlanDocument } from "@rovara-code/contracts";
+import { CallbackCapabilities } from "../../packages/core/src/callbacks.js";
+import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../packages/core/src/core/design-review/packet-route.js";
+import { readSlotPacket } from "../../packages/core/src/core/design-review/packet-store.js";
+import { readSlotKeyRecord } from "../../packages/core/src/core/design-review/slot-keys.js";
+import { checkDesignApproval, designApprovalRecordItems, designRiskOf, gradeApprovalRisk } from "../../packages/core/src/core/design-review/decision.js";
+import { SubjectRefusal } from "../../packages/core/src/core/decisions/approval-gate.js";
+import { gradePlanRisk } from "../../packages/core/src/core/decisions/plan-risk.js";
+import { NO_LESSONS_USED } from "../../packages/core/src/core/build-step/changed-files.js";
+import { workflowPullRequestBody } from "../../packages/core/src/core/proof/workflow-pull-request-body.js";
+import { proofDesignOf } from "../../packages/core/src/core/design-review/design-proof.js";
+import { designNotRunLine } from "../../packages/core/src/core/design-review/not-run.js";
+import { designProofLine } from "../../packages/core/src/core/design-review/proof-line.js";
+import { operationKey } from "../../packages/core/src/core/task-flow/keys.js";
 import { COMPANY, SIGNING_KEY } from "../support/task-flow-harness.js";
-import { runDueDispatches } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { UNPRICED_REFERENCE_PRICE, spendAcceptedFor, unpricedNoteOf, unpricedReferencePriceOf } from "../../packages/broker/src/local/app/design-review.js";
+import { runDueDispatches } from "../../packages/core/src/core/task-flow/stage-machine.js";
+import { UNPRICED_REFERENCE_PRICE, spendAcceptedFor, unpricedNoteOf, unpricedReferencePriceOf } from "../../packages/core/src/local/app/design-review.js";
 import { answerRound, choose, localDesignReview, design, finish, mintKeys, nextJob, taskOf, toDesignPhase, toRound, waitingWithBlocker, world, planned, type World } from "../support/design-review-flow-world.js";
 
 const CAPABILITY = "x-agentx-callback-capability";

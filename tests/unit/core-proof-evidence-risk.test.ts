@@ -2,13 +2,13 @@
 // design's rule). The signal comes only from a pack for exactly this code, only from checks of kind security, and can only raise the level. With no port (the proof switch off) there is no signal and nothing is read.
 import { describe, expect, it } from "vitest";
 import { createCandidateManifest, type CheckEntry, type EvidencePack, type EvidenceRaw, type VerificationReport } from "../../packages/contracts/src/index.js";
-import { evidenceLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
-import { keepEvidence, loadEvidencePack } from "../../packages/broker/src/core/proof/evidence-keep.js";
-import { guardPack } from "../../packages/broker/src/core/proof/evidence-guard.js";
-import { evidenceRiskSignal, kindOfRawCheck } from "../../packages/broker/src/core/proof/evidence-risk.js";
-import { assessRisk, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
-import { recomputeRisk } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { evidenceRiskOfTask as riskOfTask, securityCheckIdsOf } from "../../packages/broker/src/core/proof/evidence-risk-input.js";
+import { evidenceLines } from "../../packages/core/src/core/proof/evidence-lines.js";
+import { keepEvidence, loadEvidencePack } from "../../packages/core/src/core/proof/evidence-keep.js";
+import { guardPack } from "../../packages/core/src/core/proof/evidence-guard.js";
+import { evidenceRiskSignal, kindOfRawCheck } from "../../packages/core/src/core/proof/evidence-risk.js";
+import { assessRisk, type RiskInput } from "../../packages/core/src/core/proof/risk.js";
+import { recomputeRisk } from "../../packages/core/src/core/proof/pull-request-body.js";
+import { evidenceRiskOfTask as riskOfTask, securityCheckIdsOf } from "../../packages/core/src/core/proof/evidence-risk-input.js";
 import { EVIDENCE_OP, EVIDENCE_TASK, evidenceWorld } from "../support/evidence-keep-world.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
 

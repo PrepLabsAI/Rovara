@@ -1,9 +1,9 @@
 // Decisions D1: the pure card projector and the deterministic risk tiers. Every touchpoint row of the design becomes a card; tiers only go up; friction follows the tier; links are same-origin.
 import { describe, expect, it } from "vitest";
-import { DecisionCardSchema, DecisionTabsSchema, DECISION_KIND_FLOOR_RISK, DECISION_KINDS, type DecisionKind, type DecisionRisk } from "@agentx/contracts";
-import { projectDecisionCards, cardOfItem, decisionCardPath, type DecisionItem, type ItemBase } from "../../packages/broker/src/core/decisions/project.js";
-import { isInfraPath, riskTierOf } from "../../packages/broker/src/core/decisions/risk-tier.js";
-import { isSafeRelativePath } from "../../packages/broker/src/core/decisions/text.js";
+import { DecisionCardSchema, DecisionTabsSchema, DECISION_KIND_FLOOR_RISK, DECISION_KINDS, type DecisionKind, type DecisionRisk } from "@rovara-code/contracts";
+import { projectDecisionCards, cardOfItem, decisionCardPath, type DecisionItem, type ItemBase } from "../../packages/core/src/core/decisions/project.js";
+import { isInfraPath, riskTierOf } from "../../packages/core/src/core/decisions/risk-tier.js";
+import { isSafeRelativePath } from "../../packages/core/src/core/decisions/text.js";
 
 const TASK = "11111111-1111-4111-8111-111111111111";
 const base = (id: string, extra: Partial<ItemBase> = {}): ItemBase => ({ subjectId: id, taskId: TASK, project: "payments", title: "Retry failed payments", createdAt: "2026-10-30T10:00:00.000Z", contentVersion: "v1", openPath: `/app/sessions/ses_${"a".repeat(20)}`, ...extra });

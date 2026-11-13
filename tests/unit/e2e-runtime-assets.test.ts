@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import { createE2ERuntimeAssets, parseE2EFirstPartyCapture } from "../../packages/verifier/src/runtime-assets.js";
 import { expectedE2EConfigDigest } from "../../packages/verifier/src/identity.js";
 

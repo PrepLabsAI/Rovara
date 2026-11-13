@@ -1,10 +1,10 @@
 // Test services: a setup draft's dependency candidates become PROPOSED dependencies (through the backing chooser, real catalog software only), and the card lines say what backs each one plainly.
 import { describe, expect, it } from "vitest";
-import { TEST_ENV_DRAFT_RESULT_KEY, TestEnvironmentBodySchema, type OrgId, type TestEnvDraft, type TestEnvironmentBody } from "@agentx/contracts";
-import { DEPENDENCIES_LEFT_OUT_NOTE, DEPENDENCIES_NO_CATALOG_NOTE, DEPENDENCIES_NOT_PROPOSED_NOTE } from "../../packages/broker/src/core/test-env/dependency-proposal.js";
-import { dependencyCardLines } from "../../packages/broker/src/core/test-env/dependency-card-lines.js";
-import { sanitizeTestEnvDraft, testEnvDraftEndItems } from "../../packages/broker/src/core/test-env/draft.js";
-import { TEST_SERVICES_MIN_CATALOG_REVISION } from "../../packages/broker/src/core/test-env/dependency-plan.js";
+import { TEST_ENV_DRAFT_RESULT_KEY, TestEnvironmentBodySchema, type OrgId, type TestEnvDraft, type TestEnvironmentBody } from "@rovara-code/contracts";
+import { DEPENDENCIES_LEFT_OUT_NOTE, DEPENDENCIES_NO_CATALOG_NOTE, DEPENDENCIES_NOT_PROPOSED_NOTE } from "../../packages/core/src/core/test-env/dependency-proposal.js";
+import { dependencyCardLines } from "../../packages/core/src/core/test-env/dependency-card-lines.js";
+import { sanitizeTestEnvDraft, testEnvDraftEndItems } from "../../packages/core/src/core/test-env/draft.js";
+import { TEST_SERVICES_MIN_CATALOG_REVISION } from "../../packages/core/src/core/test-env/dependency-plan.js";
 import { pinnedCatalog, unpinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;

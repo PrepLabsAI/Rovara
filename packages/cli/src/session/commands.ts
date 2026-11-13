@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import {
   AGENTX_NAME_PATTERN, CLI_PACKAGE_NAME, INTENT_NOT_WAITING_MESSAGE, LEVEL_WORDS, YOUR_CALL_WORDS, NeedsConfirmationReaderSchema, SESSION_LEVELS, SessionIdSchema, sessionTaskStatus, taskStatusText, TASK_VIEW_HEADER, TASK_VIEW_VERSION, agentXError, sessionLink,
   type SessionLevel,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { DeveloperSessionDeps } from "../developer/session.js";
 import { appRequest, clean, developerRef, list, result, seg, str, type AppResult } from "./app-request.js";
 

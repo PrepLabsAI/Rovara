@@ -4,7 +4,7 @@
 // all in one call (FR-039 to FR-041). No tool applies or declines a change directly, and no tool
 // input reaches the apply or the decline: only confirmChange's human answer does (SC-005).
 // agentx_admin_changes reads the audit records (FR-052).
-import { ADMIN_LIST_MAX, AdminChangeOutcomeSchema, type AdminChangeInput } from "@agentx/contracts";
+import { ADMIN_LIST_MAX, AdminChangeOutcomeSchema, type AdminChangeInput } from "@rovara-code/contracts";
 import { z } from "zod";
 import { adminOf } from "./admin-tools.js";
 import { confirmChange, changeError, type ConfirmationOutcome } from "./confirmation.js";

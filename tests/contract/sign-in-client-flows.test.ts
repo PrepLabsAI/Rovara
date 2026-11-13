@@ -4,10 +4,10 @@
 import { createHash } from "node:crypto";
 import { decodeJwt } from "jose";
 import { describe, expect, it } from "vitest";
-import { DEVELOPER_TOKEN_AUDIENCE } from "@agentx/contracts";
-import { developerIdentityConfigFromEnvironment } from "../../packages/broker/src/aws/developer-identity.js";
-import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import { DEVELOPER_TOKEN_AUDIENCE } from "@rovara-code/contracts";
+import { developerIdentityConfigFromEnvironment } from "../../packages/core/src/aws/developer-identity.js";
+import { developerTokenVerifier } from "../../packages/core/src/developer/verify-token.js";
+import { ownerKeyForSubject } from "../../packages/core/src/aws/lambda.js";
 import { CHALLENGE, ISSUER, OIDC_ISSUER, VERIFIER, httpEvent, identityHarness, type FakeOidcUser, type FakeSlackUser } from "../support/developer-fakes.js";
 
 const WEB = "https://scheduler.example.com/callback";

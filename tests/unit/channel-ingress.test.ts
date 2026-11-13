@@ -1,7 +1,7 @@
 // Spec 062 FR-021, FR-024, FR-030, SC-003: the channel API accepts only signed, fresh, bound and linked requests.
 import { describe, expect, it, vi } from "vitest";
-import { generateWebhookSecret, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent, type ChannelQueueItem } from "@agentx/contracts";
-import { createChannelIngressHandler, type ChannelIngressDependencies } from "../../packages/broker/src/aws/channel-ingress.js";
+import { generateWebhookSecret, webhookHeaders, type ChannelAdapterRecord, type ChannelEvent, type ChannelQueueItem } from "@rovara-code/contracts";
+import { createChannelIngressHandler, type ChannelIngressDependencies } from "../../packages/core/src/aws/channel-ingress.js";
 
 const NOW = Date.parse("2026-11-08T10:00:00.000Z");
 const secret = generateWebhookSecret();

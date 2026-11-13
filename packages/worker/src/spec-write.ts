@@ -1,7 +1,7 @@
 // K1 lane D, D2: the worker's half of "Rovara writes the spec". The run is a read-only planning session (read, grep, find and ls: no shell, no write tool). The broker's prompt holds the owner-approved plan as
 // data; the model answers with ONE block, fenced with the spec label, holding a structured draft. The worker reads it with `readSpecDraft` (bounded, one inert line per statement, the digest and kind taken from the
 // broker's binding) and the broker reads it again: the worker's copy is never trusted. The model writes no file and the run changes nothing; the broker renders and publishes.
-import { SPEC_CRITERIA_MAX, SPEC_DESIGN_MAX, SPEC_LINE_MAX, SPEC_REQUIREMENTS_MAX, SPEC_TASKS_MAX, SPEC_WRITE_INFO_STRING, readSpecDraft, specWriteAnswerOf, type SpecDraft, type SpecWriteBinding } from "@agentx/contracts";
+import { SPEC_CRITERIA_MAX, SPEC_DESIGN_MAX, SPEC_LINE_MAX, SPEC_REQUIREMENTS_MAX, SPEC_TASKS_MAX, SPEC_WRITE_INFO_STRING, readSpecDraft, specWriteAnswerOf, type SpecDraft, type SpecWriteBinding } from "@rovara-code/contracts";
 
 /** What the run is asked, after the broker's own rules. */
 export function specWriteInstructions(binding: SpecWriteBinding): string {

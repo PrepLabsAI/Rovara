@@ -3,7 +3,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { failureIndexKey } from "../../packages/contracts/src/index.js";
-import { GitHubAppCredentialProvider } from "../../packages/broker/src/github-app.js";
+import { GitHubAppCredentialProvider } from "../../packages/core/src/github-app.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
 

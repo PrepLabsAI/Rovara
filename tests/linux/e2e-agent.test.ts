@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { e2eAgentValueKeyId, parseVerifiedE2EAgentActionLedger } from "@agentx/contracts";
+import { e2eAgentValueKeyId, parseVerifiedE2EAgentActionLedger } from "@rovara-code/contracts";
 import { allOutputText, caseStatuses, observations, readReport } from "../support/e2e-executor-output.js";
 import { removeAgentProbeDirs, runAgentProbe, whyAgent, type AgentProbeRun } from "../support/linux-agent.js";
 import { AGENT_GOAL } from "../support/orders-m14-agent.js";

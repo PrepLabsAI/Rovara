@@ -10,7 +10,7 @@
 //     after it returns (no cache: a set withdrawn between rounds is not served in the next one).
 //   - The set is never a FILE or a value the agent can read: this file and fake-helper.ts may be imported only by the run layer (tests/unit/worker-fixture-source-guards.test.ts). In the coding phase the fake it feeds IS reachable by the agent, by design:
 //     the agent's own requests to the fake get the set's recorded answers (that is what a fake is for), so a set's answers are visible to the agent that tests against it. The review that approved the set is the control for that; a sealed round's helper is not the agent's.
-import { FixtureSetCallbackReplySchema, type FixtureSet } from "@agentx/contracts";
+import { FixtureSetCallbackReplySchema, type FixtureSet } from "@rovara-code/contracts";
 import { FixtureFetchRefused, fetchFixtureSet } from "./fixture-fetch.js";
 
 export type FixtureDeliveryReason = "bad_digest" | "unavailable" | "wrong_answer" | "expired" | "refused";

@@ -6,12 +6,12 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { PlanDocument, TestProof } from "../../packages/contracts/src/index.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
-import { REVIEW_SAME_MODEL_NOTE } from "../../packages/broker/src/core/proof/review-model-lines.js";
-import { PULL_REQUEST_BODY_MAX_BYTES } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { buildProofTable, checkIdOfProofItem, type ProofCheckResult, type ProofScenarioRow } from "../../packages/broker/src/core/proof/proof-table.js";
-import { PROOF_LEVEL_LAST, proofSection } from "../../packages/broker/src/core/proof/proof-section.js";
-import { loadTestProof } from "../../packages/broker/src/core/proof/test-proof-reader.js";
-import { workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
+import { REVIEW_SAME_MODEL_NOTE } from "../../packages/core/src/core/proof/review-model-lines.js";
+import { PULL_REQUEST_BODY_MAX_BYTES } from "../../packages/core/src/core/proof/pull-request-body.js";
+import { buildProofTable, checkIdOfProofItem, type ProofCheckResult, type ProofScenarioRow } from "../../packages/core/src/core/proof/proof-table.js";
+import { PROOF_LEVEL_LAST, proofSection } from "../../packages/core/src/core/proof/proof-section.js";
+import { loadTestProof } from "../../packages/core/src/core/proof/test-proof-reader.js";
+import { workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/core/src/core/proof/workflow-pull-request-body.js";
 
 /** What the worker writes for a task's checks: one item per check, `readiness:<index>`; the check at `provenIndex` is a test runner whose new test fails on the original code, the others are linters that passed. */
 function workerTestProof(candidateDigest: string, provenIndex: number, checkCount = provenIndex + 1): { proof: TestProof } {

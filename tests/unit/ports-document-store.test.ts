@@ -1,7 +1,7 @@
 // Port lane W0: the in-memory document store passes the shared conformance suite, and the pure rules behave as written.
 import { describe, expect, it } from "vitest";
-import { DocumentStoreError, OUTBOX_PENDING_INDEX, applyUpdateOps, change, compareText, companyOfKey, companyScoped, deepEqual, evaluateCondition, when, type StoredDocument } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { DocumentStoreError, OUTBOX_PENDING_INDEX, applyUpdateOps, change, compareText, companyOfKey, companyScoped, deepEqual, evaluateCondition, when, type StoredDocument } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 import { CONFORMANCE_INDEXES, runDocumentStoreConformance } from "../support/ports/document-store-conformance.js";
 
 runDocumentStoreConformance("in-memory fake", {

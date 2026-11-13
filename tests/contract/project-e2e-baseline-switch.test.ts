@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_DEVELOPER_TASK_POLICY, DeveloperTaskPolicySchema, ProjectDefinitionSchema, developerTaskPolicy } from "@agentx/contracts";
-import { projectE2EBaselineWanted } from "../../packages/broker/src/aws/workflow-e2e-baseline.js";
+import { DEFAULT_DEVELOPER_TASK_POLICY, DeveloperTaskPolicySchema, ProjectDefinitionSchema, developerTaskPolicy } from "@rovara-code/contracts";
+import { projectE2EBaselineWanted } from "../../packages/core/src/aws/workflow-e2e-baseline.js";
 
 // M1.3 Task 3.7b, owner decision D2: the baseline round "can be switched off per project". The switch is part of the project's developer-task policy, not of its E2E policy, because
 // the E2E policy is bound by digest to the approved setup and a switch that needed the setup approved again would not be a switch.

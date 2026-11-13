@@ -6,7 +6,7 @@
 //     or `unreadable`, and nothing from the download is kept or returned.
 // It starts nothing and writes nothing: the caller (the service runner) hands the checked set to the fake server, which checks the digest once more before it serves.
 import { createHash } from "node:crypto";
-import { FIXTURE_SET_MAX_BYTES, FixtureSetSchema, fixtureSetDigest, type FixtureSet } from "@agentx/contracts";
+import { FIXTURE_SET_MAX_BYTES, FixtureSetSchema, fixtureSetDigest, type FixtureSet } from "@rovara-code/contracts";
 
 export const FIXTURE_FETCH_TIMEOUT_MS = 20_000;
 const DIGEST = /^[a-f0-9]{64}$/u;

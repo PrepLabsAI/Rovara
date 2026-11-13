@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
 import { join, sep } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 // The worker writes a handful of files in the agent's repository itself: refs, HEAD, the index, locks, and the objects it creates. The agent can rename or replace
 // any directory of that repository at any moment, so a path checked a moment ago can lead somewhere else by the time it is written. On Linux each directory is

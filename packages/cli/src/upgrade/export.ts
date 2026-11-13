@@ -5,7 +5,7 @@
 // set keeps them and no secret is in any file.
 import { chmod, copyFile, mkdir, mkdtemp, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@rovara-code/contracts";
 import { templateParameterNames, upgradeKeptParameterNames, withDeclaredSignIn, type DeployAnswers } from "../deploy/deploy-environment.js";
 import { assertClaimable } from "../deploy/export-bundle.js";
 import { MissingStackOutputError, SECRET_PARAMETERS, stackParameters, type DeployPart, type StackOutputs } from "../deploy/parameters.js";

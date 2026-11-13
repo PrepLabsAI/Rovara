@@ -15,7 +15,7 @@ import path from "node:path";
 import {
   SAVED_ENV_PUSH_LOGIN_PATH, SAVED_ENV_RESULT_PATH, SavedEnvRegistryAuthSchema, agentXError, imageDigestOfReference,
   type SavedEnvBuildResult, type SavedEnvRegistryAuth, type WorkerInvocation,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { SANDBOX_TARGET, executionFor, proveCommandPort } from "../execution-target.js";
 import type { PreparationManifest } from "../prepare.js";
 import type { RepositoryCredentialProvider } from "../repository-credentials.js";

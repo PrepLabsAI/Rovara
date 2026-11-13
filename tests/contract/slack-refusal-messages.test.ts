@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { slackRefusalMessage } from "../../packages/broker/src/aws/slack-refusals.js";
+import { slackRefusalMessage } from "../../packages/core/src/aws/slack-refusals.js";
 
 const OUT_OF_DATE = "That approval is out of date. Use the latest message in this thread.";
 

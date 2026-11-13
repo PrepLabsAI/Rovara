@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
+import { issueCapability } from "../../packages/core/src/aws/cancellation.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 import { exportBaselineSource, type BaselineSourceExport } from "../../packages/worker/src/baseline-source-export.js";
 import { postWorkerTerminalResult } from "../../packages/worker/src/terminal-callback.js";

@@ -1,17 +1,17 @@
 // Test services: the evidence of a round with dependencies. The pack's dependency rows and labels are the BROKER's (from what it pinned); the worker's usage record only says whether a dependency really
 // ran. The pull request says what each was backed by, unknown calls are counted as registrable domain + count, and a pack without dependencies is what it was.
 import { describe, expect, it } from "vitest";
-import { EvidencePackSchema, testEnvDigest, EvidenceRawSchema, TestEnvironmentBodySchema, type CheckEntry, type EvidenceEnvironment, type OrgId, type EvidenceRaw } from "@agentx/contracts";
-import { BLOCKED_CALLS_ITEM_ID, NO_USAGE_RECORD_ITEM, dependencyEvidenceOf } from "../../packages/broker/src/core/proof/dependency-evidence.js";
-import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence-pack.js";
-import { keepEvidence, loadEvidencePack, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
-import { evidenceLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import type { TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
-import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
-import { testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
+import { EvidencePackSchema, testEnvDigest, EvidenceRawSchema, TestEnvironmentBodySchema, type CheckEntry, type EvidenceEnvironment, type OrgId, type EvidenceRaw } from "@rovara-code/contracts";
+import { BLOCKED_CALLS_ITEM_ID, NO_USAGE_RECORD_ITEM, dependencyEvidenceOf } from "../../packages/core/src/core/proof/dependency-evidence.js";
+import { buildEvidencePack } from "../../packages/core/src/core/proof/evidence-pack.js";
+import { keepEvidence, loadEvidencePack, type KeepEvidenceDeps } from "../../packages/core/src/core/proof/evidence-keep.js";
+import { evidenceLines } from "../../packages/core/src/core/proof/evidence-lines.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createDocumentEvidenceBlobStore } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import type { TestEnvDeps } from "../../packages/core/src/core/test-env/deps.js";
+import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/core/src/core/test-env/environment.js";
+import { evidenceEnvironmentOf } from "../../packages/core/src/core/test-env/evidence-line.js";
+import { testEnvironmentForStart } from "../../packages/core/src/core/test-env/usable.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
 import { projectStore } from "../support/test-env-world.js";
 

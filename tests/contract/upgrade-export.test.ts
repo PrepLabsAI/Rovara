@@ -2,7 +2,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS } from "@rovara-code/contracts";
 import { OPERATOR_PARAMETERS, SECRET_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { upgradeKeptParameterNames } from "../../packages/cli/src/deploy/deploy-environment.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";

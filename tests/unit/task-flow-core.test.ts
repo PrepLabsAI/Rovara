@@ -2,11 +2,11 @@
 // document store port. Nothing here names DynamoDB, SQS or EC2.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
-import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
-import { dispatchPartition, operationKey, taskIndexKey, taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { queryAll } from "@agentx/contracts";
-import type { OperationRecord, TaskRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
+import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type WorkerInvocation } from "@rovara-code/contracts";
+import { CallbackCapabilities } from "../../packages/core/src/callbacks.js";
+import { dispatchPartition, operationKey, taskIndexKey, taskKey, taskPointerKey, workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { queryAll } from "@rovara-code/contracts";
+import type { OperationRecord, TaskRecord, WorkspaceRecord } from "../../packages/core/src/core/task-flow/records.js";
 import { COMPANY, SIGNING_KEY, createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const READY = { kind: "ready", path: "QUICK", restatement: "Add a health endpoint", assumptions: ["It returns 200"] } as const;
@@ -396,7 +396,7 @@ describe("admission and audit are in the start's own transaction", () => {
 
 describe("the task routes", () => {
   it("start, read, list and close a task through the route function, and describe an error without leaking anything else", async () => {
-    const { handleTaskRoute } = await import("../../packages/broker/src/core/task-flow/routes.js");
+    const { handleTaskRoute } = await import("../../packages/core/src/core/task-flow/routes.js");
     const h = createHarness();
     await h.registerProject();
     const body = JSON.stringify({ requestId: newRequestId(), project: "payments", instructions: "via the route" });
@@ -416,16 +416,16 @@ describe("the task routes", () => {
 
 describe("the flow built from the plug-in registry", () => {
   it("takes the store, queue, machines and policy seams the registry holds, and refuses a project on a code host nobody registered", async () => {
-    const { createAdapterRegistry } = await import("../../packages/broker/src/ports/adapter-registry.js");
-    const { registerCodeDefaults } = await import("../../packages/broker/src/ports/policy-defaults.js");
-    const { createTaskFlowFromRegistry, TASK_FLOW_INDEXES } = await import("../../packages/broker/src/core/task-flow/flow.js");
-    const { MemoryDocumentStore } = await import("../../packages/broker/src/ports/memory-document-store.js");
-    const { MemoryQueueService } = await import("../../packages/broker/src/ports/memory-queue.js");
-    const { FakeWorkerMachines } = await import("../../packages/broker/src/ports/fake-worker-machines.js");
-    const { FakeCodeHost } = await import("../../packages/broker/src/plugins/fake/code-host.js");
-    const { FakeHostModel } = await import("../../packages/broker/src/plugins/fake/model.js");
-    const { createStoreProjectSource } = await import("../../packages/broker/src/core/task-flow/project-source.js");
-    const { RepositoryGrantService } = await import("../../packages/broker/src/repository-access.js");
+    const { createAdapterRegistry } = await import("../../packages/core/src/ports/adapter-registry.js");
+    const { registerCodeDefaults } = await import("../../packages/core/src/ports/policy-defaults.js");
+    const { createTaskFlowFromRegistry, TASK_FLOW_INDEXES } = await import("../../packages/core/src/core/task-flow/flow.js");
+    const { MemoryDocumentStore } = await import("../../packages/core/src/ports/memory-document-store.js");
+    const { MemoryQueueService } = await import("../../packages/core/src/ports/memory-queue.js");
+    const { FakeWorkerMachines } = await import("../../packages/core/src/ports/fake-worker-machines.js");
+    const { FakeCodeHost } = await import("../../packages/core/src/plugins/fake/code-host.js");
+    const { FakeHostModel } = await import("../../packages/core/src/plugins/fake/model.js");
+    const { createStoreProjectSource } = await import("../../packages/core/src/core/task-flow/project-source.js");
+    const { RepositoryGrantService } = await import("../../packages/core/src/repository-access.js");
     const h = createHarness();
     await h.registerProject();
     const registry = createAdapterRegistry();
@@ -450,8 +450,8 @@ describe("the flow built from the plug-in registry", () => {
 
 describe("the flow refuses to be built wrongly", () => {
   it("needs the indexes it reads, and a signing key of 32 bytes", async () => {
-    const { MemoryDocumentStore } = await import("../../packages/broker/src/ports/memory-document-store.js");
-    const { createTaskFlow } = await import("../../packages/broker/src/core/task-flow/flow.js");
+    const { MemoryDocumentStore } = await import("../../packages/core/src/ports/memory-document-store.js");
+    const { createTaskFlow } = await import("../../packages/core/src/core/task-flow/flow.js");
     const h = createHarness();
     expect(() => createTaskFlow({ ...h.deps, store: new MemoryDocumentStore() })).toThrow(/index/);
     expect(() => createTaskFlow({ ...h.deps, callbackSigningKey: "short" })).toThrow(/32 bytes/);

@@ -1,7 +1,7 @@
 // Waiting for AWS during agentx destroy: never giving up early (the control-plane delete takes 20
 // to 40 minutes while its VPC Lambda functions release their network interfaces, live 2026-09-28),
 // and always saying what it is waiting for.
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@rovara-code/contracts";
 import { isVolumeGone, type DestroyApi } from "./aws.js";
 
 export const STACK_DELETE_TIMEOUT_MS = 3 * 60 * 60 * 1000;

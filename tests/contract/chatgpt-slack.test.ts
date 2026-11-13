@@ -2,16 +2,16 @@
 // finish, through the real ingress, interactivity and broker handlers over the real connection store.
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CHATGPT_CALLBACK_URL } from "@agentx/contracts";
-import { chatGptConnections, type ChatGptSealer } from "../../packages/broker/src/chatgpt/connections.js";
-import { CHATGPT_TOKEN_URL } from "../../packages/broker/src/chatgpt/oauth.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import { CHATGPT_CALLBACK_URL } from "@rovara-code/contracts";
+import { chatGptConnections, type ChatGptSealer } from "../../packages/core/src/chatgpt/connections.js";
+import { CHATGPT_TOKEN_URL } from "../../packages/core/src/chatgpt/oauth.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
 import {
   CHATGPT_CONNECTING_TEXT, CHATGPT_OPEN_ACTION, CHATGPT_PASTE_ACTION, CHATGPT_PASTE_SUBMISSION, answerSlackChatGpt, chatGptSlackCommand,
   chatGptSubmission, isHandedOffChatGptFinish, runHandedOffChatGptFinish, type HandedOffChatGptFinish,
-} from "../../packages/broker/src/aws/slack-chatgpt.js";
-import { createSlackIngressHandler } from "../../packages/broker/src/aws/slack-ingress.js";
-import { chatGptActionHandler, createSlackInteractivityHandler } from "../../packages/broker/src/aws/slack-interactivity.js";
+} from "../../packages/core/src/aws/slack-chatgpt.js";
+import { createSlackIngressHandler } from "../../packages/core/src/aws/slack-ingress.js";
+import { chatGptActionHandler, createSlackInteractivityHandler } from "../../packages/core/src/aws/slack-interactivity.js";
 import { createAdminBroker } from "../support/admin-broker.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
 

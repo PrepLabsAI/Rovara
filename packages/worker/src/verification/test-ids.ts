@@ -5,7 +5,7 @@
 // Nothing is rewritten that is not a path or a class path; an id with whitespace stays what it is and `isSafeTestId` keeps it out of every list that is matched.
 import { stat } from "node:fs/promises";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
-import { isRerunnableTestId, type ProjectCommand } from "@agentx/contracts";
+import { isRerunnableTestId, type ProjectCommand } from "@rovara-code/contracts";
 import { counted, type ParsedTestReport, type ReportedTest } from "./test-report.js";
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/u;

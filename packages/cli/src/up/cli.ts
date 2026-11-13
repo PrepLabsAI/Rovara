@@ -3,8 +3,8 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { TaskDiagnosisViewReaderSchema, agentXError, diagnosisProposalLine, modelSelectionLines, type ModelSelectionState } from "@agentx/contracts";
-import { createDockerRunner, defaultStateDirectory, startLocalRuntime, type DockerRunner, type LocalRuntime, type LocalRuntimeOptions } from "@agentx/broker/local";
+import { TaskDiagnosisViewReaderSchema, agentXError, diagnosisProposalLine, modelSelectionLines, type ModelSelectionState } from "@rovara-code/contracts";
+import { createDockerRunner, defaultStateDirectory, startLocalRuntime, type DockerRunner, type LocalRuntime, type LocalRuntimeOptions } from "@rovara-code/core/local";
 import type { Command } from "commander";
 import type { TextWriter } from "../init/prompts.js";
 import { runUpChecks, upChecksText, type UpCheck, type UpCheckServices } from "./checks.js";

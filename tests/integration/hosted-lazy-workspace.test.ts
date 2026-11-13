@@ -9,7 +9,7 @@ import { processSlackRequest, type ThreadState, type ThreadStore } from "../../p
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
-import { hashJson } from "../../packages/broker/src/aws/broker-shared.js";
+import { hashJson } from "../../packages/core/src/aws/broker-shared.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { brokerFetch } from "../support/broker-fetch.js";
 import {

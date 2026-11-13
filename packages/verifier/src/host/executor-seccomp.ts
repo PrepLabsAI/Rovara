@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { E2E_EXECUTOR_SECCOMP_PROFILE_SHA256 } from "@agentx/contracts";
+import { E2E_EXECUTOR_SECCOMP_PROFILE_SHA256 } from "@rovara-code/contracts";
 
 const MAX_PROFILE_BYTES = 128 * 1024;
 

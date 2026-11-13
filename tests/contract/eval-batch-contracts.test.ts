@@ -10,7 +10,7 @@ import {
   summarize,
   wilsonInterval,
   type EvalRunMeasure,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const settings = {
   stateMachineArn: "arn:aws:states:us-east-1:123456789012:stateMachine:eval",

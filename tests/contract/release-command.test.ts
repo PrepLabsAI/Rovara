@@ -284,7 +284,7 @@ describe("release pipeline trigger", () => {
     expect(samples.filter((sample) => !triggered(sample))).toEqual([]);
     expect(triggered("package-lock.json")).toBe(true);
     expect(triggered("packages/aws-adapters/src/index.ts")).toBe(false);
-    expect(triggered("packages/broker/src/aws/dispatcher.ts")).toBe(true);
+    expect(triggered("packages/core/src/aws/dispatcher.ts")).toBe(true);
     expect(triggered("infra/lib/control-plane.ts")).toBe(true);
     expect(triggered("packages/orchestrator/src/orchestrator.ts")).toBe(true);
     expect(triggered("packages/cli/src/main.ts")).toBe(true);

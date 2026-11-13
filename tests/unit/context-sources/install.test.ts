@@ -1,11 +1,11 @@
 // What the install passes to the context-source builders: the operator's settings are read once and fail closed (ranges, the install's own network, the MCP host's address and token), and the
 // builders keep the rules a shared install needs unless a single-owner install says otherwise.
 import { describe, expect, it } from "vitest";
-import { agentXError } from "@agentx/contracts";
-import { installContextSources, privateMcpInstallConfig } from "../../../packages/broker/src/context-sources/install.js";
-import { createContextSourceOwnerDependencies } from "../../../packages/broker/src/context-sources/wiring.js";
-import { contextToolsDependencies } from "../../../packages/broker/src/local/app/context-tools.js";
-import { confirmSourceChange, proposeSourceChange, toolSchemaHash } from "../../../packages/broker/src/context-sources/settings.js";
+import { agentXError } from "@rovara-code/contracts";
+import { installContextSources, privateMcpInstallConfig } from "../../../packages/core/src/context-sources/install.js";
+import { createContextSourceOwnerDependencies } from "../../../packages/core/src/context-sources/wiring.js";
+import { contextToolsDependencies } from "../../../packages/core/src/local/app/context-tools.js";
+import { confirmSourceChange, proposeSourceChange, toolSchemaHash } from "../../../packages/core/src/context-sources/settings.js";
 import { InMemoryConnectionSecrets, memoryStore } from "../../support/connection-fakes.js";
 import { NOW, ORG, SEARCH_TOOL, source } from "./fixtures.js";
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { projectSetupTerminalAuthorityChecks } from "../../packages/broker/src/aws/project-setup-terminal-conditions.js";
+import { projectSetupTerminalAuthorityChecks } from "../../packages/core/src/aws/project-setup-terminal-conditions.js";
 import { assertDynamoExpressionAttributes } from "../support/validating-document-client.js";
 
 describe("project setup terminal authority transaction checks", () => {

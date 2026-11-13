@@ -2,9 +2,9 @@
 // Spec 025 E8, E9, E12: the email index, an admin ending a developer's sessions, a channel by name.
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { channelByNameThroughLambda, endDeveloperSessionsThroughLambda } from "../../packages/broker/src/aws/developer-routes.js";
-import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
-import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
+import { channelByNameThroughLambda, endDeveloperSessionsThroughLambda } from "../../packages/core/src/aws/developer-routes.js";
+import { slackDirectory } from "../../packages/core/src/developer/slack-directory.js";
+import { emailIndexKey } from "../../packages/core/src/developer/store.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
 import { BOT_TOKEN, TEAM, identityHarness, routeFetch } from "../support/developer-fakes.js";
 

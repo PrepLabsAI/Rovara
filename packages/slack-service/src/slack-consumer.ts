@@ -1,7 +1,7 @@
 // Spec 062 Phase 5b: the Slack request queue's consumer: the core queue runner (consumer.ts) reading Slack request
 // messages (version 1, or a Slack version 2 inbound message; another channel's is discarded), with page comments
 // checked against their schema before their handler sees them.
-import { SlackPageCommentMessageSchema, readSlackRequestMessage, type SlackPageCommentMessage, type SlackRequestMessage } from "@agentx/contracts";
+import { SlackPageCommentMessageSchema, readSlackRequestMessage, type SlackPageCommentMessage, type SlackRequestMessage } from "@rovara-code/contracts";
 import {
   processGroup as processQueueGroup,
   runConsumer as runQueueConsumer,

@@ -251,7 +251,7 @@ describe("AgentStepPayloadSchema", () => {
 
 describe("the size of an agent-step invocation", () => {
   // DynamoDB's item limit, 400 KB (409,600 bytes). The invocation is stored inline in the outbox item
-  // (OutboxRecordBase.invocation, packages/broker/src/aws/lambda.ts), which has no constant for it, so it is mirrored here.
+  // (OutboxRecordBase.invocation, packages/core/src/aws/lambda.ts), which has no constant for it, so it is mirrored here.
   const DYNAMODB_ITEM_LIMIT_BYTES = 409_600;
   // The worker refuses a larger /invocations body (MAX_INVOCATION_BYTES in packages/worker/src/server.ts).
   const WORKER_BODY_LIMIT_BYTES = 1_048_576;

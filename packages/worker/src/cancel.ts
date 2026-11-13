@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 export interface AbortablePiSession {
   abort(): Promise<void>;

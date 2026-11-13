@@ -1,8 +1,8 @@
 // Design review stage: the Rovara design template (instructions and the strict reader) and the two-setting switch.
 import { describe, expect, it } from "vitest";
-import { designTemplateInstructions, designTemplateRetryPrompt, readDesignTemplate } from "../../packages/broker/src/core/design-review/template.js";
-import { designReviewEnabled } from "../../packages/broker/src/core/design-review/switch.js";
-import { designTextOf } from "../../packages/broker/src/core/design-review/resolve-run.js";
+import { designTemplateInstructions, designTemplateRetryPrompt, readDesignTemplate } from "../../packages/core/src/core/design-review/template.js";
+import { designReviewEnabled } from "../../packages/core/src/core/design-review/switch.js";
+import { designTextOf } from "../../packages/core/src/core/design-review/resolve-run.js";
 
 const SECTIONS = ["§1 Problem and goal", "§2 Current system", "§3 Proposed design", "§4 Alternatives", "§5 Risks", "§6 Areas touched", "§7 Assumptions", "§8 Sources"];
 const meta = (value: unknown = { touches: ["data_model"], repositories: ["api"], services: [], sources: [{ kind: "repo_file", repo: "api", ref: "src/a.ts" }] }) => `\`\`\`rovara-design-meta\n${JSON.stringify(value)}\n\`\`\``;

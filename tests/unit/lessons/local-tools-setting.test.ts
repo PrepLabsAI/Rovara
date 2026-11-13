@@ -1,10 +1,10 @@
 // Decision 46b: the two switches for local coding tools: what they come to (ON under Standard, OFF under Regulated, the company's switch off for every project), and that every change is audited BEFORE it is made and a change
 // that cannot be recorded changes nothing.
 import { describe, expect, it } from "vitest";
-import type { LocalToolsSettings, LocalToolsSettingsStore } from "../../../packages/broker/src/lessons/local-tools.js";
-import { readLocalToolsState, setCompanyLocalTools, setProjectLocalTools } from "../../../packages/broker/src/lessons/local-tools-setting.js";
-import type { LessonAuditEvent, LessonAuditSink } from "../../../packages/broker/src/lessons/ports.js";
-import type { LearningSettings } from "../../../packages/broker/src/lessons/policy.js";
+import type { LocalToolsSettings, LocalToolsSettingsStore } from "../../../packages/core/src/lessons/local-tools.js";
+import { readLocalToolsState, setCompanyLocalTools, setProjectLocalTools } from "../../../packages/core/src/lessons/local-tools-setting.js";
+import type { LessonAuditEvent, LessonAuditSink } from "../../../packages/core/src/lessons/ports.js";
+import type { LearningSettings } from "../../../packages/core/src/lessons/policy.js";
 import { Audit, PROJECT, WS } from "./lesson-helpers.js";
 
 function store(initial: Partial<LocalToolsSettings> = {}, fail?: "read" | "write") {

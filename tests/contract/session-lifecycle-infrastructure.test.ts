@@ -226,7 +226,7 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     });
     expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
     // The metric the reconciler emits (session-reconciler.ts) is the one the alarm reads.
-    expect(readFileSync(new URL("../../packages/broker/src/aws/session-reconciler.ts", import.meta.url), "utf8")).toContain("ReconcilerQualifiedAmiReadFailures:");
+    expect(readFileSync(new URL("../../packages/core/src/aws/session-reconciler.ts", import.meta.url), "utf8")).toContain("ReconcilerQualifiedAmiReadFailures:");
   });
 
   it("alarms the operator when either state machine fails or times out", () => {

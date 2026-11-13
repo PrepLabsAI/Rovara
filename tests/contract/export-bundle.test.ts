@@ -12,7 +12,7 @@ import {
   environmentCloudFormationRoleName,
   environmentOperatorRoleName,
   type ReleaseManifest,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import type { DeployAnswers } from "../../packages/cli/src/deploy/deploy-environment.js";
 import { readBundleAnswers, writeExportBundle } from "../../packages/cli/src/deploy/export-bundle.js";

@@ -17,7 +17,7 @@
 // (--outputFile, --junitxml): then it is per test, for the tests in the changed files. AgentX never alters a customer's command.
 import { lstat, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict } from "@agentx/contracts";
+import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict } from "@rovara-code/contracts";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
 import { testIdResolver } from "./test-ids.js";

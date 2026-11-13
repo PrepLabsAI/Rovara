@@ -17,7 +17,7 @@ import {
   queryAll,
   when,
   type DocumentChange,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import {
   DynamoDocumentStore,
   ConsumerNotReadyError,
@@ -32,7 +32,7 @@ import {
   type DynamoStreamRecord,
 } from "../../packages/aws-adapters/src/index.js";
 import * as dynamoPluginModule from "../../packages/aws-adapters/src/dynamodb/plugin.js";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/core/src/ports/adapter-registry.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { dynamoWorld } from "../support/ports/dynamodb-harness.js";
 
@@ -340,14 +340,14 @@ describe("the change feed over the table's stream", () => {
 
 describe("the dynamodb storage plug-in", () => {
   const importer: ModuleImporter = async (specifier) => {
-    if (specifier !== "@rovara/aws-adapters/dynamodb") throw new Error("no such module");
+    if (specifier !== "@rovara-code/aws/dynamodb") throw new Error("no such module");
     return dynamoPluginModule;
   };
 
   it("is an allowed module name and loads from a config entry, only when named (no AWS call at load)", async () => {
-    expect(isAllowedModuleSpecifier("@rovara/aws-adapters/dynamodb")).toBe(true);
+    expect(isAllowedModuleSpecifier("@rovara-code/aws/dynamodb")).toBe(true);
     const registry = createAdapterRegistry();
-    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "storage", name: "dynamodb", module: "@rovara/aws-adapters/dynamodb", settings: { tableName: "State", region: "us-west-2", endpoint: "http://127.0.0.1:1", ttlAttribute: "expiresAt" } }] }), { registry, importModule: importer });
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "storage", name: "dynamodb", module: "@rovara-code/aws/dynamodb", settings: { tableName: "State", region: "us-west-2", endpoint: "http://127.0.0.1:1", ttlAttribute: "expiresAt" } }] }), { registry, importModule: importer });
     const store = registry.require("storage");
     expect(store).toBeInstanceOf(DynamoDocumentStore);
     expect(store.ttlAttribute).toBe("expiresAt");

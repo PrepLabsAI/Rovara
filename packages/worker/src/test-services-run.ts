@@ -36,7 +36,7 @@ import { resolve, sep } from "node:path";
 import {
   CATALOG_REGISTRY_ROOT, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, AWS_EMULATOR_ENGINE_VERSION, agentXError, awsPlanNeedsAllServices, catalogEntryById, catalogRepositoryName, checkEmulatorEngine, normaliseAwsServiceKey,
   type CatalogEdition, type CatalogEntry, type ServiceCatalog, type TaskAwsResource, type TaskDependencyPlan, type TestEnvTaskPlan, type TestServicesStartFailure, type TestServicesUsageRecord,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, type TaskSandbox } from "./task-sandbox.js";
 import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import type { ArtifactSink } from "./artifacts.js";

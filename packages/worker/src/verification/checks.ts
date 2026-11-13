@@ -13,7 +13,7 @@ import {
   type CheckOutcome,
   type ProjectCommand,
   type PublicationCheckResult,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { MAX_COMMAND_OUTPUT_BYTES, redactedTail, tailCollector } from "../collected-process.js";
 import { devcontainerBashOperations, runDevcontainerCommand, type DevcontainerCli, type DevcontainerTarget } from "../devcontainer.js";

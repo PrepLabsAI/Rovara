@@ -4,8 +4,8 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { DEVELOPER_EVENT_TEXT_MAX, DeveloperTaskEventSchema } from "@agentx/contracts";
-import { recentTaskEvents, taskEvent, type StoredEvent } from "../../packages/broker/src/developer/task-records.js";
+import { DEVELOPER_EVENT_TEXT_MAX, DeveloperTaskEventSchema } from "@rovara-code/contracts";
+import { recentTaskEvents, taskEvent, type StoredEvent } from "../../packages/core/src/developer/task-records.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 
 const REQUEST_ID = "9e7ea41c-561a-49e1-bbc3-2737b23fa76c";

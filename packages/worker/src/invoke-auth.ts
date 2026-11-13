@@ -6,7 +6,7 @@ import {
   type WorkerInvokeTokenClaims,
   workflowPublicationContext,
   workflowPublicationContextDigest,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const MAX_TOKEN_LENGTH = 2_048;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;

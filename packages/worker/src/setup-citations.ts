@@ -4,7 +4,7 @@
 //   - a citation of a file that is not in the commit the broker resolved (`git ls-tree -r <commit>`) is dropped, and an item left with no citation is dropped with it;
 //   - a devcontainer "exists" only if its file is in that commit.
 // The broker then re-reads what is left from GitHub at the same commit (verifyProposalDetailed) before anything shows the proposal.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { runIsolatedGit } from "./isolated-repository.js";
 import type { SetupScan } from "./setup-scan.js";
 

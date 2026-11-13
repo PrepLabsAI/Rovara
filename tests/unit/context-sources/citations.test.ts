@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { Citation, WorkflowReviewFinding } from "@agentx/contracts";
+import type { Citation, WorkflowReviewFinding } from "@rovara-code/contracts";
 import {
   claimCitations, downgradeSourceOnlyFindings, documentCitationStore, fetchLiveFacts, recheckCitations, replayCitation, sourceCritiquePoints, type ReplayDependencies, type StoredCitation,
-} from "../../../packages/broker/src/context-sources/citations.js";
-import { buildClaimSources, clearLiveFactsCache } from "../../../packages/broker/src/context-sources/plan-sources.js";
-import { documentResultStore } from "../../../packages/broker/src/context-sources/quotes.js";
-import { renderPlanDocument } from "../../../packages/broker/src/aws/plan-page/render-plan.js";
-import { resultDigest } from "../../../packages/broker/src/context-sources/present.js";
-import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../../packages/broker/src/core/task-flow/flow.js";
+} from "../../../packages/core/src/context-sources/citations.js";
+import { buildClaimSources, clearLiveFactsCache } from "../../../packages/core/src/context-sources/plan-sources.js";
+import { documentResultStore } from "../../../packages/core/src/context-sources/quotes.js";
+import { renderPlanDocument } from "../../../packages/core/src/aws/plan-page/render-plan.js";
+import { resultDigest } from "../../../packages/core/src/context-sources/present.js";
+import { INDEX_EXPIRY_ATTRIBUTE } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../../packages/core/src/core/task-flow/flow.js";
 import { planDocument } from "../../support/plan-documents.js";
 import { GET_TOOL, NOW, ORG, SEARCH_TOOL, source } from "./fixtures.js";
 

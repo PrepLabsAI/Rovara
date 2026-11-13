@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { projectSetupSessionKey } from "@agentx/contracts";
-import { ProjectSetupSessionManager } from "../../packages/broker/src/aws/sessions.js";
+import { projectSetupSessionKey } from "@rovara-code/contracts";
+import { ProjectSetupSessionManager } from "../../packages/core/src/aws/sessions.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 describe("PROJECT_SETUP session storage", () => {

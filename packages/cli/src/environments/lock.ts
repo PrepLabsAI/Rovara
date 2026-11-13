@@ -1,4 +1,4 @@
-import { AgentXError, agentXError, environmentSettingsPrefix } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentSettingsPrefix } from "@rovara-code/contracts";
 import { ParameterExistsError, type ParameterStore } from "./parameter-store.js";
 
 export interface LockRecord { holder: string; command: string; acquiredAt: string }

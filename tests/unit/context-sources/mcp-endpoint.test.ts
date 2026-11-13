@@ -1,7 +1,7 @@
 // The rovara MCP endpoint's protocol: one JSON-RPC message per POST, tools only, and every tool call through the call route's own request schema.
 import { describe, expect, it, vi } from "vitest";
-import type { ContextToolCallRequest, ContextToolCatalog } from "@agentx/contracts";
-import { answerMcp, boundedAnswerText, MCP_ANSWER_MAX_BYTES, mcpToolsOf, type McpToolHost } from "../../../packages/broker/src/context-sources/mcp-endpoint.js";
+import type { ContextToolCallRequest, ContextToolCatalog } from "@rovara-code/contracts";
+import { answerMcp, boundedAnswerText, MCP_ANSWER_MAX_BYTES, mcpToolsOf, type McpToolHost } from "../../../packages/core/src/context-sources/mcp-endpoint.js";
 
 const catalog: ContextToolCatalog = {
   sources: [{ sourceId: "sim", label: "SIM", quotes: "citations_only" }],

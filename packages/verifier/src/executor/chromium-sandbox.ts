@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ChromiumSandboxAttestationSchema, evaluateChromiumSandbox, type ChromiumSandboxAttestation, type ChromiumSandboxProcess, type ChromiumSandboxVerdict } from "@agentx/contracts";
+import { ChromiumSandboxAttestationSchema, evaluateChromiumSandbox, type ChromiumSandboxAttestation, type ChromiumSandboxProcess, type ChromiumSandboxVerdict } from "@rovara-code/contracts";
 
 const LIST_TIMEOUT_MS = 15_000;
 const POLL_MS = 100;

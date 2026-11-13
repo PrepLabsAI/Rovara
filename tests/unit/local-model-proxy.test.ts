@@ -1,12 +1,12 @@
 // Port lane L9a, K1: the local model proxy's pieces that need no network: the token book, the usage reader, the request guard (Cloud's rules), the text
 // scrubber, the routes, the gateway's route table and the callback capability action.
 import { describe, expect, it } from "vitest";
-import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
+import { CallbackCapabilities } from "../../packages/core/src/callbacks.js";
 import {
   ALLOWED_BETAS, DEFAULT_TOKEN_TTL_SECONDS, MIN_TOKEN_TTL_SECONDS, ModelTokenBook, NO_MODEL_GRANTS, RequestNotAllowed, TOKEN_PREFIX, UsageCollector,
   checkRequestBody, checkRequestHeaders, capabilityModelGrants, localRoute, scrubProviderText, upstreamUrl, usageOf, DEFAULT_PROVIDER_ENDPOINTS,
   type ModelGrant,
-} from "../../packages/broker/src/local/model-proxy/index.js";
+} from "../../packages/core/src/local/model-proxy/index.js";
 import { fakeKey, loadGatewayRelay, sha256 } from "../support/model-proxy-world.js";
 
 const grant = (over: Partial<ModelGrant> = {}): ModelGrant => ({ workspaceId: "ws-1", operationId: "op-1", routes: [localRoute("anthropic", "claude-test").route], ...over });

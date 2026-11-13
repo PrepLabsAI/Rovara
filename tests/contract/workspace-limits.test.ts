@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseConflict, releaseItems } from "../../packages/broker/src/developer/limits.js";
+import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseConflict, releaseItems } from "../../packages/core/src/developer/limits.js";
 import { SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, loadSlackBroker, registerSlackProject } from "../support/slack-broker.js";
 
 const fallback = { member: 3, organization: 20 };

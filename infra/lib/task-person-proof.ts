@@ -43,7 +43,7 @@ export class TaskPersonProof extends Construct {
 
     const proof = new lambdaNodejs.NodejsFunction(this, "Function", {
       runtime: lambda.Runtime.NODEJS_22_X,
-      entry: resolve(process.cwd(), "packages/broker/src/aws/task-person-proof-runtime.ts"),
+      entry: resolve(process.cwd(), "packages/core/src/aws/task-person-proof-runtime.ts"),
       handler: "handler",
       role: proofRole,
       timeout: Duration.seconds(7),

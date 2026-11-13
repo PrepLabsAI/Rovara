@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import type { TaskPersonInviteExecutionReceipt } from "../../packages/contracts/src/developer.js";
-import { createTaskPersonInviteHandler, type TaskPersonInviteHandlerPorts } from "../../packages/broker/src/aws/task-person-invite-handler.js";
-import { taskPersonInviteStateConditions, type TaskPersonProjectAuthorityWitness } from "../../packages/broker/src/aws/task-person-invite-authority-fence.js";
-import { taskPersonInviteClaimDigest } from "../../packages/broker/src/developer/task-people-effects.js";
-import type { TaskPersonCheck } from "../../packages/broker/src/developer/task-people.js";
+import { createTaskPersonInviteHandler, type TaskPersonInviteHandlerPorts } from "../../packages/core/src/aws/task-person-invite-handler.js";
+import { taskPersonInviteStateConditions, type TaskPersonProjectAuthorityWitness } from "../../packages/core/src/aws/task-person-invite-authority-fence.js";
+import { taskPersonInviteClaimDigest } from "../../packages/core/src/developer/task-people-effects.js";
+import type { TaskPersonCheck } from "../../packages/core/src/developer/task-people.js";
 
 const taskId = "11111111-1111-4111-8111-111111111111";
 const requestId = "22222222-2222-4222-8222-222222222222";

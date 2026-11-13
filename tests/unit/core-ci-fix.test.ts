@@ -6,11 +6,11 @@ import {
   CI_BLOCK_BYTES_MAX, CI_FAILED_JOBS_MAX, CI_FIX_ROUNDS_MAX, CI_OUTPUT_BLOCK_HEADER, WorkflowSnapshotSchema, WorkflowTransitionError, blockWorkflowCiFix, ciFixAskMessage, ciFixStopMessage,
   ciFixUnrelatedMessage, createCandidateManifest, createWorkflowSnapshot, endWorkflowCiFixUnrelated, isCiFixBlockReason, recordWorkflowPullRequestUpdate, retryWorkflowCiFix, startWorkflowFix,
   workflowFixRoundsLeft, abandonWorkflowFix, blockWorkflowPullRequestUpdate, observeWorkflowPullRequest, observeWorkflowPullRequestMergedWithFix, workflowFollowsOnlyMerge, type WorkflowProgram, type WorkflowSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import {
   ciEvidenceKey, ciFixPrompt, ciFixPromptWithoutOutput, ciOutputBlock, cleanLog, collectCiEvidence, decideCiFix, firstLogLine, taskAutonomy,
-} from "../../packages/broker/src/core/ci-fix/ci-fix.js";
-import type { MergeActionContext } from "../../packages/broker/src/core/branch-sync/merge-action.js";
+} from "../../packages/core/src/core/ci-fix/ci-fix.js";
+import type { MergeActionContext } from "../../packages/core/src/core/branch-sync/merge-action.js";
 
 const HEAD_A = "a".repeat(40);
 const TASK_ID = "00000000-0000-4000-8000-0000000000a1";

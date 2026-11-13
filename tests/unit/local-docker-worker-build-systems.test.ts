@@ -2,10 +2,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUILD_SYSTEM_PROFILES_ENV, BuildSystemProfileSchema, parseBuildSystemProfiles, type BuildSystemProfile } from "@agentx/contracts";
+import { BUILD_SYSTEM_PROFILES_ENV, BuildSystemProfileSchema, parseBuildSystemProfiles, type BuildSystemProfile } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { DockerWorkerMachines } from "../../packages/broker/src/local/docker-worker-machines.js";
-import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
+import { DockerWorkerMachines } from "../../packages/core/src/local/docker-worker-machines.js";
+import { createEphemeralInvokeSigner } from "../../packages/core/src/local/invoke-signer.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 
 const COMPANY = "org_aaaaaaaaaaaaaaaaaaaa";

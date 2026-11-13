@@ -1,5 +1,5 @@
 // Test services slice 1: the signed catalog loader over an explicit list of keys. NOT exported from the package's index: `loadSignedCatalog` (catalog-trust.ts) gives it the compiled-in keys; tests give their own through
-// `@agentx/contracts/testing`.
+// `@rovara-code/contracts/testing`.
 import { CATALOG_MAX_BYTES, CATALOG_SIGNATURE_MAX_BYTES, CatalogSignatureSchema, verifyCatalogSignature, type CatalogSignature } from "./service-catalog-verify.js";
 import { ServiceCatalogSchema } from "./service-catalog.js";
 import type { VerifiedCatalog } from "./service-catalog-images.js";

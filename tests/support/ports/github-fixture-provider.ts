@@ -9,9 +9,9 @@ import { githubAccountType, githubMergeableState } from "./github-fixture-api.js
 import type {
   GitHubCodeHostProvider, GitHubFeedbackComment, GitHubPullRequestChangedFile, GitHubPullRequestDetails, GitHubPullRequestFeedback, GitHubPullRequestInput, GitHubPullRequestResult,
   GitHubPullRequestUpdate, GitHubRepositoryCredential, GitHubRepositoryIdentity, MergePullRequestResult, PullRequestCheck, PullRequestStatus, WorkingBranchPage,
-} from "../../../packages/broker/src/plugins/code-host/github/provider.js";
-import type { CommitFilesRequest } from "../../../packages/broker/src/plugins/code-host/github/commit-files.js";
-import type { FakeChangeRequest, FakeHostModel } from "@agentx/broker/fakes";
+} from "../../../packages/core/src/plugins/code-host/github/provider.js";
+import type { CommitFilesRequest } from "../../../packages/core/src/plugins/code-host/github/commit-files.js";
+import type { FakeChangeRequest, FakeHostModel } from "@rovara-code/core/fakes";
 
 export const GITHUB_OWNER = "acme";
 export const GITHUB_NAME = "app";

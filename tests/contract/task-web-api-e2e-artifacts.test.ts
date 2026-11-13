@@ -1,16 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
-import { TASK_PAGE_API, createTaskWebApi, type TaskWebApiDependencies } from "../../packages/broker/src/aws/task-web-api.js";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
+import type { AdaptedHttpRequest } from "../../packages/core/src/aws/lambda.js";
+import { TASK_PAGE_API, createTaskWebApi, type TaskWebApiDependencies } from "../../packages/core/src/aws/task-web-api.js";
 import { DEV_ISSUER, MAYA, OMAR } from "../support/developer-task-broker.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound, type ApplicationRound } from "../support/e2e-application-round-harness.js";
 import { FAIL, caseIdsOf, operatorEvidenceWith, runRound } from "../support/e2e-application-round-run.js";
 import { OTHER_SHOT, OTHER_SHOT_SHA, SHOT, SHOT_SHA, row } from "../support/e2e-scenario-results.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
-import { createWorkflowE2EDisplayObject } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
-import { storeWorkflowE2EArtifacts } from "../../packages/broker/src/aws/workflow-e2e-artifacts.js";
+import { createWorkflowE2EDisplayObject } from "../../packages/core/src/aws/workflow-e2e-notifier-projection.js";
+import { storeWorkflowE2EArtifacts } from "../../packages/core/src/aws/workflow-e2e-artifacts.js";
 
 // M1.3 Task 3.7: the screenshot behind a row is read through a route that needs a task session, answers only for a digest in the task's current display, and streams the
 // private object with its recorded type. Nobody without access to the task can read it.

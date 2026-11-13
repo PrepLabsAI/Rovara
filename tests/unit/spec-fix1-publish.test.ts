@@ -1,9 +1,9 @@
 // The BROKER builds the spec commit through GitHub; nothing of the builder's workspace is in it, and the broker checks the commit adds exactly the spec's files before a pull request opens.
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { SpecFile } from "@agentx/contracts";
-import { GitHubSpecError, githubSpecClient } from "../../packages/broker/src/plugins/code-host/github/spec-git-client.js";
-import { SpecPublishError, assertSpecPaths, gitBlobSha, publishSpec, type SpecGitClient, type SpecPullRequestOpener } from "../../packages/broker/src/core/spec/publish.js";
+import type { SpecFile } from "@rovara-code/contracts";
+import { GitHubSpecError, githubSpecClient } from "../../packages/core/src/plugins/code-host/github/spec-git-client.js";
+import { SpecPublishError, assertSpecPaths, gitBlobSha, publishSpec, type SpecGitClient, type SpecPullRequestOpener } from "../../packages/core/src/core/spec/publish.js";
 
 const BASE = "b".repeat(40);
 const BRANCH = "agentx/11111111-1111-4111-a111-111111111111";

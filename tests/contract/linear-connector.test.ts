@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { ConnectorsSchema, ProjectDefinitionSchema, StoredProjectDefinitionSchema } from "../../packages/contracts/src/index.js";
-import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
-import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
-import { linearConnectorType } from "../../packages/broker/src/aws/linear-connector-type.js";
+import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors } from "../../packages/core/src/aws/connector-types.js";
+import { CredentialRegistry } from "../../packages/core/src/aws/credentials.js";
+import { linearConnectorType } from "../../packages/core/src/aws/linear-connector-type.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 

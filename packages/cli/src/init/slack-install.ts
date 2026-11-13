@@ -12,7 +12,7 @@
 // step adds them (apps.manifest.update) once Slack can reach AgentX, with the same token, which
 // lives only in this run's memory and is never stored.
 import { randomBytes } from "node:crypto";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { InitContext } from "./context.js";
 import { SLACK_BOT_HANDLE_PATTERN } from "./install-state.js";
 import { cleanSecret } from "./prompts.js";

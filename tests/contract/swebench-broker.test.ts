@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
-import { AgentXError, SwebenchLaunchSchema, type SwebenchLaunch } from "@agentx/contracts";
+import { AgentXError, SwebenchLaunchSchema, type SwebenchLaunch } from "@rovara-code/contracts";
 import { swebenchEvalDefinition } from "../../infra/lib/swebench-eval-definition.js";
-import { stopSwebenchRun, type SwebenchDependencies, type SwebenchDeployment } from "../../packages/broker/src/aws/swebench.js";
-import { swebenchDeploymentFromParameters } from "../../packages/broker/src/aws/swebench-settings.js";
-import { createBatch, evalBatchRunId, getBatch, topUpBatches, withEvalBatches } from "../../packages/broker/src/aws/eval-batch.js";
+import { stopSwebenchRun, type SwebenchDependencies, type SwebenchDeployment } from "../../packages/core/src/aws/swebench.js";
+import { swebenchDeploymentFromParameters } from "../../packages/core/src/aws/swebench-settings.js";
+import { createBatch, evalBatchRunId, getBatch, topUpBatches, withEvalBatches } from "../../packages/core/src/aws/eval-batch.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject, serviceCall } from "../support/slack-broker.js";
 
 const thread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;

@@ -1,7 +1,7 @@
 // The conformance suites of the `learning` point: one for an embedder (`LessonEmbedder`), one for where lesson vectors are kept (`LessonVectors`). Code's hashing
 // embedder, the fixed test embedder, the document-store vectors and the memory vectors run them; a hosted embedder service and its vector store run them later.
 import { describe, expect, it } from "vitest";
-import type { LessonEmbedder, LessonVectors } from "@agentx/contracts";
+import type { LessonEmbedder, LessonVectors } from "@rovara-code/contracts";
 
 export interface EmbedderHarness {
   create(): Promise<{ embedder: LessonEmbedder; dispose?: () => Promise<void> }>;

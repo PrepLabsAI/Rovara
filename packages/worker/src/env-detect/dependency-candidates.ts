@@ -1,6 +1,6 @@
 // Shared helpers of the dependency detectors (test services D1-D7): the image/driver name tables, safe names, and the merge that turns many sightings of one family into one candidate.
 // Everything a detector puts in a candidate is a family id, a kind, a fixed word, a number or an environment variable NAME. A value read from a file (a password, a host, a token) is never copied.
-import { awsSeededKinds, awsServiceKeyFromSdkName, awsEmulatorServiceRow, looksLikeSecretValue, normaliseAwsServiceKey, type AwsSdkNameKind, type TestEnvDependencyKind } from "@agentx/contracts";
+import { awsSeededKinds, awsServiceKeyFromSdkName, awsEmulatorServiceRow, looksLikeSecretValue, normaliseAwsServiceKey, type AwsSdkNameKind, type TestEnvDependencyKind } from "@rovara-code/contracts";
 import { DEPENDENCY_REFUSED_FIELDS, type DependencyCandidate, type DependencyEvidence, type DependencyHints, type DependencyStrength } from "./types.js";
 
 export const MAX_EVIDENCE = 8;

@@ -1,19 +1,19 @@
 // A small world for the automation tests: the document store, a clock, an admission that can refuse, a recording audit sink, a starter that records every unattended start, the owner's approvers, and the stores and
 // dependencies built on them. Nothing here names a provider.
-import { INDEX_EXPIRY_ATTRIBUTE, type Admission, type AdmissionRequest, type ApprovalProof, type AuditEvent, type AuditSink, type OrgId, type ProjectDefinition } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import type { AutomationSwitch } from "../../packages/broker/src/core/automation/switch.js";
-import type { AutomatedRunRequest, AutomatedRunStarter, UnattendedStartDeps } from "../../packages/broker/src/core/automation/run-seam.js";
-import { AgentStore } from "../../packages/broker/src/core/agents/store.js";
-import type { ProjectRules } from "../../packages/broker/src/core/agents/rules.js";
-import type { RosterDependencies } from "../../packages/broker/src/core/agents/roster.js";
-import { ChainStore } from "../../packages/broker/src/core/chains/store.js";
-import type { ChainRunnerDeps } from "../../packages/broker/src/core/chains/runner.js";
-import { TriggerStore } from "../../packages/broker/src/core/triggers/store.js";
-import type { TriggerDispatchDeps } from "../../packages/broker/src/core/triggers/dispatch.js";
-import { SchedulerError, type DueSchedule, type ScheduleEntry, type Scheduler } from "@agentx/contracts";
-import type { UnattendedTasks } from "../../packages/broker/src/core/automation/run-seam.js";
+import { INDEX_EXPIRY_ATTRIBUTE, type Admission, type AdmissionRequest, type ApprovalProof, type AuditEvent, type AuditSink, type OrgId, type ProjectDefinition } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import type { AutomationSwitch } from "../../packages/core/src/core/automation/switch.js";
+import type { AutomatedRunRequest, AutomatedRunStarter, UnattendedStartDeps } from "../../packages/core/src/core/automation/run-seam.js";
+import { AgentStore } from "../../packages/core/src/core/agents/store.js";
+import type { ProjectRules } from "../../packages/core/src/core/agents/rules.js";
+import type { RosterDependencies } from "../../packages/core/src/core/agents/roster.js";
+import { ChainStore } from "../../packages/core/src/core/chains/store.js";
+import type { ChainRunnerDeps } from "../../packages/core/src/core/chains/runner.js";
+import { TriggerStore } from "../../packages/core/src/core/triggers/store.js";
+import type { TriggerDispatchDeps } from "../../packages/core/src/core/triggers/dispatch.js";
+import { SchedulerError, type DueSchedule, type ScheduleEntry, type Scheduler } from "@rovara-code/contracts";
+import type { UnattendedTasks } from "../../packages/core/src/core/automation/run-seam.js";
 
 export const COMPANY = "org_00000000000000000000" as OrgId;
 export const OWNER = localOwnerPrincipal();
@@ -146,8 +146,8 @@ export const reporterOverlay = (extra: Record<string, unknown> = {}) => ({
 
 /** Makes an agent and publishes its draft; returns its id and version. */
 export async function publishAgent(world: AutomationWorld, overlay: unknown = reporterOverlay(), name = "Reporter"): Promise<{ agentId: string; version: number }> {
-  const { resolveAgent } = await import("../../packages/broker/src/core/agents/store.js");
-  const { validateRecipeForCompany } = await import("../../packages/broker/src/core/agents/guardrails.js");
+  const { resolveAgent } = await import("../../packages/core/src/core/agents/store.js");
+  const { validateRecipeForCompany } = await import("../../packages/core/src/core/agents/guardrails.js");
   const record = await world.agents.create({ orgId: COMPANY, name, by: OWNER.personId, overlay });
   const recipe = await resolveAgent(world.agents, COMPANY, record.agentId, "draft");
   const problems = await validateRecipeForCompany(world.agents.table, COMPANY, recipe);
@@ -157,7 +157,7 @@ export async function publishAgent(world: AutomationWorld, overlay: unknown = re
 
 /** Makes a one-step chain on `agentId`, publishes it (pinned) and returns its id. */
 export async function publishChain(world: AutomationWorld, agentId: string, definition: Record<string, unknown> = {}, name = "Review chain"): Promise<string> {
-  const { validateChainForPublish } = await import("../../packages/broker/src/core/chains/validate.js");
+  const { validateChainForPublish } = await import("../../packages/core/src/core/chains/validate.js");
   const design = { start: "first", steps: [{ kind: "agent", id: "first", name: "First", agent: { agentId, version: "current" }, next: { kind: "end" } }], limits: { maxRunUsd: 5 }, ...definition };
   const chain = await world.chains.create({ orgId: COMPANY, name, by: OWNER.personId, definition: design });
   const draft = (await world.chains.getDraft(COMPANY, chain.chainId))!;
@@ -168,8 +168,8 @@ export async function publishChain(world: AutomationWorld, agentId: string, defi
 
 /** Publishes the next version of an agent: its draft is saved with `overlay` and published. */
 export async function republishAgent(world: AutomationWorld, agentId: string, overlay: unknown): Promise<number> {
-  const { resolveAgent } = await import("../../packages/broker/src/core/agents/store.js");
-  const { validateRecipeForCompany } = await import("../../packages/broker/src/core/agents/guardrails.js");
+  const { resolveAgent } = await import("../../packages/core/src/core/agents/store.js");
+  const { validateRecipeForCompany } = await import("../../packages/core/src/core/agents/guardrails.js");
   const draft = (await world.agents.getDraft(COMPANY, agentId))!;
   const saved = await world.agents.saveDraft({ orgId: COMPANY, agentId: agentId, overlay, expectedRevision: draft.revision, by: OWNER.personId });
   const recipe = await resolveAgent(world.agents, COMPANY, agentId, "draft");
@@ -179,7 +179,7 @@ export async function republishAgent(world: AutomationWorld, agentId: string, ov
 
 /** Publishes the next version of a chain with `definition`. */
 export async function republishChain(world: AutomationWorld, chainId: string, definition: unknown): Promise<number> {
-  const { validateChainForPublish } = await import("../../packages/broker/src/core/chains/validate.js");
+  const { validateChainForPublish } = await import("../../packages/core/src/core/chains/validate.js");
   const draft = (await world.chains.getDraft(COMPANY, chainId))!;
   const saved = await world.chains.saveDraft({ orgId: COMPANY, chainId: chainId, definition, expectedRevision: draft.revision, by: OWNER.personId });
   const checked = await validateChainForPublish(world.roster, COMPANY, saved.definition);

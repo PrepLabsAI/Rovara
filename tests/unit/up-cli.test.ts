@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { LocalRuntime } from "@agentx/broker/local";
+import type { LocalRuntime } from "@rovara-code/core/local";
 import { executeCli } from "../../packages/cli/src/main.js";
 import type { UpCommandContext } from "../../packages/cli/src/up/cli.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
@@ -161,7 +161,7 @@ describe("rovara up --check", () => {
     const gh = vi.fn(async () => "gho_from_cli");
     const state = await mkdtemp(join(tmpdir(), "rovara-l4-cli-"));
     cleanup.push(() => rm(state, { recursive: true, force: true }));
-    const { resolveGithubAccess, createLocalSecrets } = await import("../../packages/broker/src/local/index.js");
+    const { resolveGithubAccess, createLocalSecrets } = await import("../../packages/core/src/local/index.js");
     const secrets = createLocalSecrets(state, {});
     expect((await resolveGithubAccess({ companyId: "c", secrets, environment: { GH_TOKEN: "from-env" }, gh }))?.source).toBe("environment");
     await writeFile(join(state, "keys.json"), '{"github":"from-file"}', { mode: 0o600 });
@@ -270,7 +270,7 @@ describe("rovara up", () => {
 
   it("builds and tests the code hosts from the shared list, not by name (L11 decision 51)", async () => {
     const { readFile } = await import("node:fs/promises");
-    for (const file of ["packages/cli/src/up/checks.ts", "packages/broker/src/local/runtime.ts"]) {
+    for (const file of ["packages/cli/src/up/checks.ts", "packages/core/src/local/runtime.ts"]) {
       expect(await readFile(join(process.cwd(), file), "utf8"), file).not.toContain("createLocalGithubCodeHost");
     }
   });

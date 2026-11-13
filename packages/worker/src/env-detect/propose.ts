@@ -16,7 +16,7 @@ import {
   type TestEnvValueSource,
   type TestEnvironmentBody,
   type TestEnvironmentProposal,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { coverageSpecsOf } from "../verification/cobertura-lcov-coverage.js";
 import type { Detection, DetectedSource, Located } from "./types.js";
 

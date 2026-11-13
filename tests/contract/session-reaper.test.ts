@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Ec2RuntimeBinding } from "../../packages/contracts/src/session.js";
-import { SessionManager } from "../../packages/broker/src/aws/sessions.js";
-import { createReaperHandler, type ReaperDependencies, type StopProgress } from "../../packages/broker/src/aws/session-reaper.js";
+import { SessionManager } from "../../packages/core/src/aws/sessions.js";
+import { createReaperHandler, type ReaperDependencies, type StopProgress } from "../../packages/core/src/aws/session-reaper.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = new Date("2026-09-27T12:00:00.000Z");

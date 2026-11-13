@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { E2EArtifactRefSchema, E2EPolicySchema } from "@agentx/contracts";
+import { E2EArtifactRefSchema, E2EPolicySchema } from "@rovara-code/contracts";
 import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, CAPTURE_GROUP_BUDGET_BYTES, CAPTURE_SCREENSHOT_MAX_BYTES, admittedCapturePolicy, createCaptureRecorder, encodedBytes,
   finalizeCaptureArtifacts, type CaptureEntry } from "../../packages/verifier/src/executor/capture.js";
 import { createFileCaseLedger } from "../../packages/verifier/src/executor/case-ledger.js";

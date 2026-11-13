@@ -4,7 +4,7 @@ import { appendFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { WorkerInvocation } from "@agentx/contracts";
+import type { WorkerInvocation } from "@rovara-code/contracts";
 import { WorkspaceConversationStore } from "../../packages/worker/src/conversations.js";
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { openRegisteredWorkspacePiSession, type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";

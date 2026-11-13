@@ -2,7 +2,7 @@
 // Each reviewer is a NEW pi session made by `createWorkspacePiSession` as an agent-run session: its own system prompt (the role prompt), no repository context files and no coding preamble, the
 // read-only file tools (nothing for the merge step), and no history. The one user message is sent by `design-review.ts`; this file only wires pi to the port.
 import { randomUUID } from "node:crypto";
-import { DESIGN_REVIEW_ARTIFACT, MODEL_NOT_ENABLED_CODE, PACKET_DELIVERY_BYTES_MAX, agentXError, type DesignReviewBinding, type DesignReviewWorkerResult } from "@agentx/contracts";
+import { DESIGN_REVIEW_ARTIFACT, MODEL_NOT_ENABLED_CODE, PACKET_DELIVERY_BYTES_MAX, agentXError, type DesignReviewBinding, type DesignReviewWorkerResult } from "@rovara-code/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import { runDesignReview, modelKeyIdOf, type DesignReviewOptions, type DesignReviewPorts, type DesignReviewSession, type OpenDesignReviewSession } from "./design-review.js";
 import type { FileOpsTarget } from "./file-ops-exec.js";

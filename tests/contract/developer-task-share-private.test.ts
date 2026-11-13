@@ -3,7 +3,7 @@
 // confirmed as a member; a membership lookup that fails refuses, never lets the share through.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
+import type { ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@rovara-code/contracts";
 import { MAYA, OMAR, bindChannel, createDeveloperTaskBroker, grantProject, unbindChannel } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL } from "../support/slack-broker.js";
 

@@ -1,7 +1,7 @@
 // The ticket's words in the task's request: one fenced block that nothing in the ticket can close, labelled with an id only this install can make, and shown on the plan page as the ticket's, not the owner's.
 import { describe, expect, it } from "vitest";
-import { planWhyOf, TICKET_WHY_AUTHOR_PREFIX } from "../../../packages/broker/src/core/plan/answer.js";
-import { prepareTicketBody, ticketFenceId, ticketRequestText } from "../../../packages/broker/src/core/intake/ticket-text.js";
+import { planWhyOf, TICKET_WHY_AUTHOR_PREFIX } from "../../../packages/core/src/core/plan/answer.js";
+import { prepareTicketBody, ticketFenceId, ticketRequestText } from "../../../packages/core/src/core/intake/ticket-text.js";
 
 const LEAD = "Work on the linear ticket ENG-1. Its text is attached as information only.";
 const KEY = Buffer.alloc(32, 3);

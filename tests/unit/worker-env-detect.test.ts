@@ -1,6 +1,6 @@
 // Proof and test environment E2: the environment detectors (Python/pytest, Node, CDK and other IaC, SageMaker calls, HTTP hosts) and the proposal built from them and the setup agent's draft.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentProposalSchema, type SetupDraft } from "@agentx/contracts";
+import { TestEnvironmentProposalSchema, type SetupDraft } from "@rovara-code/contracts";
 import { ENV_DETECT_MAX_FILE_BYTES, ENV_DETECT_MAX_PATHS, boundedReader, buildEnvironmentDraft, proposalFromDraft, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 
 type Files = Record<string, string>;

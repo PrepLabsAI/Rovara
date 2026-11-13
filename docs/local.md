@@ -238,7 +238,7 @@ your home are shared with the VM, which is where the state folder is.
 **Test services** (`ROVARA_TEST_SERVICES=1`). *Code* (no catalog signing key) runs them from the owner's own image list, described right after this paragraph. A build that compiles in a catalog signing key (*Cloud's*) uses only the signed catalog described here, and never reads the owner's list. With a registry to take the service images from (`ROVARA_TEST_SERVICES_REGISTRY`, and `ROVARA_TEST_SERVICES_CATALOG_ENV`, default `local`) and a signed service catalog this release
 trusts (`ROVARA_SERVICE_CATALOG_DIR`, else `./service-catalog`: `catalog.json` and `catalog.sig.json`), `rovara up` pulls the catalog's images by digest on the host (only what the catalog pins; images you already had are
 never removed) and starts the worker with test services configured. The worker then makes an internal Docker network per run, starts the pinned images on it, and runs a sealed check sandbox on that network alone. It can do this because
-the Docker socket guard (`packages/broker/src/local/isolation`) gains narrow rules, only for installs that turned services on. The guard accepts only these shapes: networks named `rovara-svc-<hex>` on `172.30.<slot>.0/24`, internal, with the
+the Docker socket guard (`packages/core/src/local/isolation`) gains narrow rules, only for installs that turned services on. The guard accepts only these shapes: networks named `rovara-svc-<hex>` on `172.30.<slot>.0/24`, internal, with the
 run's labels; catalog helpers from exactly the pulled references, as a fixed non-root user; worker-image programs from files shipped in the worker image; the sealed check sandbox; and the resolver guard. The resolver guard is the one root
 container with NET_ADMIN: it runs from the worker's pinned image with one of two fixed commands, in the namespace of the worker's own check sandbox. Run files (including per-run passwords, mode 0600, short-lived) live in
 `<state folder>/test-services/<worker>`, which sandboxes never mount. The guard never mounts a path the worker could have changed: a file that goes into a service container is opened without following links, must be a plain file of the run folder (4 MiB at most), and is copied by the guard into its own folder, and the container gets the copy. A service container runs only as a non-root user and group of the same number, never the Docker socket's group; a worker program's environment never carries node options, shell start files or preloads. The guard makes each run network itself without an address on the host's side (so a container on it has no route to a service of the host or the VM), and refuses a network that has one. The guard keeps its copies of run files for an hour after the last use and then removes them. IPv6 is off in service containers and in the sealed check sandbox. Service containers together may not ask for more than three quarters of the machine's memory. A project's dev container is never joined to a run network, and each kind of container (task sandbox, dev container, service container) is told apart by the guard's own labels and held to its own rules for a command and an attach: a service container takes a command only as its own non-root user and no input on an attach. `rovara up` refuses to start test services when the host already has an address in `172.30.0.0/16`, the range the run networks use. Builds, pulls, volumes, copies and project images are still refused. **This release ships no catalog signing key**, so the signed path is not used here: Code uses the owner's list below. A build with a key that cannot verify its catalog fails closed with a clear sentence (nothing is pulled, the worker offers none, a run that needs them is refused) and never falls back to the owner's list. Proved on Colima against real Docker (internal network, no route out, a non-listed image refused, the sealed sandbox reaches only its helpers);
@@ -273,7 +273,7 @@ you start with `rovara up --this-machine`; even then it is not built, and every 
 
 ## The task flow on `rovara up` (lane L9-wire)
 
-`rovara up` now runs the wave-1 lanes as one process. Everything below is `packages/broker/src/local/app/`; the lanes it joins know the
+`rovara up` now runs the wave-1 lanes as one process. Everything below is `packages/core/src/local/app/`; the lanes it joins know the
 ports and not each other, and this is the only place that knows all of them.
 
 | What | Where it comes from |
@@ -491,7 +491,7 @@ Stored rows, all under the company scope: `NOTIFY_PREFS#<company>` and `NOTIFY_S
 The chat tool the product shipped first is a plug-in of this kind. Name it in your plug-in config; the tokens are read through the `secrets` point (an environment variable or an owner-only file), never held in the config:
 
 ```json
-{ "point": "channel", "name": "slack", "module": "@agentx/broker/plugins/channel-slack",
+{ "point": "channel", "name": "slack", "module": "@rovara-code/core/plugins/channel-slack",
   "settings": { "botToken": { "env": "SLACK_BOT_TOKEN" }, "appToken": { "env": "SLACK_APP_TOKEN" }, "projects": ["web"] } }
 ```
 
@@ -690,7 +690,7 @@ A model provider is a plug-in of the `model-provider` point (`packages/contracts
 | `credential()` (optional) | the AWS credential, Google token or Entra token, resolved at each call |
 
 Code registers `anthropic`, `openai` and `openrouter` as defaults, with the addresses, sign-in and format the proxy always used. A module for a company's own gateway is a few lines
-(`modelProviderPlugin({...})`, `packages/broker/src/plugins/model-provider/plugin.ts`); the config entry names it (`{ "point": "model-provider", "name": "company-gateway", "module": "./gateway.mjs",
+(`modelProviderPlugin({...})`, `packages/core/src/plugins/model-provider/plugin.ts`); the config entry names it (`{ "point": "model-provider", "name": "company-gateway", "module": "./gateway.mjs",
 "settings": { "address": "...", "defaultModel": "...", "prices": {...} } }`), and the settings may change only the name, address, default model and prices. Its key is the provider's entry in `keys.json`
 or an environment variable (the three built-ins keep `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`; any other provider reads `ROVARA_MODEL_<ID>_API_KEY`, hyphens becoming underscores, so a provider called `linear` can never read `LINEAR_API_KEY`), never the config. `rovara up` refuses to start with a provider that is not well formed (an `http` address to another machine, a sign-in header
 the proxy owns, the vertex variant on another format, a price of 0, an `aws-sigv4` provider whose address is not https `*.amazonaws.com` in its region, an id that belongs to another part of Rovara such as `github` or
@@ -720,7 +720,7 @@ when the key store has no entry. A model choice asks only the provider that coul
 
 ### Model calls: the worker holds no key (lane L9a, provisional until Pratik agrees, owner decision 58)
 
-The broker serves a small model proxy on the same callback listener (`packages/broker/src/local/model-proxy/`). A worker is given the proxy's
+The broker serves a small model proxy on the same callback listener (`packages/core/src/local/model-proxy/`). A worker is given the proxy's
 address (`AGENTX_MODEL_PROXY_URL`, an address, not a secret) and asks the broker for a token with its callback capability
 (`GET /v1/internal/model-access`). The token lasts 15 minutes, is good for one workspace and one operation, and names the models the broker chose for
 that operation. The worker sends its model calls to `<proxy>/v1/messages`, `/v1/responses` or `/v1/chat/completions` with the token where a key would

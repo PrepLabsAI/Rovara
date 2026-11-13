@@ -2,10 +2,10 @@
 // and operation, refuse to change them once written, refuse a damaged copy, and let them expire.
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { INDEX_EXPIRY_ATTRIBUTE, PacketDeliverySchema, packetDigestOf, queryAll, type DocumentStore, type OrgId } from "@agentx/contracts";
-import { buildReviewerPacket, type PacketReaders } from "../../packages/broker/src/core/design-review/packet.js";
-import { SLOT_PACKET_TTL_SECONDS, designReviewPartition, packetTextOf, putSlotPackets, readSlotPacket, removeSlotPackets } from "../../packages/broker/src/core/design-review/packet-store.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { INDEX_EXPIRY_ATTRIBUTE, PacketDeliverySchema, packetDigestOf, queryAll, type DocumentStore, type OrgId } from "@rovara-code/contracts";
+import { buildReviewerPacket, type PacketReaders } from "../../packages/core/src/core/design-review/packet.js";
+import { SLOT_PACKET_TTL_SECONDS, designReviewPartition, packetTextOf, putSlotPackets, readSlotPacket, removeSlotPackets } from "../../packages/core/src/core/design-review/packet-store.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const OTHER_ORG = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import process from "node:process";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, e2eAnonymousAccountIdDigest } from "@agentx/contracts";
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, e2eAnonymousAccountIdDigest } from "@rovara-code/contracts";
 import { createCompiledApiApplicationFixture } from "../support/e2e-application-fixture.js";
 import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
 

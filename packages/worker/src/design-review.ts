@@ -19,7 +19,7 @@ import {
   filterReviewerCitations, itemOf, lightCriticWritesParaphrase, mergeDesignFindings, modelFailureCodeOf, packetDigestOf, readDesignReview, reviewerMessagesOf,
   type DesignReviewBinding, type DesignReviewRunFailure, type DesignReviewWorkerResult, type DesignReviewerOutcome, type InvocationModelRoute, type ModelSelection,
   type DroppedFinding, type PacketDelivery, type RawDesignFinding, type ReviewerRole,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { ModelBudgetExhaustedError, ModelNotAllowedError } from "@agentx/model-runtime";
 
 /** A reviewer or merge session, as the orchestration sees it. */

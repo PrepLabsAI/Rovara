@@ -1,7 +1,7 @@
 // What every setup day-2 command needs: the environment's settings from SSM (FR-004), an admin
 // session (the same check init uses), the secrets store, prompts, and the injected services.
 // main.ts builds the real one; tests pass their own through CliDependencies.setup.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { Command } from "commander";
 import { openSystemBrowser } from "../auth.js";

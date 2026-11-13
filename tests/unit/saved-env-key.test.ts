@@ -1,8 +1,8 @@
 // Saved project images (SV wiring): the environment key the broker works out from the code host's tree listing. It must move when a key file, the revision, the secret names, the base image or the detector globs
 // move, stay put for any other file, and give NO key (never a key over fewer files) when the listing is cut, a key file is a link or a submodule, or a dev container file cannot be read.
 import { describe, expect, it, vi } from "vitest";
-import { SAVED_ENV_MAX_KEY_FILES, blobKeyHash, computeEnvironmentKey } from "@agentx/contracts";
-import { KeyListingCache, expectedEnvironmentKey, type KeyHost, type TreeEntryListing } from "../../packages/broker/src/core/test-env/saved-env-key.js";
+import { SAVED_ENV_MAX_KEY_FILES, blobKeyHash, computeEnvironmentKey } from "@rovara-code/contracts";
+import { KeyListingCache, expectedEnvironmentKey, type KeyHost, type TreeEntryListing } from "../../packages/core/src/core/test-env/saved-env-key.js";
 
 const blob = (n: string): string => n.padStart(40, "0");
 const file = (path: string, id: string, mode = "100644"): TreeEntryListing => ({ path, mode, type: "blob", sha: blob(id) });

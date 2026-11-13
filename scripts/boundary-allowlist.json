@@ -12,7 +12,7 @@
     "^@(rovara|preplabsai|agentx)/cloud(-|$)"
   ],
   "publicAwsAdapters": {
-    "package": "@rovara/aws-adapters",
+    "package": "@rovara-code/aws",
     "dir": "packages/aws-adapters",
     "adapters": [
       {
@@ -55,7 +55,7 @@
   "awsSdkSanctioned": [
     {
       "id": "bedrock-model-provider",
-      "dir": "packages/broker/src/plugins/model-provider/bedrock/",
+      "dir": "packages/core/src/plugins/model-provider/bedrock/",
       "sdk": [
         "@aws-sdk/client-sts"
       ],

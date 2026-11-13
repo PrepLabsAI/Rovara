@@ -3,7 +3,7 @@
 // written only by deployEnvironment once the Slack stack exists; these two let a stopped init
 // resume before that, from any machine with access to the account.
 import { z } from "zod";
-import { agentXError, AGENTX_NAME_PATTERN, EnvironmentNameSchema, environmentSettingsPrefix, ImageDigest } from "@agentx/contracts";
+import { agentXError, AGENTX_NAME_PATTERN, EnvironmentNameSchema, environmentSettingsPrefix, ImageDigest } from "@rovara-code/contracts";
 import { AlertEmailSchema, ACCOUNT_PATTERN, BudgetAnswersSchema, GITHUB_LOGIN_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 

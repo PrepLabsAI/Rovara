@@ -10,7 +10,7 @@ import {
   pullRequestBodyWithDraftNote,
   privateKeyFromSecret,
   webhookSecretFromSecret,
-} from "../../packages/broker/src/github-app.js";
+} from "../../packages/core/src/github-app.js";
 
 /** A provider whose installation lookups GitHub answers for any owner, as installation 163046162. */
 function appProvider(options: ConstructorParameters<typeof GitHubAppCredentialProvider>[0]): GitHubAppCredentialProvider {

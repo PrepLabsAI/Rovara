@@ -24,7 +24,7 @@ import {
   serviceRoleStatements,
   type PolicyScope,
   type PolicyStatementJson,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { InitAnswers } from "../init/install-state.js";
 import { ACCOUNT_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
 import type { DeployAnswers } from "./deploy-environment.js";

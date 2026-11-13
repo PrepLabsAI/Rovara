@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentError } from "e2e/agent";
-import { E2EAgentActionLedgerSchema, generateE2EAgentValueKey, type E2EModelChannelClient } from "@agentx/contracts";
+import { E2EAgentActionLedgerSchema, generateE2EAgentValueKey, type E2EModelChannelClient } from "@rovara-code/contracts";
 import { E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
 import { createE2EAgentLedgerWriter } from "../../packages/verifier/src/executor/agent-ledger.js";
 import { createE2EAgentStepDriver } from "../../packages/verifier/src/executor/agent-step-driver.js";

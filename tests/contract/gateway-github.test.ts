@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { approvedTools, type GitHubMcpContext } from "../../packages/broker/src/github-mcp.js";
+import { approvedTools, type GitHubMcpContext } from "../../packages/core/src/github-mcp.js";
 import { GITHUB_MCP_ENDPOINT, githubBinder } from "../../packages/gateway/src/index.js";
 
 const sort = (item: unknown): unknown => Array.isArray(item) ? item.map(sort)

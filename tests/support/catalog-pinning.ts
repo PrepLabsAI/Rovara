@@ -1,7 +1,7 @@
 // Test services: a pinned catalog and a signer for tests, built at run time (no key is kept anywhere). The digests are the SHA-256 of the entry's id, so they are stable and differ per entry.
 import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { CATALOG_SIGNATURE_ALGORITHM, ServiceCatalogSchema, catalogSigningMessage, parseBundlePublicKey, sha256HexOf, type ServiceCatalog, type VerifiedCatalog } from "@agentx/contracts";
+import { CATALOG_SIGNATURE_ALGORITHM, ServiceCatalogSchema, catalogSigningMessage, parseBundlePublicKey, sha256HexOf, type ServiceCatalog, type VerifiedCatalog } from "@rovara-code/contracts";
 import { loadSignedCatalogWith } from "../../packages/contracts/dist/catalog-load-core.js";
 
 export const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
@@ -70,7 +70,7 @@ export function verifiedCatalog(catalog: ServiceCatalog): VerifiedCatalog {
   return loaded.catalog;
 }
 
-/** A catalog loader that trusts exactly the keys the test names (`@agentx/contracts/testing`), for the broker's `load` port. Test code only. */
+/** A catalog loader that trusts exactly the keys the test names (`@rovara-code/contracts/testing`), for the broker's `load` port. Test code only. */
 export function loaderTrusting(...trustedKeys: string[]) {
   return (input: { catalogBytes: Uint8Array; signatureBytes: Uint8Array }) => loadSignedCatalogWith({ catalogBytes: input.catalogBytes, signatureBytes: input.signatureBytes }, trustedKeys);
 }

@@ -5,7 +5,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { agentXError, type WorkerInvocation } from "@rovara-code/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { OperationJournal, createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/index.js";
 import { WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";

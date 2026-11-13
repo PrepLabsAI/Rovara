@@ -7,8 +7,6 @@
     "agentx": "./dist/bin.js"
   },
   "dependencies": {
-    "@agentx/broker": "0.1.0",
-    "@agentx/contracts": "0.1.0",
     "@agentx/gateway": "0.1.0",
     "@agentx/mcp": "0.1.0",
     "@agentx/model-runtime": "0.1.0",
@@ -30,6 +28,8 @@
     "@aws-sdk/client-ssm": "3.1134.0",
     "@aws-sdk/client-sts": "3.1134.0",
     "@modelcontextprotocol/sdk": "1.32.0",
+    "@rovara-code/contracts": "0.1.0",
+    "@rovara-code/core": "0.1.0",
     "@smithy/node-http-handler": "4.12.1",
     "commander": "15.0.0",
     "smol-toml": "1.9.0",

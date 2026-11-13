@@ -1,9 +1,9 @@
 // The local scheduler: the contract every scheduler passes, and the rules this one adds (UTC cron and intervals, missed fires, retries, restarts, one handler).
 import { describe, expect, it } from "vitest";
-import { SchedulerError, type DueSchedule, type ScheduleEntry } from "@agentx/contracts";
+import { SchedulerError, type DueSchedule, type ScheduleEntry } from "@rovara-code/contracts";
 import { checkEntry, createIntervalScheduler, latestSlot, parseCron, slotIdOf, type IntervalScheduler } from "../../packages/local-adapters/src/interval-scheduler.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { checkScheduleEntry, createFakeScheduler, scheduleSlotId } from "../../packages/broker/src/ports/fake-scheduler.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { checkScheduleEntry, createFakeScheduler, scheduleSlotId } from "../../packages/core/src/ports/fake-scheduler.js";
 import { runSchedulerConformance } from "../support/ports/scheduler-conformance.js";
 
 const COMPANY = "org_00000000000000000000";

@@ -9,11 +9,11 @@
 //
 // The host side is the core's own code: `createChannelSink`, `postApprovalCard`, the bindings and links on a memory store. The router is the fake of what a hosted adapter does (one installation per company); a leaking router is
 // built on purpose in the tests to show the set fails on it.
-import { MemoryDocumentStore } from "@agentx/broker/ports";
+import { MemoryDocumentStore } from "@rovara-code/core/ports";
 import {
   bindChannelSpace, createChannelSink, issueChannelLinkCode, postApprovalCard, redeemChannelLinkCode, type ChannelCompanyOf, type ChannelWork,
-} from "@agentx/broker/channel";
-import { agentXError, type ChannelAdapter, type ChannelEvent, type InboundMessage, type OrgId, type SecretRef } from "@agentx/contracts";
+} from "@rovara-code/core/channel";
+import { agentXError, type ChannelAdapter, type ChannelEvent, type InboundMessage, type OrgId, type SecretRef } from "@rovara-code/contracts";
 import { NO_COMPANY_WORDS } from "../isolation/company-router.js";
 import { createCompanySecretStore, type CompanySecretStore } from "../isolation/secret-ledger.js";
 import {

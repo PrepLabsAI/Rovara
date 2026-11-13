@@ -1,12 +1,12 @@
 // The prompt header is an input, a person's edit typed in Rovara is an input, derived text of unknown origin
 // is unknown, a person's name on derived text blocks, a lesson may not be merged out of a repository's file by an ineligible draft.
 import { describe, expect, it } from "vitest";
-import { approveLesson, type ApproveDeps } from "../../../packages/broker/src/lessons/approve.js";
-import { curateDraft, foldDuplicate, type CurateDeps } from "../../../packages/broker/src/lessons/curate.js";
-import { reflectSubject, type LessonDraft, type ReflectDeps } from "../../../packages/broker/src/lessons/reflect.js";
-import type { EvidenceSpan } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { afterPersonEdit, citationsStayIn, isRepoFileEligible, mergeKeepsRepoOnly, repoVisibilityOf } from "../../../packages/broker/src/lessons/repo-eligibility.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
+import { approveLesson, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
+import { curateDraft, foldDuplicate, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
+import { reflectSubject, type LessonDraft, type ReflectDeps } from "../../../packages/core/src/lessons/reflect.js";
+import type { EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
+import { afterPersonEdit, citationsStayIn, isRepoFileEligible, mergeKeepsRepoOnly, repoVisibilityOf } from "../../../packages/core/src/lessons/repo-eligibility.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, allowAllAccess, candidateJson, codeCite, directory, draft, embedder, lessonRecord, memberSpan, reply, seed, settings, subject, verifier } from "./lesson-helpers.js";
 
 const A = "github:repo/1001";

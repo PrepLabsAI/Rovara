@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ENVIRONMENT_PLACEHOLDER } from "@agentx/contracts";
+import { ENVIRONMENT_PLACEHOLDER } from "@rovara-code/contracts";
 import type { CallerIdentity, StackReader } from "../../packages/cli/src/environments/adopt.js";
 import { environmentCachePath, resolveDeploymentFile, writeEnvironmentCache } from "../../packages/cli/src/environments/cache.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";

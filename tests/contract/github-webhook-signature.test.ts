@@ -1,10 +1,10 @@
 import { createHmac } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, type WorkflowSnapshot, type WorkflowFeedbackBundle } from "../../packages/contracts/src/task-workflow-node.js";
-import { claimGithubWebhookDelivery, completeGithubWebhookDelivery, findLinkedGithubWorkflowPullRequest, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, receiveGithubWebhook, reconcileTaskPullRequestFeedback, reserveGithubWebhookDelivery, verifyGithubWebhookSignature, verifyTaskPullRequestFeedbackCurrent } from "../../packages/broker/src/aws/github-webhooks.js";
-import type { ReconcileTaskPullRequestFeedbackInput } from "../../packages/broker/src/aws/github-webhooks.js";
-import type { GitHubPullRequestFeedback } from "../../packages/broker/src/github-app.js";
-import type { FeedbackReviewMeasure } from "../../packages/broker/src/developer/feedback-review-measures.js";
+import { claimGithubWebhookDelivery, completeGithubWebhookDelivery, findLinkedGithubWorkflowPullRequest, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, receiveGithubWebhook, reconcileTaskPullRequestFeedback, reserveGithubWebhookDelivery, verifyGithubWebhookSignature, verifyTaskPullRequestFeedbackCurrent } from "../../packages/core/src/aws/github-webhooks.js";
+import type { ReconcileTaskPullRequestFeedbackInput } from "../../packages/core/src/aws/github-webhooks.js";
+import type { GitHubPullRequestFeedback } from "../../packages/core/src/github-app.js";
+import type { FeedbackReviewMeasure } from "../../packages/core/src/developer/feedback-review-measures.js";
 import { call, createBroker, loadSlackBroker } from "../support/slack-broker.js";
 import { validatingDocumentClient } from "../support/validating-document-client.js";
 import { reorderMaps } from "../support/fake-dynamodb.js";
@@ -305,7 +305,7 @@ describe("GitHub webhook signature verification", () => {
 
   it("lets only an administrator requeue a failed delivery after checking its linked PR scope", async () => {
     await (await import("../support/slack-broker.js")).loadSlackBroker();
-    const broker = await import("../../packages/broker/src/aws/broker.js");
+    const broker = await import("../../packages/core/src/aws/broker.js");
     const deliveryId = "550e8400-e29b-41d4-a716-446655440030";
     const taskId = "550e8400-e29b-41d4-a716-446655440031";
     const workspaceId = "550e8400-e29b-41d4-a716-446655440032";
@@ -523,7 +523,7 @@ describe("task-wide current PR feedback reconciliation", () => {
   it("routes broker feedback events into immutable bundles before saving the collection", async () => {
     const f = await fixture();
     await (await import("../support/slack-broker.js")).loadSlackBroker();
-    const broker = await import("../../packages/broker/src/aws/broker.js");
+    const broker = await import("../../packages/core/src/aws/broker.js");
     expect(broker.processGithubWorkflowEvent).toBeTypeOf("function");
     const stored = new Map<string, string>();
     const dependencies = {

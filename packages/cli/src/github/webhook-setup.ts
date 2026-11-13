@@ -2,11 +2,11 @@
 // Secrets Manager secret (key webhookSecret): an existing valid one is reused, never rotated, and
 // it is never printed, logged or put in an error.
 import { randomBytes } from "node:crypto";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { InitSecrets } from "../init/context.js";
 import { appSettingsUrl, GITHUB_WEBHOOK_EVENTS, type GitHubApi } from "../init/github-app.js";
 
-/** The broker refuses a webhook secret shorter than this (packages/broker/src/github-app.ts). */
+/** The broker refuses a webhook secret shorter than this (packages/core/src/github-app.ts). */
 const MIN_SECRET_LENGTH = 32;
 const MAX_SECRET_BYTES = 4_096;
 

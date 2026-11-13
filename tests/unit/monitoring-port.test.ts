@@ -1,8 +1,8 @@
 // The monitoring port: the adapters Code ships, how they are registered, and how a connection's check is answered by whatever adapter the registry holds.
 import { describe, expect, it } from "vitest";
-import { SecretValue, type MonitoringAdapter, type OrgConnection } from "@agentx/contracts";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { connectionChecksFromRegistry, nativeMonitoringAdapters, registerNativeMonitoring } from "../../packages/broker/src/monitoring/native-adapters.js";
+import { SecretValue, type MonitoringAdapter, type OrgConnection } from "@rovara-code/contracts";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { connectionChecksFromRegistry, nativeMonitoringAdapters, registerNativeMonitoring } from "../../packages/core/src/monitoring/native-adapters.js";
 
 const ORG = "org_00000000000000000000";
 const SENTRY: OrgConnection = { connectionId: "con_aaaaaaaaaaaaaaaaaaaa", type: "sentry", label: "S", access: "read", region: "us", orgSlug: "acme" };

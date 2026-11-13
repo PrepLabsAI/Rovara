@@ -1,5 +1,5 @@
 // L4 hardening: ONE module writes a project's design review setting onto its PROJECT_PLAYBOOK item,
-// packages/broker/src/core/design-review/playbook-store.ts, because it is the one place that validates the setting with the strict schema, holds it to the company's lock, and pins what it read in the condition.
+// packages/core/src/core/design-review/playbook-store.ts, because it is the one place that validates the setting with the strict schema, holds it to the company's lock, and pins what it read in the condition.
 // A raw write anywhere else would skip all three and could store a value the readers can only read as Off. This scan reads every non-test source file of the packages, infra and scripts and fails on any file other
 // than the store that BOTH names the playbook item (its entity type or its key builder) AND writes (a Put, Update, transaction or batch). Reading the item and building a ConditionCheck on it are fine.
 import { readdirSync, readFileSync } from "node:fs";
@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const THE_WRITER = "packages/broker/src/core/design-review/playbook-store.ts";
+const THE_WRITER = "packages/core/src/core/design-review/playbook-store.ts";
 
 const NAMES_THE_ITEM = /\bPROJECT_PLAYBOOK\b|\bprojectPlaybookKey\s*\(|PLAYBOOK#/u;
 const WRITES = /\b(?:PutCommand|UpdateCommand|BatchWriteCommand|TransactWriteCommand|PutItemCommand|UpdateItemCommand)\b|\bkind\s*:\s*"put"|\.transact\(|\.put\(|\bPut\s*:|\bUpdate\s*:|\bUpdateExpression\b/u;
@@ -45,7 +45,7 @@ describe("only the playbook store writes a project's design review setting", () 
     expect(files).toContain(THE_WRITER);
     const text = readFileSync(path.join(ROOT, THE_WRITER), "utf8");
     // Positive control: under any other name, the store's own text breaks the rule (it names the item and writes it).
-    expect(singleWriterProblems("packages/broker/src/elsewhere.ts", text)).toEqual(["writes an item it names as the project playbook"]);
+    expect(singleWriterProblems("packages/core/src/elsewhere.ts", text)).toEqual(["writes an item it names as the project playbook"]);
     expect(singleWriterProblems(THE_WRITER, text)).toEqual([]);
   });
 
@@ -61,16 +61,16 @@ describe("only the playbook store writes a project's design review setting", () 
     ["an update expression on the attribute alone", 'const expression = { UpdateExpression: "SET #x.designReview = :d" };'],
     ["an expression attribute name for the setting beside the playbook key", 'new UpdateCommand({ Key: projectPlaybookKey(org, p), ExpressionAttributeNames: { "#d": "designReview" } });'],
   ])("the scan catches %s", (_name, text) => {
-    expect(singleWriterProblems("packages/broker/src/somewhere/new-writer.ts", text).length).toBeGreaterThan(0);
+    expect(singleWriterProblems("packages/core/src/somewhere/new-writer.ts", text).length).toBeGreaterThan(0);
   });
 
   it("does not flag a task record's workflow.designReview, nor the attribute name where no playbook item is named", () => {
-    expect(singleWriterProblems("packages/broker/src/t.ts", 'new UpdateCommand({ Key: taskKey, UpdateExpression: "SET #w = :w", ExpressionAttributeNames: { "#w": "workflow" }, ConditionExpression: "attribute_exists(workflow.designReview)" })')).toEqual([]);
-    expect(singleWriterProblems("packages/broker/src/u.ts", 'const names = { "#d": "designReview" }; new UpdateCommand({ Key: taskKey, UpdateExpression: "SET workflow.#d = :v" })')).toEqual([]);
+    expect(singleWriterProblems("packages/core/src/t.ts", 'new UpdateCommand({ Key: taskKey, UpdateExpression: "SET #w = :w", ExpressionAttributeNames: { "#w": "workflow" }, ConditionExpression: "attribute_exists(workflow.designReview)" })')).toEqual([]);
+    expect(singleWriterProblems("packages/core/src/u.ts", 'const names = { "#d": "designReview" }; new UpdateCommand({ Key: taskKey, UpdateExpression: "SET workflow.#d = :v" })')).toEqual([]);
   });
 
   it("and lets through reading the item and a ConditionCheck on it", () => {
-    expect(singleWriterProblems("packages/broker/src/x.ts", "const found = await send(new GetCommand({ Key: projectPlaybookKey(org, p) }));")).toEqual([]);
-    expect(singleWriterProblems("packages/broker/src/y.ts", "return { ConditionCheck: { TableName: t, Key: projectPlaybookKey(org, p), ConditionExpression: '#revision = :r' } };")).toEqual([]);
+    expect(singleWriterProblems("packages/core/src/x.ts", "const found = await send(new GetCommand({ Key: projectPlaybookKey(org, p) }));")).toEqual([]);
+    expect(singleWriterProblems("packages/core/src/y.ts", "return { ConditionCheck: { TableName: t, Key: projectPlaybookKey(org, p), ConditionExpression: '#revision = :r' } };")).toEqual([]);
   });
 });

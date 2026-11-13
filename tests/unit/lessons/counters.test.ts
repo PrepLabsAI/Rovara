@@ -1,11 +1,11 @@
 // Counters from outcomes, the two task-page buttons, auto-retire, the worker's load report, expiry and the panel rows.
 import { describe, expect, it } from "vitest";
-import { modelCorrectionJudge } from "../../../packages/broker/src/lessons/judge-model.js";
-import { applyLoadReport, recordFeedback, recordTaskOutcome, settleHelpful, REVERT_WINDOW_MS, type CounterDeps, type TaskOutcome } from "../../../packages/broker/src/lessons/counters.js";
-import { expiryWindowMs, renewLesson, sweepExpired } from "../../../packages/broker/src/lessons/expiry.js";
-import { lessonPanelRows } from "../../../packages/broker/src/lessons/panel.js";
-import { InMemoryLessonStore, type LoadManifest } from "../../../packages/broker/src/lessons/store.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
+import { modelCorrectionJudge } from "../../../packages/core/src/lessons/judge-model.js";
+import { applyLoadReport, recordFeedback, recordTaskOutcome, settleHelpful, REVERT_WINDOW_MS, type CounterDeps, type TaskOutcome } from "../../../packages/core/src/lessons/counters.js";
+import { expiryWindowMs, renewLesson, sweepExpired } from "../../../packages/core/src/lessons/expiry.js";
+import { lessonPanelRows } from "../../../packages/core/src/lessons/panel.js";
+import { InMemoryLessonStore, type LoadManifest } from "../../../packages/core/src/lessons/store.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
 import { Alerts, Audit, Clock, Judge, ScriptedModel, Spend, KEY, PROJECT, WS, lessonRecord, seed, settings, allowAllAccess, type FeedbackDeps } from "./lesson-helpers.js";
 
 const DAY = 86_400_000;

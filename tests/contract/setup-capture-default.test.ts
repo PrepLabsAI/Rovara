@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { E2EPolicySchema, canonicalJson } from "@agentx/contracts";
+import { E2EPolicySchema, canonicalJson } from "@rovara-code/contracts";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
 import { contractSnapshot } from "../support/e2e-application-plan-fixtures.js";

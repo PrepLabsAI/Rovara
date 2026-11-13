@@ -5,9 +5,9 @@
 import { PassThrough } from "node:stream";
 import { CredentialUnavailable, ToolRefusal, discoverTools, executeTool, type ConnectorDefinition, type Ledger } from "@agentx/gateway";
 import { describe, expect, it, vi } from "vitest";
-import { lookupFetch, pinnedLookup } from "../../packages/broker/src/connections/pinned-endpoint.js";
-import { NATIVE_TEXT_LIMIT, NativeToolRefusal, nativeConnection, type NativeTool } from "../../packages/broker/src/connectors/native/runtime.js";
-import { VendorFetchError, safeLookup, safeVendorFetch, vendorFetch, vendorFetcher } from "../../packages/broker/src/connectors/native/vendor-fetch.js";
+import { lookupFetch, pinnedLookup } from "../../packages/core/src/connections/pinned-endpoint.js";
+import { NATIVE_TEXT_LIMIT, NativeToolRefusal, nativeConnection, type NativeTool } from "../../packages/core/src/connectors/native/runtime.js";
+import { VendorFetchError, safeLookup, safeVendorFetch, vendorFetch, vendorFetcher } from "../../packages/core/src/connectors/native/vendor-fetch.js";
 
 const TOKEN = "sntrys_VERYSECRETTOKEN0123456789";
 

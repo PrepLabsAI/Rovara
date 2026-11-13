@@ -2,10 +2,10 @@
 // there, and every refusal with its fixed reason.
 import { describe, expect, it } from "vitest";
 import { SAGEMAKER_DEFAULT_WITHOUT_RECORDING, SAGEMAKER_STAND_IN_PARKED, SageMakerEndpointBackingSchema } from "../../packages/contracts/src/index.js";
-import { DEFAULT_ALLOWED_BACKINGS, type AllowedBackings } from "../../packages/broker/src/core/test-env/backing-choice.js";
+import { DEFAULT_ALLOWED_BACKINGS, type AllowedBackings } from "../../packages/core/src/core/test-env/backing-choice.js";
 import {
   SAGEMAKER_CHOICE_REASONS, SAGEMAKER_CHOICE_REASON_WORDS, SAGEMAKER_SKIP_REASON_WORDS, chooseSageMakerBacking, pinnedSageMakerBacking, type SageMakerChoiceInput,
-} from "../../packages/broker/src/core/test-env/sagemaker-backing.js";
+} from "../../packages/core/src/core/test-env/sagemaker-backing.js";
 
 const sha = (letter: string) => letter.repeat(64);
 const allowed = (over: Partial<AllowedBackings> = {}): AllowedBackings => ({ ...DEFAULT_ALLOWED_BACKINGS, ...over });

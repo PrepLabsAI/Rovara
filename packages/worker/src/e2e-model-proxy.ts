@@ -16,7 +16,7 @@ import {
   type E2EModelChannelRequest,
   type E2EModelReceipt,
   type E2EModelRouteDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import {
   E2E_BUDGET_EXHAUSTED_PREFIX,
   E2EPayloadRefusedError,

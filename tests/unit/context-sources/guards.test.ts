@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { checkArguments, contextWriteGate, looksLikeCode } from "../../../packages/broker/src/context-sources/guards.js";
-import { frameResult, inertSchema, presentedToolName, resolvePresentedTool } from "../../../packages/broker/src/context-sources/present.js";
+import { checkArguments, contextWriteGate, looksLikeCode } from "../../../packages/core/src/context-sources/guards.js";
+import { frameResult, inertSchema, presentedToolName, resolvePresentedTool } from "../../../packages/core/src/context-sources/present.js";
 import { source } from "./fixtures.js";
 
 describe("contextWriteGate", () => {

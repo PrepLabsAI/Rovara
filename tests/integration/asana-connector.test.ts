@@ -2,8 +2,8 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { ASANA_MCP_ENDPOINT, ASANA_TOKEN_ENDPOINT, connectMcp } from "@agentx/gateway";
-import { asanaConnectorType } from "../../packages/broker/src/aws/asana-connector-type.js";
-import { githubConnectorType, type ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
+import { asanaConnectorType } from "../../packages/core/src/aws/asana-connector-type.js";
+import { githubConnectorType, type ConnectorType } from "../../packages/core/src/aws/connector-types.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors-node.js";
 import { SlackThreadWorkspaceResultSchema } from "../../packages/contracts/src/slack.js";
 import { startFakeAsana, type FakeAsana } from "../support/fake-asana.js";

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { taskGraphDigest, type PlanClaim, type PlanDecision, type PlanDocument, type PlanEvidenceBundle } from "@agentx/contracts";
-import { claimAnchor, renderPlanDocument, type RenderPlanInput } from "../../packages/broker/src/aws/plan-page/render-plan.js";
-import type { PageCommentView } from "../../packages/broker/src/aws/plan-page/comments.js";
-import { resolvePlanEvidence } from "../../packages/broker/src/developer/plan-evidence.js";
+import { taskGraphDigest, type PlanClaim, type PlanDecision, type PlanDocument, type PlanEvidenceBundle } from "@rovara-code/contracts";
+import { claimAnchor, renderPlanDocument, type RenderPlanInput } from "../../packages/core/src/aws/plan-page/render-plan.js";
+import type { PageCommentView } from "../../packages/core/src/aws/plan-page/comments.js";
+import { resolvePlanEvidence } from "../../packages/core/src/developer/plan-evidence.js";
 import { planDocument } from "../support/plan-documents.js";
 
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";

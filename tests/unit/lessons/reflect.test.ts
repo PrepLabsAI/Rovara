@@ -1,8 +1,8 @@
 // The reflector. Poisoning classes,, (input side), (draft side), and from the design's §4.8.4 that fall in this task.
 import { describe, expect, it } from "vitest";
-import { buildReflectorInput } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { reflectSubject, type ReflectDeps } from "../../../packages/broker/src/lessons/reflect.js";
-import { reflectNightly, type NightlyWorkSource } from "../../../packages/broker/src/lessons/reflect-nightly.js";
+import { buildReflectorInput } from "../../../packages/core/src/lessons/reflect-input.js";
+import { reflectSubject, type ReflectDeps } from "../../../packages/core/src/lessons/reflect.js";
+import { reflectNightly, type NightlyWorkSource } from "../../../packages/core/src/lessons/reflect-nightly.js";
 import { Audit, BASE, Clock, MERGED, PROJECT, ScriptedModel, Spend, WS, candidateJson, codeCite, memberSpan, reply, settings, subject } from "./lesson-helpers.js";
 
 function deps(model: ScriptedModel, over: Partial<ReflectDeps> = {}) {

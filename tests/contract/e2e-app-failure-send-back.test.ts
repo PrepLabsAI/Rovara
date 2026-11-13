@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { workflowApplicationEvidenceCodes, workflowSendBackOffered, type WorkflowSnapshot } from "@agentx/contracts";
-import { workflowSlackHandlers, type SlackBlockAction } from "../../packages/broker/src/aws/slack-interactivity.js";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
-import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
+import { workflowApplicationEvidenceCodes, workflowSendBackOffered, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { workflowSlackHandlers, type SlackBlockAction } from "../../packages/core/src/aws/slack-interactivity.js";
+import { workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
+import { E2E_OWNER_SENTENCES } from "../../packages/core/src/e2e/owner-sentences.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import type { ApplicationGroupEvidence } from "../support/e2e-application-evidence-fixture.js";
 import { MAYA, OMAR } from "../support/developer-task-broker.js";

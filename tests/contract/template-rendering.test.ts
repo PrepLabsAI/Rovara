@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { beforeAll, describe, expect, it } from "vitest";
-import { ENVIRONMENT_PLACEHOLDER, EnvironmentNameSchema, renderTemplate } from "@agentx/contracts";
+import { ENVIRONMENT_PLACEHOLDER, EnvironmentNameSchema, renderTemplate } from "@rovara-code/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 
 function templates(env: string): Map<string, string> {

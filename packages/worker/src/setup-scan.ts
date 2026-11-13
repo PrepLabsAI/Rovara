@@ -10,7 +10,7 @@
 //   - nothing in a repository's hooks or MCP config is run or connected: both are reported as "found, not used".
 import { lstat, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { META_KNOWLEDGE_DEFAULTS, PROVENANCE_QUOTE_MAX as QUOTE_MAX } from "@agentx/contracts";
+import { META_KNOWLEDGE_DEFAULTS, PROVENANCE_QUOTE_MAX as QUOTE_MAX } from "@rovara-code/contracts";
 
 export interface ScanRepository { name: string; path: string }
 

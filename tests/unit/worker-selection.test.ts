@@ -1,6 +1,6 @@
 // Proof and test environment E5: affected-test selection (coverage map, import graph, declared, full), every fallback to the full suite, the safe command line, and the per-project round budget.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, type TestEnvironmentBody } from "@agentx/contracts";
+import { TestEnvironmentBodySchema, type TestEnvironmentBody } from "@rovara-code/contracts";
 import { BUILTIN_FULL_SUITE_ON, SELECTION_MAP_MAX_AGE_HOURS, buildImportGraph, checkRoundBudgetMs, checkTimeLimitMs, commandWithSelection, globRegExp, planSelections, selectTests, type CoverageMap, type SelectionInput } from "../../packages/worker/src/verification/selection.js";
 
 const NOW = new Date("2026-11-05T12:00:00.000Z");

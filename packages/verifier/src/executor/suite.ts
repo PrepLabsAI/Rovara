@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { E2E_EXECUTOR_COMPILED_ORIGIN, E2ETargetSchema, e2eBindingDigest, type E2EExecutorPlan, type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef,
-  type E2ETarget } from "@agentx/contracts";
+  type E2ETarget } from "@rovara-code/contracts";
 import type { E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
 import type { E2EApplicationCliCasePlan } from "../application-services.js";
 import { validateE2EApplicationExecutionAdmission, type E2EApplicationCompiledShard, type E2ECompiledApplicationSuite } from "../application-scenarios.js";

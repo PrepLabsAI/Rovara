@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2EExecutorPlanSchema, canonicalJson, e2eModelRouteRevision } from "@agentx/contracts";
+import { E2EExecutorPlanSchema, canonicalJson, e2eModelRouteRevision } from "@rovara-code/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { E2E_AGENT_LEDGER_MAX_BYTES, type E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";

@@ -1,6 +1,6 @@
 import { chmod, lstat, mkdir, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { DOCKER_DATA_DIRECTORY, RUNTIME_BACKING_DIRECTORY } from "./devcontainer-policy.js";
 
 /**

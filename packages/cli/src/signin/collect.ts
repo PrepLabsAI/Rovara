@@ -1,6 +1,6 @@
 // The questions for developer sign-in (spec 025 FR-044, FR-045), shared by agentx init and
 // agentx signin enable. Secrets come only from a hidden prompt, a file or an environment variable.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { InitSecrets } from "../init/context.js";
 import { secretFromSource, type Prompter, type SecretSource } from "../init/prompts.js";
 import { SIGN_IN_BOT_SCOPES, missingScopes, readSlackTeamIdFromSecret, slackSecretName, slackSecretWithSignIn, slackSignInCallbackUrl, type SlackApi } from "../init/slack-app.js";

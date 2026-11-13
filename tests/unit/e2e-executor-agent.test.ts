@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentError } from "e2e/agent";
 import { E2EAgentActionLedgerSchema, E2EAgentCleanTraceSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_SUMMARY, e2eAgentValueDigest, e2eAgentValueKeyId, generateE2EAgentValueKey, parseVerifiedE2EAgentActionLedger, reviewCapturedE2EAgentTrace,
-  type E2EModelChannelClient, type E2EModelChannelRequest, type E2EModelChannelResponse } from "@agentx/contracts";
+  type E2EModelChannelClient, type E2EModelChannelRequest, type E2EModelChannelResponse } from "@rovara-code/contracts";
 import { createRovaraE2EAgentExecutor, appRelativePath, elideSupersededScreens, parseScreen, parseScreenLine, E2E_AGENT_MESSAGES_SOFT_BUDGET_BYTES } from "../../packages/verifier/src/executor/agent-executor.js";
 import { createE2EAgentLedgerWriter, E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
 import { agentTraceFilePath, createE2EAgentCaptureStore, persistE2EAgentTrace } from "../../packages/verifier/src/executor/agent-capture-store.js";

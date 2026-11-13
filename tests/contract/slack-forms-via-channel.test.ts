@@ -8,11 +8,11 @@ import {
   ADMIN_CHANGE_CONFIRM_ACTION, builtInAdapterRecord, createWorkflowSnapshot, formOfSlackModal, generateWebhookSecret, slackModalOf, submitWorkflowArtifact, verifyWebhook, webhookHeaders,
   type ChannelAction,
 } from "../../packages/contracts/src/index.js";
-import { createChannelIngressHandler } from "../../packages/broker/src/aws/channel-ingress.js";
-import { createSlackChannelActionClient, createSlackChannelCommandsHandler } from "../../packages/broker/src/aws/slack-adapter.js";
-import { formAnswerOf, formCapture, slackPressOfChannelAction, slackSubmissionPayloadOf } from "../../packages/broker/src/aws/slack-channel-presses.js";
-import { createSlackInteractivityHandler, createSlackPressDispatcher, workflowSlackHandlers, type SlackBlockAction } from "../../packages/broker/src/aws/slack-interactivity.js";
-import { channelActionOfAdminPress, channelActionOfPress, channelActionOfSubmission } from "../../packages/broker/src/aws/slack-press-routing.js";
+import { createChannelIngressHandler } from "../../packages/core/src/aws/channel-ingress.js";
+import { createSlackChannelActionClient, createSlackChannelCommandsHandler } from "../../packages/core/src/aws/slack-adapter.js";
+import { formAnswerOf, formCapture, slackPressOfChannelAction, slackSubmissionPayloadOf } from "../../packages/core/src/aws/slack-channel-presses.js";
+import { createSlackInteractivityHandler, createSlackPressDispatcher, workflowSlackHandlers, type SlackBlockAction } from "../../packages/core/src/aws/slack-interactivity.js";
+import { channelActionOfAdminPress, channelActionOfPress, channelActionOfSubmission } from "../../packages/core/src/aws/slack-press-routing.js";
 
 const nowSeconds = 1_758_657_600;
 const NOW = nowSeconds * 1_000;

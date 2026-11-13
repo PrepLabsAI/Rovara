@@ -3,7 +3,7 @@
 import { request as httpRequest } from "node:http";
 import { transformSync } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { WORKSPACES_JS, workspacesHtml } from "../../packages/cli/src/workspaces-ui/page.js";
 import { workspaceState, workspacesText, type DeveloperWorkspacesResult } from "../../packages/cli/src/developer/workspaces.js";
 import { executeCli } from "../../packages/cli/src/main.js";

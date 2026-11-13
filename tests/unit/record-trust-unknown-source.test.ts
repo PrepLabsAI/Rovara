@@ -1,6 +1,6 @@
 // Port lane P6 (item T1, owner decision 60): an unknown team-record source is the narrowest audience, never "everyone in the project".
 import { describe, expect, it } from "vitest";
-import { AudienceSchema, MAINTAINERS_GROUP, audienceForSource, unknownSourceAudience, type Audience } from "@agentx/contracts";
+import { AudienceSchema, MAINTAINERS_GROUP, audienceForSource, unknownSourceAudience, type Audience } from "@rovara-code/contracts";
 
 const AT = "2026-11-10T00:00:00.000Z";
 const PROJECT: Audience = { kind: "project" };

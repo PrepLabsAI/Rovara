@@ -3,8 +3,8 @@
 import type { DescribeAlarmsCommand, DescribeAlarmsCommandOutput } from "@aws-sdk/client-cloudwatch";
 import type { GetQueueAttributesCommand, GetQueueAttributesCommandOutput } from "@aws-sdk/client-sqs";
 import { describe, expect, it } from "vitest";
-import { HEALTH_ALARM_CONDITIONAL_SUFFIXES, HEALTH_ALARM_SUFFIXES } from "@agentx/contracts";
-import { healthProbes, type HealthProbeInput } from "../../packages/broker/src/aws/health-probes.js";
+import { HEALTH_ALARM_CONDITIONAL_SUFFIXES, HEALTH_ALARM_SUFFIXES } from "@rovara-code/contracts";
+import { healthProbes, type HealthProbeInput } from "../../packages/core/src/aws/health-probes.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 
 const QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/111111111111/agentx-live25d-planted-queue";

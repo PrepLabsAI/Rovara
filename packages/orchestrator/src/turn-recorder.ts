@@ -19,7 +19,7 @@ import {
   type TurnObservation,
   type TurnOutcome,
   type UsageStats,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 interface RecordedArguments { text: string; fingerprint: string }
 

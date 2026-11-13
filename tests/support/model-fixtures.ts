@@ -3,7 +3,7 @@
 // fixtures are the planner's final text (`workflowModel({ plan })`); reviewer fixtures are faux response steps or the
 // `reviews` option of `workflowModel`; feedback fixtures answer the PR-feedback critic's prompt (`workflowModel({ feedback })`).
 import { fauxAssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
-import { PLAN_CLAIMS_MAX, PLAN_DOCUMENT_INFO_STRING, type PlanDocument } from "@agentx/contracts";
+import { PLAN_CLAIMS_MAX, PLAN_DOCUMENT_INFO_STRING, type PlanDocument } from "@rovara-code/contracts";
 import { planAnswer, planDocument } from "./plan-documents.js";
 
 // ---------------------------------------------------------------------------------------------------------------------

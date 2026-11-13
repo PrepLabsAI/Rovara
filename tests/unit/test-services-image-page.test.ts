@@ -1,8 +1,8 @@
 // Approving a test service image on the test environment page: a page session opened in the last ten minutes and a form that answers once, bound to the project and the exact image. The page shows the exact reference and
 // its registry. Nothing else can approve: not a stale page, not a replayed form, not another image's form, not a form with no token.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createLocalPagesServer, SCRIPT_TOKEN_FRESH_MS, type LocalPagesServer } from "../../packages/broker/src/core/local-pages/index.js";
-import type { LocalActionResult, ServiceImagesPageView } from "../../packages/broker/src/core/local-pages/views.js";
+import { createLocalPagesServer, SCRIPT_TOKEN_FRESH_MS, type LocalPagesServer } from "../../packages/core/src/core/local-pages/index.js";
+import type { LocalActionResult, ServiceImagesPageView } from "../../packages/core/src/core/local-pages/views.js";
 import { fakeWorld, formBody, formOf, raw, type FakeWorld } from "../support/local-pages-fakes.js";
 
 const STARTER = "docker.io/library/postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657";

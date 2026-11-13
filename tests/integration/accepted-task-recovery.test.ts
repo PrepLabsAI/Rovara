@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { InMemoryRegistry, OperationStore, OutboxConsumer } from "../../packages/broker/src/index.js";
+import { InMemoryRegistry, OperationStore, OutboxConsumer } from "../../packages/core/src/index.js";
 import { describe, expect, it } from "vitest";
 
 describe("accepted task recovery", () => {

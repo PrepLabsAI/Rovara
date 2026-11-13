@@ -1,12 +1,12 @@
 // following a session and who is looking now. The owner follows without an item; another person (a members adapter's, through the `level` seam) follows with one item and a count in the same transaction.
  
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, PRESENCE_TTL_SECONDS, SESSION_FOLLOWERS_MAX, agentSessionKey, livePresenceKey, type OrgId, type Principal } from "@agentx/contracts";
-import { createTaskSessionItems, developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/index.js";
-import { followSession, presenceIsFresh, recordPresence, removeFollower, unfollowSession, viewingNow } from "../../packages/broker/src/core/sessions/followers.js";
-import { SessionStore } from "../../packages/broker/src/core/sessions/store.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { IMPLICIT_COMPANY_ID, PRESENCE_TTL_SECONDS, SESSION_FOLLOWERS_MAX, agentSessionKey, livePresenceKey, type OrgId, type Principal } from "@rovara-code/contracts";
+import { createTaskSessionItems, developerIdOf, taskSessionId } from "../../packages/core/src/core/sessions/index.js";
+import { followSession, presenceIsFresh, recordPresence, removeFollower, unfollowSession, viewingNow } from "../../packages/core/src/core/sessions/followers.js";
+import { SessionStore } from "../../packages/core/src/core/sessions/store.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OWNER = localOwnerPrincipal();

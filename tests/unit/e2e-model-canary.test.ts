@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { E2EModelReceiptSchema } from "../../packages/contracts/src/e2e-model-channel.js";
 import { deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment, e2eAgentRouteDefinitionDigest } from "../../packages/model-runtime/src/e2e-route-derive.js";
-import { e2eAgentRouteDefinitionDigest as brokerDigest } from "../../packages/broker/src/e2e/model-route-registry.js";
+import { e2eAgentRouteDefinitionDigest as brokerDigest } from "../../packages/core/src/e2e/model-route-registry.js";
 import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput } from "../../packages/model-runtime/src/e2e-route.js";
 import { E2E_MODEL_CANARY_BOUNDS, E2E_MODEL_CANARY_CALL, runE2EModelCanary, type E2EModelCanaryRequest } from "../../packages/worker/src/e2e-model-canary.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";

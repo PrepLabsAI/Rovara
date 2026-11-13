@@ -6,7 +6,7 @@
 // bytes (`B`) have no JSON form; the port keeps the store small (owner decision 60, S2), so a row holding one is refused on read
 // rather than silently changed into a list that a later write would store in a different type.
 import type { AttributeValue } from "@aws-sdk/client-dynamodb";
-import { DocumentStoreError, type JsonValue, type StoredDocument } from "@agentx/contracts";
+import { DocumentStoreError, type JsonValue, type StoredDocument } from "@rovara-code/contracts";
 
 /** An attribute value as the wire and the stream carry it: exactly one member set. */
 export type WireValue = AttributeValue;

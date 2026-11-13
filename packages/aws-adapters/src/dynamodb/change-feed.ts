@@ -15,7 +15,7 @@
 //  - `cause: "expired"`: DynamoDB marks a time-to-live removal with the service principal as the record's user identity.
 // Consumer names are declared when the feed is built (as the readers are declared in the deployment); subscribing to another name is
 // refused. A record that cannot be read as a document (a set or bytes, decision 60) is reported to `onUnreadable` and left out.
-import { DocumentStoreError, type ChangeSubscription, type DocumentChange, type DocumentChangeFeed, type DocumentKey, type StoredDocument } from "@agentx/contracts";
+import { DocumentStoreError, type ChangeSubscription, type DocumentChange, type DocumentChangeFeed, type DocumentKey, type StoredDocument } from "@rovara-code/contracts";
 import { fromWireItem, type WireItem } from "./attribute-values.js";
 
 /** One record of a DynamoDB stream, as a Lambda event source mapping (or the streams API) hands it over. */

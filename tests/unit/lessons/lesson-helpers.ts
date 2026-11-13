@@ -1,22 +1,22 @@
-// Shared fakes for the lessons tests. No AWS, no network: every port of packages/broker/src/lessons/ports.ts has an in-memory stand-in.
-import type { AccessCheckPort } from "../../../packages/broker/src/lessons/access-port.js";
-import type { TaskVisibilityPort } from "../../../packages/broker/src/lessons/access-port.js";
-import { withLessonAudiences, type LessonTaskAudience } from "../../../packages/broker/src/lessons/task-audience.js";
-import type { CounterDeps } from "../../../packages/broker/src/lessons/counters.js";
-import type { LessonDraft } from "../../../packages/broker/src/lessons/reflect.js";
+// Shared fakes for the lessons tests. No AWS, no network: every port of packages/core/src/lessons/ports.ts has an in-memory stand-in.
+import type { AccessCheckPort } from "../../../packages/core/src/lessons/access-port.js";
+import type { TaskVisibilityPort } from "../../../packages/core/src/lessons/access-port.js";
+import { withLessonAudiences, type LessonTaskAudience } from "../../../packages/core/src/lessons/task-audience.js";
+import type { CounterDeps } from "../../../packages/core/src/lessons/counters.js";
+import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
 import type {
   AlertSink, ApproverDirectory, CitationVerifier, CorrectionJudge, LearningSpend, LessonAuditEvent, LessonAuditSink, LessonEmbedder, LessonVectors, PipelineModel, RulePublisher, StoredLessonVector,
-} from "../../../packages/broker/src/lessons/ports.js";
-import type { LearningSettings, LearningSettingsReader } from "../../../packages/broker/src/lessons/policy.js";
-import type { ReflectSubject, EvidenceSpan } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
-import type { CodeFacts } from "../../../packages/broker/src/lessons/ports.js";
-import { pathsToVerify, type VerifiedMaterial } from "../../../packages/broker/src/lessons/render.js";
-import type { PresetChange, PresetDeps } from "../../../packages/broker/src/lessons/preset-setting.js";
-import { classifyTier as realClassifyTier, type TierContext, type TierInput } from "../../../packages/broker/src/lessons/tier.js";
+} from "../../../packages/core/src/lessons/ports.js";
+import type { LearningSettings, LearningSettingsReader } from "../../../packages/core/src/lessons/policy.js";
+import type { ReflectSubject, EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import type { CodeFacts } from "../../../packages/core/src/lessons/ports.js";
+import { pathsToVerify, type VerifiedMaterial } from "../../../packages/core/src/lessons/render.js";
+import type { PresetChange, PresetDeps } from "../../../packages/core/src/lessons/preset-setting.js";
+import { classifyTier as realClassifyTier, type TierContext, type TierInput } from "../../../packages/core/src/lessons/tier.js";
 
-import { setAutoApplyGate, setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
+import { setAutoApplyGate, setLearnedLessonsGate } from "../../../packages/core/src/lessons/policy.js";
 // The learning tests exercise the model paths and the automatic path, so both gates are open here; the gates' own tests close them (clamp-auto.test.ts, outcomes-collect-while-off.test.ts).
 setAutoApplyGate(() => true);
 setLearnedLessonsGate(() => true);

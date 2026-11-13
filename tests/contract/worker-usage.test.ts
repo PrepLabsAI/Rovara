@@ -6,7 +6,7 @@ import {
   OwnerScopedOutputStore,
   WorkerCallbackService,
   type AuthenticatedIdentity,
-} from "../../packages/broker/src/index.js";
+} from "../../packages/core/src/index.js";
 import { describe, expect, it } from "vitest";
 
 describe("worker usage event compatibility", () => {

@@ -1,5 +1,5 @@
 // Worlds for the fakes: each builds a fresh model and the adapter over it. The contract suites run on these, and so do the mutants.
-import { FakeCheckRunner, FakeCodeHost, FakeHostModel, FakeTracker, fakeSignedDelivery, fakeTrackerDelivery } from "@agentx/broker/fakes";
+import { FakeCheckRunner, FakeCodeHost, FakeHostModel, FakeTracker, fakeSignedDelivery, fakeTrackerDelivery } from "@rovara-code/core/fakes";
 import { fakeCheckRunnerCompanies, fakeCodeHostCompanies, fakeTrackerCompanies } from "../isolation/fake-worlds.js";
 import type { CheckRunnerWorld } from "./check-runner-conformance.js";
 import type { CodeHostWorld } from "./code-host-conformance.js";

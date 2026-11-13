@@ -4,9 +4,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { CLOSED_SHARED_NOTICE, VIEW_ONLY_NOTICE, createWorkflowSnapshot, parseSlackThreadSubject, turnRecordKeys, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse, type SlackRequestMessage, type TurnRecord } from "../../packages/contracts/src/index.js";
-import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { STUCK_SETUP_MESSAGE, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
-import type { Notice, StreamRecord } from "../../packages/broker/src/developer/notifications.js";
+import { createNotifierHandler } from "../../packages/core/src/aws/developer-task-notifier.js";
+import { STUCK_SETUP_MESSAGE, sweepStuckSetups } from "../../packages/core/src/aws/stuck-setup.js";
+import type { Notice, StreamRecord } from "../../packages/core/src/developer/notifications.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/slack-processor.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";

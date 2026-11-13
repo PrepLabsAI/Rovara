@@ -1,0 +1,1105 @@
+// Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
+// routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
+// access token itself, then checks the environment, the method and the sign-in session on every
+// request (R12, R13), so a revoked session stops at once.
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import type { SlackRequestQueue } from "../developer/page-comments.js";
+import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  AgentXNameSchema,
+  CHANNEL_MEMBERS_MAX_CHANNELS,
+  DEVELOPER_TOKEN_AUDIENCE,
+  DEVELOPER_WORKSPACES_PER_PROJECT,
+  WORKSPACE_PROJECT_INDEX,
+  WorkspaceInstanceSchema,
+  TaskPersonProofResponseSchema,
+  TaskChannelPeopleResponseSchema,
+  TaskPeopleDisplayReadResponseSchema,
+  agentXError,
+  developerTaskPolicy,
+  workspaceRecordFields,
+  type ChannelByNameRequest,
+  type ChannelByNameResponse,
+  type ChannelInfoRequest,
+  type ChannelInfoResponse,
+  type ChannelMembersRequest,
+  type ChannelMembersResponse,
+  type DeveloperProjectsResponse,
+  type DeveloperSignInMethod,
+  type DeveloperTaskPolicy,
+  type DeveloperWorkspace,
+  type DeveloperWorkspacesResponse,
+  type EndDeveloperSessionsRequest,
+  type EndDeveloperSessionsResponse,
+  type SlackAuthCheckRequest,
+  type SlackAuthCheckResponse,
+  type SlackChannelBinding,
+  type SlackUserByEmailRequest,
+  type SlackUserByEmailResponse,
+  type TaskPersonProofRequest,
+  type TaskPersonProofResponse,
+  type TaskChannelPeopleRequest,
+  type TaskChannelPeopleResponse,
+  type TaskPeopleDisplayReadRequest,
+  type TaskPeopleDisplayReadResponse,
+  SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
+  ActorRefSchema,
+  SignInClientViewSchema,
+  AccessCheckRequestSchema,
+  AccessCheckResponseSchema,
+  SignInClientIdSchema,
+  SignInClientRecordSchema,
+  signInClientKey,
+  type AccessCheckResponse,
+  type ListSignInClientsRequest,
+  type PutSignInClientRequest,
+  type RemoveSignInClientRequest,
+  type SignInClientRecord,
+  type SignInClientView,
+} from "@rovara-code/contracts";
+import { createChannelLinkWeb } from "./channel-link-web.js";
+import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
+import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
+import { evaluateProjectAuthority } from "../developer/task-project-access.js";
+import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
+import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { decodeJwt } from "jose";
+import { applyAccessRules, type AccessCheckContext, type AccessCheckRule } from "../developer/access-rules.js";
+import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
+import type { ChatGptConnections } from "../chatgpt/connections.js";
+import type { DeveloperTaskRecord } from "../developer/task-records.js";
+import type { DeveloperTaskActions } from "./developer-task-actions.js";
+import {
+  createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, retryApplicationRoundOnPage, setPageSuggestion,
+  confirmTaskPeopleProposal, getTaskPeople, getTaskPeopleCapabilities, getTaskPeopleProposal, getTaskPeopleProposalMetadata, getTaskPersonPresentationName,
+  proposeTaskOwnershipForPage, proposeTaskPeopleRoleForPage,
+  getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
+import type { AdaptedHttpRequest } from "./lambda.js";
+import { createFeedbackReviewWeb } from "./feedback-review-web.js";
+import { TASK_PAGE, TASK_PEOPLE_CONFIRMATION, TASK_STATUS, createTaskWeb } from "./task-web.js";
+import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
+import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
+
+export interface DeveloperApiConfiguration {
+  issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
+  /** Each method's enabled-since cutoff, epoch seconds (FR-045): a session started before it was ended by a disable. */
+  since?: Partial<Record<DeveloperSignInMethod, number>>;
+  signInTableName: string;
+  channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
+  /** C0: optional until the compatible identity function is deployed; callers must fail closed when absent. */
+  taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
+  taskChannelPeople?: (request: TaskChannelPeopleRequest) => Promise<TaskChannelPeopleResponse>;
+  /** E: one request-scoped, metered proof/list transport. Absence makes the complete People view unavailable. */
+  taskPeopleDisplayRead?: (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse>;
+  /** D: exact opt-in for role changes; an existing PEOPLE sidecar remains enforced while false. */
+  taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
+  /** Spec 059: absent is the safe default; production factories intentionally leave graph starts disabled. */
+  workflowDependenciesEnabled?: boolean;
+  /** C: optional distinct claim-bound invitation endpoint; production leaves it absent until separately configured. */
+  inviteTaskPerson?: DeveloperTaskRouteDependencies["inviteTaskPerson"];
+  /** R10: bound channels' names and privacy, read by DeveloperIdentity. Optional: without it channels are listed by ID. */
+  channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
+  /** How long one request waits for channel names in all; the rest stay unnamed. Default 5 seconds. */
+  channelInfoDeadlineMs?: number;
+  /** Spec 025 A12: FR-012's email lookup, for an admin's Slack link. */
+  slackUserByEmail?: (request: SlackUserByEmailRequest) => Promise<SlackUserByEmailResponse>;
+  /** Spec 025 A13: the health route's Slack token check. */
+  slackAuthCheck?: () => Promise<SlackAuthCheckResponse>;
+  /** Spec 025 E9: an admin ends a developer's sign-in sessions, through DeveloperIdentity (the broker only reads the sign-in table). */
+  endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
+  /** Spec 063: the sign-in clients' registry, which the sign-in Lambda owns. */
+  signInClients?: SignInClientRegistry;
+  /** Spec 025 E12: a public channel by its name, through DeveloperIdentity. */
+  channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
+  /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
+  verifyAccessToken(authorization: string | undefined, audience?: string): Promise<Record<string, unknown>>;
+  /**
+   * Owner decision 132: a host's stricter rules on the access check (spec 063 FR-004), such as a fresh sign-in or an approval it keeps. They can only refuse
+   * or narrow Rovara's own answer (`developer/access-rules.ts`); none means Rovara's answer as is.
+   */
+  accessRules?: readonly AccessCheckRule[];
+  /** Spec 061 slice 2: the Slack service's request queue, set only with SLACK_REQUEST_QUEUE_URL; "Ask AgentX to reply to this comment" needs it. */
+  slackRequestQueue?: SlackRequestQueue;
+}
+export interface DeveloperRouteDependencies {
+  documentClient: { send(command: unknown): Promise<unknown> };
+  tableName: string;
+  developer: DeveloperApiConfiguration;
+  now: () => number;
+  /** The developer task routes' broker actions; without them /v1/dev/tasks* answers NOT_FOUND. */
+  tasks?: DeveloperTaskActions;
+  /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
+  refreshTaskFeedback?(taskId: string): Promise<void>;
+  /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
+  workflowE2EPresentation?: DeveloperTaskRouteDependencies["workflowE2EPresentation"];
+  workflowE2EPublicationChecks?: DeveloperTaskRouteDependencies["workflowE2EPublicationChecks"];
+  workflowE2EScenarioResults?: DeveloperTaskRouteDependencies["workflowE2EScenarioResults"];
+  workflowE2EArtifact?: DeveloperTaskRouteDependencies["workflowE2EArtifact"];
+  startWorkflowE2EBaseline?: DeveloperTaskRouteDependencies["startWorkflowE2EBaseline"];
+  /** Checks a plan's application E2E intent when the owner approves it. */
+  validateWorkflowE2EApplicationPlan?: DeveloperTaskRouteDependencies["validateWorkflowE2EApplicationPlan"];
+  registeredRepositoryIdentity?: DeveloperTaskRouteDependencies["registeredRepositoryIdentity"];
+  /** Sign in with ChatGPT (#338): each developer's connection; without it /v1/dev/chatgpt/* answers NOT_FOUND. */
+  chatgpt?: ChatGptConnections;
+  /** Spec 062: channel account links; without them /review/link/* and /v1/dev/channel-links answer NOT_FOUND. */
+  channelLinks?: ChannelLinkDependencies;
+}
+export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
+
+/** What the broker needs from a Lambda invoke; `@aws-sdk/client-lambda`'s InvokeCommand output fits. */
+export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
+
+/** One structured log line. Only event names, reasons and error names: never payloads or secrets. */
+function logDeveloperEvent(entry: Record<string, string>): void {
+  console.log(JSON.stringify({ component: "broker", ...entry }));
+}
+const errorName = (error: unknown) => (error instanceof Error ? error.name : "UnknownError");
+const SLACK_UNAVAILABLE = { ok: false, error: "slack_unavailable" } as const;
+/** A Slack or DeveloperIdentity error code: the only error text that may reach a log or an answer (R9). */
+const SLACK_ERROR_CODE = /^[a-z_]{1,64}$/;
+type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_request" };
+
+/**
+ * One direct invoke of the DeveloperIdentity function, which holds the Slack token (the broker
+ * never reads the Slack secret). `readReply` returns the good answer from the decoded reply, or
+ * undefined. Every failure fails closed as slack_unavailable with one `<event>_failed` log line;
+ * an invalid_request reply is a broker bug, logged as `<event>_invalid_request`. Lines carry only
+ * the reason, error name, FunctionError or reply error, never a payload.
+ */
+async function identityInvoke<T>(
+  invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
+  request: ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
+    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest,
+  readReply: (reply: Record<string, unknown>) => T | undefined,
+  event: string,
+): Promise<T | IdentityRefusal> {
+  const failed = (entry: Record<string, string>) => {
+    logDeveloperEvent({ event: `${event}_failed`, ...entry });
+    return SLACK_UNAVAILABLE;
+  };
+  let response: ChannelMembersInvokeResult;
+  try {
+    response = await invoke(Buffer.from(JSON.stringify(request)));
+  } catch (error) {
+    return failed({ reason: "invoke_error", error: errorName(error) });
+  }
+  if (response.FunctionError !== undefined) return failed({ reason: "function_error", functionError: response.FunctionError });
+  if (response.Payload === undefined) return failed({ reason: "empty_reply" });
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(response.Payload).toString("utf8"));
+  } catch {
+    return failed({ reason: "unreadable_reply" });
+  }
+  const reply = typeof decoded === "object" && decoded !== null ? decoded as Record<string, unknown> : {};
+  const good = readReply(reply);
+  if (good !== undefined) return good;
+  if (reply.ok === false && reply.error === "invalid_request") {
+    logDeveloperEvent({ event: `${event}_invalid_request`, reason: "the identity function refused the broker's request; this is a broker bug" });
+    return { ok: false, error: "invalid_request" };
+  }
+  // Only a code-shaped reply error (such as token_revoked) is logged; never free text.
+  return failed({ reason: "reply_error", error: reply.ok === false && typeof reply.error === "string" && SLACK_ERROR_CODE.test(reply.error) ? reply.error : "malformed_reply" });
+}
+
+/** The broker's channel-members check (FR-013) through the DeveloperIdentity function. */
+export function channelMembersThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelMembersRequest) => Promise<ChannelMembersResponse> {
+  return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true && Array.isArray(reply.memberOf)
+    ? { ok: true as const, memberOf: reply.memberOf.filter((entry): entry is string => typeof entry === "string") }
+    : undefined), "developer.channel_members");
+}
+
+/** C0: one fresh proof through DeveloperIdentity. Any old or malformed reply fails closed. */
+export function taskPersonProofThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse> {
+  return (request) => identityInvoke(invoke, request, (reply): TaskPersonProofResponse | undefined => {
+    const parsed = TaskPersonProofResponseSchema.safeParse(reply);
+    if (!parsed.success) return undefined;
+    if (!parsed.data.ok) return parsed.data.error === "ineligible" ? parsed.data : undefined;
+    const requested = new Set(request.channelIds);
+    const memberOf = parsed.data.memberOf;
+    if (parsed.data.user.id !== request.slackUserId || new Set(memberOf).size !== memberOf.length || memberOf.some((channelId) => !requested.has(channelId))) return undefined;
+    return parsed.data;
+  }, "developer.task_person_proof");
+}
+
+/** E: complete fresh channel identities through DeveloperIdentity. Partial or malformed replies fail closed. */
+export function taskChannelPeopleThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: TaskChannelPeopleRequest) => Promise<TaskChannelPeopleResponse> {
+  return (request) => identityInvoke(invoke, request, (reply): TaskChannelPeopleResponse | undefined => {
+    const parsed = TaskChannelPeopleResponseSchema.safeParse(reply);
+    if (!parsed.success) return undefined;
+    if (!parsed.data.ok) return parsed.data.error === "capacity_exceeded" ? parsed.data : undefined;
+    const requested = new Set(request.channelIds);
+    if (new Set(parsed.data.users.map((user) => user.id)).size !== parsed.data.users.length
+      || parsed.data.users.some((user) => new Set(user.memberOf).size !== user.memberOf.length || user.memberOf.some((channelId) => !requested.has(channelId)))) return undefined;
+    return parsed.data;
+  }, "developer.task_channel_people");
+}
+
+/** E: strict metered display transport. Any missing or malformed usage seals the caller's admission. */
+export function taskPeopleDisplayReadThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse> {
+  return async (request) => {
+    const failed = (reason: string): never => {
+      logDeveloperEvent({ event: "developer.task_people_display_read_failed", reason });
+      throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
+    };
+    let response: ChannelMembersInvokeResult;
+    try { response = await invoke(Buffer.from(JSON.stringify(request))); }
+    catch (error) { return failed(`invoke_${errorName(error)}`); }
+    if (response.FunctionError !== undefined) return failed("function_error");
+    if (response.Payload === undefined) return failed("empty_reply");
+    let decoded: unknown;
+    try { decoded = JSON.parse(Buffer.from(response.Payload).toString("utf8")); }
+    catch { return failed("unreadable_reply"); }
+    const parsed = TaskPeopleDisplayReadResponseSchema.safeParse(decoded);
+    if (!parsed.success || parsed.data.operation !== request.operation
+      || parsed.data.admission.slackCallsUsed > request.admission.slackCallsLimit) return failed("malformed_reply");
+    if (parsed.data.operation === "proof") {
+      const result = parsed.data.result;
+      if (result.ok) {
+        const requested = new Set(request.operation === "proof" ? request.request.channelIds : []);
+        if (request.operation !== "proof" || result.user.id !== request.request.slackUserId
+          || new Set(result.memberOf).size !== result.memberOf.length || result.memberOf.some((id) => !requested.has(id))) return failed("malformed_reply");
+      }
+    } else {
+      const result = parsed.data.result;
+      if (result.ok) {
+        const requested = new Set(request.operation === "directory" ? request.request.channelIds : []);
+        if (request.operation !== "directory" || new Set(result.users.map((user) => user.id)).size !== result.users.length
+          || result.users.some((user) => new Set(user.memberOf).size !== user.memberOf.length || user.memberOf.some((id) => !requested.has(id)))) return failed("malformed_reply");
+      }
+    }
+    return parsed.data;
+  };
+}
+
+type ChannelEntry = { channelId: string; name: string; isPrivate: boolean };
+const isChannelEntry = (entry: unknown): entry is ChannelEntry => {
+  const candidate = entry as Partial<Record<keyof ChannelEntry, unknown>> | null;
+  return typeof candidate === "object" && candidate !== null && typeof candidate.channelId === "string" && typeof candidate.name === "string" && typeof candidate.isPrivate === "boolean";
+};
+
+/** R10: bound channels' names and privacy through the DeveloperIdentity function; keeps only well-formed entries. */
+export function channelInfoThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelInfoRequest) => Promise<ChannelInfoResponse> {
+  return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true && Array.isArray(reply.channels)
+    ? { ok: true as const, channels: reply.channels.filter(isChannelEntry).map(({ channelId, name, isPrivate }) => ({ channelId, name, isPrivate })) }
+    : undefined), "developer.channel_info");
+}
+
+/** A12: who owns a verified email, through DeveloperIdentity; fails closed as slack_unavailable. */
+export function slackUserByEmailThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: SlackUserByEmailRequest) => Promise<SlackUserByEmailResponse> {
+  return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true
+    ? (typeof reply.userId === "string" ? { ok: true as const, userId: reply.userId } : { ok: true as const })
+    : undefined), "developer.slack_user_by_email");
+}
+
+/** A13: the bot token's auth.test, through DeveloperIdentity. Slack's refusal code passes through. */
+export function slackAuthCheckThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): () => Promise<SlackAuthCheckResponse> {
+  return async () => {
+    let refusal: string | undefined;
+    const answer = await identityInvoke(invoke, { kind: "slack-auth-check" }, (reply) => {
+      if (reply.ok === true && typeof reply.teamId === "string") return { ok: true as const, teamId: reply.teamId };
+      if (reply.ok === false && typeof reply.error === "string" && SLACK_ERROR_CODE.test(reply.error) && reply.error !== "invalid_request") refusal = reply.error;
+      return undefined;
+    }, "developer.slack_auth_check");
+    if (answer.ok) return answer;
+    return { ok: false, error: refusal ?? answer.error };
+  };
+}
+
+/**
+ * E9: ends a developer's sessions through DeveloperIdentity. A not_found reply is an answer (the
+ * developer never signed in), not a failure, so it is neither logged as one nor turned into
+ * unavailable (C15). Every other failure is unavailable.
+ */
+export function endDeveloperSessionsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse> {
+  return async (request) => {
+    const answer = await identityInvoke(invoke, request, (reply): EndDeveloperSessionsResponse | undefined => {
+      if (reply.ok === true) return { ok: true };
+      if (reply.ok === false && reply.error === "not_found") return { ok: false, error: "not_found" };
+      return undefined;
+    }, "developer.end_sessions");
+    if (answer.ok || answer.error === "not_found" || answer.error === "invalid_request") return answer;
+    return { ok: false, error: "unavailable" };
+  };
+}
+
+/** Spec 063: the sign-in clients' registry, through the sign-in Lambda that owns it. Throws when it cannot be reached. */
+export interface SignInClientRegistry {
+  put(client: SignInClientRecord): Promise<void>;
+  remove(clientId: string): Promise<boolean>;
+  list(): Promise<SignInClientView[]>;
+}
+
+export function signInClientsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): SignInClientRegistry {
+  const ask = async <T>(request: PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest, read: (reply: Record<string, unknown>) => T | undefined): Promise<T> => {
+    const answer = await identityInvoke(invoke, request, (reply) => (reply.ok === true ? read(reply) : undefined), "developer.sign_in_clients");
+    if (typeof answer === "object" && answer !== null && "ok" in answer && (answer as { ok: unknown }).ok === false) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not reach its sign-in service; try again");
+    }
+    return answer as T;
+  };
+  return {
+    async put(client) { await ask({ kind: "put-sign-in-client", client }, () => true); },
+    remove: (clientId) => ask({ kind: "remove-sign-in-client", clientId }, (reply) => reply.removed === true),
+    list: () => ask({ kind: "list-sign-in-clients" }, (reply) => {
+      const parsed = z.array(SignInClientViewSchema).safeParse(reply.clients);
+      return parsed.success ? parsed.data : undefined;
+    }),
+  };
+}
+
+/** E12 (Q8): a public channel by name through DeveloperIdentity; fails closed as slack_unavailable. */
+export function channelByNameThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelByNameRequest) => Promise<ChannelByNameResponse> {
+  return (request) => identityInvoke(invoke, request, (reply) => {
+    if (reply.ok !== true) return undefined;
+    const channel = reply.channel as { channelId?: unknown; name?: unknown } | undefined;
+    return typeof channel?.channelId === "string" && typeof channel.name === "string"
+      ? { ok: true as const, channel: { channelId: channel.channelId, name: channel.name } }
+      : { ok: true as const };
+  }, "developer.channel_by_name");
+}
+
+/** The broker's copy of each method's enabled-since cutoff (FR-045), from its environment. */
+export function developerSinceFromEnvironment(env: NodeJS.ProcessEnv): { slack?: number; oidc?: number } {
+  const slack = methodSince(env.DEVELOPER_SIGNIN_SLACK_SINCE);
+  const oidc = methodSince(env.DEVELOPER_OIDC_SINCE);
+  return { ...(slack === undefined ? {} : { slack }), ...(oidc === undefined ? {} : { oidc }) };
+}
+
+/**
+ * The sign-in server's public keys, read by invoking the DeveloperIdentity function with its own
+ * JWKS route (D17): the broker may not call kms:GetPublicKey, which the key policy keeps to
+ * DeveloperIdentity. Any failure throws, and the verifier answers 503 for it.
+ */
+export function developerKeysThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): () => Promise<unknown[]> {
+  const request = { version: "2.0", rawPath: "/v1/auth/.well-known/jwks.json", requestContext: { requestId: "broker-jwks", http: { method: "GET" } } };
+  const failed = (reason: string, entry: Record<string, string> = {}) => {
+    logDeveloperEvent({ event: "developer.jwks_failed", reason, ...entry });
+    return new Error(`the developer sign-in keys could not be read (${reason})`);
+  };
+  return async () => {
+    let response: ChannelMembersInvokeResult;
+    try {
+      response = await invoke(Buffer.from(JSON.stringify(request)));
+    } catch (error) {
+      throw failed("invoke_error", { error: errorName(error) });
+    }
+    if (response.FunctionError !== undefined) throw failed("function_error", { functionError: response.FunctionError });
+    if (response.Payload === undefined) throw failed("empty_reply");
+    let keys: unknown;
+    try {
+      const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { statusCode?: unknown; body?: unknown };
+      if (reply.statusCode !== 200 || typeof reply.body !== "string") throw new Error("not 200");
+      keys = (JSON.parse(reply.body) as { keys?: unknown }).keys;
+    } catch {
+      throw failed("unreadable_reply");
+    }
+    if (!Array.isArray(keys) || keys.length === 0) throw failed("no_keys");
+    return keys as unknown[];
+  };
+}
+
+const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+
+export function developerClaims(claims: Record<string, unknown> | undefined, config: DeveloperApiConfiguration): { developerId: string; sessionId: string; amr: DeveloperSignInMethod } {
+  if (claims === undefined || claims.iss !== config.issuer || claims.aud !== DEVELOPER_TOKEN_AUDIENCE || claims.env !== config.env) {
+    throw agentXError("AUTH_REQUIRED", "this route needs an AgentX developer sign-in; run agentx login <url>");
+  }
+  if (typeof claims.sub !== "string" || !/^[a-f0-9]{64}$/.test(claims.sub) || typeof claims.sid !== "string" || claims.sid === "") {
+    throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  }
+  const amr = claims.amr;
+  if (amr !== "slack" && amr !== "oidc") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  if (!config.methods[amr]) {
+    throw agentXError("AUTH_REQUIRED", `${amr === "slack" ? "Slack" : "Company"} sign-in is turned off in this environment; sign in another way with agentx login <url>`);
+  }
+  return { developerId: claims.sub, sessionId: claims.sid, amr };
+}
+
+async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promise<T | undefined> {
+  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk, sk: META }, ConsistentRead: true })) as { Item?: T };
+  return response.Item;
+}
+
+export async function authenticateDeveloper(deps: DeveloperRouteDependencies, claims: Record<string, unknown> | undefined): Promise<DeveloperCaller> {
+  const token = developerClaims(claims, deps.developer);
+  return authenticateSession(deps, token);
+}
+
+async function authenticateSession(deps: DeveloperRouteDependencies, token: { developerId: string; sessionId: string; amr: DeveloperSignInMethod }): Promise<DeveloperCaller> {
+  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr" | "endsAt" | "revokedAt" | "startedAt" | "slackUserId" | "clientId">>(deps, `SESSION#${token.sessionId}`);
+  if (session === undefined || session.developerId !== token.developerId || session.revokedAt !== undefined || session.endsAt <= Math.floor(deps.now() / 1000)) {
+    throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  }
+  // Spec 063 FR-003: a registered client's session never acts on Rovara, whatever token names it.
+  if (session.clientId !== undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  if (session.amr !== token.amr) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  // The broker may only read the sign-in table (R13), so it refuses; the token endpoint revokes the
+  // session at its next refresh.
+  if (startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
+    throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : "company sign-in"} was turned off; sign in again with agentx login <url>`);
+  }
+  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "sessionsEndedAt">>(deps, `DEVELOPER#${token.developerId}`);
+  if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {
+    // E9: D16's per-request check ends the session at once; the token endpoint revokes it at its next refresh.
+    throw agentXError("AUTH_REQUIRED", "an AgentX admin ended your sign-in; run agentx login <url> again");
+  }
+  return {
+    ...token,
+    name: developer.displayName,
+    ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
+    ...(developer.email === undefined ? {} : { email: developer.email }),
+  };
+}
+
+/** Rechecks an opaque browser-cookie session against DeveloperIdentity on every page/API request. */
+export async function authenticateDeveloperSessionId(deps: DeveloperRouteDependencies, sessionId: string): Promise<DeveloperCaller> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr" | "reviewExpiresAt">>(deps, `SESSION#${sessionId}`);
+  if (session === undefined || (session.amr !== "slack" && session.amr !== "oidc")
+    || session.reviewExpiresAt === undefined || session.reviewExpiresAt <= Math.floor(deps.now() / 1000)) {
+    throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  }
+  return authenticateSession(deps, { developerId: session.developerId, sessionId, amr: session.amr });
+}
+
+/** Every item under `pk` with the sort key prefix, following LastEvaluatedKey through each page. */
+async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix: string): Promise<T[]> {
+  const items: T[] = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const response = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix },
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      ConsistentRead: true,
+    })) as { Items?: T[]; LastEvaluatedKey?: Record<string, unknown> };
+    items.push(...(response.Items ?? []));
+    start = response.LastEvaluatedKey;
+  } while (start !== undefined);
+  return items;
+}
+
+/** Channel names are for display only: they never hold the projects list near a timeout. */
+const CHANNEL_NAMES_DEADLINE_MS = 5_000;
+const REVISION_READS_AT_ONCE = 8;
+
+/** `fn` over every item, at most `limit` at a time, results in the items' order. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/** The latest revision's number and task policy: the only fields read, so only they are fetched. */
+async function latestDefinition(deps: DeveloperRouteDependencies, project: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
+  const response = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName,
+    KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
+    ProjectionExpression: "#definition.#revision, #definition.#developerTasks",
+    ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" },
+    ScanIndexForward: false,
+    Limit: 1,
+    ConsistentRead: true,
+  })) as { Items?: Array<{ definition: { revision: number; developerTasks?: unknown } }> };
+  return response.Items?.[0]?.definition;
+}
+
+/** Each named project's latest revision and task policy; projects with no revision are left out. */
+export async function projectsWithPolicy(deps: DeveloperRouteDependencies, names: readonly string[]): Promise<Map<string, { revision: number; policy: DeveloperTaskPolicy }>> {
+  const unique = [...new Set(names)].sort();
+  const definitions = await mapLimit(unique, REVISION_READS_AT_ONCE, (name) => latestDefinition(deps, name));
+  const found = new Map<string, { revision: number; policy: DeveloperTaskPolicy }>();
+  unique.forEach((name, index) => {
+    const definition = definitions[index];
+    // developerTaskPolicy fails closed: a policy that no longer parses turns tasks and channel access off.
+    if (definition !== undefined) found.set(name, { revision: definition.revision, policy: developerTaskPolicy(definition) });
+  });
+  return found;
+}
+
+/** The channel-members check, failing closed (and logged by error name) when it throws. */
+function safeChannelMembers(deps: DeveloperRouteDependencies): (request: ChannelMembersRequest) => Promise<ChannelMembersResponse> {
+  return async (request) => {
+    try {
+      return await deps.developer.channelMembers(request);
+    } catch (error) {
+      logDeveloperEvent({ event: "developer.channel_members_failed", reason: "threw", error: errorName(error) });
+      return SLACK_UNAVAILABLE;
+    }
+  };
+}
+
+/**
+ * Channel names and privacy, best effort: without them the channels are listed by ID (R10).
+ * Privacy comes from DeveloperIdentity's 10-minute cache. The whole lookup has one deadline.
+ */
+async function channelNames(deps: DeveloperRouteDependencies, channelIds: readonly string[]): Promise<Map<string, { name: string; isPrivate: boolean }>> {
+  const names = new Map<string, { name: string; isPrivate: boolean }>();
+  const channelInfo = deps.developer.channelInfo;
+  if (channelInfo === undefined || channelIds.length === 0) return names;
+  const unique = [...new Set(channelIds)].sort();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<"deadline">((resolve) => {
+    timer = setTimeout(() => resolve("deadline"), deps.developer.channelInfoDeadlineMs ?? CHANNEL_NAMES_DEADLINE_MS);
+  });
+  try {
+    for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+      let answer: ChannelInfoResponse | "deadline";
+      try {
+        answer = await Promise.race([channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) }), expired]);
+      } catch (error) {
+        logDeveloperEvent({ event: "developer.channel_info_failed", reason: "threw", error: errorName(error) });
+        return names;
+      }
+      if (answer === "deadline") {
+        logDeveloperEvent({ event: "developer.channel_info_failed", reason: "deadline" });
+        return names;
+      }
+      if (!answer.ok) return names;
+      for (const channel of answer.channels) names.set(channel.channelId, { name: channel.name, isPrivate: channel.isPrivate });
+    }
+    return names;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A private channel is flagged by ID only: its name never leaves the control plane (R10). */
+const describeChannel = (channelId: string, names: Map<string, { name: string; isPrivate: boolean }>) => {
+  const known = names.get(channelId);
+  if (known === undefined) return { channelId };
+  return known.isPrivate ? { channelId, isPrivate: true } : { channelId, name: known.name, isPrivate: false };
+};
+
+/**
+ * FR-013: only `developer` rows are grants. A developer ID is built like an admin owner key, so an
+ * admin's `administrator` rows can sit under the same key when both sign in through one IdP.
+ */
+async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessSubject): Promise<string[]> {
+  return (await queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${caller.developerId}`, "PROJECT#"))
+    .filter((membership) => membership.role === "developer")
+    .map((membership) => membership.projectName);
+}
+
+async function bindingsOf(deps: DeveloperRouteDependencies): Promise<SlackChannelBinding[]> {
+  return deps.developer.slackTeamId === undefined ? [] : queryAll<SlackChannelBinding>(deps, channelBindingPartition(SLACK_CHANNEL, deps.developer.slackTeamId), channelBindingSortPrefix(SLACK_CHANNEL));
+}
+
+/** One answer for every refusal at the access check, so it tells a caller nothing about why. */
+const ACCESS_REFUSED = "this access check needs a signed-in person's token for this service, or a confidential service's own credentials";
+
+/** A registered sign-in client, read from the sign-in table; undefined for an unknown ID or an unreadable row. */
+async function signInClientOf(deps: DeveloperRouteDependencies, clientId: unknown): Promise<SignInClientRecord | undefined> {
+  if (!SignInClientIdSchema.safeParse(clientId).success) return undefined;
+  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: signInClientKey(clientId as string), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  if (response.Item === undefined) return undefined;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the keys
+  const { pk: _pk, sk: _sk, entityType: _type, ...rest } = response.Item;
+  const parsed = SignInClientRecordSchema.safeParse(rest);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** RFC 6749 2.3.1 HTTP Basic client credentials, or undefined. */
+function basicClientCredentials(authorization: string | undefined): { clientId: string; secret: string } | undefined {
+  const match = /^Basic ([A-Za-z0-9+/=]+)$/i.exec((authorization ?? "").trim());
+  if (match === null) return undefined;
+  const decoded = Buffer.from(match[1]!, "base64").toString("utf8");
+  const colon = decoded.indexOf(":");
+  if (colon < 1) return undefined;
+  try {
+    const formDecode = (text: string) => decodeURIComponent(text.replace(/\+/g, " "));
+    return { clientId: formDecode(decoded.slice(0, colon)), secret: formDecode(decoded.slice(colon + 1)) };
+  } catch {
+    return undefined;
+  }
+}
+
+function clientSecretMatches(secret: string, secretHash: string | undefined): boolean {
+  if (secretHash === undefined || secret === "") return false;
+  const given = createHash("sha256").update(secret).digest();
+  const kept = Buffer.from(secretHash, "hex");
+  return kept.length === given.length && timingSafeEqual(given, kept);
+}
+
+/**
+ * Spec 063 FR-004: who a registered service's signed-in person is, and what they can use now. Asked with the person's
+ * own token for that service (Bearer), or by developer ID with a confidential service's credentials (HTTP Basic). It
+ * reads the live session, developer and grants each time, so an ended sign-in or a revoked developer answers 401 at
+ * once. Administrator comes only from the person's own company sign-in (FR-005), so the developer-ID form never has it.
+ */
+export async function checkSignInAccess(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest): Promise<AccessCheckResponse> {
+  const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  const parsed = AccessCheckRequestSchema.safeParse(jsonBody(request));
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", "the access check takes an optional developerId (64 hex characters) and nothing else");
+  const authorization = request.headers.authorization;
+  const basic = basicClientCredentials(authorization);
+  const nowSeconds = Math.floor(deps.now() / 1000);
+  let developerId: string;
+  let administrator = false;
+  let clientId: string;
+  let sessionFacts: AccessCheckContext["session"];
+  if (basic !== undefined) {
+    const client = await signInClientOf(deps, basic.clientId);
+    if (client === undefined || !clientSecretMatches(basic.secret, client.secretHash) || parsed.data.developerId === undefined) throw refused();
+    developerId = parsed.data.developerId;
+    clientId = client.clientId;
+  } else {
+    if (parsed.data.developerId !== undefined) throw refused();
+    // The unverified azp only picks which client's audience the token must then verify against.
+    let azp: unknown;
+    try {
+      azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
+    } catch {
+      throw refused();
+    }
+    const client = await signInClientOf(deps, azp);
+    if (client === undefined) throw refused();
+    let claims: Record<string, unknown>;
+    try {
+      claims = await deps.developer.verifyAccessToken(authorization, client.audience);
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "RUNTIME_UNAVAILABLE") throw error;
+      throw refused();
+    }
+    if (claims.azp !== client.clientId || claims.env !== deps.developer.env || typeof claims.sub !== "string" || typeof claims.sid !== "string") throw refused();
+    const amr = claims.amr;
+    if ((amr !== "slack" && amr !== "oidc") || !deps.developer.methods[amr]) throw refused();
+    const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
+    if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
+      || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)
+      || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr])) throw refused();
+    developerId = session.developerId;
+    administrator = amr === "oidc" && session.administrator === true;
+    clientId = client.clientId;
+    sessionFacts = { sessionId: claims.sid, amr, startedAt: session.startedAt, administrator };
+    const developer = await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${developerId}`);
+    if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
+  }
+  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "provider">>(deps, `DEVELOPER#${developerId}`);
+  if (developer === undefined || developer.revoked) throw refused();
+  const listed = await listProjects(deps, {
+    developerId, sessionId: "", amr: developer.provider, name: developer.displayName,
+    ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
+  });
+  const answer: AccessCheckResponse = {
+    developerId, displayName: developer.displayName, administrator,
+    projects: listed.projects.map((project) => ({ name: project.name, access: project.access })),
+    notices: listed.notices,
+  };
+  const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
+  const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
+  if (ruled === undefined) throw refused();
+  // What leaves is exactly the answer's shape, whatever a rule did.
+  const checked = AccessCheckResponseSchema.safeParse(ruled);
+  if (!checked.success) throw refused();
+  return checked.data;
+}
+
+async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {
+  const grants = await grantsOf(deps, caller);
+  const bindings = await bindingsOf(deps);
+  const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)]);
+  const access = await resolveDeveloperAccess({
+    grants,
+    bindings,
+    ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
+    // FR-013 with FR-014: a project's own switch decides whether channel members may use it.
+    channelMembersMayUse: (project) => policies.get(project)?.policy.channelMembersMayUse === true,
+    channelMembers: safeChannelMembers(deps),
+  });
+  const listed = [...access.projects].filter(([name]) => policies.has(name));
+  // Like checkProjectAccess: a caller with no Slack link is never shown channel names.
+  const names = caller.slackUserId === undefined ? new Map<string, { name: string; isPrivate: boolean }>() : await channelNames(deps, listed.flatMap(([, entry]) => entry.channels));
+  const projects: DeveloperProjectsResponse["projects"] = [];
+  for (const [name, entry] of listed) {
+    const known = policies.get(name)!;
+    projects.push({ name, latestRevision: known.revision, access: entry.access, channels: entry.channels.map((channelId) => describeChannel(channelId, names)), tasks: known.policy });
+  }
+  return {
+    developer: {
+      id: caller.developerId, name: caller.name, provider: caller.amr,
+      ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
+      ...(caller.email === undefined ? {} : { email: caller.email }),
+    },
+    projects,
+    notices: access.slackUnavailable ? ["slack_unavailable"] : [],
+  };
+}
+
+/**
+ * FR-018's first three checks, in order, for one project; the start route calls it (Task 8), and
+ * every route must call it before a DeveloperTaskActions member that trusts its caller.
+ * PROJECT_NOT_FOUND, then PROJECT_ACCESS_DENIED (naming only public bound channels, R10), or
+ * SLACK_UNAVAILABLE when only a channel could have given access and Slack is down, then
+ * PROJECT_TASKS_DISABLED.
+ */
+export async function checkProjectAccess(
+  deps: DeveloperRouteDependencies,
+  caller: ProjectAccessSubject,
+  project: string,
+  membership?: { freshMemberOf: readonly string[] },
+): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }> {
+  // A name that is not a project name is never echoed back: it could be long or carry markup.
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name");
+  const known = (await projectsWithPolicy(deps, [project])).get(project);
+  if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
+  const grants = (await grantsOf(deps, caller)).filter((name) => name === project);
+  const bindings = (await bindingsOf(deps)).filter((binding) => binding.projectName === project);
+  const projectMemberships = grants.map((projectName) => ({ projectName, role: "developer" }));
+  const evaluate = (freshMemberOf?: readonly string[]) => evaluateProjectAuthority({
+    project,
+    revision: { revision: known.revision, definition: { developerTasks: known.policy } },
+    memberships: projectMemberships,
+    bindings,
+    ...(freshMemberOf === undefined ? {} : { freshMemberOf }),
+    ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
+  });
+  let result = evaluate(membership?.freshMemberOf);
+  if (result.kind === "needs-membership") {
+    const memberOf = new Set<string>();
+    for (let start = 0; start < result.channelIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+      const response = await safeChannelMembers(deps)({
+        kind: "channel-members", slackUserId: caller.slackUserId!, channelIds: result.channelIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS),
+      });
+      if (!response.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+      for (const channelId of response.memberOf) memberOf.add(channelId);
+    }
+    result = evaluate([...memberOf]);
+  }
+  if (result.kind === "unavailable") throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+  if (result.kind === "not-found") throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
+  if (result.kind === "needs-membership") throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+  if (result.kind === "denied") {
+    if (result.reason === "tasks-disabled") throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
+    // Only a channel that would give access is worth naming, and only a public one (R10).
+    const visible = caller.slackUserId === undefined || !known.policy.channelMembersMayUse
+      ? []
+      : [...(await channelNames(deps, result.visibleChannelIds)).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
+    throw agentXError("PROJECT_ACCESS_DENIED", accessDeniedMessage(project, visible));
+  }
+  return { revision: result.revision, policy: result.policy, access: result.access, channelIds: result.channelIds };
+}
+
+/**
+ * Spec 041 FR-002: a project's workspaces, newest first, from the sparse byWorkspaceProject index.
+ * Only a workspace's own fields are read; the index carries the whole item, so no second get is
+ * needed per workspace.
+ */
+async function projectWorkspaces(deps: DeveloperRouteDependencies, project: string): Promise<DeveloperWorkspace[]> {
+  const items: Array<Record<string, unknown>> = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const response = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName,
+      IndexName: WORKSPACE_PROJECT_INDEX.name,
+      KeyConditionExpression: "#project = :project",
+      ExpressionAttributeNames: { "#project": WORKSPACE_PROJECT_INDEX.partitionKey },
+      ExpressionAttributeValues: { ":project": project },
+      // Newest first, and never more than one page past the cap: a project with thousands of
+      // thread workspaces must not turn one page load into an unbounded scan.
+      ScanIndexForward: false,
+      Limit: DEVELOPER_WORKSPACES_PER_PROJECT,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+    items.push(...(response.Items ?? []));
+    start = items.length >= DEVELOPER_WORKSPACES_PER_PROJECT ? undefined : response.LastEvaluatedKey;
+  } while (start !== undefined);
+
+  const workspaces: DeveloperWorkspace[] = [];
+  for (const item of items.slice(0, DEVELOPER_WORKSPACES_PER_PROJECT)) {
+    const parsed = WorkspaceInstanceSchema.safeParse(workspaceRecordFields(item));
+    // A record this release cannot read is left out rather than failing the whole listing.
+    if (!parsed.success) {
+      logDeveloperEvent({ event: "developer.workspace_unreadable", project, reason: parsed.error.issues[0]?.message ?? "invalid" });
+      continue;
+    }
+    const workspace = parsed.data;
+    workspaces.push({
+      id: workspace.id,
+      projectName: workspace.projectName,
+      projectRevision: workspace.projectRevision,
+      status: workspace.status,
+      busy: workspace.activeOperationId !== null,
+      createdAt: workspace.createdAt,
+      updatedAt: workspace.updatedAt,
+    });
+  }
+  return workspaces;
+}
+
+/**
+ * FR-001: the projects the caller may use, with the workspaces in each of them. The projects come
+ * from listProjects itself, so this route applies exactly the same access rules (grants, and channel
+ * membership only where the project's developerTasks policy allows it, failing closed).
+ */
+async function listWorkspaces(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperWorkspacesResponse> {
+  const listing = await listProjects(deps, caller);
+  const workspaces: DeveloperWorkspace[] = [];
+  for (const project of listing.projects) workspaces.push(...await projectWorkspaces(deps, project.name));
+  // Across projects, still newest first, so the page's list reads as one timeline.
+  workspaces.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return { ...listing, workspaces };
+}
+
+export function developerTaskRouteDependencies(
+  deps: DeveloperRouteDependencies,
+  caller: DeveloperCaller,
+  initialSlackThread?: { teamId: string; channelId: string; threadTs: string },
+  trustedCaller: DeveloperCaller | null = caller,
+): DeveloperTaskRouteDependencies {
+  const projectChannelIds = async (project: string) => (await bindingsOf(deps))
+    .filter((binding) => binding.projectName === project)
+    .map((binding) => binding.channelId)
+    .sort();
+  const identityDependencies = (admission?: TaskPeopleDisplayAdmission): TaskPersonIdentityDependencies => {
+    const slackTeamId = deps.developer.slackTeamId;
+    const taskPersonProof = admission?.proof.bind(admission) ?? deps.developer.taskPersonProof;
+    if (slackTeamId === undefined || taskPersonProof === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+    return {
+      documentClient: deps.documentClient, tableName: deps.tableName, slackTeamId, now: deps.now, uuid: randomUUID, taskPersonProof,
+      developerRecord: async (targetDeveloperId) => {
+        const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
+        return response.Item;
+      },
+      projectChannelIds,
+      targetProjectAccess: async (subject, project, freshMemberOf) => {
+        const revision = await latestDefinition(deps, project);
+        if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
+        const [memberships, allBindings] = await Promise.all([
+          queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${subject.developerId}`, "PROJECT#"),
+          bindingsOf(deps),
+        ]);
+        const result = evaluateProjectAuthority({
+          project,
+          revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } },
+          memberships,
+          bindings: allBindings,
+          freshMemberOf,
+          ...(subject.slackUserId === undefined ? {} : { slackUserId: subject.slackUserId }),
+        });
+        if (result.kind === "allowed") return;
+        if (result.kind === "unavailable" || result.kind === "needs-membership") {
+          throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+        }
+        if (result.kind === "not-found") throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
+        if (result.kind === "denied" && result.reason === "tasks-disabled") {
+          throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
+        }
+        // System qualification has no channel-name lookup or human-facing error decoration.
+        throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
+      },
+      ...(trustedCaller === null ? {} : { trustedCaller }),
+    };
+  };
+  return {
+    documentClient: deps.documentClient,
+    tableName: deps.tableName,
+    ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
+    issuer: deps.developer.issuer,
+    actions: deps.tasks!,
+    ...(deps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: deps.workflowE2EPresentation }),
+    ...(deps.workflowE2EPublicationChecks === undefined ? {} : { workflowE2EPublicationChecks: deps.workflowE2EPublicationChecks }),
+    ...(deps.workflowE2EScenarioResults === undefined ? {} : { workflowE2EScenarioResults: deps.workflowE2EScenarioResults }),
+    ...(deps.workflowE2EArtifact === undefined ? {} : { workflowE2EArtifact: deps.workflowE2EArtifact }),
+    ...(deps.startWorkflowE2EBaseline === undefined ? {} : { startWorkflowE2EBaseline: deps.startWorkflowE2EBaseline }),
+    ...(deps.validateWorkflowE2EApplicationPlan === undefined ? {} : { validateWorkflowE2EApplicationPlan: deps.validateWorkflowE2EApplicationPlan }),
+    ...(deps.registeredRepositoryIdentity === undefined ? {} : { registeredRepositoryIdentity: deps.registeredRepositoryIdentity }),
+    ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
+    ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
+    checkTaskPerson: async (task, developerId, admission) => {
+      return checkTaskPersonIdentity(identityDependencies(admission), task, developerId);
+    },
+    resolveTaskPickerPerson: async (taskId, slackUserId) => {
+      const dependencies = identityDependencies();
+      const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
+      if (response.Item === undefined) throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
+      const task = response.Item;
+      const resolved = await resolveTaskPickerPersonWithId(dependencies, task, slackUserId);
+      const proof = await checkTaskPersonIdentity(dependencies, task, resolved.identity.developerId);
+      if (!proof.eligible || proof.identity.developerId !== resolved.identity.developerId || proof.identity.slackUserId !== resolved.identity.slackUserId) {
+        throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
+      }
+      return { personId: resolved.personId, developerId: resolved.identity.developerId, slackUserId: resolved.identity.slackUserId, channelMember: proof.channelMember };
+    },
+    taskPeopleChannel: async (taskId) => {
+      const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
+      const share = response.Item?.share;
+      if (share === undefined || typeof share.teamId !== "string" || typeof share.channelId !== "string" || typeof share.threadTs !== "string") {
+        throw agentXError("PROJECT_ACCESS_DENIED", "task channel could not be verified");
+      }
+      return { teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs };
+    },
+    ...(deps.developer.inviteTaskPerson === undefined ? {} : { inviteTaskPerson: deps.developer.inviteTaskPerson }),
+    ...(deps.developer.taskPeopleDisplayRead === undefined ? {} : {
+      createTaskPeopleDisplayAdmission: () => taskPeopleDisplayAdmission({ now: deps.now, read: deps.developer.taskPeopleDisplayRead! }),
+      listTaskPeople: async (task: DeveloperTaskRecord, admission: TaskPeopleDisplayAdmission) => {
+      const channels = [...new Set([...(await projectChannelIds(task.project)), ...(task.share === undefined ? [] : [task.share.channelId])])].sort();
+      admission.assertOpen();
+      const answer = await admission.directory({ kind: "task-channel-people", channelIds: channels });
+      if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
+      admission.assertOpen();
+      const identities = await registerTaskChannelPeople(identityDependencies(admission), task, answer.users, () => admission.assertOpen());
+      admission.assertOpen();
+      const bySlack = new Map(answer.users.map((user) => [user.id, user]));
+      return identities.map((identity) => {
+        const user = bySlack.get(identity.slackUserId);
+        if (user === undefined) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
+        return { subject: { developerId: identity.developerId, slackUserId: identity.slackUserId }, identity, eligible: true,
+          channelMember: task.share === undefined || user.memberOf.includes(task.share.channelId) };
+      });
+      },
+    }),
+    ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
+    ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
+    checkAccess: (project) => checkProjectAccess(deps, caller, project),
+    channelMember: async (slackUserId, channelId) => {
+      const answer = await safeChannelMembers(deps)({ kind: "channel-members", slackUserId, channelIds: [channelId] });
+      if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your membership of that channel; try again shortly");
+      return answer.memberOf.includes(channelId);
+    },
+    projectChannelIds,
+    ...(deps.developer.slackRequestQueue === undefined ? {} : { slackRequestQueue: deps.developer.slackRequestQueue }),
+    ...(deps.developer.channelInfo === undefined ? {} : {
+      boundChannels: async (channelIds: readonly string[]) => {
+        const known = await channelNames(deps, channelIds);
+        return channelIds.map((channelId) => {
+          const channel = known.get(channelId);
+          return channel === undefined ? { channelId } : { channelId, name: channel.name, isPrivate: channel.isPrivate };
+        });
+      },
+    }),
+    now: deps.now,
+  };
+}
+
+export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
+  if (url.pathname.startsWith("/review/link/")) {
+    const links = deps.channelLinks;
+    if (links === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
+    return createChannelLinkWeb({
+      origin: deps.developer.issuer,
+      authenticateSession: async (sessionId) => {
+        try { return await authenticateDeveloperSessionId(deps, sessionId); }
+        catch { return undefined; }
+      },
+      preview: (code) => previewLinkCode(links, code),
+      redeem: (developerId, code) => redeemLinkCode(links, developerId, code),
+    })(request, url);
+  }
+  if (url.pathname.startsWith("/review/")) {
+    if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
+    const authenticateSession = async (sessionId: string) => {
+      try { return await authenticateDeveloperSessionId(deps, sessionId); }
+      catch { return undefined; }
+    };
+    // Task 18: the read-only task page and its "moved on" check; every other /review/ path is the PR-feedback review.
+    // Spec 061 slice 2: the page's JSON API is matched here too, so the PR-feedback page never sees its paths.
+    if (TASK_PAGE.test(url.pathname) || TASK_PEOPLE_CONFIRMATION.test(url.pathname) || TASK_STATUS.test(url.pathname) || TASK_PAGE_API_PREFIX.test(url.pathname)) {
+      const routeDeps = (caller: DeveloperCaller) => developerTaskRouteDependencies(deps, caller);
+      return createTaskWeb({
+        authenticateSession,
+        getTaskDocumentView: (caller, taskId) => getTaskDocumentView(routeDeps(caller), caller, taskId),
+        getTaskFreshness: (caller, taskId) => getTaskFreshness(routeDeps(caller), caller, taskId),
+        getTaskPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
+        getTaskPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+        getTaskPeopleProposalMetadata: (caller, taskId, requestId) => getTaskPeopleProposalMetadata(routeDeps(caller), caller, taskId, requestId),
+        getTaskPersonName: (caller, taskId, personId) => getTaskPersonPresentationName(routeDeps(caller), taskId, personId),
+        getTaskPeopleCapabilities: (caller, taskId) => getTaskPeopleCapabilities(routeDeps(caller), caller, taskId),
+        api: createTaskWebApi({
+          origin: deps.developer.issuer,
+          authenticateSession,
+          taskState: (caller, taskId) => getTaskPageState(routeDeps(caller), caller, taskId),
+          listComments: (caller, taskId) => listPageComments(routeDeps(caller), caller, taskId),
+          createComment: (caller, taskId, input) => createPageComment(routeDeps(caller), caller, taskId, input),
+          editComment: (caller, taskId, input) => editPageComment(routeDeps(caller), caller, taskId, input),
+          deleteComment: (caller, taskId, input) => deletePageComment(routeDeps(caller), caller, taskId, input),
+          setSuggestion: (caller, taskId, input) => setPageSuggestion(routeDeps(caller), caller, taskId, input),
+          decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
+          retryApplicationRound: (caller, taskId, input) => retryApplicationRoundOnPage(routeDeps(caller), caller, taskId, input),
+          readE2EArtifact: (caller, taskId, sha256) => getTaskE2EArtifact(routeDeps(caller), caller, taskId, sha256),
+          getPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
+          proposePeopleRole: (caller, taskId, input) => proposeTaskPeopleRoleForPage(routeDeps(caller), caller, taskId, input),
+          proposeOwnership: (caller, taskId, input) => proposeTaskOwnershipForPage(routeDeps(caller), caller, taskId, input),
+          getPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+          confirmPeopleRequest: (caller, taskId, requestId) => confirmTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+        }),
+      })(request, url);
+    }
+    const web = createFeedbackReviewWeb({
+      origin: new URL(deps.developer.issuer).origin,
+      authenticateSession,
+      getWorkflowFeedbackReview: (caller, taskId) => getWorkflowFeedbackReview(developerTaskRouteDependencies(deps, caller), caller, taskId),
+      submitWorkflowFeedbackDecision: (caller, taskId, input) => submitWorkflowFeedbackDecision(developerTaskRouteDependencies(deps, caller), caller, taskId, input),
+      now: deps.now,
+    });
+    return web(request, url);
+  }
+  // Spec 063 FR-004: a registered service's own route, authenticated as such, never as a Rovara caller.
+  if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
+  // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
+  const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
+  if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
+  if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
+  if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
+    if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
+    return routeDeveloperTaskRequest(developerTaskRouteDependencies(deps, caller), caller, request, url);
+  }
+  if (url.pathname === CHATGPT_CONNECTION_PATH || url.pathname === `${CHATGPT_CONNECTION_PATH}/finish`) {
+    return routeChatGptConnection(deps, caller, request, url);
+  }
+  if (url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/")) {
+    return routeOwnChannelLinks(deps, caller, request, url);
+  }
+  throw agentXError("NOT_FOUND", "route not found");
+}
+
+/** Spec 062 FR-031: a developer lists and removes their own channel links, and only theirs. */
+async function routeOwnChannelLinks(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const links = deps.channelLinks;
+  if (links === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
+  if (url.pathname === "/v1/dev/channel-links" && request.method === "GET") return { links: await listDeveloperLinks(links, caller.developerId) };
+  const one = /^\/v1\/dev\/channel-links\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+  if (one !== null && request.method === "DELETE") {
+    const actor = ActorRefSchema.safeParse({ channel: decodeURIComponent(one[1]!), tenant: decodeURIComponent(one[2]!), userId: decodeURIComponent(one[3]!) });
+    if (!actor.success || actor.data.channel === "slack") throw agentXError("NOT_FOUND", "link not found");
+    return removeLink(links, actor.data, caller.developerId);
+  }
+  throw agentXError("NOT_FOUND", "route not found");
+}
+
+/** Sign in with ChatGPT (#338): the caller's own connection, and only theirs. No route answers a token. */
+export const CHATGPT_CONNECTION_PATH = "/v1/dev/chatgpt/connection";
+
+async function routeChatGptConnection(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (deps.chatgpt === undefined) throw agentXError("NOT_FOUND", "Sign in with ChatGPT is not set up in this deployment");
+  const finish = url.pathname.endsWith("/finish");
+  if (finish && request.method === "POST") return deps.chatgpt.finish(caller.developerId, jsonBody(request));
+  if (!finish && request.method === "GET") return deps.chatgpt.view(caller.developerId);
+  if (!finish && request.method === "POST") return deps.chatgpt.start(caller.developerId);
+  if (!finish && request.method === "DELETE") return deps.chatgpt.disconnect(caller.developerId);
+  throw agentXError("NOT_FOUND", "route not found");
+}
+
+function jsonBody(request: AdaptedHttpRequest): unknown {
+  if (request.body === undefined || request.body === "") return {};
+  try {
+    return JSON.parse(request.body) as unknown;
+  } catch {
+    throw agentXError("CONFIG_INVALID", "the request body is not JSON");
+  }
+}

@@ -2,7 +2,7 @@
 // See `sagemaker.ts` for what the recorder does and never does.
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { PII_KIND_WORDS, builtinPiiScanner, combinePiiScanners, type PiiScanner } from "@agentx/contracts";
+import { PII_KIND_WORDS, builtinPiiScanner, combinePiiScanners, type PiiScanner } from "@rovara-code/contracts";
 import { Option, type Command } from "commander";
 import { ReportedFailure, formatSuccess } from "../output.js";
 import { INVOKE_FAILURE_WORDS, awsCliInvoker, type SageMakerInvoker } from "./invoker.js";

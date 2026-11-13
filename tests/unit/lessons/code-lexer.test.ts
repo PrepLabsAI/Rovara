@@ -1,7 +1,7 @@
 // The lexer behind CodeFacts. It reads the WHOLE file from line 1 so the state at the cited lines is right, and returns only identifier tokens that are in code
 // (never in a comment or a string, however the string was opened) and inside the cited range.
 import { describe, expect, it } from "vitest";
-import { lexIdentifiers } from "../../../packages/broker/src/lessons/code-lexer.js";
+import { lexIdentifiers } from "../../../packages/core/src/lessons/code-lexer.js";
 
 const ids = (path: string, text: string, start = 1, end?: number): string[] | undefined => lexIdentifiers(path, text, start, end ?? text.split("\n").length);
 

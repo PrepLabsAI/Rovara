@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   LearnedRefsSchema, LearnedSkillSchema, LessonCandidateSchema, LessonSchema, LoadManifestSchema, MemoryInputSchema, MemorySnapshotSchema, ReflectorOutputSchema,
   WorkerInvocationSchema, skillFrontMatterRefusal, type OrgId,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const code = { kind: "code", repo: "acme/api", path: "src/retry/index.ts", startLine: 12, endLine: 30, anchor: "export function withRetry", commit: "abc1234" };

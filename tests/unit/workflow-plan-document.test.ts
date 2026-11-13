@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   PLAN_CLAIMS_MAX, PLAN_DECISIONS_MAX, WORKFLOW_BLOCK_REASONS, WorkflowArtifactSchema, canonicalPlanJson, diffPlanDocuments, lastFencedBlock, parsePlanDocument,
   planClaimCount, planClaimIds, planDocumentMarkdown, planSummaryLines, readCanonicalPlan, retiredClaimIds, type PlanDocument, type PlanOwnerAnswers, type WorkflowCheck,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { planAnswer, planDocument, type RawChecksInput } from "../support/plan-documents.js";
 
 const UNREADABLE = "AgentX could not read the proposed checks";

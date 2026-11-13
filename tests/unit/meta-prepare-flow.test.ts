@@ -1,14 +1,14 @@
 // A project whose meta repository is separate from its code: the head is pinned when the task starts (through the code host), the preparation carries exactly that commit, a worker that cannot
 // materialize it is refused, and the task keeps the commit only when the worker reports the one that was pinned.
 import { describe, expect, it } from "vitest";
-import { WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, agentXError, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { codeHostMetaHeadReader } from "../../packages/broker/src/core/meta-repo/head-reader.js";
-import { META_PREPARE_FEATURE, META_UNREADABLE } from "../../packages/broker/src/core/meta-repo/prepare-meta.js";
-import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import type { WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
+import { WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, agentXError, type ProjectDefinition, type WorkerInvocation } from "@rovara-code/contracts";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { FakeCodeHost } from "../../packages/core/src/plugins/fake/code-host.js";
+import { FakeHostModel } from "../../packages/core/src/plugins/fake/model.js";
+import { codeHostMetaHeadReader } from "../../packages/core/src/core/meta-repo/head-reader.js";
+import { META_PREPARE_FEATURE, META_UNREADABLE } from "../../packages/core/src/core/meta-repo/prepare-meta.js";
+import { taskKey, workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import type { WorkspaceRecord } from "../../packages/core/src/core/task-flow/records.js";
 import { createHarness, definition, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const META_URL = "https://examplehost.test/acme/meta";

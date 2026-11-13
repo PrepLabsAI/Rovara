@@ -1,9 +1,9 @@
 // Test environment: the draft a setup draft run reports (what the broker accepts), the Prove report derived from the setup check, and the merge onto an approved environment.
 import { describe, expect, it } from "vitest";
-import { TEST_ENV_DRAFT_NONE_KEY, TEST_ENV_DRAFT_RESULT_KEY, TestEnvironmentBodySchema, projectPk, testEnvDigest, testEnvIsProved, testEnvSummaryOf, type TestEnvDraft, type TestEnvironmentBody } from "@agentx/contracts";
-import { DRAFT_ABSENCE_NOTES, DRAFT_ABSENCE_UNKNOWN_NOTE, DRAFT_LEFT_OUT_NOTE, DRAFT_SELECTION_NOTE, DRAFT_TOO_LARGE_NOTE, draftRefusalOf, readTestEnvDraftNote, readTestEnvDraft, sanitizeTestEnvDraft, testEnvDraftEndItems } from "../../packages/broker/src/core/test-env/draft.js";
-import { SETUP_CHECK_MAX_AGE_MS, commandTakesTestIds, passesWithNoTests, proveReportFromSetupCheck } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { TEST_ENV_DRAFT_NONE_KEY, TEST_ENV_DRAFT_RESULT_KEY, TestEnvironmentBodySchema, projectPk, testEnvDigest, testEnvIsProved, testEnvSummaryOf, type TestEnvDraft, type TestEnvironmentBody } from "@rovara-code/contracts";
+import { DRAFT_ABSENCE_NOTES, DRAFT_ABSENCE_UNKNOWN_NOTE, DRAFT_LEFT_OUT_NOTE, DRAFT_SELECTION_NOTE, DRAFT_TOO_LARGE_NOTE, draftRefusalOf, readTestEnvDraftNote, readTestEnvDraft, sanitizeTestEnvDraft, testEnvDraftEndItems } from "../../packages/core/src/core/test-env/draft.js";
+import { SETUP_CHECK_MAX_AGE_MS, commandTakesTestIds, passesWithNoTests, proveReportFromSetupCheck } from "../../packages/core/src/core/test-env/prove-from-setup-check.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as const;
 const cmd = (executable: string, args: string[] = [], cwd = "service") => ({ cwd, executable, args, timeoutSeconds: 600 });

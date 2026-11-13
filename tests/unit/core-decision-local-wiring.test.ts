@@ -3,15 +3,15 @@
 // page-session secret and the owner's sign-in secret are never approval proofs; and the default wiring without a proof verifier offers no local-session method at all.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, createWorkflowSnapshot, submitWorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { LOCAL_SESSION_METHOD, createNoopAuditSink, registerCodeDefaults } from "../../packages/broker/src/ports/policy-defaults.js";
-import { LocalPageSessions } from "../../packages/broker/src/core/local-pages/guard.js";
-import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { createDecisionActions } from "../../packages/broker/src/core/decisions/local-actions.js";
-import { localSessionProofVerifier } from "../../packages/broker/src/core/decisions/local-session.js";
-import { createWorkflowDocumentSubject, waitingDocumentDigest, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
+import { IMPLICIT_COMPANY_ID, createWorkflowSnapshot, submitWorkflowArtifact, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { LOCAL_SESSION_METHOD, createNoopAuditSink, registerCodeDefaults } from "../../packages/core/src/ports/policy-defaults.js";
+import { LocalPageSessions } from "../../packages/core/src/core/local-pages/guard.js";
+import { createDecisionGate } from "../../packages/core/src/core/decisions/approval-gate.js";
+import { createDecisionActions } from "../../packages/core/src/core/decisions/local-actions.js";
+import { localSessionProofVerifier } from "../../packages/core/src/core/decisions/local-session.js";
+import { createWorkflowDocumentSubject, waitingDocumentDigest, workflowTaskKey } from "../../packages/core/src/core/decisions/workflow-subject.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
 const TASK_A = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";

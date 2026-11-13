@@ -1,9 +1,9 @@
 // the Ask's own model call, for each request format the built-in providers speak. The request passes the proxy's guard unchanged (no field is added to it for Ask), carries no tool, and the
 // key signs the call and appears nowhere in what comes back.
 import { describe, expect, it } from "vitest";
-import { SecretValue, type ModelKeyStore } from "@agentx/contracts";
-import { createLocalAskModel } from "../../packages/broker/src/local/ask-model.js";
-import { builtinModelProviderBook } from "../../packages/broker/src/local/model-proxy/proxy.js";
+import { SecretValue, type ModelKeyStore } from "@rovara-code/contracts";
+import { createLocalAskModel } from "../../packages/core/src/local/ask-model.js";
+import { builtinModelProviderBook } from "../../packages/core/src/local/model-proxy/proxy.js";
 
 const KEY = ["sk", "test", "K".repeat(30)].join("-");
 const keys: ModelKeyStore = { get: async () => new SecretValue(KEY), providers: async () => ["anthropic", "openai", "openrouter"] };

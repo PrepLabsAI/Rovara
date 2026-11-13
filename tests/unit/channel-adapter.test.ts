@@ -5,7 +5,7 @@ import {
   channelAdapterSecretName, channelEventId, channelLinkCodeKey, channelLinkKey, developerChannelLinkKey, generateLinkCode,
   generateWebhookSecret, linkCodeHash, LinkCodeSchema, maskChannelUserId, shapeApprovalRequest, signWebhook, verifyWebhook,
   webhookHeaders, type ChannelCapabilities,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const whatsapp = { channel: "whatsapp", tenant: "+14155550100", space: "group=AbC-12_x", thread: "main" };
 const actor = { channel: "whatsapp", tenant: "+14155550100", userId: "+919876544821" };

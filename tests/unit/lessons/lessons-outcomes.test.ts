@@ -1,17 +1,17 @@
 // Lessons outcomes lane: the end of a task counts its outcome for the lessons it loaded, with the corrections lessons already read (reviewers' pull request comments, "remember this" notes, send-backs), a judge on the
 // company's own model path, and nothing recorded where learning cannot judge. The whole path, from the task end to a settled mark, is in tests/contract/lessons-outcomes-wired.test.ts.
 import { describe, expect, it } from "vitest";
-import type { ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { modelCorrectionJudge } from "../../../packages/broker/src/lessons/judge-model.js";
-import { settleHelpful, type CounterDeps } from "../../../packages/broker/src/lessons/counters.js";
-import { newTaskFailureTally, type CurrentPause, type FailureKind, type LessonsPauseStore } from "../../../packages/broker/src/lessons/pause.js";
-import type { CorrectionJudge, CorrectionRating } from "../../../packages/broker/src/lessons/ports.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { looksLikeCorrection } from "../../../packages/broker/src/lessons/correction-filter.js";
-import { currentLearningAttempt, noteLearningFault, withLearningAttempt, type LearningAttempt } from "../../../packages/broker/src/lessons/learning-deadline.js";
-import { learnFromEndedTask, learnFromEndedTaskTyped, type TaskLearningDeps, type TaskSubjectBase } from "../../../packages/broker/src/lessons/task-end.js";
-import type { OutcomeRowReader } from "../../../packages/broker/src/lessons/task-outcome-rows.js";
-import type { EvidenceSpan } from "../../../packages/broker/src/lessons/reflect-input.js";
+import type { ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { modelCorrectionJudge } from "../../../packages/core/src/lessons/judge-model.js";
+import { settleHelpful, type CounterDeps } from "../../../packages/core/src/lessons/counters.js";
+import { newTaskFailureTally, type CurrentPause, type FailureKind, type LessonsPauseStore } from "../../../packages/core/src/lessons/pause.js";
+import type { CorrectionJudge, CorrectionRating } from "../../../packages/core/src/lessons/ports.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { looksLikeCorrection } from "../../../packages/core/src/lessons/correction-filter.js";
+import { currentLearningAttempt, noteLearningFault, withLearningAttempt, type LearningAttempt } from "../../../packages/core/src/lessons/learning-deadline.js";
+import { learnFromEndedTask, learnFromEndedTaskTyped, type TaskLearningDeps, type TaskSubjectBase } from "../../../packages/core/src/lessons/task-end.js";
+import type { OutcomeRowReader } from "../../../packages/core/src/lessons/task-outcome-rows.js";
+import type { EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
 import { Alerts, Audit, BASE, Clock, MERGED, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, embedder, facts, lessonRecord, reply, candidateJson, seed, settings, verifier, REFUSING_JUDGE } from "./lesson-helpers.js";
 
 const DAY = 86_400_000;
@@ -332,7 +332,7 @@ describe("the reflection comes first; judging has its own time and its own lease
 
 describe("erasing a commenter takes back the harmful marks their corrections caused", () => {
   it("their marks are removed (once, floor zero), another member's mark stays, and a mark made by a button is left as the existing rule has it; the person can make no new mark", async () => {
-    const { lessonDeletionPort } = await import("../../../packages/broker/src/lessons/deletion.js");
+    const { lessonDeletionPort } = await import("../../../packages/core/src/lessons/deletion.js");
     const judge = new RecordingJudge("caused");
     const w = await counted([span("pr_comment", "This is wrong, avoid this helper", { authorId: "erin" }), span("pr_comment", "Please don't use this helper here", { authorId: "fay" })], judge, { lesson: { tier: 1 } });
     await learnFromEndedTask(w.deps, merged);
@@ -406,7 +406,7 @@ describe("the initiator is matched as an id is everywhere (case and Unicode form
 
 describe("erasing a commenter undoes exactly the retirement their marks caused, and only as a card for a person", () => {
   async function erased(over: Partial<Parameters<typeof lessonRecord>[0]> = {}, authors: string[] = ["erin", "fay"]) {
-    const { lessonDeletionPort } = await import("../../../packages/broker/src/lessons/deletion.js");
+    const { lessonDeletionPort } = await import("../../../packages/core/src/lessons/deletion.js");
     const w = await counted(authors.map((authorId, i) => span("pr_comment", `Please don't use this helper here, number ${i}`, { authorId })), new RecordingJudge("caused"), { lesson: { tier: 0, ...over } });
     await learnFromEndedTask(w.deps, merged);
     const audit = new Audit();
@@ -424,7 +424,7 @@ describe("erasing a commenter undoes exactly the retirement their marks caused, 
     expect((await lesson()).retiredByHarm).toBeUndefined();
     expect((await lesson()).pendingExpiresAt).toBeGreaterThan(w.clock.now());
     expect(audit.actions().filter((a) => a === "lesson.harm_reversed")).toHaveLength(1);
-    const { retireLesson } = await import("../../../packages/broker/src/lessons/curate.js");
+    const { retireLesson } = await import("../../../packages/core/src/lessons/curate.js");
     expect(await retireLesson({ store: w.store, audit: new Audit(), now: w.clock.now }, KEY, "les_used0001", "person", "ann")).toBe(true);
     await erase("fay");
     expect(await lesson()).toMatchObject({ status: "retired", counters: { harmful: 0 } });
@@ -457,7 +457,7 @@ describe("erasing a commenter undoes exactly the retirement their marks caused, 
     expect(audit.actions()).toContain("lesson.proposal_withdrawn");
   });
   it("an erasure cut between a decrement and the row's deletion takes the mark off once, however often it is retried", async () => {
-    const { lessonDeletionPort } = await import("../../../packages/broker/src/lessons/deletion.js");
+    const { lessonDeletionPort } = await import("../../../packages/core/src/lessons/deletion.js");
     const w = await counted([span("pr_comment", "Please don't use this helper here", { authorId: "erin" }), span("pr_comment", "Do not call this helper, it breaks retries", { authorId: "fay" }), span("pr_comment", "Avoid this helper in the handler code", { authorId: "gus" })], new RecordingJudge("caused"), { lesson: { tier: 1, approvals: [{ approvalId: "a", by: "ann", at: 1, mode: "one" }] } });
     await learnFromEndedTask(w.deps, merged);
     expect((await w.store.get(KEY, "les_used0001"))!.counters.harmful).toBe(3);
@@ -473,7 +473,7 @@ describe("erasing a commenter undoes exactly the retirement their marks caused, 
 
 describe("a claim that was refused makes no call and uses no call slot", () => {
   it("corrections already paid for by an earlier delivery do not eat the task's 20 calls", async () => {
-    const { recordTaskOutcome } = await import("../../../packages/broker/src/lessons/counters.js");
+    const { recordTaskOutcome } = await import("../../../packages/core/src/lessons/counters.js");
     const ids = Array.from({ length: 5 }, (_, i) => `les_slot${String(i).padStart(4, "0")}`);
     const store = new InMemoryLessonStore();
     const clock = new Clock();

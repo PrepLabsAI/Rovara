@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { aggregateE2EVerification, canonicalJson, E2ERoundSchema } from "@agentx/contracts";
+import { aggregateE2EVerification, canonicalJson, E2ERoundSchema } from "@rovara-code/contracts";
 import { compileE2EScenarios } from "../../packages/verifier/src/scenarios.js";
 import { collectE2EActualCliRun, e2eSnapshotSourceDigest } from "../../packages/verifier/src/runtime-collection.js";
 import { E2EReportSchema } from "../../packages/verifier/src/report-schema.js";

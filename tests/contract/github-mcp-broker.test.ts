@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
+import { ownerKeyForSubject } from "../../packages/core/src/aws/lambda.js";
+import { RepositoryGrantService } from "../../packages/core/src/repository-access.js";
 import { GitHubMcpCatalogSchema } from "../../packages/contracts/src/github-mcp.js";
 
 describe("thread-authenticated GitHub MCP routes", () => {
@@ -12,7 +12,7 @@ describe("thread-authenticated GitHub MCP routes", () => {
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:test",
       GITHUB_APP_CREDENTIAL_REF: "github-app", GITHUB_APP_ACCOUNT: "example", GITHUB_APP_ID: "123", GITHUB_APP_INSTALLATION_ID: "456",
     });
-    const { createAwsBrokerHandler } = await import("../../packages/broker/src/aws/broker.js");
+    const { createAwsBrokerHandler } = await import("../../packages/core/src/aws/broker.js");
     const issuer = "https://identity.example.test";
     const teamId = "T0123456789";
     const channelId = "C0123456789";

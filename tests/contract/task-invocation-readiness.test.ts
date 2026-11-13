@@ -1,7 +1,7 @@
 // Spec 051 Task 3 (P-1, Review Focus 5): the task invocation carries the project's current readiness commands, so the
 // worker can rerun them, and a payload from an older broker, without them, still parses.
 import { randomUUID } from "node:crypto";
-import { WorkerInvocationSchema } from "@agentx/contracts";
+import { WorkerInvocationSchema } from "@rovara-code/contracts";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createBroker, ensureWorkspace, loadSlackBroker, markReady, registerSlackProject, serviceCall, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 

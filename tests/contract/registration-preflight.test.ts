@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { IN_HOUSE_TOOL_COUNT, ProjectDefinitionSchema, TOOL_LIMIT, TOOL_WARNING_THRESHOLD } from "@agentx/contracts";
+import { IN_HOUSE_TOOL_COUNT, ProjectDefinitionSchema, TOOL_LIMIT, TOOL_WARNING_THRESHOLD } from "@rovara-code/contracts";
 import { TARGET_CONFLICT_REASON } from "@agentx/gateway";
 import { describe, expect, it, vi } from "vitest";
-import { resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
-import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
-import { preflightConnectors } from "../../packages/broker/src/aws/registration-preflight.js";
-import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
+import { resolveConnectors, type ResolvedConnector } from "../../packages/core/src/aws/connector-types.js";
+import { CredentialRegistry } from "../../packages/core/src/aws/credentials.js";
+import { preflightConnectors } from "../../packages/core/src/aws/registration-preflight.js";
+import type { GitHubMcpDependencies } from "../../packages/core/src/github-mcp.js";
 import { adminCall, adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { trackerConnectorType } from "../support/tracker-connector.js";
@@ -56,7 +56,7 @@ describe("registration preflight", () => {
   });
 
   it("refuses a new revision whose repository the GitHub App cannot reach, and checks every repository", async () => {
-    const { agentXError } = await import("@agentx/contracts");
+    const { agentXError } = await import("@rovara-code/contracts");
     const checked: string[] = [];
     const checkRepositoryAccess = vi.fn(async (repository: { credentialRef: string; url: string }) => {
       checked.push(repository.url);

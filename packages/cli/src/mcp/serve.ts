@@ -1,11 +1,11 @@
 // Spec 025 FR-026: `agentx mcp`, a stdio MCP server for the developer signed in on this computer.
 // stdout carries only MCP messages; logs go to stderr and never hold a token.
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME } from "@rovara-code/contracts";
 import { randomUUID } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { AdminMeResponse } from "@agentx/contracts";
+import type { AdminMeResponse } from "@rovara-code/contracts";
 import {
   ADMIN_AUDIT_TOOLS, ADMIN_CHANGE_TOOLS, ADMIN_READ_TOOLS, NEXT_STEPS, NOT_OFFERED, REQUIRED_CHANGE_ADMIN_MINOR, UPGRADE_AGENTX_STEP, ToolError, adminApiFits, adminSignInExpiredError, adminSignInNotice,
   compatibilityChecker, createAgentXMcpServer, httpAdminClient, httpControlPlaneClient, type AdminOffer, type AdminSession, type Compatibility, type ControlPlaneClient,

@@ -5,7 +5,7 @@ import {
   SERVICE_MOCK_SCHEMA_MAX_NODES,
   ServiceMockJsonSchemaSchema,
   type ServiceMockJsonSchema,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { SyntheticGenerator } from "../data-guard.js";
 
 type Type = ServiceMockJsonSchema["type"];

@@ -1,7 +1,7 @@
 // Design review stage: MCP items reach a packet only through the project's configured read-only sources.
 import { describe, expect, it } from "vitest";
-import type { ContextSource } from "@agentx/contracts";
-import { PACKET_CHAT_SYSTEMS, packetMcpCall, parseMcpItemRef } from "../../packages/broker/src/core/design-review/mcp-allowlist.js";
+import type { ContextSource } from "@rovara-code/contracts";
+import { PACKET_CHAT_SYSTEMS, packetMcpCall, parseMcpItemRef } from "../../packages/core/src/core/design-review/mcp-allowlist.js";
 
 const tool = (upstreamName: string, role: "read" | "search" | "status" = "read") => ({ upstreamName, role, schemaHash: "a".repeat(64) });
 const source = (overrides: Partial<ContextSource> = {}): ContextSource => ({

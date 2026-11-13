@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { CheckEntry, CheckOutcome, ProjectCommand } from "@agentx/contracts";
+import type { CheckEntry, CheckOutcome, ProjectCommand } from "@rovara-code/contracts";
 
 export const CHECK_HISTORY_PATH = ".agentx/last-checks.json";
 const HISTORY_PATH = CHECK_HISTORY_PATH;

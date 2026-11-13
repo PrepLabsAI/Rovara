@@ -1,7 +1,7 @@
 // A task's model access (ruling R29): the proxy's address and a key minted for this task alone, from the
 // control plane through the operation's callback capability. The worker holds no provider secret; the key
 // stays in memory until shortly before it expires, is asked for once at a time, and is never logged.
-import { TASK_BUDGET_EXCEEDED_PREFIX, agentXError, safeRefusalWords } from "@agentx/contracts";
+import { TASK_BUDGET_EXCEEDED_PREFIX, agentXError, safeRefusalWords } from "@rovara-code/contracts";
 import { ModelBudgetExhaustedError, ModelNotAllowedError, type ModelBudgetScope } from "@agentx/model-runtime";
 
 /** Asked for again this long before the key expires, so no request carries one about to lapse. */

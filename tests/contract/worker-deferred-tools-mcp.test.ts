@@ -10,7 +10,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AGENT_STEP_PREAMBLE, DEFERRED_TOOLS_ABOVE, type ConnectorCatalog, type ContextToolCallRequest, type ContextToolCatalog } from "../../packages/contracts/src/index.js";
-import { answerMcp } from "../../packages/broker/src/context-sources/mcp-endpoint.js";
+import { answerMcp } from "../../packages/core/src/context-sources/mcp-endpoint.js";
 import { createConnectorBridgeTools } from "../../packages/worker/src/agent-run/connector-bridge.js";
 import { ROVARA_MCP_TOOL_PREFIX } from "../../packages/worker/src/context-sources/pi-mcp.js";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession } from "../../packages/worker/src/pi-session.js";

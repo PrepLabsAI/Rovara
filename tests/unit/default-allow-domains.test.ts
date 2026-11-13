@@ -1,9 +1,9 @@
 // The default list a cloud install's DNS firewall and a laptop's egress gateway allow is pinned exactly, and the names that let anyone
 // upload (a bucket of any AWS account, a GitHub repository or gist of any user) are not on it. Adding an entry means changing this file on purpose, with the reason.
 import { describe, expect, it } from "vitest";
-import { DEFAULT_AGENT_ALLOW_DOMAINS, isAllowedDomain } from "@agentx/contracts";
-import { LOCAL_DEFAULT_ALLOW_DOMAINS, hostIsAllowed } from "../../packages/broker/src/local/isolation/allow-list.js";
-import { hostAlreadyAllowed } from "../../packages/broker/src/core/setup-agent/host-refusal.js";
+import { DEFAULT_AGENT_ALLOW_DOMAINS, isAllowedDomain } from "@rovara-code/contracts";
+import { LOCAL_DEFAULT_ALLOW_DOMAINS, hostIsAllowed } from "../../packages/core/src/local/isolation/allow-list.js";
+import { hostAlreadyAllowed } from "../../packages/core/src/core/setup-agent/host-refusal.js";
 
 const EXACT_LIST = [
   "*.compute.internal", "*.ec2.internal", "*.42.10.in-addr.arpa",

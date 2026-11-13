@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import { containedRuntimeProfileForHost } from "./container-envelope.js";
 
 export type InstalledRuntimeManifest = Readonly<{

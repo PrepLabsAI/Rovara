@@ -1,4 +1,4 @@
-import { AgentXErrorCodeSchema, agentXError } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, agentXError } from "@rovara-code/contracts";
 
 /** A response body parsed defensively: `body` is `undefined` when the text is empty or is not valid JSON. */
 export interface JsonResponse {

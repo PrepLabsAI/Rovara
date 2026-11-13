@@ -1,4 +1,4 @@
-import { canonicalJson, e2eApiSchemaComponentId, type E2EApiMockFixture, type E2EApplicationServiceContract, type E2EMockSpec } from "@agentx/contracts";
+import { canonicalJson, e2eApiSchemaComponentId, type E2EApiMockFixture, type E2EApplicationServiceContract, type E2EMockSpec } from "@rovara-code/contracts";
 
 /** The port every mock and the sinkhole listen on, inside the run's `--internal` network. */
 export const MOCK_ORIGIN_PORT = 8080;

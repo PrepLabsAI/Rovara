@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, type E2EScenario } from "@agentx/contracts";
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, type E2EScenario } from "@rovara-code/contracts";
 import { createWebApiProbePlan, type WebApiProbePlan } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 
 const repoRoot = join(import.meta.dirname, "../..");

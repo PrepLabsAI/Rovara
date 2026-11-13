@@ -11,7 +11,7 @@
 import {
   TestEnvironmentBodySchema, TestEnvironmentProposalSchema, formatCommandLine, SETUP_PERSON_SOURCE, observedSource, parseCommandLine, remoteCodeReason, testEnvDigest, testEnvIsProved,
   type ProjectCommand, type SetupDraft, type SetupJournalEntry, type SetupProposal, type SetupReplacement, type TestEnvProveReport, type TestEnvValueSource, type TestEnvironmentProposal,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { realpath } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import type { EnvironmentDraft } from "./env-detect/propose.js";

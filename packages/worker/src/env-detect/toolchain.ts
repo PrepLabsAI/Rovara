@@ -6,7 +6,7 @@
 // A repository that already has a dev container gets none proposed: its own file is used, and a question is asked when that file does not obviously provide the toolchain. With a cut file list nothing is proposed.
 // The pull request that adds the proposed file MUST be create-only: it must fail, not overwrite, when a file already exists at the path (the list read here can be stale).
 // Pure over a bounded reader: nothing is run, downloaded or written. The file content is a PROPOSAL; the dev container item's own reader re-checks its size, shape and path.
-import { DEVCONTAINER_PATH_PATTERN, SETUP_DEVCONTAINER_MAX_BYTES } from "@agentx/contracts";
+import { DEVCONTAINER_PATH_PATTERN, SETUP_DEVCONTAINER_MAX_BYTES } from "@rovara-code/contracts";
 import { GRADLE_JAVA_VERSION, MAVEN_JAVA_VERSION, blank, blankBlocks } from "./java.js";
 import { goDirectives } from "./go.js";
 import { findLine, lineOf, type DetectedSource, type RepositoryReader } from "./types.js";

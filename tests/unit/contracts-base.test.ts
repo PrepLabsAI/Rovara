@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   PluginKindSchema, PluginNameSchema, companyScoped, AudienceSchema, MAX_RUN_LIMIT_USD, OrgIdSchema, RunEstimateSchema, TRUST_RANK, isRunLimitBlockReason, minTrust, orgChannelBindingKey, orgScoped,
   runLimitBlockText, runLimitWaitingText, singleOrgIdForEnv, slackBindingKey, channelBindingKey, parseBundlePublicKey,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 // The base pieces lane L1 adds so Code needs none of Cloud's org, spend or team-record files (decisions 41, 45.6 and 51).
 describe("company scope", () => {

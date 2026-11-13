@@ -8,7 +8,7 @@ import { expect } from "vitest";
 import {
   ChannelCapabilitiesSchema, ChannelEventSchema, InboundMessageSchema, StepUpKindSchema, ChannelDecisionSchema,
   type ActorRef, type ChannelAdapter, type ChannelDecision, type ChannelEvent, type ChannelInboundSink, type ConversationRef, type InboundMessage,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { twoCompanyChecks, type TwoCompanyIsolation } from "../isolation/two-company.js";
 import { assertNoSecretLeaks } from "../isolation/leaks.js";
 import { rejection, type ContractCheck } from "../ports/plugin-contract-kit.js";

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../../packages/contracts/src/index.js";
 import { E2EApplicationCollectionOracleSchema, E2EApplicationCollectionSchema, UNDECLARED_MOCK_CONSUMPTION_REASON, UNMOCKED_EXTERNAL_CALL_REASON,
   qualifyE2EApplicationCollection, requiredHostedMockSpecs, type E2EApplicationCollection } from "../../packages/verifier/src/application-result-adapter.js";
-import { buildScenarioRows } from "../../packages/broker/src/e2e/application-display.js";
+import { buildScenarioRows } from "../../packages/core/src/e2e/application-display.js";
 import { fixtureEvidence } from "../support/web-api-qualification.js";
 
 // MOCKUNUSED. The recorded run of the qualification app whose inventory origin is served by the approved, host-served mock is the base: its one case consumed the mock once. Here the

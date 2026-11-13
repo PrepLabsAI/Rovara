@@ -8,10 +8,10 @@ import {
 } from "../../packages/contracts/src/session.js";
 import { WorkspaceDeploymentModeSchema, WorkspaceInstanceSchema } from "../../packages/contracts/src/workspace.js";
 // The broker's copy of the contracts (the built package), so its instanceof AgentXError holds.
-import { agentXError } from "@agentx/contracts";
-import { parseRuntimeBinding } from "../../packages/broker/src/aws/lambda.js";
-import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
-import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
+import { agentXError } from "@rovara-code/contracts";
+import { parseRuntimeBinding } from "../../packages/core/src/aws/lambda.js";
+import { createDispatcherHandler } from "../../packages/core/src/aws/dispatcher.js";
+import { createOutboxPublisherHandler } from "../../packages/core/src/aws/outbox-publisher.js";
 import { cliRuntimeBinding, registerProject } from "../../packages/cli/src/admin/register.js";
 import {
   SLACK_CHANNEL, SLACK_TEAM, account, call, createBroker, finishOperation, lazyEnsureWorkspace, loadSlackBroker, markReady,

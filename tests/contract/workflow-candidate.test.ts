@@ -4,7 +4,7 @@ import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE } from "@agentx/contracts";
+import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE } from "@rovara-code/contracts";
 import { preparedBaseResult, type PreparationManifest } from "../../packages/worker/src/prepare.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { candidateUnchangedSinceBase, readCandidateRepositories, readCommittedCandidateSourceExport } from "../../packages/worker/src/verification/candidate.js";

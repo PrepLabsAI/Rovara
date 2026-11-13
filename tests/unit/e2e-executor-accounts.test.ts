@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, readE2EApplicationProjectContract, type E2ERuntimeAccountRef } from "@agentx/contracts";
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, readE2EApplicationProjectContract, type E2ERuntimeAccountRef } from "@rovara-code/contracts";
 import { createExecutorSessionStore, validateFormLogins } from "../../packages/verifier/src/executor/accounts.js";
 import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
 import { FormLoginError, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "../../packages/verifier/src/executor/form-login.js";

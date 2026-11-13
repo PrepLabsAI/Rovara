@@ -8,7 +8,7 @@
 // What a tool returns is framed again here as the call route's answers are (frame.ts), so no path shows the model a source's words as bare text.
 import { createMcpExtension, type InlineExtension, type LoadedMcpConfig, type McpServerEntry, type McpTransportFactory } from "@earendil-works/pi-coding-agent";
 import { StreamableHttpTransport, type McpFetch } from "@earendil-works/pi-mcp";
-import { agentXError, type ContextToolCallResponse, type ContextToolCatalog } from "@agentx/contracts";
+import { agentXError, type ContextToolCallResponse, type ContextToolCatalog } from "@rovara-code/contracts";
 import { frameForModel } from "./frame.js";
 
 /** The one MCP server the agent has. */

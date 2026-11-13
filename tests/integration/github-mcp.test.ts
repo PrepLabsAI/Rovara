@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { once } from "node:events";
 import { describe, expect, it } from "vitest";
-import { connectMcp } from "../../packages/broker/src/mcp-client.js";
+import { connectMcp } from "../../packages/core/src/mcp-client.js";
 
 describe("MCP Streamable HTTP bridge", () => {
   it("initializes, follows discovery cursors, filters tools and forwards a native call with server-only credentials", async () => {
@@ -65,7 +65,7 @@ describe("MCP Streamable HTTP bridge", () => {
   });
 
   it("reports an HTTP 401 as a rejected credential and any other failure unchanged", async () => {
-    // connectMcp above resolves through packages/broker/src/mcp-client.js, which re-exports the
+    // connectMcp above resolves through packages/core/src/mcp-client.js, which re-exports the
     // built @agentx/gateway package; McpUnauthorized must come from that same module copy for
     // instanceof to hold, not from packages/gateway/src directly.
     const { McpUnauthorized } = await import("@agentx/gateway");

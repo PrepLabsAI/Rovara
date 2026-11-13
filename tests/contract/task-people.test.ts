@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
 import {
   changeTaskPeople,
   getTaskPeople,
@@ -12,18 +12,18 @@ import {
   resolveTaskPeopleAccess,
   type TaskPeopleDependencies,
   type TaskPersonCheck,
-} from "../../packages/broker/src/developer/task-people.js";
-import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
-import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
-import { confirmTaskPeopleProposal, getTaskPeopleProposal, getTaskPeopleProposalMetadata, proposeTaskPeopleRole, submitSlackTaskPeopleRole } from "../../packages/broker/src/developer/task-people-effects.js";
+} from "../../packages/core/src/developer/task-people.js";
+import type { DeveloperTaskRecord } from "../../packages/core/src/developer/task-records.js";
+import { taskOwnerKey } from "../../packages/core/src/developer/task-records.js";
+import { confirmTaskPeopleProposal, getTaskPeopleProposal, getTaskPeopleProposalMetadata, proposeTaskPeopleRole, submitSlackTaskPeopleRole } from "../../packages/core/src/developer/task-people-effects.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
-import { checkTaskPersonIdentity } from "../../packages/broker/src/developer/task-person-identity.js";
-import type { TaskPeopleDisplayAdmission } from "../../packages/broker/src/developer/task-people-display-budget.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { developerTaskRouteDependencies } from "../../packages/core/src/aws/developer-routes.js";
+import { slackDirectory } from "../../packages/core/src/developer/slack-directory.js";
+import { checkTaskPersonIdentity } from "../../packages/core/src/developer/task-person-identity.js";
+import type { TaskPeopleDisplayAdmission } from "../../packages/core/src/developer/task-people-display-budget.js";
 import type { TaskPeopleDisplayReadRequest, TaskPersonInviteClaimRequest, TaskPersonInviteOutcome } from "../../packages/contracts/src/developer.js";
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";

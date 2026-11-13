@@ -5,7 +5,7 @@
 //   - the "apply" command must have passed in this round for the migrations to be listed as applied;
 //   - "rolled back" is true only when a rollback command passed, false when one failed, and unknown (null) when the project has none or it did not finish.
 // A migration file's text is data: only identifiers (letters, digits, `_` and `.`) are copied out of it, never a statement, a value or a comment.
-import type { CheckEntry, ProjectCommand } from "@agentx/contracts";
+import type { CheckEntry, ProjectCommand } from "@rovara-code/contracts";
 import { plainPath } from "./cobertura-lcov-coverage.js";
 import type { CandidateChange } from "./diff.js";
 

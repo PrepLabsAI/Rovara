@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { ENVIRONMENT_PLACEHOLDER, STACK_PARTS, environmentStackName } from "@agentx/contracts";
+import { ENVIRONMENT_PLACEHOLDER, STACK_PARTS, environmentStackName } from "@rovara-code/contracts";
 import type { AssetMetadataEntry } from "@aws-cdk/cloud-assembly-schema";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -92,7 +92,7 @@ export function checkedNoAmbientCdkContext(): void {
  * Runs `run` with the process's current working directory pinned to the repo root, restoring the
  * caller's original cwd afterward (even if `run` throws). infra/lib/control-plane.ts resolves each
  * Lambda's `entry` with `resolve(process.cwd(), entry)` against paths that are relative to the repo
- * root (e.g. "packages/broker/src/aws/broker.ts"), and NodejsFunction bundles each one synchronously
+ * root (e.g. "packages/core/src/aws/broker.ts"), and NodejsFunction bundles each one synchronously
  * while the stacks are being constructed — before `.synth()` is ever called. So this release builder
  * has to produce the same output regardless of the caller's own working directory.
  *

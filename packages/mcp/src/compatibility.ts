@@ -1,5 +1,5 @@
 // Spec 025 FR-048 and R23: the control plane's API version decides whether the tools work.
-import { DEVELOPER_API_VERSION, apiVersionCompatible, type AgentXConfigurationConfirm } from "@agentx/contracts";
+import { DEVELOPER_API_VERSION, apiVersionCompatible, type AgentXConfigurationConfirm } from "@rovara-code/contracts";
 import type { ControlPlaneClient } from "./client.js";
 import { NEXT_STEPS, ToolError, UPGRADE_AGENTX_STEP, plainText } from "./errors.js";
 

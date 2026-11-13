@@ -5,7 +5,7 @@ import {
 } from "@aws-sdk/client-secrets-manager";
 import {
   AgentXError, CredentialRegistrationSchema, OAUTH_AUTHORIZATION_PROFILES, OAuthAppSecretSchema, agentXError, mcpEndpointProblem, oauthProfile,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { createPkceParameters } from "../auth.js";
 import { registerCredential } from "./credential.js";
 import { discoverOAuth, registerClient } from "./oauth-discovery.js";

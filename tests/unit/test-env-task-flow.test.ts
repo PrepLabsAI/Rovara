@@ -1,12 +1,12 @@
 // The approved test environment in the task flow: a starting task pins the revision it started with, a coding or verification run is told the plan of that revision, and an environment the flow cannot carry
 // out is recorded as not applied (with its reason), never half-used.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, projectPk, testEnvDigest, type TestEnvironmentBody } from "@agentx/contracts";
+import { TestEnvironmentBodySchema, projectPk, testEnvDigest, type TestEnvironmentBody } from "@rovara-code/contracts";
 import { COMPANY, createHarness, newRequestId } from "../support/task-flow-harness.js";
-import { createTaskTestEnvironment, featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
-import { readTestEnvPin, testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
-import { readApprovedTestEnvironment, testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
+import { createTaskTestEnvironment, featuresForTestPlan } from "../../packages/core/src/core/test-env/seam.js";
+import { readTestEnvPin, testEnvironmentForStart } from "../../packages/core/src/core/test-env/usable.js";
+import { readApprovedTestEnvironment, testEnvLatestKey, testEnvRevisionKey } from "../../packages/core/src/core/test-env/environment.js";
+import { documentOf, type TestEnvDeps } from "../../packages/core/src/core/test-env/deps.js";
 
 const PROJECT = "payments";
 const cmd = (executable: string, args: string[] = []) => ({ cwd: "repo/demo", executable, args, timeoutSeconds: 600 });

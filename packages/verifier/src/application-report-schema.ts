@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyBoundedE2EJsonData, copyBoundedE2ESourceBytes } from "@agentx/contracts";
+import { copyBoundedE2EJsonData, copyBoundedE2ESourceBytes } from "@rovara-code/contracts";
 import { z } from "zod";
 import { E2EReportSchema } from "./report-schema.js";
 

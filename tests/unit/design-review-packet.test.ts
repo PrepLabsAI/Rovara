@@ -1,12 +1,12 @@
 // Design review stage: the broker builds each reviewer's packet.
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { DESIGN_REVIEW_PACKET_ITEMS_MAX, ReviewerPacketItemSchema, type ContextSource, type ContextToolCallResponse } from "@agentx/contracts";
+import { DESIGN_REVIEW_PACKET_ITEMS_MAX, ReviewerPacketItemSchema, type ContextSource, type ContextToolCallResponse } from "@rovara-code/contracts";
 import {
   PACKET_BYTES_MAX, PacketBuildError, buildReviewerPacket, estimateInputTokens, itemOf, mcpItemReaderOf, packetDigestOf, renderPacketDocument, renderPacketRequest,
   type PacketReaders,
-} from "../../packages/broker/src/core/design-review/packet.js";
-import { CRITIC_LIGHT_PROMPT, REVIEWER_PROMPTS, promptDigest, promptRecord } from "../../packages/broker/src/core/design-review/prompts/index.js";
+} from "../../packages/core/src/core/design-review/packet.js";
+import { CRITIC_LIGHT_PROMPT, REVIEWER_PROMPTS, promptDigest, promptRecord } from "../../packages/core/src/core/design-review/prompts/index.js";
 
 const sha = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 const COMMIT = "a".repeat(40);

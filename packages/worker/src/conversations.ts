@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 export const CONVERSATION_MANIFEST_VERSION = 2 as const;
 

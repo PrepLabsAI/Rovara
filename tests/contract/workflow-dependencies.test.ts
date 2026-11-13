@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TaskGraphV1Schema, taskGraphDigest, taskGraphOrder, validateTaskGraph } from "@agentx/contracts";
+import { TaskGraphV1Schema, taskGraphDigest, taskGraphOrder, validateTaskGraph } from "@rovara-code/contracts";
 
 const taskId = "8c330a74-b4c6-4f01-9356-5fe54fc55b19";
 const repo = "github:acme/payments";

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import { createE2EApplicationCollectionOracleFromCompiledSuite } from "@agentx/verifier";
 import { admittedRuntimeAccountRef } from "../../packages/verifier/src/application-result-adapter.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
@@ -14,7 +14,7 @@ afterEach(disposeRealCandidates);
 const ACCOUNTS = ["orders-owner", "orders-viewer"] as const;
 const PASS = { kind: "http-status", status: 200 } as const satisfies ObservedApiOutcome;
 const two = () => startApplicationRound({ accounts: ACCOUNTS });
-const brokerModule = () => import("../../packages/broker/src/aws/broker.js");
+const brokerModule = () => import("../../packages/core/src/aws/broker.js");
 
 /** Everything the broker's own recollection builds the oracle from, for the round's one group, with each case observed as passing. */
 async function collectedGroup(round: ApplicationRound) {

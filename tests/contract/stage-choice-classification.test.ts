@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { classifyStageChoiceChange } from "../../packages/broker/src/core/model-selection/classify.js";
+import { classifyStageChoiceChange } from "../../packages/core/src/core/model-selection/classify.js";
 const opus = { provider: "anthropic", modelId: "claude-opus-4" };
 const haiku = { provider: "anthropic", modelId: "claude-haiku-4" };
 it("uses one classifier for company lock removals and weaker review defaults", () => {

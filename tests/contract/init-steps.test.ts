@@ -2,7 +2,7 @@
 // in SSM as soon as it is known, skips a done step on every later run (FR-019), never records a
 // failed step (so the next run retries it), and records but stops on a waiting step (FR-035).
 import { describe, expect, it, vi, type Mock } from "vitest";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { initSteps } from "../../packages/cli/src/init/commands.js";
 import { emptyProgress, installProgressParameterName, readInstallProgress, writeInstallProgress, type InitStepId } from "../../packages/cli/src/init/install-state.js";
 import { runInitSteps, type InitEvent, type InitStep, type StepOutcome } from "../../packages/cli/src/init/steps.js";

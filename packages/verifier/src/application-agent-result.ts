@@ -3,7 +3,7 @@ import {
   E2EAgentTraceBindingSchema, E2EModelReceiptSchema, E2EModelRouteDefinitionSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, checkE2EGroupModelBudget, checkE2EStepModelAccounting, crossCheckE2EAgentLedgerReceipts, e2eModelRouteRevision,
   parseVerifiedE2EAgentActionLedger,
   type E2EModelFailureClass, type E2EModelReceipt, type E2EModelRouteDefinition, type E2ERoundScope, type VerifiedE2EAgentActionLedger,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 /**
  * The verdict of the AI-navigation part of a case (M1.4 Task 4.4a): the one place the plan's table of agent and model outcomes is implemented. It is a pure function over what the

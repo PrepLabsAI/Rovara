@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_BLOCK_REASONS, type ProjectCommand } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, type ProjectCommand } from "@rovara-code/contracts";
 import { E2E_CHECK, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, LINT, PLAN, SELECT_LINT, actionIds, atPlanReview, expectNoJargon, journeySuite, markInputs, modelInputs, runs, said } from "../../support/workflow-e2e-journeys.js";
 

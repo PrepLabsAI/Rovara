@@ -1,6 +1,6 @@
 // The worker image's SWE-bench mode (spec 043 FR-008): one run, then exit. The eval instance's boot
 // script runs `node packages/worker/dist/swebench-main.js` with the run in AGENTX_SWEBENCH_RUN.
-import { SwebenchRunnerConfigSchema } from "@agentx/contracts";
+import { SwebenchRunnerConfigSchema } from "@rovara-code/contracts";
 import { createDockerCli } from "./swebench/containers.js";
 import { createRunReporter } from "./swebench/reporter.js";
 import { runSwebench } from "./swebench/run.js";

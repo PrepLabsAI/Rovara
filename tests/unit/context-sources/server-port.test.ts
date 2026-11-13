@@ -1,11 +1,11 @@
-import { withoutToken } from "../../../packages/broker/src/context-sources/server-port.js";
+import { withoutToken } from "../../../packages/core/src/context-sources/server-port.js";
 import { describe, expect, it, vi } from "vitest";
-import type { McpServerEntry } from "@agentx/contracts";
-import { documentMcpServerStore, summariseProbe } from "../../../packages/broker/src/context-sources/mcp-servers.js";
-import { gatewayProber, gatewayServerPort, hostProbeClient, sourceEnvironment, type ConnectionLookup } from "../../../packages/broker/src/context-sources/server-port.js";
-import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../../packages/broker/src/core/task-flow/flow.js";
+import type { McpServerEntry } from "@rovara-code/contracts";
+import { documentMcpServerStore, summariseProbe } from "../../../packages/core/src/context-sources/mcp-servers.js";
+import { gatewayProber, gatewayServerPort, hostProbeClient, sourceEnvironment, type ConnectionLookup } from "../../../packages/core/src/context-sources/server-port.js";
+import { INDEX_EXPIRY_ATTRIBUTE } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../../packages/core/src/core/task-flow/flow.js";
 import { CONNECTION, GET_TOOL, NOW, ORG, SEARCH_TOOL } from "./fixtures.js";
 
 const connection = (over: Partial<Awaited<ReturnType<ConnectionLookup["read"]>> & object> = {}): ConnectionLookup => ({
@@ -170,7 +170,7 @@ describe("the default private guard uses the install's ranges", () => {
 describe("the MCP host is reached over https", () => {
   const stdioEntry = (): McpServerEntry => ({ ...http(), transport: { kind: "stdio", spec: { registry: "npm", name: "pkg", version: "1.0.0", args: [], integrity: `sha512-${"A".repeat(86)}==`, lockfileHash: "1".repeat(64), bundleHash: "2".repeat(64), destinations: [], secretEnv: [], size: { cpu: 256, memoryMiB: 512 } } } });
   it("refuses an http:// host address, except this machine's own loopback", async () => {
-    const { assertSecureHostUrl } = await import("../../../packages/broker/src/context-sources/server-port.js");
+    const { assertSecureHostUrl } = await import("../../../packages/core/src/context-sources/server-port.js");
     expect(() => assertSecureHostUrl("http://mcp-host.internal:8080")).toThrow(/https/u);
     expect(() => assertSecureHostUrl("http://10.0.0.5:8080")).toThrow(/https/u);
     expect(() => assertSecureHostUrl("not a url")).toThrow();

@@ -1,7 +1,7 @@
 // Spec 025 A14: the admin tools' view of the control plane, with the admin sign-in `agentx login
 // --admin` stored. Every answer is parsed with the contracts' schemas; every refusal becomes one of
 // FR-049's codes. The token is never part of an error, a log line or a result.
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME } from "@rovara-code/contracts";
 import { randomUUID } from "node:crypto";
 import {
   ADMIN_CHANGE_FAILED_PATTERN, ADMIN_CHANGE_UNEXPECTED_MESSAGE, AdminBindingsResponseSchema, AdminFailuresResponseSchema, AdminHealthResponseSchema, AdminMeResponseSchema, AdminProjectsResponseSchema,
@@ -9,7 +9,7 @@ import {
   type AdminBindingsResponse, type AdminChangeOutcome, type AdminChangeViewWire, type AdminChangesResponseWire,
   type ApplyAdminChangeRequest, type DeclineAdminChangeRequest, type ProposeAdminChangeRequest, type AdminFailuresResponse, type AdminHealthResponse, type AdminMeResponse, type AdminProjectsResponse,
   type AdminUsageGroupBy, type AdminUsageResponse, type AdminWorkspacesResponse,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { z } from "zod";
 import { NEXT_STEPS, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, plainText, type ToolErrorCode } from "./errors.js";
 

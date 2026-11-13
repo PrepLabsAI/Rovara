@@ -1,7 +1,7 @@
 // Linear fixtures: a hook (the project and the Linear workspace and team it speaks for), a signing secret that is not real, and a delivery signed exactly as `Linear-Signature` is.
 import { createHmac } from "node:crypto";
-import type { RawDelivery } from "@agentx/contracts";
-import type { LinearHook } from "../../../packages/broker/src/plugins/tracker/linear/webhook.js";
+import type { RawDelivery } from "@rovara-code/contracts";
+import type { LinearHook } from "../../../packages/core/src/plugins/tracker/linear/webhook.js";
 
 export const LINEAR_ORG = "11111111-1111-4111-8111-111111111111";
 export const TEAM = "22222222-2222-4222-8222-222222222222";

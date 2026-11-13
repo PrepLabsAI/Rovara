@@ -14,7 +14,7 @@
 //   - the answer is read by the draft's reader (`readSetupProposalAnswer`): bounded, redacted, cited, secrets by name only. Repository text and command output are data.
 import { isIP } from "node:net";
 import { isAbsolute, resolve } from "node:path";
-import { agentXError, isCredentialKey, redactText, remoteCodeReason, type SetupProposal, type SetupRunEndWord } from "@agentx/contracts";
+import { agentXError, isCredentialKey, redactText, remoteCodeReason, type SetupProposal, type SetupRunEndWord } from "@rovara-code/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { snapshotTree, withIsolatedGit } from "./isolated-git.js";
 import { runIsolatedGit } from "./isolated-repository.js";

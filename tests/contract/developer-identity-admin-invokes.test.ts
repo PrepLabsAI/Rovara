@@ -1,8 +1,8 @@
 // tests/contract/developer-identity-admin-invokes.test.ts
 // Spec 025 A11 to A13: the broker asks DeveloperIdentity who owns an email, and whether the bot token works.
 import { describe, expect, it, vi } from "vitest";
-import { slackAuthCheckThroughLambda, slackUserByEmailThroughLambda } from "../../packages/broker/src/aws/developer-routes.js";
-import { slackDirectory, type SlackProblem } from "../../packages/broker/src/developer/slack-directory.js";
+import { slackAuthCheckThroughLambda, slackUserByEmailThroughLambda } from "../../packages/core/src/aws/developer-routes.js";
+import { slackDirectory, type SlackProblem } from "../../packages/core/src/developer/slack-directory.js";
 import { BOT_TOKEN, TEAM, fakeSlack, httpEvent, identityHarness, routeFetch } from "../support/developer-fakes.js";
 
 const reply = (value: unknown) => ({ Payload: Buffer.from(JSON.stringify(value)) });

@@ -1,16 +1,16 @@
 // Revert detection without the Team record. A Rovara pull request that is later reverted is recorded once as a fact about the task, from what the code host says, and only when a person who can write to the
 // repository stands behind the revert (the one who merged the revert pull request, or the author and pusher of the revert commit). Anything unproven records nothing.
 import { describe, expect, it } from "vitest";
-import type { ChangeRequestDetails, HostAccount, OrgId, RepositoryRef } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { taskKey } from "../../packages/broker/src/developer/task-records.js";
-import { codeHostRepositoryKey } from "../../packages/broker/src/core/proof/revert/repository-key.js";
-import { findLinkedChangeRequest, linkedChangeRequestKey, linkedChangeRequestStep } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
-import { findMergeCommit, githubPullRequestAddress, mergeCommitIndexStep, mergeCommitKey } from "../../packages/broker/src/core/proof/revert/merge-commit-index.js";
-import { createRovaraPullRequestIndex } from "../../packages/broker/src/core/proof/revert/rovara-pull-request-index.js";
+import type { ChangeRequestDetails, HostAccount, OrgId, RepositoryRef } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { taskKey } from "../../packages/core/src/developer/task-records.js";
+import { codeHostRepositoryKey } from "../../packages/core/src/core/proof/revert/repository-key.js";
+import { findLinkedChangeRequest, linkedChangeRequestKey, linkedChangeRequestStep } from "../../packages/core/src/core/proof/revert/linked-change-requests.js";
+import { findMergeCommit, githubPullRequestAddress, mergeCommitIndexStep, mergeCommitKey } from "../../packages/core/src/core/proof/revert/merge-commit-index.js";
+import { createRovaraPullRequestIndex } from "../../packages/core/src/core/proof/revert/rovara-pull-request-index.js";
 import {
   detectRevertFromMergedChangeRequest, detectRevertFromPushedCommit, gitRevertedCommits, revertRecordKey, revertedCommits, revertedPullRequests, type CommitFacts, type RevertDetectorDependencies,
-} from "../../packages/broker/src/core/proof/revert/revert-detect.js";
+} from "../../packages/core/src/core/proof/revert/revert-detect.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const OTHER_ORG = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;

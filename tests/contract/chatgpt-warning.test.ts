@@ -2,11 +2,11 @@
 // it ends, once, addressed to the plan's owner. The notifier reads the ended operation from the stream.
 import { describe, expect, it } from "vitest";
 import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { chatGptFallbackText } from "../../packages/broker/src/chatgpt/fallback-notice.js";
-import { readStream, type Notice } from "../../packages/broker/src/developer/notifications.js";
-import { taskKey, taskPointerKey } from "../../packages/broker/src/developer/task-records.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { createNotifierHandler } from "../../packages/core/src/aws/developer-task-notifier.js";
+import { chatGptFallbackText } from "../../packages/core/src/chatgpt/fallback-notice.js";
+import { readStream, type Notice } from "../../packages/core/src/developer/notifications.js";
+import { taskKey, taskPointerKey } from "../../packages/core/src/developer/task-records.js";
 import { recordStream } from "../support/developer-task-broker.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";

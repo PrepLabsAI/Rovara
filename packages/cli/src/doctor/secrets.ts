@@ -1,6 +1,6 @@
 // FR-050: that secrets exist and have the right shape. Values are read only to judge their shape;
 // no message here is built from a value.
-import { KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, keyedProviderSecretName, type KeyedModelProvider } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, keyedProviderSecretName, type KeyedModelProvider } from "@rovara-code/contracts";
 import { providerKeyProblem } from "@agentx/model-runtime/config";
 import { providerSecretArn } from "../deploy/answer-schemas.js";
 import { githubAppSecretName, parseAppSecret } from "../init/github-app.js";

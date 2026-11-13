@@ -10,8 +10,8 @@ import { connect as netConnect, createServer as createNetServer } from "node:net
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { DOCKER_SOCKET_GUARD_SOURCE } from "../../packages/broker/src/local/isolation/docker-socket-guard-source.js";
-import { DEFAULT_DEVCONTAINER_REGISTRIES, daemonIsVmBacked, devcontainerRegistriesForInstall, devcontainerRegistriesFrom, guardPolicy } from "../../packages/broker/src/local/isolation/stack.js";
+import { DOCKER_SOCKET_GUARD_SOURCE } from "../../packages/core/src/local/isolation/docker-socket-guard-source.js";
+import { DEFAULT_DEVCONTAINER_REGISTRIES, daemonIsVmBacked, devcontainerRegistriesForInstall, devcontainerRegistriesFrom, guardPolicy } from "../../packages/core/src/local/isolation/stack.js";
 
 const scratch: string[] = [];
 afterAll(async () => { while (scratch.length > 0) await rm(scratch.pop()!, { recursive: true, force: true }); });

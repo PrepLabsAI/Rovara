@@ -3,10 +3,10 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { DEFAULT_DEVCONTAINER_REGISTRIES } from "../../packages/broker/src/local/isolation/stack.js";
+import { startLocalRuntime, type LocalRuntime } from "../../packages/core/src/local/runtime.js";
+import { DEFAULT_DEVCONTAINER_REGISTRIES } from "../../packages/core/src/local/isolation/stack.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 
 const cleanup: Array<() => Promise<void>> = [];

@@ -1,5 +1,5 @@
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { AgentXError, agentXError, errorStatus, type ToolHints } from "@agentx/contracts";
+import { AgentXError, agentXError, errorStatus, type ToolHints } from "@rovara-code/contracts";
 import { connectMcp, McpUnauthorized, type McpConnection, type McpToolAnnotations } from "./mcp-client.js";
 import { CredentialUnavailable } from "./credentials.js";
 import {

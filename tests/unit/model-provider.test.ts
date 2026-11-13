@@ -3,17 +3,17 @@ import { describe, expect, it } from "vitest";
 import {
   MODEL_REQUEST_FORMATS, MODEL_ROUTE_APIS, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, PluginConfigSchema, SecretValue, assertModelProvider, isLoopbackHost, modelPriceRows, modelProviderAddressProblem,
   providerFormat, type ModelProviderAdapter,
-} from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters } from "../../packages/broker/src/ports/adapter-registry.js";
-import { createEnvironmentModelKeyStore, modelKeyVariable } from "../../packages/broker/src/ports/model-key-stores.js";
+} from "@rovara-code/contracts";
+import { createAdapterRegistry, loadAdapters } from "../../packages/core/src/ports/adapter-registry.js";
+import { createEnvironmentModelKeyStore, modelKeyVariable } from "../../packages/core/src/ports/model-key-stores.js";
 import {
   ANTHROPIC_PROVIDER, BEDROCK_PROVIDER_ID, BUILTIN_MODEL_PROVIDERS, NATIVE_CHAT_CAPABILITIES, OPENAI_PROVIDER, OPENROUTER_PROVIDER, bedrockModelProvider, bedrockModelProviderPlugin,
   modelProviderPlugin, registerBuiltinModelProviders,
-} from "../../packages/broker/src/plugins/model-provider/index.js";
-import { AWS_MODULE_MISSING, AwsCredentialSetupError, createAwsCredentialSource, describeBedrockSettings, assertBuiltinIdsKept, type AwsCredentialLoaders } from "../../packages/broker/src/plugins/model-provider/index.js";
-import { createLocalModelKeyStore, modelKeyRefs } from "../../packages/broker/src/local/runtime.js";
-import { credentialOf } from "../../packages/broker/src/local/model-proxy/credentials.js";
-import { DEFAULT_PROVIDER_ENDPOINTS, upstreamTarget, upstreamUrl } from "../../packages/broker/src/local/model-proxy/index.js";
+} from "../../packages/core/src/plugins/model-provider/index.js";
+import { AWS_MODULE_MISSING, AwsCredentialSetupError, createAwsCredentialSource, describeBedrockSettings, assertBuiltinIdsKept, type AwsCredentialLoaders } from "../../packages/core/src/plugins/model-provider/index.js";
+import { createLocalModelKeyStore, modelKeyRefs } from "../../packages/core/src/local/runtime.js";
+import { credentialOf } from "../../packages/core/src/local/model-proxy/credentials.js";
+import { DEFAULT_PROVIDER_ENDPOINTS, upstreamTarget, upstreamUrl } from "../../packages/core/src/local/model-proxy/index.js";
 
 const gateway: ModelProviderAdapter = {
   kind: "company-gateway", name: "Company gateway", address: "https://models.example.test/v1", signIn: { kind: "bearer-key" },

@@ -2,10 +2,10 @@
 // the proxy's guard (no tools, nothing kept at the provider), the route is held to the diagnosis's spending cap before a key is read, a model with no known price is not used, what a call used is metered, the answer never
 // holds the key, and the one-shot token and operation die with the call. A worker's capability can never name a diagnosis's operation.
 import { afterEach, describe, expect, it } from "vitest";
-import { DIAGNOSIS_LIGHT_BUDGET_USD } from "@agentx/contracts";
-import type { DiagnosisModelProblem } from "../../packages/broker/src/core/diagnosis/index.js";
-import { createLocalDiagnosisModel, modelRatesOf, reasonOfAnswer, type LocalDiagnosisModelOptions } from "../../packages/broker/src/local/diagnosis-model.js";
-import { MODEL_PROXY_PREFIX, OneShotOperations, WORKSPACE_HEADER, builtinModelProviderBook, localRoute } from "../../packages/broker/src/local/model-proxy/index.js";
+import { DIAGNOSIS_LIGHT_BUDGET_USD } from "@rovara-code/contracts";
+import type { DiagnosisModelProblem } from "../../packages/core/src/core/diagnosis/index.js";
+import { createLocalDiagnosisModel, modelRatesOf, reasonOfAnswer, type LocalDiagnosisModelOptions } from "../../packages/core/src/local/diagnosis-model.js";
+import { MODEL_PROXY_PREFIX, OneShotOperations, WORKSPACE_HEADER, builtinModelProviderBook, localRoute } from "../../packages/core/src/local/model-proxy/index.js";
 import { askForToken, startModelProxyWorld, type ModelProxyWorld } from "../support/model-proxy-world.js";
 
 const open: Array<() => Promise<void>> = [];

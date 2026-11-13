@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { arch, hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { developerTokenKey, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";

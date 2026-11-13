@@ -64,7 +64,7 @@ describe("the emulator source guards", () => {
       { path: `${W}check-round-runners.ts`, text: "run({ controlToken })" },
       { path: `${W}check-sandbox.ts`, text: 'headers: { "x-rovara-control-token": t }' },
       { path: `${W}setup-agent.ts`, text: 'import { emulatorLedgerPort } from "./emulator-ledger.js";' },
-      { path: "packages/broker/src/rovara-code/evidence-pack.ts", text: 'import { seedEmulator } from "../../../worker/src/service-seed-aws";' },
+      { path: "packages/core/src/rovara-code/evidence-pack.ts", text: 'import { seedEmulator } from "../../../worker/src/service-seed-aws";' },
       { path: `${W}agent-tools.ts`, text: "const t = credentials.sqsReceiptSecret;" },
       { path: `${W}file-tools.ts`, text: "ROVARA_AWS_SERVICES_SQS_RECEIPT_HANDLE_SECRET" },
     ];

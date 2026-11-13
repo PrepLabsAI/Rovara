@@ -1,7 +1,7 @@
 // agentx init (FR-015 to FR-020): find the release and region, read any install already under way,
 // ask and check and confirm on a first run, then run the steps. Every AWS, GitHub, Slack, browser
 // and clock dependency is overridable through InitCliDependencies (main.ts's CliDependencies.init).
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME } from "@rovara-code/contracts";
 import { BudgetsClient } from "@aws-sdk/client-budgets";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
@@ -12,7 +12,7 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
-import { AgentXError, agentXError, environmentOperatorRoleName, environmentStackName, keyedProviderSecretName } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentOperatorRoleName, environmentStackName, keyedProviderSecretName } from "@rovara-code/contracts";
 import type { DirectProvider } from "../deploy/answer-schemas.js";
 import { authorizeCredential, secretsManagerAuthorizeSecrets } from "../admin/authorize.js";
 import { loginWithPkce, openSystemBrowser } from "../auth.js";

@@ -1,8 +1,8 @@
 // Spec 062 FR-022, FR-023: events reach the adapter signed, at least once, shaped to what it can show.
 import { describe, expect, it, vi } from "vitest";
-import { channelEventId, generateWebhookSecret, verifyWebhook, type ChannelAdapterRecord, type ChannelEvent } from "@agentx/contracts";
+import { channelEventId, generateWebhookSecret, verifyWebhook, type ChannelAdapterRecord, type ChannelEvent } from "@rovara-code/contracts";
 import { EndpointRefused } from "@agentx/gateway";
-import { createChannelEventSender, fitEventToAdapter, type ChannelEventSenderDependencies } from "../../packages/broker/src/aws/channel-events.js";
+import { createChannelEventSender, fitEventToAdapter, type ChannelEventSenderDependencies } from "../../packages/core/src/aws/channel-events.js";
 
 const NOW = Date.parse("2026-11-08T10:00:00.000Z");
 const secret = generateWebhookSecret();

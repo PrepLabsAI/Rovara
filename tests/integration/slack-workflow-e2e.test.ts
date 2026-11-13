@@ -12,7 +12,7 @@ import { fauxAssistantMessage, type FauxResponseStep } from "@earendil-works/pi-
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { VIEW_ONLY_NOTICE, type WorkflowOptionalCheck } from "../../packages/contracts/src/index.js";
 import { TASK_ANSWER_FOOTER } from "../../packages/slack-service/src/task-question.js";
-import { workflowStartedNotice } from "../../packages/broker/src/aws/slack-workflow-choice.js";
+import { workflowStartedNotice } from "../../packages/core/src/aws/slack-workflow-choice.js";
 
 /** The planner's answer: a small structured coding plan (its claims are ranked, so the later ones are the details). */
 const PLAN_DOCUMENT = planDocument({

@@ -1,8 +1,8 @@
 // Worker side: the nightly result's counts and its health block come from one tally, so the broker never reads them as disagreeing.
 import { describe, expect, it } from "vitest";
-import { NIGHTLY_STEP_WORDS, NightlyResultSchema } from "@agentx/contracts";
+import { NIGHTLY_STEP_WORDS, NightlyResultSchema } from "@rovara-code/contracts";
 import { nightlyCountsAndHealth, type NightlyRunFacts } from "../../packages/worker/src/nightly-health-report.js";
-import { nightlyHealthOf } from "../../packages/broker/src/core/test-env/nightly.js";
+import { nightlyHealthOf } from "../../packages/core/src/core/test-env/nightly.js";
 
 const check = { runsTests: true, started: true, timedOut: false, reportApproved: true, reportWritten: true, testsCollected: 100 };
 const allPassed = NIGHTLY_STEP_WORDS.map((step) => ({ step, status: "passed" as const }));

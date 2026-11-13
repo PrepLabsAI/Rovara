@@ -17,7 +17,7 @@ import {
   type RequestSuggestion,
   type SlackRequestMessage,
   type SlackThread,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { RequestRoute, RequestRouter } from "@agentx/orchestrator/request-router";
 import type { ServiceLog } from "./processor.js";
 

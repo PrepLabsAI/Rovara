@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { access, appendFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { redactText } from "@agentx/contracts";
+import { redactText } from "@rovara-code/contracts";
 import { z } from "zod";
 import { checksReport, runChecks, shellCheckRun, type CheckRun } from "./check-runner.js";
 import { captureCandidate, CandidateHoldError, sameCandidate, type CandidateSnapshot } from "./candidate.js";

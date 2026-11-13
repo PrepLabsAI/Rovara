@@ -3,10 +3,10 @@
 // refusal is the same 401; a live check means an ended sign-in or a revoked developer is refused at once.
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
-import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
-import type { AccessCheckContext, AccessCheckRule } from "../../packages/broker/src/developer/access-rules.js";
-import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
+import type { ChannelMembersRequest, ChannelMembersResponse } from "@rovara-code/contracts";
+import type { DeveloperApiConfiguration } from "../../packages/core/src/aws/developer-routes.js";
+import type { AccessCheckContext, AccessCheckRule } from "../../packages/core/src/developer/access-rules.js";
+import { developerTokenVerifier } from "../../packages/core/src/developer/verify-token.js";
 import { createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { localSigner } from "../support/developer-fakes.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";

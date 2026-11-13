@@ -1,8 +1,8 @@
 // Owner decision 2026-10-27: where the repository has code owners that cover the changed paths, a code owner has to approve before the change request is ready. The host reads its own owners file (item C4);
 // these tests feed the verdict the neutral answer, made by the shared file reader for the syntax most hosts use.
 import { describe, expect, it } from "vitest";
-import { codeOwnerVerdict } from "../../packages/broker/src/core/merge/code-owners.js";
-import { readCodeOwnersFile } from "../../packages/broker/src/plugins/code-host/code-owners-file.js";
+import { codeOwnerVerdict } from "../../packages/core/src/core/merge/code-owners.js";
+import { readCodeOwnersFile } from "../../packages/core/src/plugins/code-host/code-owners-file.js";
 
 const never = async (): Promise<"unknown"> => "unknown";
 

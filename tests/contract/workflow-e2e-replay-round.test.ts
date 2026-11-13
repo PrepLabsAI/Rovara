@@ -1,16 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { workflowSendBackOffered } from "@agentx/contracts";
+import { workflowSendBackOffered } from "@rovara-code/contracts";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound, type RoundCore } from "../support/e2e-application-round-harness.js";
 import { FAIL, PASS, runRound } from "../support/e2e-application-round-run.js";
 import { call } from "../support/slack-broker.js";
 import { MAYA } from "../support/developer-task-broker.js";
-import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
-import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
-import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
-import { startTaskWorkflowE2EReplayFromSystem } from "../../packages/broker/src/aws/developer-tasks.js";
-import { replayStartItem, requestWorkflowE2EReplay } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
+import { failOutboxOperation } from "../../packages/core/src/aws/outbox-failure.js";
+import { issueCapability } from "../../packages/core/src/aws/cancellation.js";
+import type { DurableOutboxRecord } from "../../packages/core/src/aws/lambda.js";
+import { startTaskWorkflowE2EReplayFromSystem } from "../../packages/core/src/aws/developer-tasks.js";
+import { replayStartItem, requestWorkflowE2EReplay } from "../../packages/core/src/aws/workflow-e2e-replay.js";
 
 // M1.4 Task 4.6b (tests 16 and 17) on the real broker: the operator's request to replay a task's qualified round refuses before a runner is started or anything is recorded, for each of its
 // reasons; and a replay round, whatever its result, changes nothing in the workflow, the qualification, send-back or publication.

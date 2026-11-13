@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { startLocalHttpServer, type LocalHttpServer } from "../../packages/broker/src/local/http-server.js";
+import { startLocalHttpServer, type LocalHttpServer } from "../../packages/core/src/local/http-server.js";
 import {
   LocalStateError,
   ensureStateDirectory,
@@ -12,7 +12,7 @@ import {
   readOwnerFile,
   resolveConfigLocation,
   writeOwnerFile,
-} from "../../packages/broker/src/local/state-directory.js";
+} from "../../packages/core/src/local/state-directory.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {

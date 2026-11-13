@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { canonicalJson, createCandidateManifest, e2eApplicationMetadataSourceRefs, e2eAppBuildManifestDigest,
-  E2EApplicationPlanIntentSchema, inspectE2ERepository, proposeE2ESetup, type E2ESourceSnapshot } from "@agentx/contracts";
-import { deriveE2EApplicationApprovalBinding } from "../../packages/broker/src/e2e/application-plan-binding.js";
+  E2EApplicationPlanIntentSchema, inspectE2ERepository, proposeE2ESetup, type E2ESourceSnapshot } from "@rovara-code/contracts";
+import { deriveE2EApplicationApprovalBinding } from "../../packages/core/src/e2e/application-plan-binding.js";
 import { buildE2EApplication } from "../../packages/verifier/src/application-build.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../../packages/verifier/src/application-build-source.js";
 

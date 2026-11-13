@@ -3,10 +3,10 @@
 //   2. an unattended run uses a published version of an active agent only;
 //   3. a write that depends on what it read is conditional on it (a lost race is a conflict, not an overwrite).
 import { describe, expect, it } from "vitest";
-import { DEFAULT_AGENT_GUARDRAILS } from "@agentx/contracts";
-import { writeGuardrails } from "../../packages/broker/src/core/agents/guardrails.js";
-import { resolveAgentForAutonomousRun } from "../../packages/broker/src/core/agents/roster.js";
-import { resolveAgent } from "../../packages/broker/src/core/agents/store.js";
+import { DEFAULT_AGENT_GUARDRAILS } from "@rovara-code/contracts";
+import { writeGuardrails } from "../../packages/core/src/core/agents/guardrails.js";
+import { resolveAgentForAutonomousRun } from "../../packages/core/src/core/agents/roster.js";
+import { resolveAgent } from "../../packages/core/src/core/agents/store.js";
 import { COMPANY, OWNER, PROJECT, createAutomationWorld, publishAgent, reporterOverlay } from "../support/automation-world.js";
 
 const run = (world: ReturnType<typeof createAutomationWorld>, agentId: string, project = PROJECT) => resolveAgentForAutonomousRun(world.roster, { orgId: COMPANY, project, agentId });

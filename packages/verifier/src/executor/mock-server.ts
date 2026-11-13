@@ -3,7 +3,7 @@ import { createSocket } from "node:dgram";
 import { writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
-import type { E2EApiMockFixture } from "@agentx/contracts";
+import type { E2EApiMockFixture } from "@rovara-code/contracts";
 import { CORE_LEDGER_MAX_LINES, clip, startCore, type CoreAnswer, type CoreStrategy, type RunningCore } from "../service-mocks/fake-core.js";
 
 // This file imports no package: it runs in a container with a 128 MiB limit and half a CPU, where loading the contracts barrel takes ten seconds and most of that memory. It

@@ -11,7 +11,7 @@ import {
   type CheckEntry,
   type CheckOutcome,
   type CheckReport,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { CustomMessageEntryDraft, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { redactedTail } from "../collected-process.js";
 import { ownBefore, runChecks, type CheckPlan, type CheckRunners } from "./checks.js";

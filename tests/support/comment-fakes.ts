@@ -1,5 +1,5 @@
 // Lane L12 (owner decision 66): the two reads the Approvers seam makes for a comment proof, as a test double. The "code host" only reports what a comment holds; the checks are Rovara's (`checkCommentProof`).
-import { shortDigest, type CommentRequestContext, type FetchedComment } from "../../packages/broker/src/core/pr-commands/comment-checks.js";
+import { shortDigest, type CommentRequestContext, type FetchedComment } from "../../packages/core/src/core/pr-commands/comment-checks.js";
 
 export const THREAD = { repository: "example/repo", number: 12 } as const;
 export const POSTED_AT = "2026-11-09T10:00:00.000Z";

@@ -4,15 +4,15 @@ import { mkdtemp, mkdir, readdir, realpath, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { E2EReplayTrace } from "@agentx/contracts";
+import type { E2EReplayTrace } from "@rovara-code/contracts";
 import { E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, WorkerInvocationSchema, canonicalJson, e2eModelRouteRevision, e2eRuntimeBindingKey, type E2EApplicationExecutionAdmission,
-  type E2EModelDayBudgetRequest } from "@agentx/contracts";
+  type E2EModelDayBudgetRequest } from "@rovara-code/contracts";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createDockerApplicationHost, DEFAULT_DEADLINE_GRACE_MS, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
 import { DIAGNOSTICS_NOTICE, createEvidenceBudget } from "../../packages/worker/src/workflow-e2e-application-checks.js";
-import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES } from "@agentx/contracts";
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES } from "@rovara-code/contracts";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
 import type { E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";

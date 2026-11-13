@@ -31,10 +31,10 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { nextGeneration } from "../packages/broker/src/aws/runtime-requalify.js";
-import { acquireRequalifyLock, releaseRequalifyLock } from "../packages/broker/src/aws/runtime-requalify-lock.js";
-import { recordRenewalSuccess } from "../packages/broker/src/aws/runtime-requalify-heartbeat.js";
-import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
+import { nextGeneration } from "../packages/core/src/aws/runtime-requalify.js";
+import { acquireRequalifyLock, releaseRequalifyLock } from "../packages/core/src/aws/runtime-requalify-lock.js";
+import { recordRenewalSuccess } from "../packages/core/src/aws/runtime-requalify-heartbeat.js";
+import { e2eModelCheckRunnerKey } from "../packages/core/src/e2e/model-route-registry.js";
 import { ec2Binding } from "../packages/cli/src/setup/project-add.js";
 import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
 import {

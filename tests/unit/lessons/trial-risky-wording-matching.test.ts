@@ -1,9 +1,9 @@
 // (risky wording survives dots, identifiers and new families) and (claims matched on whole tokens and path segments).
 import { describe, expect, it } from "vitest";
-import { hasRiskyTrialWording, lessonClaimsSupported, trialBlockers, type TrialContext } from "../../../packages/broker/src/lessons/trial.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
-import { approvePresetChange, setLearningPreset, type PresetChange, type PresetDeps } from "../../../packages/broker/src/lessons/preset-setting.js";
-import type { LessonAuditEvent } from "../../../packages/broker/src/lessons/ports.js";
+import { hasRiskyTrialWording, lessonClaimsSupported, trialBlockers, type TrialContext } from "../../../packages/core/src/lessons/trial.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { approvePresetChange, setLearningPreset, type PresetChange, type PresetDeps } from "../../../packages/core/src/lessons/preset-setting.js";
+import type { LessonAuditEvent } from "../../../packages/core/src/lessons/ports.js";
 import { Audit, PROJECT, WS, draft, lessonRecord } from "./lesson-helpers.js";
 
 const CLEAR: TrialContext = { preset: "standard", mode: "On", trialAllowed: true, contradiction: false, refinement: false, reviewRequired: false, held: false, braked: false };

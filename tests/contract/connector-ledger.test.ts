@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DynamoConnectorLedger, GITHUB_LEDGER, connectorLedgerKeys } from "../../packages/broker/src/aws/connector-ledger.js";
+import { DynamoConnectorLedger, GITHUB_LEDGER, connectorLedgerKeys } from "../../packages/core/src/aws/connector-ledger.js";
 import type { Invocation } from "../../packages/gateway/src/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 

@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { E2E_DEFAULT_MODEL_ROUTE_ID, e2eModelRouteRevision, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import { E2E_DEFAULT_MODEL_ROUTE_ID, e2eModelRouteRevision, type E2EWorkflowAdmissionRef } from "@rovara-code/contracts";
 import {
   E2E_MODEL_ROUTE_PARTITION, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRouteDefinitionDigest,
   e2eModelRouteRevisionKey, e2eModelRouteShapeKey, planE2EAgentRoute, readE2EModelRouteShape, type E2EAgentInstallation,
-} from "../../packages/broker/src/e2e/model-route-registry.js";
-import { createWorkflowE2EAdmissionModelChoiceReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
+} from "../../packages/core/src/e2e/model-route-registry.js";
+import { createWorkflowE2EAdmissionModelChoiceReader } from "../../packages/core/src/aws/workflow-e2e-admission-schema.js";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
 

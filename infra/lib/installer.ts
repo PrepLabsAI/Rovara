@@ -16,7 +16,7 @@ import {
   aws_lambda as lambda,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { CLI_PACKAGE_NAME, ENVIRONMENT_NAME_PATTERN } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, ENVIRONMENT_NAME_PATTERN } from "@rovara-code/contracts";
 import { packagedFunction } from "./control-plane.js";
 
 /** Starts the installer job on Create and answers CloudFormation; Update and Delete only answer.

@@ -15,7 +15,7 @@ import {
   type PullRequestResult,
   type PullRequestLifecycleResult,
   type WorkerInvocation,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME } from "./git.js";
 import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository, type CredentialedGitRunner } from "./git-auth.js";
 import { CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, candidateLayout, snapshotTree, withIsolatedGit } from "./isolated-git.js";

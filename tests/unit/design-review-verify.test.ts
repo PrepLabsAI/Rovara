@@ -1,11 +1,11 @@
 // Design review stage: the broker verifies a worker's report against the packet it built.
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { READ_ONLY_TOOLS, REVIEWER_VERIFY_FAILURES, ReviewerRunSchema, inputProofSentence } from "@agentx/contracts";
-import { buildReviewerPacket, packetDigestOf, type PacketReaders } from "../../packages/broker/src/core/design-review/packet.js";
+import { READ_ONLY_TOOLS, REVIEWER_VERIFY_FAILURES, ReviewerRunSchema, inputProofSentence } from "@rovara-code/contracts";
+import { buildReviewerPacket, packetDigestOf, type PacketReaders } from "../../packages/core/src/core/design-review/packet.js";
 import {
   verifyReviewerReport, verifyRound, runVerdictOf, type FirstCallUsageReader, type UsageCheck, type VerifyReviewerInput,
-} from "../../packages/broker/src/core/design-review/verify.js";
+} from "../../packages/core/src/core/design-review/verify.js";
 
 const keyOf = (name: string): string => createHash("sha256").update(name).digest("hex");
 const KEY = keyOf("critic-key");

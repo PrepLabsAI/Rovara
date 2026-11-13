@@ -2,7 +2,7 @@
 // UsePreviousTemplate and UsePreviousValue for every other parameter, so NoEcho values are never
 // sent again. It shows the parameter changes and the resource changes, and asks first.
 import { CreateChangeSetCommand, DeleteChangeSetCommand, DescribeChangeSetCommand, DescribeStacksCommand, ExecuteChangeSetCommand, type Change, type Stack } from "@aws-sdk/client-cloudformation";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { ADOPTED_STACK_NAMES } from "../environments/adopt.js";
 import { SIGN_IN_SINCE_PARAMETER_NAMES } from "../signin/settings.js";
 import type { ChangeSetChange } from "./deployer.js";

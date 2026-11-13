@@ -2,7 +2,7 @@ import { execFile as execFileCallback, spawn } from "node:child_process";
 import { lstat, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 const execFile = promisify(execFileCallback);
 

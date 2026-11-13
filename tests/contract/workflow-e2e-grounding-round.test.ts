@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, PlanQualityFindingSchema, planQualityFinding, workflowSendBackOffered, type E2EDisplayBaseline, type E2EScenario } from "@agentx/contracts";
+import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, PlanQualityFindingSchema, planQualityFinding, workflowSendBackOffered, type E2EDisplayBaseline, type E2EScenario } from "@rovara-code/contracts";
 import { decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { disposeRealCandidates, createRealCandidate } from "../support/e2e-application-candidate.js";
@@ -10,21 +10,21 @@ import { binding, csvScenario, ordersContractManifest, planFixture, webApiRow } 
 import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope } from "../support/e2e-application-evidence-fixture.js";
 import { MAYA } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
-import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
-import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
-import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
-import { readWorkflowE2EBaselineRecord } from "../../packages/broker/src/aws/workflow-e2e-baseline.js";
+import { failOutboxOperation } from "../../packages/core/src/aws/outbox-failure.js";
+import { issueCapability } from "../../packages/core/src/aws/cancellation.js";
+import type { DurableOutboxRecord } from "../../packages/core/src/aws/lambda.js";
+import { readWorkflowE2EBaselineRecord } from "../../packages/core/src/aws/workflow-e2e-baseline.js";
 import {
   GROUNDING_UNAVAILABLE_REASONS, groundingRoundLapsed, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord,
   recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound, verifyGroundingEvidence,
-} from "../../packages/broker/src/aws/workflow-e2e-grounding.js";
-import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationGroundingAdmission, groundingPlanDigest } from "../../packages/broker/src/e2e/application-admission.js";
-import { ApplicationBaselineSkipped, ApplicationDispatchRefusal, applicationAccountsRefusal, applicationRuntimeRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
-import { verifyApplicationE2EEvidence } from "../../packages/broker/src/e2e/application-evidence.js";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
-import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { escapedPlanText, groundingFindingsOf, plannedExpectation } from "../../packages/broker/src/developer/plan-grounding-findings.js";
-import { stopBlocksWorkflowStep, strandedPlanningRun, type StoppedRunOperation } from "../../packages/broker/src/aws/workflow-cancel-reconcile.js";
+} from "../../packages/core/src/aws/workflow-e2e-grounding.js";
+import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationGroundingAdmission, groundingPlanDigest } from "../../packages/core/src/e2e/application-admission.js";
+import { ApplicationBaselineSkipped, ApplicationDispatchRefusal, applicationAccountsRefusal, applicationRuntimeRefusal } from "../../packages/core/src/e2e/application-dispatch-check.js";
+import { verifyApplicationE2EEvidence } from "../../packages/core/src/e2e/application-evidence.js";
+import { evaluateApplicationPlanApproval } from "../../packages/core/src/e2e/application-plan-approval.js";
+import { e2eAgentRoutePolicyLimits } from "../../packages/core/src/e2e/model-route-registry.js";
+import { escapedPlanText, groundingFindingsOf, plannedExpectation } from "../../packages/core/src/developer/plan-grounding-findings.js";
+import { stopBlocksWorkflowStep, strandedPlanningRun, type StoppedRunOperation } from "../../packages/core/src/aws/workflow-cancel-reconcile.js";
 
 // The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
 assumeDrivingTestsPassed();
@@ -468,7 +468,7 @@ describe("a grounding round's admission is served on its own record, not on the 
 
 describe("the other sites that branch on a round's purpose", () => {
   it("the model budget refuses a grounding round, even one that says agentSteps, and writes nothing", async () => {
-    const { handleE2EModelBudgetCallback } = await import("../../packages/broker/src/e2e/model-budget-endpoint.js");
+    const { handleE2EModelBudgetCallback } = await import("../../packages/core/src/e2e/model-budget-endpoint.js");
     const db = new FakeDynamoDb();
     db.set({ pk: `DEVTASK#${TASK}`, sk: "META", entityType: "DEVTASK", workspaceId: "ws-1", project: "payments" });
     const dependencies = { documentClient: { send: db.send }, tableName: "state", now: () => Date.now() };

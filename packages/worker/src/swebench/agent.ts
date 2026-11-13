@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { parseAgentClaim, redactText, type CheckReport, type SwebenchStopReason } from "@agentx/contracts";
+import { parseAgentClaim, redactText, type CheckReport, type SwebenchStopReason } from "@rovara-code/contracts";
 import { recorderFingerprint } from "../artifacts.js";
 import { workspaceRelativeCdTarget, type DevcontainerPaths } from "../devcontainer.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";

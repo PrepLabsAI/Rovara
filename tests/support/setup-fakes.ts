@@ -1,7 +1,7 @@
 // Fakes for the setup modules (phase 15d2). Nothing here reaches AWS, a vendor or the control plane.
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { E2EPolicySchema, canonicalJson, createCandidateManifest, inspectE2ERepository, proposeE2ESetup } from "@agentx/contracts";
+import { E2EPolicySchema, canonicalJson, createCandidateManifest, inspectE2ERepository, proposeE2ESetup } from "@rovara-code/contracts";
 import { join } from "node:path";
 import type { AuthorizeSecrets } from "../../packages/cli/src/admin/authorize.js";
 import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js";

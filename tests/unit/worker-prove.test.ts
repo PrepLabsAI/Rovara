@@ -1,6 +1,6 @@
 // Proof and test environment E3: the Prove run's sequence, failure words, bounds, and the report the broker re-reads.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, testEnvDigest, testEnvIsProved, type ProjectCommand, type TestEnvironmentBody } from "@agentx/contracts";
+import { TestEnvironmentBodySchema, testEnvDigest, testEnvIsProved, type ProjectCommand, type TestEnvironmentBody } from "@rovara-code/contracts";
 import { proveEnvironment, type ProveCommandResult, type ProvePorts } from "../../packages/worker/src/prove.js";
 
 const sha = (letter: string) => letter.repeat(64);

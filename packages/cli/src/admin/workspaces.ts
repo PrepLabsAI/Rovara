@@ -1,4 +1,4 @@
-import { AdminWorkspacesResponseSchema, agentXError, type AdminWorkspacesResponse } from "@agentx/contracts";
+import { AdminWorkspacesResponseSchema, agentXError, type AdminWorkspacesResponse } from "@rovara-code/contracts";
 import { adminResponseBody } from "./http.js";
 
 export async function listAdminWorkspaces(input: { controlPlaneUrl: string; accessToken: string }, fetchImplementation: typeof fetch = fetch): Promise<AdminWorkspacesResponse> {

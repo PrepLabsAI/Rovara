@@ -5,61 +5,61 @@ import { request as httpRequest } from "node:http";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost, TaskDiagnosisView } from "@agentx/contracts";
+import type { AdapterRegistry, AuditEvent, AuditSink, CodeHost, TaskDiagnosisView } from "@rovara-code/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, PLAN_CRITIC_BLOCK_HEADER, PLAN_CRITIQUE_INFO_STRING, ROVARA_REPLY_MARKER, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, planDryRunCommandSha256, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, WORKFLOW_BLOCK_REASONS, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE,
   ModelSelectionStateSchema, agentSessionKey, canonicalPlanJson, change, createCandidateManifest, orgSettingsKey, queryAll, runCostKey, projectMetaKey, secondReviewModelKey, startWorkflowBranchSync, startWorkflowFix, taskGraphDigest, taskGraphOrder, when, type Check, type JsonValue, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { createHash } from "node:crypto";
-import { bindSessionSurface } from "../../packages/broker/src/core/sessions/bindings.js";
-import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
-import { createSessionControlHost } from "../../packages/broker/src/local/app/host.js";
+import { bindSessionSurface } from "../../packages/core/src/core/sessions/bindings.js";
+import { developerIdOf, taskSessionId } from "../../packages/core/src/core/sessions/create.js";
+import { createSessionControlHost } from "../../packages/core/src/local/app/host.js";
 import { planDocument } from "../support/plan-documents.js";
-import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
-import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/core/src/core/sessions/read.js";
+import { localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 import { Command } from "commander";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import * as e2eVerification from "../../packages/broker/src/core/e2e/verification.js";
+import * as e2eVerification from "../../packages/core/src/core/e2e/verification.js";
 
 // The verdict of a round is the broker's own re-collection of evidence (tested in e2e-core-verification); here it is replaced so the tests can hand the build step each verdict and see what it commits.
-vi.mock("../../packages/broker/src/core/e2e/verification.js", async (importOriginal) => {
+vi.mock("../../packages/core/src/core/e2e/verification.js", async (importOriginal) => {
   const actual = await importOriginal<typeof e2eVerification>();
   return { ...actual, verifyWorkflowE2EEvidence: vi.fn(actual.verifyWorkflowE2EEvidence) };
 });
-import { modelProxyWorkerUrl } from "../../packages/broker/src/local/docker-worker-machines.js";
-import { OPENS_PER_MINUTE } from "../../packages/broker/src/local/app/routes.js";
-import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
-import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
-import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/local/app/host.js";
+import { modelProxyWorkerUrl } from "../../packages/core/src/local/docker-worker-machines.js";
+import { OPENS_PER_MINUTE } from "../../packages/core/src/local/app/routes.js";
+import { assertGithubCloneAccess } from "../../packages/core/src/local/github-access.js";
+import { DOCUMENT_CHANGED } from "../../packages/core/src/local/app/documents.js";
+import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED } from "../../packages/core/src/local/app/host.js";
 import { registerConnectionsCommand, registerModelsCommand, registerDiagnosisCommand, registerOpenCommand, registerSecondReviewCommand } from "../../packages/cli/src/up/cli.js";
-import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { BASE_MERGED_NEEDS_YOU_MILESTONE, BASE_MERGED_RECHECKING_MILESTONE, BASE_MERGED_RETRY_REASON, workflowAutoFixCounts, type Admission } from "@agentx/contracts";
-import { dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { requireRepositoryKey } from "../../packages/broker/src/core/merge/repository-key.js";
-import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/branch-writers.js";
-import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
-import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
-import { fromDocument, toDocument, type OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { recordCritiqued } from "../../packages/broker/src/core/plan/check.js";
-import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
-import { shortDigest } from "../../packages/broker/src/core/pr-commands/comment-checks.js";
-import { approvalOfferOf } from "../../packages/broker/src/local/app/page-data.js";
-import { verifiedChangedFiles } from "../../packages/broker/src/core/build-step/changed-files.js";
-import { readyToMerge } from "../../packages/broker/src/local/app/attention.js";
-import { retryBlockedStep } from "../../packages/broker/src/local/app/retry.js";
-import { recordedHeadOf } from "../../packages/broker/src/core/build-step/head-check.js";
-import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { secondReviewReplayKey, secondReviewVerdictKey } from "../../packages/broker/src/core/second-review/index.js";
+import { FakeWorkerMachines } from "../../packages/core/src/ports/fake-worker-machines.js";
+import { FakeCodeHost } from "../../packages/core/src/plugins/fake/code-host.js";
+import { FakeHostModel } from "../../packages/core/src/plugins/fake/model.js";
+import { BASE_MERGED_NEEDS_YOU_MILESTONE, BASE_MERGED_RECHECKING_MILESTONE, BASE_MERGED_RETRY_REASON, workflowAutoFixCounts, type Admission } from "@rovara-code/contracts";
+import { dispatchRowKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { requireRepositoryKey } from "../../packages/core/src/core/merge/repository-key.js";
+import { readBranchWriters } from "../../packages/core/src/core/branch-sync/branch-writers.js";
+import { ciEvidenceItem, ciOutputBlock } from "../../packages/core/src/core/ci-fix/ci-fix.js";
+import { dispatchRowItem } from "../../packages/core/src/core/task-flow/dispatch-rows.js";
+import { fromDocument, toDocument, type OperationRecord } from "../../packages/core/src/core/task-flow/records.js";
+import { recordCritiqued } from "../../packages/core/src/core/plan/check.js";
+import { readTask } from "../../packages/core/src/core/task-flow/reads.js";
+import { shortDigest } from "../../packages/core/src/core/pr-commands/comment-checks.js";
+import { approvalOfferOf } from "../../packages/core/src/local/app/page-data.js";
+import { verifiedChangedFiles } from "../../packages/core/src/core/build-step/changed-files.js";
+import { readyToMerge } from "../../packages/core/src/local/app/attention.js";
+import { retryBlockedStep } from "../../packages/core/src/local/app/retry.js";
+import { recordedHeadOf } from "../../packages/core/src/core/build-step/head-check.js";
+import { WORKFLOW_DOCUMENT_KIND } from "../../packages/core/src/core/decisions/workflow-subject.js";
+import { runDispatchRow } from "../../packages/core/src/core/task-flow/stage-machine.js";
+import { startLocalRuntime, type LocalRuntime } from "../../packages/core/src/local/runtime.js";
+import { secondReviewReplayKey, secondReviewVerdictKey } from "../../packages/core/src/core/second-review/index.js";
 import { plain, replayRun, verdictFor } from "../support/second-review-world.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { startFakeProvider } from "../support/model-proxy-world.js";
 import { catalogModelIds, listPricesPerMillion } from "../../packages/model-runtime/src/catalog.js";
-import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
-import { catalogPriceOf, costMicrosOf } from "../../packages/broker/src/core/cost/price-table.js";
+import { costPartition } from "../../packages/core/src/core/cost/ledger.js";
+import { catalogPriceOf, costMicrosOf } from "../../packages/core/src/core/cost/price-table.js";
 import { planAnswer, testedPlanDocument } from "../support/plan-documents.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
 
@@ -1274,7 +1274,7 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
         workflowE2EEvidenceRef: { key: `workflow-e2e-evidence/sha256/${"6".repeat(64)}.json`, sha256: "6".repeat(64), byteLength: 10 } };
       const deps = h.runtime.app.flow.deps;
       const end = async () => {
-        const task = (await import("../../packages/broker/src/core/task-flow/reads.js")).readTask;
+        const task = (await import("../../packages/core/src/core/task-flow/reads.js")).readTask;
         await deps.buildSteps!.onEnded(deps, (await task(deps, taskId))!, operation as never, { status: "SUCCEEDED", outcome: { kind: "built", result: builtResult(tree).result } });
         return (await taskRecord(h, taskId)).workflow as Record<string, unknown> & { stage: string; state: string; revision: number; blockReason?: string; e2e?: { qualifiedRound?: unknown; failedRound?: unknown } };
       };

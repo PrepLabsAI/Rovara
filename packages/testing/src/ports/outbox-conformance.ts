@@ -2,7 +2,7 @@
 // the port makes: a message exists if and only if the state change committed, and it reaches its queue at least once and, with the
 // queue's duplicate suppression, once.
 import { describe, expect, it } from "vitest";
-import { OUTBOX_PENDING_INDEX, change, companyScoped, when, type DocumentStore, type QueueService, type TransactionalOutbox } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX, change, companyScoped, when, type DocumentStore, type QueueService, type TransactionalOutbox } from "@rovara-code/contracts";
 
 export interface OutboxUnderTest {
   store: DocumentStore;

@@ -1,12 +1,12 @@
 // The milestone hook on the document store, ported from Cloud's `rovara-code-milestones-hook.test.ts`. A milestone is one item in the task's partition, written in the transaction
 // of the change that caused it; the handlers an adapter registers hear it after the commit, and again from the sweep while one of them has not.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, agentSessionKey, codeMilestoneKey, queryAll, type CodeMilestone, type DocumentStore } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, agentSessionKey, codeMilestoneKey, queryAll, type CodeMilestone, type DocumentStore } from "@rovara-code/contracts";
 import {
   CODE_MILESTONE_ATTEMPTS_MAX, CODE_MILESTONE_DUE_PK, codeMilestoneItems, codeMilestoneWrittenFor, createDocumentMilestones, type CodeMilestoneHandler, type DocumentMilestones,
-} from "../../packages/broker/src/core/milestones/milestones.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
+} from "../../packages/core/src/core/milestones/milestones.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../packages/core/src/core/task-flow/flow.js";
 
 const orgId = IMPLICIT_COMPANY_ID;
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";

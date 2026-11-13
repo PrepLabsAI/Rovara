@@ -1,10 +1,10 @@
 // The pure parts of the candidate check: the lists it runs (and the approval writes), the stored record's reader, and what makes a proposal a setup run's.
 import { describe, expect, it } from "vitest";
 import { INDEX_EXPIRY_ATTRIBUTE, TestEnvironmentBodySchema, type ProjectCommand } from "../../packages/contracts/src/index.js";
-import { candidateCheckKey, readCandidateCheck } from "../../packages/broker/src/core/test-env/candidate-check.js";
-import { candidateLists, candidateListsChecked, commandsMissingFromSettings, commandsToApply, sameCommands } from "../../packages/broker/src/core/test-env/candidate-commands.js";
-import { isSetupRunProposal } from "../../packages/broker/src/core/test-env/environment.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { candidateCheckKey, readCandidateCheck } from "../../packages/core/src/core/test-env/candidate-check.js";
+import { candidateLists, candidateListsChecked, commandsMissingFromSettings, commandsToApply, sameCommands } from "../../packages/core/src/core/test-env/candidate-commands.js";
+import { isSetupRunProposal } from "../../packages/core/src/core/test-env/environment.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as never;
 const DIGEST = "a".repeat(64);

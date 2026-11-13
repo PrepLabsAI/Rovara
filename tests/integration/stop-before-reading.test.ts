@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { join } from "node:path";
-import { WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, type WorkerInvocation } from "@agentx/contracts";
+import { WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, type WorkerInvocation } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import type { DevcontainerCli } from "../../packages/worker/src/devcontainer.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";

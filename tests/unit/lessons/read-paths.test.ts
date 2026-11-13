@@ -7,7 +7,7 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const ROOT = join(__dirname, "../../..");
-const BROKER = join(ROOT, "packages/broker");
+const BROKER = join(ROOT, "packages/core");
 
 /** Files that read the lesson store and hand nothing back to a viewer (they act on a lesson: count, curate, delete, expire, promote, process). */
 const INTERNAL_LESSON_FILES: Record<string, string> = {
@@ -43,7 +43,7 @@ const PLANTED_DIR = "zzguard";
 /**
  * Builds ONE program for the broker plus the planted samples. The analysis resolves calls by the types of the broker's own code, so third-party declaration files are served empty
  * (the AWS SDK, openai, zod and the rest are about 14 MB of declarations and took the program from about 1 GB to about 2.5 GB, enough to kill a CI worker). The broker's own
- * sources, the workspace packages (@agentx/contracts and the others, which resolve to their own dist files) and the TypeScript lib files stay real, so LessonStore and the team-record store resolve exactly as before.
+ * sources, the workspace packages (@rovara-code/contracts and the others, which resolve to their own dist files) and the TypeScript lib files stay real, so LessonStore and the team-record store resolve exactly as before.
  */
 function analyse(root = BROKER): Hit[] {
   const config = ts.getParsedCommandLineOfConfigFile(join(root, "tsconfig.json"), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => undefined });

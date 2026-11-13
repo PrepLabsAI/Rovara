@@ -1,5 +1,5 @@
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { KEYED_MODEL_PROVIDERS, SECRET_ARN_PATTERN, agentXError, type KeyedModelProvider } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, SECRET_ARN_PATTERN, agentXError, type KeyedModelProvider } from "@rovara-code/contracts";
 import { catalogModel } from "./catalog.js";
 
 export type ModelRole = "worker" | "orchestrator" | "classifier";

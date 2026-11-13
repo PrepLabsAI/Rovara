@@ -1,6 +1,6 @@
 // Proof and test environment E10: the synthetic data guard (personal data patterns, production names) and the seeded generator.
 import { describe, expect, it } from "vitest";
-import { DataGuardReportSchema, ServiceMockFixtureSetSchema, type ServiceMockFixtureSet, type TestEnvProdDeny } from "@agentx/contracts";
+import { DataGuardReportSchema, ServiceMockFixtureSetSchema, type ServiceMockFixtureSet, type TestEnvProdDeny } from "@rovara-code/contracts";
 import { DATA_GUARD_MAX_BYTES, DataGuardInputTooLarge, createSyntheticGenerator, guardApiSample, guardFixtureSet, guardInputs, guardSeeds, luhnValid, scanText } from "../../packages/verifier/src/data-guard.js";
 
 const DENY: TestEnvProdDeny = { accountIds: ["111122223333"], hosts: ["*.prod.example.com", "billing.corp.net"], arnPrefixes: ["arn:aws:sagemaker:us-east-1:222222222222:"] };

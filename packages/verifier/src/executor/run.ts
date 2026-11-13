@@ -4,7 +4,7 @@ import { appendFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, r
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { E2E_CHROMIUM_SANDBOX_FILE, E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, copyBoundedE2EJsonData, canonicalJson, type ChromiumSandboxAttestation, type ChromiumSandboxVerdict, type E2EExecutorPlan } from "@agentx/contracts";
+import { E2E_CHROMIUM_SANDBOX_FILE, E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, copyBoundedE2EJsonData, canonicalJson, type ChromiumSandboxAttestation, type ChromiumSandboxVerdict, type E2EExecutorPlan } from "@rovara-code/contracts";
 import { compareE2EApplicationPublicList } from "../application-identity.js";
 import { normalizeE2EApplicationPublicList } from "../application-result-adapter.js";
 import { parseE2EApplicationReport } from "../application-report-schema.js";

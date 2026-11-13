@@ -1,8 +1,8 @@
 // Spec 025 Task 6: the broker actions developer task routes use, driven over the Slack harness's fake table.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, type Mock } from "vitest";
-import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
-import { developerTaskIdentity, taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
+import type { DeveloperTaskActions } from "../../packages/core/src/aws/developer-task-actions.js";
+import { developerTaskIdentity, taskOwnerKey } from "../../packages/core/src/developer/task-records.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { markReady } from "../support/slack-broker.js";
 

@@ -2,7 +2,7 @@
 // capture with the journey invariants checked after every test, and readers for what the owner saw and what the model
 // was given.
 import { afterEach, beforeEach, expect, vi, type MockInstance } from "vitest";
-import type { WorkflowOptionalCheck } from "@agentx/contracts";
+import type { WorkflowOptionalCheck } from "@rovara-code/contracts";
 import { planAnswer, planDocument } from "./plan-documents.js";
 import { visibleSlackText } from "./strict-slack.js";
 import { JARGON, registerJourneyInvariants } from "./workflow-e2e-invariants.js";

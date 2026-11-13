@@ -2,8 +2,8 @@
 // Spec 025 FR-055, D21, C17, C18: a developer task's setup is failed 50 minutes after it started.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { STUCK_SETUP_MESSAGE, STUCK_SETUP_MS, setupWatchKey, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
-import { noticesFromStream } from "../../packages/broker/src/developer/notifications.js";
+import { STUCK_SETUP_MESSAGE, STUCK_SETUP_MS, setupWatchKey, sweepStuckSetups } from "../../packages/core/src/aws/stuck-setup.js";
+import { noticesFromStream } from "../../packages/core/src/developer/notifications.js";
 import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, ensureWorkspace } from "../support/slack-broker.js";
 

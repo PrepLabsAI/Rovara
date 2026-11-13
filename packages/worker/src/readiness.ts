@@ -1,4 +1,4 @@
-import { agentXError, type ProjectCommand, type WorkspaceStatus } from "@agentx/contracts";
+import { agentXError, type ProjectCommand, type WorkspaceStatus } from "@rovara-code/contracts";
 import { storedCommandOutput } from "./command-failure.js";
 
 export interface CommandResult {

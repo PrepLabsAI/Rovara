@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 

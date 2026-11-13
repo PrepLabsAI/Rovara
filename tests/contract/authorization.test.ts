@@ -5,7 +5,7 @@ import {
   authorizeProject,
   authorizeWorkspace,
   JwtAuthenticator,
-} from "../../packages/broker/src/index.js";
+} from "../../packages/core/src/index.js";
 
 async function signedIdentity(subject: string, groups: string[] = []) {
   const { privateKey, publicKey } = await generateKeyPair("RS256");

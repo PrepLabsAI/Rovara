@@ -1,7 +1,7 @@
 // The two-company isolation sets for the fakes: a code host, a tracker and a check runner, each made of one fake per company (same raw ids, nothing else shared) behind a company router.
 // A real adapter that serves many companies builds the same `TwoCompanyIsolation` over its own fixtures and appends the same checks (`twoCompanyChecks`).
-import { FakeCheckRunner, FakeCodeHost, FakeHostModel, FakeTracker, fakeSignedDelivery, fakeTrackerDelivery } from "@agentx/broker/fakes";
-import type { CheckRunner, CodeHost, HostScope, Tracker } from "@agentx/contracts";
+import { FakeCheckRunner, FakeCodeHost, FakeHostModel, FakeTracker, fakeSignedDelivery, fakeTrackerDelivery } from "@rovara-code/core/fakes";
+import type { CheckRunner, CodeHost, HostScope, Tracker } from "@rovara-code/contracts";
 import { routeByCompany, type CompanyResolver } from "./company-router.js";
 import {
   COMPANY_A, SHARED_RAW_IDS, TWO_COMPANIES, attempt, type FailClosedProbe, type IsolationCompany, type IsolationSurface, type ResolverFailure, type TwoCompanyIsolation,

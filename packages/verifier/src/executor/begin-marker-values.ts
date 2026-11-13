@@ -1,4 +1,4 @@
-import { E2E_MODEL_CHANNEL_MAX_COOKIE_VALUES, E2E_MODEL_SESSION_SYNC_MAX_BODY_BYTES, boundSessionValue } from "@agentx/contracts";
+import { E2E_MODEL_CHANNEL_MAX_COOKIE_VALUES, E2E_MODEL_SESSION_SYNC_MAX_BODY_BYTES, boundSessionValue } from "@rovara-code/contracts";
 
 /**
  * The session values a begin marker carries (the newest ones; the session sync carries all of them before the first call anyway). Each is bounded the way the sync bounds it

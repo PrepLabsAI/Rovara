@@ -4,10 +4,10 @@
 import { randomUUID } from "node:crypto";
 import { SLACK_FORMAT } from "../../packages/slack-service/src/slack-format.js";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { releaseFailedPreparation } from "../../packages/broker/src/aws/failed-preparation.js";
-import { failActiveOperation, failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
-import { sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
-import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
+import { releaseFailedPreparation } from "../../packages/core/src/aws/failed-preparation.js";
+import { failActiveOperation, failOutboxOperation } from "../../packages/core/src/aws/outbox-failure.js";
+import { sweepStuckCancels } from "../../packages/core/src/aws/stuck-cancels.js";
+import type { DurableOutboxRecord } from "../../packages/core/src/aws/lambda.js";
 import { preparationFailedMessage } from "../../packages/slack-service/src/messages.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";

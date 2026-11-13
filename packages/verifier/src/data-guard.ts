@@ -10,7 +10,7 @@
 //   - prod_host, prod_arn, prod_account: a host, an ARN or an account id on the company's deny list (the same matchers the broker uses at approval).
 // Fail closed: input over `DATA_GUARD_MAX_BYTES` is refused (it throws), a report holds at most 100 findings (more is still `ok: false`), and no regular expression here can backtrack badly.
 import type {
-  DATA_GUARD_SOURCES} from "@agentx/contracts";
+  DATA_GUARD_SOURCES} from "@rovara-code/contracts";
 import {
   DataGuardReportSchema,
   prodDenyMatchesAccount,
@@ -20,7 +20,7 @@ import {
   type DataGuardReport,
   type ServiceMockFixtureSet,
   type TestEnvProdDeny,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 export type DataGuardFindingKind = DataGuardReport["findings"][number]["kind"];
 export type DataGuardSource = (typeof DATA_GUARD_SOURCES)[number];

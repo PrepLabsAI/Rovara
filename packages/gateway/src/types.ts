@@ -1,4 +1,4 @@
-import type { SlackRequester, ToolHints } from "@agentx/contracts";
+import type { SlackRequester, ToolHints } from "@rovara-code/contracts";
 import type { McpConnection } from "./mcp-client.js";
 
 export type Access = "read" | "write";

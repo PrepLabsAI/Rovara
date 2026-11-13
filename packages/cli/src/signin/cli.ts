@@ -1,7 +1,7 @@
 // The `agentx signin` command group (spec 025 FR-045, FR-046) and the developer sign-in flags that
 // agentx init shares (F14), kept out of main.ts. Builds real AWS and Slack clients only when a test
 // has not overridden them.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { STSClient } from "@aws-sdk/client-sts";

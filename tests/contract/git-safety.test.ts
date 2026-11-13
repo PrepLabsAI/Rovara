@@ -4,7 +4,7 @@ import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError } from "@rovara-code/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { publishWorkspaceDiff, repositoriesFingerprint } from "../../packages/worker/src/artifacts.js";
 import { gitHardenedEnvironment, HARDENED_GIT_CONFIG, projectCommandEnvironment } from "../../packages/worker/src/git.js";

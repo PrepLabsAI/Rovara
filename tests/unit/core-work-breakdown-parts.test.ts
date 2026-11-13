@@ -1,10 +1,10 @@
 // the broker's decisions about parts, ported from Cloud's `rovara-code-parallel-parts-broker.test.ts` onto the document store: how many parts may run together (held to the free
 // workspace slots of the person and of the company), when ordered work may start, the trees a part may start from, and whether an older worker can take over a plan's retained progress.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, PARALLEL_PARTS_MAX, type TaskGraphV1, type WorkItemProgressV1 } from "@agentx/contracts";
-import { developerCharge, type WorkspaceCharge } from "../../packages/broker/src/core/task-flow/keys.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { parallelPartsDecision, parallelPartsForTask, parallelStartTrees, serialWorkerCanResume, widestStep, workflowDependenciesAllowed } from "../../packages/broker/src/core/work-breakdown/parallel-parts.js";
+import { IMPLICIT_COMPANY_ID, PARALLEL_PARTS_MAX, type TaskGraphV1, type WorkItemProgressV1 } from "@rovara-code/contracts";
+import { developerCharge, type WorkspaceCharge } from "../../packages/core/src/core/task-flow/keys.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { parallelPartsDecision, parallelPartsForTask, parallelStartTrees, serialWorkerCanResume, widestStep, workflowDependenciesAllowed } from "../../packages/core/src/core/work-breakdown/parallel-parts.js";
 
 const charge = developerCharge({ companyId: IMPLICIT_COMPANY_ID, developerId: "dev-1" });
 const V2 = { definitionVersion: "1.1.0" };

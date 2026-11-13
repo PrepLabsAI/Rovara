@@ -1,7 +1,7 @@
 // The channel suite's world for the in-process fake adapter (`FakeChannelAdapter`). The fake records the events it is given, so what people "are shown" is read back from them, and a person
 // speaks and presses by calling the sink the core handed to `start`. It has no workspace, no markup and no limits of its own: it promises only what the port asks, and the checks that need more are skipped.
-import { FakeChannelAdapter } from "@agentx/broker/ports";
-import type { ActorRef, ChannelDecision, ChannelEvent, ConversationRef } from "@agentx/contracts";
+import { FakeChannelAdapter } from "@rovara-code/core/ports";
+import type { ActorRef, ChannelDecision, ChannelEvent, ConversationRef } from "@rovara-code/contracts";
 import type { ChannelPerson, ChannelWorld, ShownMessage, ShownRequest } from "./channel-conformance.js";
 
 export const FAKE_CHANNEL_ID = "examplechat";

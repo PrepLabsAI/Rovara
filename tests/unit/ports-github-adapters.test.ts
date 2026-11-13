@@ -2,12 +2,12 @@
 // answers; and the adapter-specific behaviour the neutral contract cannot say is checked here. What the real GitHub client does (the requests it makes, the
 // installation tokens it mints, the branches it will read) is tested with that client, in the lane that brings it.
 import { describe, expect, it } from "vitest";
-import { codeBuildCheckRunner } from "../../packages/broker/src/plugins/check-runner/codebuild/index.js";
-import { githubActionsCheckRunner } from "../../packages/broker/src/plugins/check-runner/github-actions/index.js";
-import { githubCodeHost, GITHUB_CODE_HOST_CAPABILITIES } from "../../packages/broker/src/plugins/code-host/github/index.js";
-import { replyTargetOf } from "../../packages/broker/src/plugins/code-host/github/mapping.js";
-import { FakeHostModel } from "@agentx/broker/fakes";
-import type { CodeBuildGateway } from "../../packages/broker/src/codebuild.js";
+import { codeBuildCheckRunner } from "../../packages/core/src/plugins/check-runner/codebuild/index.js";
+import { githubActionsCheckRunner } from "../../packages/core/src/plugins/check-runner/github-actions/index.js";
+import { githubCodeHost, GITHUB_CODE_HOST_CAPABILITIES } from "../../packages/core/src/plugins/code-host/github/index.js";
+import { replyTargetOf } from "../../packages/core/src/plugins/code-host/github/mapping.js";
+import { FakeHostModel } from "@rovara-code/core/fakes";
+import type { CodeBuildGateway } from "../../packages/core/src/codebuild.js";
 import { CodeHostCapabilitiesSchema, type CodeBuildCheckResult } from "../../packages/contracts/src/index.js";
 import { checkRunnerChecks, type CheckRunnerWorld } from "../support/ports/check-runner-conformance.js";
 import { codeHostChecks, type CodeHostWorld } from "../support/ports/code-host-conformance.js";

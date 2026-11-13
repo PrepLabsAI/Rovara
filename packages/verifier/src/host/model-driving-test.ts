@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { DRIVING_TEST_BUDGET, WEB_API_AGENT_PROBE_GOAL, e2eModelRouteRevision, type E2EModelFailure, type E2EModelReceipt, type E2EModelRouteDefinition } from "@agentx/contracts";
+import { DRIVING_TEST_BUDGET, WEB_API_AGENT_PROBE_GOAL, e2eModelRouteRevision, type E2EModelFailure, type E2EModelReceipt, type E2EModelRouteDefinition } from "@rovara-code/contracts";
 import { collectE2EApplicationRun } from "../application-collection.js";
 import { qualifyE2EApplicationCollection } from "../application-result-adapter.js";
 import { runIsolatedE2EApplication } from "../application-runtime.js";

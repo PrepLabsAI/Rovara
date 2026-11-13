@@ -1,14 +1,14 @@
 // The nightly fire: the schedule on the scheduler port, and every decision a fire makes (one run per slot, per day and per gap; fixed skip reasons; admission; claims given back).
 import { describe, expect, it } from "vitest";
-import { agentXError, testEnvDigest, type DueSchedule } from "@agentx/contracts";
+import { agentXError, testEnvDigest, type DueSchedule } from "@rovara-code/contracts";
 import {
   NIGHTLY_FIRE_MAX_AGE_MS, NIGHTLY_MIN_GAP_MS, NIGHTLY_RUN_MAX_MS, deleteNightlySchedule, handleNightlyFire, nightlyScheduleName, nightlySlotId, putNightlySchedule, recordNightlyResult,
   syncNightlySchedule, validateNightlyCron, type NightlyRunPort,
-} from "../../packages/broker/src/core/test-env/nightly.js";
-import { readLatestNight } from "../../packages/broker/src/core/test-env/night-status.js";
-import { admitNightly } from "../../packages/broker/src/core/test-env/nightly-run.js";
-import { createFakeScheduler } from "../../packages/broker/src/ports/fake-scheduler.js";
-import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
+} from "../../packages/core/src/core/test-env/nightly.js";
+import { readLatestNight } from "../../packages/core/src/core/test-env/night-status.js";
+import { admitNightly } from "../../packages/core/src/core/test-env/nightly-run.js";
+import { createFakeScheduler } from "../../packages/core/src/ports/fake-scheduler.js";
+import { createAllowAllAdmission } from "../../packages/core/src/ports/policy-defaults.js";
 import { HEAD1, HEAD2, ORG, PROJECT, SCHEDULED, T0, approveForTest, body, nightlyWorld, result, rows } from "../support/nightly-world.js";
 
 describe("the schedule", () => {

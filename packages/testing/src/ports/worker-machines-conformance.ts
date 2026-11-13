@@ -1,6 +1,6 @@
 // Port lane W0: the conformance suite every worker-machines adapter must pass (EC2, local Docker, this machine, the fake).
 import { describe, expect, it } from "vitest";
-import { MachineError, type MachineHealth, type MachineSpec, type WorkerInvocation, type WorkerMachines } from "@agentx/contracts";
+import { MachineError, type MachineHealth, type MachineSpec, type WorkerInvocation, type WorkerMachines } from "@rovara-code/contracts";
 
 export interface WorkerMachinesUnderTest {
   machines: WorkerMachines;

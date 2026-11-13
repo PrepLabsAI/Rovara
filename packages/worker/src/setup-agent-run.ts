@@ -17,7 +17,7 @@
 import { resolve } from "node:path";
 import {
   AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, type SetupAgentLimits, type SetupJournalEntry, type SetupProposal, type SetupRunSummary,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { scanRepositories, type SetupScan } from "./setup-scan.js";
 import { trackedPathsOf, type TrackedPaths } from "./setup-citations.js";

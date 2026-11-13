@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { E2EReplaySourceCase, E2EReplayTrace } from "@agentx/contracts";
+import type { E2EReplaySourceCase, E2EReplayTrace } from "@rovara-code/contracts";
 import { runE2EExecutorSerially as runE2EExecutor } from "./executor-run-lock.js";
 import { createOrdersM14AgentPlan, startOrdersM14App, type AgentPlanOptions, type OrdersM14AppProcess, type OrdersM14Variant } from "./orders-m14-agent.js";
 import type { WebApiProbePlan } from "../../packages/verifier/src/host/web-api-probe-plan.js";

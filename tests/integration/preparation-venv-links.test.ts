@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, symlink, writeFile, readdir, readlink, lstat } from "no
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import { defaultVenvLinkPolicy, type VenvLinkPolicy } from "../../packages/worker/src/workspace-links.js";

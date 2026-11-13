@@ -1,9 +1,9 @@
 // The laptop's answers to the second review's seams: a model is served only from a provider that is signed in, and only with a catalog price (its spend cap is priced from it); the cap is sized from the model's rates.
 import { describe, expect, it } from "vitest";
-import type { ModelKeyStore } from "@agentx/contracts";
+import type { ModelKeyStore } from "@rovara-code/contracts";
 import { catalogModelIds, listPricesPerMillion } from "@agentx/model-runtime/catalog";
-import { SECOND_REVIEW_CAP_TYPICAL_REVIEWS, SECOND_REVIEW_CAP_WORST_CALLS, capUsdOf, createLocalSecondReviewSeams } from "../../packages/broker/src/local/app/second-review.js";
-import { ASSUMED_MAX_OUTPUT_TOKENS, builtinModelProviderBook } from "../../packages/broker/src/local/model-proxy/proxy.js";
+import { SECOND_REVIEW_CAP_TYPICAL_REVIEWS, SECOND_REVIEW_CAP_WORST_CALLS, capUsdOf, createLocalSecondReviewSeams } from "../../packages/core/src/local/app/second-review.js";
+import { ASSUMED_MAX_OUTPUT_TOKENS, builtinModelProviderBook } from "../../packages/core/src/local/model-proxy/proxy.js";
 import { SONNET } from "../support/second-review-world.js";
 
 const keys = (have: string[]): ModelKeyStore => ({ async get() { return undefined; }, async providers() { return have; } });

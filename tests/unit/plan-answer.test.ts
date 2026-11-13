@@ -1,10 +1,10 @@
 // The planner's answer read as a structured plan (`core/plan/answer.ts`) and the words a structured planning run is given (`core/plan/prompts.ts`).
-import { PLAN_WHY_REQUEST_MAX_CHARS, WORKFLOW_PLAN_MAX_BYTES, canonicalPlanJson, type PlanDocument } from "@agentx/contracts";
+import { PLAN_WHY_REQUEST_MAX_CHARS, WORKFLOW_PLAN_MAX_BYTES, canonicalPlanJson, type PlanDocument } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
-import { PLANNER_WHY_AUTHOR, planDocumentKindOf, planWhyOf, readPlanAnswer } from "../../packages/broker/src/core/plan/answer.js";
-import { answerWithCiChecks } from "../../packages/broker/src/core/plan/ci.js";
-import { planUnreadablePrompt } from "../../packages/broker/src/core/plan/process.js";
-import { structuredPlanIntro, structuredPlanRules } from "../../packages/broker/src/core/plan/prompts.js";
+import { PLANNER_WHY_AUTHOR, planDocumentKindOf, planWhyOf, readPlanAnswer } from "../../packages/core/src/core/plan/answer.js";
+import { answerWithCiChecks } from "../../packages/core/src/core/plan/ci.js";
+import { planUnreadablePrompt } from "../../packages/core/src/core/plan/process.js";
+import { structuredPlanIntro, structuredPlanRules } from "../../packages/core/src/core/plan/prompts.js";
 import { planAnswer, planDocument, testedPlanDocument } from "../support/plan-documents.js";
 
 const repositories = [{ name: "demo", path: "repo/demo" }];
@@ -167,8 +167,8 @@ describe("the checks the repository's CI requires join the planner's proposals",
 
 describe("the cited code is attached only to the plan it was read for", () => {
   it("refuses evidence for a digest the task no longer holds, and attaches once", async () => {
-    const { attachPlanEvidence } = await import("../../packages/broker/src/core/plan/store.js");
-    const { MemoryDocumentStore } = await import("../../packages/broker/src/ports/memory-document-store.js");
+    const { attachPlanEvidence } = await import("../../packages/core/src/core/plan/store.js");
+    const { MemoryDocumentStore } = await import("../../packages/core/src/ports/memory-document-store.js");
     const store = new MemoryDocumentStore();
     const kept = new Map<string, Uint8Array>();
     const blobs = { put: async (key: string, bytes: Uint8Array) => { kept.set(key, bytes); }, get: async (key: string) => kept.get(key) };

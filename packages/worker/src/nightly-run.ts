@@ -16,7 +16,7 @@ import { posix } from "node:path";
 import {
   CoverageMapSchema, NightlyResultSchema, agentXError, canonicalJson, isRerunnableTestId, isValidTestId, testEnvDigest, testIdOf,
   type CoverageMapData, type NightlyResult, type NightlyRunWire, type NightlyStepWord, type TestEnvCheck, type TestEnvironmentBody, type TEST_ENV_PROVE_STEPS,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { nightlyCountsAndHealth, type NightlyRunFacts, type NightlyStepStatus } from "./nightly-health-report.js";
 import { proveEnvironment, type ProveCommandResult, type ProvePorts } from "./prove.js";
 import { commandWithSelection } from "./verification/selection.js";

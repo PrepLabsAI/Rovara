@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import {
   InMemoryProjectRegistry,
   InMemoryRegistry,
   PreparationCoordinator,
   RepositoryGrantService,
   type AuthenticatedIdentity,
-} from "../../packages/broker/src/index.js";
+} from "../../packages/core/src/index.js";
 import { describe, expect, it } from "vitest";
 import { reorderMaps } from "../support/fake-dynamodb.js";
 

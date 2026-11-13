@@ -1,7 +1,7 @@
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 /**
  * Where the worker keeps scratch of its own: the throwaway Git repositories it reads a candidate with, and the folder that holds a Git credential while one command runs (TF12).

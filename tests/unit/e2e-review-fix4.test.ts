@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, canonicalJson, type E2ESourceSnapshot } from "@agentx/contracts";
-import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
+import { createCandidateManifest, canonicalJson, type E2ESourceSnapshot } from "@rovara-code/contracts";
+import { inspectE2ERepository } from "../../packages/core/src/e2e/discovery.js";
 
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const file = (path: string, text: string) => ({ path, bytes: Buffer.from(text), sha256: hash(text), kind: "blob" as const });

@@ -2,10 +2,10 @@
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, PluginRegistryError, SecretValue, type AdapterRegistry, type SecretStore } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PluginRegistryError, SecretValue, type AdapterRegistry, type SecretStore } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
+import { startLocalRuntime, type LocalRuntime } from "../../packages/core/src/local/runtime.js";
+import { TASK_FLOW_INDEXES } from "../../packages/core/src/core/task-flow/flow.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -314,7 +314,7 @@ describe("rovara up runtime", () => {
   });
 
   it("reads allowBroadTokenForWorker from the config, and refuses anything but a boolean", async () => {
-    const { parsePluginConfigText } = await import("../../packages/broker/src/local/runtime.js");
+    const { parsePluginConfigText } = await import("../../packages/core/src/local/runtime.js");
     expect(parsePluginConfigText('{"version":1,"plugins":[],"allowBroadTokenForWorker":true}').allowBroadTokenForWorker).toBe(true);
     expect(parsePluginConfigText('{"version":1,"plugins":[]}').allowBroadTokenForWorker).toBeUndefined();
     expect(() => parsePluginConfigText('{"version":1,"plugins":[],"allowBroadTokenForWorker":"yes"}')).toThrow();

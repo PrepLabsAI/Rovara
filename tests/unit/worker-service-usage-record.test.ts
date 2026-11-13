@@ -1,6 +1,6 @@
 // Slice 1, s1-sealed T1: the usage record (service-usage-record.ts). Deferred check TS-SEAL-1: a name the program asked for can hold a run secret, so the record never carries a name: a registrable domain and a count
 // at most, and not even that when the redactor changes it. Nothing starts Docker.
-import { TestServicesUsageRecordSchema } from "@agentx/contracts";
+import { TestServicesUsageRecordSchema } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 import { SEALED_DNS_STATE_FILE, type SealedDnsRecord } from "../../packages/worker/src/check-sandbox.js";
 import { createServiceRedactor } from "../../packages/worker/src/service-env.js";

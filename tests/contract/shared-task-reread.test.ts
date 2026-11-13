@@ -4,7 +4,7 @@
 // before it changes it. The line is added after the request hash, so a repeated requestId still matches.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SHARED_WORKSPACE_REREAD, hashJson } from "../../packages/broker/src/aws/broker-shared.js";
+import { SHARED_WORKSPACE_REREAD, hashJson } from "../../packages/core/src/aws/broker-shared.js";
 import { MAYA, createDeveloperTaskBroker, markThreadPosted, teammate } from "../support/developer-task-broker.js";
 
 const PRIYA = "U0PRIYA001";

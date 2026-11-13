@@ -8,7 +8,7 @@
 import {
   LearnedContextSchema, cleanLessonText, locateCitation,
   type CitationLocation, type CodeCitation, type LearnedContext, type LearnedLesson, type LoadReport, type LessonStage,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 /** What the check needs of a file at the base commit: its lines, or only the count when the file is too large to hold. */
 export interface BaseFile { lineCount: number; lines: string[] | undefined }

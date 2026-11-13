@@ -1,8 +1,8 @@
 // Port lane P5 (item K2): signing a call to a provider. SigV4 is checked against AWS's own published example, so a change that breaks the signature fails here and not in an account.
 import { describe, expect, it } from "vitest";
-import { SecretValue, type ModelProviderAdapter } from "@agentx/contracts";
-import { SignInProblem, needsCredential, parseAwsCredentials, signCall, signV4 } from "../../packages/broker/src/local/model-proxy/sign-in.js";
-import { NATIVE_CHAT_CAPABILITIES } from "../../packages/broker/src/plugins/model-provider/index.js";
+import { SecretValue, type ModelProviderAdapter } from "@rovara-code/contracts";
+import { SignInProblem, needsCredential, parseAwsCredentials, signCall, signV4 } from "../../packages/core/src/local/model-proxy/sign-in.js";
+import { NATIVE_CHAT_CAPABILITIES } from "../../packages/core/src/plugins/model-provider/index.js";
 
 const provider = (signIn: ModelProviderAdapter["signIn"], address = "https://models.example.test"): ModelProviderAdapter => ({
   kind: "gateway", name: "Gateway", address, signIn, formats: [{ format: "openai-completions", capabilities: NATIVE_CHAT_CAPABILITIES }],

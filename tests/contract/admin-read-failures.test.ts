@@ -1,7 +1,7 @@
 // tests/contract/admin-read-failures.test.ts
 // Spec 025 A7, US5 scenario 3: failures in a window, newest first, from the failure index.
 import { describe, expect, it } from "vitest";
-import { readFailures, timeWindow, type AdminReadDependencies } from "../../packages/broker/src/aws/admin-reads.js";
+import { readFailures, timeWindow, type AdminReadDependencies } from "../../packages/core/src/aws/admin-reads.js";
 import { failureIndexKey } from "../../packages/contracts/src/index.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";

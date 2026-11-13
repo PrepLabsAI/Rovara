@@ -1,12 +1,12 @@
 // A draft whose curate-and-settle step failed on a passing store fault (before any model call) is tried once more inside the worker's deadline; it is NEVER tried again once the step started a model call
 // (the customer pays for each call, so a retry must not double-charge), after a fault that is not a passing one, or when the deadline is near or past.
 import { describe, expect, it } from "vitest";
-import { DRAFT_RETRY_MIN_LEFT_MS, processDraftRetrying } from "../../../packages/broker/src/lessons/draft-retry.js";
-import { logRef } from "../../../packages/broker/src/lessons/log-ref.js";
-import { withLearningAttempt } from "../../../packages/broker/src/lessons/learning-deadline.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import type { ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import type { LessonDraft } from "../../../packages/broker/src/lessons/reflect.js";
+import { DRAFT_RETRY_MIN_LEFT_MS, processDraftRetrying } from "../../../packages/core/src/lessons/draft-retry.js";
+import { logRef } from "../../../packages/core/src/lessons/log-ref.js";
+import { withLearningAttempt } from "../../../packages/core/src/lessons/learning-deadline.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import type { ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, allowAllAccess, closeEmbedder, directory, draft, embedder, facts, lessonRecord, settings, verifier } from "./lesson-helpers.js";
 
 const throttled = (): Error => Object.assign(new Error("secret table text"), { name: "ThrottlingException" });

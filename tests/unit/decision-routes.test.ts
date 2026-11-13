@@ -2,12 +2,12 @@
 // nothing is bulk, and the routes decide nothing themselves: they call the existing endpoint through the performer and report what it really answered.
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { describe, expect, it, vi } from "vitest";
-import type { DecisionAnswered } from "@agentx/contracts";
-import { DecisionCardsViewSchema, DecisionNeedsConfirmationSchema } from "@agentx/contracts";
-import { routeDecisionCards, type DecisionCaller, type DecisionPerformer, type DecisionRequest, type DecisionSources, type PerformOutcome } from "../../packages/broker/src/core/decisions/routes.js";
-import { decisionCardPath, type DecisionItem, type ItemBase } from "../../packages/broker/src/core/decisions/project.js";
-import { inMemoryDecisionStore } from "../../packages/broker/src/core/decisions/store.js";
-import { summarizeDecisionMeasures, type DecisionMeasure } from "../../packages/broker/src/core/decisions/measures.js";
+import type { DecisionAnswered } from "@rovara-code/contracts";
+import { DecisionCardsViewSchema, DecisionNeedsConfirmationSchema } from "@rovara-code/contracts";
+import { routeDecisionCards, type DecisionCaller, type DecisionPerformer, type DecisionRequest, type DecisionSources, type PerformOutcome } from "../../packages/core/src/core/decisions/routes.js";
+import { decisionCardPath, type DecisionItem, type ItemBase } from "../../packages/core/src/core/decisions/project.js";
+import { inMemoryDecisionStore } from "../../packages/core/src/core/decisions/store.js";
+import { summarizeDecisionMeasures, type DecisionMeasure } from "../../packages/core/src/core/decisions/measures.js";
 
 const TASK = "11111111-1111-4111-8111-111111111111";
 const ME: DecisionCaller = { orgId: "org1", developerId: "dev1" };

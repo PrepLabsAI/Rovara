@@ -1,20 +1,20 @@
 // A ticket asks for work, on a laptop: the project's intake rule, the poll through a registered tracker, the owner's list ("Start" and "Not this one"), the task that follows its ticket, and the write-back to the ticket
 // from the milestone hook. A ticket starts a task and never approves anything. The task flow is the real one on its fakes; the tracker is the fake tracker.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, IntakeWaitingListSchema, intakeItemIdOf, intakeItemKey, type CodeMilestone, type DocumentStore, type ExternalAccountRef, type OrgId } from "@agentx/contracts";
-import { noteOwnWrite, ownWriteVerdictOf } from "../../../packages/broker/src/core/intake/own-writes.js";
-import { sendTicketUpdate } from "../../../packages/broker/src/core/ticket-updates/index.js";
-import { createLocalIntake, type LocalIntake } from "../../../packages/broker/src/local/app/intake.js";
-import { createLocalMilestones } from "../../../packages/broker/src/local/app/tracking.js";
-import { createSessionStartExtras } from "../../../packages/broker/src/local/app/session-start.js";
-import { readIntakeItem } from "../../../packages/broker/src/core/intake/store.js";
-import { bindSessionSurface, sessionBindingsOf, unbindSessionSurface } from "../../../packages/broker/src/core/sessions/bindings.js";
-import { developerIdOf, taskSessionId } from "../../../packages/broker/src/core/sessions/create.js";
-import { taskKey } from "../../../packages/broker/src/core/task-flow/keys.js";
-import { createAdapterRegistry } from "../../../packages/broker/src/ports/adapter-registry.js";
-import { createLocalOwnerIdentity, localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
-import { FAKE_TRACKER_KIND, FakeTracker } from "../../../packages/broker/src/plugins/fake/tracker.js";
-import { planWhyOf } from "../../../packages/broker/src/core/plan/answer.js";
+import { IMPLICIT_COMPANY_ID, IntakeWaitingListSchema, intakeItemIdOf, intakeItemKey, type CodeMilestone, type DocumentStore, type ExternalAccountRef, type OrgId } from "@rovara-code/contracts";
+import { noteOwnWrite, ownWriteVerdictOf } from "../../../packages/core/src/core/intake/own-writes.js";
+import { sendTicketUpdate } from "../../../packages/core/src/core/ticket-updates/index.js";
+import { createLocalIntake, type LocalIntake } from "../../../packages/core/src/local/app/intake.js";
+import { createLocalMilestones } from "../../../packages/core/src/local/app/tracking.js";
+import { createSessionStartExtras } from "../../../packages/core/src/local/app/session-start.js";
+import { readIntakeItem } from "../../../packages/core/src/core/intake/store.js";
+import { bindSessionSurface, sessionBindingsOf, unbindSessionSurface } from "../../../packages/core/src/core/sessions/bindings.js";
+import { developerIdOf, taskSessionId } from "../../../packages/core/src/core/sessions/create.js";
+import { taskKey } from "../../../packages/core/src/core/task-flow/keys.js";
+import { createAdapterRegistry } from "../../../packages/core/src/ports/adapter-registry.js";
+import { createLocalOwnerIdentity, localOwnerPrincipal } from "../../../packages/core/src/ports/policy-defaults.js";
+import { FAKE_TRACKER_KIND, FakeTracker } from "../../../packages/core/src/plugins/fake/tracker.js";
+import { planWhyOf } from "../../../packages/core/src/core/plan/answer.js";
 import { COMPANY, createHarness, newRequestId } from "../../support/task-flow-harness.js";
 
 const OWNER_ACCOUNT: ExternalAccountRef = { provider: FAKE_TRACKER_KIND, tenant: "", accountId: "u-owner" };
@@ -268,7 +268,7 @@ describe("the ticket hears about the task", () => {
 
   it("a tracker that refuses the write is noted for the settings page and never fails the task", async () => {
     const { w, taskId, sessionId } = await started();
-    w.tracker.comment = async () => { const { TrackerWriteRefusedError } = await import("@agentx/contracts"); throw new TrackerWriteRefusedError("needs_write_access"); };
+    w.tracker.comment = async () => { const { TrackerWriteRefusedError } = await import("@rovara-code/contracts"); throw new TrackerWriteRefusedError("needs_write_access"); };
     await pullRequestReady(w, taskId, sessionId);
     const view = await w.call("GET", "/v1/app/projects/payments/intake/updates");
     expect(view.body).toMatchObject({ access: [{ tracker: FAKE_TRACKER_KIND, state: "needs_write_access" }] });

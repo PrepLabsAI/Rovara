@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { E2EApplicationEvidenceRefSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2EExecutorPlan } from "@agentx/contracts";
+import { E2EApplicationEvidenceRefSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2EExecutorPlan } from "@rovara-code/contracts";
 import type { E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
 import type { E2EApplicationCliCasePlan } from "../application-services.js";
 import type { E2EApplicationObservationBinding, E2EApplicationOwnedSubject, E2EApplicationProofBytes } from "../application-result-adapter.js";

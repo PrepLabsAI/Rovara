@@ -1,10 +1,10 @@
 // What a stage is told. By default at most 5 lessons and 2 KB; a project may ask for more or less within the existing caps (12 lessons, 6 KB); a value outside them is ignored.
 // Path scopes filter once the task's files are known, and a stage with no plan yet does not drop path-scoped lessons for want of files.
 import { describe, expect, it } from "vitest";
-import { LOAD_MAX_BYTES, LOAD_MAX_LESSONS, loadLessonsForStage, type LoadDeps, type LoadRequest } from "../../../packages/broker/src/lessons/load.js";
-import { LOAD_DEFAULT_BYTES, LOAD_DEFAULT_LESSONS, resolveLearning, resolveLoadBudget } from "../../../packages/broker/src/lessons/policy.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
+import { LOAD_MAX_BYTES, LOAD_MAX_LESSONS, loadLessonsForStage, type LoadDeps, type LoadRequest } from "../../../packages/core/src/lessons/load.js";
+import { LOAD_DEFAULT_BYTES, LOAD_DEFAULT_LESSONS, resolveLearning, resolveLoadBudget } from "../../../packages/core/src/lessons/policy.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
 import { Audit, Clock, MemoryVectors, PROJECT, WS, allowAllAccess, embedder, lessonRecord, seed, settings } from "./lesson-helpers.js";
 
 function setup(s = settings()) {
@@ -78,8 +78,8 @@ describe("path scopes filter", () => {
 
 describe("the project's stored budget", () => {
   it("is written within the caps and read back through the settings reader, for that project only", async () => {
-    const { documentLearningSettings, DocumentTier0Settings, writeLoadBudget } = await import("../../../packages/broker/src/lessons/document-settings.js");
-    const { MemoryDocumentStore } = await import("../../../packages/broker/src/ports/memory-document-store.js");
+    const { documentLearningSettings, DocumentTier0Settings, writeLoadBudget } = await import("../../../packages/core/src/lessons/document-settings.js");
+    const { MemoryDocumentStore } = await import("../../../packages/core/src/ports/memory-document-store.js");
     const ORG_A = "org_aaaaaaaaaaaaaaaaaaaa";
     const store = new MemoryDocumentStore();
     const reader = documentLearningSettings(store, new DocumentTier0Settings(store));

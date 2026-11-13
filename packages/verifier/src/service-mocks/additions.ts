@@ -12,7 +12,7 @@ import {
   type ServiceMockAdditionSet,
   type ServiceMockFixtureSet,
   type TestEnvProdDeny,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { createSyntheticGenerator, guardInputs } from "../data-guard.js";
 import { FixtureSetRefused, hashOfRequest } from "./fixture-set.js";
 import { recordFixtureSet, type RecordInput, type RecordedResponse } from "./recorder.js";

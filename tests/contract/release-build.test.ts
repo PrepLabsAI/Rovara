@@ -153,7 +153,7 @@ describe("release builder", () => {
       process.chdir(elsewhere);
       try {
         // infra/lib/control-plane.ts resolves each Lambda's `entry` (e.g.
-        // "packages/broker/src/aws/broker.ts") with resolve(process.cwd(), entry); before this fix,
+        // "packages/core/src/aws/broker.ts") with resolve(process.cwd(), entry); before this fix,
         // running buildRelease from a directory that is not the repo root made NodejsFunction fail
         // to find those entry files at all.
         const out = join(await mkdtemp(join(tmpdir(), "agentx-release-")), "r");

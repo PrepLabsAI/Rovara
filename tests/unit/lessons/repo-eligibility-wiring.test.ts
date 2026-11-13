@@ -1,11 +1,11 @@
 // RepoOnly is SET by the reflector from every input it was given, AND-merged by the curator and by a person's merge, and no model is called by any of it.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { curateDraft, foldDuplicate, type CurateDeps } from "../../../packages/broker/src/lessons/curate.js";
-import { reflectSubject, type LessonDraft, type ReflectDeps } from "../../../packages/broker/src/lessons/reflect.js";
-import type { EvidenceSpan } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { LessonProvenanceSchema, LessonSchema } from "../../../packages/broker/src/lessons/types.js";
+import { curateDraft, foldDuplicate, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
+import { reflectSubject, type LessonDraft, type ReflectDeps } from "../../../packages/core/src/lessons/reflect.js";
+import type { EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { LessonProvenanceSchema, LessonSchema } from "../../../packages/core/src/lessons/types.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, candidateJson, draft, embedder, lessonRecord, memberSpan, reply, seed, settings, subject, verifier } from "./lesson-helpers.js";
 
 const A = "github:repo/1001";
@@ -80,7 +80,7 @@ describe("reflect sets repoOnly from every input the reflector was given", () =>
 
   it("the pure eligibility code imports no model, spend, audit, org or team-record code (so it can be ported as it is)", () => {
     for (const file of ["repo-eligibility.ts", "repo-eligibility-report.ts"]) {
-      const source = readFileSync(new URL(`../../../packages/broker/src/lessons/${file}`, import.meta.url), "utf8");
+      const source = readFileSync(new URL(`../../../packages/core/src/lessons/${file}`, import.meta.url), "utf8");
       const imports = [...source.matchAll(/^import [^;]*? from "([^"]+)";/gmu)].map((m) => m[1]!);
       for (const from of imports) expect(["./trial.js", "./project-repo-audience.js", "./types.js", "./repo-eligibility.js", "./store.js"], `${file} imports ${from}`).toContain(from);
     }

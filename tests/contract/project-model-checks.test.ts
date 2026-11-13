@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ModelRefSchema, ProjectDefinitionSchema, ProjectModelOptionsSchema, type ProjectDefinition } from "@agentx/contracts";
+import { ModelRefSchema, ProjectDefinitionSchema, ProjectModelOptionsSchema, type ProjectDefinition } from "@rovara-code/contracts";
 import type { ModelCheckResult } from "../../packages/model-runtime/src/model-check.js";
 import { registerRevision } from "../../packages/cli/src/setup/project-add.js";
 import { checkProjectModels, projectModelChecks, PROJECT_MODEL_CHECK_MAX_PAIRS, type ProjectModelChecker } from "../../packages/cli/src/setup/project-model-check.js";

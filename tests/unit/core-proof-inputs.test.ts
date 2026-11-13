@@ -2,10 +2,10 @@
 // no listing is made for a task with no checks recorded for the current code; and a slow read inside the PR-feedback rewrite replaces an old Proof table with a one-line marker.
 import { describe, expect, it, vi } from "vitest";
 import type { PlanDocument, TestProof } from "../../packages/contracts/src/index.js";
-import { loadProofContext } from "../../packages/broker/src/core/proof/proof-inputs.js";
-import { loadTestProof } from "../../packages/broker/src/core/proof/test-proof-reader.js";
-import { hadProofSection, proofReadLimitMs, withinTime } from "../../packages/broker/src/core/proof/proof-keep.js";
-import { proofSection } from "../../packages/broker/src/core/proof/proof-section.js";
+import { loadProofContext } from "../../packages/core/src/core/proof/proof-inputs.js";
+import { loadTestProof } from "../../packages/core/src/core/proof/test-proof-reader.js";
+import { hadProofSection, proofReadLimitMs, withinTime } from "../../packages/core/src/core/proof/proof-keep.js";
+import { proofSection } from "../../packages/core/src/core/proof/proof-section.js";
 
 const DIGEST = "1".repeat(64);
 const task = { ownerKey: "owner-key", workspaceId: "ws-1" };

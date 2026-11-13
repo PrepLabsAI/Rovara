@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import { E2EApplicationExternalConnectionRefSchema, E2EApplicationHostPreparationBindingSchema,
-  E2EApplicationServiceContractSchema, type E2EApplicationExternalConnectionRef } from "@agentx/contracts";
+  E2EApplicationServiceContractSchema, type E2EApplicationExternalConnectionRef } from "@rovara-code/contracts";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 type AppRouteInput = { applicationId: string; serviceContract: unknown };

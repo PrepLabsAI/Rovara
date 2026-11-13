@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
-import { createDeveloperApiConfiguration, workflowDependenciesConfigurationFromEnvironment } from "../../packages/broker/src/aws/workflow-dependencies-configuration.js";
-import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import { planDocumentInstructions } from "../../packages/core/src/aws/broker-shared.js";
+import { createDeveloperApiConfiguration, workflowDependenciesConfigurationFromEnvironment } from "../../packages/core/src/aws/workflow-dependencies-configuration.js";
+import { developerTaskRouteDependencies } from "../../packages/core/src/aws/developer-routes.js";
 
 describe("workflow dependency runtime configuration", () => {
   it("is disabled unless the exact runtime value is true", () => {

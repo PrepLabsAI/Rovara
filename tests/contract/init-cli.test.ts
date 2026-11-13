@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@rovara-code/contracts";
 import { CDK_CONSTRUCT_IDS } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
 import { executeCli } from "../../packages/cli/src/main.js";

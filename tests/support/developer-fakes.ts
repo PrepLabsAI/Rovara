@@ -3,14 +3,14 @@
 import { createHash, generateKeyPairSync, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
 import { SignJWT, UnsecuredJWT, createLocalJWKSet, type JWTHeaderParameters, type JWTVerifyGetKey } from "jose";
-import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
-import { oidcSignInProvider, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
-import type { DeveloperIdentityDependencies, HttpResult } from "../../packages/broker/src/developer/server.js";
-import { createDeveloperIdentityHandler } from "../../packages/broker/src/developer/server.js";
-import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
-import { DeveloperSignInStore } from "../../packages/broker/src/developer/store.js";
-import type { PublicSigningJwk, TokenSigner } from "../../packages/broker/src/developer/tokens.js";
-import { kmsTokenSigner } from "../../packages/broker/src/developer/tokens.js";
+import type { HttpApiV2Event } from "../../packages/core/src/aws/lambda.js";
+import { oidcSignInProvider, slackSignInProvider } from "../../packages/core/src/developer/providers.js";
+import type { DeveloperIdentityDependencies, HttpResult } from "../../packages/core/src/developer/server.js";
+import { createDeveloperIdentityHandler } from "../../packages/core/src/developer/server.js";
+import { slackDirectory } from "../../packages/core/src/developer/slack-directory.js";
+import { DeveloperSignInStore } from "../../packages/core/src/developer/store.js";
+import type { PublicSigningJwk, TokenSigner } from "../../packages/core/src/developer/tokens.js";
+import { kmsTokenSigner } from "../../packages/core/src/developer/tokens.js";
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 
 export const T0 = Date.parse("2026-09-27T12:00:00.000Z");

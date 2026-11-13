@@ -1,11 +1,11 @@
 // A rejected lesson a judge calls "same" drops the draft only when the two are the same advice BY STRUCTURE (the test that lets a judge's "same" merge two live lessons).
 // Any other pair (a paraphrase, an opposite no word list knows such as pause / resume) becomes a pending card for a person ("matches a rejected lesson"): never dropped, never on trial.
 import { beforeEach, describe, expect, it } from "vitest";
-import { curateDraft, type CurateDeps } from "../../../packages/broker/src/lessons/curate.js";
-import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { resetNoEmbedderNotice } from "../../../packages/broker/src/lessons/similarity.js";
-import type { LessonDraft } from "../../../packages/broker/src/lessons/reflect.js";
+import { curateDraft, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
+import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { resetNoEmbedderNotice } from "../../../packages/core/src/lessons/similarity.js";
+import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, allowAllAccess, draft, embedder, lessonRecord, seed, settings, verifier } from "./lesson-helpers.js";
 
 const answer = (...verdicts: string[]): string => JSON.stringify({ verdicts: verdicts.map((verdict, i) => ({ n: i + 1, verdict })) });

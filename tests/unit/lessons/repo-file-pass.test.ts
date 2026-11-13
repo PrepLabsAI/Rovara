@@ -2,9 +2,9 @@
 // the mutation checks (eligibility filter removed, adoption allowed, ignored-PR rule removed, hand-edit hold removed) are recorded in the this install.
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { LESSON_FILE_BRANCH_PATTERN } from "@agentx/contracts";
-import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
-import { parseLessonsFile } from "../../../packages/broker/src/lessons/repo-file-format.js";
+import { LESSON_FILE_BRANCH_PATTERN } from "@rovara-code/contracts";
+import { setLearnedLessonsGate } from "../../../packages/core/src/lessons/policy.js";
+import { parseLessonsFile } from "../../../packages/core/src/lessons/repo-file-format.js";
 import { DAY, FILE, FakeRepoHost, OTHER_PLACE, passSetup, personApproved, repoLesson } from "./repo-file-helpers.js";
 
 afterEach(() => { setLearnedLessonsGate(() => true); });
@@ -474,7 +474,7 @@ describe("while lessons are off nothing is delivered and the pass makes no model
 
   it("the pass imports no model, pipeline or reflection code", () => {
     for (const file of ["repo-file-pass", "repo-file-plan", "repo-file-format", "repo-file-pointer", "repo-file-pr", "repo-file-state"]) {
-      const text = readFileSync(`packages/broker/src/lessons/${file}.ts`, "utf8");
+      const text = readFileSync(`packages/core/src/lessons/${file}.ts`, "utf8");
       expect(text, file).not.toMatch(/PipelineModel|from "\.\/reflect|model-gate|learningCompletion|callModel|\.complete\(/u);
     }
   });

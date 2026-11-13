@@ -1,14 +1,14 @@
 // The two callbacks of a browser and API checks run, on the document store and object storage: the read of its admission and the upload of its evidence.
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, type DocumentStore, type E2EWorkflowAdmissionRef, type ObjectStorage } from "@agentx/contracts";
-import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { IMPLICIT_COMPANY_ID, type DocumentStore, type E2EWorkflowAdmissionRef, type ObjectStorage } from "@rovara-code/contracts";
+import { createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { operationKey } from "../../packages/core/src/core/task-flow/keys.js";
 import {
   handleE2EEvidenceUpload, readE2EAdmissionChunk, storeE2EAdmission, type ChecksOperation, type RoundRecordReaders, type RoundTask, type StartedRoundRecord,
-} from "../../packages/broker/src/core/e2e/callbacks.js";
-import { UPLOAD_CHUNK_BYTES, type UploadStores } from "../../packages/broker/src/core/e2e/uploads-chunks.js";
+} from "../../packages/core/src/core/e2e/callbacks.js";
+import { UPLOAD_CHUNK_BYTES, type UploadStores } from "../../packages/core/src/core/e2e/uploads-chunks.js";
 
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const rejects = (promise: Promise<unknown>, code: string) => expect(promise).rejects.toMatchObject({ code });

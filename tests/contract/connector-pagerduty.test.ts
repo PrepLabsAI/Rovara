@@ -4,12 +4,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverTools, executeTool, type ConnectorDefinition, type Ledger } from "@agentx/gateway";
 import { ProjectDefinitionSchema, type OrgId } from "../../packages/contracts/src/index.js";
-import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
-import { pagerdutyConnectionCheck, pagerdutyConnectorType } from "../../packages/broker/src/connectors/native/pagerduty-connector-type.js";
-import { PAGERDUTY_TOOL_NAMES } from "../../packages/broker/src/connectors/native/pagerduty.js";
+import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors, type ResolvedConnector } from "../../packages/core/src/aws/connector-types.js";
+import { pagerdutyConnectionCheck, pagerdutyConnectorType } from "../../packages/core/src/connectors/native/pagerduty-connector-type.js";
+import { PAGERDUTY_TOOL_NAMES } from "../../packages/core/src/connectors/native/pagerduty.js";
 import { PROJECT_CONNECTOR_TOOLS } from "../support/project-connector-tools.js";
-import { orgCredentialRegistry } from "../../packages/broker/src/connections/registry.js";
-import { OrgConnectionStore } from "../../packages/broker/src/connections/store.js";
+import { orgCredentialRegistry } from "../../packages/core/src/connections/registry.js";
+import { OrgConnectionStore } from "../../packages/core/src/connections/store.js";
 import { InMemoryConnectionSecrets, memoryStore } from "../support/connection-fakes.js";
 import { routeFetch } from "../support/developer-fakes.js";
 import { fakePagerDuty } from "../support/fake-vendor-apis.js";

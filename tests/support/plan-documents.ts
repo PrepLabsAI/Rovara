@@ -1,6 +1,6 @@
 // Structured plan documents for tests: a small valid document, and the planner's final answer that carries it.
 import { createHash } from "node:crypto";
-import { PLAN_DOCUMENT_INFO_STRING, type PlanDocument } from "@agentx/contracts";
+import { PLAN_DOCUMENT_INFO_STRING, type PlanDocument } from "@rovara-code/contracts";
 
 /** The planner's raw `checks` object (each proposed-check field plus the claims it proves). */
 export interface RawChecksInput {

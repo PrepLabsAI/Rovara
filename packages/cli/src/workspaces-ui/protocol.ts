@@ -1,5 +1,5 @@
 // What the workspaces page and its local server say to each other (spec 041).
-import type { DeveloperWorkspacesResponse } from "@agentx/contracts";
+import type { DeveloperWorkspacesResponse } from "@rovara-code/contracts";
 
 /** The session token minted for this run. Sent as a header by the page's own requests, and in the
  * query string only where a browser cannot set a header: the document and its module. */

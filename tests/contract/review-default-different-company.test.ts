@@ -1,9 +1,9 @@
 // Owner decision 2026-11-02 (option A): the review steps (plan check, code review, security review) that nobody has set default to the strongest usable model of a different company than the step they check.
 // One test per rule.
 import { describe, expect, it } from "vitest";
-import { resolveStageModel, type StageModelInput } from "../../packages/broker/src/core/model-selection/resolver.js";
-import { candidatesOf } from "../../packages/broker/src/core/second-review/model-ranking.js";
-import { reviewDefaultExtras, STAGE_POOL_MAX } from "../../packages/broker/src/core/model-selection/review-default-pool.js";
+import { resolveStageModel, type StageModelInput } from "../../packages/core/src/core/model-selection/resolver.js";
+import { candidatesOf } from "../../packages/core/src/core/second-review/model-ranking.js";
+import { reviewDefaultExtras, STAGE_POOL_MAX } from "../../packages/core/src/core/model-selection/review-default-pool.js";
 import { EffectiveStageModelSchema } from "../../packages/contracts/src/stage-models.js";
 
 const sonnet = { provider: "anthropic", modelId: "claude-sonnet-4" };

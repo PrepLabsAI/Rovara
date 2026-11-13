@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { GetQueueAttributesCommand, ReceiptHandleIsInvalid, SQSServiceException } from "@aws-sdk/client-sqs";
-import { OUTBOX_PENDING_INDEX, QUEUE_LIMITS, change, companyScoped, isAllowedModuleSpecifier, when, type DocumentChange, type OutboxRelayReport } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX, QUEUE_LIMITS, change, companyScoped, isAllowedModuleSpecifier, when, type DocumentChange, type OutboxRelayReport } from "@rovara-code/contracts";
 import {
   DEAD_LETTER_ATTRIBUTE,
   DynamoStreamChangeFeed,
@@ -20,8 +20,8 @@ import {
   type DynamoStreamRecord,
 } from "../../packages/aws-adapters/src/index.js";
 import * as sqsPluginModule from "../../packages/aws-adapters/src/sqs/plugin.js";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
-import { createTransactionalOutbox } from "../../packages/broker/src/ports/transactional-outbox.js";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/core/src/ports/adapter-registry.js";
+import { createTransactionalOutbox } from "../../packages/core/src/ports/transactional-outbox.js";
 import { runOutboxConformance } from "../support/ports/outbox-conformance.js";
 import { runQueueConformance } from "../support/ports/queue-conformance.js";
 import { dynamoWorld } from "../support/ports/dynamodb-harness.js";
@@ -627,13 +627,13 @@ describe("poison messages: SQS's redrive policy moves them, and the adapter reac
 
 describe("the sqs queue plug-in", () => {
   it("is an allowed module name and loads from a config entry, only when named (no AWS call at load)", async () => {
-    expect(isAllowedModuleSpecifier("@rovara/aws-adapters/sqs")).toBe(true);
+    expect(isAllowedModuleSpecifier("@rovara-code/aws/sqs")).toBe(true);
     const importer: ModuleImporter = async (specifier) => {
-      if (specifier === "@rovara/aws-adapters/sqs") return sqsPluginModule;
+      if (specifier === "@rovara-code/aws/sqs") return sqsPluginModule;
       throw new Error(`unexpected module ${specifier}`);
     };
     const registry = createAdapterRegistry();
-    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "queue", name: "sqs", module: "@rovara/aws-adapters/sqs", settings: { region: "us-west-2", endpoint: "http://127.0.0.1:1", queues: { dispatch: { url: urlOf("dispatch"), deadLetterUrl: urlOf("dispatch-dead") } } } }] }), { registry, importModule: importer });
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "queue", name: "sqs", module: "@rovara-code/aws/sqs", settings: { region: "us-west-2", endpoint: "http://127.0.0.1:1", queues: { dispatch: { url: urlOf("dispatch"), deadLetterUrl: urlOf("dispatch-dead") } } } }] }), { registry, importModule: importer });
     expect(registry.require("queue")).toBeDefined();
   });
 

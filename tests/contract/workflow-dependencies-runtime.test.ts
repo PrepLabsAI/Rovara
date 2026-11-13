@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { taskGraphDigest, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
+import { taskGraphDigest, WORKER_INVOCATION_FEATURES } from "@rovara-code/contracts";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { createWorkflowE2E, SLACK_MAYA, type WorkflowE2E } from "../support/workflow-e2e.js";
 import { assertJourneyInvariants, registerJourneyInvariants } from "../support/workflow-e2e-invariants.js";

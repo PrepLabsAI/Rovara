@@ -2,7 +2,7 @@
 // `config set`, doctor and the project-model checks all come here, so every failure carries the same class and a persistent Bedrock throttle is read against the quota.
 import type { ModelsAnswers } from "../deploy/answer-schemas.js";
 import { checkModel, type ModelCheckResult } from "@agentx/model-runtime/model-check";
-import type { ModelProvider } from "@agentx/contracts";
+import type { ModelProvider } from "@rovara-code/contracts";
 import type { PrerequisiteChecks } from "./prerequisites.js";
 
 /** Where each keyed provider's key and routing are configured for the environment (the settings' `models`). */

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, e2EDefaultSyntheticAccountDefinition, inspectE2EPortableSource, inspectE2ERepository, e2ePortableOperationDescriptorDigest, e2EPortableApprovalBindingDigest, type E2EPlanSelectionInput, type E2ESyntheticAccountContext } from "@agentx/contracts";
+import { canonicalJson, e2EDefaultSyntheticAccountDefinition, inspectE2EPortableSource, inspectE2ERepository, e2ePortableOperationDescriptorDigest, e2EPortableApprovalBindingDigest, type E2EPlanSelectionInput, type E2ESyntheticAccountContext } from "@rovara-code/contracts";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 

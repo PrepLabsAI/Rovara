@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { ASANA_PROJECT_TOOL_ACCESS, ConnectorsSchema, type CredentialType, ProjectDefinitionSchema, StoredProjectDefinitionSchema } from "../../packages/contracts/src/index.js";
 import { ASANA_MCP_ENDPOINT, ASANA_TOKEN_ENDPOINT, CredentialUnavailable } from "../../packages/gateway/src/index.js";
-import { asanaConnectorType } from "../../packages/broker/src/aws/asana-connector-type.js";
-import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
-import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
-import { credentialRefusals } from "../../packages/broker/src/aws/registration-preflight.js";
+import { asanaConnectorType } from "../../packages/core/src/aws/asana-connector-type.js";
+import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors, type ResolvedConnector } from "../../packages/core/src/aws/connector-types.js";
+import { CredentialRegistry } from "../../packages/core/src/aws/credentials.js";
+import { credentialRefusals } from "../../packages/core/src/aws/registration-preflight.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const PROJECT = "1210000000000010";

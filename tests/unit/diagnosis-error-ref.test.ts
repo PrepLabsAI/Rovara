@@ -1,7 +1,7 @@
 // The reference a task view carries for the error it shows (what Fix with agent is about): codes and ids only, never text, and none for a task with no error to fix.
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_BLOCK_REASONS, errorRefKey } from "@agentx/contracts";
-import { taskViewErrorRef } from "../../packages/broker/src/core/diagnosis/error-ref.js";
+import { WORKFLOW_BLOCK_REASONS, errorRefKey } from "@rovara-code/contracts";
+import { taskViewErrorRef } from "../../packages/core/src/core/diagnosis/error-ref.js";
 
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const OPERATION = "6c1f2f3a-4d5e-4f60-8a71-92b3c4d5e6f7";

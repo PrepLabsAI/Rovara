@@ -4,8 +4,8 @@
 // environment file, so a token the real worker would refuse fails here too.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
-import type { DockerResult, DockerRunner } from "../../../packages/broker/src/local/docker-runner.js";
+import { WorkerInvocationSchema, type WorkerInvocation } from "@rovara-code/contracts";
+import type { DockerResult, DockerRunner } from "../../../packages/core/src/local/docker-runner.js";
 import { invocationMatchesClaims, invokeAuthenticationFromEnvironment, verifyInvokeAuthorization } from "../../../packages/worker/src/invoke-auth.js";
 
 export interface FakeContainer {

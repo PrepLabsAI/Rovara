@@ -2,15 +2,15 @@
 // input-wide source counting, and company locks that only make things stricter.
 import { describe, expect, it } from "vitest";
 import { foldForMatching } from "../../../packages/contracts/src/index.js";
-import { hasCommandOrUrl, touchesRiskyPath } from "../../../packages/broker/src/lessons/guards.js";
-import { DEFAULT_APPROVAL_POLICY, resolveLearning, stricterMode } from "../../../packages/broker/src/lessons/policy.js";
-import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { reflectSubject } from "../../../packages/broker/src/lessons/reflect.js";
-import type { EvidenceSpan } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { PROJECT_VOLUME_KEY } from "../../../packages/broker/src/lessons/sources.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { type TierInput } from "../../../packages/broker/src/lessons/tier.js";
-import { buildWeeklyDigest } from "../../../packages/broker/src/lessons/digest.js";
+import { hasCommandOrUrl, touchesRiskyPath } from "../../../packages/core/src/lessons/guards.js";
+import { DEFAULT_APPROVAL_POLICY, resolveLearning, stricterMode } from "../../../packages/core/src/lessons/policy.js";
+import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { reflectSubject } from "../../../packages/core/src/lessons/reflect.js";
+import type { EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
+import { PROJECT_VOLUME_KEY } from "../../../packages/core/src/lessons/sources.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { type TierInput } from "../../../packages/core/src/lessons/tier.js";
+import { buildWeeklyDigest } from "../../../packages/core/src/lessons/digest.js";
 import { Alerts, Audit, Clock, KEY, uniqueDraft, lessonRecord, seed, MemoryVectors, ScriptedModel, Spend, candidateJson, codeCite, draft, embedder, memberSpan, reply, settings, subject, verifier, classifyTier, facts, autoSettings, allowAllAccess } from "./lesson-helpers.js";
 
 const valid = [{ index: 0, result: "valid" as const, at: 1 }];

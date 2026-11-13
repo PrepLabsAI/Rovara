@@ -3,7 +3,7 @@ import { lstat, realpath, chmod, unlink, link, open } from "node:fs/promises";
 import { lstatSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { join, resolve } from "node:path";
-import { copyBoundedE2EJsonData, canonicalJson } from "@agentx/contracts";
+import { copyBoundedE2EJsonData, canonicalJson } from "@rovara-code/contracts";
 
 const MAX_FRAME_BYTES = 262_144;
 const MAX_DEPTH = 64;

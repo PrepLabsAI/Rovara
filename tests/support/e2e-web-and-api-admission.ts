@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
-import { buildApplicationExecutionAdmission, type ApplicationAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
-import type { E2EApplicationExecutionAdmission } from "@agentx/contracts";
+import { evaluateApplicationPlanApproval } from "../../packages/core/src/e2e/application-plan-approval.js";
+import { buildApplicationExecutionAdmission, type ApplicationAdmission, type ApplicationAdmissionInput } from "../../packages/core/src/e2e/application-admission.js";
+import type { E2EApplicationExecutionAdmission } from "@rovara-code/contracts";
 import { decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission, type ValidatedE2EApplicationAdmission } from "@agentx/verifier";
 import { createRealCandidate } from "./e2e-application-candidate.js";
 import { binding, oneAppWebAndApiFixture, webApiRow } from "./e2e-application-plan-fixtures.js";

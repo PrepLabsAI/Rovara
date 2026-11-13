@@ -1,4 +1,4 @@
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 import { formatError, formatSuccess } from "../../packages/cli/src/output.js";
 

@@ -4,18 +4,18 @@ import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { HostScopeSchema, IMPLICIT_COMPANY_ID, PluginRegistryError, type CodeHost, type PluginModule, type RepositoryRef } from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
+import { HostScopeSchema, IMPLICIT_COMPANY_ID, PluginRegistryError, type CodeHost, type PluginModule, type RepositoryRef } from "@rovara-code/contracts";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/core/src/ports/adapter-registry.js";
 import {
   NO_CHECK_RUNNER_MESSAGE, NO_CODE_HOST_MESSAGE, NO_HOST_MESSAGE, NO_TRACKER_MESSAGE, assertRepositoryHostsKnown, checkRunnerForKind, checkRunnerKinds, codeHostForKind, codeHostForRecord,
   codeHostForRepository, codeHostKinds, trackerForKind, trackerKinds,
-} from "../../packages/broker/src/plugins/routing.js";
-import { SECRET_FILE_MAX_BYTES, SecretSourceSchema, secretReader } from "../../packages/broker/src/plugins/module-support.js";
-import { codeBuildPlugin } from "../../packages/broker/src/plugins/check-runner/codebuild/plugin.js";
-import { githubActionsPlugin } from "../../packages/broker/src/plugins/check-runner/github-actions/plugin.js";
-import { githubCodeHostPlugin } from "../../packages/broker/src/plugins/code-host/github/plugin.js";
-import { fakePlugins, FakeCheckRunner, FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
-import { linearTrackerPlugin } from "../../packages/broker/src/plugins/tracker/linear/plugin.js";
+} from "../../packages/core/src/plugins/routing.js";
+import { SECRET_FILE_MAX_BYTES, SecretSourceSchema, secretReader } from "../../packages/core/src/plugins/module-support.js";
+import { codeBuildPlugin } from "../../packages/core/src/plugins/check-runner/codebuild/plugin.js";
+import { githubActionsPlugin } from "../../packages/core/src/plugins/check-runner/github-actions/plugin.js";
+import { githubCodeHostPlugin } from "../../packages/core/src/plugins/code-host/github/plugin.js";
+import { fakePlugins, FakeCheckRunner, FakeCodeHost, FakeHostModel } from "@rovara-code/core/fakes";
+import { linearTrackerPlugin } from "../../packages/core/src/plugins/tracker/linear/plugin.js";
 import { GITHUB_REPO_URL, GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
 
 const REPO_URL = "https://git.example.test/acme/app";

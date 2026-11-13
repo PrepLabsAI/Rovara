@@ -2,19 +2,19 @@
 // candidates, the approve card, the evidence rows and the pull request lines. A service the table does not know, and any emulated dependency without a pinned local-aws, is "not available yet"; with tx off or with no
 // emulated dependency everything reads as it did before.
 import { describe, expect, it } from "vitest";
-import { AWS_EMULATOR_ENGINE_VERSION, TestEnvRegionSchema, TestEnvironmentBodySchema, TestEnvTaskPlanSchema, TaskDependencyPlanSchema, WORKER_INVOCATION_FEATURES, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, awsEmulatorEvidenceLine, testEnvDigest, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type VerifiedCatalog } from "@agentx/contracts";
-import { sanitizeTestEnvDraft } from "../../packages/broker/src/core/test-env/draft.js";
-import { DEPENDENCY_PLAN_REFUSAL_WORDS, TEST_SERVICES_MIN_CATALOG_REVISION, isEmulatedTaskService, dependenciesStartableNow, taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import { EMULATED_DEFAULT_REGION, proposeDependencies } from "../../packages/broker/src/core/test-env/dependency-proposal.js";
-import { dependencyCardLines } from "../../packages/broker/src/core/test-env/dependency-card-lines.js";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
-import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
-import { featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
-import { UNUSED_WORDS, environmentUnusedReason, testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
-import { AWS_PERMISSIONS_ITEM_ID, AWS_PERMISSIONS_NOT_CHECKED, dependencyEvidenceOf, type PinnedDependency, type RawUsage } from "../../packages/broker/src/core/proof/dependency-evidence.js";
-import { packDependencyLines } from "../../packages/broker/src/core/proof/dependency-lines.js";
-import { evidenceNotTestedLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
-import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS } from "../../packages/broker/src/core/test-env/devcontainer-check.js";
+import { AWS_EMULATOR_ENGINE_VERSION, TestEnvRegionSchema, TestEnvironmentBodySchema, TestEnvTaskPlanSchema, TaskDependencyPlanSchema, WORKER_INVOCATION_FEATURES, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, awsEmulatorEvidenceLine, testEnvDigest, type OrgId, type ProjectCommand, type TestEnvironment, type TestEnvironmentBody, type VerifiedCatalog } from "@rovara-code/contracts";
+import { sanitizeTestEnvDraft } from "../../packages/core/src/core/test-env/draft.js";
+import { DEPENDENCY_PLAN_REFUSAL_WORDS, TEST_SERVICES_MIN_CATALOG_REVISION, isEmulatedTaskService, dependenciesStartableNow, taskDependencyPlansOf } from "../../packages/core/src/core/test-env/dependency-plan.js";
+import { EMULATED_DEFAULT_REGION, proposeDependencies } from "../../packages/core/src/core/test-env/dependency-proposal.js";
+import { dependencyCardLines } from "../../packages/core/src/core/test-env/dependency-card-lines.js";
+import { evidenceEnvironmentOf } from "../../packages/core/src/core/test-env/evidence-line.js";
+import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/core/src/core/test-env/task-plan.js";
+import { featuresForTestPlan } from "../../packages/core/src/core/test-env/seam.js";
+import { UNUSED_WORDS, environmentUnusedReason, testEnvironmentForStart } from "../../packages/core/src/core/test-env/usable.js";
+import { AWS_PERMISSIONS_ITEM_ID, AWS_PERMISSIONS_NOT_CHECKED, dependencyEvidenceOf, type PinnedDependency, type RawUsage } from "../../packages/core/src/core/proof/dependency-evidence.js";
+import { packDependencyLines } from "../../packages/core/src/core/proof/dependency-lines.js";
+import { evidenceNotTestedLines } from "../../packages/core/src/core/proof/evidence-lines.js";
+import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS } from "../../packages/core/src/core/test-env/devcontainer-check.js";
 import { digestOfId, pinnedCatalog, unpinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
 import { projectStore } from "../support/test-env-world.js";

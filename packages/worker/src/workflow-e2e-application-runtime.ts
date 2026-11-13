@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { E2E_AGENT_STEPS_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE } from "@agentx/contracts";
+import { E2E_AGENT_STEPS_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE } from "@rovara-code/contracts";
 import { assertE2EEnvironmentCannotRedirect, assertE2ESharedAwsConfigCannotRedirect, deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment } from "@agentx/model-runtime";
 import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHostDeps, type DockerCli } from "@agentx/verifier";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";

@@ -18,7 +18,7 @@ const CORE = [
     "messages", "model-command", "shared-task", "interrupted-turn", "progress-note", "ids", "active-turn-store", "runtime",
     "thread-api", "thread-workspace-request",
   ].map((name) => `${SERVICE}/${name}.ts`),
-  ...["channel-adapters", "channel-conversation", "channel-events", "channel-ingress", "channel-link-web", "channel-links"].map((name) => `packages/broker/src/aws/${name}.ts`),
+  ...["channel-adapters", "channel-conversation", "channel-events", "channel-ingress", "channel-link-web", "channel-links"].map((name) => `packages/core/src/aws/${name}.ts`),
 ];
 
 /** Slack's own modules in the orchestrator service, besides every `slack-*.ts`; main.ts composes both sides. */
@@ -64,7 +64,7 @@ function isSlackModule(from: string, specifier: string): boolean {
 function slackUses(file: string): string[] {
   return importsOf(file).flatMap((use) => [
     ...(isSlackModule(file, use.specifier) ? [`imports Slack module ${use.specifier}`] : []),
-    ...(use.specifier === "@agentx/contracts" || use.specifier.includes("/contracts/") ? use.names.filter(isSlackName).map((name) => `imports ${name} from ${use.specifier}`) : []),
+    ...(use.specifier === "@rovara-code/contracts" || use.specifier.includes("/contracts/") ? use.names.filter(isSlackName).map((name) => `imports ${name} from ${use.specifier}`) : []),
   ]);
 }
 
@@ -80,16 +80,16 @@ describe("the Slack boundary (spec 062 SC-004)", () => {
 
   it("does not grow Slack imports elsewhere", () => {
     const core = new Set(CORE);
-    const others = ["packages/broker/src", "packages/slack-service/src", "packages/gateway/src", "packages/cli/src", "packages/worker/src", "packages/mcp/src"]
+    const others = ["packages/core/src", "packages/slack-service/src", "packages/gateway/src", "packages/cli/src", "packages/worker/src", "packages/mcp/src"]
       .flatMap((directory) => tsFiles(directory))
       .filter((file) => !core.has(file))
       .filter((file) => !basename(file).startsWith("slack-") && !(dirname(file) === SERVICE && SLACK_MODULES.has(basename(file, ".ts"))))
-      .filter((file) => importsOf(file).some((use) => (use.specifier === "@agentx/contracts" || use.specifier.includes("/contracts/")) && use.names.some(isSlackName)));
+      .filter((file) => importsOf(file).some((use) => (use.specifier === "@rovara-code/contracts" || use.specifier.includes("/contracts/")) && use.names.some(isSlackName)));
     expect(others.length, others.join("\n")).toBeLessThanOrEqual(OTHER_SLACK_IMPORTERS_MAX);
   });
 
   it("finds a Slack import where there is one", () => {
-    expect(slackUses(`${SERVICE}/slack-processor.ts`)).toContain("imports SlackRequestMessage from @agentx/contracts");
+    expect(slackUses(`${SERVICE}/slack-processor.ts`)).toContain("imports SlackRequestMessage from @rovara-code/contracts");
     expect(slackUses(`${SERVICE}/main.ts`)).toContain("imports Slack module ./slack-processor.js");
   });
 });

@@ -8,7 +8,7 @@ import {
   detailsMessageView,
   turnDetailsView,
   type SlackModalView,
-} from "../../packages/broker/src/aws/slack-details-view.js";
+} from "../../packages/core/src/aws/slack-details-view.js";
 
 function call(overrides: Record<string, unknown> = {}) {
   return {

@@ -1,9 +1,9 @@
 // Lane L10 (review M4, L4): the tier of a plan is the planner's own reading RAISED to a floor the core computes itself, never lowered; and the coder is told the plan's decisions are settled.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalPlanJson, type PlanDocument, type WorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
-import { gradePlanRisk, planRiskFloor } from "../../packages/broker/src/core/decisions/plan-risk.js";
-import { approvedCodingPlan } from "../../packages/broker/src/core/build-step/plan-input.js";
+import { canonicalPlanJson, type PlanDocument, type WorkflowArtifact, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { gradePlanRisk, planRiskFloor } from "../../packages/core/src/core/decisions/plan-risk.js";
+import { approvedCodingPlan } from "../../packages/core/src/core/build-step/plan-input.js";
 import { planDocument } from "../support/plan-documents.js";
 
 const structured = (plan: PlanDocument, markdown = "") => ({ format: "structured" as const, artifact: {} as never, plan, markdown });

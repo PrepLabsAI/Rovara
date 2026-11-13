@@ -3,8 +3,8 @@
 // database IDs as strings), and any call can be made to fail. In wire mode, `fetch` serves the REST and GraphQL
 // endpoints the real GitHubAppCredentialProvider calls, so its parsing runs too.
 import { createHash } from "node:crypto";
-import { agentXError } from "@agentx/contracts";
-import type { GitHubFeedbackComment, GitHubFeedbackThread, GitHubPullRequestDetails, GitHubPullRequestFeedback, GitHubPullRequestInput, GitHubPullRequestResult, GitHubPullRequestUpdate } from "../../packages/broker/src/github-app.js";
+import { agentXError } from "@rovara-code/contracts";
+import type { GitHubFeedbackComment, GitHubFeedbackThread, GitHubPullRequestDetails, GitHubPullRequestFeedback, GitHubPullRequestInput, GitHubPullRequestResult, GitHubPullRequestUpdate } from "../../packages/core/src/github-app.js";
 
 export type GitHubReviewState = "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "PENDING" | "DISMISSED";
 

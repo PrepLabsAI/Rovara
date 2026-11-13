@@ -1,6 +1,6 @@
 // agentx project add, channel add, connector add and alerts test (phase 15d2): day-2 forms of
 // init's finishing steps, built on the same setup/ modules.
-import { agentXError, AgentXNameSchema } from "@agentx/contracts";
+import { agentXError, AgentXNameSchema } from "@rovara-code/contracts";
 import type { Command } from "commander";
 import { readSlackBotToken } from "../init/slack-app.js";
 import { definedEntries, secretSource } from "../signin/cli.js";

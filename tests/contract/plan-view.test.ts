@@ -4,13 +4,13 @@ import { describe, expect, it } from "vitest";
 import {
   WorkflowSnapshotSchema, builtinFileCheckCommand, canonicalPlanJson, createWorkflowSnapshot, parsePlanDocument, planDocumentMarkdown, readCanonicalPlan,
   type PlanDocument,
-} from "@agentx/contracts";
-import { shortenMarkdown } from "../../packages/broker/src/developer/plan-artifacts.js";
-import { PLAN_UNREADABLE_CATEGORIES, PLAN_UNREADABLE_SENTENCES, planCheckSummary, planUnreadableCategory } from "../../packages/broker/src/developer/plan-check-summary.js";
-import { plainBlockReason, structuredExtraLines, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
-import { renderPlanDocument } from "../../packages/broker/src/aws/plan-page/render-plan.js";
-import { readTaskPlanDocument } from "../../packages/broker/src/aws/task-plan-document.js";
-import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
+} from "@rovara-code/contracts";
+import { shortenMarkdown } from "../../packages/core/src/developer/plan-artifacts.js";
+import { PLAN_UNREADABLE_CATEGORIES, PLAN_UNREADABLE_SENTENCES, planCheckSummary, planUnreadableCategory } from "../../packages/core/src/developer/plan-check-summary.js";
+import { plainBlockReason, structuredExtraLines, workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
+import { renderPlanDocument } from "../../packages/core/src/aws/plan-page/render-plan.js";
+import { readTaskPlanDocument } from "../../packages/core/src/aws/task-plan-document.js";
+import { routeDeveloperTaskRequest } from "../../packages/core/src/aws/developer-tasks.js";
 import { OMAR, PRIYA, pageTask } from "../support/page-tasks.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 

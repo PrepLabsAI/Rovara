@@ -7,7 +7,7 @@
 // - Build reads its own checked-out files, as before;
 // - the meta repo is always read at the pinned `knowledgeCommit`, hash-verified, and never from its folder's files.
 // A base or knowledge commit that cannot be verified stops the stage with the existing fixed message: the working tree is never the fallback.
-import { AgentXNameSchema, RelativeWorkspacePathSchema, agentXError } from "@agentx/contracts";
+import { AgentXNameSchema, RelativeWorkspacePathSchema, agentXError } from "@rovara-code/contracts";
 import { locateRepository, type RepositoryContextFile, type WorkspaceRepositoryReference } from "../repository-context.js";
 import type { KnowledgeBudgets, KnowledgeItem, KnowledgeStage } from "./model.js";
 import type { MetaRepoCheckout } from "./meta-contract.js";

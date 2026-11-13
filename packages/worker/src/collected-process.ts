@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { redactText } from "@agentx/contracts";
+import { redactText } from "@rovara-code/contracts";
 
 /** How much of each output stream a command keeps: its last 1 MiB, where errors usually are (#154). */
 export const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;

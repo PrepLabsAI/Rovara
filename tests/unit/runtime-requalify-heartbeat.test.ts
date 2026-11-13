@@ -2,8 +2,8 @@
 // renewal that never ran left no data and no alarm.
 import { beforeEach, describe, expect, it } from "vitest";
 import { REQUALIFY_AGE_METRIC, REQUALIFY_PROFILE_ID, REQUALIFY_STALE_AFTER_DAYS, requalifyLastSuccessKey, requalifyScheduleEnabledKey } from "../../packages/contracts/src/index.js";
-import { runRequalifyAction } from "../../packages/broker/src/aws/runtime-requalify-steps.js";
-import { recordRenewalSuccess } from "../../packages/broker/src/aws/runtime-requalify-heartbeat.js";
+import { runRequalifyAction } from "../../packages/core/src/aws/runtime-requalify-steps.js";
+import { recordRenewalSuccess } from "../../packages/core/src/aws/runtime-requalify-heartbeat.js";
 import { FakeCloud } from "../support/requalify-fake-cloud.js";
 
 const DAY = 24 * 3_600_000;

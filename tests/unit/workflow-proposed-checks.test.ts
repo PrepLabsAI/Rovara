@@ -1,6 +1,6 @@
 // Proposed checks: the planner's `agentx-checks` block, read all or nothing.
 import { describe, expect, it } from "vitest";
-import { WorkflowCheckPolicySchema, extractProposedChecks, parseProposedChecks, proposedCheckTextIssues, workflowSelectedChecks, type WorkflowCheck } from "@agentx/contracts";
+import { WorkflowCheckPolicySchema, extractProposedChecks, parseProposedChecks, proposedCheckTextIssues, workflowSelectedChecks, type WorkflowCheck } from "@rovara-code/contracts";
 
 const UNREADABLE = "AgentX could not read the proposed checks";
 const repositoryPaths = ["workspace/payments", "workspace/web"];

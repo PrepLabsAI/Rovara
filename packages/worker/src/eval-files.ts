@@ -5,7 +5,7 @@
 //   - Both paths are hidden from the candidate snapshot (`hideFromCandidate`, isolated-git.ts): the diff, the review and any commit of the copy never show them, tracked or not.
 import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { LESSON_FILE_PATH, agentXError, type EvalFilesPayload } from "@agentx/contracts";
+import { LESSON_FILE_PATH, agentXError, type EvalFilesPayload } from "@rovara-code/contracts";
 import { hideFromCandidate } from "./isolated-git.js";
 
 const AGENTS_FILE = "AGENTS.md";

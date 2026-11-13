@@ -11,7 +11,7 @@
 //
 // NOT here (deferred to the staging real-run checks, listed in the lane report): starting service mocks and probing pre-prod from a worker (they need the verifier's mock host, which needs Docker), the saved image
 // (`update`, `ranFrom: saved_image`), and a coverage map for anything but coverage.py contexts.
-import { NIGHTLY_CALLBACK_BODY_MAX_BYTES, NIGHTLY_RUN_WALL_CLOCK_MS, NightlyResultSchema, agentXError, type NightFailedReason, type NightlyResultCallbackBody, type NightlyRunPayload, type WorkerInvocation, type TestEnvCheck } from "@agentx/contracts";
+import { NIGHTLY_CALLBACK_BODY_MAX_BYTES, NIGHTLY_RUN_WALL_CLOCK_MS, NightlyResultSchema, agentXError, type NightFailedReason, type NightlyResultCallbackBody, type NightlyRunPayload, type WorkerInvocation, type TestEnvCheck } from "@rovara-code/contracts";
 import { EventBatcher, type EventBatchSink } from "./events.js";
 import type { WorkerCancellationController } from "./cancel.js";
 import type { PreparationManifest } from "./prepare.js";

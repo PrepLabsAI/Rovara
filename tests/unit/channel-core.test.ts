@@ -1,15 +1,15 @@
 // The core around an in-process channel adapter: linking a chat account to a person, binding a space to a project, the cards Rovara posts, and the sink that checks everything an adapter hears before it runs anything.
 // The adapters here are fakes and no chat tool is named.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, change, LINK_CODE_TTL_SECONDS, linkCodeHash, orgChannelLinkCodeKey, orgChannelLinkKey, type ActorRef, type ChannelDecision, type ConversationRef, type InboundMessage, type OrgId } from "@agentx/contracts";
-import { createLocalOwnerApprovers } from "../../packages/broker/src/ports/policy-defaults.js";
-import { chatDecisionMethod } from "../../packages/broker/src/local/app/chat.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
+import { IMPLICIT_COMPANY_ID, change, LINK_CODE_TTL_SECONDS, linkCodeHash, orgChannelLinkCodeKey, orgChannelLinkKey, type ActorRef, type ChannelDecision, type ConversationRef, type InboundMessage, type OrgId } from "@rovara-code/contracts";
+import { createLocalOwnerApprovers } from "../../packages/core/src/ports/policy-defaults.js";
+import { chatDecisionMethod } from "../../packages/core/src/local/app/chat.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { FakeChannelAdapter } from "../../packages/core/src/ports/fake-channel-adapter.js";
 import {
   bindChannelSpace, cardKey, createChannelSink, issueChannelLinkCode, linkedPerson, listAllChannelBindings, listChannelLinks, postApprovalCard, previewChannelLinkCode, readApprovalCard, readChannelBinding,
   recordTaskThread, readTaskThread, redeemChannelLinkCode, removeChannelLink, unbindChannelSpace, type ChannelWork,
-} from "../../packages/broker/src/core/channel/index.js";
+} from "../../packages/core/src/core/channel/index.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const clock = { ms: Date.parse("2026-11-10T10:00:00.000Z") };

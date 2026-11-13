@@ -7,14 +7,14 @@ import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { REQUALIFY_REASON_CODES, REQUALIFY_PROFILE_ID, REQUALIFY_STEP_REASON_CODES, e2eQualificationPrefix, requalifyLastSuccessKey, requalifyRunKey } from "../../packages/contracts/src/index.js";
 import { assertRuntimeInstallationHostIdentity } from "../../packages/verifier/src/install-qualification.js";
 import { requalifyDefinition } from "../../infra/lib/runtime-requalify.js";
-import { runRequalifyAction, type RequalifyStepsDependencies } from "../../packages/broker/src/aws/runtime-requalify-steps.js";
+import { runRequalifyAction, type RequalifyStepsDependencies } from "../../packages/core/src/aws/runtime-requalify-steps.js";
 import { ENV, EXECUTOR_IMAGE, FakeCloud, ROLE_ID, SECRET, WORKER_IMAGE, runMachine, type MachineRun } from "../support/requalify-fake-cloud.js";
 
 const holder = vi.hoisted(() => ({ cloud: undefined as unknown as FakeCloud }));
-vi.mock("../../packages/broker/src/aws/runtime-requalify.js", async () => {
+vi.mock("../../packages/core/src/aws/runtime-requalify.js", async () => {
   const { randomUUID: uuid } = await import("node:crypto");
   const contracts = await import("../../packages/contracts/src/index.js");
-  const readiness = await import("../../packages/broker/src/aws/e2e-runtime-readiness.js");
+  const readiness = await import("../../packages/core/src/aws/e2e-runtime-readiness.js");
   const generationOf = (cloud: FakeCloud) => Math.max(0, ...(["web", "api"] as const).map((kind) => Number(cloud.row(kind)?.["generation"] ?? 0)));
   const heldBy = (cloud: FakeCloud, runId: string) => { if (cloud.lock()?.["runId"] !== runId) throw new Error("requalify-refused:lock-not-held"); };
   return {

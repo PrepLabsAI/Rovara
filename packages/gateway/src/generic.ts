@@ -1,4 +1,4 @@
-import { itemPathHolders, parseItemPath, type ItemPathStep, type McpAuth, type McpConnectorConfig, type OwnershipRule } from "@agentx/contracts";
+import { itemPathHolders, parseItemPath, type ItemPathStep, type McpAuth, type McpConnectorConfig, type OwnershipRule } from "@rovara-code/contracts";
 import { checkEndpointAddresses, type AddressLookup } from "./endpoint.js";
 import { GuardRejection, type Binder, type ConnectorDefinition, type CredentialProvider, type Guard, type GuardedItemTools, type GuardInput } from "./types.js";
 import { isObject, resultText } from "./util.js";

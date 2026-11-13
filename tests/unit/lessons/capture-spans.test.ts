@@ -1,8 +1,8 @@
 // The reflector's two new kinds of person evidence. A human reviewer's comment on a Rovara pull request (`pr_comment`) and, from the same lane, a "remember this" note.
 // Both are a person's own words: an outsider's are removed before any model call, a quoted text is an outsider's, and a comment that LED TO A CHANGE (the strongest signal) is a member signal.
 import { describe, expect, it } from "vitest";
-import { buildReflectorInput } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { reflectSubject } from "../../../packages/broker/src/lessons/reflect.js";
+import { buildReflectorInput } from "../../../packages/core/src/lessons/reflect-input.js";
+import { reflectSubject } from "../../../packages/core/src/lessons/reflect.js";
 import { Audit, Clock, ScriptedModel, Spend, candidateJson, memberSpan, reply, settings, subject } from "./lesson-helpers.js";
 
 const comment = (text: string, over: Record<string, unknown> = {}) => memberSpan(text, { kind: "pr_comment", eventId: "acme/api#pr7:review_comment11", authorId: "rae", ...over });

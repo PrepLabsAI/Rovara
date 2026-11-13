@@ -1,9 +1,9 @@
 // Spec 025 Task 12: closing a developer task (FR-016, FR-030, R6, R15, R22, owner decisions 5 and 6).
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { agentXError } from "@agentx/contracts";
-import { finishTaskClose } from "../../packages/broker/src/aws/developer-tasks.js";
-import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
+import { agentXError } from "@rovara-code/contracts";
+import { finishTaskClose } from "../../packages/core/src/aws/developer-tasks.js";
+import type { DeveloperTaskRecord } from "../../packages/core/src/developer/task-records.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { SLACK_TEAM } from "../support/slack-broker.js";

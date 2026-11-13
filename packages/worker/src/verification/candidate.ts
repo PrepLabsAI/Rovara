@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, agentXError, createCandidateManifest, isSafeE2ESourcePath, type CandidateManifest } from "@agentx/contracts";
+import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, agentXError, createCandidateManifest, isSafeE2ESourcePath, type CandidateManifest } from "@rovara-code/contracts";
 import { commitLock, lockIn, openDirectory, readFileIn, releaseLock, type DirectoryLock, type HeldDirectory } from "../candidate-fs.js";
 import { CANDIDATE_EXCLUDE_PATHSPEC, snapshotTree, withIsolatedGit, type IsolatedGit } from "../isolated-git.js";
 export { CANDIDATE_EXCLUDE_PATHSPEC };

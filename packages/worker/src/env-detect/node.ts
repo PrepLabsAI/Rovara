@@ -1,6 +1,6 @@
 // Node detector: package.json scripts (test, lint, typecheck, build), the package manager's install command, and lockfiles.
 import { awsClientCandidate, callArguments, candidate, hardcodedEndpoint, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
-import type { ProjectCommand } from "@agentx/contracts";
+import type { ProjectCommand } from "@rovara-code/contracts";
 import { readsDatabaseSetting } from "./env-config.js";
 import { type DependencyCandidate, type Detection, type Detector, type DetectorContext, type Located, findLine } from "./types.js";
 

@@ -1,5 +1,5 @@
-import type { E2EModelChannelRequest } from "@agentx/contracts";
-import { e2eScannableEmailLocalPart, redactText } from "@agentx/contracts";
+import type { E2EModelChannelRequest } from "@rovara-code/contracts";
+import { e2eScannableEmailLocalPart, redactText } from "@rovara-code/contracts";
 import { e2eSecretSpellings } from "./e2e-secret-spellings.js";
 
 /**

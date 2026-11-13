@@ -1,8 +1,8 @@
 // The trial-only risky-wording screen catches 26 risky phrasings that an earlier version of the screen let through,
 // and ordinary lessons that sit next to the new words still pass. (narrowing words for false positives) is NOT done here: it waits for the replay eval.
 import { describe, expect, it } from "vitest";
-import { hasRiskyTrialWording, trialBlockers, touchesAuthorityOrSpend, type TrialContext } from "../../../packages/broker/src/lessons/trial.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
+import { hasRiskyTrialWording, trialBlockers, touchesAuthorityOrSpend, type TrialContext } from "../../../packages/core/src/lessons/trial.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
 import { codeCite, draft, lessonRecord } from "./lesson-helpers.js";
 
 const CLEAR: TrialContext = { preset: "standard", mode: "On", trialAllowed: true, contradiction: false, refinement: false, reviewRequired: false, held: false, braked: false };

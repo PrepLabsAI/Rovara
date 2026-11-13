@@ -2,11 +2,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
-import { canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, workflowFindingFingerprint, type PlanDocument } from "@agentx/contracts";
-import { claimAnchor } from "../../packages/broker/src/aws/plan-page/render-plan.js";
-import { createTaskWeb, type TaskDocumentEntry, type TaskDocumentKind, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
-import { TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "../../packages/broker/src/aws/task-page-assets.js";
-import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
+import { canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, workflowFindingFingerprint, type PlanDocument } from "@rovara-code/contracts";
+import { claimAnchor } from "../../packages/core/src/aws/plan-page/render-plan.js";
+import { createTaskWeb, type TaskDocumentEntry, type TaskDocumentKind, type TaskDocumentView } from "../../packages/core/src/aws/task-web.js";
+import { TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "../../packages/core/src/aws/task-page-assets.js";
+import type { AdaptedHttpRequest } from "../../packages/core/src/aws/lambda.js";
 import { MAYA, OMAR, createDeveloperTaskBroker, grantProject, registerRevision, type Developer } from "../support/developer-task-broker.js";
 import { planDocument } from "../support/plan-documents.js";
 import { SLACK_CHANNEL } from "../support/slack-broker.js";

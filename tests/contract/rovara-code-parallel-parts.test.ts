@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PARALLEL_PARTS_MAX, taskGraphDigest, type TaskGraphV1, type WorkItemProgressV1 } from "@agentx/contracts";
+import { PARALLEL_PARTS_MAX, taskGraphDigest, type TaskGraphV1, type WorkItemProgressV1 } from "@rovara-code/contracts";
 import { executeParallelWorkflowDependencies, type ExecuteParallelWorkflowDependenciesInput } from "../../packages/worker/src/parallel-parts.js";
 
 const taskId = "8c330a74-b4c6-4f01-9356-5fe54fc55b19";

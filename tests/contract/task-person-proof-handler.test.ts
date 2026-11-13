@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTaskPersonProofHandler } from "../../packages/broker/src/aws/task-person-proof-handler.js";
+import { createTaskPersonProofHandler } from "../../packages/core/src/aws/task-person-proof-handler.js";
 
 const request = {
   kind: "task-dispatch-person-proof",

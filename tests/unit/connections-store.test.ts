@@ -1,9 +1,9 @@
 // The connection store on the document store port: what a record holds and does not hold, how a secret is kept apart, what a change writes together, and the rules a save refuses.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
-import { OrgConnectionStore, readConnectionSecret, readConnectionToken, type ConnectionChecks } from "../../packages/broker/src/connections/store.js";
-import { orgCredentialRegistry } from "../../packages/broker/src/connections/registry.js";
-import { orgConnectorSecretName } from "../../packages/broker/src/connections/org-secrets.js";
+import { IMPLICIT_COMPANY_ID, type AuditEvent, type AuditSink, type OrgId } from "@rovara-code/contracts";
+import { OrgConnectionStore, readConnectionSecret, readConnectionToken, type ConnectionChecks } from "../../packages/core/src/connections/store.js";
+import { orgCredentialRegistry } from "../../packages/core/src/connections/registry.js";
+import { orgConnectorSecretName } from "../../packages/core/src/connections/org-secrets.js";
 import { InMemoryConnectionSecrets, memoryStore } from "../support/connection-fakes.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;

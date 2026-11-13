@@ -1,7 +1,7 @@
 // The init steps that deploy stacks: each drives 15c2's deployEnvironment for its parts, under the
 // lock the step runner already holds. Before deploying, a step waits for any of its stacks still
 // busy from an interrupted run (CloudFormation keeps going after a terminal closes).
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@rovara-code/contracts";
 import { deployIdentityAnswers, deployImagesAnswers, progressLine } from "../deploy/commands.js";
 import { deployEnvironment, type DeployAnswers } from "../deploy/deploy-environment.js";
 import { installOrder, type DeployPart } from "../deploy/parameters.js";

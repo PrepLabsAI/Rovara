@@ -3,7 +3,7 @@
 // Not changing list, outside the untrusted problem tags.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, workflowFindingFingerprint, type WorkflowSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, workflowFindingFingerprint, type WorkflowSnapshot } from "@rovara-code/contracts";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 

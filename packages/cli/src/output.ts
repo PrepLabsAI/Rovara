@@ -1,4 +1,4 @@
-import { AgentXError, type AgentXErrorCode } from "@agentx/contracts";
+import { AgentXError, type AgentXErrorCode } from "@rovara-code/contracts";
 import { StoppedByOperator } from "./stopped.js";
 
 export interface FormattedError {

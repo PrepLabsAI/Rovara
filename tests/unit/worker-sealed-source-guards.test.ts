@@ -30,7 +30,7 @@ export const USAGE_RECORD_USERS: readonly string[] = [
   // the evidence file the worker writes (EvidenceRawSchema) carries the record under `testServices`, so evidence.ts imports its schema (s1-broker T4)
   "packages/contracts/src/evidence.ts", `${W}service-usage-record.ts`, `${W}test-services-run.ts`, `${W}verification/evidence-raw.ts`,
   // Code's broker keeps the test environment under core/test-env/: candidate-check.ts keeps the record on the candidate check (recordCandidateUsage, keepCandidateUsage) and prove-from-setup-check.ts derives the two Prove steps from it
-  "packages/broker/src/core/test-env/candidate-check.ts", "packages/broker/src/core/test-env/prove-from-setup-check.ts",
+  "packages/core/src/core/test-env/candidate-check.ts", "packages/core/src/core/test-env/prove-from-setup-check.ts",
 ];
 
 const SEALED_MODULES = /["'][^"']*\/(?:check-round-runners|service-usage-record)(?:\.js|\.ts)?["']/u;
@@ -107,14 +107,14 @@ describe("the sealed round's source guards", () => {
 
   it("an agent-facing module, or any module not on the allowlist, cannot touch the usage record or the sealed round (all packages)", () => {
     const bad = (path: string, text: string) => sealedSourceViolations([{ path, text }]);
-    for (const path of [`${W}pi-session.ts`, `${W}agent-run/loop.ts`, `${W}setup-agent-run.ts`, `${W}read-skill-tool.ts`, `${W}model-access.ts`, "packages/model-proxy/src/proxy.ts", "packages/orchestrator/src/x.ts", "packages/broker/src/org/prompt-builder.ts"]) {
+    for (const path of [`${W}pi-session.ts`, `${W}agent-run/loop.ts`, `${W}setup-agent-run.ts`, `${W}read-skill-tool.ts`, `${W}model-access.ts`, "packages/model-proxy/src/proxy.ts", "packages/orchestrator/src/x.ts", "packages/core/src/org/prompt-builder.ts"]) {
       expect(bad(path, 'import { buildServiceUsageRecord } from "./service-usage-record.js";'), path).toEqual([`${path}: is not allowed to use the sealed round or the usage record builder`]);
       expect(bad(path, 'import { runSealedCheckRound } from "./check-round-runners.js";'), path).toHaveLength(1);
-      expect(bad(path, 'import type { TestServicesUsageRecord } from "@agentx/contracts";'), path).toEqual([`${path}: is not allowed to use the usage record type`]);
+      expect(bad(path, 'import type { TestServicesUsageRecord } from "@rovara-code/contracts";'), path).toEqual([`${path}: is not allowed to use the usage record type`]);
     }
     // The allowed ones pass.
-    expect(bad(`${W}test-services-run.ts`, 'import { buildServiceUsageRecord } from "./service-usage-record.js";\nimport { runSealedCheckRound } from "./check-round-runners.js";\nimport type { TestServicesUsageRecord } from "@agentx/contracts";')).toEqual([]);
-    expect(bad("packages/broker/src/core/test-env/candidate-check.ts", 'import type { TestServicesUsageRecord } from "@agentx/contracts";')).toEqual([]);
+    expect(bad(`${W}test-services-run.ts`, 'import { buildServiceUsageRecord } from "./service-usage-record.js";\nimport { runSealedCheckRound } from "./check-round-runners.js";\nimport type { TestServicesUsageRecord } from "@rovara-code/contracts";')).toEqual([]);
+    expect(bad("packages/core/src/core/test-env/candidate-check.ts", 'import type { TestServicesUsageRecord } from "@rovara-code/contracts";')).toEqual([]);
   });
 
   it("the allowlists name files that exist or are the planned wiring, and nothing agent-facing", () => {

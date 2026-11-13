@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { SWEBENCH_DATASETS, SwebenchInstanceIdSchema, SwebenchRunResultSchema, parseSwebenchCommand, swebenchAgentLimits, swebenchFamily, swebenchInstanceIdFits } from "@agentx/contracts";
+import { SWEBENCH_DATASETS, SwebenchInstanceIdSchema, SwebenchRunResultSchema, parseSwebenchCommand, swebenchAgentLimits, swebenchFamily, swebenchInstanceIdFits } from "@rovara-code/contracts";
 
 const IDS = readFileSync(new URL("../fixtures/secbench-eval-instance-ids.txt", import.meta.url), "utf8").trim().split("\n");
 const USAGE = "eval secbench patch <instance-id> [model <name>]";

@@ -1,4 +1,4 @@
-import type { OwnershipRule } from "@agentx/contracts";
+import type { OwnershipRule } from "@rovara-code/contracts";
 import { genericBinder, ownershipGuard, ownershipGuardedTools } from "./generic.js";
 import type { Binder, ConnectorDefinition, CredentialProvider, Guard, GuardedItemTools } from "./types.js";
 

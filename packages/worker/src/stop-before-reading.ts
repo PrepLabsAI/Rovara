@@ -1,4 +1,4 @@
-import { WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, agentXError, redactText } from "@agentx/contracts";
+import { WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, agentXError, redactText } from "@rovara-code/contracts";
 import { containWorkspace, type OtherOperationWait } from "./publish.js";
 import { stopWorkspaceProcesses } from "./workspace-processes.js";
 import { sweepWorkspaceContainers } from "./workspace-containers.js";

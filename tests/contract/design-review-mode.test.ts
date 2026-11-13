@@ -7,9 +7,9 @@ import {
 } from "../../packages/contracts/src/index.js";
 import {
   designClassificationLine, designReasonPhrase, resolveDesignMode, skipRefusalText, skipVerdict, type DesignModeDecision, type DesignModeInput,
-} from "../../packages/broker/src/core/design-review/mode.js";
-import { DESIGN_REVIEW_FAIL_CLOSED_SETTING, markEffective, type EffectiveDesignReviewSetting } from "../../packages/broker/src/core/design-review/effective-setting.js";
-import { UNDERSTAND_RULES } from "../../packages/broker/src/rovara-code/understand.js";
+} from "../../packages/core/src/core/design-review/mode.js";
+import { DESIGN_REVIEW_FAIL_CLOSED_SETTING, markEffective, type EffectiveDesignReviewSetting } from "../../packages/core/src/core/design-review/effective-setting.js";
+import { UNDERSTAND_RULES } from "../../packages/core/src/rovara-code/understand.js";
 
 const setting = (patch: Partial<DesignReviewSetting> = {}): EffectiveDesignReviewSetting => markEffective({ ...DESIGN_REVIEW_DEFAULT_SETTING, ...patch });
 const ready = (design?: { needed: boolean; reasons: DesignReason[]; note?: string }): IntentAssessment => ({

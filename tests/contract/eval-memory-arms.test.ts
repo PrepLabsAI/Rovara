@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EVAL_ARMS_MAX, EvalMemoryDimensionSchema, armPipeline, canonicalArm, compareArms, compareMemoryArms, evalMemoryArms, memoryInputForArm, parseArm, readArmRows, type ArmRunRow,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const SNAPSHOT = `snp_${"0123456789abcdef0123"}`;
 const row = (task: string, arm: string, resolved: boolean | undefined, repeat = 1): ArmRunRow => ({ task, arm, resolved, repeat });

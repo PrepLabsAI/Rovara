@@ -1,7 +1,7 @@
 // TS18: seeds and reset hooks (test-services.md 4.0.6 step 4, 4.1.2). Nothing starts Docker: a fake daemon records every argument list. What is checked: seeds run in order and stop at the first failure with a fixed
 // sentence; each reset kind sends exactly its fixed statements (no repository text, no secret in an argument); the order of a reset between checks and for a fresh round; and the check round asks for fresh helpers first.
 import { describe, expect, it } from "vitest";
-import type { ProjectCommand } from "@agentx/contracts";
+import type { ProjectCommand } from "@rovara-code/contracts";
 import { runChecks, planChecks, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { controlCallArgs, type HelperCredentials, type HelperFiles } from "../../packages/worker/src/service-helpers.js";
 import { runNetworkAddresses, runNetworkBridge, runNetworkHelperIp, runNetworkLabelArgs, runNetworkName, type ServicesNetwork } from "../../packages/worker/src/run-network.js";

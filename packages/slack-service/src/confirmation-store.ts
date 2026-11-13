@@ -1,5 +1,5 @@
 import { GetCommand, PutCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { PendingConfirmationSchema, confirmationKey, pendingConfirmationFromItem } from "@agentx/contracts";
+import { PendingConfirmationSchema, confirmationKey, pendingConfirmationFromItem } from "@rovara-code/contracts";
 import { UNPOSTED_MARK, type ConfirmationStore } from "./confirmations.js";
 import type { ServiceLog } from "./processor.js";
 

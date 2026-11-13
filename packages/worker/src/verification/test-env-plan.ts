@@ -9,7 +9,7 @@
 //   - a selection that picked no test at all is NOT "run nothing": it is the whole check (`unknown_file`), because an argument-less command runs every test and must not be reported as zero;
 //   - a plan that does not fit the commands the run was sent (fewer commands than the plan has checks) is ignored whole, and the run goes as it was sent.
 // The result says what ran, in the evidence's own words ("37 of 1,240, coverage map, 14 hours old", or "the whole check, map missing"); the broker checks it against the reports it reads.
-import { TEST_ENV_SELECT_PLACEHOLDER, type CandidateRepository, type EvidenceSelectionSchema, type ProjectCommand, type TestEnvTaskPlan, type TestEnvironmentBody } from "@agentx/contracts";
+import { TEST_ENV_SELECT_PLACEHOLDER, type CandidateRepository, type EvidenceSelectionSchema, type ProjectCommand, type TestEnvTaskPlan, type TestEnvironmentBody } from "@rovara-code/contracts";
 import type { z } from "zod";
 import { candidateChanges } from "./diff.js";
 import { checkRoundBudgetMs, planSelections, type ChangedPath, type CheckSelectionPlan, type CoverageMap } from "./selection.js";

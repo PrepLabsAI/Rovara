@@ -3,17 +3,17 @@
 // next call (no cache); the install switch, the company's "lessons stay in Rovara" switch, a project in Off, Regulated and the project's own switch each return nothing with a plain reason; an unknown repository is refused; no model or
 // embedder is touched; nothing a lesson or a task says is logged.
 import { afterEach, describe, expect, it } from "vitest";
-import { LOCAL_LESSONS_NOTES_LINE } from "@agentx/contracts";
-import { OrgIdSchema } from "@agentx/contracts";
-import { LOCAL_OFF_MESSAGES, LocalLessonsUnavailable, lessonsForLocalTool, oneLine, renderLocalLessons, stableOrPersonApproved, type LocalLessonsDeps, type LocalLessonsInput, type LocalToolsSettings } from "../../../packages/broker/src/lessons/local-tools.js";
-import { normalizeRemote } from "../../../packages/broker/src/lessons/repo-remote.js";
-import { setLearnedLessonsGate, type LearningSettings } from "../../../packages/broker/src/lessons/policy.js";
-import { withProjectRepoScopes } from "../../../packages/broker/src/lessons/project-repo-audience.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { withLessonAudiences, type LessonTaskAudience } from "../../../packages/broker/src/lessons/task-audience.js";
-import { TRIAL_APPROVER } from "../../../packages/broker/src/lessons/trial.js";
-import type { Audience, Lesson } from "../../../packages/broker/src/lessons/types.js";
-import type { AccessCheckPort } from "../../../packages/broker/src/lessons/access-port.js";
+import { LOCAL_LESSONS_NOTES_LINE } from "@rovara-code/contracts";
+import { OrgIdSchema } from "@rovara-code/contracts";
+import { LOCAL_OFF_MESSAGES, LocalLessonsUnavailable, lessonsForLocalTool, oneLine, renderLocalLessons, stableOrPersonApproved, type LocalLessonsDeps, type LocalLessonsInput, type LocalToolsSettings } from "../../../packages/core/src/lessons/local-tools.js";
+import { normalizeRemote } from "../../../packages/core/src/lessons/repo-remote.js";
+import { setLearnedLessonsGate, type LearningSettings } from "../../../packages/core/src/lessons/policy.js";
+import { withProjectRepoScopes } from "../../../packages/core/src/lessons/project-repo-audience.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { withLessonAudiences, type LessonTaskAudience } from "../../../packages/core/src/lessons/task-audience.js";
+import { TRIAL_APPROVER } from "../../../packages/core/src/lessons/trial.js";
+import type { Audience, Lesson } from "../../../packages/core/src/lessons/types.js";
+import type { AccessCheckPort } from "../../../packages/core/src/lessons/access-port.js";
 import { PROJECT, WS, draft, lessonRecord, seed, settings, wideAudience } from "./lesson-helpers.js";
 
 const REMOTE_A = "https://github.com/acme/api.git";

@@ -6,7 +6,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { readRuntimeStatus, runtimeChecks, type RuntimeStatusRead } from "../../packages/cli/src/doctor/runtime.js";
 import type { DoctorContext } from "../../packages/cli/src/doctor/checks.js";
-import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
+import { e2eRegisteredRuntimeKey } from "../../packages/core/src/aws/e2e-runtime-readiness.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
 import { PROFILE, webApiRow } from "../support/e2e-application-plan-fixtures.js";

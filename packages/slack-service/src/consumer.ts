@@ -1,4 +1,4 @@
-import type { TaskQuestionRoute } from "@agentx/contracts";
+import type { TaskQuestionRoute } from "@rovara-code/contracts";
 import { HANDOFF_MILLISECONDS, TurnHandedOffError } from "./interrupted-turn.js";
 import type { ServiceLog } from "./processor.js";
 

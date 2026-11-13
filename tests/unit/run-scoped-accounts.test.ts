@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { RUN_SCOPED_ASSUMED_TOKEN_TTL_MS, RUN_SCOPED_DEFAULT_MAX_HOLD_MS, RUN_SCOPED_GRACE_MS, RUN_SCOPED_MAX_ROUND_MS, RUN_SCOPED_REVOKE_ATTEMPTS, RUN_SCOPED_SESSION_PROBES_MAX, RUN_SCOPED_STORE_ATTEMPTS, cognitoPresenceOf, cognitoTestPoolProvisioner, evidenceAccountsOf, holdFor, httpHookProvisioner, provisionRunScopedAccounts, revocationSettledAt,
   revokeRunScopedAccounts, runScopedExpiry, seedCommandProvisioner, sessionStateOfStatus, sweepRunScopedLeases,
-  type AccountPresence, type AccountProvisionerPort, type LeaseAlert, type AccountProvisionerPorts, type LeaseRecord, type LeaseStore, type RunScopedAccount, type RunScopedLease, type SessionCredential, type SessionState } from "../../packages/broker/src/e2e/run-scoped-accounts.js";
+  type AccountPresence, type AccountProvisionerPort, type LeaseAlert, type AccountProvisionerPorts, type LeaseRecord, type LeaseStore, type RunScopedAccount, type RunScopedLease, type SessionCredential, type SessionState } from "../../packages/core/src/e2e/run-scoped-accounts.js";
 import { TestEnvAccountSchema, type TestEnvAccount } from "../../packages/contracts/src/index.js";
 
 // Built at runtime: a key-shaped literal in a test file is refused by the repository's secret scan.

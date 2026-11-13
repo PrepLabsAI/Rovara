@@ -1,7 +1,7 @@
 import { request } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { isMaskVolumeName } from "./workspace-state.js";
 import { workspaceProcessScope, type WorkspaceProcessScope } from "./workspace-processes.js";
 

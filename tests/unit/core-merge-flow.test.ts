@@ -5,8 +5,8 @@ import { MERGE_NOT_READY_MESSAGES as M, hostRateLimitRetryAt, mergeTrackingKey, 
 import {
   TrackingRequestCapError, registerMergeActionDecider, pressMerge, prepareMerge, trackPullRequest, trackTask, reconcileTrackingTask, readMergeTracking, mergeViewOf, trackingRequestCap,
   type MergeReadBudget,
-} from "../../packages/broker/src/core/merge/index.js";
-import { requireRepositoryKey } from "../../packages/broker/src/core/merge/repository-key.js";
+} from "../../packages/core/src/core/merge/index.js";
+import { requireRepositoryKey } from "../../packages/core/src/core/merge/repository-key.js";
 import { ORG, OWNER_SESSION, TASK_ID, githubShapedHost, mergeWorld, wrapStore, type MergeWorld } from "../support/merge-world.js";
 
 const budget = (limit = 1_000): MergeReadBudget & { used: () => number } => {
@@ -493,7 +493,7 @@ describe("the press", () => {
 });
 
 import type { CodeHost } from "../../packages/contracts/src/index.js";
-import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
+import { FakeCodeHost, type FakeHostModel } from "@rovara-code/core/fakes";
 /** A host that is ready by every read and then says no to the merge itself (branch protection the reads cannot see). */
 function refusingMerge(model: FakeHostModel): CodeHost {
   const fake = new FakeCodeHost(model);

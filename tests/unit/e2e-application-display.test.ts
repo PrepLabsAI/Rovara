@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { E2EAssertion } from "@agentx/contracts";
+import type { E2EAssertion } from "@rovara-code/contracts";
 import {
   accountLabelOf, baselineOf, buildScenarioRows, deriveFailedAssertion, displayText, readCaptureScreenshots, scenarioTitle, summarizeScenarios,
   type BuildScenarioRowsInput, type DisplayGroupInput,
-} from "../../packages/broker/src/e2e/application-display.js";
+} from "../../packages/core/src/e2e/application-display.js";
 
 // M1.3 Task 3.7: a display row is derived from what the broker verified, never from what the worker says about itself. These tests hold the pure derivation: the
 // expected-versus-actual wording for each assertion kind, the row statuses, the screenshot rules and what may never reach a row (an email, a credential).

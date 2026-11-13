@@ -3,15 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   COMPANY_RULES_EXCEED_BUDGET_MESSAGE, PLAYBOOK_FILE_PATH, change, projectPlaybookKey, STANDING_INSTRUCTIONS_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, agentXError, queryAll,
   type CompanyInstructionsSnapshot, type WorkerInvocation,
-} from "@agentx/contracts";
-import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { createStandingInstructions, STANDING_BLOCK_TOO_LONG } from "../../packages/broker/src/core/instructions/step-block.js";
-import { COULD_NOT_READ_RULES, createPlaybookService } from "../../packages/broker/src/core/playbook/service.js";
-import { createCodeHostPlaybookSource } from "../../packages/broker/src/core/playbook/source.js";
-import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import type { OperationRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
+} from "@rovara-code/contracts";
+import { createAdapterRegistry } from "../../packages/core/src/ports/adapter-registry.js";
+import { FakeCodeHost } from "../../packages/core/src/plugins/fake/code-host.js";
+import { FakeHostModel } from "../../packages/core/src/plugins/fake/model.js";
+import { createStandingInstructions, STANDING_BLOCK_TOO_LONG } from "../../packages/core/src/core/instructions/step-block.js";
+import { COULD_NOT_READ_RULES, createPlaybookService } from "../../packages/core/src/core/playbook/service.js";
+import { createCodeHostPlaybookSource } from "../../packages/core/src/core/playbook/source.js";
+import { workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import type { OperationRecord, WorkspaceRecord } from "../../packages/core/src/core/task-flow/records.js";
 import { COMPANY, createHarness, definition, newRequestId, type Harness } from "../support/task-flow-harness.js";
 import { fakeCompanyInstructionsSource } from "../support/company-instructions-fake.js";
 

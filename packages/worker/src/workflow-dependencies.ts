@@ -1,4 +1,4 @@
-import { TaskGraphV1Schema, WorkItemProgressV1Schema, taskGraphDigest, taskGraphOrder, type TaskGraphV1, type WorkItemProgressV1 } from "@agentx/contracts";
+import { TaskGraphV1Schema, WorkItemProgressV1Schema, taskGraphDigest, taskGraphOrder, type TaskGraphV1, type WorkItemProgressV1 } from "@rovara-code/contracts";
 
 export interface WorkflowDependencyExecutionContext {
   baseTreeSha: string;

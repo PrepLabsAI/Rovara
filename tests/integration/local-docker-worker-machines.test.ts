@@ -6,11 +6,11 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PROTOCOL_VERSION, WorkerInvocationSchema, type WorkerInvocation } from "@rovara-code/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { createDockerRunner } from "../../packages/broker/src/local/docker-runner.js";
-import { DockerWorkerMachines, MACHINE_LABEL, workspaceIdFor } from "../../packages/broker/src/local/docker-worker-machines.js";
-import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
+import { createDockerRunner } from "../../packages/core/src/local/docker-runner.js";
+import { DockerWorkerMachines, MACHINE_LABEL, workspaceIdFor } from "../../packages/core/src/local/docker-worker-machines.js";
+import { createEphemeralInvokeSigner } from "../../packages/core/src/local/invoke-signer.js";
 import { runWorkerMachinesConformance } from "../support/ports/worker-machines-conformance.js";
 
 const IMAGE = process.env.ROVARA_LOCAL_DOCKER_IMAGE;

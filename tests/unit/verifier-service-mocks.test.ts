@@ -2,8 +2,8 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { ServiceMockFixtureSetSchema, ServiceMockJsonSchemaSchema, awsEndpointUrlVariable, serviceMockFixtureSetDigest, serviceMockRequestHash, type ServiceMockFixtureSet, type TestEnvProdDeny } from "@agentx/contracts";
-import { ServiceMockAdditionSetSchema, serviceMockAdditionsListing } from "@agentx/contracts";
+import { ServiceMockFixtureSetSchema, ServiceMockJsonSchemaSchema, awsEndpointUrlVariable, serviceMockFixtureSetDigest, serviceMockRequestHash, type ServiceMockFixtureSet, type TestEnvProdDeny } from "@rovara-code/contracts";
+import { ServiceMockAdditionSetSchema, serviceMockAdditionsListing } from "@rovara-code/contracts";
 import { createSyntheticGenerator } from "../../packages/verifier/src/data-guard.js";
 import { FixtureSetRefused, additionsFromPreprod, additionsFromSchema, pinAdditionSet, inferJsonSchema, recordFixtureSet, schemaAccepts, startServiceMock, synthesizeFromSchema, type RecordInput, type RunningServiceMock } from "../../packages/verifier/src/service-mocks/index.js";
 

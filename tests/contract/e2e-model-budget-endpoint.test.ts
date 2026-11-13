@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, type E2EModelDayBudgetRequest } from "@agentx/contracts";
-import { handleE2EModelBudgetCallback, type E2EModelBudgetDependencies, type E2EModelBudgetOperation } from "../../packages/broker/src/e2e/model-budget-endpoint.js";
-import { e2eModelBudgetKey, e2eModelBudgetReservationKey, isTransientAwsFault } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
+import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, type E2EModelDayBudgetRequest } from "@rovara-code/contracts";
+import { handleE2EModelBudgetCallback, type E2EModelBudgetDependencies, type E2EModelBudgetOperation } from "../../packages/core/src/e2e/model-budget-endpoint.js";
+import { e2eModelBudgetKey, e2eModelBudgetReservationKey, isTransientAwsFault } from "../../packages/core/src/e2e/model-route-registry.js";
+import { issueCapability } from "../../packages/core/src/aws/cancellation.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound } from "../support/e2e-application-round-harness.js";
 import { call } from "../support/slack-broker.js";

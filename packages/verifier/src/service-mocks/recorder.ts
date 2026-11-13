@@ -14,7 +14,7 @@ import {
   type DataGuardReport,
   type ServiceMockFixtureSet,
   type TestEnvProdDeny,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { guardFixtureSet, guardInputs } from "../data-guard.js";
 import { hashOfRequest } from "./fixture-set.js";
 import { inferJsonSchema } from "./schema.js";

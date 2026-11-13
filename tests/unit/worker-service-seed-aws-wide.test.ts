@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TaskAwsResourcesSchema, awsSeededKinds, type TaskAwsResource } from "@agentx/contracts";
+import { TaskAwsResourcesSchema, awsSeededKinds, type TaskAwsResource } from "@rovara-code/contracts";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { EmulatorSeedError, buildAwsSeedDocument, placeholderSecretValue, readAwsResourcesFromIac, seedReportCovers } from "../../packages/worker/src/service-seed-aws.js";
 

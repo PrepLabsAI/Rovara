@@ -1,5 +1,5 @@
 // agentx login <url> (FR-011): the developer sign-in. It needs no AWS credentials.
-import { CLI_PACKAGE_NAME, AGENTX_CLI_CLIENT_ID, AgentXConfigurationSchema, DEVELOPER_API_VERSION, DeveloperTokenResponseSchema, agentXError, apiVersionCompatible, type AgentXConfiguration } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, AGENTX_CLI_CLIENT_ID, AgentXConfigurationSchema, DEVELOPER_API_VERSION, DeveloperTokenResponseSchema, agentXError, apiVersionCompatible, type AgentXConfiguration } from "@rovara-code/contracts";
 import { createCallbackListener, createPkceParameters, openSystemBrowser } from "../auth.js";
 import type { TokenStore } from "../token-store.js";
 import { LOCAL_ENVIRONMENT, LOCAL_ENVIRONMENT_RESERVED, developerTokenKey, saveDeveloperEnvironment } from "./config.js";

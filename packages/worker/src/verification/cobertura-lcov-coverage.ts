@@ -9,7 +9,7 @@
 // refused whole, and a file name inside it only ever selects among the paths the diff already names, so it can never make AgentX read any other file.
 import { isAbsolute, normalize, resolve, sep } from "node:path";
 import { realpath } from "node:fs/promises";
-import { EVIDENCE_COVERAGE_FILES_MAX, EVIDENCE_UNCOVERED_LINES_MAX, type EvidenceRaw, type ProjectCommand } from "@agentx/contracts";
+import { EVIDENCE_COVERAGE_FILES_MAX, EVIDENCE_UNCOVERED_LINES_MAX, type EvidenceRaw, type ProjectCommand } from "@rovara-code/contracts";
 import type { CandidateChange } from "./diff.js";
 import { isTestPath } from "./test-paths.js";
 import { readContainedReport, type ReportFileFailure } from "./report-file.js";

@@ -1,11 +1,11 @@
 // Starting a saved image's rebuild on the task flow: the job becomes a read-only preparation pinned to the job's commits, with no credential in anything stored; the build systems' key files are in
 // both the job's globs and the broker's key; every refusal that will not mend ends the job.
 import { describe, expect, it } from "vitest";
-import { PREPARE_SAVED_ENV_BUILD_FEATURE, PrepareSavedEnvBuildSchema, queryAll, type BuildSystem } from "@agentx/contracts";
-import { SAVED_ENV_JOB_LEASE_MS, checkRebuild, leaseForDispatch, type RebuildJob } from "../../packages/broker/src/core/test-env/saved-env.js";
-import { savedEnvBuildInputsOf, savedEnvSecretNames, startSavedEnvRebuild } from "../../packages/broker/src/core/test-env/saved-env-rebuild.js";
-import { workspaceKey, operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { startMarkerKey } from "../../packages/broker/src/core/test-env/saved-env-markers.js";
+import { PREPARE_SAVED_ENV_BUILD_FEATURE, PrepareSavedEnvBuildSchema, queryAll, type BuildSystem } from "@rovara-code/contracts";
+import { SAVED_ENV_JOB_LEASE_MS, checkRebuild, leaseForDispatch, type RebuildJob } from "../../packages/core/src/core/test-env/saved-env.js";
+import { savedEnvBuildInputsOf, savedEnvSecretNames, startSavedEnvRebuild } from "../../packages/core/src/core/test-env/saved-env-rebuild.js";
+import { workspaceKey, operationKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { startMarkerKey } from "../../packages/core/src/core/test-env/saved-env-markers.js";
 import { BASE_IMAGE, COMPANY, HEAD, PROJECT, approve, environmentBody, savedWorld, textOf, type SavedWorld, type StoredOperation } from "../support/saved-env-harness.js";
 
 const ids = { orgId: COMPANY, projectId: PROJECT };

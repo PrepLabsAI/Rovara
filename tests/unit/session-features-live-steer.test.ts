@@ -1,13 +1,13 @@
 // a message to a running step reaches the worker through the machines port, with a capability that opens nothing, only to a worker that is up and lists the feature; anything else is a note.
  
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LIVE_STEER_FEATURE, LIVE_STEER_REAPPROVAL_REASON, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE, WorkerInvocationSchema, liveSteerOperationId } from "@agentx/contracts";
-import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
-import { LIVE_STEER_ATTEMPTS, livePersonLabel, sendLiveSteer, type LiveSteerDeps } from "../../packages/broker/src/core/sessions/live-steer.js";
-import { isReapprovalStop, reapprovalMessageIds } from "../../packages/broker/src/core/sessions/live-steer-reapproval.js";
-import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
-import { clearLiveDeliveredSince } from "../../packages/broker/src/core/sessions/steer.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { LIVE_STEER_FEATURE, LIVE_STEER_REAPPROVAL_REASON, WORKFLOW_LIVE_STEER_REAPPROVAL_MESSAGE, WorkerInvocationSchema, liveSteerOperationId } from "@rovara-code/contracts";
+import { CallbackCapabilities } from "../../packages/core/src/callbacks.js";
+import { LIVE_STEER_ATTEMPTS, livePersonLabel, sendLiveSteer, type LiveSteerDeps } from "../../packages/core/src/core/sessions/live-steer.js";
+import { isReapprovalStop, reapprovalMessageIds } from "../../packages/core/src/core/sessions/live-steer-reapproval.js";
+import { FakeWorkerMachines } from "../../packages/core/src/ports/fake-worker-machines.js";
+import { clearLiveDeliveredSince } from "../../packages/core/src/core/sessions/steer.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const WORKSPACE = "6f0d1c1e-1b9e-4c64-8f4a-0d7f6a9c3b11";

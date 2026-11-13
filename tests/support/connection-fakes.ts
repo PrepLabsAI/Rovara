@@ -1,9 +1,9 @@
 // TEST SUPPORT: an in-memory secret store for connections (the `ConnectionSecrets` the stores take) that keeps each company's secrets apart and checks a name against its company as the real
 // stores do, and a memory document store with the task flow's indexes.
-import { INDEX_EXPIRY_ATTRIBUTE, type OrgId } from "@agentx/contracts";
-import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
-import { admitSecretName, type ConnectionSecrets } from "../../packages/broker/src/connections/org-secrets.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { INDEX_EXPIRY_ATTRIBUTE, type OrgId } from "@rovara-code/contracts";
+import { TASK_FLOW_INDEXES } from "../../packages/core/src/core/task-flow/flow.js";
+import { admitSecretName, type ConnectionSecrets } from "../../packages/core/src/connections/org-secrets.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 export const memoryStore = (): MemoryDocumentStore => new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, ttlAttribute: INDEX_EXPIRY_ATTRIBUTE });
 

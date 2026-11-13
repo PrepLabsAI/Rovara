@@ -2,7 +2,7 @@
 // connector in this environment's project files, the credential exists with the right shape and,
 // for Linear and Jira, still works. Asana is not refreshed here: a refresh rotates the token the
 // control plane holds (question 10). A vendor's own words never reach a check: they may repeat the key.
-import { environmentConnectorSecretPrefix, OAuthRefreshTokenSecretSchema, StaticSecretSchema, type McpAuth } from "@agentx/contracts";
+import { environmentConnectorSecretPrefix, OAuthRefreshTokenSecretSchema, StaticSecretSchema, type McpAuth } from "@rovara-code/contracts";
 import { mcpCredentialRef } from "../setup/connectors/mcp.js";
 import { connectorSecretName } from "../setup/connectors/revision.js";
 import { environmentProjectFiles } from "../setup/project-add.js";

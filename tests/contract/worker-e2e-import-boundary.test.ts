@@ -19,7 +19,7 @@ export function specifiersOf(source: string): string[] {
   return [...found];
 }
 
-const WORKSPACE = /^@agentx\/([a-z-]+)(?:\/(.+))?$/;
+const WORKSPACE = /^@(?:agentx|rovara-code)\/([a-z-]+)(?:\/(.+))?$/;
 const BANNED_FILE = /(?:^|\/)executor\/(?:model-channel|agent-[a-z-]+)\.ts$/;
 const BANNED_SPECIFIER = /^(?:ai|@ai-sdk\/.+|e2e\/agent|@agentx\/verifier\/executor)(?:\/.*)?$/;
 

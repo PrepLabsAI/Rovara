@@ -1,10 +1,10 @@
 // Port lane W0: the in-memory queue passes the queue conformance suite, and the generic outbox passes the outbox suite over the
 // in-memory store and queue.
 import { describe, expect, it } from "vitest";
-import { OUTBOX_PENDING_INDEX, type QueueService } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
-import { createTransactionalOutbox } from "../../packages/broker/src/ports/transactional-outbox.js";
+import { OUTBOX_PENDING_INDEX, type QueueService } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { MemoryQueueService } from "../../packages/core/src/ports/memory-queue.js";
+import { createTransactionalOutbox } from "../../packages/core/src/ports/transactional-outbox.js";
 import { runOutboxConformance } from "../support/ports/outbox-conformance.js";
 import { runQueueConformance } from "../support/ports/queue-conformance.js";
 

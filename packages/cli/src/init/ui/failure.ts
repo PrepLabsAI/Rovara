@@ -2,7 +2,7 @@
 // Spec 048 FR-060 (and the first action of FR-061): a failure is a screen, not the end of the page.
 // What happened in plain words, what to do as page actions, and the technical details collapsed.
 // Phase 3 adds the other kinds of failure and their actions here.
-import { environmentStackName } from "@agentx/contracts";
+import { environmentStackName } from "@rovara-code/contracts";
 import { cliErrorFor } from "../../deploy/commands.js";
 import { DEPLOY_STEP_PARTS, type DeployStepId } from "../deploy-steps.js";
 import type { InitStepId } from "../install-state.js";

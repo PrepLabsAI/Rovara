@@ -27,7 +27,7 @@ import { lookup } from "node:dns/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { connect as netConnect, isIP, type Socket } from "node:net";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
-import { TEST_ACCOUNT_LIMITS, TEST_ACCOUNT_LIMIT_DEFAULTS, prodDenyMatchesHost, type TestEnvProdDeny } from "@agentx/contracts";
+import { TEST_ACCOUNT_LIMITS, TEST_ACCOUNT_LIMIT_DEFAULTS, prodDenyMatchesHost, type TestEnvProdDeny } from "@rovara-code/contracts";
 
 export const PROXY_PORT = 443;
 export const PROXY_LISTEN_PORT = 3128;

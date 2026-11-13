@@ -4,10 +4,10 @@ import {
   E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
   deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, inspectE2EApplicationRepository, withE2EAnonymousTargets, e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
-} from "@agentx/contracts";
-import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
+} from "@rovara-code/contracts";
+import { webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
 import { ordersManifestWith, registryFor } from "./e2e-account-registry-fixtures.js";
-import type { E2EAccountRegistryEntry } from "../../packages/broker/src/e2e/application-account-registry.js";
+import type { E2EAccountRegistryEntry } from "../../packages/core/src/e2e/application-account-registry.js";
 
 /** Fixtures shared by the application planning, approval, admission and dispatch tests: the orders contract app, its approved setup, a v2 intent, and READY catalog rows. */
 export const PROFILE = WEB_API_RUNTIME_PROFILE_ID;

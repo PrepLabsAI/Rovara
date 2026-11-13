@@ -1,4 +1,4 @@
-import { E2EApplicationLaunchTargetSchema, E2E_EXECUTOR_COMPILED_ORIGIN, type E2EApplicationLaunchTarget, type E2EPolicy, type E2ERegisteredRuntime } from "@agentx/contracts";
+import { E2EApplicationLaunchTargetSchema, E2E_EXECUTOR_COMPILED_ORIGIN, type E2EApplicationLaunchTarget, type E2EPolicy, type E2ERegisteredRuntime } from "@rovara-code/contracts";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "./rovara-http-engine-descriptor.js";
 
 /**

@@ -1,4 +1,4 @@
-import { MODEL_PROVIDERS, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS } from "@agentx/contracts";
+import { MODEL_PROVIDERS, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS } from "@rovara-code/contracts";
 import { providerKeyParameters } from "./model-keys.js";
 import { openRouterRoutingParameter } from "./openrouter.js";
 import {

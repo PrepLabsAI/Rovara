@@ -1,7 +1,7 @@
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { E2E_CHROMIUM_SANDBOX_FILE, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_LIMITS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, canonicalJson, webApiProbeRunId, type RuntimeInstallChallenge, type WebApiProbeEvidence,
-  type WebApiProbeRun } from "@agentx/contracts";
+  type WebApiProbeRun } from "@rovara-code/contracts";
 import { collectE2EApplicationRun } from "../application-collection.js";
 import { loadWebApiQualificationProbeAssets, type E2EAgentProbeScriptTurn } from "../application-runtime-probes.js";
 import { e2eApplicationGroupAgentSteps } from "../application-scenarios.js";

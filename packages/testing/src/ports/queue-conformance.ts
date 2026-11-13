@@ -3,7 +3,7 @@
 // Time: visibility timeouts and delays need time to pass. The harness gives `advance(seconds)`: the fake moves its clock; an adapter
 // with a real clock sleeps (use short timeouts there).
 import { describe, expect, it } from "vitest";
-import { QUEUE_LIMITS, type Queue, type QueueOptions, type QueueService } from "@agentx/contracts";
+import { QUEUE_LIMITS, type Queue, type QueueOptions, type QueueService } from "@rovara-code/contracts";
 
 export interface QueueUnderTest {
   service: QueueService;

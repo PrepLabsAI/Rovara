@@ -1,4 +1,4 @@
-import { itemPathProblems, schemaHasItemPath, type ToolHints } from "@agentx/contracts";
+import { itemPathProblems, schemaHasItemPath, type ToolHints } from "@rovara-code/contracts";
 import type { SkippedTool } from "./engine.js";
 import type { CatalogTool } from "./types.js";
 import { canonical, isObject } from "./util.js";

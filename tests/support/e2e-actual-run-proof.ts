@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, type E2EExecutorPlan } from "@agentx/contracts";
+import { canonicalJson, type E2EExecutorPlan } from "@rovara-code/contracts";
 import type { E2EActualApplicationRun } from "../../packages/verifier/src/application-collection.js";
 import { readE2EApplicationSupervisorProof } from "../../packages/verifier/src/application-result-adapter.js";
 import { resolveE2EExecutorSuite } from "../../packages/verifier/src/executor/suite.js";

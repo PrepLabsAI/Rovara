@@ -8,7 +8,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   UNSTAMPED_WAITER_GRACE_MS, UNWAITED_TASK_IDLE_LIMIT_MS, UNWAITED_TASK_NOTE, WAITER_SEEN_WITHIN_MS,
   lastActivityAt, slackBotTokenFrom, sweepUnwaitedTasks,
-} from "../../packages/broker/src/aws/unwaited-tasks.js";
+} from "../../packages/core/src/aws/unwaited-tasks.js";
 import {
   SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, loadSlackBroker, markReady, registerSlackProject, serviceCall,
 } from "../support/slack-broker.js";
@@ -304,7 +304,7 @@ describe("the backstop: the bot token (#173)", () => {
 
 describe("the backstop: where it runs (#173)", () => {
   it("is wired only where the threads table, the Slack secret and the signing key are named (named environments)", async () => {
-    const { unwaitedTaskBackstopWanted } = await import("../../packages/broker/src/aws/unwaited-tasks.js");
+    const { unwaitedTaskBackstopWanted } = await import("../../packages/core/src/aws/unwaited-tasks.js");
     const named = { SLACK_THREADS_TABLE_NAME: "threads", SLACK_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf", CALLBACK_SIGNING_KEY: "k".repeat(32) };
     expect(unwaitedTaskBackstopWanted(named)).toBe(true);
     for (const missing of Object.keys(named)) {
@@ -371,7 +371,7 @@ describe("the backstop: review hardening (#173)", () => {
   });
 
   it("says when its configuration is only partly present, so a half-wired environment is visible", async () => {
-    const { unwaitedTaskBackstopConfiguration } = await import("../../packages/broker/src/aws/unwaited-tasks.js");
+    const { unwaitedTaskBackstopConfiguration } = await import("../../packages/core/src/aws/unwaited-tasks.js");
     const named = { SLACK_THREADS_TABLE_NAME: "threads", SLACK_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf", CALLBACK_SIGNING_KEY: "k".repeat(32) };
     expect(unwaitedTaskBackstopConfiguration(named)).toEqual({ state: "on" });
     expect(unwaitedTaskBackstopConfiguration({})).toEqual({ state: "off" });

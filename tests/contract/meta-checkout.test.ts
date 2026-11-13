@@ -16,7 +16,7 @@ import {
 import { META_CHECKOUT_MAX_FILES, listMaterialized, metaPathWanted, parseTreeListing } from "../../packages/worker/src/meta-checkout.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import { prepareWorkspace, preparedBaseResult, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
-import { META_PREPARE_FEATURE, knowledgeCommitToStore, metaPrepareFor, metaPrepareProblem, parseKnowledgeCommit } from "../../packages/broker/src/core/meta-repo/prepare-meta.js";
+import { META_PREPARE_FEATURE, knowledgeCommitToStore, metaPrepareFor, metaPrepareProblem, parseKnowledgeCommit } from "../../packages/core/src/core/meta-repo/prepare-meta.js";
 
 const execFileAsync = promisify(execFile);
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" };

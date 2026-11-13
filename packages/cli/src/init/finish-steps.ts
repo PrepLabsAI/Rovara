@@ -1,6 +1,6 @@
 // The init steps after developer sign-in (phase 15d2), and the message init ends with. Each step
 // is a thin wrapper around a setup/ module, so agentx init and the day-2 commands behave the same.
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@rovara-code/contracts";
 import { AlertEmailSchema } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";

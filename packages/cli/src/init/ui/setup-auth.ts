@@ -11,7 +11,7 @@
 // deleted as the job reads it.
 import { createHash, randomBytes } from "node:crypto";
 import { DecryptCommand, EncryptCommand, type KMSClient } from "@aws-sdk/client-kms";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { tokenStoreKey, type LoginOptions } from "../../auth.js";
 import type { StoredTokens } from "../../token-store.js";
 import type { SetupStore, SetupSession } from "./setup-store.js";

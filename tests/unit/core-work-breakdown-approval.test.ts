@@ -2,9 +2,9 @@
 // and the refusals (a version 1 task without the install's switch, a task not pinned to one repository, an invalid graph).
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalPlanJson, taskGraphDigest, type TaskGraphV1, type WorkflowArtifact } from "@agentx/contracts";
-import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../packages/broker/src/developer/workflow-actions.js";
-import { PLAN_UNREADABLE, approvedGraphOf, breakdownForApproval } from "../../packages/broker/src/core/work-breakdown/plan-graph.js";
+import { canonicalPlanJson, taskGraphDigest, type TaskGraphV1, type WorkflowArtifact } from "@rovara-code/contracts";
+import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../packages/core/src/developer/workflow-actions.js";
+import { PLAN_UNREADABLE, approvedGraphOf, breakdownForApproval } from "../../packages/core/src/core/work-breakdown/plan-graph.js";
 import { planDocument } from "../support/plan-documents.js";
 
 const TASK = "8c330a74-b4c6-4f01-9356-5fe54fc55b19";

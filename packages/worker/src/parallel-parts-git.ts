@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { open, readdir, readFile, realpath, rmdir, unlink } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { kindIn, openDirectory, type HeldDirectory } from "./candidate-fs.js";
 import { candidateLayout, copyObjectsOut, snapshotTree, withIsolatedGit } from "./isolated-git.js";
 import { withIsolatedRepository } from "./isolated-repository.js";

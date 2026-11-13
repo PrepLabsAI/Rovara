@@ -8,9 +8,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_PLAN_FEATURE, TestEnvTaskPlanSchema, TestEnvironmentBodySchema, WORKER_INVOCATION_FEATURES,
   type ProjectCommand, type ServiceCatalog, type TaskDependencyPlan,
-} from "@agentx/contracts";
-import { taskDependencyPlansOf } from "../../packages/broker/src/core/test-env/dependency-plan.js";
-import { featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
+} from "@rovara-code/contracts";
+import { taskDependencyPlansOf } from "../../packages/core/src/core/test-env/dependency-plan.js";
+import { featuresForTestPlan } from "../../packages/core/src/core/test-env/seam.js";
 import { withDetachedWorking } from "../../packages/worker/src/check-sandbox.js";
 import { forgetWorkerStartSweeps } from "../../packages/worker/src/service-runner.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";

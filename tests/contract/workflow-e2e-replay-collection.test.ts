@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { canonicalJson, type E2EReplayTrace } from "@agentx/contracts";
+import { canonicalJson, type E2EReplayTrace } from "@rovara-code/contracts";
 import { agentRunnable, downloadsOf, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { recordingsOf, runReplayCase, type ReplayRun } from "../support/agent-replay-run.js";
 import { asLinuxRun, assembleAgentRun, assembleReplayRun, collectAssembled, firstCase, type AssembledRun } from "../support/agent-collection.js";

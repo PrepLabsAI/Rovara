@@ -3,7 +3,7 @@
 // What is sent, and where: the text of the customer's own requests and answers, to the analyzer address the customer gives. That address must be this computer (loopback) unless the customer also says
 // `--allow-remote-presidio`: a recorded answer holds data the customer has not yet judged, and the recorder never sends it to a remote service by default. Nothing is ever sent to Rovara.
 // An analyzer that cannot be reached or answers something unexpected makes the scan FAIL (the recording stops): a scan that did not finish is never a clean one.
-import { mergeFindings, type PiiFinding, type PiiKind, type PiiScanner } from "@agentx/contracts";
+import { mergeFindings, type PiiFinding, type PiiKind, type PiiScanner } from "@rovara-code/contracts";
 
 /** Presidio's entity types, by the kind they are reported as. A type that is not here is not asked for. */
 export const PRESIDIO_ENTITY_KINDS: Readonly<Record<string, PiiKind>> = {

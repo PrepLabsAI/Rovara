@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "@agentx/contracts";
-import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
+import { canonicalJson } from "@rovara-code/contracts";
+import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/core/src/aws/project-setup-runtime-catalog.js";
 
 const binding = {
   deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "@agentx/contracts";
-import { WORKFLOW_E2E_DISPLAY_SCHEMA_VERSION, createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection, workflowE2EDisplayRef } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
-import { workflowE2ENotifierBlocks } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { renderE2EUnavailableSlackBlock } from "../../packages/broker/src/e2e-presentation.js";
+import { canonicalJson } from "@rovara-code/contracts";
+import { WORKFLOW_E2E_DISPLAY_SCHEMA_VERSION, createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection, workflowE2EDisplayRef } from "../../packages/core/src/aws/workflow-e2e-notifier-projection.js";
+import { workflowE2ENotifierBlocks } from "../../packages/core/src/aws/developer-task-notifier.js";
+import { renderE2EUnavailableSlackBlock } from "../../packages/core/src/e2e-presentation.js";
 import { readLegacyV2WorkflowE2ENotifierProjection } from "../support/legacy-display-v2-reader.js";
 import { agentNavigation, agentRow } from "../support/e2e-agent-display.js";
 import { failedBaseline, results, row } from "../support/e2e-scenario-results.js";

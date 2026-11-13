@@ -1,7 +1,7 @@
 // The test environment's own write into the project's settings is recorded, so the look a person worked from is not called stale because of it; any other change to the settings still makes it stale.
 import { describe, expect, it } from "vitest";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { lookIsStale, ownWriteOf, readOwnSettingsWrite, recordOwnSettingsWrite } from "../../packages/broker/src/core/test-env/own-settings-write.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { lookIsStale, ownWriteOf, readOwnSettingsWrite, recordOwnSettingsWrite } from "../../packages/core/src/core/test-env/own-settings-write.js";
 
 const ORG = "org_00000000000000000000" as never;
 

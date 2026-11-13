@@ -1,7 +1,7 @@
 // Design review stage: the small guards that sit beside the dispatch, in the worker and the contracts. Each fails without its fix.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { AgentXError, DesignReviewRoundSchema, createWorkflowSnapshot, enableDesignReview, submitDesignReview, startDesignReview, submitWorkflowArtifact, decideWorkflow, type WorkflowProgram, type WorkflowSnapshot } from "@agentx/contracts";
+import { AgentXError, DesignReviewRoundSchema, createWorkflowSnapshot, enableDesignReview, submitDesignReview, startDesignReview, submitWorkflowArtifact, decideWorkflow, type WorkflowProgram, type WorkflowSnapshot } from "@rovara-code/contracts";
 import { mergeMaterialOf } from "../../packages/worker/src/design-review.js";
 import { reviewFileToolsOf } from "../../packages/worker/src/design-review-sessions.js";
 import { neutralizeFrameTags } from "../../packages/worker/src/context-sources/frame.js";

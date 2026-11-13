@@ -1,4 +1,4 @@
-import type { WorkspaceLimit } from "@agentx/contracts";
+import type { WorkspaceLimit } from "@rovara-code/contracts";
 import type { WorkerAccess, WorkerRefusal } from "@agentx/orchestrator";
 import { deterministicUuid } from "./ids.js";
 import type { ConversationFormat } from "./conversation-format.js";

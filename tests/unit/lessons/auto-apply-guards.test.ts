@@ -2,12 +2,12 @@
 // - project brake: when the project's volume alert fires, tier-0 lessons go to the one-tap queue for the next day; no source is paused.
 // - cold start: a source cannot auto-apply until a PERSON has approved nine of its lessons.
 import { describe, expect, it } from "vitest";
-import { curateDraft } from "../../../packages/broker/src/lessons/curate.js";
-import { AUTO_APPLY_GUARDS } from "../../../packages/broker/src/lessons/policy.js";
-import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { coldSourcesOf, projectBrakeOn } from "../../../packages/broker/src/lessons/sources.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import type { LessonDraft } from "../../../packages/broker/src/lessons/reflect.js";
+import { curateDraft } from "../../../packages/core/src/lessons/curate.js";
+import { AUTO_APPLY_GUARDS } from "../../../packages/core/src/lessons/policy.js";
+import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { coldSourcesOf, projectBrakeOn } from "../../../packages/core/src/lessons/sources.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, autoSettings, embedder, facts, lessonRecord, seed, settings, uniqueDraft, verifier } from "./lesson-helpers.js";
 
 const DAY = 86_400_000;

@@ -2,14 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { E2E_AGENT_TRACE_FILE_MAX_BYTES, canonicalJson, E2E_AGENT_TRACE_SUMMARY, e2eAgentValueKeyId, reviewCapturedE2EAgentTrace } from "@agentx/contracts";
+import { E2E_AGENT_TRACE_FILE_MAX_BYTES, canonicalJson, E2E_AGENT_TRACE_SUMMARY, e2eAgentValueKeyId, reviewCapturedE2EAgentTrace } from "@rovara-code/contracts";
 import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { AGENT_GOAL } from "../support/orders-m14-agent.js";
 import { asLinuxRun, assembleAgentRun, brokerRoundFor, collectAssembled, firstCase } from "../support/agent-collection.js";
 import { agentTraceGroupOf, buildE2EAgentModelEvidence } from "../../packages/verifier/src/host/agent-model-evidence.js";
 import { agentInstructionDigest, mapAgentTraceToStep, reviewAgentTraceFile, selectAgentTraceUploads, verifiedAgentCaseLedger, type E2EAgentTraceCase } from "../../packages/verifier/src/application-agent-traces.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
-import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
+import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/core/src/e2e/application-evidence.js";
 
 // Task 4.6a (CAPTURE46) end to end on this machine: the real executor and a real Chromium leave the recording of a passed AI navigation step; the host reviews it against the ledger and
 // uploads it with the group's evidence; the broker reviews it again against the ledger it verified, and hands it on only for a round it decided is PASS.

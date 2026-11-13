@@ -4,13 +4,13 @@
 import { describe, expect, it } from "vitest";
 import {
   IMPLICIT_COMPANY_ID, agentSessionKey, openAgentSessionKey, sessionTaskStatus, type AgentSessionRecord, type AuditSink, type DocumentChange, type OrgId, type Principal, type SessionId,
-} from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+} from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 import {
   SessionStore, computeTaskState, createSessionControl, createTaskSessionItems, developerIdOf, listSessions, projectChanges, readSessionEvents, refreshSessionSummary, sessionSnapshot, sessionTargetsOf,
   sweepOpenSessions, taskSessionId, type SessionChange, type SessionControlHost, type SessionTaskFacts, type SummaryDependencies,
-} from "../../packages/broker/src/core/sessions/index.js";
+} from "../../packages/core/src/core/sessions/index.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OWNER = localOwnerPrincipal();

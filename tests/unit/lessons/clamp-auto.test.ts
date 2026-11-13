@@ -1,9 +1,9 @@
 // While automatic go-live is not enabled, a stored tier0 "auto" from ANY source is never honoured. The clamp is in `resolveLearning` (the one place every
 // consumer of the settings goes through), so no reader, present or future, can bypass it.
 import { afterEach, describe, expect, it } from "vitest";
-import { approversRequired, resolveLearning, setAutoApplyGate } from "../../../packages/broker/src/lessons/policy.js";
-import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
+import { approversRequired, resolveLearning, setAutoApplyGate } from "../../../packages/core/src/lessons/policy.js";
+import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, WS, PROJECT, draft, embedder, facts, settings, verifier } from "./lesson-helpers.js";
 
 afterEach(() => setAutoApplyGate(() => true));

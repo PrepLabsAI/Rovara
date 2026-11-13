@@ -3,7 +3,7 @@
 // those are stored where the owner reads them. So the worker remembers what each source returned during the stage and, before anything is sent or saved, replaces any run of
 // RUN_WORDS or more words that appears word for word in a source's text. Reasoning ("thinking") blocks are not stored at all in a stage that read a source. A short quote
 // (a few words, an id, a title) is not touched: this stops copying the source out, not citing it.
-import { stripHiddenCharacters } from "@agentx/contracts";
+import { stripHiddenCharacters } from "@rovara-code/contracts";
 import type { EventBatchSink } from "../events.js";
 import type { ArtifactSink } from "../artifacts.js";
 

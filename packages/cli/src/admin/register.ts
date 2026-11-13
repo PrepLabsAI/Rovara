@@ -6,7 +6,7 @@ import {
   agentXError,
   type Ec2RuntimeBinding,
   type ProjectDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { readJsonResponse, serverError } from "./http.js";
 
 export type ProjectRuntimeBinding = Ec2RuntimeBinding;

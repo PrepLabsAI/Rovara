@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
-import { taskPersonProofInvokeCommand, taskPersonProofLambdaClient } from "../../packages/broker/src/aws/dispatcher.js";
-import { taskPersonProofThroughLambda } from "../../packages/broker/src/aws/task-person-proof-transport.js";
+import { createTaskAuthorityAdmission } from "../../packages/core/src/aws/task-authority-admission.js";
+import { taskPersonProofInvokeCommand, taskPersonProofLambdaClient } from "../../packages/core/src/aws/dispatcher.js";
+import { taskPersonProofThroughLambda } from "../../packages/core/src/aws/task-person-proof-transport.js";
 
 const request = { kind: "task-person-proof" as const, slackUserId: "U123ABC", channelIds: ["C123ABC"] };
 const positive = { ok: true as const, user: { id: "U123ABC", teamId: "T123ABC", name: "Person" }, memberOf: ["C123ABC"] };

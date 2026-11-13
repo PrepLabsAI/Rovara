@@ -20,8 +20,8 @@ import {
   type OutboundEventInput,
   type OutboundEventsAdapter,
   type PluginModule,
-} from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, publishOutboundEvent, type ModuleImporter } from "../../packages/broker/src/ports/index.js";
+} from "@rovara-code/contracts";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, publishOutboundEvent, type ModuleImporter } from "../../packages/core/src/ports/index.js";
 
 const NOW = 1_800_000_000;
 const SECRET = generateWebhookSecret();

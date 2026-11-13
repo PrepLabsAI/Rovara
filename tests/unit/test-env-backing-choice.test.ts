@@ -7,7 +7,7 @@ import { testAccountApprovalDigest, testAccountExternalId, testAccountSecretRef,
 import {
   BACKING_ORDER, BACKING_PLACES, BACKING_REASONS, BACKING_REASON_WORDS, DEFAULT_ALLOWED_BACKINGS, SKIP_REASONS, SKIP_REASON_WORDS, chooseBacking, effectiveAllowedBackings,
   type AllowedBackings, type BackingChoiceInput, type FixtureFact,
-} from "../../packages/broker/src/core/test-env/backing-choice.js";
+} from "../../packages/core/src/core/test-env/backing-choice.js";
 
 const sha = (letter: string) => letter.repeat(64);
 const ORG = `org_${"a1b2c3d4e5".repeat(2)}`;

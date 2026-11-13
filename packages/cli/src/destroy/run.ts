@@ -3,7 +3,7 @@
 // environment, and safe to re-run: the inventory of retained resources is saved in SSM before any
 // stack is deleted, and the settings and lock are deleted last.
 import { access, rm } from "node:fs/promises";
-import { agentXError, environmentPullThroughPrefix, environmentStackName, type StackPart } from "@agentx/contracts";
+import { agentXError, environmentPullThroughPrefix, environmentStackName, type StackPart } from "@rovara-code/contracts";
 import { tokenStoreKey } from "../auth.js";
 import { forgetDeveloperSignIn } from "../developer/config.js";
 import { plainMessage } from "../output.js";

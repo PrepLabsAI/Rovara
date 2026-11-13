@@ -9,7 +9,7 @@ import { createInterface } from "node:readline";
 import {
   AdminChangeResponseWireSchema, AdminChangesResponseWireSchema, AgentXErrorCodeSchema, RecordedChangeResponseWireSchema, agentXError,
   type AdminChangeAuditRecordWire, type AdminChangeInput, type AdminChangeViewWire, type ConfigChange, type ConfigChangeOutcomeRequest,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { adminResponseBody, readJsonResponse, serverError } from "./http.js";
 
 /** Matches ADMIN_LIST_MAX, the most a change page holds. */

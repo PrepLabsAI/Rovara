@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   SLACK_ROUTE_ATTRIBUTE, SLACK_ROUTE_PAGE_COMMENT, SlackCommentAnsweredRequestSchema, SlackPageCommentMessageSchema, SlackRequestMessageSchema,
   SlackTaskAnswerRequestSchema, pageCommentAttributes, pageCommentEventId, routeOf, taskQuestionOf,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const commentId = "6c1f5d7e-4ab0-4d43-9c55-2f0a3c9e2b11";

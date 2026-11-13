@@ -1,6 +1,6 @@
 // Lane L8: fakes for the local pages' data and actions, and a raw HTTP client that can set any Host header (fetch cannot).
 import { request as httpRequest } from "node:http";
-import { type ApprovalOffer, type DesignReviewView, type LessonLocalToolsView, type LessonReposView, type LessonView, type LocalActionResult, type LocalPageActions, type LocalPageData, type PlanPageView, type ProofReportView } from "../../packages/broker/src/core/local-pages/index.js";
+import { type ApprovalOffer, type DesignReviewView, type LessonLocalToolsView, type LessonReposView, type LessonView, type LocalActionResult, type LocalPageActions, type LocalPageData, type PlanPageView, type ProofReportView } from "../../packages/core/src/core/local-pages/index.js";
 import { planDocument } from "./plan-documents.js";
 
 export const TASK = "0b4f2b1e-3c6a-4d2e-9a77-5f1d8c0a1e11";

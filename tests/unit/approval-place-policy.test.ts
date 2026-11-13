@@ -6,7 +6,7 @@ import {
   APPROVAL_DECIDER_ROLES, APPROVAL_DECISION_KINDS, APPROVAL_PLACES, APPROVAL_PLACE_ANSWERS, APPROVAL_PLACE_RISKS, APPROVAL_SIGN_IN_SKEW_SECONDS, DEFAULT_RECENT_SIGN_IN_SETTING,
   RECENT_SIGN_IN_DEFAULT_SECONDS, RECENT_SIGN_IN_MAX_SECONDS, RECENT_SIGN_IN_MIN_SECONDS, RECENT_SIGN_IN_SKEW_SECONDS, RecentSignInSettingSchema, approvalPlaceDecision, checkRecentSignInChange, isOutsideApprovalPlace,
   type ApprovalDeciderRole, type ApprovalPlace, type ApprovalPlaceInput, type ApprovalPlaceVerdict,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 const NOW = Date.parse("2026-11-11T12:00:00.000Z");
 const HOUR = 3_600_000;

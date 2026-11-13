@@ -3,7 +3,7 @@
 //  - `rovara chat` does not change anything itself: linking a chat account, binding a space to a project and choosing where you are told are made on a local page the running `rovara up` opens in your browser. Each one lets a
 //    chat account act as you or sends the titles of your tasks to a place, so the API login this command holds (the one an AI tool may hold too) is not enough for any of them.
 //  - `rovara chat status` shows what is set up, never a code or a token.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { homedir } from "node:os";
 import type { Command } from "commander";
 import type { TextWriter } from "../init/prompts.js";

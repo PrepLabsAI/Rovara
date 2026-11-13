@@ -1,7 +1,7 @@
 // What the loader is told about a task besides its title: a short summary of the approved plan and the files the plan names. Pure, bounded, and made only from the plan's own structure.
 import { describe, expect, it } from "vitest";
-import type { PlanDocument } from "@agentx/contracts";
-import { PLAN_FACTS_MAX_FILES, PLAN_FACTS_SUMMARY_MAX, planLoadFacts } from "../../../packages/broker/src/lessons/plan-facts.js";
+import type { PlanDocument } from "@rovara-code/contracts";
+import { PLAN_FACTS_MAX_FILES, PLAN_FACTS_SUMMARY_MAX, planLoadFacts } from "../../../packages/core/src/lessons/plan-facts.js";
 
 const plan = (claims: PlanDocument["claims"], title = "Retry failed HTTP calls"): PlanDocument => ({ schemaVersion: 1, title, why: [], claims, notChanging: [], risks: [], decisions: [] });
 

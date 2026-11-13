@@ -1,7 +1,7 @@
 // Enterprise foundations P9: the intent source `tracker` is the neutral spelling of a ticket that asks for work; `linear`, `jira` and `github_issue` stay valid (dual read, no migration).
 // A stored intent, session binding or task that says `linear` is read as the `linear` tracker's, and the schema accepts both spellings exactly as it did.
 import { describe, expect, it } from "vitest";
-import { CODE_INTENT_SOURCES, CodeIntentRequestSchema, TRACKER_INTENT_SOURCES, isTrackerIntentSource, trackerItemOfBinding, trackerOfCodeIntent } from "@agentx/contracts";
+import { CODE_INTENT_SOURCES, CodeIntentRequestSchema, TRACKER_INTENT_SOURCES, isTrackerIntentSource, trackerItemOfBinding, trackerOfCodeIntent } from "@rovara-code/contracts";
 
 const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
 const base = { requestId: REQUEST_ID, project: "web", input: { text: "Fix it" } };

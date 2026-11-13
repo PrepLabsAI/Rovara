@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
-import { createGitHubAppCredentials } from "../../packages/broker/src/aws/github-credentials.js";
+import { createGitHubAppCredentials } from "../../packages/core/src/aws/github-credentials.js";
 
 const WEBHOOK_SECRET = "w".repeat(40);
 const NEWER_WEBHOOK_SECRET = "n".repeat(40);

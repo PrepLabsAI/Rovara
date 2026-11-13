@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from
 import { dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
-import { canonicalJson, ProjectSetupRunnerToolchainSchema } from "@agentx/contracts";
+import { canonicalJson, ProjectSetupRunnerToolchainSchema } from "@rovara-code/contracts";
 import type { E2EConfig } from "e2e";
 import { z } from "zod";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";

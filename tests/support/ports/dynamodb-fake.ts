@@ -31,7 +31,7 @@ import {
   type AttributeValue,
   type CancellationReason,
 } from "@aws-sdk/client-dynamodb";
-import type { IndexDefinition } from "@agentx/contracts";
+import type { IndexDefinition } from "@rovara-code/contracts";
 import type { DynamoDbCommand, DynamoDbSender, DynamoStreamRecord } from "../../../packages/aws-adapters/src/index.js";
 
 type AV = AttributeValue;

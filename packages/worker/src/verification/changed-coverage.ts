@@ -7,7 +7,7 @@
 // covered when ANY block on it ran, so `if cond {` is covered when the condition ran even if the body did not. Comment lines inside a block's lines are counted with it.
 // Fail closed and bounded: a text that is not a complete, well-formed profile (a wrong header, a malformed line, mixed modes, a reversed or enormous range, more than 1,000,000 blocks) is `undefined`, "not measured".
 // Ranges are merged, never expanded line by line, so a block over millions of lines costs nothing.
-import { EVIDENCE_COVERAGE_FILES_MAX, EVIDENCE_UNCOVERED_LINES_MAX } from "@agentx/contracts";
+import { EVIDENCE_COVERAGE_FILES_MAX, EVIDENCE_UNCOVERED_LINES_MAX } from "@rovara-code/contracts";
 import { parseAttributes, plainName, tagEnd, withoutCommentsAndCdata } from "./test-report.js";
 
 /** A cover profile larger than this, or with more blocks, is not read. */

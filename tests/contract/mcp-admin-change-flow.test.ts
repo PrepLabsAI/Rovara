@@ -2,9 +2,9 @@
 // Spec 025 User Story 6, SC-005, SC-011, SC-013, end to end: agentx mcp's server, the broker in
 // process, an admin sign-in, a client with or without elicitation, and the Slack press.
 import { randomUUID } from "node:crypto";
-import type { ChannelInfoRequest, ChannelMembersRequest } from "@agentx/contracts";
+import type { ChannelInfoRequest, ChannelMembersRequest } from "@rovara-code/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
+import { createNotifierHandler } from "../../packages/core/src/aws/developer-task-notifier.js";
 import { ADMIN_SLACK, createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { MAYA, OMAR, grantProject } from "../support/developer-task-broker.js";
 import { adminSignedInClient } from "../support/mcp-broker-client.js";

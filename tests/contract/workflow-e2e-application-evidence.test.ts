@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, WorkerInvocationSchema, type E2EApplicationExecutionAdmission } from "@agentx/contracts";
+import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, WorkerInvocationSchema, type E2EApplicationExecutionAdmission } from "@rovara-code/contracts";
 import { createDockerApplicationHost, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";

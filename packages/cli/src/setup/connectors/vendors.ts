@@ -1,6 +1,6 @@
 // The one real read each connector's test needs (FR-038), behind one interface so tests fake it.
 // Nothing here reaches the control plane; only the vendor's own API.
-import { agentXError, OAUTH_AUTHORIZATION_PROFILES, type McpAuth } from "@agentx/contracts";
+import { agentXError, OAUTH_AUTHORIZATION_PROFILES, type McpAuth } from "@rovara-code/contracts";
 import { connectMcp, listMcpTools, McpUnauthorized } from "@agentx/gateway";
 
 export interface LinearTeam { id: string; key: string; name: string }

@@ -1,4 +1,4 @@
-import { E2E_FORM_LOGIN_SUCCESS_TIMEOUT_MS, type E2EFormLogin } from "@agentx/contracts";
+import { E2E_FORM_LOGIN_SUCCESS_TIMEOUT_MS, type E2EFormLogin } from "@rovara-code/contracts";
 import { chromium, request as playwrightRequest, type BrowserContext } from "playwright-core";
 import { readBrowserState } from "./browser-state-reader.js";
 import type { ClassifiedValue } from "./credential-classifier.js";

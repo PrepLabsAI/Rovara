@@ -5,7 +5,7 @@
 // Nothing about what init does changes here. This module is injected through the seams init already
 // has -- `Prompter`, `onEvent`, `write(line)` and `openBrowser(url)` -- so the terminal path and
 // `--yes` are untouched.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { InstallSurface, OpenManifestHost, OpenSlackInstallHost } from "../context.js";
 import type { Prompter } from "../prompts.js";
 import type { InitEvent } from "../steps.js";

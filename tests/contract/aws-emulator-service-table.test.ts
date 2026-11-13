@@ -12,7 +12,7 @@ import { EmulatorSchema, emulatorChoosable, emulatorServiceTier } from "../../pa
 import { SEEDED_AWS_SERVICES, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TaskDependencyPlanSchema, awsPlanNeedsAllServices } from "../../packages/contracts/src/test-environment-wire.js";
 import { TEST_SERVICES_AWS_USAGE_LIMITS, TestServicesAwsUsageSchema, testServicesAwsUsageVerdict, type TestServicesUsageRecord } from "../../packages/contracts/src/test-services-usage.js";
 import { WORKER_INVOCATION_FEATURES } from "../../packages/contracts/src/protocol.js";
-import { featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
+import { featuresForTestPlan } from "../../packages/core/src/core/test-env/seam.js";
 
 const rows = AWS_EMULATOR_SERVICES;
 const byKey = (key: string) => awsEmulatorServiceRow(key)!;

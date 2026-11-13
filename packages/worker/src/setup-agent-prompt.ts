@@ -4,7 +4,7 @@
 //
 // The words here are guidance. The controls are code: the sandbox has no secrets and no root, the tools are the five listed in setup-agent.ts (no write or edit tool), a command over a limit does not run
 // (setup-agent-journal.ts), and a change to a tracked file or to a commit is found by `git` afterwards and ends the run. Text from the repository is quoted as data and never read as instructions.
-import { SETUP_AGENT_LIMITS_MAX, type SetupAgentLimits } from "@agentx/contracts";
+import { SETUP_AGENT_LIMITS_MAX, type SetupAgentLimits } from "@rovara-code/contracts";
 import { quotedContextText } from "./context-text.js";
 import { setupProposalFormatLines, type SetupDraftRepository } from "./setup-draft.js";
 

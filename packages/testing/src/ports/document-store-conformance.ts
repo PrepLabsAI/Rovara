@@ -16,7 +16,7 @@ import {
   type DocumentStore,
   type IndexDefinition,
   type StoredDocument,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 /** The indexes the suite needs the store to keep. The harness passes them to the adapter when it builds the store. */
 export const CONFORMANCE_INDEXES: readonly IndexDefinition[] = [

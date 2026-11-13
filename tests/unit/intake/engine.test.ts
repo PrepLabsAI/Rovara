@@ -1,10 +1,10 @@
 // one rule for a ticket that asks for work, from any tracker. A task starts only from a member act; a ticket an outsider files waits for a member to say
 // "Start"; the same ticket is one item however often it is handed over; the ticket's text is data (framed, redacted, inert) and never sits where the request is read.
 import { describe, expect, it } from "vitest";
-// The broker reads `@agentx/contracts` (its built output), so the errors a test throws must be that package's too, or `instanceof` would tell them apart.
-import { AgentXError, agentXError, intakeItemIdOf, type CodeIntentRequest, type OrgId } from "@agentx/contracts";
-import { ingestIntake, ingestIntakeBatch, startWaitingIntake, type IntakeCandidate, type IntakePorts } from "../../../packages/broker/src/core/intake/engine.js";
-import { listWaitingIntakeItems, readIntakeItem, INTAKE_MAX_WAITING_PER_PROJECT } from "../../../packages/broker/src/core/intake/store.js";
+// The broker reads `@rovara-code/contracts` (its built output), so the errors a test throws must be that package's too, or `instanceof` would tell them apart.
+import { AgentXError, agentXError, intakeItemIdOf, type CodeIntentRequest, type OrgId } from "@rovara-code/contracts";
+import { ingestIntake, ingestIntakeBatch, startWaitingIntake, type IntakeCandidate, type IntakePorts } from "../../../packages/core/src/core/intake/engine.js";
+import { listWaitingIntakeItems, readIntakeItem, INTAKE_MAX_WAITING_PER_PROJECT } from "../../../packages/core/src/core/intake/store.js";
 import { RecordingStore } from "../../support/intake-world.js";
 
 const ORG = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -91,7 +91,7 @@ describe("a member's act starts the work", () => {
   });
 
   it("is a request the schema accepts", async () => {
-    const { CodeIntentRequestSchema } = await import("@agentx/contracts");
+    const { CodeIntentRequestSchema } = await import("@rovara-code/contracts");
     const w = world();
     await ingestIntake(w.ports, candidate());
     expect(CodeIntentRequestSchema.safeParse(w.started[0]!.request).success).toBe(true);
@@ -263,7 +263,7 @@ describe("one session per ticket", () => {
 
   it("takes over a start whose lease ran out (the process died after it began), and starts the ticket once", async () => {
     const w = world();
-    const { claimIntakeItem } = await import("../../../packages/broker/src/core/intake/store.js");
+    const { claimIntakeItem } = await import("../../../packages/core/src/core/intake/store.js");
     await claimIntakeItem(w.ports.table, { orgId: ORG, project: PROJECT, itemId: intakeItemIdOf("jira", "PAY-12"), channel: "jira", system: "jira", id: "PAY-12", url: REF.url, title: "Refunds fail", requester: { display: "Maya", standing: "member", developerId: MEMBER }, state: "starting", startedBy: MEMBER });
     w.clock.now += 5 * 60_000;
     expect(await ingestIntake(w.ports, candidate())).toMatchObject({ outcome: "started" });
@@ -272,7 +272,7 @@ describe("one session per ticket", () => {
 
   it("puts a cut-short start back among the waiting tickets when the one who asks now is not a member", async () => {
     const w = world();
-    const { claimIntakeItem } = await import("../../../packages/broker/src/core/intake/store.js");
+    const { claimIntakeItem } = await import("../../../packages/core/src/core/intake/store.js");
     await claimIntakeItem(w.ports.table, { orgId: ORG, project: PROJECT, itemId: intakeItemIdOf("jira", "PAY-12"), channel: "jira", system: "jira", id: "PAY-12", url: REF.url, title: "Refunds fail", requester: { display: "Maya", standing: "member", developerId: MEMBER }, state: "starting", startedBy: MEMBER });
     w.clock.now += 5 * 60_000;
     expect(await ingestIntake(w.ports, candidate({ actor: undefined }))).toEqual({ outcome: "duplicate", state: "waiting" });
@@ -282,7 +282,7 @@ describe("one session per ticket", () => {
 
   it("lets a member say Start for a cut-short start", async () => {
     const w = world();
-    const { claimIntakeItem } = await import("../../../packages/broker/src/core/intake/store.js");
+    const { claimIntakeItem } = await import("../../../packages/core/src/core/intake/store.js");
     await claimIntakeItem(w.ports.table, { orgId: ORG, project: PROJECT, itemId: intakeItemIdOf("jira", "PAY-12"), channel: "jira", system: "jira", id: "PAY-12", url: REF.url, title: "Refunds fail", requester: { display: "Maya", standing: "member", developerId: MEMBER }, state: "starting", startedBy: MEMBER });
     w.clock.now += 5 * 60_000;
     expect(await startWaitingIntake(w.ports, { orgId: ORG, project: PROJECT, itemId: intakeItemIdOf("jira", "PAY-12"), approver: OTHER_MEMBER })).toMatchObject({ outcome: "started" });
@@ -303,7 +303,7 @@ describe("one session per ticket", () => {
     const w = world();
     const id = intakeItemIdOf("jira", "PAY-12");
     // Another caller holds the start.
-    const { claimIntakeItem } = await import("../../../packages/broker/src/core/intake/store.js");
+    const { claimIntakeItem } = await import("../../../packages/core/src/core/intake/store.js");
     await claimIntakeItem(w.ports.table, { orgId: ORG, project: PROJECT, itemId: id, channel: "jira", system: "jira", id: "PAY-12", url: REF.url, title: "Refunds fail", requester: { display: "Maya", standing: "member", developerId: MEMBER }, state: "starting", startedBy: MEMBER });
     expect(await ingestIntake(w.ports, candidate())).toEqual({ outcome: "duplicate", state: "starting" });
     expect(w.started).toEqual([]);

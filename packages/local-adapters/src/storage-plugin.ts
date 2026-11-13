@@ -2,7 +2,7 @@
 //   { "point": "storage", "name": "sqlite", "module": "@agentx/local-adapters/storage",
 //     "settings": { "path": ".rovara/state.db", "indexes": [ ... ], "ttlAttribute": "expiresAt" } }
 // Not wired into the broker here: lane L4 loads it.
-import { OUTBOX_PENDING_INDEX, type IndexDefinition, type JsonValue, type PluginModule } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX, type IndexDefinition, type JsonValue, type PluginModule } from "@rovara-code/contracts";
 import { allowOnly, databasePath, optionalNumber, SettingsError, synchronousSetting } from "./settings.js";
 import { SqliteDocumentStore } from "./sqlite-document-store.js";
 

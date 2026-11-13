@@ -1,5 +1,5 @@
 // Issue #235: Ctrl-C at a terminal question is a stop the person chose, not an internal error.
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError } from "@rovara-code/contracts";
 
 /** A stop the person made: printed as its one plain line, with exit code 130 (the shell's for Ctrl-C). */
 export class StoppedByOperator extends Error {

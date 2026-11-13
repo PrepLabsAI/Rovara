@@ -4,14 +4,14 @@ import {
   E2EApplicationAccountDefinitionSchema, E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   canonicalJson, createE2ESyntheticAccountDefinition, deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eApplicationAccountDefinitionDigest,
   e2eSyntheticAccountContractDigest, resolveE2ELatestAccountRef, workflowApplicationRetryOffered, WorkflowSnapshotSchema,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import {
   E2EAccountRegistryError, e2eAccountDefinitionKey, e2eAccountLatestKey, latestAccountRef, parseAccountEntry, pickAccountEntry, planSyntheticAccountWrites,
   type E2EAccountRegistryEntry,
-} from "../../packages/broker/src/e2e/application-account-registry.js";
-import { readAccountRegistryEntries } from "../../packages/broker/src/aws/e2e-account-registry.js";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
-import { taskPageStage } from "../../packages/broker/src/aws/developer-tasks.js";
+} from "../../packages/core/src/e2e/application-account-registry.js";
+import { readAccountRegistryEntries } from "../../packages/core/src/aws/e2e-account-registry.js";
+import { evaluateApplicationPlanApproval } from "../../packages/core/src/e2e/application-plan-approval.js";
+import { taskPageStage } from "../../packages/core/src/aws/developer-tasks.js";
 import { createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
@@ -825,7 +825,7 @@ describe("a whole round with two accounts of one application", () => {
 
   it("holds the verdict to the registry too: authority is valid while it holds the pinned refs, and not once one account has a newer revision", async () => {
     const round = await startApplicationRound({ accounts: ACCOUNTS });
-    const broker = await import("../../packages/broker/src/aws/broker.js");
+    const broker = await import("../../packages/core/src/aws/broker.js");
     const valid: { reason?: string; runtimeChange?: "requalified" | "unusable" | "accounts" } = {};
     expect(await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, round.taskNow() as never, round.candidate, round.admission, valid), valid.reason).toBe(true);
     const key = round.harness.db.find((row) => row.pk === testProjectPk("payments") && String(row.sk).endsWith("#orders-owner") && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))[0]!;

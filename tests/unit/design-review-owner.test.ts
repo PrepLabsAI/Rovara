@@ -1,28 +1,28 @@
 // What the owner does to a design review. The cost hold and its choices (through the approval gate), the question card, Skip, Retry, Resume, `design first`, the wait sweep (reminders, parking,
 // closing), and the design's approval that carries the task on through the plan, the build and the reviews. The worker is simulated; the broker's records are checked in the store.
 import { describe, expect, it } from "vitest";
-import { BUDGET_EXHAUSTED_FAILURE_MESSAGE, DesignReviewBindingSchema, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, createCandidateManifest, type PlanDocument, type WorkflowSnapshot } from "@agentx/contracts";
-import { designChoicesOf } from "../../packages/broker/src/core/design-review/choice-subject.js";
-import { answerReviewQuestions, resumeParkedReview, retryBlockedReview } from "../../packages/broker/src/core/design-review/actions.js";
-import { sweepDesignWaits, designWaitNotifyKey, designWaitRowKey } from "../../packages/broker/src/core/design-review/wait.js";
-import { designPanelOf, designQuestionsOf } from "../../packages/broker/src/core/design-review/panel.js";
-import { loadDesignProof } from "../../packages/broker/src/core/design-review/design-proof.js";
-import { designProofLine } from "../../packages/broker/src/core/design-review/proof-line.js";
-import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
-import { NO_LESSONS_USED } from "../../packages/broker/src/core/build-step/changed-files.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { readWorkspace, runDueDispatches } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { chargeMarkerKey, taskIndexKey, taskPointerKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { createDesignChoiceSubject } from "../../packages/broker/src/core/design-review/choice-subject.js";
-import type { Admission, TransactItem } from "@agentx/contracts";
+import { BUDGET_EXHAUSTED_FAILURE_MESSAGE, DesignReviewBindingSchema, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, createCandidateManifest, type PlanDocument, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { designChoicesOf } from "../../packages/core/src/core/design-review/choice-subject.js";
+import { answerReviewQuestions, resumeParkedReview, retryBlockedReview } from "../../packages/core/src/core/design-review/actions.js";
+import { sweepDesignWaits, designWaitNotifyKey, designWaitRowKey } from "../../packages/core/src/core/design-review/wait.js";
+import { designPanelOf, designQuestionsOf } from "../../packages/core/src/core/design-review/panel.js";
+import { loadDesignProof } from "../../packages/core/src/core/design-review/design-proof.js";
+import { designProofLine } from "../../packages/core/src/core/design-review/proof-line.js";
+import { workflowPullRequestBody } from "../../packages/core/src/core/proof/workflow-pull-request-body.js";
+import { NO_LESSONS_USED } from "../../packages/core/src/core/build-step/changed-files.js";
+import { taskKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { readWorkspace, runDueDispatches } from "../../packages/core/src/core/task-flow/stage-machine.js";
+import { chargeMarkerKey, taskIndexKey, taskPointerKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { createDesignChoiceSubject } from "../../packages/core/src/core/design-review/choice-subject.js";
+import type { Admission, TransactItem } from "@rovara-code/contracts";
 import { COMPANY, newRequestId } from "../support/task-flow-harness.js";
 import {
   BASE, SESSION, localDesignReview, answerRound, approve, choose, design, finish, makeGate, mintKeys, nextJob, planned, plannedStructured, sha, taskOf, toDesignPhase, toRound, world, type World,
 } from "../support/design-review-flow-world.js";
-import { DESIGN_REVIEW_INFO_STRING } from "@agentx/contracts";
-import { createLocalOwnerApprovers, localOwnerPrincipal, LOCAL_SESSION_METHOD } from "../../packages/broker/src/ports/policy-defaults.js";
-import { designChoiceDigest } from "../../packages/broker/src/core/design-review/choice-subject.js";
-import { DESIGN_CHOICE_KIND } from "../../packages/broker/src/core/design-review/choice-subject.js";
+import { DESIGN_REVIEW_INFO_STRING } from "@rovara-code/contracts";
+import { createLocalOwnerApprovers, localOwnerPrincipal, LOCAL_SESSION_METHOD } from "../../packages/core/src/ports/policy-defaults.js";
+import { designChoiceDigest } from "../../packages/core/src/core/design-review/choice-subject.js";
+import { DESIGN_CHOICE_KIND } from "../../packages/core/src/core/design-review/choice-subject.js";
 
 const CODING_PLAN: PlanDocument = {
   schemaVersion: 1, title: "Retry", why: [{ text: "Timed-out payments are dropped.", author: "Priya" }], claims: [{ id: "1", text: "A timed-out payment is retried once." }], notChanging: ["Refunds stay as they are."], risks: ["A retry could charge twice."], decisions: [],

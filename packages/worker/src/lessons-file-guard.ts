@@ -2,7 +2,7 @@
 // lessons pull request, which a person merges. This is the worker's check, made on the commit it is about to push, before any credential is fetched or anything is sent; the broker re-checks the pull request through the code
 // host before it is marked ready or merged (the core's merge check, where present). It looks at every path the commits add, change, delete or rename (a rename counts under both names; `--no-renames` lists each side),
 // compared as NFC and without case, and at `.rovara` itself (the folder swapped for a file or a link). A diff that cannot be read fails closed.
-import { LESSON_FILE_PATH, agentXError } from "@agentx/contracts";
+import { LESSON_FILE_PATH, agentXError } from "@rovara-code/contracts";
 
 /** The sentence a task fails with. Fixed words: no path, no repository text. */
 export const LESSONS_FILE_REFUSAL = "This change touches .rovara/lessons.md, which is the team's file and changes only through Rovara's weekly lessons pull request. Take that file out of the change.";

@@ -1,6 +1,6 @@
 // Convergence lane A1: builds the DynamoDB document store over the in-memory DynamoDB double, with its change feed fed the way the
 // hosted stream reader feeds it (each committed record handed to `deliver`, in commit order).
-import { OUTBOX_PENDING_INDEX, type ChangeSubscription, type DocumentChange, type DocumentChangeFeed, type IndexDefinition } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX, type ChangeSubscription, type DocumentChange, type DocumentChangeFeed, type IndexDefinition } from "@rovara-code/contracts";
 import { DynamoDocumentStore, DynamoStreamChangeFeed, type DynamoDocumentStoreOptions, type DynamoStreamChangeFeedOptions, type DynamoStreamRecord } from "../../../packages/aws-adapters/src/index.js";
 import { CONFORMANCE_INDEXES, type DocumentStoreHarness, type DocumentStoreUnderTest } from "./document-store-conformance.js";
 import { FakeDynamoDb } from "./dynamodb-fake.js";

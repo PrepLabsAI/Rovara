@@ -2,7 +2,7 @@
 // at a point it announces on stdout, so nothing here ever closes the file cleanly.
 //   usage: node --import tsx sqlite-crash-child.ts <mode> <database path> [clock ms]
 import { writeSync } from "node:fs";
-import { OUTBOX_PENDING_INDEX, change, when, type DocumentChange } from "@agentx/contracts";
+import { OUTBOX_PENDING_INDEX, change, when, type DocumentChange } from "@rovara-code/contracts";
 import { SqliteDatabase, SqliteDocumentStore, SqliteQueueService } from "../../../packages/local-adapters/src/index.js";
 
 const [mode, path, clock] = process.argv.slice(2);

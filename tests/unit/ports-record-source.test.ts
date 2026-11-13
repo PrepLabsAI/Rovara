@@ -1,8 +1,8 @@
 // The `team-record-source` point (lane K1): the memory sink keeps the sink contract, the scripted source passes the source suite, Code's sink keeps nothing, and the
 // sources the audience rule believes are the registered ones.
 import { describe, expect, it } from "vitest";
-import { MAINTAINERS_GROUP, PLUGIN_POINT_CARDINALITY, PluginRegistryError, audienceForSource, recordDraftRefusal, recordLinks, recordScopeCovers, recordSourceDraftProblem, recordStoredTrust, type RecordDraft } from "@agentx/contracts";
-import { createAdapterRegistry, createFakeRecordSource, createMemoryRecordSink, createRefusingRecordSink, knownRecordSources } from "../../packages/broker/src/ports/index.js";
+import { MAINTAINERS_GROUP, PLUGIN_POINT_CARDINALITY, PluginRegistryError, audienceForSource, recordDraftRefusal, recordLinks, recordScopeCovers, recordSourceDraftProblem, recordStoredTrust, type RecordDraft } from "@rovara-code/contracts";
+import { createAdapterRegistry, createFakeRecordSource, createMemoryRecordSink, createRefusingRecordSink, knownRecordSources } from "../../packages/core/src/ports/index.js";
 import { CHAT_SAMPLE, runRecordSinkConformance, runRecordSourceConformance, sampleRecordDraft as sampleWith } from "../support/ports/record-source-conformance.js";
 
 const sampleRecordDraft = (extra: Parameters<typeof sampleWith>[1] = {}): RecordDraft => sampleWith(CHAT_SAMPLE, extra);

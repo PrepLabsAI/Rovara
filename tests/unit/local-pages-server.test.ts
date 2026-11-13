@@ -1,7 +1,7 @@
 // Lane L8: the local review pages. The security cases come first: they are the reason the pages are safe to leave running on a developer's machine.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createLocalOwnerApprovers, LOCAL_SESSION_METHOD } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createLocalPagesServer, MAX_BODY_BYTES, type LocalPagesServer } from "../../packages/broker/src/core/local-pages/index.js";
+import { createLocalOwnerApprovers, LOCAL_SESSION_METHOD } from "../../packages/core/src/ports/policy-defaults.js";
+import { createLocalPagesServer, MAX_BODY_BYTES, type LocalPagesServer } from "../../packages/core/src/core/local-pages/index.js";
 import { DESIGN_OFFER, OFFER, OTHER_TASK, TASK, fakeWorld, formBody, formOf, raw, type FakeWorld } from "../support/local-pages-fakes.js";
 
 let server: LocalPagesServer;

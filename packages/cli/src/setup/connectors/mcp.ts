@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import {
   agentXError, ConnectorNameSchema, environmentConnectorSecretPrefix, mcpEndpointProblem, McpConnectorSchema, OAuthRefreshTokenSecretSchema,
   type McpAuth, type McpConnectorConfig,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { listCredentials, registerCredential } from "../../admin/credential.js";
 import type { AuthorizeSecrets } from "../../admin/authorize.js";
 import { secretFromSource, type SecretSource } from "../../init/prompts.js";

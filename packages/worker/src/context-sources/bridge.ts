@@ -12,7 +12,7 @@ import {
   type ContextToolCallRequest,
   type ContextToolCallResponse,
   type ContextToolCatalog,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { frameForModel } from "./frame.js";
 
 const CAPABILITY_HEADER = "x-agentx-callback-capability";

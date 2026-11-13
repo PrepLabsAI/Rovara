@@ -4,8 +4,8 @@ import { expect } from "vitest";
 import {
   CheckRunnerCapabilitiesSchema,
   type Check, type CheckRunner, type CheckTarget, type HostScope, type RepositoryRef,
-} from "@agentx/contracts";
-import type { FakeHostModel } from "@agentx/broker/fakes";
+} from "@rovara-code/contracts";
+import type { FakeHostModel } from "@rovara-code/core/fakes";
 import { twoCompanyChecks, type TwoCompanyIsolation } from "../isolation/two-company.js";
 import { rejection, type ContractCheck } from "./plugin-contract-kit.js";
 

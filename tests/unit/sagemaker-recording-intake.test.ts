@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   SAGEMAKER_RECORDING_MAX_BYTES, SageMakerRecordingFileSchema, builtinPiiScanner, rescanSageMakerRecording, sageMakerFixtureDigest, sageMakerRecordingSamples, type PiiScanner, type SageMakerRecordingFile,
 } from "../../packages/contracts/src/index.js";
-import { SAGEMAKER_INTAKE_REFUSAL_WORDS, intakeSageMakerRecording } from "../../packages/broker/src/core/test-env/sagemaker-recording-intake.js";
+import { SAGEMAKER_INTAKE_REFUSAL_WORDS, intakeSageMakerRecording } from "../../packages/core/src/core/test-env/sagemaker-recording-intake.js";
 
 const DENY = { accountIds: [], hosts: ["*.prod.example.com"], arnPrefixes: [] };
 const EMAIL = "pat.quill@fakemail-sample.io";

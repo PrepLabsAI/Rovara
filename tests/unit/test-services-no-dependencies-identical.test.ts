@@ -2,14 +2,14 @@
 // fails, the switch needs a per-project allow-list first. Covered: the setup proposal (sanitized draft), the task plans (checks and coding), the Prove report, the evidence pack, and the pull request lines the evidence
 // builds (the pull request body takes its testing lines from the pack and has no other test-services input).
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentBodySchema, type OrgId, type TestEnvDraft, type TestEnvironmentBody } from "@agentx/contracts";
-import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence-pack.js";
-import { evidenceLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
-import { sanitizeTestEnvDraft } from "../../packages/broker/src/core/test-env/draft.js";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
-import { proveReportFromSetupCheck } from "../../packages/broker/src/core/test-env/prove-from-setup-check.js";
-import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
-import { testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
+import { TestEnvironmentBodySchema, type OrgId, type TestEnvDraft, type TestEnvironmentBody } from "@rovara-code/contracts";
+import { buildEvidencePack } from "../../packages/core/src/core/proof/evidence-pack.js";
+import { evidenceLines } from "../../packages/core/src/core/proof/evidence-lines.js";
+import { sanitizeTestEnvDraft } from "../../packages/core/src/core/test-env/draft.js";
+import { evidenceEnvironmentOf } from "../../packages/core/src/core/test-env/evidence-line.js";
+import { proveReportFromSetupCheck } from "../../packages/core/src/core/test-env/prove-from-setup-check.js";
+import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/core/src/core/test-env/task-plan.js";
+import { testEnvironmentForStart } from "../../packages/core/src/core/test-env/usable.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 

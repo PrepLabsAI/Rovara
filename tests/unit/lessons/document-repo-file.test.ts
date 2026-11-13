@@ -1,10 +1,10 @@
 // The per-repository state of the lessons file in the document store: the in-memory store and the document-store one answer the same. Every write is conditional on the revision that was read; the items sit under
 // the LESSONSET prefix the project and company erase wipe.
-import { queryAll, teamRecordPk } from "@agentx/contracts";
+import { queryAll, teamRecordPk } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
-import { documentRepoFileStore } from "../../../packages/broker/src/lessons/document-repo-file.js";
-import { InMemoryRepoFileStore, StateUnreadable, newRepoFileState } from "../../../packages/broker/src/lessons/repo-file-state.js";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
+import { documentRepoFileStore } from "../../../packages/core/src/lessons/document-repo-file.js";
+import { InMemoryRepoFileStore, StateUnreadable, newRepoFileState } from "../../../packages/core/src/lessons/repo-file-state.js";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
 import { KEY, PLACE, OTHER_PLACE } from "./repo-file-helpers.js";
 
 const stores = (): Array<[string, () => InMemoryRepoFileStore | ReturnType<typeof documentRepoFileStore>]> => [

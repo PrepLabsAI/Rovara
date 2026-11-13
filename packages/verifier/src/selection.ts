@@ -1,5 +1,5 @@
 import { types } from "node:util";
-import { E2EExecutionPlanSchema, canonicalJson, copyBoundedE2EJsonData, type E2EExecutionPlan, type E2EExpectedCase, type E2ETarget } from "@agentx/contracts";
+import { E2EExecutionPlanSchema, canonicalJson, copyBoundedE2EJsonData, type E2EExecutionPlan, type E2EExpectedCase, type E2ETarget } from "@rovara-code/contracts";
 import { upstreamE2ECaseIdentity } from "./identity.js";
 
 export type E2ESelectionTuple = Readonly<{ caseId: string; compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: "contained-candidate-process-response/v1"; requestProtocol: "contained-candidate-host-request/v1"; upstreamTestId: string; upstreamResultId: string; title: string; targetId: string; targetName: string; agent: "default"; disposition: "run" | "filtered" }>;

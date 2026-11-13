@@ -12,7 +12,7 @@ import { readEnvironmentSettings, writeEnvironmentSettings } from "../../package
 import { writeSlackTeamId } from "../../packages/cli/src/signin/settings.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { accessChanged, runUpgrade, type UpgradeDependencies } from "../../packages/cli/src/upgrade/run.js";
 import { SETTINGS } from "../support/doctor-fakes.js";
 import { allStackOutputs, fakeGitHubApi, fakeRelease, memoryInitSecrets, scriptedDeployer, T0, TEST_PRIVATE_KEY } from "../support/init-fakes.js";

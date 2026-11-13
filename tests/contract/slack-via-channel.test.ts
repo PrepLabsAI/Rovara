@@ -6,10 +6,10 @@ import {
   DETAILS_ACTION, builtInAdapterRecord, channelEventGroupId, confirmationBlocks, detailsReplyBlocks, generateWebhookSecret, usableWebhookSecret, webhookHeaders,
   type ChannelEvent, type ChannelQueueItem, type SlackRequestMessage, type SlackThreadWorkspaceResult,
 } from "../../packages/contracts/src/index.js";
-import { adapterForChannel, builtInAdapterFromEnvironment, getChannelAdapter } from "../../packages/broker/src/aws/channel-adapters.js";
-import { createChannelEventSender, type SqsRecord } from "../../packages/broker/src/aws/channel-events.js";
-import { createChannelIngressHandler, type ChannelIngressDependencies } from "../../packages/broker/src/aws/channel-ingress.js";
-import { createSlackChannelEventsHandler, createSlackChannelForwarder, type SlackChannelEventsDependencies } from "../../packages/broker/src/aws/slack-adapter.js";
+import { adapterForChannel, builtInAdapterFromEnvironment, getChannelAdapter } from "../../packages/core/src/aws/channel-adapters.js";
+import { createChannelEventSender, type SqsRecord } from "../../packages/core/src/aws/channel-events.js";
+import { createChannelIngressHandler, type ChannelIngressDependencies } from "../../packages/core/src/aws/channel-ingress.js";
+import { createSlackChannelEventsHandler, createSlackChannelForwarder, type SlackChannelEventsDependencies } from "../../packages/core/src/aws/slack-adapter.js";
 import { channelRequestHandler } from "../../packages/slack-service/src/channel-requests.js";
 import { slackChannelRequests } from "../../packages/slack-service/src/slack-channel.js";
 import type { TurnInput } from "../../packages/slack-service/src/slack-processor.js";

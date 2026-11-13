@@ -1,7 +1,7 @@
 // The `email` point (lane K1): the fake passes the contract; Code's default sends nothing and says so; the refusal rule every adapter shares.
 import { describe, expect, it } from "vitest";
-import { EmailError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, emailRefusal, isPlainEmailAddress } from "@agentx/contracts";
-import { createAdapterRegistry, createFakeEmailSender, createUnavailableEmailSender, registerCodeDefaults } from "../../packages/broker/src/ports/index.js";
+import { EmailError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, emailRefusal, isPlainEmailAddress } from "@rovara-code/contracts";
+import { createAdapterRegistry, createFakeEmailSender, createUnavailableEmailSender, registerCodeDefaults } from "../../packages/core/src/ports/index.js";
 import { runEmailConformance } from "../support/ports/email-conformance.js";
 
 runEmailConformance("the in-memory fake", {

@@ -1,7 +1,7 @@
 // Spec 048 FR-028 and FR-065: the install name, the GitHub owner and the app name, checked before
 // anything is created.
 import { describe, expect, it } from "vitest";
-import { environmentStackName } from "@agentx/contracts";
+import { environmentStackName } from "@rovara-code/contracts";
 import { clashChecks } from "../../packages/cli/src/init/clash-checks.js";
 import { githubAppSlug } from "../../packages/cli/src/init/github-app.js";
 import { fakeGitHubApi, sampleAnswers } from "../support/init-fakes.js";

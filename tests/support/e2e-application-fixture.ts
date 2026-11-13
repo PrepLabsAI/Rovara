@@ -3,9 +3,9 @@ import { E2EApplicationExecutionAdmissionSchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_I
   e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, E2EApplicationPlanIntentSchema,
   E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema, E2ERuntimeCapabilityDescriptorSchema,
   inspectE2EApplicationRepository, inspectE2ERepository, projectE2EApplicationPortableSelection, withE2EAnonymousTargets, proposeE2ESetup, selectE2EApplicationExecutionPlan,
-  type E2EPolicy, type E2ESourceSnapshot } from "@agentx/contracts";
-import { deriveE2EApplicationApprovalBinding } from "../../packages/broker/src/e2e/application-plan-binding.js";
-import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
+  type E2EPolicy, type E2ESourceSnapshot } from "@rovara-code/contracts";
+import { deriveE2EApplicationApprovalBinding } from "../../packages/core/src/e2e/application-plan-binding.js";
+import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/core/src/e2e/feature-plan-intent.js";
 import { compileE2EApplicationScenarios, createE2EApplicationPortableChildBindings, encodeE2EApplicationExecutionAdmission,
   type E2ECompiledApplicationSuite } from "../../packages/verifier/src/application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../../packages/verifier/src/application-build-source.js";

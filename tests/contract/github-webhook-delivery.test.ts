@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   claimGithubWebhookDelivery, completeGithubWebhookDelivery, processGithubWebhookDelivery, rejectGithubWebhookDelivery,
   reserveGithubWebhookDelivery, retryGithubWebhookDelivery,
-} from "../../packages/broker/src/aws/github-webhooks.js";
+} from "../../packages/core/src/aws/github-webhooks.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { assertDynamoExpressionAttributes, validatingDocumentClient } from "../support/validating-document-client.js";
 

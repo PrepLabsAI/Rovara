@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { arch, hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import { ProjectDefinitionSchema, type ProjectDefinition } from "@agentx/contracts";
+import { ProjectDefinitionSchema, type ProjectDefinition } from "@rovara-code/contracts";
 import { developerAccessToken } from "../developer/session.js";
 import { GitHub } from "./github.js";
 import { createRegisteredEnrollment, createRegisteredPendingEnrollment, PublicationJoinRequestSchema, type PublicationJoinTransport } from "./enrollment.js";

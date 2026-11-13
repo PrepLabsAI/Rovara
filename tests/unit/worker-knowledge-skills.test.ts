@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { MetaSkillSnapshotSchema } from "@agentx/contracts";
+import { MetaSkillSnapshotSchema } from "@rovara-code/contracts";
 import { loadMetaSkills, mergeSkills, stripSkillExecution, SKILL_TEXT_MAX_BYTES } from "../../packages/worker/src/knowledge/skills.js";
 import { createReaderRegistry } from "../../packages/worker/src/knowledge/registry.js";
 import { memoryKnowledgeSource } from "../../packages/worker/src/knowledge/source.js";

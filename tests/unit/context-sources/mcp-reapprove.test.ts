@@ -2,15 +2,15 @@
 // with the pinned install unchanged. What is promised: the diff is exact; only an admin can re-approve, and a second admin when the install asks for one; the tools approved are the ones the
 // admin was shown (otherwise nothing is approved); the install is never touched; a paused server stays paused unless somebody re-approves it; the controller serves it again at once.
 import { describe, expect, it } from "vitest";
-import type { McpServerProbe } from "@agentx/contracts";
-import { mcpServerAudit } from "../../../packages/broker/src/context-sources/audit.js";
-import { approveMcpServer, diffTools, documentMcpServerStore, legacyToolsHash, proposeMcpServer, reapprovePausedMcpServer, reviewPausedMcpServer, sameTools, summariseProbe, type McpServerDependencies, type McpServerSecrets } from "../../../packages/broker/src/context-sources/mcp-servers.js";
+import type { McpServerProbe } from "@rovara-code/contracts";
+import { mcpServerAudit } from "../../../packages/core/src/context-sources/audit.js";
+import { approveMcpServer, diffTools, documentMcpServerStore, legacyToolsHash, proposeMcpServer, reapprovePausedMcpServer, reviewPausedMcpServer, sameTools, summariseProbe, type McpServerDependencies, type McpServerSecrets } from "../../../packages/core/src/context-sources/mcp-servers.js";
 import { routeMcpServers } from "../../support/mcp-server-routes.js";
 import { capturingAuditDeps } from "../../support/audit-capture.js";
-import { INDEX_EXPIRY_ATTRIBUTE, change } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { TASK_FLOW_INDEXES } from "../../../packages/broker/src/core/task-flow/flow.js";
-import { toolSchemaHash, type DiscoveredTool } from "../../../packages/broker/src/context-sources/settings.js";
+import { INDEX_EXPIRY_ATTRIBUTE, change } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
+import { TASK_FLOW_INDEXES } from "../../../packages/core/src/core/task-flow/flow.js";
+import { toolSchemaHash, type DiscoveredTool } from "../../../packages/core/src/context-sources/settings.js";
 import { GET_TOOL, NOW, ORG, PLAIN_TOOL, SEARCH_TOOL, WRITE_TOOL } from "./fixtures.js";
 
 const admin = (developerId = "dev1", orgRole = "admin") => ({ orgId: ORG, developerId, orgRole });

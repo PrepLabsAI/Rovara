@@ -6,7 +6,7 @@
 // checks the interactivity URL, so AgentX sends both URLs a correctly signed Slack-style request
 // itself, then asks the engineer to confirm the Event Subscriptions page shows Verified.
 import { createHmac, randomBytes } from "node:crypto";
-import { AgentXError, agentXError, environmentStackName, errorStatus } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentStackName, errorStatus } from "@rovara-code/contracts";
 import type { InitContext, InitSecrets, SecretFlags } from "./context.js";
 import { SLACK_BOT_HANDLE_PATTERN, type InstallProgress } from "./install-state.js";
 import { askForm, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, secretFromSource, type FormField, type SecretSource } from "./prompts.js";

@@ -12,7 +12,7 @@ import {
   type ChannelQueueItem,
   type ConversationRef,
   type PendingConfirmation,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { confirmationApprovalKind, confirmationDigest, type ConfirmationAnswer } from "./confirmations.js";
 import { checkReportEvents, doneFields, pullRequestEvents } from "./channel-task-events.js";
 import { PLAIN_FORMAT } from "./conversation-format.js";

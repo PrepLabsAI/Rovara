@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { E2EAgentActionLedgerSchema, e2eAgentValueKeyId } from "@agentx/contracts";
+import { E2EAgentActionLedgerSchema, e2eAgentValueKeyId } from "@rovara-code/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { assembleAgentRun, collectAssembled, firstCase } from "../support/agent-collection.js";

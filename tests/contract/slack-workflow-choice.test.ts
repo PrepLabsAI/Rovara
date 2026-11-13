@@ -17,7 +17,7 @@ import {
   workflowChoiceRefusal,
   workflowStartFailureNotice,
   workflowStartedNotice,
-} from "../../packages/broker/src/aws/slack-workflow-choice.js";
+} from "../../packages/core/src/aws/slack-workflow-choice.js";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { suggestionCardMessage, workflowChoicePut } from "../../packages/contracts/src/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";

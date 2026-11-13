@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidateManifest, type E2ESourceSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, type E2ESourceSnapshot } from "@rovara-code/contracts";
 import { validateE2EApplicationBuildSourceManifest } from "../../packages/verifier/src/application-build-source.js";
 import { createProcessCandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
 import { MAX_BUILD_SOURCE_MANIFEST_BYTES, exportCandidateBuildSource, exportCandidateBuildSourceInScratch } from "../../packages/worker/src/e2e-build-source-export.js";

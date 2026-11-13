@@ -1,6 +1,6 @@
 // What a coding run did, kept only to answer for it when the run ends with no code change: the commands the agent ran, what they printed, and the agent's last words. It reads the session's own
 // tool events (nothing else is stored or asked of a model). The block it builds is redacted and bounded (`buildNoChangeFindings`) before it leaves the worker.
-import { NO_CHANGE_FINDINGS_COMMANDS_MAX, NO_CHANGE_FINDINGS_CONCLUSION_MAX, NO_CHANGE_FINDINGS_OMITTED_MAX, buildNoChangeFindings, type NoChangeFindings } from "@agentx/contracts";
+import { NO_CHANGE_FINDINGS_COMMANDS_MAX, NO_CHANGE_FINDINGS_CONCLUSION_MAX, NO_CHANGE_FINDINGS_OMITTED_MAX, buildNoChangeFindings, type NoChangeFindings } from "@rovara-code/contracts";
 
 /** The tools whose calls are told as "commands the agent ran": the shell and the tools that only read. A tool that writes is never listed. */
 const LISTED_TOOLS: ReadonlySet<string> = new Set(["bash", "grep", "find", "ls", "read"]);

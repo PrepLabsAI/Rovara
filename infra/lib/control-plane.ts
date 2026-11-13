@@ -31,7 +31,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@rovara-code/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
@@ -165,7 +165,7 @@ export class ControlPlaneStack extends Stack {
       visibilityTimeout: Duration.minutes(2),
     });
 
-    const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker.ts", {
+    const broker = packagedFunction(this, "Broker", "packages/core/src/aws/broker.ts", {
       STATE_TABLE_NAME: state.tableName,
       AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
       AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: e2eFeatureRuntimeCatalogId,
@@ -230,7 +230,7 @@ export class ControlPlaneStack extends Stack {
     // read inside 120, and the rest is for attaching the bundle and cleaning up. 1,024 MB: files are read in memory.
     // Developer tasks, and so their plans, exist only in named environments; the legacy templates gain nothing.
     if (naming.env !== undefined) {
-      const planEvidence = packagedFunction(this, "PlanEvidence", "packages/broker/src/aws/plan-evidence-handler.ts", {
+      const planEvidence = packagedFunction(this, "PlanEvidence", "packages/core/src/aws/plan-evidence-handler.ts", {
         STATE_TABLE_NAME: state.tableName,
         ARTIFACT_BUCKET_NAME: artifacts.bucketName,
         GITHUB_APP_CREDENTIAL_REF: githubAppCredentialRef.valueAsString,
@@ -271,7 +271,7 @@ export class ControlPlaneStack extends Stack {
     const outboxPublisher = packagedFunction(
       this,
       "OutboxPublisher",
-      "packages/broker/src/aws/outbox-publisher.ts",
+      "packages/core/src/aws/outbox-publisher.ts",
       {
         STATE_TABLE_NAME: state.tableName,
         DISPATCH_QUEUE_URL: dispatchQueue.queueUrl,
@@ -296,7 +296,7 @@ export class ControlPlaneStack extends Stack {
     const dispatcher = packagedFunction(
       this,
       "Dispatcher",
-      "packages/broker/src/aws/dispatcher.ts",
+      "packages/core/src/aws/dispatcher.ts",
       {
         STATE_TABLE_NAME: state.tableName,
         AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
@@ -652,7 +652,7 @@ export class ControlPlaneStack extends Stack {
     const slackIngress = packagedFunction(
       this,
       "SlackIngress",
-      "packages/broker/src/aws/slack-ingress.ts",
+      "packages/core/src/aws/slack-ingress.ts",
       {
         STATE_TABLE_NAME: state.tableName,
         SLACK_THREADS_TABLE_NAME: slackThreads.tableName,
@@ -1101,7 +1101,7 @@ export class ControlPlaneStack extends Stack {
     // slot is held), and nothing has to switch it off. Overlapping ticks are safe: every change is a conditional write.
     // Its 90-second timeout, like the broker's 30, must stay well below EVAL_BATCH_STALE_CLAIM_MS (5 minutes,
     // eval-batch.ts): a stale claim is recovered only once the top-up that made it is dead.
-    const evalBatchTick = packagedFunction(this, "EvalBatchTick", "packages/broker/src/aws/eval-batch-tick.ts", {
+    const evalBatchTick = packagedFunction(this, "EvalBatchTick", "packages/core/src/aws/eval-batch-tick.ts", {
       STATE_TABLE_NAME: state.tableName,
       ARTIFACT_BUCKET_NAME: artifacts.bucketName,
       CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,

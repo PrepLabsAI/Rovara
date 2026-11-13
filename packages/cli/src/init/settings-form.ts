@@ -5,7 +5,7 @@
 // left out: the flag answers it. The page shows the form as one screen; the terminal asks the four,
 // then ADVANCED_QUESTION (prompts.ts askForm).
 import { DEFAULT_BEDROCK_MODELS } from "@agentx/model-runtime/config";
-import { ENVIRONMENT_NAME_PATTERN, ENVIRONMENT_PLACEHOLDER, EnvironmentNameSchema } from "@agentx/contracts";
+import { ENVIRONMENT_NAME_PATTERN, ENVIRONMENT_PLACEHOLDER, EnvironmentNameSchema } from "@rovara-code/contracts";
 import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { InitFlags } from "./answers.js";
 import { estimateMonthlyCost, modelName, modelPriceLabel, money, suggestedBudgetUsd } from "./cost.js";

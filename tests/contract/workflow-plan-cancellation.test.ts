@@ -3,11 +3,11 @@
 // workflow write in the cancel's transaction never fails the cancel.
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "@agentx/contracts";
-import { startTaskWorkflowFeedbackReviewFromWebhook } from "../../packages/broker/src/aws/developer-tasks.js";
-import { releaseFailedCancelWorkspace } from "../../packages/broker/src/aws/failed-cancel-release.js";
-import { sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
-import { stopBlocksWorkflowStep, strandedPlanningRun, type StoppedRunOperation, type StoppedRunTask } from "../../packages/broker/src/aws/workflow-cancel-reconcile.js";
+import { WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { startTaskWorkflowFeedbackReviewFromWebhook } from "../../packages/core/src/aws/developer-tasks.js";
+import { releaseFailedCancelWorkspace } from "../../packages/core/src/aws/failed-cancel-release.js";
+import { sweepStuckCancels } from "../../packages/core/src/aws/stuck-cancels.js";
+import { stopBlocksWorkflowStep, strandedPlanningRun, type StoppedRunOperation, type StoppedRunTask } from "../../packages/core/src/aws/workflow-cancel-reconcile.js";
 import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
 

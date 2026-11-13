@@ -9,12 +9,12 @@ import {
   lockSecondReviewLoweringNeedsSecondPerson, projectSecondReviewLoweringNeedsSecondPerson, secondReviewModelKey, secondReviewShadowPassed,
   stricterSecondReviewMode, summarizeSecondReviewReplay, workflowFindingFingerprint,
   type ModelIdentifier, type SecondReviewReplayCase, type SecondReviewReplayRun, type SecondReviewVerdict, type WorkflowReviewReport,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import {
   admitSecondReview, againstModels, estimateSecondReviewUsd, planSecondReview, secondOpinionOf, secondOpinionPrLines, secondOpinionShownOn,
   mergeWaitsForSecondReview, secondOpinionUnavailable, secondReviewAcknowledgement, secondReviewAlreadyRan, secondReviewBlocksWhenUnavailable,
   type SecondReviewPlan, type SecondReviewPlanInput,
-} from "../../packages/broker/src/core/second-review/plan.js";
+} from "../../packages/core/src/core/second-review/plan.js";
 
 const SONNET: ModelIdentifier = { provider: "anthropic", modelId: "claude-sonnet-4-6" };
 const OPUS: ModelIdentifier = { provider: "anthropic", modelId: "claude-opus-4-6" };

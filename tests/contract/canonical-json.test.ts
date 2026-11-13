@@ -1,4 +1,4 @@
-import { canonicalJson, sameJsonContent } from "@agentx/contracts";
+import { canonicalJson, sameJsonContent } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
 
 describe("canonical JSON", () => {

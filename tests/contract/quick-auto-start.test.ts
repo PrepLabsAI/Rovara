@@ -1,6 +1,6 @@
 // Decision 134: the broker's own check before a clear small change starts Quick on its own.
 import { describe, expect, it } from "vitest";
-import { QUICK_AUTO_START_MAX_CHARS, quickAutoStartRefusal, quickAutoStartText } from "../../packages/broker/src/core/intake/quick-auto-start.js";
+import { QUICK_AUTO_START_MAX_CHARS, quickAutoStartRefusal, quickAutoStartText } from "../../packages/core/src/core/intake/quick-auto-start.js";
 
 describe("which small changes may start Quick on their own", () => {
   it("lets a short, plain, low-risk change start", () => {

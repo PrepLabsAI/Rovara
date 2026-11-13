@@ -3,10 +3,10 @@ import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
-import { createLocalConnectionSecrets } from "../../packages/broker/src/connections/local-secrets.js";
-import { orgConnectorSecretName } from "../../packages/broker/src/connections/org-secrets.js";
-import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-stores.js";
+import { IMPLICIT_COMPANY_ID } from "@rovara-code/contracts";
+import { createLocalConnectionSecrets } from "../../packages/core/src/connections/local-secrets.js";
+import { orgConnectorSecretName } from "../../packages/core/src/connections/org-secrets.js";
+import { createLocalSecretStore } from "../../packages/core/src/ports/secret-stores.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length > 0) await cleanup.pop()!(); });

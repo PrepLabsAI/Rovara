@@ -4,8 +4,8 @@ import {
   renderTaskPeoplePanel,
   renderTaskPeopleUnavailable,
   type TaskPeopleConfirmationView,
-} from "../../packages/broker/src/aws/task-people-page-view.js";
-import type { TaskPeopleView } from "../../packages/broker/src/developer/task-people.js";
+} from "../../packages/core/src/aws/task-people-page-view.js";
+import type { TaskPeopleView } from "../../packages/core/src/developer/task-people.js";
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
 const OWNER_ID = "22222222-2222-4222-8222-222222222222";

@@ -4,7 +4,7 @@
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
-import { DEVELOPER_TASK_SUMMARY_MAX, redactSecrets, redactText } from "@agentx/contracts";
+import { DEVELOPER_TASK_SUMMARY_MAX, redactSecrets, redactText } from "@rovara-code/contracts";
 import { ToolError } from "./errors.js";
 import { FIRST_LIST_WAIT_MS, NOT_OFFERED, ToolOffer, guardTransport, type AdminOffer, type AdminToolGroup } from "./offer.js";
 import { RequestIdMemory } from "./request-ids.js";

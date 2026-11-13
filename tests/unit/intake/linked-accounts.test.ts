@@ -1,7 +1,7 @@
 // The owner's linked outside accounts are matched on all three parts of the neutral shape: the tracker, the workspace or site, and the account. An account of another site, another tracker or another company is nobody.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
-import { createLocalOwnerIdentity, localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
+import { IMPLICIT_COMPANY_ID } from "@rovara-code/contracts";
+import { createLocalOwnerIdentity, localOwnerPrincipal } from "../../../packages/core/src/ports/policy-defaults.js";
 
 const JIRA = { provider: "jira", tenant: "acme.atlassian.net", accountId: "712020:abc" };
 const LINEAR = { provider: "linear", tenant: "", accountId: "u-owner" };

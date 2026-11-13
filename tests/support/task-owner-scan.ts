@@ -29,7 +29,7 @@ export interface Hit {
 export interface Root { dir: string; prefix: string }
 
 /** The source the guard covers: the broker's and the contracts package's. */
-export const guardedRoots = (packagesDir: string): Root[] => [{ dir: path.join(packagesDir, "broker/src"), prefix: "" }, { dir: path.join(packagesDir, "contracts/src"), prefix: "contracts/" }];
+export const guardedRoots = (packagesDir: string): Root[] => [{ dir: path.join(packagesDir, "core/src"), prefix: "" }, { dir: path.join(packagesDir, "contracts/src"), prefix: "contracts/" }];
 
 export function sourceFiles(directory: string): string[] {
   return readdirSync(directory).flatMap((entry) => {

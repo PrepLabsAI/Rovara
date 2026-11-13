@@ -1,6 +1,6 @@
 // TS-UX-1 (0.5.10): which commands need a database that exists only inside the test environment (seeds and migrations), so they are routed to the dependency's seed and never to SETUP.
 import { describe, expect, it } from "vitest";
-import { isDatabaseSeedCommand, parseCommandLine } from "@agentx/contracts";
+import { isDatabaseSeedCommand, parseCommandLine } from "@rovara-code/contracts";
 
 const is = (line: string): boolean => isDatabaseSeedCommand(parseCommandLine(line, "svc", 900));
 

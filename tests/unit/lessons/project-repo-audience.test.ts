@@ -2,16 +2,16 @@
 // the live task rules then apply as for any project-wide lesson. Any other restriction (a Slack channel, another project's repository, an explicit list, mixed places) stays restricted. The access check
 // is a stand-in that restricts every place it is asked about with a restriction and has no record to say otherwise.
 import { describe, expect, it } from "vitest";
-import type { AccessCheckPort, TaskVisibilityPort } from "../../../packages/broker/src/lessons/access-port.js";
-import { learnedContextFromRefs } from "../../../packages/broker/src/lessons/deliver.js";
-import { loadLessonsForStage, type LoadDeps, type LoadRequest } from "../../../packages/broker/src/lessons/load.js";
-import { mentionsRepoPlace, repoOnlyScopes, viewedForLessons, withProjectRepoScopes } from "../../../packages/broker/src/lessons/project-repo-audience.js";
-import { promoteToRule } from "../../../packages/broker/src/lessons/promote.js";
-import { readVisible } from "../../../packages/broker/src/lessons/read-visible.js";
-import { InMemoryLessonStore, type LoadManifest } from "../../../packages/broker/src/lessons/store.js";
-import { withLessonAudiences, type LessonTaskAudience } from "../../../packages/broker/src/lessons/task-audience.js";
-import { lessonsUsedReaderOver } from "../../../packages/broker/src/lessons/used-in-pr.js";
-import type { Audience, Lesson } from "../../../packages/broker/src/lessons/types.js";
+import type { AccessCheckPort, TaskVisibilityPort } from "../../../packages/core/src/lessons/access-port.js";
+import { learnedContextFromRefs } from "../../../packages/core/src/lessons/deliver.js";
+import { loadLessonsForStage, type LoadDeps, type LoadRequest } from "../../../packages/core/src/lessons/load.js";
+import { mentionsRepoPlace, repoOnlyScopes, viewedForLessons, withProjectRepoScopes } from "../../../packages/core/src/lessons/project-repo-audience.js";
+import { promoteToRule } from "../../../packages/core/src/lessons/promote.js";
+import { readVisible } from "../../../packages/core/src/lessons/read-visible.js";
+import { InMemoryLessonStore, type LoadManifest } from "../../../packages/core/src/lessons/store.js";
+import { withLessonAudiences, type LessonTaskAudience } from "../../../packages/core/src/lessons/task-audience.js";
+import { lessonsUsedReaderOver } from "../../../packages/core/src/lessons/used-in-pr.js";
+import type { Audience, Lesson } from "../../../packages/core/src/lessons/types.js";
 import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, draft, embedder, lessonRecord, seed, settings, wideAudience } from "./lesson-helpers.js";
 
 const T1 = "2026-10-30T09:00:00.000Z";

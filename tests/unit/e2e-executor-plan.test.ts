@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { E2EExecutorPlanSchema, e2eExecutorAdmissionDigest } from "@agentx/contracts";
+import { E2EExecutorPlanSchema, e2eExecutorAdmissionDigest } from "@rovara-code/contracts";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 
 const fixture = createOrdersExecutorPlan({ probe: "api-state-positive-v1" });

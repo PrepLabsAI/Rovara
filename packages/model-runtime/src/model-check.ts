@@ -1,4 +1,4 @@
-import { bedrockProfileGeography, modelCheckClassSentence, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { bedrockProfileGeography, modelCheckClassSentence, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@rovara-code/contracts";
 import { MissingProviderSecret } from "./config.js";
 import { classifyProviderFailure, isNetworkCode, signalPattern } from "./provider-failure.js";
 import { foundationModelIdOf, quotaHint, type QuotaClient } from "./model-discovery.js";

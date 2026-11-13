@@ -1,4 +1,4 @@
-import { JIRA_PROJECT_TOOL_ACCESS } from "@agentx/contracts";
+import { JIRA_PROJECT_TOOL_ACCESS } from "@rovara-code/contracts";
 import { GuardRejection, type Binder, type ConnectorDefinition, type CredentialProvider, type Guard } from "./types.js";
 import { limitJqlToProject } from "./jira-jql.js";
 import { isObject } from "./util.js";

@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import type { MeterEntry, ModelUsage, PriceTable } from "@agentx/contracts";
+import type { MeterEntry, ModelUsage, PriceTable } from "@rovara-code/contracts";
 import {
   CODE_HOST_COMMENT_METHOD,
   LOCAL_SESSION_METHOD,
@@ -14,8 +14,8 @@ import {
   createNoopAuditSink,
   createPriceTableMetering,
   localOwnerPrincipal,
-} from "../../packages/broker/src/ports/policy-defaults.js";
-import { createEnvironmentModelKeyStore, createFileModelKeyStore, createLayeredModelKeyStore, createMemoryModelKeyStore, environmentVariableFor } from "../../packages/broker/src/ports/model-key-stores.js";
+} from "../../packages/core/src/ports/policy-defaults.js";
+import { createEnvironmentModelKeyStore, createFileModelKeyStore, createLayeredModelKeyStore, createMemoryModelKeyStore, environmentVariableFor } from "../../packages/core/src/ports/model-key-stores.js";
 import { runAdmissionConformance, runApproversConformance, runAuditSinkConformance, runIdentityConformance, runMeteringConformance, runModelKeyStoreConformance } from "../support/ports/policy-conformance.js";
 import { commentReads, freshComment } from "../support/comment-fakes.js";
 

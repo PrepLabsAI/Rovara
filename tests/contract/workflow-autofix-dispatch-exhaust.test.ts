@@ -6,16 +6,16 @@ import { describe, expect, it } from "vitest";
 import {
   WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, autoFixDecision, classifyBlockedWorkflow, createCandidateManifest, WorkflowDecisionRecordSchema, WorkflowSnapshotSchema, createWorkflowSnapshot, wholeTaskSpendUsd, workflowAutoActionRequestId, workflowAutomaticRetryDecision,
   type AutoFixBudget, type AutoFixFacts, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { AUTOFIX_ROUND_ESTIMATE_USD, autofixConfigFromEnvironment } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
+} from "@rovara-code/contracts";
+import { AUTOFIX_ROUND_ESTIMATE_USD, autofixConfigFromEnvironment } from "../../packages/core/src/aws/workflow-autofix-runner.js";
 import {
   DISPATCH_EXHAUST_RETRY_DELAY_MS, autofixBlockCauseOf, autofixBlockRows, autofixRowHeld, autofixSwitchOn, dispatchExhaustRows, endedRunRows, ownerStopRows,
-} from "../../packages/broker/src/aws/workflow-autofix-dispatch-exhaust.js";
-import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
-import { failActiveOperation } from "../../packages/broker/src/aws/outbox-failure.js";
-import { sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
-import { AutoFixAskSchema, autoFixCardLines } from "../../packages/broker/src/developer/autofix-messages.js";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+} from "../../packages/core/src/aws/workflow-autofix-dispatch-exhaust.js";
+import { workflowDispatchItem } from "../../packages/core/src/aws/broker-shared.js";
+import { failActiveOperation } from "../../packages/core/src/aws/outbox-failure.js";
+import { sweepStuckCancels } from "../../packages/core/src/aws/stuck-cancels.js";
+import { AutoFixAskSchema, autoFixCardLines } from "../../packages/core/src/developer/autofix-messages.js";
+import { workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
 import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
 

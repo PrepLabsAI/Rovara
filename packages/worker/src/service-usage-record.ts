@@ -32,7 +32,7 @@
 import {
   AwsHeavyFunctionSchema, AwsOperationNameSchema, AwsServiceKeySchema, TEST_SERVICES_AWS_USAGE_LIMITS, normaliseAwsLedgerName, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_SCHEMA_VERSION, TestServicesAwsUsageSchema, hostProblem, looksLikeSecretValue, registrableDomain,
   type AwsHeavyFunction, type TestServicesAwsUsage, type TestServicesDependencyUsage, type TestServicesFakeUsage, type TestServicesStartFailure, type TestServicesUsageRecord,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { readSealedDnsRecord, type SealedDnsRecord } from "./check-sandbox.js";
 import { EmulatorControlError } from "./emulator-control.js";
 import { EmulatorLedgerError, type EmulatorLedger, type EmulatorLedgerPort } from "./emulator-ledger.js";

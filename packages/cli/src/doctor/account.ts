@@ -1,6 +1,6 @@
 // FR-050's model access, alert subscription and budget; the region's capacity (the vCPU quota and
 // free Elastic IPs init checks, item 5); and spec 025 FR-046's sign-in checks, unchanged.
-import { KEYED_MODEL_PROVIDERS, environmentStackName, isKeyedModelProvider } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, environmentStackName, isKeyedModelProvider } from "@rovara-code/contracts";
 import { EC2_WORKER_VCPU_REQUIREMENT, modelCheckProblem, NAT_ELASTIC_IPS, type ModelRole } from "../init/prerequisites.js";
 import { runModelCheck } from "../init/run-model-check.js";
 import { plainMessage } from "../output.js";

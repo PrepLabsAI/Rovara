@@ -2,11 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   E2EDisplayScenarioSchema, E2E_APPLICATION_SEND_BACK_CODES, cutEvidenceReason, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, sendBackInstructions, sendBackProblems,
   workflowApplicationEvidenceCodes, workflowSendBackOffered, type WorkflowSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import type { DockerApplicationUnavailableReason } from "@agentx/verifier";
-import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
-import { buildScenarioRows, type DisplayGroupInput } from "../../packages/broker/src/e2e/application-display.js";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { E2E_OWNER_SENTENCES } from "../../packages/core/src/e2e/owner-sentences.js";
+import { buildScenarioRows, type DisplayGroupInput } from "../../packages/core/src/e2e/application-display.js";
+import { workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
 
 // M1.4 RUN-2: every reason the app host (and the worker, and the broker's own runtime gate) can end a group with has its own fixed owner sentence, shown on the rows and in the

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ConnectorCallRequest, ConnectorCatalog } from "@agentx/contracts";
+import type { ConnectorCallRequest, ConnectorCatalog } from "@rovara-code/contracts";
 import { createConnectorTools } from "./connector-tools.js";
 
 export const ORCHESTRATION_TOOL_NAMES = [

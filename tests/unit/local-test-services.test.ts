@@ -4,12 +4,12 @@ import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CATALOG_FILE, CATALOG_SIGNATURE_ALGORITHM, CATALOG_SIGNATURE_FILE, catalogPins, catalogSigningMessage, parseBundlePublicKey, sha256HexOf, MachineError } from "@agentx/contracts";
+import { CATALOG_FILE, CATALOG_SIGNATURE_ALGORITHM, CATALOG_SIGNATURE_FILE, catalogPins, catalogSigningMessage, parseBundlePublicKey, sha256HexOf, MachineError } from "@rovara-code/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import type { DockerResult, DockerRunner } from "../../packages/broker/src/local/docker-runner.js";
-import { DockerWorkerMachines } from "../../packages/broker/src/local/docker-worker-machines.js";
-import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
-import { NO_TRUSTED_CATALOG_SENTENCE, loadLocalServiceCatalog, localTestServicesFrom, prepareTestServiceImages, removePulledTestServiceImages, testServicesEnvironment } from "../../packages/broker/src/local/test-services.js";
+import type { DockerResult, DockerRunner } from "../../packages/core/src/local/docker-runner.js";
+import { DockerWorkerMachines } from "../../packages/core/src/local/docker-worker-machines.js";
+import { createEphemeralInvokeSigner } from "../../packages/core/src/local/invoke-signer.js";
+import { NO_TRUSTED_CATALOG_SENTENCE, loadLocalServiceCatalog, localTestServicesFrom, prepareTestServiceImages, removePulledTestServiceImages, testServicesEnvironment } from "../../packages/core/src/local/test-services.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { pinnedCatalog, verifiedCatalog } from "../support/catalog-pinning.js";
 

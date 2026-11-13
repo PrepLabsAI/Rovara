@@ -2,15 +2,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { canonicalJson, type E2EReplaySourceCase, type E2EReplayTrace } from "@agentx/contracts";
+import { canonicalJson, type E2EReplaySourceCase, type E2EReplayTrace } from "@rovara-code/contracts";
 import { agentRunnable, downloadsOf, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { recordingsOf, runReplayCase, type ReplayRun } from "../support/agent-replay-run.js";
 import { asLinuxRun, assembleAgentRun, assembleReplayRun, brokerRoundFor, type AssembledRun } from "../support/agent-collection.js";
 import { FIXED_RUNTIME_AT, type OrdersM14Variant } from "../support/orders-m14-agent.js";
-import { verifyApplicationE2EEvidence } from "../../packages/broker/src/e2e/application-evidence.js";
+import { verifyApplicationE2EEvidence } from "../../packages/core/src/e2e/application-evidence.js";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayResultOf, replaySourceCasesOf, replayStartItem, requestWorkflowE2EReplay, verifyReplayEvidence } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
+import { readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayResultOf, replaySourceCasesOf, replayStartItem, requestWorkflowE2EReplay, verifyReplayEvidence } from "../../packages/core/src/aws/workflow-e2e-replay.js";
 
 // M1.4 Task 4.6b: the broker's own verification of a replay. The real executor and Chromium replay the recording a verified round left; the broker re-collects the replay from its raw
 // evidence, and records `{ status, reproduced, downloadSha256Match, reason? }` from that and from what the verified round showed, which the replay admission signs.

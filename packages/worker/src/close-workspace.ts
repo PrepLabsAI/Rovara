@@ -6,7 +6,7 @@ import {
   agentXError,
   type WorkspaceClosePreflightResult,
   type WorkspaceCloseReason,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { runIsolatedGit } from "./isolated-repository.js";
 import type { PreparationManifest } from "./prepare.js";
 import { storedCommandOutput } from "./command-failure.js";

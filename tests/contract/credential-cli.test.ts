@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { listCredentials, registerCredential } from "../../packages/cli/src/admin/credential.js";
 import { tokenStoreKey } from "../../packages/cli/src/auth.js";

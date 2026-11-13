@@ -7,7 +7,7 @@
 // this file writes itself. No file content ever becomes part of a command's executable or args, and
 // no file content, private key or installation token is ever logged.
 import { createHash } from "node:crypto";
-import { agentXError, createCandidateManifest, type CandidateManifest, type CandidateRepository, type ProjectCommand } from "@agentx/contracts";
+import { agentXError, createCandidateManifest, type CandidateManifest, type CandidateRepository, type ProjectCommand } from "@rovara-code/contracts";
 import type { InitSecrets } from "../init/context.js";
 import { githubAppJwt, githubAppSecretName, parseAppSecret, type GitHubApi } from "../init/github-app.js";
 

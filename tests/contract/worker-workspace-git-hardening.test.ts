@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { publishWorkspaceDiff, repositoriesFingerprint } from "../../packages/worker/src/artifacts.js";
 import { inspectWorkspaceForClose } from "../../packages/worker/src/close-workspace.js";

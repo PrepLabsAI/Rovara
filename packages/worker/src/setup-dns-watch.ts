@@ -1,7 +1,7 @@
 import { createSocket, type Socket as UdpSocket } from "node:dgram";
 import { connect, createServer, isIP, type Server, type Socket as TcpSocket } from "node:net";
 // The small entry, not the barrel: the DNS helper containers that load this module run under a 128 MB limit (contracts src/dns-helper.ts).
-import { SETUP_BLOCKED_HOSTS_MAX, SetupHostSchema, agentXError } from "@agentx/contracts/dns-helper";
+import { SETUP_BLOCKED_HOSTS_MAX, SetupHostSchema, agentXError } from "@rovara-code/contracts/dns-helper";
 
 /**
  * Blocked-host detection for the setup agent (design setup-test-health 3.3, task SH9).

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
-import { createTaskWeb, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
+import type { AdaptedHttpRequest } from "../../packages/core/src/aws/lambda.js";
+import { createTaskWeb, type TaskDocumentView } from "../../packages/core/src/aws/task-web.js";
 import { SHOT_SHA, failedBaseline, results, row } from "../support/e2e-scenario-results.js";
 
 // M1.3 Task 3.7: the task page lists one row per scenario of the browser and API round, in its own section, and links a screenshot to the API route behind the session.

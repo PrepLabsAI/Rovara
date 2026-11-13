@@ -13,7 +13,7 @@
 //
 // The messages are cleaned into new values and assigned together before anything else happens. Pi's runner catches a handler's throw and then runs its own summary on whatever the
 // preparation holds, so every failure with sources involved (or not known to be absent) cancels the compaction: an unscrubbed summary is worse than no summary.
-import type { WorkflowApprovedPlan } from "@agentx/contracts";
+import type { WorkflowApprovedPlan } from "@rovara-code/contracts";
 import type { CompactionResult, InlineExtension, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { stubContextEvent } from "./context-sources/events.js";
 import { stubSourceFrames } from "./context-sources/frame.js";

@@ -1,4 +1,4 @@
-import type { WorkerInvocation } from "@agentx/contracts";
+import type { WorkerInvocation } from "@rovara-code/contracts";
 import type { WorkerTerminalResult } from "./server.js";
 
 export async function postProjectSetupTerminalResult(input: {

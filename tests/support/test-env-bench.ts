@@ -1,12 +1,12 @@
 // A bench for the test environment's tests: one registered project on an in-memory store, the approval gate over the local owner's session, and the three calls a person makes (propose, prove, approve).
 // The Prove report is made from the body the way a passing run would report it, so a test only says what differs.
 import { randomUUID } from "node:crypto";
-import { IMPLICIT_COMPANY_ID, type OrgId, type TestEnvironmentBody } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createDecisionGate, type DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import type { TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
-import { TEST_ENVIRONMENT_KIND, createTestEnvironmentSubject, proposeTestEnvironment, recordTestEnvProveReport, testEnvironmentSubjectId, type TestEnvironmentDecisionDetails } from "../../packages/broker/src/core/test-env/environment.js";
+import { IMPLICIT_COMPANY_ID, type OrgId, type TestEnvironmentBody } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createDecisionGate, type DecisionAttempt } from "../../packages/core/src/core/decisions/approval-gate.js";
+import type { TestEnvDeps } from "../../packages/core/src/core/test-env/deps.js";
+import { TEST_ENVIRONMENT_KIND, createTestEnvironmentSubject, proposeTestEnvironment, recordTestEnvProveReport, testEnvironmentSubjectId, type TestEnvironmentDecisionDetails } from "../../packages/core/src/core/test-env/environment.js";
 import { projectStore } from "./test-env-world.js";
 
 export const BENCH_ORG: OrgId = IMPLICIT_COMPANY_ID;

@@ -1,7 +1,7 @@
 // The build step reads a failed check's output to tell "the check's own Python could not run" from "the change broke the code". The output is shaped by
 // the customer's own tests, so a hostile repository controls it: the traceback-file pattern must stay linear, and must still name the same file.
 import { describe, expect, it } from "vitest";
-import { checkCommandCouldNotRun } from "../../packages/broker/src/core/build-step/check-results.js";
+import { checkCommandCouldNotRun } from "../../packages/core/src/core/build-step/check-results.js";
 
 const python = (args: string[]) => ({ executable: "/usr/bin/python3", args, cwd: "/work/repo" });
 

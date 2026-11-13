@@ -5,10 +5,10 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { E2EAgentActionLedgerSchema, WorkerInvocationSchema, e2eAgentValueKeyId, parseVerifiedE2EAgentActionLedger, type E2EModelDayBudgetRequest } from "@agentx/contracts";
+import { E2EAgentActionLedgerSchema, WorkerInvocationSchema, e2eAgentValueKeyId, parseVerifiedE2EAgentActionLedger, type E2EModelDayBudgetRequest } from "@rovara-code/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
-import { verifyApplicationE2EEvidence } from "../../packages/broker/src/e2e/application-evidence.js";
-import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
+import { verifyApplicationE2EEvidence } from "../../packages/core/src/e2e/application-evidence.js";
+import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/core/src/e2e-presentation.js";
 import type { E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 import { encodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps } from "../../packages/verifier/src/application-scenarios.js";
 import { createProcessDockerCli, createDockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
@@ -22,8 +22,8 @@ import { workflowE2EApplicationHostDeps, type WorkflowE2EApplicationRuntimeConfi
 import { ciImage } from "../support/ci-images.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { AGENT_GOAL, FIXED_RUNTIME_AT, ORDERS_M14_APP_FILES, ORDERS_M14_ROOT, createOrdersM14AgentPlan, sha256Hex } from "../support/orders-m14-agent.js";
-import { E2E_REPLAY_PURPOSE, replaySourceCasesOf, verifyReplayEvidence } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
-import type { E2EReplaySourceCase, E2EReplayTrace } from "@agentx/contracts";
+import { E2E_REPLAY_PURPOSE, replaySourceCasesOf, verifyReplayEvidence } from "../../packages/core/src/aws/workflow-e2e-replay.js";
+import type { E2EReplaySourceCase, E2EReplayTrace } from "@rovara-code/contracts";
 
 /** The task page's section for these rows as text (entities undone, so a sentence is matched as the owner reads it), and the Slack summary of them. */
 const pageText = (scenarios: readonly object[]) => renderE2EScenarioRowsHtml({ scenarios: scenarios as never }, { artifactPath: (sha256) => `/a/${sha256}` })

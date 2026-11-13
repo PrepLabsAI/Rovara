@@ -1,17 +1,17 @@
 // Trial: where a lesson's words must come from, risky wording and lesson types, stricter settings that stop a trial, scope and citations.
 import { describe, expect, it } from "vitest";
-import { approveLesson, type ApproveDeps } from "../../../packages/broker/src/lessons/approve.js";
-import { lessonDeletionPort } from "../../../packages/broker/src/lessons/deletion.js";
-import { recordFeedback, recordTaskOutcome, type CounterDeps } from "../../../packages/broker/src/lessons/counters.js";
-import { LOAD_MAX_LESSONS, approvedForUse, loadLessonsForStage, type LoadDeps } from "../../../packages/broker/src/lessons/load.js";
-import { DEFAULT_APPROVAL_POLICY, resolveLearning, type LearningSettings } from "../../../packages/broker/src/lessons/policy.js";
-import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { buildReflectorInput } from "../../../packages/broker/src/lessons/reflect-input.js";
-import { memberCorrectionOf, reflectSubject, type LessonDraft, type ReflectDeps } from "../../../packages/broker/src/lessons/reflect.js";
-import { InMemoryLessonStore, type LoadManifest } from "../../../packages/broker/src/lessons/store.js";
-import { NO_REASON_TEXT } from "../../../packages/broker/src/lessons/task-subject.js";
-import { TRIAL_APPROVER, hasRiskyTrialWording, isPublishable, isTrialLesson, keyIdentifiers, lessonClaimsSupported, promoteIfStable, trialBlockers, type TrialContext } from "../../../packages/broker/src/lessons/trial.js";
-import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
+import { approveLesson, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
+import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
+import { recordFeedback, recordTaskOutcome, type CounterDeps } from "../../../packages/core/src/lessons/counters.js";
+import { LOAD_MAX_LESSONS, approvedForUse, loadLessonsForStage, type LoadDeps } from "../../../packages/core/src/lessons/load.js";
+import { DEFAULT_APPROVAL_POLICY, resolveLearning, type LearningSettings } from "../../../packages/core/src/lessons/policy.js";
+import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { buildReflectorInput } from "../../../packages/core/src/lessons/reflect-input.js";
+import { memberCorrectionOf, reflectSubject, type LessonDraft, type ReflectDeps } from "../../../packages/core/src/lessons/reflect.js";
+import { InMemoryLessonStore, type LoadManifest } from "../../../packages/core/src/lessons/store.js";
+import { NO_REASON_TEXT } from "../../../packages/core/src/lessons/task-subject.js";
+import { TRIAL_APPROVER, hasRiskyTrialWording, isPublishable, isTrialLesson, keyIdentifiers, lessonClaimsSupported, promoteIfStable, trialBlockers, type TrialContext } from "../../../packages/core/src/lessons/trial.js";
+import type { Lesson } from "../../../packages/core/src/lessons/types.js";
 import {
   Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, allowAllAccess, candidateJson, codeCite, directory, draft, embedder, facts, lessonRecord, memberSpan, reply, seed, settings, subject, verifier,
 } from "./lesson-helpers.js";

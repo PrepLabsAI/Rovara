@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { TaskPeopleView } from "@agentx/contracts";
+import type { TaskPeopleView } from "@rovara-code/contracts";
 import { DEVELOPER_TOOLS } from "../../packages/mcp/src/tools.js";
 
 const view: TaskPeopleView = {

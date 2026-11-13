@@ -4,11 +4,11 @@
 // write and declares none, or a malformed or duplicated declaration, is still refused.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectDefinitionSchema, type OrgId } from "../../packages/contracts/src/index.js";
-import { resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
-import { sentryConnectorType } from "../../packages/broker/src/connectors/native/sentry-connector-type.js";
-import { preflightConnectors } from "../../packages/broker/src/aws/registration-preflight.js";
-import { orgCredentialRegistry } from "../../packages/broker/src/connections/registry.js";
-import { OrgConnectionStore } from "../../packages/broker/src/connections/store.js";
+import { resolveConnectors } from "../../packages/core/src/aws/connector-types.js";
+import { sentryConnectorType } from "../../packages/core/src/connectors/native/sentry-connector-type.js";
+import { preflightConnectors } from "../../packages/core/src/aws/registration-preflight.js";
+import { orgCredentialRegistry } from "../../packages/core/src/connections/registry.js";
+import { OrgConnectionStore } from "../../packages/core/src/connections/store.js";
 import { InMemoryConnectionSecrets, memoryStore } from "../support/connection-fakes.js";
 import { routeFetch } from "../support/developer-fakes.js";
 import { fakeSentry } from "../support/fake-vendor-apis.js";

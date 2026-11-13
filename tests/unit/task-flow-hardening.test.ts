@@ -1,10 +1,10 @@
 // Lane L6a, round 1 of review: the races and refusals the reviewers named, each as a test that fails if the behaviour breaks.
 import { describe, expect, it } from "vitest";
-import { companyScoped, projectMetaKey, queryAll, type Admission, type AdmissionRequest, type TransactItem, type WorkerInvocation } from "@agentx/contracts";
-import { acceptStep, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { chargeMarkerKey, developerCharge, operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
-import type { OperationRecord, WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
+import { companyScoped, projectMetaKey, queryAll, type Admission, type AdmissionRequest, type TransactItem, type WorkerInvocation } from "@rovara-code/contracts";
+import { acceptStep, readWorkspace } from "../../packages/core/src/core/task-flow/stage-machine.js";
+import { chargeMarkerKey, developerCharge, operationKey, workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { readTask } from "../../packages/core/src/core/task-flow/reads.js";
+import type { OperationRecord, WorkspaceRecord } from "../../packages/core/src/core/task-flow/records.js";
 import { COMPANY, createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 /** An admission that records every key it is asked about and every reservation given back. */

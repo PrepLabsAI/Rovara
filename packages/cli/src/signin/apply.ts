@@ -2,7 +2,7 @@
 // settings (spec 025 FR-045, R6, R7). Runs under the environment lock. Client secrets are written
 // only once the change is confirmed (F21), and are never printed.
 import { DescribeStacksCommand, ExecuteChangeSetCommand, type Stack } from "@aws-sdk/client-cloudformation";
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@rovara-code/contracts";
 import { updateStackParameters } from "../deploy/parameter-update.js";
 import { withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";

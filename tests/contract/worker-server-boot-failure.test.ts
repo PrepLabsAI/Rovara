@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OperationJournal, createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/index.js";
-import { pingWorker } from "../../packages/broker/src/aws/session-steps.js";
+import { pingWorker } from "../../packages/core/src/aws/session-steps.js";
 import { workerBootFailureOf } from "../../packages/worker/src/worker-scratch.js";
 
 afterEach(() => vi.restoreAllMocks());

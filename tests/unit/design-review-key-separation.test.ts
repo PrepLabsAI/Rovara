@@ -1,9 +1,9 @@
 // Each reviewer's key is its own, a repeated or unknown role is refused, and the review's spend is held to the smaller of its two limits. These pin the rules a hosted install will rely on when it adopts this
 // core: a slot is looked up only in the stored binding, a slot asked for twice gives no result and is charged its whole budget, a key is given exactly its ceiling, and the ceilings never add up past either room.
 import { describe, expect, it } from "vitest";
-import { DesignReviewBindingSchema, DesignReviewWorkerResultSchema, type DesignReviewBinding } from "@agentx/contracts";
-import { bindingSlotOf, designReviewKeyIds, planSlotBudgets, readSlotCeiling, recordSlotReask } from "../../packages/broker/src/core/design-review/slot-keys.js";
-import { mergeBindingFor } from "../../packages/broker/src/core/design-review/merge-binding.js";
+import { DesignReviewBindingSchema, DesignReviewWorkerResultSchema, type DesignReviewBinding } from "@rovara-code/contracts";
+import { bindingSlotOf, designReviewKeyIds, planSlotBudgets, readSlotCeiling, recordSlotReask } from "../../packages/core/src/core/design-review/slot-keys.js";
+import { mergeBindingFor } from "../../packages/core/src/core/design-review/merge-binding.js";
 import { COMPANY } from "../support/task-flow-harness.js";
 import { answerRound, localDesignReview, mintKeys, nextJob, taskOf, toRound, world } from "../support/design-review-flow-world.js";
 

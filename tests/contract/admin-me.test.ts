@@ -1,7 +1,7 @@
 // tests/contract/admin-me.test.ts
 // Spec 025 A12 (Q3): who the admin is, and whether their verified email matches a Slack user.
 import { describe, expect, it, vi } from "vitest";
-import { adminIdentityReader } from "../../packages/broker/src/aws/admin-me.js";
+import { adminIdentityReader } from "../../packages/core/src/aws/admin-me.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { issuer } from "../support/slack-broker.js";
 

@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { readFile, readdir, readlink, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 
 const execFile = promisify(execFileCallback);
 

@@ -11,20 +11,20 @@ import type { InvokeCommand } from "@aws-sdk/client-lambda";
 import { PLAN_CLAIMS_MAX, TaskDispatchProofRequestSchema, TaskDispatchProofResponseSchema, TaskPersonProofResponseSchema, WORKER_INVOKE_AUTHORIZATION_SCHEME,
   WORKER_INVOCATION_FEATURES, WORKER_PING_FEATURES_FIELD, WORKFLOW_PLAN_MAX_BYTES, WorkerInvocationSchema, WorkflowSnapshotSchema,
   type TaskPersonProofRequest,
-  type Ec2RuntimeBinding, type WorkerInvocation } from "@agentx/contracts";
-import { createEc2Delivery } from "../../../packages/broker/src/aws/ec2-delivery.js";
-import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../../packages/broker/src/aws/lambda.js";
+  type Ec2RuntimeBinding, type WorkerInvocation } from "@rovara-code/contracts";
+import { createEc2Delivery } from "../../../packages/core/src/aws/ec2-delivery.js";
+import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../../packages/core/src/aws/lambda.js";
 import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { SLACK_CHANNEL } from "../../support/slack-broker.js";
-import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
-import { taskOwnerKey } from "../../../packages/broker/src/developer/task-records.js";
+import type { CheckTaskPerson } from "../../../packages/core/src/developer/task-people.js";
+import { taskOwnerKey } from "../../../packages/core/src/developer/task-records.js";
 import { DYNAMODB_ITEM_MAX_BYTES } from "../../support/fake-dynamodb.js";
 import { planAnswer, planDocument } from "../../support/plan-documents.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
 import { EDITS, MERGED, OPENED_PR, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 import { loadRollback0212Parser } from "../../support/rollback-0212-parser.js";
-import { handler as productionDispatcher, taskPersonProofLambdaClient } from "../../../packages/broker/src/aws/dispatcher.js";
-import { handler as taskPersonProofRuntime } from "../../../packages/broker/src/aws/task-person-proof-runtime.js";
+import { handler as productionDispatcher, taskPersonProofLambdaClient } from "../../../packages/core/src/aws/dispatcher.js";
+import { handler as taskPersonProofRuntime } from "../../../packages/core/src/aws/task-person-proof-runtime.js";
 
 /** Feature list exported by the source commit pinned in rollback-0.2.12/provenance.json. */
 const ROLLBACK_0212_WORKER_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks",

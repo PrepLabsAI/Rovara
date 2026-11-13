@@ -2,7 +2,7 @@
 // and setting it will create, and an estimated monthly cost at a stated usage, then asks. No test
 // here reaches AWS, GitHub or Slack.
 import { describe, expect, it } from "vitest";
-import { environmentStackName } from "@agentx/contracts";
+import { environmentStackName } from "@rovara-code/contracts";
 import { confirmInstallPlan, estimateMonthlyCost, installPlanText, planSummary } from "../../packages/cli/src/init/plan.js";
 import { count, PRICES_CHECKED, STATED_USAGE } from "../../packages/cli/src/init/cost.js";
 import { sampleAnswers, scriptedPrompter } from "../support/init-fakes.js";

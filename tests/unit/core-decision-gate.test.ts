@@ -6,13 +6,13 @@ import { describe, expect, it } from "vitest";
 import {
   IMPLICIT_COMPANY_ID, approvalProofKey, createWorkflowSnapshot, submitWorkflowArtifact, when,
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type AuditSink, type ExternalAccountRef, type Principal, type TransactItem, type WorkflowSnapshot,
-} from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { decisionRequestIdOf, approvalBindingId, approvalProofMarkerKey, approvalRecordKey, createDecisionGate, type DecisionAttempt, type DecisionSubject } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
+} from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { decisionRequestIdOf, approvalBindingId, approvalProofMarkerKey, approvalRecordKey, createDecisionGate, type DecisionAttempt, type DecisionSubject } from "../../packages/core/src/core/decisions/approval-gate.js";
+import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/core/src/core/decisions/workflow-subject.js";
 import { commentReads, freshComment } from "../support/comment-fakes.js";
-import type { FetchedComment } from "../../packages/broker/src/core/pr-commands/comment-checks.js";
+import type { FetchedComment } from "../../packages/core/src/core/pr-commands/comment-checks.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
 const OWNER = localOwnerPrincipal();
@@ -390,7 +390,7 @@ describe("the approval gate: a failing store never half-decides", () => {
   it("a throttled store fails the call and leaves no decision, so the same request can be sent again with the same proof... once the adapter allows it", async () => {
     const { store, gate, ready } = world();
     await ready;
-    store.injectFault(new (await import("@agentx/contracts")).DocumentStoreError("unavailable", "down"));
+    store.injectFault(new (await import("@rovara-code/contracts")).DocumentStoreError("unavailable", "down"));
     const request = attempt();
     await expect(gate.decide(request)).rejects.toThrow();
     expect(await store.get(approvalRecordKey(COMPANY, request.requestId))).toBeUndefined();
@@ -434,7 +434,7 @@ describe("the approval gate: what the review of round 1 found", () => {
     const { store, gate, ready } = world();
     await ready;
     const request = attempt();
-    store.injectFault(new (await import("@agentx/contracts")).DocumentStoreError("unavailable", "down"), 1);
+    store.injectFault(new (await import("@rovara-code/contracts")).DocumentStoreError("unavailable", "down"), 1);
     // The first calls read the store, so the fault lands on the first read; retry until the attempt gets as far as its commit once.
     for (let tries = 0; tries < 6; tries += 1) {
       try { const result = await gate.decide(request); if (result.status === "decided") break; } catch { /* retried */ }

@@ -1,14 +1,14 @@
 // The model a task step is handed to a worker with: chosen once per operation, kept on it, and the same on a repeat delivery; a step with no model of its own, a design-review round and a step that is not a task
 // step are left to the install's one model; a step no model fits ends with the reason in words.
 import { describe, expect, it, vi } from "vitest";
-import type { ModelIdentifier } from "@agentx/contracts";
-import { chooseStepModel } from "../../packages/broker/src/core/task-flow/step-model.js";
-import type { OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import type { StepChoice } from "../../packages/broker/src/core/model-selection/service.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { CRITIC_MODEL_ATTEMPTS_MAX, PLAN_CHECK_NO_MODEL_LEFT, planCheckFailures, retriesPlanCheck } from "../../packages/broker/src/core/plan/check-retry.js";
-import { criticModelUnusable } from "../../packages/broker/src/rovara-code/critic.js";
+import type { ModelIdentifier } from "@rovara-code/contracts";
+import { chooseStepModel } from "../../packages/core/src/core/task-flow/step-model.js";
+import type { OperationRecord } from "../../packages/core/src/core/task-flow/records.js";
+import { operationKey } from "../../packages/core/src/core/task-flow/keys.js";
+import type { StepChoice } from "../../packages/core/src/core/model-selection/service.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { CRITIC_MODEL_ATTEMPTS_MAX, PLAN_CHECK_NO_MODEL_LEFT, planCheckFailures, retriesPlanCheck } from "../../packages/core/src/core/plan/check-retry.js";
+import { criticModelUnusable } from "../../packages/core/src/rovara-code/critic.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const m = (provider: string, modelId: string): ModelIdentifier => ({ provider, modelId });

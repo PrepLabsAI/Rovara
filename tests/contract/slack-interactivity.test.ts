@@ -31,15 +31,15 @@ import {
   invokeWorkflowDecision,
   workflowCheckControls,
   workflowSlackHandlers,
-} from "../../packages/broker/src/aws/slack-interactivity.js";
-import { SlackWorkflowStartError, answerChosenRequest, answerRequestEventId, createDynamoWorkflowChoiceStore, workflowChoiceRefusal } from "../../packages/broker/src/aws/slack-workflow-choice.js";
-import { createAnswerQueue } from "../../packages/broker/src/aws/slack-ingress.js";
+} from "../../packages/core/src/aws/slack-interactivity.js";
+import { SlackWorkflowStartError, answerChosenRequest, answerRequestEventId, createDynamoWorkflowChoiceStore, workflowChoiceRefusal } from "../../packages/core/src/aws/slack-workflow-choice.js";
+import { createAnswerQueue } from "../../packages/core/src/aws/slack-ingress.js";
 import { workflowChoicePut } from "../../packages/contracts/src/index.js";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import type { SendMessageCommand } from "@aws-sdk/client-sqs";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
-import { cleanLine, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { cleanLine, workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 

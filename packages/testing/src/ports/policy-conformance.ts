@@ -20,7 +20,7 @@ import {
   type ModelUsage,
   type PresentedCredential,
   type Principal,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 
 // ---- Admission ----
 

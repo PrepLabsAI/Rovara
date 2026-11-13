@@ -1,5 +1,5 @@
 import { E2ERunBindingSchema, canonicalJson, e2ePolicyDigest, type E2ECollection, type E2ERunInput,
-  type E2ERuntimePorts, type E2ERunBinding } from "@agentx/contracts";
+  type E2ERuntimePorts, type E2ERunBinding } from "@rovara-code/contracts";
 import { createHash } from "node:crypto";
 import type { E2EActualApplicationRun } from "./application-collection.js";
 import { runIsolatedE2E } from "./runtime.js";

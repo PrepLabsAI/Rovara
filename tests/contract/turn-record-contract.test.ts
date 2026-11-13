@@ -665,7 +665,7 @@ describe("AI-tool turn records (spec 025 FR-037)", () => {
 });
 
 // Fix round 1 (review of spec 025 phase 25b, Task 4): TEXT_PATTERNS did not cover AgentX's own
-// minted tokens (packages/broker/src/developer/tokens.ts: randomToken("agxr_" | "agxc_")), so a
+// minted tokens (packages/core/src/developer/tokens.ts: randomToken("agxr_" | "agxc_")), so a
 // leaked refresh token or authorization code in free text was not redacted.
 describe("secret redaction, fix round 4 (AgentX's own tokens)", () => {
   it.each([

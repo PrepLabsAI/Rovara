@@ -1,6 +1,6 @@
 // `agentx admin project register --file` (M1.4 Task 4.10D, review I-2): the documented way to set a project's models runs the same model check as project add. The environment's settings (its region
 // and key configuration) are read the way the setup commands read them; a computer that cannot read them registers anyway, says so, and sends no stale check result.
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition } from "@rovara-code/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings } from "../environments/settings.js";
 import { checkProjectModels, type ProjectModelChecker } from "./project-model-check.js";

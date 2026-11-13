@@ -6,7 +6,7 @@
 // at most MAX_CITATIONS things are checked and at most MAX_REASONS reasons are kept. What a call returned is kept as a small index of the tokens a citation can be looked
 // up in (built from the WHOLE answer, before its text is cut), so one big read cannot switch the checks off; only when an index overflows its bound is that one kind of
 // check (pull requests, commits, files) skipped, rather than blaming the agent for evidence the recorder could not keep.
-import { redactText, type AgentStepGrounding } from "@agentx/contracts";
+import { redactText, type AgentStepGrounding } from "@rovara-code/contracts";
 
 /** The most of a report that is read; the worker cuts a report to 32 KiB before it is checked, so this is a backstop. */
 export const GROUNDING_REPORT_SCAN_CHARS = 262_144;

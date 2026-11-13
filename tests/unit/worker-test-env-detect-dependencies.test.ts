@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TEST_ENV_CANDIDATE_MAX, TEST_ENV_DRAFT_MAX_BYTES, TestEnvDraftSchema, type TestEnvDraft } from "@agentx/contracts";
+import { TEST_ENV_CANDIDATE_MAX, TEST_ENV_DRAFT_MAX_BYTES, TestEnvDraftSchema, type TestEnvDraft } from "@rovara-code/contracts";
 import type { runDetectorsGuarded } from "../../packages/worker/src/env-detect/guarded.js";
 import type { Detection, DependencyCandidate } from "../../packages/worker/src/env-detect/types.js";
 import { detectTestEnvironment } from "../../packages/worker/src/test-env-detect.js";

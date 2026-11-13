@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes, type E2EScenario } from "@agentx/contracts";
+import { canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes, type E2EScenario } from "@rovara-code/contracts";
 import { projectE2EModuleExportNames } from "./result-adapter.js";
 
 const MAX_RESPONSE_FRAME_BYTES = 262_144;

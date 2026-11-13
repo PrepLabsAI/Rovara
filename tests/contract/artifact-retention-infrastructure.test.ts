@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
-import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE } from "@rovara-code/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
@@ -78,7 +78,7 @@ describe("the broker may put the tag on the object it stores", () => {
 });
 
 describe("the broker tags a screenshot, and only a screenshot, with that retention tag", () => {
-  const artifacts = readFileSync("packages/broker/src/aws/workflow-e2e-artifacts.ts", "utf8");
+  const artifacts = readFileSync("packages/core/src/aws/workflow-e2e-artifacts.ts", "utf8");
 
   it("puts the tag on the screenshot object it stores", () => {
     expect(artifacts).toContain("Tagging: E2E_ARTIFACT_RETENTION_TAG");
@@ -89,7 +89,7 @@ describe("the broker tags a screenshot, and only a screenshot, with that retenti
       .trim().split("\n").filter((file) => file !== "");
     // core/e2e/artifacts.ts is the ports version of the screenshot write: it puts the tag's value on a screenshot as its retention class, and on nothing else.
     // packages/aws-adapters/src/s3/index.ts is the S3 object-storage adapter: it writes a tag only from its settings' class -> tag map and names no tag itself (checked below).
-    expect(found.sort()).toEqual(["packages/aws-adapters/src/s3/index.ts", "packages/broker/src/aws/workflow-e2e-artifacts.ts", "packages/broker/src/core/e2e/artifacts.ts", "packages/contracts/src/e2e-view-node.ts"]);
+    expect(found.sort()).toEqual(["packages/aws-adapters/src/s3/index.ts", "packages/contracts/src/e2e-view-node.ts", "packages/core/src/aws/workflow-e2e-artifacts.ts", "packages/core/src/core/e2e/artifacts.ts"]);
   });
 
   it("lets the S3 adapter tag only from its settings: it names neither the screenshot tag nor its key or value", () => {

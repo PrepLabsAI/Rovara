@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { configKey } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
-import { developerIdentityConfigFromEnvironment } from "../../packages/broker/src/aws/developer-identity.js";
+import { developerIdentityConfigFromEnvironment } from "../../packages/core/src/aws/developer-identity.js";
 import { httpEvent, identityHarness } from "../support/developer-fakes.js";
 
 describe("the environment's confirmation methods (FR-041)", () => {

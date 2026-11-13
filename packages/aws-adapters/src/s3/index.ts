@@ -1,4 +1,4 @@
-// Convergence lane A3 (owner decision 72, O2): the `object-storage` port over an S3 bucket (`@rovara/aws-adapters/s3`). Generic and public: it holds no company, money or authority rule; it is the same
+// Convergence lane A3 (owner decision 72, O2): the `object-storage` port over an S3 bucket (`@rovara-code/aws/s3`). Generic and public: it holds no company, money or authority rule; it is the same
 // layout the hosted product writes, so a bucket written by either is read by the other and no data moves.
 //
 // The layout, unchanged from the hosted evidence store (`aws/evidence-artifacts.ts` there):
@@ -15,7 +15,7 @@
 //
 // Errors never carry S3's own words (they can name the bucket or the key): a refusal is one of the port's errors, and anything else is `S3ObjectStorageError` with a fixed sentence.
 import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, type PutObjectCommandInput } from "@aws-sdk/client-s3";
-import { ObjectConflictError, ObjectMetaError, ObjectTooBigError, assertObjectKey, assertObjectMeta, assertObjectPrefix, type ObjectMeta, type ObjectPutOptions, type ObjectStat, type ObjectStorage } from "@agentx/contracts";
+import { ObjectConflictError, ObjectMetaError, ObjectTooBigError, assertObjectKey, assertObjectMeta, assertObjectPrefix, type ObjectMeta, type ObjectPutOptions, type ObjectStat, type ObjectStorage } from "@rovara-code/contracts";
 
 /** The largest object one PUT may carry (S3's own limit). */
 export const S3_SINGLE_PUT_MAX_BYTES = 5 * 1_024 * 1_048_576;

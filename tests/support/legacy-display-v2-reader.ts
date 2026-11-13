@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { E2ESharedViewSchema, E2EWorkflowDisplayRefSchema, E2E_DISPLAY_SCREENSHOT_MAX_BYTES } from "@agentx/contracts";
+import { E2ESharedViewSchema, E2EWorkflowDisplayRefSchema, E2E_DISPLAY_SCREENSHOT_MAX_BYTES } from "@rovara-code/contracts";
 
 // A verbatim copy of the notifier's display reader as it stood at the end of Task 4.4a (commit d901218b, the parent of Tasks 4.4b and 4.4c), which is the reader M1.3 shipped:
 // the strict display schema v2 (a row, a baseline), the v2 envelope and `readWorkflowE2ENotifierProjection`. It is pinned here so that a test can show that a reader built before

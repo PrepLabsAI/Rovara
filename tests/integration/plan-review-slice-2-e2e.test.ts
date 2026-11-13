@@ -4,7 +4,7 @@
 // sees, and that no code is written until the owner presses Approve.
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
-import { SlackPageCommentMessageSchema, SlackRequestMessageSchema, slackThreadSubject, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
+import { SlackPageCommentMessageSchema, SlackRequestMessageSchema, slackThreadSubject, type ChannelMembersRequest, type ChannelMembersResponse } from "@rovara-code/contracts";
 import { createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
 import { MAYA, bearerFor } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, call, orchestratorPrincipal } from "../support/slack-broker.js";
@@ -12,8 +12,8 @@ import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { openTaskPage, readable, signInToReview, type PageReader, type TaskPageTab } from "../support/page-browser.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import type { SlackRequestQueue } from "../../packages/broker/src/developer/page-comments.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import type { SlackRequestQueue } from "../../packages/core/src/developer/page-comments.js";
 import { handlePageComment } from "../../packages/slack-service/src/page-comment.js";
 import { runTaskAnswer } from "../../packages/slack-service/src/task-question.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";

@@ -8,9 +8,9 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContextToolCallRequest, ContextToolCallResponse, ContextToolCatalog } from "../../packages/contracts/src/index.js";
-import { answerMcp } from "../../packages/broker/src/context-sources/mcp-endpoint.js";
+import { answerMcp } from "../../packages/core/src/context-sources/mcp-endpoint.js";
 import { piMcpEnabled, rovaraMcpConfig, rovaraMcpExtensions, rovaraMcpTransport, ROVARA_MCP_TOOL_PREFIX } from "../../packages/worker/src/context-sources/pi-mcp.js";
-import { MCP_ANSWER_MAX_BYTES } from "../../packages/broker/src/context-sources/mcp-endpoint.js";
+import { MCP_ANSWER_MAX_BYTES } from "../../packages/core/src/context-sources/mcp-endpoint.js";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession, promptWithSources, workerPiDirectory } from "../../packages/worker/src/pi-session.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 

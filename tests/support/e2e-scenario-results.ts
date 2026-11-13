@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { E2EDisplayScenario, E2EScenarioResults } from "@agentx/contracts";
+import type { E2EDisplayScenario, E2EScenarioResults } from "@rovara-code/contracts";
 
 /** Rows as the broker derives them, for the tests of what the page, Slack and the artifact route do with them. */
 export const SHOT = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(512, 0x42)]);

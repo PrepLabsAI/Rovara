@@ -11,7 +11,7 @@ import {
   QuickAutoStartRequestSchema,
   QuickAutoStartResultSchema,
   taskResultChecks,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { pollOperation } from "@agentx/orchestrator/event-client";
 import type { ThreadServiceApi } from "./processor.js";

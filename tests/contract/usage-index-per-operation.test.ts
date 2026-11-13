@@ -10,8 +10,8 @@ import { join } from "node:path";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { describe, expect, it } from "vitest";
 import { WorkerInvocationSchema } from "../../packages/contracts/src/index.js";
-import { indexActivity, type IndexStore } from "../../packages/broker/src/aws/activity-index.js";
-import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
+import { indexActivity, type IndexStore } from "../../packages/core/src/aws/activity-index.js";
+import type { StreamRecord } from "../../packages/core/src/developer/notifications.js";
 import { statsSince } from "../../packages/worker/src/usage.js";
 import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
@@ -206,7 +206,7 @@ describe("the usage index holds each operation's own cost, written once", () => 
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:test",
       GITHUB_APP_CREDENTIAL_REF: "github-app", GITHUB_APP_ACCOUNT: "example", GITHUB_APP_ID: "123", GITHUB_APP_INSTALLATION_ID: "456",
     });
-    const { autofixOperationUsage } = await import("../../packages/broker/src/aws/broker.js");
+    const { autofixOperationUsage } = await import("../../packages/core/src/aws/broker.js");
     const autofixed = async (id: string) => autofixOperationUsage({ documentClient: eventsClient, tableName: "table" } as never, id);
     const spentBy = [0.03815, 0.02035, 0.04978 + 0.0123, 0.03688 + 0.02712, 0.0517, 0, 0.0777 + 0.0111, 0.0299];
     for (const [position, operation] of operations.entries()) expect((await autofixed(operation.id))?.total, `operation ${String(position)}`).toBeCloseTo(spentBy[position]!, 6);

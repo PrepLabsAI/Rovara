@@ -2,8 +2,8 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentStackName } from "@agentx/contracts";
-import type { ReleaseManifest, StackPart } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentStackName } from "@rovara-code/contracts";
+import type { ReleaseManifest, StackPart } from "@rovara-code/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
 import { providerSecretArn, type ModelsAnswers } from "./answer-schemas.js";

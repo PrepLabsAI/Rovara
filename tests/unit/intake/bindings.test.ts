@@ -1,9 +1,9 @@
 // The session's binding to its ticket, on the document store: one surface follows one session and a session follows one ticket; a repeat is the same; an ended session refuses; another company's session is not found.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, agentSessionKey, change, type SessionBinding, type SessionId } from "@agentx/contracts";
-import { bindSessionSurface, sessionBindingsOf, sessionForSurface, unbindSessionSurface } from "../../../packages/broker/src/core/sessions/bindings.js";
-import { createTaskSessionItems, taskSessionId } from "../../../packages/broker/src/core/sessions/create.js";
-import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
+import { IMPLICIT_COMPANY_ID, agentSessionKey, change, type SessionBinding, type SessionId } from "@rovara-code/contracts";
+import { bindSessionSurface, sessionBindingsOf, sessionForSurface, unbindSessionSurface } from "../../../packages/core/src/core/sessions/bindings.js";
+import { createTaskSessionItems, taskSessionId } from "../../../packages/core/src/core/sessions/create.js";
+import { localOwnerPrincipal } from "../../../packages/core/src/ports/policy-defaults.js";
 import { RecordingStore } from "../../support/intake-world.js";
 
 const ORG = IMPLICIT_COMPANY_ID;

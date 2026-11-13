@@ -502,7 +502,7 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   const body = bootScript.replace(/^#!.*\n/, "");
   return [
     "#!/bin/bash",
-    "# Rendered by ec2WorkerBootScript (@agentx/contracts).",
+    "# Rendered by ec2WorkerBootScript (contracts).",
     ...variables.map(([name, value]) => `export ${name}='${value}'`),
     body,
   ].join("\n");

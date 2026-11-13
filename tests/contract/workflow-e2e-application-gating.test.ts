@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { combineE2EVerdicts, type E2EVerdict } from "../../packages/broker/src/e2e/verdict.js";
-import { applicationEvidenceLimits, expectedApplicationAssertionAssets, verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
+import { combineE2EVerdicts, type E2EVerdict } from "../../packages/core/src/e2e/verdict.js";
+import { applicationEvidenceLimits, expectedApplicationAssertionAssets, verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/core/src/e2e/application-evidence.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope, type ApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
-import { canonicalJson } from "@agentx/contracts";
-import { applicationIntentWithAccountRefs, applicationRoundIntent } from "../../packages/broker/src/e2e/application-plan-approval.js";
+import { canonicalJson } from "@rovara-code/contracts";
+import { applicationIntentWithAccountRefs, applicationRoundIntent } from "../../packages/core/src/e2e/application-plan-approval.js";
 import { planFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { shaCanonicalOf } from "../support/e2e-account-registry-fixtures.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";

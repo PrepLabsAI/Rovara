@@ -5,14 +5,14 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ObjectConflictError, ObjectKeyError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, isAllowedModuleSpecifier, isValidObjectKey, type ObjectStorage } from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { DOCUMENT_BLOB_MAX_BYTES, createDocumentEvidenceBlobStore, createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
+import { ObjectConflictError, ObjectKeyError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, isAllowedModuleSpecifier, isValidObjectKey, type ObjectStorage } from "@rovara-code/contracts";
+import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/core/src/ports/adapter-registry.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { DOCUMENT_BLOB_MAX_BYTES, createDocumentEvidenceBlobStore, createDocumentObjectStorage } from "../../packages/core/src/core/proof/evidence-blob-store.js";
 import { FolderHardLinksUnsupportedError, FolderObjectStorage, spellPart, unspellPart } from "../../packages/local-adapters/src/folder-object-storage.js";
 import * as folderModule from "../../packages/local-adapters/src/object-storage-plugin.js";
-import { evidencePrefixesOf, eraseTaskEvidence } from "../../packages/broker/src/core/proof/evidence-erase.js";
-import { storeEvidenceArtifacts } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
+import { evidencePrefixesOf, eraseTaskEvidence } from "../../packages/core/src/core/proof/evidence-erase.js";
+import { storeEvidenceArtifacts } from "../../packages/core/src/core/proof/evidence-artifacts.js";
 import { runObjectStorageConformance } from "../support/ports/object-storage-conformance.js";
 
 const folders: string[] = [];

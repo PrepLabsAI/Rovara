@@ -7,10 +7,10 @@ import { describe, expect, it } from "vitest";
 import {
   PlanQualityFindingSchema, builtinFileCheckCommand, builtinFileCheckOf, canonicalPlanJson, parsePlanDocument, readCanonicalPlan, revisablePlanQualityFindings,
   type PlanDocument, type PlanQualityFinding, type WorkflowCheck, type WorkflowFeatureE2EIntent,
-} from "@agentx/contracts";
-import { e2eFeatureIntentDigest } from "../../packages/broker/src/e2e/feature-plan-intent.js";
-import type { FeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
-import { isStaticReaderCommand, planQualityFindings, type PlanQualityContext } from "../../packages/broker/src/developer/plan-quality.js";
+} from "@rovara-code/contracts";
+import { e2eFeatureIntentDigest } from "../../packages/core/src/e2e/feature-plan-intent.js";
+import type { FeatureE2EPlanningContext } from "../../packages/core/src/e2e/feature-plan-planning-context.js";
+import { isStaticReaderCommand, planQualityFindings, type PlanQualityContext } from "../../packages/core/src/developer/plan-quality.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const FOLDER = "workspace/orders";

@@ -1,4 +1,4 @@
-import { E2E_AGENT_STOP_CODES, type E2EModelChannelClient } from "@agentx/contracts";
+import { E2E_AGENT_STOP_CODES, type E2EModelChannelClient } from "@rovara-code/contracts";
 import { AgentError, isAgentError } from "e2e/agent";
 import type { E2EWebAgentPorts } from "../web-runtime.js";
 import { beginMarkerSessionValues } from "./begin-marker-values.js";

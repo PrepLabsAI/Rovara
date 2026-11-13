@@ -2,7 +2,7 @@
 // `rovara up` open the project's page, where the owner approves. Approving is never done from here: it is the owner's own act on the page, with a proof the page signs for exactly one request.
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { Command } from "commander";
 import type { UpCommandContext } from "./cli.js";
 import { requireLocalRuntime } from "./local-runtime.js";

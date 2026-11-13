@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 import { prHeadKey, type WorkflowSnapshot } from "../../packages/contracts/src/index.js";
 import {
   codeHostRepositoryKey, mergedLines, mergedMilestoneItems, mergedStateItems, prHeadItems, readMergeTracking, trackingWriteItem, trackingItemOf,
-} from "../../packages/broker/src/core/merge/index.js";
-import { findMergeCommit } from "../../packages/broker/src/core/proof/revert/merge-commit-index.js";
+} from "../../packages/core/src/core/merge/index.js";
+import { findMergeCommit } from "../../packages/core/src/core/proof/revert/merge-commit-index.js";
 import { MemoryMilestones, ORG, SESSION_ID, TASK_ID, mergeWorld, wrapStore } from "../support/merge-world.js";
 
 const SHA = "ab".repeat(20);

@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { REGISTRY_TOKEN_MIN_LENGTH, e2eSecretSpellings } from "@agentx/contracts";
+import { REGISTRY_TOKEN_MIN_LENGTH, e2eSecretSpellings } from "@rovara-code/contracts";
 import { DOCKER_DATA_DIRECTORY, RUNTIME_BACKING_DIRECTORY } from "./devcontainer-policy.js";
 
 export const ISSUED_TOKENS_PATH = ".agentx/registry-issued-tokens.json";

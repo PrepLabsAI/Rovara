@@ -1,7 +1,7 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { createLocalJWKSet, decodeProtectedHeader, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
-import { issueAccessToken, kmsTokenSigner, pkceChallengeMatches, randomToken, sha256Hex } from "../../packages/broker/src/developer/tokens.js";
+import { issueAccessToken, kmsTokenSigner, pkceChallengeMatches, randomToken, sha256Hex } from "../../packages/core/src/developer/tokens.js";
 import { ISSUER, T0, fakeKms, rsaKeyPair } from "../support/developer-fakes.js";
 
 const KEY = "arn:aws:kms:us-east-1:123456789012:key/k1";

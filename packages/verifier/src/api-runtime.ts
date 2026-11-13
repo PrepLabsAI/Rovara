@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { E2EApplicationCliHostDescriptorSchema, E2EScenarioSchema, E2ERunBindingSchema, E2ERuntimeAccountRefSchema,
   canonicalJson, buildApiSample, type E2ERuntimeAccountRef, type E2EScenario, type E2EApplicationAccountPorts,
-  type E2EApplicationSupervisorPorts, type E2EApplicationPreparedEnvironment, type E2ERunInput, type ProjectSetupRunnerToolchain } from "@agentx/contracts";
+  type E2EApplicationSupervisorPorts, type E2EApplicationPreparedEnvironment, type E2ERunInput, type ProjectSetupRunnerToolchain } from "@rovara-code/contracts";
 import { createE2EApplicationCaseCaptureFrame, createE2EApplicationAssertionObservationHeader,
   readValidatedE2EApplicationCliCasePlan, recordE2EApplicationCliEvidence,
   readValidatedE2EApplicationCaseObservation, type E2EApplicationCliCasePlanReader,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 
 /**
  * The one engine an API application target may name: Rovara's own first-party HTTP engine. It drives nothing (every request goes

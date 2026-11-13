@@ -1,6 +1,6 @@
 // Lane L10 (review N2): what a worker is sent for the credential the code host gave. It must be usable now: not expired, not valid for longer than an hour, a shape the worker takes.
 import { describe, expect, it } from "vitest";
-import { usableWorkerCredential } from "../../packages/broker/src/local/app/push-credential.js";
+import { usableWorkerCredential } from "../../packages/core/src/local/app/push-credential.js";
 
 const host = { capabilities: { perPersonCredentials: false } } as never;
 const now = Date.parse("2026-11-09T12:00:00.000Z");

@@ -1,4 +1,4 @@
-import {TaskModelFallbackRequestSchema,TaskModelFallbackAuthorizationSchema,TaskModelPolicyBindingSchema,agentXError,type ModelSelection,type TaskModelFallbackRequest,type TaskModelFallbackAuthorization,type TaskModelPolicyBinding} from "@agentx/contracts";
+import {TaskModelFallbackRequestSchema,TaskModelFallbackAuthorizationSchema,TaskModelPolicyBindingSchema,agentXError,type ModelSelection,type TaskModelFallbackRequest,type TaskModelFallbackAuthorization,type TaskModelPolicyBinding} from "@rovara-code/contracts";
 /** A legacy notification response or a stale binding never authorizes a governed replacement. */
 export function parseTaskModelFallbackAuthorization(raw:unknown,expected:TaskModelPolicyBinding):TaskModelFallbackAuthorization {
  const reply=TaskModelFallbackAuthorizationSchema.safeParse(raw),binding=TaskModelPolicyBindingSchema.safeParse(expected);

@@ -3,10 +3,10 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { LIGHT_CRITIC_PROMPT_ID, REVIEWER_ROLES, ReviewerRunSchema, readDesignMerge, readDesignResolve, readDesignReview } from "../../packages/contracts/src/index.js";
-import { ALL_DESIGN_REVIEW_PROMPTS, CRITIC_LIGHT_PROMPT, MATERIAL_MARKER, MERGE_PROMPT, REVIEWER_PROMPTS, promptDigest, promptRecord, reviewerPromptFor } from "../../packages/broker/src/core/design-review/prompts/index.js";
+import { ALL_DESIGN_REVIEW_PROMPTS, CRITIC_LIGHT_PROMPT, MATERIAL_MARKER, MERGE_PROMPT, REVIEWER_PROMPTS, promptDigest, promptRecord, reviewerPromptFor } from "../../packages/core/src/core/design-review/prompts/index.js";
 
 const root = process.cwd();
-const promptsDir = path.join(root, "packages/broker/src/core/design-review/prompts");
+const promptsDir = path.join(root, "packages/core/src/core/design-review/prompts");
 const HEADER = /^\/\/ Adapted from the Elephant-Goldfish Model \(github\.com\/google\/elephant-goldfish-model, commit 464db031e\), .*Copyright 2026 Google LLC, Apache License 2\.0\.\n\/\/ Modified by Rovara \(PrepLabsAI\): /u;
 const ATTRIBUTION_FILES = ["common.ts", "comprehension.ts", "critic.ts", "critic-light.ts", "critic-b.ts", "codebase.ts", "zoom-out.ts", "merge.ts", "resolve.ts"];
 
@@ -127,7 +127,7 @@ describe("third-party notices for the prompts", () => {
     expect(notices).toContain("google/elephant-goldfish-model");
     expect(notices).toContain("Copyright 2026 Google LLC");
     expect(notices).toContain("Apache License, Version 2.0");
-    expect(notices).toContain("packages/broker/src/core/design-review/prompts/NOTICE");
+    expect(notices).toContain("packages/core/src/core/design-review/prompts/NOTICE");
     expect(await readFile(path.join(root, "LICENSE-APACHE"), "utf8")).toContain("Apache License");
   });
 });

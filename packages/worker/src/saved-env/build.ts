@@ -55,7 +55,7 @@ import {
   type SavedEnvImageManifest,
   type SavedEnvRegistryAuth,
   type TestEnvironmentBody,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { proveEnvironment } from "../prove.js";
 import { defaultRealPath, sharesWorkspace, type FreshSandbox } from "../setup-agent-prove.js";
 import { runIsolatedGit } from "../isolated-repository.js";

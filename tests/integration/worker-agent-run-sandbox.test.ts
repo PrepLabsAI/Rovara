@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, getCurrentTools, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AGENT_STEP_PREAMBLE, ProjectDefinitionSchema, type ConnectorCallRequest, type ConnectorCatalog, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
+import { AGENT_STEP_PREAMBLE, ProjectDefinitionSchema, type ConnectorCallRequest, type ConnectorCatalog, type ProjectDefinition, type WorkerInvocation } from "@rovara-code/contracts";
 import type { AgentSkillFile } from "../../packages/worker/src/agent-step.js";
 import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";

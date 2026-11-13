@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { isAssumedRoleOf } from "../../packages/broker/src/aws/lambda.js";
+import { isAssumedRoleOf } from "../../packages/core/src/aws/lambda.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import {
   account, call, createBroker, ensureWorkspace, issuer, loadSlackBroker, markReady, orchestratorPrincipal, orchestratorRoleArn,

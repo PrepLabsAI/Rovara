@@ -2,11 +2,11 @@
 // parsed into a small fake DOM inside a vm sandbox.
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
-import type { PlanDocument } from "@agentx/contracts";
-import { createTaskWeb, type TaskDocumentEntry, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
-import { TASK_PAGE_DECIDING_COPY, TASK_PAGE_DECIDING_SCRIPT } from "../../packages/broker/src/aws/task-page-assets.js";
-import { renderTaskPeopleConfirmation, renderTaskPeoplePanel } from "../../packages/broker/src/aws/task-people-page-view.js";
-import type { PageCommentView } from "../../packages/broker/src/aws/plan-page/comments.js";
+import type { PlanDocument } from "@rovara-code/contracts";
+import { createTaskWeb, type TaskDocumentEntry, type TaskDocumentView } from "../../packages/core/src/aws/task-web.js";
+import { TASK_PAGE_DECIDING_COPY, TASK_PAGE_DECIDING_SCRIPT } from "../../packages/core/src/aws/task-page-assets.js";
+import { renderTaskPeopleConfirmation, renderTaskPeoplePanel } from "../../packages/core/src/aws/task-people-page-view.js";
+import type { PageCommentView } from "../../packages/core/src/aws/plan-page/comments.js";
 import { fakeStorage, makeEvent, parseHtml, type FakeDocument, type FakeElement } from "../support/fake-dom.js";
 import { planDocument } from "../support/plan-documents.js";
 

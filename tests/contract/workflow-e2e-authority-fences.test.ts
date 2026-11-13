@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalPlanJson } from "@agentx/contracts";
+import { canonicalPlanJson } from "@rovara-code/contracts";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { planDocument } from "../support/plan-documents.js";
 import { sha, startApplicationRound, type ApplicationRound } from "../support/e2e-application-round-harness.js";
@@ -10,7 +10,7 @@ import { sha, startApplicationRound, type ApplicationRound } from "../support/e2
 
 afterEach(disposeRealCandidates);
 // The broker module reads its environment when it loads, so it is imported only once the harness (which sets that environment up) has started.
-const brokerModule = () => import("../../packages/broker/src/aws/broker.js");
+const brokerModule = () => import("../../packages/core/src/aws/broker.js");
 
 const v1Intent = { schemaVersion: 1 as const, requestedTargetIds: ["target-1"], accountContextRefs: [], portableOperationRefs: [], semanticExportDeltas: [],
   scenarios: [{ scenarioId: "scenario-1", requirementId: "requirement-1", requestedTargetIds: ["target-1"], required: true, accountProfileId: "synthetic",

@@ -17,7 +17,7 @@ import {
   MODEL_PROVIDERS,
   agentXError,
   type ProjectDefinition,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { DEFAULT_DIRECT_MODELS } from "@agentx/model-runtime/config";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";

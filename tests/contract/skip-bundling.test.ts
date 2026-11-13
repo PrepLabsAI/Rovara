@@ -10,7 +10,7 @@ import { BUNDLING_STACKS_KEY, contextJsonWithoutBundling, skipLambdaBundling } f
 // A test that only checks a template's shape does not need the bundle, so it may skip it; a test
 // that reads the bundle (the release builder's, the session lifecycle's) must not. These tests keep
 // both paths honest: bundling still produces the handler, and skipping it changes nothing else.
-const ENTRY = "packages/broker/src/aws/developer-identity.ts";
+const ENTRY = "packages/core/src/aws/developer-identity.ts";
 
 function synthProbe(context: Record<string, unknown>): { assetDirs: string[]; template: string; directory: string } {
   const app = new App({ context });

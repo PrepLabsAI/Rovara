@@ -13,7 +13,7 @@ import {
   stopEvalBatch,
   fetchEvalBatchResults,
 } from "../../packages/cli/src/admin/eval-batch.js";
-import { evalBatchPlaceholderThreadTs, isPlaceholderThreadTs } from "../../packages/broker/src/aws/eval-batch-admin.js";
+import { evalBatchPlaceholderThreadTs, isPlaceholderThreadTs } from "../../packages/core/src/aws/eval-batch-admin.js";
 import { exitCodeForError } from "../../packages/cli/src/output.js";
 
 const base = { controlPlaneUrl: "https://api.example.com/", accessToken: "token" };

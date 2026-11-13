@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { canonicalJson } from "@agentx/contracts";
-import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
-import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
+import { canonicalJson } from "@rovara-code/contracts";
+import { buildFeatureE2EPlanningContext } from "../../packages/core/src/e2e/feature-plan-planning-context.js";
+import { webApiRuntimeCapabilities } from "../../packages/core/src/aws/e2e-feature-verifier-catalog.js";
 import { NOW, PROFILE, approvedSetup, snapshotOf } from "../support/e2e-application-plan-fixtures.js";
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 

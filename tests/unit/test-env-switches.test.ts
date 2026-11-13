@@ -3,12 +3,12 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { CATALOG_FILE, CATALOG_SIGNATURE_FILE, CATALOG_SIGNATURE_ALGORITHM, catalogSigningMessage, parseBundlePublicKey, sha256HexOf } from "@agentx/contracts";
-import { nightlyHealthEnabled } from "../../packages/broker/src/core/test-env/health-switch.js";
-import { savedEnvEnabled } from "../../packages/broker/src/core/test-env/saved-env-switch.js";
-import { SHIPPED_CATALOG_FOLDER, SERVICE_CATALOG_DIRECTORY_VARIABLE, releaseServiceCatalogSource, shippedCatalogDirectory } from "../../packages/broker/src/core/test-env/shipped-catalog.js";
-import { testEnvironmentEnabled } from "../../packages/broker/src/core/test-env/switch.js";
-import { projectImagesEnabled, testAccountsEnabled, testServicesEnabled } from "../../packages/broker/src/core/test-env/test-services-switch.js";
+import { CATALOG_FILE, CATALOG_SIGNATURE_FILE, CATALOG_SIGNATURE_ALGORITHM, catalogSigningMessage, parseBundlePublicKey, sha256HexOf } from "@rovara-code/contracts";
+import { nightlyHealthEnabled } from "../../packages/core/src/core/test-env/health-switch.js";
+import { savedEnvEnabled } from "../../packages/core/src/core/test-env/saved-env-switch.js";
+import { SHIPPED_CATALOG_FOLDER, SERVICE_CATALOG_DIRECTORY_VARIABLE, releaseServiceCatalogSource, shippedCatalogDirectory } from "../../packages/core/src/core/test-env/shipped-catalog.js";
+import { testEnvironmentEnabled } from "../../packages/core/src/core/test-env/switch.js";
+import { projectImagesEnabled, testAccountsEnabled, testServicesEnabled } from "../../packages/core/src/core/test-env/test-services-switch.js";
 import { loaderTrusting, pinnedCatalog, testSigner } from "../support/catalog-pinning.js";
 
 describe("the switches", () => {

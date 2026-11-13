@@ -13,9 +13,9 @@ import { type E2ESourceSnapshot } from "../../packages/contracts/src/e2e-source.
 import { e2eApplicationUpstreamTestIdFromIdentity, projectE2EApplicationPortableSelection, selectE2EApplicationExecutionPlan,
   type E2EApplicationPlanSelectionInput } from "../../packages/contracts/src/e2e-application-execution-plan.js";
 import { e2eCaseIdFromIdentity, e2eCaseIdentityDigest, e2eUpstreamTestIdFromIdentity } from "../../packages/contracts/src/e2e-case-identity.js";
-import { deriveE2EApplicationApprovalBinding } from "../../packages/broker/src/e2e/application-plan-binding.js";
-import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
-import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
+import { deriveE2EApplicationApprovalBinding } from "../../packages/core/src/e2e/application-plan-binding.js";
+import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/core/src/e2e/feature-plan-intent.js";
+import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/core/src/e2e/application-feature-plan-intent.js";
 import { compileE2EScenarios } from "../../packages/verifier/src/scenarios.js";
 
 function qualifiedWebRuntime(profileId: string, now: number) {

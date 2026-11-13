@@ -1,12 +1,12 @@
 // The saved environments on a real task-flow harness: the memory store the flow uses, an approved test environment written the way an approval writes it, the fake image registry and the key's code host.
 import { createHash } from "node:crypto";
-import { TestEnvProveReportSchema, TestEnvironmentBodySchema, testEnvDigest, type ProjectCommand, type TestEnvironmentBody } from "@agentx/contracts";
-import { createAdapterRegistry, createFakeImageRegistry, type FakeImageRegistry } from "../../packages/broker/src/ports/index.js";
-import type { BuildSystem } from "@agentx/contracts";
-import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
-import { testEnvLatestKey, testEnvProveKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
-import { createSavedEnvDeps } from "../../packages/broker/src/core/test-env/saved-env-real.js";
-import type { TreeEntryListing, KeyHost } from "../../packages/broker/src/core/test-env/saved-env-key.js";
+import { TestEnvProveReportSchema, TestEnvironmentBodySchema, testEnvDigest, type ProjectCommand, type TestEnvironmentBody } from "@rovara-code/contracts";
+import { createAdapterRegistry, createFakeImageRegistry, type FakeImageRegistry } from "../../packages/core/src/ports/index.js";
+import type { BuildSystem } from "@rovara-code/contracts";
+import { documentOf, type TestEnvDeps } from "../../packages/core/src/core/test-env/deps.js";
+import { testEnvLatestKey, testEnvProveKey, testEnvRevisionKey } from "../../packages/core/src/core/test-env/environment.js";
+import { createSavedEnvDeps } from "../../packages/core/src/core/test-env/saved-env-real.js";
+import type { TreeEntryListing, KeyHost } from "../../packages/core/src/core/test-env/saved-env-key.js";
 import { COMPANY, createHarness, type Harness, type HarnessOptions } from "./task-flow-harness.js";
 
 export { COMPANY };

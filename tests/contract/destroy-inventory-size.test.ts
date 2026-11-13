@@ -5,7 +5,7 @@
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { STACK_PARTS, type StackPart } from "@agentx/contracts";
+import { STACK_PARTS, type StackPart } from "@rovara-code/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { inventoryParameterName, mergeInventory, retainedResources, writeInventory, type RetainedResource } from "../../packages/cli/src/destroy/inventory.js";
 import { SSM_STANDARD_VALUE_LIMIT } from "../../packages/cli/src/init/install-state.js";

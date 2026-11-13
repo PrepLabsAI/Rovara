@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { diffStat, type WorkerInvocation } from "@agentx/contracts";
+import { diffStat, type WorkerInvocation } from "@rovara-code/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { MISSING_BASE_NOTE, publishWorkspaceDiff, workspaceFingerprint, type WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";

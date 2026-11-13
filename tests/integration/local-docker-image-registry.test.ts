@@ -7,9 +7,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { savedEnvRepositoryName } from "@agentx/contracts";
-import { createDockerImageRegistry } from "../../packages/broker/src/local/docker-image-registry.js";
-import { createDockerRunner } from "../../packages/broker/src/local/docker-runner.js";
+import { savedEnvRepositoryName } from "@rovara-code/contracts";
+import { createDockerImageRegistry } from "../../packages/core/src/local/docker-image-registry.js";
+import { createDockerRunner } from "../../packages/core/src/local/docker-runner.js";
 
 const IMAGE = process.env.ROVARA_LOCAL_REGISTRY_IMAGE;
 const run = promisify(execFile);

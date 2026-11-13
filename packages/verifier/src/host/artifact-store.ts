@@ -4,7 +4,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { canonicalJson, E2EAppArtifactRefSchema, E2ERunBindingSchema, E2EApplicationHostPreparationBindingSchema,
   E2ELinuxApplicationProfileSchema, type E2EAppArtifactRef, type E2EApplicationArtifactStore, type E2EApplicationArtifactStoreBinding,
-  type E2ELinuxApplicationProfile } from "@agentx/contracts";
+  type E2ELinuxApplicationProfile } from "@rovara-code/contracts";
 
 const chunkSize = 64 * 1024;
 const maxArtifactBytes = 112 * 1024 * 1024;

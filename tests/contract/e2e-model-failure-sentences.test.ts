@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { E2E_AGENT_UNKNOWN_CODES } from "@agentx/verifier";
-import { E2E_OWNER_SENTENCES, modelSentenceContext } from "../../packages/broker/src/e2e/owner-sentences.js";
-import { buildScenarioRows, scrubScenarioResults, type DisplayGroupInput } from "../../packages/broker/src/e2e/application-display.js";
+import { E2E_OWNER_SENTENCES, modelSentenceContext } from "../../packages/core/src/e2e/owner-sentences.js";
+import { buildScenarioRows, scrubScenarioResults, type DisplayGroupInput } from "../../packages/core/src/e2e/application-display.js";
 import { results, row } from "../support/e2e-scenario-results.js";
 
 // M1.4 Task 4.10B, tests 22 and 23: the owner's sentences for each failure class name the provider and the model, from the broker's stored definition only.

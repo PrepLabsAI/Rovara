@@ -9,7 +9,7 @@
 // The runner holds no timer and no polling of its own: SH14's wiring calls `run` for each command the broker's setup callback hands over. Commands run one at a time.
 import { randomBytes } from "node:crypto";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import type { SetupJournalEntry } from "@agentx/contracts";
+import type { SetupJournalEntry } from "@rovara-code/contracts";
 import { setupAgentShell, type SetupAgentShell, type SetupCommandRecord, type TrackedFilesVerdict } from "./setup-agent.js";
 
 export interface PersonCommandRunnerInput {

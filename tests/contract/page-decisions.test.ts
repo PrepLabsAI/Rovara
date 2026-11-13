@@ -1,10 +1,10 @@
 // A decision on a plan with the owner's answers and the comments they chose, through the one transition Slack and MCP use.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { DeveloperTaskViewSchema, WorkflowDecisionSchema, createCandidateManifest, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
-import { decideTaskWorkflow, promptTagId, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
-import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { ownerAnswersFor, refusalMessage } from "../../packages/broker/src/developer/owner-answers.js";
+import { DeveloperTaskViewSchema, WorkflowDecisionSchema, createCandidateManifest, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { decideTaskWorkflow, promptTagId, type DeveloperTaskRouteDependencies } from "../../packages/core/src/aws/developer-tasks.js";
+import type { DeveloperCaller } from "../../packages/core/src/aws/developer-routes.js";
+import { ownerAnswersFor, refusalMessage } from "../../packages/core/src/developer/owner-answers.js";
 import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";

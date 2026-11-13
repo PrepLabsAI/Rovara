@@ -2,8 +2,8 @@
 // Spec 025 A4: the outbox publisher dispatches as before and indexes after; the index never fails the batch.
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { indexActivity } from "../../packages/broker/src/aws/activity-index.js";
-import { INDEX_SAFETY_MARGIN_MS, createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
+import { indexActivity } from "../../packages/core/src/aws/activity-index.js";
+import { INDEX_SAFETY_MARGIN_MS, createOutboxPublisherHandler } from "../../packages/core/src/aws/outbox-publisher.js";
 
 const outbox = { eventName: "INSERT", dynamodb: { NewImage: marshall({ pk: "OUTBOX#o1", sk: "OUTBOX", entityType: "OUTBOX", status: "PENDING", id: "o1", operationId: "op", workspaceId: "ws" }) } };
 

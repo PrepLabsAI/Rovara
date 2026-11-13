@@ -1,5 +1,5 @@
 import { REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES } from "../../packages/contracts/src/index.js";
-import { requalifySetupWorkRow } from "../../packages/broker/src/e2e/requalify-hold.js";
+import { requalifySetupWorkRow } from "../../packages/core/src/e2e/requalify-hold.js";
 
 export const DRAIN_FIXTURE_NOW = Date.parse("2026-10-27T03:00:00.000Z");
 const NOW = DRAIN_FIXTURE_NOW;

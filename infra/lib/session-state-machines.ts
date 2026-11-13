@@ -1,6 +1,6 @@
 // Amazon States Language (JSONata) for the EC2 session provisioner and deleter (issue #83, design in
 // #76). The provisioner starts from a ProvisioningInput and the deleter from a DeletionInput
-// (packages/broker/src/aws/sessions.ts). Each step that records progress calls the session steps
+// (packages/core/src/aws/sessions.ts). Each step that records progress calls the session steps
 // Lambda, which applies the SESSION transition conditionally on the generation.
 
 type State = Record<string, unknown>;
@@ -31,7 +31,7 @@ const STATE_WAIT_CHECKS = 60;
 export const WORKSPACE_DEVICE = "/dev/sdf";
 
 /**
- * An EC2 AMI ID, the pattern of WORKER_AMI_ID_PATTERN in packages/broker/src/aws/worker-ami.ts
+ * An EC2 AMI ID, the pattern of WORKER_AMI_ID_PATTERN in packages/core/src/aws/worker-ami.ts
  * (infra does not import the broker; tests/contract/session-state-machines.test.ts keeps them equal).
  */
 export const AMI_ID_PATTERN_SOURCE = "^ami-[0-9a-f]{8}([0-9a-f]{9})?$";

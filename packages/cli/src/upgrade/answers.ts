@@ -3,7 +3,7 @@
 // settings do not hold (the GitHub App, your own OIDC provider's admin claim, the operator
 // principal). Operator-set parameters are carried by deployEnvironment (Task 1), not here, and the
 // callback signing key comes from Secrets Manager.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { DeployAnswers } from "../deploy/deploy-environment.js";
 import type { StackReader } from "../environments/adopt.js";
 import type { EnvironmentSettings } from "../environments/settings.js";

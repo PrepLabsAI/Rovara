@@ -1,6 +1,6 @@
 // A document store for the intake tests: the memory store, plus a record of every key written so a test can look at what is kept (`find`). The sweep never runs (the clock of a test is not the real one).
-import type { DocumentKey, StoredDocument, TransactItem } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import type { DocumentKey, StoredDocument, TransactItem } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 
 export class RecordingStore extends MemoryDocumentStore {
   readonly #written = new Map<string, DocumentKey>();

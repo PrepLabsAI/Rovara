@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   WorkflowDecisionSchema, WorkflowTransitionError, createWorkflowSnapshot, decideWorkflow, submitWorkflowArtifact, type WorkflowSnapshot,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { reorderMaps } from "../support/fake-dynamodb.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";

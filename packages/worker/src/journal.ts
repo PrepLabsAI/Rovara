@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@rovara-code/contracts";
 
 export type JournalStatus = "ACCEPTED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED";
 

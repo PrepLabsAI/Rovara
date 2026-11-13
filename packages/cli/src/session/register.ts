@@ -1,5 +1,5 @@
 // Lane L8: the `sessions` and `session *` commands. main.ts calls `registerSessionCommands` once; everything the commands need from it comes in as `context`.
-import { INTENT_QUESTIONS_MAX } from "@agentx/contracts";
+import { INTENT_QUESTIONS_MAX } from "@rovara-code/contracts";
 import type { Command } from "commander";
 import type { DeveloperSessionDeps } from "../developer/session.js";
 import { formatSuccess } from "../output.js";

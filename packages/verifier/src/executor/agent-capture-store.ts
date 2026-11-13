@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { E2EAgentCleanTraceSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_FILE_SCHEMA_VERSION, e2eAgentValueDigest } from "@agentx/contracts";
+import { E2EAgentCleanTraceSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_FILE_SCHEMA_VERSION, e2eAgentValueDigest } from "@rovara-code/contracts";
 import { agentInstructionDigest } from "../application-agent-traces.js";
 import { cleanE2EAgentTrace } from "./agent-trace-clean.js";
 import { E2E_AGENT_EVIDENCE_DIR } from "./evidence-paths.js";

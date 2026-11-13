@@ -5,7 +5,7 @@
 // as the key (webhookSecret) and is never printed either.
 import { createSign, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@rovara-code/contracts";
 import { activeHintLine, ensureGithubWebhook, missingEventsLine, storedWebhookSecret } from "../github/webhook-setup.js";
 import type { InitContext, ManifestHost, OpenManifestHost } from "./context.js";
 import { checkPrivateKeyPem, secretFromSource } from "./prompts.js";

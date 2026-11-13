@@ -4,7 +4,7 @@
 // Slack orchestrator role, never the admin claim.
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { slackThreadSubject } from "../../packages/contracts/src/index.js";
-import { finalizeBatch, withEvalBatches } from "../../packages/broker/src/aws/eval-batch.js";
+import { finalizeBatch, withEvalBatches } from "../../packages/core/src/aws/eval-batch.js";
 import { watchEvalBatchesOnce } from "../../packages/slack-service/src/eval-batch-watcher.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createEvalBatchWatchApi } from "../../packages/slack-service/src/slack-thread-api.js";

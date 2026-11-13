@@ -3,9 +3,9 @@
 // interpreter for the renewal's state machine definition so the real machine runs against the real step code. No AWS call is ever made.
 import { createHash, randomUUID } from "node:crypto";
 import { canonicalJson, e2eQualificationPrefix, REQUALIFY_PROFILE_ID, type Ec2RuntimeBinding } from "../../packages/contracts/src/index.js";
-import { e2eModelCheckRunnerKey } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
-import type { RequalifyStepsDependencies } from "../../packages/broker/src/aws/runtime-requalify-steps.js";
+import { e2eModelCheckRunnerKey } from "../../packages/core/src/e2e/model-route-registry.js";
+import { e2eRegisteredRuntimeKey } from "../../packages/core/src/aws/e2e-runtime-readiness.js";
+import type { RequalifyStepsDependencies } from "../../packages/core/src/aws/runtime-requalify-steps.js";
 
 export const ENV = "agentxlivetest123";
 export const CATALOG = "feature-catalog-1";

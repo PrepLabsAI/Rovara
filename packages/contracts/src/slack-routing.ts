@@ -1,7 +1,7 @@
 // Task 21: smart routing for a plain top-level @AgentX request. The Slack ingress hands such a request to the Slack
 // service, which asks the safety-check (classifier) model whether it is a question or a change: a question goes to the
 // chat agent, and a change gets a card that suggests Quick or Full. Nothing that changes code starts without a click.
-// Shared by the Slack ingress and interactivity (packages/broker) and the Slack service (packages/slack-service).
+// Shared by the Slack ingress and interactivity (packages/core) and the Slack service (packages/slack-service).
 import { z } from "zod";
 import type { SlackThread } from "./slack.js";
 import { workflowRequestId } from "./task-workflow-node.js";

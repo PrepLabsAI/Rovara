@@ -1,7 +1,7 @@
 // Lane L12 (owner decision 66): every safety check on a comment offered as a proof is Rovara's, decided from what the host fetched. One test for each check.
 import { describe, expect, it } from "vitest";
-import { ROVARA_REPLY_MARKER } from "@agentx/contracts";
-import { checkCommentProof } from "../../packages/broker/src/core/pr-commands/comment-checks.js";
+import { ROVARA_REPLY_MARKER } from "@rovara-code/contracts";
+import { checkCommentProof } from "../../packages/core/src/core/pr-commands/comment-checks.js";
 import { ARTIFACT_DIGEST, THREAD, freshComment, threadContext } from "../support/comment-fakes.js";
 
 const DANA = { provider: "examplehost", tenant: "", accountId: "dana" };

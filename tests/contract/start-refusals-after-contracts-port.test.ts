@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_PATH_REQUIRED } from "@agentx/contracts";
+import { WORKFLOW_PATH_REQUIRED } from "@rovara-code/contracts";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 
 // The contracts (lane L1) now accept three start-request shapes this broker has no path for. The start handler keeps refusing them, as the old request schema did.

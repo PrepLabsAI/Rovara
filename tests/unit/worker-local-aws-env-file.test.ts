@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AWS_EMULATOR_ENGINE_VERSION, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, WORKER_INVOCATION_FEATURES, catalogPrepullList } from "@agentx/contracts";
+import { AWS_EMULATOR_ENGINE_VERSION, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, WORKER_INVOCATION_FEATURES, catalogPrepullList } from "@rovara-code/contracts";
 import { LOCAL_AWS_FORK_KEYS_OF, LOCAL_AWS_SERVICE_KEYS, localAwsEnvLines, newLocalAwsCredentials } from "../../packages/worker/src/service-helpers.js";
 import { REPO_ENDPOINT_NAMES_MAX, ServiceEnvError, buildServiceEnvironment } from "../../packages/worker/src/service-env.js";
 import { repoAwsEndpointNames } from "../../packages/worker/src/repo-aws-endpoints.js";

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, E2E_RUNTIME_ENVIRONMENT_DRIFTED_CODE, canonicalJson, type E2ECollection, type E2EModelDayBudgetRequest, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
-  type WorkerInvocation } from "@agentx/contracts";
+  type WorkerInvocation } from "@rovara-code/contracts";
 import { resolveE2EAgentRouteForAdmission, type E2EInvoke } from "@agentx/model-runtime";
 import { E2E_AGENT_UNKNOWN_CODES, collectE2EApplicationRun, decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, e2eApplicationPrivateTransferMaxBytes, runIsolatedE2EApplication,
   e2eCompiledRuntime, validateE2EApplicationExecutionAdmission, type DockerApplicationHost, type DockerApplicationModelChannel, type E2ECompiledApplicationSuite } from "@agentx/verifier";

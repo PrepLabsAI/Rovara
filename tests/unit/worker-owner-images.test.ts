@@ -1,7 +1,7 @@
 // The worker on a laptop that runs from the owner's approved image list: it is told the list in its environment (by the broker, which a job cannot change), rebuilds the same catalog from it, names an image by the
 // owner's pinned reference, and refuses any image that is not on the list or that has another digest. A MongoDB helper starts with no password (the run's network is sealed).
 import { describe, expect, it } from "vitest";
-import { OWNER_STARTER_IMAGES, ownerCatalogOf, ownerImageReferences, ownerStarterEntries, type CatalogEntry } from "@agentx/contracts";
+import { OWNER_STARTER_IMAGES, ownerCatalogOf, ownerImageReferences, ownerStarterEntries, type CatalogEntry } from "@rovara-code/contracts";
 import { TEST_SERVICES_OWNER_IMAGES_ENVIRONMENT, testServicesConfigFromEnvironment } from "../../packages/worker/src/test-services-run.js";
 import { startHelpers, type HelperFiles } from "../../packages/worker/src/service-helpers.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";

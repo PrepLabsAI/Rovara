@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { canonicalJson, e2eBindingDigest } from "@agentx/contracts";
+import { canonicalJson, e2eBindingDigest } from "@rovara-code/contracts";
 import { createCompiledApiApplicationFixture } from "../support/e2e-application-fixture.js";
 import { createE2EApplicationCaseCaptureFrame, createE2EApplicationAssertionObservationHeader,
   readValidatedE2EApplicationCaseObservation } from "../../packages/verifier/src/application-services.js";

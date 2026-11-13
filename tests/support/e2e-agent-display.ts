@@ -1,4 +1,4 @@
-import type { E2EDisplayScenario } from "@agentx/contracts";
+import type { E2EDisplayScenario } from "@rovara-code/contracts";
 import { row } from "./e2e-scenario-results.js";
 
 /** The navigation block of a row as the broker derives it from a verified ledger: the model clicked 'Download orders' and the CSV check decided. */

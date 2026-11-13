@@ -1,7 +1,7 @@
 // Live interaction F3: the worker's half of the deep diagnosis. The run is a read-only planning session (read, grep, find and ls: no shell, no write tool; no network and no MCP, because a diagnosis
 // carries no context sources) in a workspace whose repositories were cloned and nothing else was run. The model reads the files the error points at and answers with ONE JSON object: the broker reads
 // it again (`sanitizeDiagnosis`), so the worker's copy is never trusted and this module only makes sure there is an answer worth sending.
-import { DIAGNOSIS_ANSWER_MAX_CHARS, diagnosisPrefillGuide, diagnosisTurnRules } from "@agentx/contracts";
+import { DIAGNOSIS_ANSWER_MAX_CHARS, diagnosisPrefillGuide, diagnosisTurnRules } from "@rovara-code/contracts";
 
 export interface DiagnosisRepository { name: string; path: string; resolvedCommit?: string | undefined }
 

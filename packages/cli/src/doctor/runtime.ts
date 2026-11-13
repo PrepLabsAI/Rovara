@@ -1,7 +1,7 @@
 // agentx doctor's browser and API runtime checks (evaluation fix RUN-3): the qualified runtime lives seven days and only an operator renewing it keeps browser and API checks
 // running, so doctor warns ahead of time, naming when it expires and the exact command that renews it. Only the control plane knows the registrations, so they are read through this
 // computer's admin sign-in; without one the check is skipped, with how to sign in.
-import { CLI_PACKAGE_NAME, E2ERuntimeStatusSchema, e2eRuntimeExpiryNotice, e2eRuntimeRenewCommand, E2E_RUNTIME_GENERIC_RENEW_COMMAND, type E2ERuntimeStatus } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, E2ERuntimeStatusSchema, e2eRuntimeExpiryNotice, e2eRuntimeRenewCommand, E2E_RUNTIME_GENERIC_RENEW_COMMAND, type E2ERuntimeStatus } from "@rovara-code/contracts";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 
 export type RuntimeStatusRead = { kind: "status"; status: E2ERuntimeStatus; awsProfile?: string | undefined } | { kind: "signed-out" } | { kind: "not-set-up" };

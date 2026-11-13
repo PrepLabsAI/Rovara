@@ -1,6 +1,6 @@
 // tests/contract/mcp-client.test.ts
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { NEXT_STEPS, SHARE_BUSY_STEP, TOOL_ERROR_CODES, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, httpControlPlaneClient, signInStep } from "../../packages/mcp/src/index.js";
 
 const TOKEN = "eyJhbGciOiJSUzI1NiJ9.planted-access-token.sig";

@@ -1,4 +1,4 @@
-import { MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider } from "@rovara-code/contracts";
 import { MODEL_NOT_ENABLED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
 import type { WorkerLogSink } from "./worker-log.js";
 

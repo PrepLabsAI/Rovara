@@ -1,8 +1,8 @@
 // Spec 062 FR-031: the link page signs the person in, names what they are linking, and links only on a same-origin confirm.
 import { describe, expect, it, vi } from "vitest";
-import { agentXError } from "@agentx/contracts";
-import { createChannelLinkWeb } from "../../packages/broker/src/aws/channel-link-web.js";
-import { CSRF_COOKIE, SESSION_COOKIE } from "../../packages/broker/src/aws/web-session.js";
+import { agentXError } from "@rovara-code/contracts";
+import { createChannelLinkWeb } from "../../packages/core/src/aws/channel-link-web.js";
+import { CSRF_COOKIE, SESSION_COOKIE } from "../../packages/core/src/aws/web-session.js";
 
 const origin = "https://rovara.example.com";
 const code = "A".repeat(32);

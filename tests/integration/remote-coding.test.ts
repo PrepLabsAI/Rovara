@@ -4,13 +4,13 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { ProjectDefinition, WorkerInvocation } from "@agentx/contracts";
+import type { ProjectDefinition, WorkerInvocation } from "@rovara-code/contracts";
 import {
   InMemoryRegistry,
   OperationStore,
   OwnerScopedOutputStore,
   type AuthenticatedIdentity,
-} from "../../packages/broker/src/index.js";
+} from "../../packages/core/src/index.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";

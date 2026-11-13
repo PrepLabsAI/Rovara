@@ -5,13 +5,13 @@ import {
   AWS_PLAN_SERVICES_MAX, IMPLICIT_COMPANY_ID, TEST_ENV_DEPENDENCY_LIMITS, TEST_ENV_EDIT_STALE_MESSAGE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_USAGE_LIMITS, TEST_SERVICES_HEAVY_FUNCTION_REASONS,
   TestEnvBackingSchema, TestEnvEditBodySchema, TestEnvironmentBodySchema, TestServicesAwsUsageSchema, TestServicesUsageRecordSchema, awsHeavyFunctionEvidenceLine, awsHeavyFunctionEvidenceLines, awsPlanNeedsAllServices,
   projectMetaKey, testEnvDigest, type TaskDependencyPlan, type TestEnvironmentBody, type TestServicesUsageRecord,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { AWS_EMULATOR_SERVICES } from "../../packages/contracts/src/generated/aws-emulator-services.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { documentOf, type TestEnvDeps } from "../../packages/broker/src/core/test-env/deps.js";
-import { clearEditedProposal, currentProposalDigest, proposeTestEnvironment, refuseStaleEdit, setEditedProposal } from "../../packages/broker/src/core/test-env/environment.js";
-import { featuresForTestPlan } from "../../packages/broker/src/core/test-env/seam.js";
-import { AWS_FIDELITY_ITEM_PREFIX, dependencyEvidenceOf } from "../../packages/broker/src/core/proof/dependency-evidence.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { documentOf, type TestEnvDeps } from "../../packages/core/src/core/test-env/deps.js";
+import { clearEditedProposal, currentProposalDigest, proposeTestEnvironment, refuseStaleEdit, setEditedProposal } from "../../packages/core/src/core/test-env/environment.js";
+import { featuresForTestPlan } from "../../packages/core/src/core/test-env/seam.js";
+import { AWS_FIDELITY_ITEM_PREFIX, dependencyEvidenceOf } from "../../packages/core/src/core/proof/dependency-evidence.js";
 import { createServiceRedactor, helperSecretValues } from "../../packages/worker/src/service-env.js";
 import { newLocalAwsCredentials } from "../../packages/worker/src/service-helpers.js";
 import { buildServiceUsageRecord, mergeAwsUsage, reduceHeavyFunctions } from "../../packages/worker/src/service-usage-record.js";

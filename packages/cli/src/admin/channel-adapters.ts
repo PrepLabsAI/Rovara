@@ -8,7 +8,7 @@ import {
   agentXError,
   type ChannelAdapterRecord,
   type ChannelAdapterRegistration,
-} from "@agentx/contracts";
+} from "@rovara-code/contracts";
 import { readJsonResponse, serverError } from "./http.js";
 
 export interface AdminCall { controlPlaneUrl: string; accessToken: string }

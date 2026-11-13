@@ -1,7 +1,7 @@
 // Convergence lane A2: builds the SQS queue service over the in-memory SQS double. The deployment declares queues (CDK); the harness
 // plays the deployment: the first ask for a name (with the options the suite wants) creates that queue and its dead-letter queue in the
 // double, and the adapter then reads them back as it would from SQS.
-import type { QueueOptions, QueueService } from "@agentx/contracts";
+import type { QueueOptions, QueueService } from "@rovara-code/contracts";
 import { SqsQueueService, type SqsQueueDeclaration, type SqsQueueServiceOptions } from "../../../packages/aws-adapters/src/index.js";
 import type { QueueHarness, QueueUnderTest } from "./queue-conformance.js";
 import { FakeSqs, type FakeSqsQueueSpec } from "./sqs-fake.js";

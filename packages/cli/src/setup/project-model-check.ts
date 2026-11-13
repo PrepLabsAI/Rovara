@@ -1,6 +1,6 @@
 // MODEL1 (M1.4 Task 4.10D): a project's default and approved models are checked when a revision is registered, so a model the account cannot use is found before the first task that
 // switches to it. The check is the shared single-call model check; what is stored with a pair is a class and a time, never a message, a signal or provider text.
-import { MODEL_PROVIDERS, ProjectDefinitionSchema, agentXError, modelCheckClassSentence, modelKey, type ModelCheckRecord, type ModelProvider, type ModelRef, type ProjectDefinition } from "@agentx/contracts";
+import { MODEL_PROVIDERS, ProjectDefinitionSchema, agentXError, modelCheckClassSentence, modelKey, type ModelCheckRecord, type ModelProvider, type ModelRef, type ProjectDefinition } from "@rovara-code/contracts";
 import type { ModelCheckResult } from "@agentx/model-runtime/model-check";
 import { environmentProjectFiles } from "./project-add.js";
 import { check as doctorCheck, type DoctorCheck, type DoctorContext } from "../doctor/checks.js";

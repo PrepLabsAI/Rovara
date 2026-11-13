@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Ec2RuntimeBinding } from "../../packages/contracts/src/session.js";
-import { SessionManager, sessionFromItem } from "../../packages/broker/src/aws/sessions.js";
+import { SessionManager, sessionFromItem } from "../../packages/core/src/aws/sessions.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const PROVISIONER = "arn:aws:states:us-east-1:111122223333:stateMachine:provisioner";

@@ -2,11 +2,11 @@
 // untrusted, and the mark a step moves moves only forward (so each note is given once).
  
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_THREAD_NOTES_MAX } from "@agentx/contracts";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import { WORKFLOW_THREAD_NOTES_MAX } from "@rovara-code/contracts";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
 import {
   APP_NOTE_SECTION_HEADER, noteKey, notesFedUpdate, notesPromptSection, promptTagId, readTaskNotes, sessionNoteItems, stepNotes,
-} from "../../packages/broker/src/core/sessions/notes.js";
+} from "../../packages/core/src/core/sessions/notes.js";
 
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const T0 = Date.parse("2026-11-10T10:00:00.000Z");

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { E2EDisplayScenarioSchema, E2EScenarioResultsSchema } from "@agentx/contracts";
+import { E2EDisplayScenarioSchema, E2EScenarioResultsSchema } from "@rovara-code/contracts";
 import {
   e2eMockedBadge, e2eScenarioSummary, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks,
-} from "../../packages/broker/src/e2e-presentation.js";
+} from "../../packages/core/src/e2e-presentation.js";
 import { OTHER_SHOT_SHA, SHOT_SHA, failedBaseline, failedViewerRow, fiveScenarios, results, row } from "../support/e2e-scenario-results.js";
 
 // M1.3 Task 3.7: one row per scenario on the task page, and a text-only summary in Slack (at most 3000 characters): the counts, the first failed row, what was mocked,

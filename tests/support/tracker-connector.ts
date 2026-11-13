@@ -1,8 +1,8 @@
 // A test-only connector type: a static-secret vendor whose scopes are sites. No production code
 // registers it; tests inject it to exercise the generic connector paths beside GitHub.
 import type { ToolApproval } from "@agentx/gateway";
-import { connectorLedgerKeys } from "../../packages/broker/src/aws/connector-ledger.js";
-import type { ConnectorType, ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
+import { connectorLedgerKeys } from "../../packages/core/src/aws/connector-ledger.js";
+import type { ConnectorType, ResolvedConnector } from "../../packages/core/src/aws/connector-types.js";
 
 export const TRACKER_ENDPOINT = "https://mcp.tracker.test/mcp";
 

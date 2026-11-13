@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { e2eAgentValueKeyId, e2eModelRouteRevision, E2E_MODEL_FAILURE_CLASSES, type E2EModelFailure, type E2EModelReceipt, type E2EModelRouteDefinition } from "@agentx/contracts";
+import { e2eAgentValueKeyId, e2eModelRouteRevision, E2E_MODEL_FAILURE_CLASSES, type E2EModelFailure, type E2EModelReceipt, type E2EModelRouteDefinition } from "@rovara-code/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import { createE2EProviderInvoke } from "../../packages/model-runtime/src/e2e-provider-invoke.js";
 import { createE2EProviderInvokeForTesting } from "../../packages/model-runtime/src/e2e-provider-invoke-testing.js";
-import { E2E_OWNER_SENTENCES, modelSentenceContext } from "../../packages/broker/src/e2e/owner-sentences.js";
-import { buildScenarioRows } from "../../packages/broker/src/e2e/application-display.js";
+import { E2E_OWNER_SENTENCES, modelSentenceContext } from "../../packages/core/src/e2e/owner-sentences.js";
+import { buildScenarioRows } from "../../packages/core/src/e2e/application-display.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { PROVIDER_KEY, SECRET_ARN, bedrockRoute, channelRequest, installationEnvironment, keyedRoute } from "../support/e2e-model-fixtures.js";
 import { bedrockLoopback, fakeFetch, jsonError } from "../support/e2e-provider-fakes.js";

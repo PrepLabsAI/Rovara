@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
-import { slackWorkflowCaller } from "../../packages/broker/src/aws/slack-workflow-caller.js";
+import { developerIdForSlackUser } from "../../packages/core/src/aws/admin-actions.js";
+import { slackWorkflowCaller } from "../../packages/core/src/aws/slack-workflow-caller.js";
 
 describe("Slack workflow caller", () => {
   it("native_slack_and_slack_signin_page_mcp_share_owner_principal", () => {

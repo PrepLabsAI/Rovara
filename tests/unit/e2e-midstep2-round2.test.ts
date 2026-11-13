@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { E2E_EXECUTOR_COMPILED_ORIGIN, readE2EApplicationProjectContract } from "@agentx/contracts";
+import { E2E_EXECUTOR_COMPILED_ORIGIN, readE2EApplicationProjectContract } from "@rovara-code/contracts";
 import { createExecutorSessionStore } from "../../packages/verifier/src/executor/accounts.js";
 import { agentTraceFilePath, createE2EAgentCaptureStore, persistE2EAgentTrace } from "../../packages/verifier/src/executor/agent-capture-store.js";
 import { readBrowserState, type BrowserContextLike, type BrowserFrameLike } from "../../packages/verifier/src/executor/browser-state-reader.js";

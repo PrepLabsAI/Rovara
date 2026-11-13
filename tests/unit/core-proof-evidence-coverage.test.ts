@@ -3,8 +3,8 @@
 import { describe, expect, it } from "vitest";
 import type { CheckEntry } from "../../packages/contracts/src/index.js";
 import { EVIDENCE_OP, EVIDENCE_TASK, evidenceWorld } from "../support/evidence-keep-world.js";
-import { evidenceLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
-import { keepEvidence, loadEvidencePack } from "../../packages/broker/src/core/proof/evidence-keep.js";
+import { evidenceLines } from "../../packages/core/src/core/proof/evidence-lines.js";
+import { keepEvidence, loadEvidencePack } from "../../packages/core/src/core/proof/evidence-keep.js";
 
 const DIGEST = "c".repeat(64);
 const TASK = EVIDENCE_TASK;

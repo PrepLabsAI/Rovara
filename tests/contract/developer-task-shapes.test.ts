@@ -10,8 +10,8 @@ import {
   taskTitle,
 } from "../../packages/contracts/src/index.js";
 // F1: imported from the package, not the src path, so this is the same module instance the
-// orchestrator's re-export resolves to (both resolve through @agentx/contracts's dist build).
-import { lastAssistantResponse } from "@agentx/contracts";
+// orchestrator's re-export resolves to (both resolve through @rovara-code/contracts's dist build).
+import { lastAssistantResponse } from "@rovara-code/contracts";
 import { lastAssistantResponse as orchestratorCopy } from "../../packages/orchestrator/src/control-plane-api.js";
 
 const requestId = "33333333-3333-4333-8333-333333333333";

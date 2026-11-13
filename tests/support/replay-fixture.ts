@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { canonicalJson, type E2EReplayTrace } from "@agentx/contracts";
+import { canonicalJson, type E2EReplayTrace } from "@rovara-code/contracts";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "./e2e-orders-executor-fixture.js";
 
 /**

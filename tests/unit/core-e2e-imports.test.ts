@@ -4,7 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const folder = resolve("packages/broker/src/core/e2e");
+const folder = resolve("packages/core/src/core/e2e");
 
 /** Every way a module is loaded: `import x from`, `export x from`, a side-effect `import "x"`, and a dynamic `import("x")` (type imports are erased). */
 function specifiersOf(text: string): string[] {

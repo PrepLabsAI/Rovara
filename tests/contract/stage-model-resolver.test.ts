@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { resolveStageModel, STAGE_OPERATION_MAPPING } from "../../packages/broker/src/core/model-selection/resolver.js";
-import type { StageModelInput } from "../../packages/broker/src/core/model-selection/resolver.js";
+import { resolveStageModel, STAGE_OPERATION_MAPPING } from "../../packages/core/src/core/model-selection/resolver.js";
+import type { StageModelInput } from "../../packages/core/src/core/model-selection/resolver.js";
 const build = { provider: "anthropic", modelId: "claude-sonnet-4" };
 const other = { provider: "anthropic", modelId: "claude-opus-4" };
 const base = (): StageModelInput => ({ orgId: "org_a", stage: "build", sourcesRevision: 2, candidates: [build, other].map((model) => ({ model, sourceId: "rovara", enabled: true, inEffectiveOrder: true, evidence: { orgId: "org_a", sourcesRevision: 2, kind: "rovara_catalog" } })), forbidden: [], approved: [build, other], builtinDefault: build });

@@ -5,7 +5,7 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { agentXError, ReleaseManifestSchema, renderTemplate, type ReleaseManifest } from "@agentx/contracts";
+import { agentXError, ReleaseManifestSchema, renderTemplate, type ReleaseManifest } from "@rovara-code/contracts";
 import { sha256Hex } from "./hash.js";
 import type { DeployPart } from "./parameters.js";
 

@@ -6,21 +6,21 @@ import { createHash } from "node:crypto";
 import { expect } from "vitest";
 import {
   DESIGN_REVIEW_INFO_STRING, DesignReviewBindingSchema, DesignReviewWorkerResultSchema, WORKER_INVOCATION_FEATURES, canonicalPlanJson, decideWorkflow, type Admission, type PlanDocument, type WorkflowSnapshot, type WorkerInvocation,
-} from "@agentx/contracts";
-import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
-import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { fromDocument, type OperationRecord, type TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
-import { retryBlockedReview, designFirstOf } from "../../packages/broker/src/core/design-review/actions.js";
-import { createDesignReviewSteps } from "../../packages/broker/src/core/design-review/steps.js";
-import { putSlotKey, readSlotCeiling } from "../../packages/broker/src/core/design-review/slot-keys.js";
-import { writeDesignReviewSetting } from "../../packages/broker/src/core/design-review/playbook-store.js";
-import type { DesignReviewRuntime } from "../../packages/broker/src/core/design-review/round-ports.js";
-import { LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
-import { createWorkflowDocumentSubject } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { DESIGN_CHOICE_KIND, createDesignChoiceSubject, designChoiceDigest } from "../../packages/broker/src/core/design-review/choice-subject.js";
-import { checkDesignApproval, designApprovalRecordItems, designRiskOf } from "../../packages/broker/src/core/design-review/decision.js";
-import { createLocalDesignReview } from "../../packages/broker/src/local/app/design-review.js";
+} from "@rovara-code/contracts";
+import { dispatchRowItem } from "../../packages/core/src/core/task-flow/dispatch-rows.js";
+import { operationKey, taskKey, workspaceKey } from "../../packages/core/src/core/task-flow/keys.js";
+import { fromDocument, type OperationRecord, type TaskRecord } from "../../packages/core/src/core/task-flow/records.js";
+import { retryBlockedReview, designFirstOf } from "../../packages/core/src/core/design-review/actions.js";
+import { createDesignReviewSteps } from "../../packages/core/src/core/design-review/steps.js";
+import { putSlotKey, readSlotCeiling } from "../../packages/core/src/core/design-review/slot-keys.js";
+import { writeDesignReviewSetting } from "../../packages/core/src/core/design-review/playbook-store.js";
+import type { DesignReviewRuntime } from "../../packages/core/src/core/design-review/round-ports.js";
+import { LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
+import { createDecisionGate } from "../../packages/core/src/core/decisions/approval-gate.js";
+import { createWorkflowDocumentSubject } from "../../packages/core/src/core/decisions/workflow-subject.js";
+import { DESIGN_CHOICE_KIND, createDesignChoiceSubject, designChoiceDigest } from "../../packages/core/src/core/design-review/choice-subject.js";
+import { checkDesignApproval, designApprovalRecordItems, designRiskOf } from "../../packages/core/src/core/design-review/decision.js";
+import { createLocalDesignReview } from "../../packages/core/src/local/app/design-review.js";
 import { COMPANY, createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 export const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");

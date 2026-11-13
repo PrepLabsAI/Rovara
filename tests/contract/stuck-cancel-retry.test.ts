@@ -7,7 +7,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   SLACK_CHANNEL, SLACK_TEAM, call, createBroker, ensureWorkspace, finishOperation, loadSlackBroker, markReady, registerSlackProject, serviceCall,
 } from "../support/slack-broker.js";
-import { FAILED_CANCEL_RELEASED_MESSAGE, STUCK_CANCEL_RETRY_MS, createCancelRetrier, sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
+import { FAILED_CANCEL_RELEASED_MESSAGE, STUCK_CANCEL_RETRY_MS, createCancelRetrier, sweepStuckCancels } from "../../packages/core/src/aws/stuck-cancels.js";
 
 const SIGNING_KEY = "c".repeat(64);
 

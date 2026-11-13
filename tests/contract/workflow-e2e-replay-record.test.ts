@@ -1,11 +1,11 @@
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { indexExpiresAt } from "@agentx/contracts";
+import { indexExpiresAt } from "@rovara-code/contracts";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import {
   E2E_REPLAY_PURPOSE, listWorkflowE2EReplayRecords, markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayStartItem, requestWorkflowE2EReplay,
   type VerifiedReplay,
-} from "../../packages/broker/src/aws/workflow-e2e-replay.js";
+} from "../../packages/core/src/aws/workflow-e2e-replay.js";
 
 // M1.4 Task 4.6b: the replay's record, E2E_REPLAY#<sourceRoundId>#<attempt>, beside the task. Conditional writes, the same 30-day TTL as the baseline's, and nothing of the task changed.
 

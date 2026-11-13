@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SlackPostError } from "../../packages/broker/src/aws/slack-web.js";
+import { SlackPostError } from "../../packages/core/src/aws/slack-web.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
 
 const section = (text: string) => ({ type: "section", text: { type: "mrkdwn", text } });

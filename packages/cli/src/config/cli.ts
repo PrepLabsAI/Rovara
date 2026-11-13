@@ -1,6 +1,6 @@
 // The `agentx config` command group (FR-048, FR-049), kept out of main.ts. Builds real AWS clients
 // only when a test has not overridden them.
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { BudgetsClient } from "@aws-sdk/client-budgets";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";

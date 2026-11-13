@@ -2,14 +2,14 @@
 // answered `delivered` with the note marked; a queued one is settled when a step takes its note, and closed when the session ends.
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, agentSessionKey, sessionQueuedSteersKey, when, type OrgId, type TransactItem } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, agentSessionKey, sessionQueuedSteersKey, when, type OrgId, type TransactItem } from "@rovara-code/contracts";
 import {
   SessionStore, createSessionControl, createTaskSessionItems, developerIdOf, readSessionEvents, taskSessionId, type MessagePlan, type SessionControlHost,
-} from "../../packages/broker/src/core/sessions/index.js";
-import { noteKey, sessionNoteItems } from "../../packages/broker/src/core/sessions/notes.js";
-import { closeQueuedSteers, messageKey, settleSteerDeliveries, settleSteerDeliveriesFor, SESSION_ENDED_REASON } from "../../packages/broker/src/core/sessions/steer.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+} from "../../packages/core/src/core/sessions/index.js";
+import { noteKey, sessionNoteItems } from "../../packages/core/src/core/sessions/notes.js";
+import { closeQueuedSteers, messageKey, settleSteerDeliveries, settleSteerDeliveriesFor, SESSION_ENDED_REASON } from "../../packages/core/src/core/sessions/steer.js";
+import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
+import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/core/src/ports/policy-defaults.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OWNER = localOwnerPrincipal();

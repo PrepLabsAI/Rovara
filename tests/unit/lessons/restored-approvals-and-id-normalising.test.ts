@@ -1,14 +1,14 @@
 // The sole-owner exception and the author rule on a restored approval, ONE id normaliser everywhere, the kill switch under a
 // fence, the settle policy re-read at go-live, and an undefined settings row.
 import { describe, expect, it } from "vitest";
-import { approveLesson, rollbackLessonSet, retireByPerson, type ApproveDeps } from "../../../packages/broker/src/lessons/approve.js";
-import { lessonDeletionPort } from "../../../packages/broker/src/lessons/deletion.js";
-import { resolveLearning, type LearningSettings, type LearningSettingsReader } from "../../../packages/broker/src/lessons/policy.js";
-import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
-import { scrubLesson } from "../../../packages/broker/src/lessons/scrub.js";
-import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { distinctIds, idIn, normId, sameId } from "../../../packages/broker/src/lessons/types.js";
-import { isCorroborated } from "../../../packages/broker/src/lessons/value.js";
+import { approveLesson, rollbackLessonSet, retireByPerson, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
+import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
+import { resolveLearning, type LearningSettings, type LearningSettingsReader } from "../../../packages/core/src/lessons/policy.js";
+import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { scrubLesson } from "../../../packages/core/src/lessons/scrub.js";
+import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
+import { distinctIds, idIn, normId, sameId } from "../../../packages/core/src/lessons/types.js";
+import { isCorroborated } from "../../../packages/core/src/lessons/value.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, autoSettings, directory, draft, embedder, facts, lessonRecord, seed, settings, verifier, allowAllAccess } from "./lesson-helpers.js";
 
 describe("a restored approval is re-checked against today's rules", () => {

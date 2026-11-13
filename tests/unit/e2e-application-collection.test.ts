@@ -3,9 +3,9 @@ import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import process from "node:process";
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson } from "@rovara-code/contracts";
 import { createCompiledApiApplicationFixture, createCompiledTwoShardApiApplicationFixture } from "../support/e2e-application-fixture.js";
-import { e2eAgentValueKeyId, e2eModelRouteRevision } from "@agentx/contracts";
+import { e2eAgentValueKeyId, e2eModelRouteRevision } from "@rovara-code/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
 import { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "../../packages/verifier/src/application-templates.js";
@@ -50,7 +50,7 @@ function collection(overrides: Record<string, unknown> = {}) {
 describe("application collection contracts", () => {
   it("accepts a protected pending-to-ready probe sequence and rejects a foreign probe identity", async () => {
     const module = await import("../../packages/verifier/src/application-result-adapter.js");
-    const contracts = await import("@agentx/contracts");
+    const contracts = await import("@rovara-code/contracts");
     const frame = (artifactId: string, value: unknown) => {
       const body = Buffer.from(canonicalJson(value));
       return { ref: { artifactId, sha256: createHash("sha256").update(body).digest("hex"), byteLength: body.byteLength, mediaType: "application/json" }, bytes: body };

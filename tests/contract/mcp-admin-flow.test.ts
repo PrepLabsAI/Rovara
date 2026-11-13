@@ -3,7 +3,7 @@
 // committed here (US5's "committed snapshot"; never regenerated, never vitest -u).
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { indexActivity } from "../../packages/broker/src/aws/activity-index.js";
+import { indexActivity } from "../../packages/core/src/aws/activity-index.js";
 import { failureIndexKey, usageIndexKey } from "../../packages/contracts/src/index.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { MAYA, bearerFor, recordStream } from "../support/developer-task-broker.js";

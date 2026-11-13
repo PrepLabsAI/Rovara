@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { planDocumentMarkdown, type PlanDocument, type PlanEvidenceInput } from "@agentx/contracts";
-import { renderDiagram } from "../../packages/broker/src/aws/plan-page/diagrams.js";
+import { planDocumentMarkdown, type PlanDocument, type PlanEvidenceInput } from "@rovara-code/contracts";
+import { renderDiagram } from "../../packages/core/src/aws/plan-page/diagrams.js";
 import { planDocument } from "../support/plan-documents.js";
 
 type Diagram = Extract<PlanEvidenceInput, { kind: "flow" | "schema" | "stateMachine" }>;

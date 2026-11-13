@@ -1,4 +1,4 @@
-import type { WebApiProbeObservation } from "@agentx/contracts";
+import type { WebApiProbeObservation } from "@rovara-code/contracts";
 
 /**
  * What a failed runtime qualification may say about itself without host access. The qualification log can carry stack traces, paths and values echoed by a

@@ -1,9 +1,9 @@
 // LIVEFIX-1 item 2 (AUTOFIXGAP), on the real broker: the CHECKS dispatch refuses the round before it starts (VERIFY WAITING -> BLOCKED), and that block is looked at by the automatic-fix policy as
 // a block written by a finished run is. The live case: the coding round left the approved application with no launch recipe in the source ("has no launch recipe in the approved source").
 import { afterEach, describe, expect, it } from "vitest";
-import { WORKFLOW_AGENTX_ACTOR_ID, workflowApplicationEvidenceCodes, type WorkflowSnapshot } from "@agentx/contracts";
-import { AutoFixAskSchema } from "../../packages/broker/src/developer/autofix-messages.js";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { WORKFLOW_AGENTX_ACTOR_ID, workflowApplicationEvidenceCodes, type WorkflowSnapshot } from "@rovara-code/contracts";
+import { AutoFixAskSchema } from "../../packages/core/src/developer/autofix-messages.js";
+import { workflowMessage } from "../../packages/core/src/developer/workflow-messages.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound, type RoundBrokerHarness } from "../support/e2e-application-round-harness.js";
 

@@ -26,7 +26,7 @@
 // No repository-controlled string reaches a docker argument: the run id must be plain (letters, digits, hyphens; it is only ever hashed), the workspace must be a 16-hex key, every name and the bridge are hashes, the addresses come from a
 // number, and the ids the sweep passes on must pass a plain-id check. A dependency's alias (`postgres`) is not part of this module; the helper launcher (TS14) must validate it before it uses `--network-alias`.
 import { createHash } from "node:crypto";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import type { DockerCli } from "./swebench/containers.js";
 import { DOCKER_CALL_TIMEOUT_MS, SETUP_NETWORK_SLOTS, isSlotCollision, setupNetworkSlot } from "./setup-network.js";
 

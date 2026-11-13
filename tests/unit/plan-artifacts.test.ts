@@ -1,8 +1,8 @@
 // A workflow document read back from storage: legacy Markdown as it was, a structured plan checked and rendered.
 import { createHash } from "node:crypto";
-import { canonicalPlanJson, planDocumentMarkdown, type WorkflowArtifact } from "@agentx/contracts";
+import { canonicalPlanJson, planDocumentMarkdown, type WorkflowArtifact } from "@rovara-code/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown } from "../../packages/broker/src/developer/plan-artifacts.js";
+import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown } from "../../packages/core/src/developer/plan-artifacts.js";
 import { planDocument } from "../support/plan-documents.js";
 
 const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");

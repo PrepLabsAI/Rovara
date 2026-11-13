@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, E2EWorkflowAdmissionRefSchema, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, canonicalJson, groundingScenarioIds, type E2EScenario, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, E2EWorkflowAdmissionRefSchema, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, canonicalJson, groundingScenarioIds, type E2EScenario, type E2EWorkflowAdmissionRef } from "@rovara-code/contracts";
 import { executeWorkflowE2EApplicationChecks } from "../../packages/worker/src/workflow-e2e-application-checks.js";
-import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
-import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
+import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/core/src/e2e/application-admission.js";
+import { evaluateApplicationPlanApproval } from "../../packages/core/src/e2e/application-plan-approval.js";
+import { e2eAgentRoutePolicyLimits } from "../../packages/core/src/e2e/model-route-registry.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { binding, csvScenario, ordersContractManifest, planFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 

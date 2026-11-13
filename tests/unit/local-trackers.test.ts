@@ -1,7 +1,7 @@
 // The trackers `rovara up` registers: only the ones the owner has signed in to, each sign-in read through the secrets socket when it is used (never kept), and the Jira site checked before a token can go to it.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, PluginConfigSchema, SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
-import { createLocalTrackers } from "../../packages/broker/src/local/trackers.js";
+import { IMPLICIT_COMPANY_ID, PluginConfigSchema, SecretValue, type SecretRef, type SecretStore } from "@rovara-code/contracts";
+import { createLocalTrackers } from "../../packages/core/src/local/trackers.js";
 
 // Built at run time: a fixture must not look like a real key.
 const LINEAR = ["lin", "api", "fixture"].join("_");

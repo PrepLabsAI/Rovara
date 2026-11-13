@@ -6,7 +6,7 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path";
 import { createSyntheticSourceInfo, type Skill } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
-import { agentXError } from "@agentx/contracts";
+import { agentXError } from "@rovara-code/contracts";
 import { piTaskToolCapabilities, type PiSessionHandle, type PiWorkflowMode } from "./pi-session.js";
 
 /** One skill of this operation's snapshot, as the broker serves it (`GET /v1/internal/agent-skills`). */
