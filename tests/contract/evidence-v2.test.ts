@@ -63,14 +63,25 @@ describe("the v2 schema", () => {
     expect(EvidencePackV2Schema.safeParse(undated).success).toBe(false);
   });
 
-  it("refuses a 'real run' that did not run in a sealed round, and one whose proof rests on scripted AI replies (M4)", () => {
-    for (const isolation of ["sandbox", "developer_machine", "imported"]) {
+  it("allows a 'real run' in the agent's sandbox (O44: the final round runs unsealed, only the words change), and refuses one on a laptop or imported (M4)", () => {
+    expect(EvidencePackV2Schema.safeParse(v2Pack({ producer: { edition: "cloud", isolation: "sealed" } })).success).toBe(true);
+    const unsealed = v2Pack({ producer: { edition: "cloud", isolation: "sandbox" } });
+    expect(EvidencePackV2Schema.safeParse(unsealed).success).toBe(true);
+    expect(renderEvidence(unsealed).firstLine).toBe("Verified · Run by Rovara, not sealed");
+    for (const isolation of ["developer_machine", "imported"]) {
       expect(EvidencePackV2Schema.safeParse(v2Pack({ producer: { edition: "cloud", isolation } })).success, isolation).toBe(false);
     }
-    expect(EvidencePackV2Schema.safeParse(v2Pack({ producer: { edition: "cloud", isolation: "sandbox" }, level: { reached: "sandbox_only", required: [] } })).success).toBe(true);
-    const scripted = clone(v2Pack());
-    Object.assign(scripted.checks[0]!, { proofBasis: "scripted_ai_replies", trust: "simulated" });
-    expect(EvidencePackV2Schema.safeParse(scripted).success).toBe(false);
+    expect(EvidencePackV2Schema.safeParse(v2Pack({ producer: { edition: "cloud", isolation: "developer_machine" }, level: { reached: "their_ci", required: [] } })).success).toBe(true);
+  });
+
+  it("refuses a 'real run' whose proof rests on scripted AI replies, in any isolation (M4)", () => {
+    for (const isolation of ["sealed", "sandbox"]) {
+      const scripted = clone(v2Pack({ producer: { edition: "cloud", isolation } }));
+      Object.assign(scripted.checks[0]!, { proofBasis: "scripted_ai_replies", trust: "simulated" });
+      expect(EvidencePackV2Schema.safeParse(scripted).success, isolation).toBe(false);
+      scripted.level.reached = "sandbox_only";
+      expect(EvidencePackV2Schema.safeParse(scripted).success, `${isolation} sandbox_only`).toBe(true);
+    }
   });
 
   it("names who ran a check as runBy", () => {
