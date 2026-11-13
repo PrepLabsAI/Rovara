@@ -34,6 +34,7 @@ import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { sessionEventItem } from "../core/sessions/store.js";
 import { verifyPublishedChanges } from "../core/build-step/changed-files.js";
 import { runTierChecks } from "../core/build-step/tier-checks.js";
+import { scopeHoldOf } from "../core/build-step/scope-question.js";
 import { skippedPlanning } from "../core/decisions/change-tier.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { readTask } from "../core/task-flow/reads.js";
@@ -185,6 +186,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     repository: resolver,
     // A pull request seen "changed outside Rovara" has no recorded head, so its head reads as someone else's and it is never called ready.
     recordedHead: recordedHeadOf(flow),
+    // A small change that grew to risky stays a draft until a person keeps it and the risky reviews pass.
+    readyHold: (task) => scopeHoldOf(flow, task),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 

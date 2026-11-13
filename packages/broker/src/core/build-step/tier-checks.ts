@@ -26,6 +26,8 @@ import { readTask } from "../task-flow/reads.js";
 import type { TaskRecord } from "../task-flow/records.js";
 import { failedQuickCheck, ownQuickChecks, quickCheckEntry, withQuickChecks } from "../task-flow/stage-selection.js";
 import { iso, log } from "../task-flow/support.js";
+import { askScopeQuestion, isOutageReason, scopeBanner, scopeHolds, withScopeBanner } from "./scope-question.js";
+import { pullRequestRecordKey, pullRequestRecordOf } from "./records.js";
 import { checkingModelOf, runCodeReview, runGrownReviews, tierReviewerOf, type CheckingModel, type GrownReviewResult, type TierReviewPurpose } from "./tier-review-calls.js";
 import { createHash } from "node:crypto";
 
@@ -125,7 +127,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     // A head the record has no tier for (a person's push, or one the post-push writer could not read) is tiered here, from the same files.
     const flow = workflow.flow;
     // A reviewer outage holds the head it happened on, not the next ones: the head of the first tier an outage raised.
-    const outageOnly = flow?.tier !== undefined && flow.tier.reasons.length > 0 && flow.tier.reasons.every((reason) => reason.code === "reviewer_unavailable");
+    const outageOnly = flow?.tier !== undefined && flow.tier.reasons.length > 0 && flow.tier.reasons.every(isOutageReason);
     const outageHead = [...(flow?.tierHistory ?? []), ...(flow?.tier === undefined ? [] : [flow.tier])].find((tier) => tier.reasons.some((reason) => reason.code === "reviewer_unavailable"))?.headSha;
     const outageElsewhere = outageOnly && outageHead !== head;
     const needsTier = flow?.tier?.headSha !== head || flow.tier.source === "estimate" || outageElsewhere;
@@ -141,7 +143,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       if (fresh === undefined) return current;
       // A reviewer outage holds the head it happened on, not the next ones: a tier raised by nothing but an outage on another head does not carry over (the new head is asked again).
       const previous = current?.tier;
-      if (current !== undefined && previous !== undefined && outageElsewhere && previous.reasons.length > 0 && previous.reasons.every((reason) => reason.code === "reviewer_unavailable")) {
+      if (current !== undefined && previous !== undefined && outageElsewhere && previous.reasons.length > 0 && previous.reasons.every(isOutageReason)) {
         // The outage's raise is kept in the history (it is what happened on that head); the growth it alone caused does not stand for the new head.
         const { grewAfterBuild: _grew, ...rest } = current;
         void _grew;
@@ -222,10 +224,12 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     // Written under the record read; another writer that got in first gets the same results applied to its record.
     let current: WorkflowSnapshot = workflow;
     let written = false;
+    let finalFlow: WorkflowFlow | undefined = flow;
     for (let attempt = 0; attempt < WRITE_ATTEMPTS && !written; attempt += 1) {
       const base = current.flow;
       const tiered = withDocsTotal(withTier(base));
       const next = withReview(withChecks(floor === undefined ? tiered : recordReviewerFloor(tiered, floor, at) ?? tiered));
+      finalFlow = next ?? base;
       if (next === undefined || JSON.stringify(next) === JSON.stringify(base)) { written = true; break; }
       written = await deps.store.update({
         key: taskKey(task.taskId), ops: [change.set(["workflow", "flow"], JSON.parse(JSON.stringify(next)) as never)],
@@ -238,6 +242,8 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       }
     }
     if (!written) return "unavailable";
+    // A small change that grew to risky: the scope question (from the head's own deterministic reasons), the banner on the pull request, and the notice, once per question.
+    if (finalFlow !== undefined) await scopeStep(deps, task, { flow: finalFlow, headTier: tierFromDiff(read.diff, { ...bound, at, head: read.head }), files: read.diff.files, head, at, targets });
     // The person is told what grew, once per head and level (the review's own record says whether it passed).
     if (grown !== undefined && task.sessionId !== undefined && draft?.tier !== undefined) {
       const sentence = tierGrowthSentence(draft.tier, (path) => inertLine(path, 80));
@@ -253,5 +259,35 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     if (error instanceof Error && error.name === "HostRateLimitError") throw error;
     log(deps, { event: "tier_checks.unavailable", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
     return "unavailable";
+  }
+}
+
+/** The scope question of a change that grew to risky, the banner at the top of its pull request description (only a description Rovara wrote and nobody edited since), and the person's notice. Best effort: a failure here changes no record the merge reads. */
+async function scopeStep(deps: TaskFlowDeps, task: TaskRecord, input: { flow: WorkflowFlow; headTier: ChangeTier; files: readonly TierFile[]; head: string; at: string; targets: ReadonlyArray<TierReadTarget & { headSha: string }> }): Promise<void> {
+  try {
+    const { asked, question } = await askScopeQuestion(deps, task, input);
+    if (question === undefined) return;
+    const held = scopeHolds(input.flow, question);
+    const banner = scopeBanner(question, held);
+    for (const target of input.targets) {
+      const record = await pullRequestRecordOf(deps, task.workspaceId, target.repositoryId, target.number);
+      const ref = changeRequestRef(target.repositoryUrl, target.number);
+      const now = await target.host.getChangeRequest(ref, { orgId: deps.companyId });
+      // Only a description Rovara wrote and nobody edited since (a person's words stay theirs); the banner is replaced in place.
+      if (record === undefined || (now.body !== record.body)) continue;
+      const body = withScopeBanner(now.body ?? "", banner);
+      if (body === now.body) continue;
+      await target.host.updateChangeRequest(ref, { body }, { orgId: deps.companyId });
+      await deps.store.update({ key: pullRequestRecordKey(task.workspaceId, target.repositoryId, target.number), ops: [change.set("body", body), change.set("updatedAt", input.at)], condition: when.present() });
+    }
+    if (asked && task.sessionId !== undefined) {
+      const text = question.kind === "couldnt_check"
+        ? "Rovara could not check this change, so it stays a draft. Retry the check from the task page, or stop the task."
+        : `This grew from small to risky. It also changed ${question.area}: ${question.files.map((file) => `${file.path} (+${String(file.additions)} -${String(file.deletions)})`).join(", ")}. It stays a draft: keep these files, remove them, or stop the task on the task page.`;
+      const eventId = `evt_${createHash("sha256").update(`scope-question\u0000${task.taskId}\u0000${String(question.version)}`).digest("hex").slice(0, 24)}`;
+      await new SessionStore(deps.store).appendEvent(deps.companyId, task.sessionId, { eventId, at: input.at, type: "status", actor: { kind: "system" }, text });
+    }
+  } catch (error) {
+    log(deps, { event: "tier_checks.scope_step_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
   }
 }
