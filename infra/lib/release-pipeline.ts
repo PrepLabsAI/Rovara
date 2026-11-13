@@ -69,9 +69,9 @@ export class ReleasePipelineStack extends Stack {
       description: "Runs npm run release:prod for AgentX mainline commits",
       environment: {
         buildImage: codebuild.LinuxArmBuildImage.AMAZON_LINUX_2023_STANDARD_3_0,
-        // 8 vCPUs: the release runs the whole test suite (as an unprivileged account), which takes about 35 minutes on 4
-        // and must finish, with the image builds and deploys, inside the build's 45-minute limit.
-        computeType: codebuild.ComputeType.LARGE,
+        // 32 vCPUs: the release runs the whole test suite (as an unprivileged account), about 32 minutes on 4 vCPUs and 16
+        // on 8; on 32 the release takes about 14 minutes, well inside the build's 45-minute limit.
+        computeType: codebuild.ComputeType.X_LARGE,
         privileged: true,
       },
       concurrentBuildLimit: 1,

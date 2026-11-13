@@ -10684,7 +10684,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "Description": "Runs npm run release:prod for AgentX mainline commits",
         "EncryptionKey": "alias/aws/s3",
         "Environment": {
-          "ComputeType": "BUILD_GENERAL1_LARGE",
+          "ComputeType": "BUILD_GENERAL1_XLARGE",
           "Image": "aws/codebuild/amazonlinux-aarch64-standard:3.0",
           "ImagePullCredentialsType": "CODEBUILD",
           "PrivilegedMode": true,
