@@ -21,6 +21,7 @@ import { OneShotOperations, capabilityModelGrants, localRoute, readyProviders, r
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { estimatePathOf, recordRunCost, runCostInputOf } from "../../core/cost/estimate.js";
 import { remainingUsd, taskLimitUsd } from "../../core/cost/limits.js";
+import { createTaskActions } from "../../core/task-flow/task-actions.js";
 import { createModelSelection, type ModelSelectionService } from "../../core/model-selection/service.js";
 import { createUsableModels } from "../../core/model-selection/usable-models.js";
 import { createLocalModelSelectionSeams } from "./model-selection.js";
@@ -643,7 +644,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
   const callbackHandler = createCallbackService({ flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}) });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, modelSelection, designReview, diagnosis, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
+  // The owner's moves on a task already running (send back, review findings, continue): with a run limit held, a round is not started on a task that has spent its limit (or whose spend cannot be told); the limit is the one the model proxy holds the task to.
+  const taskActions = createTaskActions(flow.deps, options.runLimit === false ? {} : { roundCap: async (task) => ({ limitUsd: taskLimitUsd(task), spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) }) });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, secondReview, modelSelection, designReview, diagnosis, taskActions, openPage: (path, openOptions) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser", ...(openOptions?.fresh === true || path === "/second-review" ? { fresh: true } : {}) })), version: options.version });
   // Ask about a task: the owner's question is answered by one model call with no tools, with the model the install's steps use; the call's usage joins the task's cost.
   const ask = createAsk({
     store, audit: registry.require("audit-sink"), admission: registry.require("admission"), enabled: options.ask ?? true, artifacts: blobs, readers: () => ({ diff: createAskDiffReader({ peek: createPeekClient(flow.deps) }) }), questionHashKey: deriveKey(rootKey, "ask-question"), log,
