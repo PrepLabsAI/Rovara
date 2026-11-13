@@ -47,6 +47,16 @@ const gateways = (): CompanyGatewayRow[] => {
 };
 
 describe("modelHostBlockList", () => {
+  it("blocks documented Azure AI inference hosts and finds serverless calls at DNS label boundaries", () => {
+    const block = modelHostBlockList(rows, []);
+    const hostSuffixes = modelHostSuffixBlockList(rows);
+    expect(block).toContain("models.inference.ai.azure.com");
+    expect(hostSuffixes).toContain("models.ai.azure.com");
+    for (const host of ["models.inference.ai.azure.com", "deployment.eastus2.models.ai.azure.com", "deployment.models.ai.azure.com"]) {
+      expect(findRedirectEscapes(block, [host], { hostSuffixes })).toMatchObject([{ host, kind: "ignored_redirect" }]);
+    }
+    expect(findRedirectEscapes(block, ["notmodels.ai.azure.com", "models.ai.azure.com.example.com", "models.inference.ai.azure.com.example.com", "login.microsoftonline.com"], { hostSuffixes })).toEqual([]);
+  });
   it.each([
     ["OpenAI residency", ["eu.api.openai.com", "us.api.openai.com"]],
     ["Codestral", ["codestral.mistral.ai"]],
@@ -110,7 +120,7 @@ describe("modelHostBlockList", () => {
     for (const host of ["api.openai.com", "api.anthropic.com", "api.cohere.com", "api.cohere.ai", "api.mistral.ai", "api.groq.com", "api.together.xyz", "europe-west10-aiplatform.googleapis.com", "asia-south2-aiplatform.googleapis.com", "northamerica-south1-aiplatform.googleapis.com", "europe-north2-aiplatform.googleapis.com", "aiplatform.mtls.googleapis.com", "us-central1-aiplatform.mtls.googleapis.com", "generativelanguage.mtls.googleapis.com"]) {
       expect(list, host).toContain(host);
     }
-    expect(modelHostSuffixBlockList(rows)).toEqual(["cognitiveservices.azure.com", "openai.azure.com", "services.ai.azure.com"]);
+    expect(modelHostSuffixBlockList(rows)).toEqual(["cognitiveservices.azure.com", "models.ai.azure.com", "openai.azure.com", "services.ai.azure.com"]);
     expect(list.some((host) => host.endsWith("openai.azure.com"))).toBe(false);
   });
   it("never lists a wildcard, so Cloud Storage's *.googleapis.com is not caught", () => {

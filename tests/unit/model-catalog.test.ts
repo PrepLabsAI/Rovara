@@ -133,6 +133,17 @@ describe("the built-in rows", () => {
 });
 
 describe("row schema", () => {
+  it("accepts only the three DEC 174 token hosts as authHosts", () => {
+    const authHosts = ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"];
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ authHosts })).success).toBe(true);
+    expect(ModelCatalogRowSchema.safeParse(sampleRow({ authHosts: [] })).success).toBe(true);
+    for (const host of authHosts) expect(ModelCatalogRowSchema.safeParse(sampleRow({ authHosts: [host] })).success, host).toBe(true);
+    for (const host of ["eu.api.openai.com", "models.inference.ai.azure.com", "storage.googleapis.com", "auth.example.com", "x.oauth2.googleapis.com", "oauth2.googleapis.com.evil.example.com", "OAUTH2.googleapis.com", "oauth2.googleapis.com."]) {
+      const row = sampleRow({ authHosts: [host] });
+      expect(ModelCatalogRowSchema.safeParse(row).success, host).toBe(false);
+      expect(parseModelCatalogBytes(new TextEncoder().encode(JSON.stringify({ schemaVersion: 1, revision: 1, rows: [row] }))).ok, host).toBe(false);
+    }
+  });
   it("accepts a built-in row round-tripped through JSON", () => {
     expect(ModelCatalogRowSchema.safeParse(sampleRow()).success).toBe(true);
   });
@@ -354,7 +365,7 @@ describe("the stable digest and the unsigned parse", () => {
     expect(modelCatalogDigest({ ...base, revision: base.revision + 1 })).not.toBe(modelCatalogDigest(base));
   });
   it("pins the digest of the built-in rows: any change to a row is a conscious change here", () => {
-    expect(modelCatalogDigest(builtinModelCatalog())).toBe("03b52a098103f2d2cf71dc918558184d910a03d263ecdecbc27e65a750e62971");
+    expect(modelCatalogDigest(builtinModelCatalog())).toBe("c8327551ff3ec7156387c3c2b7d594f678bcd223b7fc9caea69dd2ffaae01d69");
   });
   it("keeps the unsigned parse out of the barrel: only builtinModelCatalog() may feed F1 and F2", async () => {
     const barrel = (await import("../../packages/contracts/src/index.js")) as Record<string, unknown>;
