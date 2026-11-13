@@ -349,7 +349,7 @@ describe("absentOnNew and originalRunLooksCut: the test-first case and cut runs"
     expect(absentOnNew(before, rep(["tests/test_new.py", "new_name", "passed"]), ["tests/test_new.py"])).toEqual({ ids: ["tests/test_old.py::gone"], count: 1 });
   });
   it("treats a pytest tmp_path id and a temporary directory as unstable", () => {
-    const before = rep(["t.py", "test_x[/tmp/pytest-of-ci/pytest-3/test_x0]", "passed"], ["t.py", "test_y[/private/var/folders/ab/T/pytest-of-me/x]", "passed"], ["t.py", "test_z[/var/folders/ab/c]", "passed"], ["t.py", "test_ok[1]", "passed"]);
+    const before = rep(["t.py", "test_x[/tmp/pytest-of-ci/pytest-3/test_x0]", "passed"], ["t.py", "test_y[/private/var/folders/ab/T/pytest-of-me/x]", "passed"], ["t.py", "test_z[/var/folders/ab/c]", "passed"], ["t.py", "test_w[pytest-of-ci-3]", "passed"], ["t.py", "test_ok[1]", "passed"]);
     expect(absentOnNew(before, rep(), [])).toEqual({ ids: ["t.py::test_ok[1]"], count: 1 });
   });
   const many = (n: number, file = "t.py") => rep(...Array.from({ length: n }, (_unused, i): [string, string, "passed"] => [file, `t${String(i)}`, "passed"]));
