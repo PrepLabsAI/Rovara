@@ -17,7 +17,20 @@ export type SdkResult = z.infer<typeof SdkResultSchema>;
 export function parseSdkResult(text: string): SdkResult {
     if (text.length > 4096 || text.trim().split("\n").length !== 1)
         throw new Error("invalid SDK result size or line count");
-    return SdkResultSchema.parse(JSON.parse(text) as unknown);
+    try {
+        return SdkResultSchema.parse(JSON.parse(text) as unknown);
+    } catch {
+        throw new Error("invalid SDK result");
+    }
+}
+export function assertSdkCanary(path: string): void {
+    if (readFileSync(path, "utf8") !== '"model-canary.rovara-canary.dev"\n')
+        throw new Error("SDK canary missing or runtime escape recorded");
+}
+export interface SdkSandboxPaths { privateHome: string; runtime: string; scratch: string }
+export function sdkSandboxInvocation(command: string, args: readonly string[], paths: SdkSandboxPaths): { command: string; args: string[] } {
+    const profile = '(version 1)(allow default)(deny network*)(allow network* (remote ip "localhost:*"))(allow network* (local ip "localhost:*"))(deny file-read* (subpath (param "PRIVATE_HOME")))(allow file-read* (subpath (param "RUNTIME")))(allow file-read* (subpath (param "SCRATCH")))';
+    return { command: "/usr/bin/sandbox-exec", args: ["-D", `PRIVATE_HOME=${paths.privateHome}`, "-D", `RUNTIME=${paths.runtime}`, "-D", `SCRATCH=${paths.scratch}`, "-p", profile, command, ...args] };
 }
 export function assertNoEscapes(path: string): void {
     if (readFileSync(path, "utf8").length !== 0)
@@ -33,7 +46,7 @@ export function classifySdkResult(result: SdkResult, mode: string, variant: stri
         const expectedStatus = mode === "rate_limit" ? 429 : (mode === "token_limit" && variant === "input" || mode === "unmatched") || result.scenario === "embeddings" && mode !== "" ? 400 : 0;
         if (expectedStatus > 0 && result.raisedIn === "api" && result.status === expectedStatus && result.messageSeen)
             return "PASS-ERROR";
-        if (mode === "cut_off_stream" && (result.scenario !== "stream" || result.textSeen) && (result.raisedIn === "transport" || result.raisedIn === "api" && result.status === 0))
+        if (mode === "cut_off_stream" && (result.scenario !== "stream" || result.textSeen) && (result.raisedIn === "transport" || result.raisedIn === "api" && result.status === 0 && ["APIConnectionError", "OpenAIConnectionError"].includes(result.errorClass)))
             return "PASS-ERROR";
         if (result.raisedIn === "customer" && (mode === "token_limit" && variant === "output" && result.errorClass === "LengthFinishReasonError" || mode === "refusal" && variant === "filter" && result.errorClass === "ContentFilterFinishReasonError"))
             return "PASS-ERROR";

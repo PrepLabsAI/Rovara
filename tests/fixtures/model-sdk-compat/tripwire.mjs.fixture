@@ -52,4 +52,11 @@ if (WebSocketOriginal) globalThis.WebSocket = class extends WebSocketOriginal {
   constructor(url,...args) { check(new URL(url).hostname); super(url,...args); }
 };
 syncBuiltinESMExports();
+const canary = new net.Socket();
+try {
+  canary.connect(443, 'model-canary.rovara-canary.dev');
+  throw new Error('tripwire canary not refused');
+} catch (error) {
+  if (error.code !== 'SDK_EGRESS_REFUSED') throw error;
+} finally { canary.destroy(); }
 globalThis.__sdkTripwireActive = true;

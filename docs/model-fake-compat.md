@@ -1,5 +1,9 @@
 # Model fake SDK compatibility
 
+**Round 2 validation pending:** the table below preserves the Round 1 measurements. It has not been rerun with the new mandatory macOS sandbox or tightened cutoff oracle. Per the agreed split, 9d must run `ROVARA_SANDBOX_TESTS=1` against `model-sdk-compat-sandbox.test.ts` and then the live suite outside Codex. No Round 2 live pass is claimed here.
+
+**Table provenance:** the 20 `FIXED` labels and their fix notes were applied by hand to measured passing cells; the legacy Python gRPC `UNVERIFIED` row was added by hand. The six Vertex normal text/stream rows and the Vertex afterCalls row are measured runner output, not handwritten results. The table was assembled from Round 1 `results.json` outputs; rerendering a fresh run alone does not recreate the manual annotations.
+
 Run date: 2026-11-13. Helper base: 64b10bee72aeec3a28a1ac37ba578763e3c47601 plus the fixes in this PR. Python 3.13.17; Node 22.23.2. Mac-only live run; scripted replies, not real-provider proof.
 
 FAIL: 0, FIXED: 20, N/A: 8, PASS: 166, PASS-ERROR: 139, UNVERIFIED: 1
@@ -12,7 +16,7 @@ These are real SDK calls to the scripted loopback helper on macOS, including ful
 
 Every SDK dependency was installed into a disposable directory outside all repositories: 73 Python wheels with exact versions and SHA-256 hashes via `pip --require-hashes --only-binary=:all:`, and 94 npm lock entries with exact versions/integrity via `npm ci --ignore-scripts --no-audit --no-fund`. No SDK install used Rovara's dependencies. The Python wheel hashes target this macOS/Python runtime; Linux live SDKs were not run. AI SDK adapters use `ai` 7.0.172 with `@ai-sdk/openai` 4.0.117 and `@ai-sdk/google` 4.0.120.
 
-Each child starts with an empty inherited environment, fresh scratch HOME/config directories, loopback redirects, and dummy credentials. Vertex project/location cases remove API-key variables and obtain their dummy credential from the helper's metadata service. Python isolated mode plus its audit hook denies private-home file access and subprocesses; Node's permission flags restrict filesystem reads and writes to the scratch client and evidence. Both preloads refuse network/DNS destinations outside loopback; any nonempty or unreadable refusal log fails the run, even when an SDK catches the error. Native canaries were refused before any SDK ran. Real scenario refusal logs: **0**. The helper's trusted ledger also must show zero refused callers and zero redirect escapes.
+In Round 1, each child started with an empty inherited environment, fresh scratch HOME/config directories, loopback redirects, and dummy credentials. Vertex project/location cases remove API-key variables and obtain their dummy credential from the helper's metadata service. Python isolated mode plus its audit hook denies private-home file access and subprocesses; Node's permission flags restrict filesystem reads and writes to the scratch client and evidence. Both preloads refuse network/DNS destinations outside loopback; any nonempty or unreadable refusal log fails the run, even when an SDK catches the error. Native canaries were refused before any SDK ran. Real scenario refusal logs: **0**. The helper's trusted ledger also must show zero refused callers and zero redirect escapes.
 
 ## Fixes and retry findings
 
@@ -34,6 +38,12 @@ Expected attempts were read from the pinned installed SDK source, not inferred s
 | AI SDK OpenAI/Google | 3 | `src/util/retry-with-exponential-backoff.ts` defaults maxRetries to 2. |
 
 Transport-drop finding: Python OpenAI/Anthropic/LangChain OpenAI retry non-stream read failures twice, and AI SDK OpenAI/Google retry their retryable APICallError twice. These text cutoffs therefore take three attempts; other cutoffs take one. Python Cohere's streaming 429 takes one despite its unary default of three. The matrix uses these operation-specific expectations; no unexplained attempt mismatch remains. Node legacy Google replaces a stream socket cause with its own fixed “Error reading from the stream” error; the fixture recognizes only that exact SDK error internally and prints no message. Python OpenAI's final helper raises LengthFinishReasonError/ContentFilterFinishReasonError for the matching finish modes; these are documented customer exceptions, not malformed-byte parse failures.
+
+## Round 2 isolation changes
+
+Every live Python and Node child now runs through `/usr/bin/sandbox-exec`: deny all networking except loopback, deny reads of the real home, and allow the selected interpreter runtime and scratch tree. Any sandbox launch failure, timeout, or nonzero exit fails the run; there is no unsandboxed fallback. The real home is a sandbox profile parameter, never a child environment variable. Python also audits native sendto/sendmsg/getnameinfo and refuses ctypes handles outside explicit paths in the venv. Importing a dependency that needs system ctypes handles will fail closed and needs investigation, not a relaxed guard.
+
+Each preload performs its own refusal canary before SDK imports. Every child log must contain exactly that one canary line and zero runtime refusals; missing, stale, additional or unreadable evidence fails the run. Node reports its installed package version independently of the pins. The supervisor validates the final environment, pins and result schema, and cutoff API errors require a recognized connection class or confirmed transport marker.
 
 ## Reproduction
 

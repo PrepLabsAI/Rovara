@@ -52,12 +52,28 @@ def _audit(event, args):
             raise PermissionError('SDK_PRIVATE_HOME_REFUSED')
     if event in ('subprocess.Popen','os.system','os.exec','os.posix_spawn'):
         raise PermissionError('SDK_SUBPROCESS_REFUSED')
-    if event == 'socket.connect':
+    if event in ('socket.connect', 'socket.sendto', 'socket.sendmsg'):
         address = args[1]
         _check(address[0] if isinstance(address,tuple) else 'unreadable')
     if event == 'socket.getaddrinfo':
         _check(args[0])
+    if event == 'socket.getnameinfo':
+        _check(args[0][0])
+    if event == 'ctypes.dlopen':
+        # No process-wide libc handle or system libraries. Only explicit venv paths.
+        name = args[0]
+        root = os.path.realpath(sys.prefix) + os.sep
+        if not isinstance(name, str) or not os.path.isabs(name) or not os.path.realpath(name).startswith(root):
+            raise PermissionError('SDK_NATIVE_LIBRARY_REFUSED')
 
 
 sys.addaudithook(_audit)
+with socket.socket() as _canary:
+    try:
+        _canary.connect(('model-canary.rovara-canary.dev', 443))
+    except PermissionError as _error:
+        if str(_error) != 'SDK_EGRESS_REFUSED':
+            raise
+    else:
+        raise SystemExit('tripwire canary not refused')
 sys._sdk_tripwire_active = True

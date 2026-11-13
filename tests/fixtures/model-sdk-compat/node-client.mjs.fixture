@@ -5,8 +5,8 @@ const LIB=process.env.LIBRARY, SCENARIO=process.env.SCENARIO, BASE=process.env.B
 const STREAM=SCENARIO==='stream', TOOL=SCENARIO==='tool'||MODE==='bad_tool_json';
 const prompt=TOOL?'compat-tool':'compat-text';
 const schema={type:'object',properties:{city:{type:'string'}},required:['city'],additionalProperties:false};
-const pins=JSON.parse(readFileSync(new URL('./pins.json',import.meta.url),'utf8'));
-const version=pins.node[LIB.startsWith('ai-')?'ai':LIB];
+const packageName=LIB.startsWith('ai-')?'ai':LIB;
+const version=JSON.parse(readFileSync(new URL(`./node_modules/${packageName}/package.json`,import.meta.url),'utf8')).version;
 const r={library:LIB,version,scenario:SCENARIO,outcome:'parsed',errorClass:'none',raisedIn:'none',finish:'none',toolArgsParse:'na',textSeen:false,usageSeen:false,vectorLength:0,status:0,secondTurn:false,messageSeen:false};
 const finish=v=>{if(v!=null) r.finish=/^[A-Za-z0-9_:-]{1,60}$/.test(String(v))?String(v):'other';};
 function args(value) { if(typeof value==='string') { try{value=JSON.parse(value);}catch{r.toolArgsParse='invalid';return;} } r.toolArgsParse=value&&typeof value.city==='string'?'valid':'schema_invalid'; }
