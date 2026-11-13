@@ -320,6 +320,10 @@ describe("no callers", () => {
     const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
     expect([0, 1]).toContain(found.status);
     const hits = found.stdout.split("\n").filter((entry) => entry !== "");
-    expect(hits.filter((file) => !file.startsWith("packages/contracts/"))).toEqual([]);
+    // TE-B3 shares only inert text: weakening-flags.ts may call inertEvidenceText, and nothing else from v2.
+    expect(hits.filter((file) => !file.startsWith("packages/contracts/") && file !== "packages/broker/src/core/proof/weakening-flags.ts")).toEqual([]);
+    const others = spawnSync("git", ["grep", "--untracked", "-lw", ...names.filter((name) => name !== "inertEvidenceText").flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
+    expect([0, 1]).toContain(others.status);
+    expect(others.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/"))).toEqual([]);
   });
 });
