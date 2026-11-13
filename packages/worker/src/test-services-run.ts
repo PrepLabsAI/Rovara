@@ -59,6 +59,7 @@ import {
 import { EmulatorControlError, type EmulatorControlTarget } from "./emulator-control.js";
 import { emulatorLedgerPort, type EmulatorLedgerPort } from "./emulator-ledger.js";
 import { EmulatorSeedError, SEEDED_AWS_SERVICES, readAwsResourcesFromIac, seedEmulator } from "./service-seed-aws.js";
+import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { SeedError, createResetHooks, resetForNextCheck, seedRun, type ResetDependency, type SeedPorts } from "./service-reset.js";
 import { SeedFileError, loadSeedFile, readSeedFile, seedFileDigest } from "./service-seed-file.js";
 import { seedLockHoldsInCheckout } from "./service-seed-lock.js";
@@ -911,6 +912,8 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
         try {
           await seedRun(countResets(workSession).session, [dependencyOf(item, workSession, files, runId)], workingSeeds, seedSignal);
         } catch (error) {
+          // A seed command whose stop could not be confirmed may still be running: it is not "seed failed", and nothing must touch the workspace after it.
+          if (error instanceof RunnerKillUnconfirmedError) throw error;
           for (const id of item.emulator?.ids ?? [item.plan.id]) failures.set(id, "seed_failed");
           throw new TestServicesError(seedStartFailureOf(error), failures);
         }
@@ -1018,6 +1021,8 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
         try {
           await seedRun(state.counted, state.resetDeps.filter((dependency) => dependency.id === item.plan.id), roundSeeds, seedSignal);
         } catch (error) {
+          // A seed command whose stop could not be confirmed may still be running: it is not "seed failed", and nothing must touch the workspace after it.
+          if (error instanceof RunnerKillUnconfirmedError) throw error;
           for (const id of item.emulator?.ids ?? [item.plan.id]) failures.set(id, "seed_failed");
           throw new TestServicesError(seedStartFailureOf(error), failures);
         }
@@ -1036,7 +1041,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
           await step("round-directory", () => removeRunDirectory(roundFiles.directory));
         }
       }
-      throw failure;
+      throw error instanceof RunnerKillUnconfirmedError ? error : failure;
     }
   };
   const currentRound = (): CheckRunners => {
@@ -1077,6 +1082,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
     ids,
     checkRunners() {
       return {
+        kind: "sealed",
         runProjectCommand: async (command, signal) => {
           const result = await currentRound().runProjectCommand(command, signal);
           if (result.exitCode !== 0 || result.timedOut) checkFailed = true;

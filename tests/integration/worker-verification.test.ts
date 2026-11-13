@@ -24,6 +24,8 @@ import {
   WorkflowFeedbackBundleSchema,
 } from "../../packages/contracts/src/index.js";
 import type { WorkerArtifact } from "../../packages/worker/src/artifacts.js";
+import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
+import { markWorkspaceUnsafe } from "../../packages/worker/src/workspace-safety.js";
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import { createDefaultPiSessionAdapter, type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
@@ -122,6 +124,9 @@ async function runTask(options: {
   budgets?: number[];
   /** An artifact name whose upload fails, so the task throws after the agent finished. */
   failArtifact?: string;
+  /** Called with each artifact's name as the task saves it, inside the task's own context. */
+  onArtifact?: (name: string) => void;
+
   /** D-16: the original code AgentX measures before results on. Default: none (the fixture has no repositories). */
   originalCode?: OriginalCode;
   /** The scripted model's context window. Pi 1.5 compacts a long transcript on its own, and a compaction asks the scripted model for a summary, which would use up the script; a run with huge outputs gives the model room. */
@@ -157,9 +162,10 @@ async function runTask(options: {
       ...(options.budgets === undefined ? {} : { checkBudgetMs: budgetSequence(options.budgets) }),
       ...(options.cancellation === undefined ? {} : { cancellationController: options.cancellation }),
       ...(options.originalCode === undefined ? {} : { originalCode: options.originalCode }),
-      eventSink: async (batch) => { events.push(...batch); },
+      eventSink: async (batch) => { events.push(...batch) },
       artifactSink: async (artifact) => {
         if (artifact.name === options.failArtifact) throw new Error(`upload of ${artifact.name} failed`);
+        options.onArtifact?.(artifact.name);
         artifacts.push(artifact);
       },
     });
