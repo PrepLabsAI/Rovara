@@ -178,10 +178,28 @@ const adapterRequestId = (requestId: string): string => `${requestId}.${randomUU
 /** The decision's request id inside the id the Approvers seam was given (a request id has no dot, so everything before the first one). */
 export const decisionRequestIdOf = (adapterRequest: string): string => adapterRequest.split(".")[0]!;
 
-/** Where a used proof's marker lives: one per (method, token, request). The token itself is never stored, only its hash. */
+/** How many partitions a company's used-proof markers are spread over (a single partition per company was a hot key on DynamoDB). */
+export const APPROVAL_PROOF_SHARDS = 32;
+
+/** The shard of a proof key: the first byte of the key's SHA-256, modulo the shard count. The key already holds the hash of the token and the request, so the spread is even; hashing again keeps any string safe. */
+const approvalProofShard = (proofKey: string): string =>
+  String(createHash("sha256").update(proofKey, "utf8").digest()[0]! % APPROVAL_PROOF_SHARDS).padStart(2, "0");
+
+/** Where a used proof's marker lives: one per (method, token, request), in one of `APPROVAL_PROOF_SHARDS` partitions picked by a hash of the proof key. The token itself is never stored, only its hash. */
 export function approvalProofMarkerKey(companyId: string, proofKey: string): DocumentKey {
+  return { pk: companyScoped(companyId, `APPROVAL_PROOF#${approvalProofShard(proofKey)}`), sk: proofKey };
+}
+
+/**
+ * Where markers were written before the partition was sharded: one partition per company. Every used-proof check reads this key as well as the new one, until the old markers have expired (they carry the expiry
+ * attribute); a later release drops this read (DEFERRED row APPROVAL-PROOF-LEGACY-READ-DROP). Nothing is written here any more.
+ */
+export function legacyApprovalProofMarkerKey(companyId: string, proofKey: string): DocumentKey {
   return { pk: companyScoped(companyId, "APPROVAL_PROOF"), sk: proofKey };
 }
+
+/** Every key a used proof may be found under: the sharded key first, then the old one. A reader outside the gate (a host's courtesy check that a proof was already used) asks all of them. */
+export const approvalProofMarkerKeys = (companyId: string, proofKey: string): readonly [DocumentKey, DocumentKey] => [approvalProofMarkerKey(companyId, proofKey), legacyApprovalProofMarkerKey(companyId, proofKey)];
 
 function recordOf(document: StoredDocument): ApprovalRecord | undefined {
   const text = (name: string) => (typeof document[name] === "string" ? document[name] : undefined);
@@ -242,6 +260,9 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   const markerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
   /** The marker of a one-decision credential (a comment) that names no request: it is spent once, anywhere. */
   const spentOnceKey = (companyId: string, method: string, token: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: "*" }));
+  // The same two markers as an older release wrote them (one partition per company). They are only ever read: a proof used under either key is used.
+  const legacyMarkerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => legacyApprovalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
+  const legacySpentOnceKey = (companyId: string, method: string, token: string): DocumentKey => legacyApprovalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: "*" }));
 
   const sameDecision = (record: ApprovalRecord, attempt: DecisionAttempt): boolean =>
     record.kind === attempt.kind && record.subjectId === attempt.subjectId && record.outcome === attempt.outcome && record.revision === attempt.seen.revision && record.artifactDigest === attempt.seen.artifactDigest;
@@ -259,7 +280,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
     if (record === undefined || !sameDecision(record, attempt)) return reused;
     const bindingId = approvalBindingId(attempt.companyId, record.kind, record.subjectId, record.revision, record.artifactDigest);
     for (const credential of attempt.credentials) {
-      const marker = await deps.store.get(markerOf(attempt.companyId, credential.method, credential.token, bindingId));
+      const marker = (await deps.store.get(markerOf(attempt.companyId, credential.method, credential.token, bindingId))) ?? (await deps.store.get(legacyMarkerOf(attempt.companyId, credential.method, credential.token, bindingId)));
       if (marker === undefined || marker["requestId"] !== attempt.requestId) continue;
       const request: ApprovalRequest = {
         companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), kind: record.approvalKind, outcome: attempt.outcome, subject: { type: record.subjectType, id: record.subjectId }, revision: record.revision, artifactDigest: record.artifactDigest,
@@ -398,6 +419,9 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
           item: { ...spentOnceKey(attempt.companyId, proof.method, proof.token), entityType: "APPROVAL_PROOF_SPENT", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
           condition: when.absent(),
         })),
+        // A proof an older release used up under the old (unsharded) key is used up here too: the check is in the same transaction, so a race with either key cannot let it through.
+        ...proofs.map((proof): TransactItem => ({ kind: "check", key: legacyMarkerOf(attempt.companyId, proof.method, proof.token, bindingId), condition: when.absent() })),
+        ...proofs.filter((proof) => !reusableMethods.includes(proof.method)).map((proof): TransactItem => ({ kind: "check", key: legacySpentOnceKey(attempt.companyId, proof.method, proof.token), condition: when.absent() })),
         ...(applied.extra ?? []),
         ...deps.audit.stage({
           eventId: `approval:${attempt.requestId}`, companyId: attempt.companyId, at: decidedAt,
@@ -411,7 +435,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
       // ---- a lost race: say which rule lost
       const proofStart = 2;
       const onceCount = proofs.filter((proof) => !reusableMethods.includes(proof.method)).length;
-      const proofEnd = proofStart + proofs.length + onceCount;
+      const proofEnd = proofStart + 2 * (proofs.length + onceCount);
       if (committed.failed.some((index) => index >= proofStart && index < proofEnd)) return refuse("proof_already_used", "That proof was already used.");
       if (committed.failed.includes(1)) {
         const again = await replayOf(attempt);
