@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  buildSideBySideJudgeCall, checkSideBySideJudgePin, judgeIdentityWords, modelBelongsToFamily, renderSideBySide, runSideBySide, serializeSideBySideJudgeInput, sideBySideScoringPromptSha256, SIDE_BY_SIDE_CHECK_KIND, SIDE_BY_SIDE_JUDGE_CASE_CLOSE,
+  buildSideBySideJudgeCall, checkSideBySideJudgePin, judgeIdentityWords, modelBelongsToFamily, renderSideBySide, runSideBySide, serializeSideBySideJudgeInput, sideBySidePairsPart, sideBySideScoringPromptSha256, SIDE_BY_SIDE_CHECK_KIND, SIDE_BY_SIDE_JUDGE_CASE_CLOSE,
   SIDE_BY_SIDE_JUDGE_CASE_OPEN, SIDE_BY_SIDE_JUDGE_ROLE, vendorFamilyOf, type SideBySideHumanCheck, type SideBySideJudgeIdentity, type SideBySideSummary,
 } from "../../packages/contracts/src/index.js";
 import { PIN, RUN_DEFAULTS, COMPANY_A, COMPANY_B, canary, recordingJudge, reportNeeded, sbsWorld, source, verdictText } from "../support/side-by-side-world.js";
@@ -176,6 +176,8 @@ describe("L2: the identity is re-validated when printed", () => {
   it("renders the check as unverified in both modes when the summary's identity is broken", () => {
     const summary = { schemaVersion: 1, evidence: { kind: "prompt_side_by_side", countsTowardProof: false }, judge: { ...good, independence: "spot_checked_against_human_labels" }, counts: { planned: 0, judged: 0, same: 0, better: 0, worse: 0, unclear: 0, notRun: 0, callFailed: 0, judgeNotRun: 0, refused: 0, possiblySteering: 0 }, cases: [], meters: { product: { calls: 0, costMicros: 0 }, rovara: { calls: 0, costMicros: 0 } } } as unknown as SideBySideSummary;
     for (const mode of ["public", "full"] as const) expect(renderSideBySide(summary, { mode })).toContain("Judge identity could not be verified.");
+    // The check's label for the pack writer does not name an identity that fails the check either.
+    expect(sideBySidePairsPart(summary, { mode: "full" }, () => undefined).label).toBe("Old vs new prompt (judge identity could not be verified)");
   });
 });
 
