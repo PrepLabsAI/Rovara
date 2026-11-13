@@ -356,3 +356,70 @@ describe("M3: a proof that could not compare says so", () => {
     expect(lines({ testProof: { ...(proofOf({ status: "not_checked", note: "stopped" }) as Record<string, unknown>), candidateDigest: candidate.digest } })).toContain("- Test weakening: could not compare (the run was stopped)");
   });
 });
+
+// ---- re-check of TE-B3 (N1, N5, N6)
+describe("N1: exclude options are read only where they mean a test or coverage run", () => {
+  it.each([
+    ["package.json", '    "install:prod": "npm ci --omit=dev",'], ["package.json", '    "prune": "npm prune --omit=dev",'], ["package.json", '    "pack": "tar --exclude=node_modules -czf a.tgz .",'],
+    ["package.json", '    "docs": "typedoc --exclude **/*.test.ts",'], ["Makefile", "\trsync -a --exclude .git . out/"], ["setup.cfg", "pip install --omit x"],
+    ["package.json", '    "lint": "eslint --ignore-pattern dist ."'], ["package.json", '    "format": "prettier --write . --ignore-path .gitignore"'], ["package.json", '    "lint": "eslint --ignore dist ."'],
+    ["package.json", '    "audit": "npm audit --omit=dev"'], ["package.json", '    "build": "tsc",'],
+  ])("%s: %s is not a flag", (path, line) => expect(flagsOf(path, [line]).testsExcluded).toBeUndefined());
+  it.each([
+    ["pyproject.toml", 'omit = ["a.py"]'], ["package.json", '    "test": "vitest --exclude src/a.test.ts"'], ["Makefile", "\tpytest --ignore tests/slow"], ["Makefile", "\tcoverage run --omit=a.py -m pytest"],
+    ["package.json", '    "cov": "nyc --exclude src/a.js mocha"'], ["package.json", '    "test": "jest --ignore-glob=*.x"'], ["pytest.ini", "addopts = --deselect a::b"], ["jest.config.js", "  testPathIgnorePatterns: ['/x/'],"],
+    ["package.json", '    "testPathIgnorePatterns": ["/legacy/"]'], [".coveragerc", "omit = a.py"],
+  ])("%s: %s is a flag", (path, line) => expect(flagsOf(path, [line]).testsExcluded).toBe(true));
+});
+
+describe("N6: every path pattern is linear in the path", () => {
+  it.each(["tests/", "a/", "tests/tests/", "test/a/", ".approved.", ".golden.", ".cassette.", "snapshots/", "fixtures/", "a.", "__snapshots__/"])("a hostile path of %s repeated stays fast", (unit) => {
+    for (const times of [2_000, 8_000, 16_000]) {
+      const hostile = unit.repeat(times);
+      for (const tail of ["x", "snapshotz/x", "fixturez/x", ".snapz"]) {
+        const started = Date.now();
+        isSnapshotPath(hostile + tail); isFixturePath(hostile + tail); isTestConfigPath(hostile + tail); isInstructionFilePath(hostile + tail); isCiExecutedPath(hostile + tail);
+        expect(Date.now() - started, `${unit} x${String(times)} ${tail}`).toBeLessThan(200);
+      }
+    }
+  });
+  it("a test folder above is still what decides snapshots/, golden/ and fixtures/", () => {
+    expect(isSnapshotPath("a/tests/b/c/snapshots/d")).toBe(true);
+    expect(isSnapshotPath("a/b/snapshots/tests/d")).toBe(false);
+    expect(isSnapshotPath("tests/snapshots")).toBe(false);
+    expect(isFixturePath("tests/x/fixtures/y.json")).toBe(true);
+    expect(isFixturePath("fixtures/tests/y.json")).toBe(false);
+    expect(isSnapshotPath("a/Foo.verified.txt")).toBe(true);
+    expect(isSnapshotPath("a/Foo.verified")).toBe(false);
+  });
+});
+
+describe("N5: every check that was not compared is named, even when another was", () => {
+  const proofOf = (over: Record<string, unknown>) => ({ schemaVersion: 1 as const, candidateDigest: DIGEST, status: "checked" as const, note: "completed" as const, changedTests: { added: 1, changed: 0, deleted: 0 }, durationMs: 1, ...over }) as never;
+  const item = (checkId: string, label: string) => ({ checkId, label, granularity: "check", verdict: "proves_change", reason: "assertion_failed_on_old" });
+  const compared = { checkId: "readiness:0", skippedBefore: 0, skippedAfter: 0, absentOnNew: [], absentOnNewCount: 0 };
+  it("a check that was not compared gets its own line, with its name, next to a check that was", () => {
+    const proof = proofOf({ items: [item("readiness:0", "unit"), item("readiness:1", "integration")], weakening: [compared], weakeningNotCompared: [{ checkId: "readiness:1", reason: "original_run_truncated" }] });
+    expect(weakeningBlock([], undefined, { testProof: proof, candidateDigest: DIGEST })).toEqual([WEAKENING_HEADING, "- Test weakening: could not compare integration (the run on the original code looks cut short)", ""]);
+  });
+  it("when no check was compared, each one is still named, not one reason for all", () => {
+    const proof = proofOf({ items: [item("readiness:0", "unit"), item("readiness:1", "integration")], weakeningNotCompared: [{ checkId: "readiness:0", reason: "no_report" }, { checkId: "readiness:1", reason: "original_run_truncated" }] });
+    expect(weakeningBlock([], undefined, { testProof: proof, candidateDigest: DIGEST })).toEqual([
+      WEAKENING_HEADING, "- Test weakening: could not compare unit (a test report was not available from both runs)", "- Test weakening: could not compare integration (the run on the original code looks cut short)", "",
+    ]);
+  });
+  it("names each such check, bounded, with the rest counted", () => {
+    const many = Array.from({ length: 8 }, (_unused, n) => ({ checkId: `readiness:${String(n + 1)}`, reason: "no_report" }));
+    const lines = weakeningBlock([], undefined, { testProof: proofOf({ weakening: [compared], weakeningNotCompared: many }), candidateDigest: DIGEST });
+    expect(lines.filter((line) => line.startsWith("- Test weakening: could not compare"))).toHaveLength(6);
+    expect(lines.at(-2)).toBe("- Test weakening: could not compare 3 more checks");
+  });
+  it("makes a check's name inert", () => {
+    const proof = proofOf({ items: [item("readiness:1", "[x](https://evil.example) @everyone")], weakening: [compared], weakeningNotCompared: [{ checkId: "readiness:1", reason: "no_report" }] });
+    const text = weakeningBlock([], undefined, { testProof: proof, candidateDigest: DIGEST }).join("\n");
+    expect(text).not.toMatch(/\]\(|(^|[^\u200d])@\w/u);
+  });
+  it("nothing is said when every check was compared", () => {
+    expect(weakeningBlock([], undefined, { testProof: proofOf({ weakening: [compared] }), candidateDigest: DIGEST })).toEqual([]);
+  });
+});

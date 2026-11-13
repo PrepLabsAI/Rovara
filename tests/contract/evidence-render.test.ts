@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   EVIDENCE_ISOLATIONS, EVIDENCE_LEVELS, EVIDENCE_RENDER_LIMITS, NEWER_EVIDENCE_WORDS, evidencePackV1ToV2, inertEvidenceText, readEvidencePack, renderEvidence, renderEvidenceRead, type EvidencePackV2,
 } from "../../packages/contracts/src/index.js";
+import { isolatedGitEnvironment } from "../../packages/worker/src/git.js";
 import { v1Pack, v2Pack } from "../support/evidence-v2-fixtures.js";
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -339,11 +340,22 @@ describe("callers", () => {
     ];
     expect(names.length).toBeGreaterThan(60);
     expect(names).toEqual(expect.arrayContaining(["renderEvidence", "readEvidencePack", "inertEvidenceText", "tolerantRead", "isRegisteredCheckKind", "EvidencePackV2Schema"]));
-    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root });
+    const found = spawnSync("git", ["grep", "--untracked", "-lw", ...names.flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
     expect([0, 1]).toContain(found.status);
     const hits = found.stdout.split("\n").filter((entry) => entry !== "");
     // TE-A2b is the first caller (the writer, the readers and the description's Evidence block); any other caller has to be named here on purpose.
     expect(hits.filter((file) => !file.startsWith("packages/contracts/")).sort()).toEqual([
+      "packages/broker/src/core/proof/evidence-guard.ts",
+      "packages/broker/src/core/proof/evidence-keep.ts",
+      "packages/broker/src/core/proof/evidence-lines.ts",
+      "packages/broker/src/core/proof/evidence-pack.ts",
+      "packages/broker/src/core/proof/evidence-v2-lines.ts",
+      "packages/broker/src/core/proof/weakening-flags.ts",
+    ]);
+    // B3 may share inert text only; the other v2 exports remain confined to the A2b callers.
+    const others = spawnSync("git", ["grep", "--untracked", "-lw", ...names.filter((name) => name !== "inertEvidenceText").flatMap((name) => ["-e", name]), "--", "packages", "scripts", "infra"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
+    expect([0, 1]).toContain(others.status);
+    expect(others.stdout.split("\n").filter((file) => file !== "" && !file.startsWith("packages/contracts/")).sort()).toEqual([
       "packages/broker/src/core/proof/evidence-guard.ts",
       "packages/broker/src/core/proof/evidence-keep.ts",
       "packages/broker/src/core/proof/evidence-lines.ts",
@@ -357,7 +369,7 @@ describe("callers", () => {
 describe("nothing turns the version 2 writer on yet", () => {
   const root = fileURLToPath(new URL("../..", import.meta.url));
   const grep = (...args: string[]) => {
-    const found = spawnSync("git", ["grep", "--untracked", ...args, "--", ":(glob)packages/*/src/**"], { encoding: "utf8", cwd: root });
+    const found = spawnSync("git", ["grep", "--untracked", ...args, "--", ":(glob)packages/*/src/**"], { encoding: "utf8", cwd: root, env: isolatedGitEnvironment(root) });
     expect([0, 1]).toContain(found.status);
     return found.stdout.split("\n").filter((entry) => entry !== "");
   };
