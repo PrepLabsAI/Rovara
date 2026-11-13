@@ -11,12 +11,17 @@
 // body at most 1 MiB, the brief at most 256 KiB as JSON. Text that looks like a credential is MASKED (`redactText`) before the brief is formed; `promptSha256` is the hash of the prompt AS THE HELPER READ IT (before the mask), because that
 // is what a reply's `match.promptSha256` compares (`selectModelReply`); the agent never sees the unmasked text.
 //
-// What a brief is NOT: proof of anything. `embedding` and `rerank` calls get a brief of their kind, but an answer to them is computed by the family's builder (vectors, scores), not written by a model: the agent has nothing
-// to write for them (`replyAgentCanAnswer` says so). `models`, `countTokens` and `count_tokens` get no brief (`unsupported_operation`).
+// What a brief is NOT: proof of anything. An embedding, rerank, `models` or token-count call gets NO brief (`unsupported_operation`): the family's builder computes those answers (vectors, scores), a model writes nothing, and
+// they must not use up the capture cap.
+//
+// Two hashes tie a brief to the request it came from. `promptSha256` is the hash of the prompt as the helper read it; when masking changed the prompt text, `promptMaskedSha256` is the hash of the masked text the brief carries, and
+// `parseReplyBrief` re-checks it. `shapeSha256` is a digest of the call's operation, role layout, tools and schema: the same prompt text with another shape is another request (a reply's match has no shape field, so Part B must
+// refuse to count a prompt hash that was seen with two shape digests: `promptsWithConflictingShapes`).
 //
 // A brief made here (or parsed back with `parseReplyBrief`, which re-checks every bound) is registered in a module-private set: the channel (`model-independent-channel.ts`) accepts only a registered brief, so a hand-made or
 // spread copy of one is refused.
 import { z } from "zod";
+import { canonicalJson } from "./canonical-json.js";
 import { MODEL_ECHO_PATTERN, MODEL_REQUEST_BODY_MAX_BYTES } from "./model-family-common.js";
 import { readModelRequestFacts } from "./model-request-facts.js";
 import { OPERATIONS_BY_FAMILY, SERVED_MODEL_FAMILIES, isServedModelFamily, type ServedModelFamily } from "./model-served-family.js";
@@ -32,10 +37,10 @@ export const REPLY_BRIEF_MAX_BYTES = 256 * 1024;
 const SCHEMA_MAX_NODES = 4_000;
 
 /** Why no brief was made, as fixed words (never text from the request). Each means "this call stays not counted". */
-export const REPLY_BRIEF_REFUSALS = ["not_json", "unsupported_operation", "no_prompt", "too_long", "bad_schema", "bad_tools"] as const;
+export const REPLY_BRIEF_REFUSALS = ["not_json", "unsupported_operation", "no_prompt", "too_long", "bad_schema", "bad_tools", "bad_model"] as const;
 export type ReplyBriefRefusal = (typeof REPLY_BRIEF_REFUSALS)[number];
 
-export const REPLY_ANSWER_KINDS = ["text", "json", "tool_call", "embedding", "rerank"] as const;
+export const REPLY_ANSWER_KINDS = ["text", "json", "tool_call"] as const;
 export type ReplyAnswerKind = (typeof REPLY_ANSWER_KINDS)[number];
 
 export type ReplyJson = null | boolean | number | string | readonly ReplyJson[] | { readonly [key: string]: ReplyJson };
@@ -68,7 +73,11 @@ export interface ReplyBrief {
   /** SHA-256 of the prompt text as the helper read it (before the mask): what `match.promptSha256` compares. */
   readonly promptSha256: string;
   readonly promptMasked: boolean;
+  /** SHA-256 of `promptText` when masking changed the prompt text (so the carried text is tied to a hash); absent otherwise. */
+  readonly promptMaskedSha256?: string | undefined;
   readonly shape: ReplyAnswerShape;
+  /** Digest of the call's operation, role layout, tool names and schema (see the file header). */
+  readonly shapeSha256: string;
 }
 export type ReplyBriefResult = { readonly ok: true; readonly brief: ReplyBrief } | { readonly ok: false; readonly reason: ReplyBriefRefusal };
 
@@ -252,12 +261,55 @@ function readMaxOutputTokens(body: Record<string, unknown>): number | undefined 
   );
 }
 
-const EMBEDDING_OPERATIONS: ReadonlySet<string> = new Set(["embeddings", "embed", "embedContent", "batchEmbedContents"]);
-const NO_BRIEF_OPERATIONS: ReadonlySet<string> = new Set(["models", "countTokens", "count_tokens"]);
+const NO_BRIEF_OPERATIONS: ReadonlySet<string> = new Set(["embeddings", "embed", "embedContent", "batchEmbedContents", "rerank", "models", "countTokens", "count_tokens"]);
 
-/** Whether the agent has something to write for this brief: a text, JSON or tool-call answer. An embedding or rerank answer is computed by the family's builder. */
+/** Whether the agent has something to write for this brief: a text, JSON or tool-call answer (every brief has one: calls whose answer is computed get no brief). */
 export function replyAgentCanAnswer(brief: ReplyBrief): boolean {
   return brief.shape.kind === "text" || brief.shape.kind === "json" || brief.shape.kind === "tool_call";
+}
+
+/** What the agent is told about the request, as data: the ONE description `buildAgentInput` serializes and the leak screen reads, so what is screened is what is sent. */
+export function replyRequestData(brief: ReplyBrief): { family: ServedModelFamily; operation: string; model?: string; prompt: string; answerShape: ReplyAnswerShape } {
+  return { family: brief.family, operation: brief.operation, ...(brief.model === undefined ? {} : { model: brief.model }), prompt: brief.promptText, answerShape: brief.shape };
+}
+
+const ROLE_LISTS = ["messages", "contents", "input"] as const;
+const SYSTEM_KEYS = ["system", "system_instruction", "systemInstruction", "instructions"] as const;
+/** The digest of what makes two requests with the same prompt text different calls: operation, answer kind, role layout, which system fields exist, tool names, a hash of the schema. */
+function shapeDigest(operation: string, body: Record<string, unknown>, shape: ReplyAnswerShape): string {
+  const roles: string[] = [];
+  for (const key of ROLE_LISTS) {
+    const list = own(body, key);
+    if (!Array.isArray(list)) continue;
+    for (const item of list.slice(0, 200)) {
+      const role = isRecord(item) ? own(item, "role") : undefined;
+      roles.push(typeof role === "string" && /^[A-Za-z_-]{1,32}$/u.test(role) ? role : "?");
+    }
+  }
+  const digestInput = {
+    operation,
+    kind: shape.kind,
+    stream: shape.stream,
+    roles,
+    system: SYSTEM_KEYS.filter((key) => own(body, key) !== undefined),
+    tools: (shape.tools ?? []).map((tool) => tool.name),
+    toolsRequired: shape.toolsRequired === true,
+    forced: shape.forcedToolName ?? null,
+    schema: shape.jsonSchema === undefined ? null : sha256HexOf(new TextEncoder().encode(canonicalJson(shape.jsonSchema))),
+  };
+  return sha256HexOf(new TextEncoder().encode(`rovara-reply-brief-shape/v1\n${canonicalJson(digestInput)}`));
+}
+
+/** The prompt hashes that appear with more than one shape digest in this batch of briefs. A reply matches by prompt hash only, so the capture step must not count such a prompt. */
+export function promptsWithConflictingShapes(briefs: readonly ReplyBrief[]): Set<string> {
+  const seen = new Map<string, string>();
+  const conflicts = new Set<string>();
+  for (const brief of briefs) {
+    const first = seen.get(brief.promptSha256);
+    if (first === undefined) seen.set(brief.promptSha256, brief.shapeSha256);
+    else if (first !== brief.shapeSha256) conflicts.add(brief.promptSha256);
+  }
+  return conflicts;
 }
 
 const BRIEFS = new WeakSet<object>();
@@ -293,33 +345,33 @@ export function extractReplyBrief(family: ServedModelFamily, operation: string, 
   const promptText = redactText(prompt);
   if (promptText !== prompt) mask.changed = true;
 
-  const model = options.model ?? facts.model;
+  const bodyModel = own(body, "model");
+  const model = options.model ?? (bodyModel === undefined ? undefined : typeof bodyModel === "string" ? bodyModel : "");
+  if (model !== undefined && !MODEL_ECHO_PATTERN.test(model)) return { ok: false, reason: "bad_model" };
   const stream = facts.stream || operation === "streamGenerateContent";
   const maxOutputTokens = readMaxOutputTokens(body);
   let shape: ReplyAnswerShape;
-  if (EMBEDDING_OPERATIONS.has(operation)) shape = { kind: "embedding", stream: false };
-  else if (operation === "rerank") shape = { kind: "rerank", stream: false };
-  else {
-    const json = readJsonMode(body, mask);
-    if (json === "bad_schema") return { ok: false, reason: "bad_schema" };
-    const read = readTools(body, mask);
-    if (!read.ok) return { ok: false, reason: "bad_tools" };
-    const choice = readToolChoice(body);
-    const tools = choice.none ? [] : read.tools;
-    const forced = choice.forcedName !== undefined && tools.some((tool) => tool.name === choice.forcedName) ? choice.forcedName : undefined;
-    const base = { stream, ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }) };
-    if (json.mode && !(tools.length > 0 && choice.required)) shape = { kind: "json", ...base, ...(json.schema === undefined ? {} : { jsonSchema: json.schema }) };
-    else if (tools.length > 0) shape = { kind: "tool_call", ...base, tools, toolsRequired: choice.required, ...(forced === undefined ? {} : { forcedToolName: forced }) };
-    else shape = { kind: "text", ...base };
-  }
+  const json = readJsonMode(body, mask);
+  if (json === "bad_schema") return { ok: false, reason: "bad_schema" };
+  const read = readTools(body, mask);
+  if (!read.ok) return { ok: false, reason: "bad_tools" };
+  const choice = readToolChoice(body);
+  const tools = choice.none ? [] : read.tools;
+  const forced = choice.forcedName !== undefined && tools.some((tool) => tool.name === choice.forcedName) ? choice.forcedName : undefined;
+  const base = { stream, ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }) };
+  if (json.mode && !(tools.length > 0 && choice.required)) shape = { kind: "json", ...base, ...(json.schema === undefined ? {} : { jsonSchema: json.schema }) };
+  else if (tools.length > 0) shape = { kind: "tool_call", ...base, tools, toolsRequired: choice.required, ...(forced === undefined ? {} : { forcedToolName: forced }) };
+  else shape = { kind: "text", ...base };
   const brief: ReplyBrief = {
     family,
     operation,
-    ...(model === undefined || !MODEL_ECHO_PATTERN.test(model) ? {} : { model }),
+    ...(model === undefined ? {} : { model }),
     promptText,
     promptSha256: sha256HexOf(new TextEncoder().encode(prompt)),
     promptMasked: mask.changed,
+    ...(promptText === prompt ? {} : { promptMaskedSha256: sha256HexOf(new TextEncoder().encode(promptText)) }),
     shape,
+    shapeSha256: shapeDigest(operation, body, shape),
   };
   if (utf8Bytes(JSON.stringify(brief)) > REPLY_BRIEF_MAX_BYTES) return { ok: false, reason: "too_long" };
   return { ok: true, brief: register(brief) };
@@ -350,7 +402,9 @@ const BriefSchema = z
     promptText: z.string().min(1).refine((text) => utf8Bytes(text) <= REPLY_BRIEF_PROMPT_MAX_BYTES, "the prompt is at most 64 KiB"),
     promptSha256: z.string().regex(/^[0-9a-f]{64}$/u),
     promptMasked: z.boolean(),
+    promptMaskedSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
     shape: ShapeSchema,
+    shapeSha256: z.string().regex(/^[0-9a-f]{64}$/u),
   })
   .strict()
   .superRefine((brief, context) => {
@@ -360,6 +414,9 @@ const BriefSchema = z
     if (jsonSchema !== undefined && kind !== "json") context.addIssue({ code: "custom", path: ["shape", "jsonSchema"], message: "a schema belongs to a json shape" });
     if ((toolsRequired !== undefined || forcedToolName !== undefined) && kind !== "tool_call") context.addIssue({ code: "custom", path: ["shape"], message: "tool flags belong to a tool_call shape" });
     if (forcedToolName !== undefined && !(tools ?? []).some((tool) => tool.name === forcedToolName)) context.addIssue({ code: "custom", path: ["shape", "forcedToolName"], message: "a forced tool is a declared one" });
+    // The prompt hash is tied to the prompt text: an unmasked brief hashes to its own promptSha256; a brief whose prompt was masked carries the hash of the masked text and it must match.
+    const textSha = sha256HexOf(new TextEncoder().encode(brief.promptText));
+    if (brief.promptMaskedSha256 === undefined ? textSha !== brief.promptSha256 : !brief.promptMasked || textSha !== brief.promptMaskedSha256 || textSha === brief.promptSha256) context.addIssue({ code: "custom", path: ["promptSha256"], message: "the prompt hash matches the prompt text (or its masked-text hash)" });
     if (new Set((tools ?? []).map((tool) => tool.name)).size !== (tools ?? []).length) context.addIssue({ code: "custom", path: ["shape", "tools"], message: "a tool is declared once" });
   });
 

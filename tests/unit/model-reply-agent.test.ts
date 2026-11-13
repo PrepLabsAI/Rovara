@@ -4,6 +4,8 @@ import {
   REPLY_AGENT_OUTPUT_MAX_BYTES,
   REPLY_AGENT_ROLE_TEXT,
   buildAgentInput,
+  replyEchoesRequest,
+  replyRequestData,
   extractReplyBrief,
   validateAgentOutput,
   valueMatchesSchema,
@@ -53,9 +55,10 @@ describe("buildAgentInput", () => {
     const input = buildAgentInput(chat({ api_key: "CANARY-KEY", user: "CANARY-USER", metadata: { diff: "CANARY-DIFF" } }), []);
     for (const canary of ["CANARY-KEY", "CANARY-USER", "CANARY-DIFF"]) expect(`${input.system}\n${input.user}`).not.toContain(canary);
   });
-  it("refuses an embedding brief and more than 3 examples", () => {
-    const embed = must(extractReplyBrief("openai_compatible", "embeddings", JSON.stringify({ model: "e", input: "hello there" })));
-    expect(() => buildAgentInput(embed, [])).toThrow(RangeError);
+  it("sends exactly replyRequestData (what the leak screen reads) plus the examples, and refuses more than 3 examples", () => {
+    const brief = jsonBrief();
+    const block = /```json\n([\s\S]*)\n```/u.exec(buildAgentInput(brief, []).user)?.[1] ?? "";
+    expect(JSON.parse(block) as unknown).toEqual({ request: JSON.parse(JSON.stringify(replyRequestData(brief))) as unknown, examples: [] });
     const example = { id: "a", response: { text: "x", finish: "stop" as const } };
     expect(() => buildAgentInput(chat(), [example, example, example, example])).toThrow(RangeError);
   });
@@ -128,10 +131,6 @@ describe("validateAgentOutput: tool calls", () => {
     expect(validateAgentOutput(brief, reply({ finish: "tool_calls", toolCalls: [{ name: "other", args: {} }] })).ok).toBe(false);
     expect(validateAgentOutput(brief, reply({ finish: "tool_calls", toolCalls: [{ name: "get_weather", args: { city: "Oslo" } }] })).ok).toBe(true);
   });
-  it("embedding briefs: not an agent operation", () => {
-    const embed = must(extractReplyBrief("openai_compatible", "embeddings", JSON.stringify({ model: "e", input: "hello there" })));
-    expect(validateAgentOutput(embed, reply({ text: "x" }))).toEqual({ ok: false, reason: "not_agent_operation" });
-  });
 });
 
 describe("a prompt-injection prompt does not change the output shape", () => {
@@ -168,5 +167,37 @@ describe("valueMatchesSchema", () => {
     expect(ok({ $ref: "#/$defs/missing" }, 1)).toBe(false);
     expect(ok({ $ref: "https://elsewhere.test/schema" }, 1)).toBe(false);
     expect(ok({ $ref: "#/$defs/a", $defs: { a: { $ref: "#/$defs/a" } } }, 1)).toBe(false);
+  });
+});
+
+describe("replyEchoesRequest: the structural check (a reply that repeats the request verbatim is not counted)", () => {
+  const echo = (brief: ReplyBrief, response: Record<string, unknown>): boolean => replyEchoesRequest(brief, { text: "", finish: "stop", ...response } as never);
+  it("a text reply that is, or a JSON string value that is, a passage of the prompt (6+ characters, normalized)", () => {
+    const brief = chat({}, "Reply to the customer with: Your refund is on its way, order 4471.");
+    expect(echo(brief, { text: "Your refund is on its way, order 4471." })).toBe(true);
+    expect(echo(brief, { text: "YOUR   refund is on its way, ORDER 4471." })).toBe(true);
+    expect(echo(brief, { text: "Thanks for waiting, a refund is coming." })).toBe(false);
+  });
+  it("short strings are not compared (under 6 characters)", () => {
+    expect(echo(chat({}, "Say: yesok"), { text: "yesok" })).toBe(false);
+    expect(echo(chat({}, "Say: yes ok!"), { text: "yes ok!" })).toBe(true); // 7 characters
+  });
+  it("every string value of a JSON reply, nested, and every tool-argument string", () => {
+    const jsonB = chat({ response_format: { type: "json_schema", json_schema: { name: "t", schema: { type: "object", properties: { note: { type: "string" } } } } } }, "The customer wrote: please cancel my subscription today");
+    expect(echo(jsonB, { text: JSON.stringify({ note: "please cancel my subscription today" }) })).toBe(true);
+    expect(echo(jsonB, { text: JSON.stringify({ deep: [{ x: { y: "please cancel my subscription today" } }] }) })).toBe(true);
+    expect(echo(jsonB, { text: JSON.stringify({ note: "A cancellation request." }) })).toBe(false);
+    const toolB = chat({ tools: TOOLS }, "Find the weather for Reykjavik in winter");
+    expect(echo(toolB, { finish: "tool_calls", toolCalls: [{ name: "get_weather", args: { city: "Reykjavik in winter" } }] })).toBe(true);
+    expect(echo(toolB, { finish: "tool_calls", toolCalls: [{ name: "get_weather", args: { city: "Oslo" } }] })).toBe(false);
+  });
+  it("also against the schema's prose (description, title, default, examples, $comment) and tool descriptions, but not its enum or const values", () => {
+    const withDefault = chat({ response_format: { type: "json_schema", json_schema: { name: "t", schema: { type: "object", properties: { r: { type: "string", default: "positive-sentiment", description: "the overall mood" } } } } } });
+    expect(echo(withDefault, { text: JSON.stringify({ r: "positive-sentiment" }) })).toBe(true);
+    expect(echo(withDefault, { text: JSON.stringify({ r: "the overall mood" }) })).toBe(true);
+    const withEnum = chat({ response_format: { type: "json_schema", json_schema: { name: "t", schema: { type: "object", properties: { r: { type: "string", enum: ["positive-sentiment", "negative-sentiment"] } } } } } });
+    expect(echo(withEnum, { text: JSON.stringify({ r: "positive-sentiment" }) })).toBe(false);
+    const withTool = chat({ tools: [{ type: "function", function: { name: "f", description: "Looks up the parcel tracking record", parameters: { type: "object", properties: { q: { type: "string" } } } } }] });
+    expect(echo(withTool, { finish: "tool_calls", toolCalls: [{ name: "f", args: { q: "Looks up the parcel tracking record" } }] })).toBe(true);
   });
 });

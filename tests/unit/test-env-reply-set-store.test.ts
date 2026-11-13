@@ -6,7 +6,6 @@ import {
   IMPLICIT_COMPANY_ID,
   INDEX_EXPIRY_ATTRIBUTE,
   REPLY_OVERLAY_TTL_DAYS,
-  createRovaraIndependentDecision,
   modelReplyEntrySha256,
   queryAll,
   replyEntrySortKey,
@@ -19,6 +18,7 @@ import {
   type StoredDocument,
   type TransactItem,
 } from "@agentx/contracts";
+import { createRovaraIndependentDecision } from "@agentx/contracts/independent-channel";
 import { COMPANY_A, COMPANY_B } from "@agentx/testing";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createReplySetStore, type ReplySetStoreOptions } from "../../packages/broker/src/core/test-env/reply-set-store.js";

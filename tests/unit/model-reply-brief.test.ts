@@ -6,7 +6,8 @@ import {
   extractReplyBrief,
   isReplyBrief,
   parseReplyBrief,
-  replyAgentCanAnswer,
+  promptsWithConflictingShapes,
+  replyRequestData,
   selectModelReply,
   sha256HexOf,
   type ModelReplySet,
@@ -19,6 +20,7 @@ const must = (result: ReturnType<typeof extractReplyBrief>): ReplyBrief => {
   return result.brief;
 };
 const openAi = (extra: Record<string, unknown> = {}, content = "Summarize the quarterly report in one line.") => JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content }], ...extra });
+const PROMPT_TEXT = "Summarize the quarterly report in one line.";
 const CANARY = "CANARY-FIELD-7f3a";
 
 describe("what the brief holds", () => {
@@ -27,7 +29,7 @@ describe("what the brief holds", () => {
     const brief = must(extractReplyBrief("openai_compatible", "chat_completions", body));
     const text = JSON.stringify(brief);
     expect(text).not.toContain(CANARY);
-    expect(Object.keys(brief).sort()).toEqual(["family", "model", "operation", "promptMasked", "promptSha256", "promptText", "shape"]);
+    expect(Object.keys(brief).sort()).toEqual(["family", "model", "operation", "promptMasked", "promptSha256", "promptText", "shape", "shapeSha256"]);
     expect(brief).toMatchObject({ family: "openai_compatible", operation: "chat_completions", model: "gpt-4o", promptText: "Summarize the quarterly report in one line.", shape: { kind: "text", stream: false, maxOutputTokens: 200 } });
     expect(Object.keys(brief.shape).sort()).toEqual(["kind", "maxOutputTokens", "stream"]);
   });
@@ -112,16 +114,19 @@ describe("the declared answer shape, per family", () => {
     const body = JSON.stringify({ model: "command-r", messages: [{ role: "user", content: "x" }], response_format: { type: "json_object", json_schema: { type: "object", properties: { a: { type: "string" } } } } });
     expect(must(extractReplyBrief("cohere", "chat", body)).shape).toMatchObject({ kind: "json", jsonSchema: { type: "object" } });
   });
-  it("embeddings and rerank get a brief of their kind that the agent cannot answer; models and token counts get none", () => {
-    const embed = must(extractReplyBrief("openai_compatible", "embeddings", JSON.stringify({ model: "text-embedding-3-small", input: "hello world" })));
-    expect(embed.shape.kind).toBe("embedding");
-    expect(replyAgentCanAnswer(embed)).toBe(false);
-    const rerank = must(extractReplyBrief("cohere", "rerank", JSON.stringify({ model: "rerank-v3", query: "q", documents: ["a", "b"] })));
-    expect(rerank.shape.kind).toBe("rerank");
-    expect(replyAgentCanAnswer(rerank)).toBe(false);
-    expect(extractReplyBrief("openai_compatible", "models", "{}")).toEqual({ ok: false, reason: "unsupported_operation" });
-    expect(extractReplyBrief("gemini", "countTokens", JSON.stringify({ contents: [{ parts: [{ text: "x" }] }] }))).toEqual({ ok: false, reason: "unsupported_operation" });
-    expect(extractReplyBrief("anthropic_messages", "chat_completions", "{}")).toEqual({ ok: false, reason: "unsupported_operation" });
+  it("embeddings and rerank get no brief (they would only use up the capture cap), and neither do models and token counts", () => {
+    for (const [family, operation, body] of [
+      ["openai_compatible", "embeddings", JSON.stringify({ model: "text-embedding-3-small", input: "hello world" })],
+      ["cohere", "rerank", JSON.stringify({ model: "rerank-v3", query: "q", documents: ["a", "b"] })],
+      ["cohere", "embed", JSON.stringify({ model: "e", texts: ["a b c"] })],
+      ["gemini", "embedContent", JSON.stringify({ content: { parts: [{ text: "x y z" }] } })],
+      ["gemini", "batchEmbedContents", JSON.stringify({ requests: [{ content: { parts: [{ text: "x y z" }] } }] })],
+      ["openai_compatible", "models", "{}"],
+      ["gemini", "countTokens", JSON.stringify({ contents: [{ parts: [{ text: "x" }] }] })],
+      ["anthropic_messages", "chat_completions", "{}"],
+    ] as const) {
+      expect(extractReplyBrief(family, operation, body), `${family} ${operation}`).toEqual({ ok: false, reason: "unsupported_operation" });
+    }
   });
 });
 
@@ -180,10 +185,83 @@ describe("registration", () => {
     expect(parseReplyBrief({ ...written, extra: CANARY }).ok).toBe(false);
     expect(parseReplyBrief({ ...written, promptText: "x".repeat(REPLY_BRIEF_PROMPT_MAX_BYTES + 1) }).ok).toBe(false);
     expect(parseReplyBrief({ ...written, operation: "models" }).ok).toBe(false);
-    expect(parseReplyBrief({ ...written, operation: "embeddings" }).ok).toBe(true);
+    expect(parseReplyBrief({ ...written, operation: "embeddings" }).ok).toBe(false);
     const evil = JSON.parse(`{"type":"object","__proto__":{"x":1}}`) as unknown;
     expect(parseReplyBrief({ ...written, shape: { kind: "json", stream: false, jsonSchema: evil } }).ok).toBe(false);
     expect(parseReplyBrief({ ...written, shape: { kind: "text", stream: false, tools: [{ name: "t" }] } }).ok).toBe(false);
     expect(parseReplyBrief(null).ok).toBe(false);
+  });
+});
+
+describe("the prompt hash is tied to the prompt text when a brief is read back (M3)", () => {
+  const written = (content = PROMPT_TEXT): Record<string, unknown> => {
+    const brief = must(extractReplyBrief("openai_compatible", "chat_completions", openAi({}, content)));
+    return JSON.parse(JSON.stringify(brief)) as Record<string, unknown>;
+  };
+  it("an unmasked brief must hash to its promptSha256: a forged hash is refused", () => {
+    expect(parseReplyBrief(written()).ok).toBe(true);
+    expect(parseReplyBrief({ ...written(), promptSha256: "a".repeat(64) }).ok).toBe(false);
+    expect(parseReplyBrief({ ...written(), promptText: "harmless greeting" }).ok).toBe(false);
+  });
+  it("a masked brief carries the hash of its masked text and it must match; a mismatch is refused", () => {
+    const masked = written(`Use the key ${fakeKey()} to call the API.`);
+    expect(masked.promptMasked).toBe(true);
+    expect(typeof masked.promptMaskedSha256).toBe("string");
+    expect(parseReplyBrief(masked).ok).toBe(true);
+    expect(parseReplyBrief({ ...masked, promptMaskedSha256: "b".repeat(64) }).ok).toBe(false);
+    const without = { ...masked };
+    delete without.promptMaskedSha256;
+    expect(parseReplyBrief(without).ok).toBe(false);
+    expect(parseReplyBrief({ ...masked, promptText: "something else entirely" }).ok).toBe(false);
+  });
+  it("an unmasked brief carries no masked-text hash", () => {
+    expect(parseReplyBrief({ ...written(), promptMaskedSha256: "c".repeat(64) }).ok).toBe(false);
+    expect(written()).not.toHaveProperty("promptMaskedSha256");
+  });
+  it("a masked schema with an unmasked prompt still ties the prompt hash directly", () => {
+    const body = openAi({ tools: [{ type: "function", function: { name: "t", description: `call with ${fakeKey()}`, parameters: { type: "object" } } }] });
+    const brief = must(extractReplyBrief("openai_compatible", "chat_completions", body));
+    expect(brief.promptMasked).toBe(true);
+    expect(brief.promptMaskedSha256).toBeUndefined();
+    expect(parseReplyBrief(JSON.parse(JSON.stringify(brief))).ok).toBe(true);
+  });
+});
+
+describe("the shape digest (M5)", () => {
+  const digest = (body: unknown): string => must(extractReplyBrief("openai_compatible", "chat_completions", JSON.stringify(body))).shapeSha256;
+  const messages = (...roles: [string, string][]) => roles.map(([role, content]) => ({ role, content }));
+  it("the same prompt text with another role layout, tools or schema gets another digest; the same request gets the same", () => {
+    const a = digest({ model: "m", messages: messages(["system", "Be terse"], ["user", "Hi"]) });
+    const b = digest({ model: "m", messages: messages(["user", "Be terse\nHi"]) });
+    const c = digest({ model: "m", messages: messages(["user", "Be terse"], ["assistant", "Hi"]) });
+    const d = digest({ model: "m", messages: messages(["user", "Be terse\nHi"]), tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }], tool_choice: "required" });
+    const e = digest({ model: "m", messages: messages(["user", "Be terse\nHi"]), response_format: { type: "json_object" } });
+    expect(new Set([a, b, c, d, e]).size).toBe(5);
+    expect(digest({ model: "m", messages: messages(["system", "Be terse"], ["user", "Hi"]) })).toBe(a);
+    expect(a).toMatch(/^[0-9a-f]{64}$/u);
+  });
+  it("the same prompt hash with two shape digests is listed as conflicting (the capture step refuses to count it)", () => {
+    const one = must(extractReplyBrief("openai_compatible", "chat_completions", JSON.stringify({ model: "m", messages: messages(["system", "Be terse"], ["user", "Hi"]) })));
+    const two = must(extractReplyBrief("openai_compatible", "chat_completions", JSON.stringify({ model: "m", messages: messages(["user", "Be terse\nHi"]) })));
+    const other = must(extractReplyBrief("openai_compatible", "chat_completions", JSON.stringify({ model: "m", messages: messages(["user", "something else entirely"]) })));
+    expect(one.promptSha256).toBe(two.promptSha256);
+    expect([...promptsWithConflictingShapes([one, two, other])]).toEqual([one.promptSha256]);
+    expect([...promptsWithConflictingShapes([one, one, other])]).toEqual([]);
+  });
+});
+
+describe("the model name (L3)", () => {
+  it("a model name that cannot be put in a match refuses the brief; it is not silently dropped", () => {
+    expect(extractReplyBrief("openai_compatible", "chat_completions", openAi({ model: "bad model name!" }))).toEqual({ ok: false, reason: "bad_model" });
+    expect(extractReplyBrief("openai_compatible", "chat_completions", openAi(), { model: "bad model name!" })).toEqual({ ok: false, reason: "bad_model" });
+    expect(extractReplyBrief("openai_compatible", "chat_completions", openAi({ model: 42 }))).toEqual({ ok: false, reason: "bad_model" });
+    expect(extractReplyBrief("gemini", "generateContent", JSON.stringify({ contents: [{ parts: [{ text: "hello" }] }] })).ok).toBe(true);
+  });
+});
+
+describe("what the agent is sent", () => {
+  it("replyRequestData is the one description of the request: family, operation, model, prompt and shape", () => {
+    const brief = must(extractReplyBrief("openai_compatible", "chat_completions", openAi()));
+    expect(replyRequestData(brief)).toEqual({ family: "openai_compatible", operation: "chat_completions", model: "gpt-4o", prompt: PROMPT_TEXT, answerShape: brief.shape });
   });
 });

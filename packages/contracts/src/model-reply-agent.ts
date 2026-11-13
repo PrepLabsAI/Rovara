@@ -13,7 +13,8 @@
 // are what remain.
 import { canonicalJson } from "./canonical-json.js";
 import { ModelReplyResponseSchema, type ModelReplyResponse } from "./model-reply-set.js";
-import { replyAgentCanAnswer, type ReplyBrief, type ReplyJsonObject } from "./model-reply-brief.js";
+import { replyAgentCanAnswer, replyRequestData, type ReplyBrief, type ReplyJsonObject } from "./model-reply-brief.js";
+import { normalizeScreenText } from "./model-reply-leak-screen.js";
 import type { ReplyExample } from "./model-reply-examples.js";
 
 export const REPLY_AGENT_OUTPUT_MAX_BYTES = 256 * 1024;
@@ -54,13 +55,7 @@ export function buildAgentInput(brief: ReplyBrief, examples: readonly ReplyExamp
   if (!replyAgentCanAnswer(brief)) throw new RangeError("the agent writes no reply for this kind of call");
   if (examples.length > REPLY_AGENT_MAX_EXAMPLES) throw new RangeError("at most 3 examples");
   const data = {
-    request: {
-      family: brief.family,
-      operation: brief.operation,
-      ...(brief.model === undefined ? {} : { model: brief.model }),
-      prompt: brief.promptText,
-      answerShape: brief.shape,
-    },
+    request: replyRequestData(brief),
     examples: examples.map((example) => ({ ...(example.promptContains === undefined ? {} : { promptContains: example.promptContains }), reply: example.response })),
   };
   const json = JSON.stringify(data, null, 2);
@@ -234,4 +229,71 @@ export function validateAgentOutput(brief: ReplyBrief, text: string): AgentOutpu
   const parsed = ModelReplyResponseSchema.safeParse(json);
   if (!parsed.success || !checkReplyShape(brief, parsed.data)) return { ok: false, reason: "bad_shape" };
   return { ok: true, response: withComputedUsage(brief, parsed.data) };
+}
+
+// ---- the structural check: a reply that repeats the request is not counted
+
+export const REPLY_ECHO_MIN_CHARS = 6;
+const PROSE_KEYS: ReadonlySet<string> = new Set(["description", "title", "$comment"]);
+const VALUE_KEYS: ReadonlySet<string> = new Set(["default", "examples", "example"]);
+
+function allStrings(value: unknown, out: string[], depth: number): void {
+  if (depth > 24) return;
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) for (const item of value) allStrings(item, out, depth + 1);
+  else if (isRecord(value)) for (const key of Object.keys(value)) allStrings(value[key], out, depth + 1);
+}
+
+/** The schema's prose: description, title, $comment, default and examples. Not enum or const values (a reply must be able to pick one), not keys, not `type` and the like. */
+function schemaProse(value: unknown, out: string[], depth: number): void {
+  if (depth > 24 || !isRecord(value)) {
+    if (Array.isArray(value)) for (const item of value) schemaProse(item, out, depth + 1);
+    return;
+  }
+  for (const key of Object.keys(value)) {
+    const child = value[key];
+    if (key === "enum" || key === "const") continue;
+    if (PROSE_KEYS.has(key) && typeof child === "string") out.push(child);
+    else if (VALUE_KEYS.has(key)) allStrings(child, out, depth + 1);
+    else schemaProse(child, out, depth + 1);
+  }
+}
+
+/** What the agent could copy from: the prompt, the tool descriptions and the schemas' prose. */
+function echoSources(brief: ReplyBrief): string[] {
+  const out: string[] = [brief.promptText];
+  for (const tool of brief.shape.tools ?? []) {
+    if (tool.description !== undefined) out.push(tool.description);
+    schemaProse(tool.parametersSchema, out, 0);
+  }
+  schemaProse(brief.shape.jsonSchema, out, 0);
+  return out;
+}
+
+/** The strings of a reply: its text, every string value of the JSON it holds (when the text is JSON), and every string in the tool-call arguments. */
+function replyStrings(response: ModelReplyResponse): string[] {
+  const out: string[] = [response.text];
+  const trimmed = response.text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      allStrings(JSON.parse(trimmed), out, 0);
+    } catch {
+      // not JSON: the text itself was compared
+    }
+  }
+  for (const call of response.toolCalls ?? []) allStrings(call.args, out, 0);
+  return out;
+}
+
+/**
+ * Whether a reply repeats the request: its text, a string value of its JSON, or a tool-call argument string of 6 or more characters (normalized as the leak screen normalizes) appears verbatim in the prompt, a tool description or a
+ * schema's prose. The channel refuses to count such a reply (`reply_echoes_request`). This is a structural check that needs no knowledge of the tests: a reply cannot carry what the prompt did not already hold. It does not prove
+ * independence; the label stays "written without seeing the tests".
+ */
+export function replyEchoesRequest(brief: ReplyBrief, response: ModelReplyResponse): boolean {
+  const haystack = echoSources(brief).map(normalizeScreenText).join("\u0001");
+  return replyStrings(response).some((text) => {
+    const needle = normalizeScreenText(text);
+    return needle.length >= REPLY_ECHO_MIN_CHARS && haystack.includes(needle);
+  });
 }

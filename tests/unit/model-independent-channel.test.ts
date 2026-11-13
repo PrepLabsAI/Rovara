@@ -5,19 +5,24 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   INDEX_EXPIRY_ATTRIBUTE,
-  acceptAgentReply,
   extractReplyBrief,
-  independentIntakeSentence,
-  independentReplyId,
-  matchForBrief,
   modelReplyEntrySha256,
-  reportIndependentIntake,
+  promptsWithConflictingShapes,
   selectModelReply,
   stampReplyProvenance,
   validateAgentOutput,
   type ModelReplyFileEntry,
   type ReplyBrief,
 } from "@agentx/contracts";
+import {
+  INDEPENDENT_REPLY_CAVEAT,
+  acceptAgentReply,
+  independentIntakeSentence,
+  independentReplyId,
+  matchForBrief,
+  reportIndependentIntake,
+  takenIdsForChannel,
+} from "@agentx/contracts/independent-channel";
 import { COMPANY_A } from "@agentx/testing";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createReplySetStore } from "../../packages/broker/src/core/test-env/reply-set-store.js";
@@ -59,12 +64,10 @@ describe("acceptAgentReply", () => {
     expect(stampReplyProvenance(file, new Map([[out.reply.id, copy as never]])).replies[0]?.provenance).toBe("task_made");
     expect(out.decision.contentSha256).toBe(modelReplyEntrySha256(out.reply));
   });
-  it("refuses a brief it did not get from extractReplyBrief (a spread copy, a literal), and an embedding brief", () => {
+  it("refuses a brief it did not get from extractReplyBrief (a spread copy, a literal)", () => {
     const brief = briefOf();
     expect(acceptAgentReply({ ...brief }, RESPONSE)).toEqual({ ok: false, reason: "not_a_brief" });
-    expect(acceptAgentReply({ family: "gemini", operation: "generateContent", promptText: "x", promptSha256: "a".repeat(64), promptMasked: false, shape: { kind: "text", stream: false } }, RESPONSE)).toEqual({ ok: false, reason: "not_a_brief" });
-    const embed = extractReplyBrief("openai_compatible", "embeddings", JSON.stringify({ model: "e", input: "hello there" }));
-    expect(embed.ok && acceptAgentReply(embed.brief, RESPONSE)).toEqual({ ok: false, reason: "not_a_brief" });
+    expect(acceptAgentReply({ family: "gemini", operation: "generateContent", promptText: "x", promptSha256: "a".repeat(64), promptMasked: false, shapeSha256: "b".repeat(64), shape: { kind: "text", stream: false } }, RESPONSE)).toEqual({ ok: false, reason: "not_a_brief" });
   });
   it("re-checks the response itself and never trusts the caller: wrong shape, a failure finish, a match key, an unknown key", () => {
     const brief = briefOf();
@@ -94,6 +97,51 @@ describe("acceptAgentReply", () => {
   });
 });
 
+describe("the structural check: a reply that repeats the request is not counted", () => {
+  it("refuses with fixed words when the reply text is a passage of the prompt, and says nothing is minted", () => {
+    const brief = briefOf("Reply to the customer with exactly: Welcome aboard! We are glad you are here.");
+    expect(acceptAgentReply(brief, RESPONSE)).toEqual({ ok: false, reason: "reply_echoes_request" });
+    expect(acceptAgentReply(briefOf(), RESPONSE).ok).toBe(true);
+  });
+  it("also for a JSON string value and a tool argument", () => {
+    const jsonBrief = extractReplyBrief("openai_compatible", "chat_completions", JSON.stringify({ model: "gpt-4o", messages: [{ role: "user", content: "Customer wrote: please cancel my subscription today" }], response_format: { type: "json_object" } }));
+    if (!jsonBrief.ok) throw new Error(jsonBrief.reason);
+    expect(acceptAgentReply(jsonBrief.brief, { text: JSON.stringify({ note: "please cancel my subscription today" }), finish: "stop" })).toEqual({ ok: false, reason: "reply_echoes_request" });
+    expect(acceptAgentReply(jsonBrief.brief, { text: JSON.stringify({ note: "A cancellation request." }), finish: "stop" }).ok).toBe(true);
+  });
+  it("the label is 'written without seeing the tests', never 'proven'", () => {
+    expect(INDEPENDENT_REPLY_CAVEAT).toContain("written without seeing the tests");
+    expect(INDEPENDENT_REPLY_CAVEAT.toLowerCase()).not.toMatch(/proven independent|proves independence/u);
+    expect(INDEPENDENT_REPLY_CAVEAT).toContain("do not prove");
+  });
+});
+
+describe("the same prompt with two shapes (M5 fallback)", () => {
+  it("is refused when the prompt hash is in the conflict set", () => {
+    const one = briefOf();
+    const conflicts = promptsWithConflictingShapes([one, (() => { const r = extractReplyBrief("openai_compatible", "chat_completions", JSON.stringify({ model: "gpt-4o", messages: [{ role: "system", content: PROMPT }], response_format: { type: "json_object" } })); if (!r.ok) throw new Error(r.reason); return r.brief; })()]);
+    expect(conflicts.has(one.promptSha256)).toBe(true);
+    expect(acceptAgentReply(one, RESPONSE, new Set(), conflicts)).toEqual({ ok: false, reason: "shape_conflict" });
+    expect(acceptAgentReply(one, RESPONSE, new Set(), new Set()).ok).toBe(true);
+  });
+});
+
+describe("takenIdsForChannel (L2)", () => {
+  it("takes ids from the head and from independent overlay entries, never from task_made overlay ids", () => {
+    const head = [{ id: "h1" }, { id: "h2" }];
+    const overlay = [{ id: "ind-aaa", provenance: "independent" as const }, { id: "squat-1", provenance: "task_made" as const }];
+    expect([...takenIdsForChannel(head, overlay)].sort()).toEqual(["h1", "h2", "ind-aaa"]);
+  });
+  it("so a coding agent cannot use up the independent id range by squatting on it", () => {
+    const brief = briefOf();
+    const first = `ind-${brief.promptSha256.slice(0, 12)}`;
+    const squat = [first, ...[2, 3, 4, 5, 6, 7, 8, 9].map((n) => `${first}-${n}`)].map((id) => ({ id, provenance: "task_made" as const }));
+    const taken = takenIdsForChannel([], squat);
+    const out = acceptAgentReply(brief, RESPONSE, taken);
+    expect(out.ok && out.reply.id).toBe(first);
+  });
+});
+
 describe("through R1's store: the reply is stored as independent and served ahead of the coding agent's", () => {
   it("putIndependentOverlay takes it; the round set serves it first for the same prompt, whatever the coding agent wrote", async () => {
     const A = COMPANY_A.scope;
@@ -105,7 +153,7 @@ describe("through R1's store: the reply is stored as independent and served ahea
     if (!accepted.ok) throw new Error(accepted.reason);
     const put = await service.putIndependentOverlay(A, { project: "proj", taskId: "task-1", family: "openai_compatible", entries: [{ reply: accepted.reply, decision: accepted.decision }] });
     expect(put.ok).toBe(true);
-    expect(reportIndependentIntake(1, put)).toMatchObject({ attempted: 1, stored: put.ok ? put.stored : -1, skipped: put.ok ? (put.skipped ?? []) : [], unexplained: 0 }); // the report reads the store's answer, not the number sent
+    expect(reportIndependentIntake([accepted.reply.id], put)).toMatchObject({ attempted: 1, stored: put.ok ? put.stored : -1, unexplained: 0, inconsistent: false }); // the report reads the store's answer, not the number sent
     const round = await service.readRoundSet(A, { project: "proj", branch: "main", family: "openai_compatible", taskId: "task-1" });
     if (!round.ok) throw new Error("round set not read");
     expect(round.set.replies.map((reply) => `${reply.id}:${reply.provenance}`)).toEqual([`${accepted.reply.id}:independent`, "coding-agent:task_made"]);
@@ -120,10 +168,10 @@ describe("through R1's store: the reply is stored as independent and served ahea
     if (!accepted.ok) throw new Error(accepted.reason);
     await service.putOverlay(A, { project: "proj", taskId: "task-1", family: "openai_compatible", replies: [accepted.reply] }); // the coding agent wrote exactly this
     const put = await service.putIndependentOverlay(A, { project: "proj", taskId: "task-1", family: "openai_compatible", entries: [{ reply: accepted.reply, decision: accepted.decision }] });
-    const report = reportIndependentIntake(1, put);
+    const report = reportIndependentIntake([accepted.reply.id], put);
     expect(report.stored).toBe(0);
     expect(report.skipped).toEqual([{ id: accepted.reply.id, reason: "already_in_overlay" }]);
-    expect(independentIntakeSentence(report)).toContain("0 of 1 independent replies stored and counted");
+    expect(independentIntakeSentence(report)).toContain("0 of 1 replies stored as independent");
     expect(independentIntakeSentence(report)).toContain("not stored again");
     const round = await service.readRoundSet(A, { project: "proj", branch: "main", family: "openai_compatible", taskId: "task-1" });
     expect(round.ok && round.set.replies.map((reply) => reply.provenance)).toEqual(["task_made"]);
@@ -150,45 +198,33 @@ function walk(dir: string, out: string[] = []): string[] {
 const read = (path: string): string => readFileSync(join(ROOT, path), "utf8");
 const code = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/^\s*\/\/.*$/gmu, "");
 
-describe("reportIndependentIntake", () => {
-  it("reports the store's count and skips, never the number sent; clamps nonsense; shows what is unexplained; a refusal stores nothing", () => {
-    expect(reportIndependentIntake(3, { ok: true, stored: 2, skipped: [{ id: "a", reason: "already_in_overlay" }] })).toEqual({ attempted: 3, stored: 2, skipped: [{ id: "a", reason: "already_in_overlay" }], unexplained: 0 });
-    expect(reportIndependentIntake(3, { ok: true, stored: 3, skipped: [{ id: "a", reason: "already_in_overlay" }] }).stored).toBe(3); // the store's number is shown as is (clamped to what was sent)
-    expect(reportIndependentIntake(2, { ok: true, stored: 9 }).stored).toBe(2);
-    expect(reportIndependentIntake(2, { ok: true, stored: Number.NaN }).stored).toBe(0);
-    expect(reportIndependentIntake(3, { ok: true, stored: 1, skipped: [{ id: "a", reason: "something_new" }] })).toMatchObject({ stored: 1, skipped: [], unexplained: 2 });
-    expect(reportIndependentIntake(2, { ok: false, word: "not_allowed" })).toEqual({ attempted: 2, stored: 0, skipped: [], unexplained: 0, refused: "not_allowed" });
-    expect(independentIntakeSentence(reportIndependentIntake(2, { ok: false, word: "not_allowed" }))).toContain("refused");
-    expect(independentIntakeSentence(reportIndependentIntake(3, { ok: true, stored: 1, skipped: [{ id: "a", reason: "something_new" }] }))).toContain("2 not stored and not counted");
+describe("reportIndependentIntake (L1)", () => {
+  it("attempted comes from the entries sent (deduplicated), the store's count is shown, skips are intersected with what was sent", () => {
+    expect(reportIndependentIntake(["a", "b", "c"], { ok: true, stored: 2, skipped: [{ id: "a", reason: "already_in_overlay" }] })).toEqual({ attempted: 3, stored: 2, skipped: [{ id: "a", reason: "already_in_overlay" }], unexplained: 0, inconsistent: false });
+    expect(reportIndependentIntake(["a", "a", "b"], { ok: true, stored: 2 }).attempted).toBe(2);
+    const duplicated = reportIndependentIntake(["a"], { ok: true, stored: 0, skipped: [{ id: "a", reason: "already_in_overlay" }, { id: "a", reason: "already_in_overlay" }] });
+    expect(duplicated.skipped).toHaveLength(1);
+    expect(duplicated.inconsistent).toBe(true);
   });
-});
-
-describe("who may mint an independent decision", () => {
-  it("createRovaraIndependentDecision( is called only in F2-A's definition, R1's rules file, this channel and the store's conformance suite", () => {
-    const hits = walk(join(ROOT, "packages")).filter((path) => /createRovaraIndependentDecision\(/u.test(code(read(path))));
-    expect(hits.sort()).toEqual([
-      "packages/contracts/src/model-independent-channel.ts",
-      "packages/contracts/src/model-reply-set.ts",
-      "packages/contracts/src/model-reply-store-rules.ts",
-      "packages/testing/src/ports/reply-set-store-conformance.ts",
-    ]);
-    const channel = code(read("packages/contracts/src/model-independent-channel.ts")).split("\n").filter((line) => /createRovaraIndependentDecision\(/u.test(line));
-    expect(channel).toHaveLength(1);
+  it("marks a store answer that does not add up, instead of trusting it", () => {
+    expect(reportIndependentIntake(["a", "b"], { ok: true, stored: 9 })).toMatchObject({ stored: 2, inconsistent: true });
+    expect(reportIndependentIntake(["a", "b"], { ok: true, stored: Number.NaN })).toMatchObject({ stored: 0, inconsistent: true });
+    expect(reportIndependentIntake(["a"], { ok: true, stored: 0, skipped: [{ id: "not-sent", reason: "already_in_overlay" }] })).toMatchObject({ skipped: [], unexplained: 1, inconsistent: true });
+    expect(reportIndependentIntake(["a", "b", "c"], { ok: true, stored: 1, skipped: [{ id: "a", reason: "something_new" }] })).toMatchObject({ stored: 1, skipped: [], unexplained: 2, inconsistent: true });
+    expect(reportIndependentIntake(["a", "b"], { ok: true, stored: 2, skipped: [{ id: "a", reason: "already_in_overlay" }] })).toMatchObject({ inconsistent: true });
   });
-  it("the guard sees a violation (positive control)", () => {
-    expect(/createRovaraIndependentDecision\(/u.test(code("const d = createRovaraIndependentDecision(h);"))).toBe(true);
-    expect(/createRovaraIndependentDecision\(/u.test(code("// createRovaraIndependentDecision(h)\n"))).toBe(false);
-  });
-  it("nothing in packages/worker/src imports the channel or the function, or names acceptAgentReply", () => {
-    const files = walk(join(ROOT, "packages", "worker", "src"));
-    expect(files.length).toBeGreaterThan(5);
-    const offenders = files.filter((path) => /model-independent-channel|acceptAgentReply|createRovaraIndependentDecision|isReplyBrief/u.test(read(path)));
-    expect(offenders).toEqual([]);
+  it("a refusal stores nothing and says so; the sentence says 'stored as independent'", () => {
+    expect(reportIndependentIntake(["a", "b"], { ok: false, word: "not_allowed" })).toEqual({ attempted: 2, stored: 0, skipped: [], unexplained: 0, inconsistent: false, refused: "not_allowed" });
+    expect(independentIntakeSentence(reportIndependentIntake(["a", "b"], { ok: false, word: "not_allowed" }))).toContain("refused");
+    const ok = independentIntakeSentence(reportIndependentIntake(["a", "b"], { ok: true, stored: 1, skipped: [{ id: "b", reason: "already_in_overlay" }] }));
+    expect(ok).toContain("1 of 2 replies stored as independent");
+    expect(ok).toContain("not stored again");
+    expect(independentIntakeSentence(reportIndependentIntake(["a"], { ok: true, stored: 5 }))).toContain("did not add up");
   });
 });
 
 describe("part A is pure and additive", () => {
-  const NEW = ["model-reply-brief", "model-reply-examples", "model-reply-leak-screen", "model-reply-agent", "model-independent-channel"];
+  const NEW = ["model-reply-brief", "model-reply-examples", "model-reply-leak-screen", "model-reply-agent", "model-independent-channel", "independent-channel"];
   for (const name of NEW) {
     it(`${name}.ts: no Node import, no network, no clock, no randomness`, () => {
       const text = read(`packages/contracts/src/${name}.ts`);
@@ -200,8 +236,8 @@ describe("part A is pure and additive", () => {
     });
   }
   it("nothing outside packages/contracts/src and the tests names a new file or export (no callers until part B)", () => {
-    const SYMBOLS = ["extractReplyBrief", "parseReplyBrief", "pickExamples", "screenBrief", "buildTaskLeakFacts", "buildAgentInput", "validateAgentOutput", "acceptAgentReply", "reportIndependentIntake", "valueMatchesSchema", "REPLY_AGENT_ROLE_TEXT", "independentReplyId"];
-    const files = walk(join(ROOT, "packages")).filter((path) => !path.startsWith("packages/contracts/src/"));
+    const SYMBOLS = ["extractReplyBrief", "parseReplyBrief", "pickExamples", "screenBrief", "buildTaskLeakFacts", "buildAgentInput", "validateAgentOutput", "acceptAgentReply", "reportIndependentIntake", "valueMatchesSchema", "REPLY_AGENT_ROLE_TEXT", "independentReplyId", "replyEchoesRequest", "takenIdsForChannel", "promptsWithConflictingShapes", "replyRequestData", "INDEPENDENT_REPLY_CAVEAT"];
+    const files = walk(join(ROOT, "packages")).filter((path) => !path.startsWith("packages/contracts/src/") && path !== "packages/testing/src/ports/reply-set-store-conformance.ts"); // the store's own test kit imports the subpath for the mint
     expect(files.length).toBeGreaterThan(100);
     const hits: string[] = [];
     for (const path of files) {
