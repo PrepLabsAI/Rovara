@@ -71,6 +71,8 @@ export class SessionLifecycle extends Construct {
     // IAM inline-policy attachments require the name, without the role's path.
     this.instanceRoleName = Fn.select(naming.env === undefined ? 1 : 3, Fn.split("/", instanceRoleArn.valueAsString));
     const launchTemplateId = parameter("Ec2WorkerLaunchTemplateId", "The EC2 workers' launch template");
+    // Read by the broker (spec 065b), which binds a project a sign-in client creates to these workers.
+    parameter("Ec2WorkerSubnets", "The EC2 workers' availabilityZone=subnetId pairs");
 
     // AUTOREQUALIFY AR-4: written by the requalifier (never by this construct's principals); read by
     // the provisioner (to launch from it) and the reconciler (to recycle workers on another AMI).

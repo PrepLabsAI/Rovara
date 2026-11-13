@@ -57,6 +57,8 @@ export async function createAdminBroker(options: {
   linking?: DeveloperApiConfiguration;
   /** Spec 062: channel adapters turned on, so the link routes have their links. */
   channelAdapters?: boolean;
+  /** Spec 065b: what a sign-in client's project is built from. */
+  clientProjects?: unknown;
   /** Sign in with ChatGPT (#338): built over the same fake table when given. */
   chatgpt?: (db: FakeDynamoDb) => ChatGptConnections;
   /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
@@ -88,6 +90,7 @@ export async function createAdminBroker(options: {
     ...(options.turnRecords ? { turnRecords: options.turnRecords } : {}),
     ...(options.developer ? { developer: options.developer } : {}),
     ...(options.linking ? { linking: options.linking } : {}),
+    ...(options.clientProjects === undefined ? {} : { clientProjects: options.clientProjects }),
     ...(options.channelAdapters ? { channelAdapters: { secretPrefix: "agentx/production/", secrets: { put: vi.fn() } } } : {}),
     ...(options.chatgpt ? { chatgpt: options.chatgpt(db) } : {}),
   } as never);
