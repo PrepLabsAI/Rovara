@@ -54,6 +54,8 @@ import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecor
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
 import { workflowWriteOps } from "./flow-guard.js";
+import { afterUnderstand, smallPlanRoute } from "./stage-selection.js";
+import { isExplicitPath } from "../../rovara-code/explicit-path.js";
 import type { StepOutcome } from "./outcome.js";
 import { knowledgeCommitToStore } from "../meta-repo/prepare-meta.js";
 import { SETUP_AGENT_FEATURE } from "@agentx/contracts";
@@ -536,9 +538,14 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
         await commitWorkflow(deps, task, answerWorkflowIntent(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, artifact: outcome.answerArtifact, now }));
         return;
       }
-      let next = recordIntentAssessment(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, now });
+      const assessed = recordIntentAssessment(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, now });
+      let next = assessed;
       // The design review: a ready reading that needs a design (or that the person asked to have reviewed) switches it on, which forces the Full path.
       if (deps.designReview !== undefined) next = await deps.designReview.afterUnderstand(deps, task, next, outcome.assessment, now);
+      // The lighter flow: a request whose named files make it exactly small does not get the design review (or the Full path) a project default would give it; the skip and its record are in this commit.
+      if (deps.lighterFlow === true && assessed.intent?.assessment !== undefined) {
+        next = afterUnderstand({ assessed, considered: next, requestText: task.requestText, assessment: assessed.intent.assessment, explicitPath: isExplicitPath(workflow), at: now });
+      }
       // A ready request goes on to planning with no one asking: the row commits with the transition, and is run right after.
       const toPlan = next.stage === "PLAN" && next.state === "READY";
       const committed = await commitWorkflow(deps, task, next, toPlan ? [dispatchRowItem(deps, task.taskId, next.revision, "PLAN", now)] : []);
@@ -551,14 +558,23 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
         ...(outcome.proposal === undefined ? {} : { proposal: outcome.proposal }),
         ...(outcome.noChangeNeeded === true ? { noChangeNeeded: true } : {}),
       });
-      // The change tier's ESTIMATE, before any code exists: from the files the plan names and the words of the request. It picks nothing yet and is replaced by the diff's tier after the build.
-      const next = withTierEstimate(submitted, outcome.cites?.plan, task.requestText, iso(deps));
+      // The change tier's ESTIMATE, before any code exists: from the files the plan names and the words of the request. It is replaced by the diff's tier after the build.
+      // With the lighter flow on it also picks the steps: exactly small (the files of the plan, the request and Understand's reading) skips the plan check and the approval, in this same commit.
+      const routed = deps.lighterFlow === true && workflowDocumentType(submitted) === "plan"
+        ? smallPlanRoute({ submitted, plan: outcome.cites?.plan, requestText: task.requestText, noChangeNeeded: outcome.noChangeNeeded === true, at: iso(deps) }) : undefined;
+      const next = routed?.workflow ?? withTierEstimate(submitted, outcome.cites?.plan, task.requestText, iso(deps));
+      const toCode = (routed?.skipped.length ?? 0) > 0 && next.stage === "IMPLEMENT" && next.state === "READY";
       // A version 2 coding plan is read by a second step before a person sees it: the check is a row like every automatic step, written with the plan.
       const toCheck = next.stage === "PLAN_CRITIQUE" && next.state === "READY";
       // What the run is expected to cost, from the cost of the project's earlier runs (or the default for the path), kept on the task beside the plan: the plan page, the decision card's risk, the session and the tools read it.
       const estimate = await planRunEstimate(deps, task, next);
-      const committed = await commitWorkflow(deps, task, next, toCheck ? [dispatchRowItem(deps, task.taskId, next.revision, "CRITIQUE", iso(deps))] : [], [...(task.planUnreadable === undefined ? [] : [change.remove("planUnreadable")]), ...(estimate === undefined ? [] : [change.set("runEstimate", estimate as unknown as JsonValue)])]);
+      const row = toCheck ? dispatchRowItem(deps, task.taskId, next.revision, "CRITIQUE", iso(deps)) : toCode ? dispatchRowItem(deps, task.taskId, next.revision, "IMPLEMENT", iso(deps)) : undefined;
+      const committed = await commitWorkflow(deps, task, next, row === undefined ? [] : [row], [...(task.planUnreadable === undefined ? [] : [change.remove("planUnreadable")]), ...(estimate === undefined ? [] : [change.set("runEstimate", estimate as unknown as JsonValue)])]);
       if (committed && toCheck) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "CRITIQUE" });
+      if (committed && toCode) {
+        log(deps, { event: "task_flow.planning_skipped", taskId: task.taskId, level: next.flow?.tier?.level, kinds: next.flow?.tier?.kinds, skipped: next.flow?.skippedSteps, reasons: next.flow?.tier?.reasons.map((reason) => reason.code) });
+        await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "IMPLEMENT" });
+      }
       // The code the plan cites is read after the plan is committed, so a slow or failing code host never holds the plan up.
       if (committed && outcome.cites !== undefined) {
         await deps.afterPlanStored?.({ task, workflow: next, artifactId: outcome.artifact.id, artifactSha256: outcome.artifact.sha256, plan: outcome.cites.plan, prefix: outcome.cites.prefix })
