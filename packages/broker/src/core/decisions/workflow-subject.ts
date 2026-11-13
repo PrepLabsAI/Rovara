@@ -15,6 +15,7 @@ import {
 } from "@agentx/contracts";
 import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../developer/workflow-actions.js";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "./approval-gate.js";
+import { flowIs } from "../task-flow/flow-guard.js";
 
 export const WORKFLOW_DOCUMENT_KIND = "workflow-document";
 /** What a refused decision says when the structured plan it names cannot be read back. */
@@ -131,7 +132,7 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       return {
         key: workflowTaskKey(taskId),
         // The revision and the wait, as the engine's own update condition holds them: a write from any other state loses.
-        guard: when.and(when.eq(["workflow", "revision"], workflow.revision), when.eq(["workflow", "state"], "WAITING"), when.eq(["workflow", "stage"], "PLAN_REVIEW"), when.notExists("closedAt")),
+        guard: when.and(when.eq(["workflow", "revision"], workflow.revision), flowIs(workflow.flow), when.eq(["workflow", "state"], "WAITING"), when.eq(["workflow", "stage"], "PLAN_REVIEW"), when.notExists("closedAt")),
         waiting,
         request: {
           kind: currentDocumentType(workflow), subject, ...(typeof task["project"] === "string" ? { projectName: task["project"] } : {}),

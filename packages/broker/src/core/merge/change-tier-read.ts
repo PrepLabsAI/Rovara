@@ -3,7 +3,8 @@
 import { createHash } from "node:crypto";
 import type { ChangeRequestFile, CodeHost, HostScope } from "@agentx/contracts";
 import { changedFilesFromHostFiles, plainChangedPath } from "../proof/changed-files.js";
-import type { DiffInput, TierFile } from "../decisions/change-tier.js";
+import { factKey, type DiffInput, type HeadFacts, type TierFile } from "../decisions/change-tier.js";
+import { fileTypeOf, normalizedTierPath } from "../decisions/sensitive-list.js";
 import { changeRequestRef, readChangeRequestFiles } from "./host-port.js";
 
 export interface TierReadTarget {
@@ -26,11 +27,79 @@ export function tierFilesOfRead(repositoryId: string, read: { files: readonly Ch
   };
 }
 
+/** The instruction files whose imports are read at the head: a document one of them reads is an instruction, whatever its name. */
+const INSTRUCTION_ROOTS = ["AGENTS.md", "CLAUDE.md", "AGENT.md", "GEMINI.md", ".github/copilot-instructions.md"] as const;
+const INSTRUCTION_READ_MAX_BYTES = 100_000;
+const DOCUMENT_READ_MAX_BYTES = 200_000;
+/** The most host reads one tier spends on facts beyond the file list. */
+const DOCUMENTS_READ_MAX = 20;
+const PATH_KINDS_READ_MAX = 40;
+
+/** The paths an instruction file names: `@path` imports and Markdown link targets, resolved against the file's folder. */
+export function importsOf(instructionPath: string, text: string): string[] {
+  const folder = instructionPath.includes("/") ? instructionPath.slice(0, instructionPath.lastIndexOf("/") + 1) : "";
+  const targets = [...text.matchAll(/(?:^|[\s(])@([\w@./-]+\.[A-Za-z0-9]{1,6})\b/gu)].map((match) => match[1]!)
+    .concat([...text.matchAll(/\]\(([^)#\s]+)(?:#[^)\s]*)?\)/gu)].map((match) => match[1]!));
+  const out: string[] = [];
+  for (const target of targets) {
+    if (/^[a-z][a-z0-9+.-]*:/iu.test(target)) continue;
+    const parts = `${target.startsWith("/") ? "" : folder}${target.replace(/^\//u, "")}`.split("/");
+    const resolved: string[] = [];
+    for (const part of parts) { if (part === "..") resolved.pop(); else if (part !== "." && part !== "") resolved.push(part); }
+    out.push(normalizedTierPath(resolved.join("/")));
+  }
+  return out;
+}
+
+export interface TierReadInput { diff: DiffInput; head: HeadFacts }
+
 /**
- * The diff the tier is computed from: every file of every change request of the task. `complete` is false when a host's list was cut or a path cannot be listed honestly. A host that cannot answer throws (the caller decides
- * what that means: the merge refuses and says so, nothing is recorded).
+ * What the host knows of the code at each head commit, beyond the file list: the text of the documents the change touches (so the section a changed line sits in is known), which paths the instruction files import, and
+ * which paths are symbolic links. A path kind the host cannot answer THROWS (the caller refuses, or leaves the tier unwritten); a document or an instruction file that cannot be read leaves that fact unknown, and the rules
+ * then do not clear the document as plain docs. `files` are the tier files already read (each names its repository).
  */
-export async function readTierDiff(targets: readonly TierReadTarget[], scope: HostScope, beforeRequest?: () => void): Promise<DiffInput> {
+export async function readHeadFacts(targets: ReadonlyArray<TierReadTarget & { headSha: string }>, files: readonly TierFile[], scope: HostScope, beforeRequest?: () => void): Promise<HeadFacts> {
+  const text = new Map<string, string>();
+  const imports = new Set<string>();
+  const links = new Set<string>();
+  let importsKnown: boolean | undefined;
+  for (const target of targets) {
+    const ref = changeRequestRef(target.repositoryUrl, target.number);
+    const listed = files.filter((file) => file.repository === target.repositoryId && file.status !== "removed");
+    // Documents: the text at the head, so a changed line's heading and block are known.
+    const documents = listed.filter((file) => fileTypeOf(file.path) === "prose").slice(0, DOCUMENTS_READ_MAX);
+    for (const document of documents) {
+      beforeRequest?.();
+      const body = await target.host.fileAtRevision(ref.repository, document.path, target.headSha, scope, { maxBytes: DOCUMENT_READ_MAX_BYTES }).catch(() => undefined);
+      if (body !== undefined) text.set(factKey(target.repositoryId, document.path), body);
+    }
+    // Instruction files at the head: what they import is an instruction too.
+    if (documents.length > 0) {
+      importsKnown ??= true;
+      for (const root of INSTRUCTION_ROOTS) {
+        beforeRequest?.();
+        try {
+          const body = await target.host.fileAtRevision(ref.repository, root, target.headSha, scope, { maxBytes: INSTRUCTION_READ_MAX_BYTES });
+          if (body !== undefined) for (const imported of importsOf(root, body)) imports.add(factKey(target.repositoryId, imported));
+        } catch {
+          importsKnown = false;
+        }
+      }
+    }
+    // Symbolic links, where the host can tell (the port's own optional read).
+    if (target.host.pathKind !== undefined) {
+      for (const file of listed.slice(0, PATH_KINDS_READ_MAX)) {
+        beforeRequest?.();
+        const kind = await target.host.pathKind(ref.repository, file.path, target.headSha, scope);
+        if (kind === "symlink") links.add(factKey(target.repositoryId, file.path));
+      }
+    }
+  }
+  return { text, instructionImports: imports, ...(importsKnown === undefined ? {} : { importsKnown }), links };
+}
+
+/** What the tier is computed from: the files of every change request of the task (as the host lists them), and the facts of `readHeadFacts`. A host that cannot answer THROWS. */
+export async function readTierInput(targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, beforeRequest?: () => void): Promise<TierReadInput> {
   const files: TierFile[] = [];
   let complete = true;
   for (const target of targets) {
@@ -38,7 +107,7 @@ export async function readTierDiff(targets: readonly TierReadTarget[], scope: Ho
     complete &&= read.complete;
     files.push(...read.files);
   }
-  return { files, complete: complete && targets.length > 0 };
+  return { diff: { files, complete: complete && targets.length > 0 }, head: await readHeadFacts(targets, files, scope, beforeRequest) };
 }
 
 const SHA = /^[a-f0-9]{40}$/u;

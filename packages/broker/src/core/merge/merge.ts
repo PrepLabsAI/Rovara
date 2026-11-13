@@ -53,12 +53,13 @@ import {
   type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
-import { higherLevel, raiseTier, recordGrowth, recordTier, tierFromDiff, tierGrew, tierGrowthSentence, type TierLevel } from "../decisions/change-tier.js";
+import { planningLevelOf, raiseTier, recordGrowth, recordTier, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, type TierLevel } from "../decisions/change-tier.js";
 import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { inertLine } from "../proof/inert-text.js";
+import { flowIs } from "../task-flow/flow-guard.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
-import { boundCommits, readTierDiff, type TierReadTarget } from "./change-tier-read.js";
+import { boundCommits, readTierInput, type TierReadTarget } from "./change-tier-read.js";
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, isHostRateLimit, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
 import { DEFAULT_CI_MODE, PERMISSION_LOOKUPS_MAX, ciAllowsMerge, ciCountsAsPassing, readBranch, readCi, tracksMerge, unreadableSinceOf, type ProjectCiMode } from "./merge-tracking.js";
 import type { MergePeople } from "./people.js";
@@ -557,22 +558,24 @@ async function mergeableNow(
   });
   if (!readiness.ready) throw agentXError("MERGE_NOT_READY", readiness.message);
   // The change tier is computed again, from the host's view of the change as it is now: a change that has grown past the tier the person approved at is not merged.
-  if (shownTier !== undefined) await tierGate(deps, task, tierTargets.filter((_, index) => facts[index]!.state !== "merged"), scope, shownTier);
+  // Never skipped: a task with no recorded tier (one that was in flight before the tier existed, or that never had a plan) is judged as if approved at the lowest tier, so anything above small is a growth.
+  await tierGate(deps, task, tierTargets.filter((_, index) => facts[index]!.state !== "merged"), scope, shownTier);
   return { plan: plan.filter((_, index) => facts[index]!.state !== "merged"), settings, alreadyMerged: false, mergedBefore, entries };
 }
 
 const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code host just now, so nothing was merged. Try again in a moment.";
 
 /**
- * Recomputes the change tier at merge, from the code host's list of changed files (never from the stored tier or an agent's word). The tier never goes down: the recorded tier and the new one are raised together. When the result is higher
- * than the tier the person approved at, the raise is recorded (so the next request shows it and is approved at it) and the merge is refused in plain words naming what grew. A host that cannot be read refuses the merge too, and records nothing.
+ * Recomputes the change tier at merge, from the code host's view of the change (never from the stored tier or an agent's word). The tier never goes down: the recorded tier and the new one are raised together. The merge is refused,
+ * in plain words naming what grew, when the result is higher than EITHER the tier the person approved at (`shown`; none recorded counts as small) OR the tier the planning steps were chosen at (the estimate, when steps were skipped).
+ * The record is written under `flowIs`, and every whole-workflow writer carries the same condition, so a writer that read the task earlier cannot write it back over the raise. A host that cannot be read refuses the merge too, and records nothing.
  */
 async function tierGate(
-  deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, shown: TierLevel,
+  deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, shown: TierLevel | undefined,
 ): Promise<void> {
-  let diff: Awaited<ReturnType<typeof readTierDiff>>;
+  let input: Awaited<ReturnType<typeof readTierInput>>;
   try {
-    diff = await readTierDiff(targets, scope);
+    input = await readTierInput(targets, scope);
   } catch (error) {
     if (isHostRateLimit(error)) throw error;
     deps.host.log?.("merge.tier_unreadable", { taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
@@ -580,17 +583,23 @@ async function tierGate(
   }
   const at = new Date(deps.now()).toISOString();
   const bases = task.workflow.reviewBase;
-  const fresh = tierFromDiff(diff, {
-    ...boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: bases?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha }))), at,
+  const fresh = tierFromDiff(input.diff, {
+    ...boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: bases?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha }))), at, head: input.head,
   });
   const flow = task.workflow.flow;
   const raised = raiseTier(flow?.tier, fresh);
-  const grew = tierGrew(shown, raised);
+  const approvedAt: TierLevel = shown ?? "small";
+  const planned = planningLevelOf(flow);
+  const grew = tierGrew(approvedAt, raised) || (planned !== undefined && tierGrew(planned, raised));
   const recorded = recordTier(flow, { ...fresh, source: "merge" });
-  const next = grew ? recordGrowth(recorded.flow, shown, higherLevel(shown, recorded.tier.level), at) : recorded.flow;
-  // Recorded either way (best effort: a lost race or a store failure never changes the answer), guarded by the revision this tier was computed against.
+  const from: TierLevel = planned !== undefined && tierRank(planned) < tierRank(approvedAt) ? planned : approvedAt;
+  const next = grew ? recordGrowth(recorded.flow, from, recorded.tier.level, at) : recorded.flow;
+  // Recorded either way (best effort: a lost race or a store failure never changes the answer), guarded by the revision this tier was computed against. A growth moves the revision.
+  const revision = task.workflow.revision;
   await deps.store.update({
-    key: taskRecordKey(task.taskId), ops: [change.set(["workflow", "flow"], plain(next) as never)], condition: when.and(when.eq(["workflow", "revision"], task.workflow.revision), when.notExists("closedAt")),
+    key: taskRecordKey(task.taskId),
+    ops: [change.set(["workflow", "flow"], plain(next) as never)],
+    condition: when.and(when.eq(["workflow", "revision"], revision), when.notExists("closedAt"), flowIs(flow)),
   }).catch(() => undefined);
   if (grew) throw agentXError("MERGE_NOT_READY", tierGrowthSentence(raised, (path) => inertLine(path, 80)));
 }
