@@ -64,6 +64,8 @@ export interface MergeWorldOptions {
   codeHost?: (model: FakeHostModel) => CodeHost;
   /** The store to keep everything in, for a test that composes services over it (default: a fresh in-memory one). */
   store?: MemoryDocumentStore;
+  /** Leave the task with no recorded change tier (the merge then judges the change as if approved at the lowest tier). Default: the task carries the highest tier, so the merge mechanics under test are not the tier gate's business. */
+  withoutTier?: boolean;
 }
 
 export interface MergeWorld {
@@ -120,7 +122,8 @@ export async function mergeWorld(options: MergeWorldOptions = {}): Promise<Merge
   const stamp = new Date(now.value).toISOString();
   const workflow = {
     schemaVersion: 1, definitionId: "agentx-task-to-pr", definitionVersion: "1.1.0", taskId: TASK_ID, revision: 9, stage: "WAIT_FOR_MERGE", state: "WAITING", path: "QUICK",
-    pullRequests: workflowPrs, updatedAt: stamp, risk: { level: "low", reasons: ["A small change with no sensitive paths."], candidateDigest: CANDIDATE },
+    pullRequests: workflowPrs, updatedAt: stamp,
+    ...(options.withoutTier === true ? {} : { flow: { rulesVersion: 1, tier: { level: "risky", kinds: ["code_config"], source: "diff", reasons: [], at: stamp } } }), risk: { level: "low", reasons: ["A small change with no sensitive paths."], candidateDigest: CANDIDATE },
   };
   await store.put({ item: plain({
     ...taskRecordKey(TASK_ID), entityType: "DEVELOPER_TASK", taskId: TASK_ID, orgId: ORG, project: "web", startingRevision: 1, workspaceId: "ws-1", sessionId: SESSION_ID,

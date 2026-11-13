@@ -8,7 +8,8 @@
 import { createHash } from "node:crypto";
 import { change, when, type CodeHost, type HostScope, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
-import { boundCommits, tierFilesOfRead } from "../merge/change-tier-read.js";
+import { flowIs } from "../task-flow/flow-guard.js";
+import { boundCommits, readHeadFacts, tierFilesOfRead } from "../merge/change-tier-read.js";
 import { changeRequestRef, readChangeRequestFiles } from "../merge/host-port.js";
 import { recordGrowth, recordTier, tierFromDiff, type TierFile } from "../decisions/change-tier.js";
 import { changedFilesFromHostFiles, parseChangedFiles } from "../proof/changed-files.js";
@@ -98,6 +99,8 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   // The change tier is read from the same list the host gave: the files with the host's own patch text.
   const tierFiles: TierFile[] = [];
   let tierComplete = true;
+  const tierTargets: Array<Parameters<typeof readHeadFacts>[0][number]> = [];
+  let headFacts: Awaited<ReturnType<typeof readHeadFacts>> | undefined;
   let complete = true;
   const hosts: Array<{ host: CodeHost; url: string; number: number; repositoryId: string; url_: string }> = [];
   try {
@@ -117,7 +120,10 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
       complete &&= read.complete;
       tierComplete &&= tierRead.complete;
       hosts.push({ host, url: definition.url, number: pullRequest.number, repositoryId: pullRequest.repositoryId, url_: pullRequest.url });
+      tierTargets.push({ host, repositoryId: pullRequest.repositoryId, repositoryUrl: definition.url, number: pullRequest.number, headSha: pullRequest.headSha ?? "" });
     }
+    // What the host knows of the code at the heads (the text of the documents, what the instruction files import, symbolic links). A host that cannot say leaves the tier unwritten and the risk high.
+    headFacts = await readHeadFacts(tierTargets, tierFiles, { orgId: deps.companyId }, beforeRequest);
   } catch (error) {
     // A host that cannot answer (a rate limit included) leaves the risk high; the caller's pause logic sees the rate limit again on its own read.
     if (error instanceof Error && error.name === "HostRateLimitError") throw error;
@@ -128,13 +134,14 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   const judged = riskFromFiles(workflow, read);
   // The tier of the code the host shows, bound to the head commits Rovara checked and the base they were built on. It only goes up, and the growth after the build is recorded.
   const at = iso(deps);
-  const fresh = tierFromDiff({ files: tierFiles, complete: tierComplete && hosts.length > 0 }, { ...boundCommits(pullRequests.map((entry) => ({ repositoryId: entry.repositoryId, headSha: entry.headSha ?? "", baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === entry.repositoryId)?.baseCommitSha }))), at });
+  const fresh = tierFromDiff({ files: tierFiles, complete: tierComplete && hosts.length > 0 }, { ...boundCommits(pullRequests.map((entry) => ({ repositoryId: entry.repositoryId, headSha: entry.headSha ?? "", baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === entry.repositoryId)?.baseCommitSha }))), at, ...(headFacts === undefined ? {} : { head: headFacts }) });
   const tiered = recordTier(workflow.flow, fresh);
   const previousLevel = workflow.flow?.tier?.level;
   const flow = tiered.grew && previousLevel !== undefined ? recordGrowth(tiered.flow, previousLevel, tiered.tier.level, at) : tiered.flow;
   const written = await deps.store.update({
     key: taskKey(task.taskId), ops: [change.set(["workflow", "risk"], JSON.parse(JSON.stringify(judged.risk)) as never), change.set(["workflow", "flow"], JSON.parse(JSON.stringify(flow)) as never)],
-    condition: when.and(when.eq(["workflow", "revision"], workflow.revision), when.notExists("closedAt")),
+    // The revision does not move (a row of the step in flight waits for it); a writer that holds the whole older workflow is stopped by its own `flowIs` condition, and this write by the same one.
+    condition: when.and(when.eq(["workflow", "revision"], workflow.revision), when.notExists("closedAt"), flowIs(workflow.flow)),
   });
   if (!written.applied) return "unavailable";
   await deps.store.put({ item: { ...verifiedFilesKey(task.workspaceId, candidate.digest), entityType: "VERIFIED_FILES", candidateDigest: candidate.digest, complete, verifiedAt: iso(deps), files: JSON.parse(JSON.stringify(all.slice(0, 200))) as never } });

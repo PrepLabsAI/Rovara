@@ -3,6 +3,7 @@
 //
 // Cloud wrote these with DynamoDB commands and expression strings. Here every write is a `TransactItem` of the port, with conditions as data; the callers add them to the transaction of the
 // change that caused them, as before.
+import { flowIs } from "../task-flow/flow-guard.js";
 import {
   INDEX_EXPIRY_ATTRIBUTE, MergeTrackingItemSchema, change, mergeTrackingKey, prHeadKey, queryAll, when,
   type DocumentStore, type MergeTrackingItem, type OrgId, type StoredDocument, type TransactItem, type WorkflowSnapshot,
@@ -102,9 +103,9 @@ export function prHeadItems(
 // ---- the task's workflow
 
 /** The write of the task's next workflow snapshot: only if the workflow is still at the revision the caller read and the task is not closed. */
-export function workflowUpdateItem(taskId: string, next: WorkflowSnapshot, expectedRevision: number): TransactItem {
+export function workflowUpdateItem(taskId: string, next: WorkflowSnapshot, expectedRevision: number, read?: Pick<WorkflowSnapshot, "flow">): TransactItem {
   return {
     kind: "update", key: taskRecordKey(taskId), ops: [change.set(["workflow"], JSON.parse(JSON.stringify(next)) as never), change.set(["updatedAt"], next.updatedAt)],
-    condition: when.and(when.eq(["workflow", "revision"], expectedRevision), when.notExists("closedAt")),
+    condition: when.and(when.eq(["workflow", "revision"], expectedRevision), when.notExists("closedAt"), ...(read === undefined ? [] : [flowIs(read.flow)])),
   };
 }

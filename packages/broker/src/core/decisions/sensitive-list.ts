@@ -1,103 +1,188 @@
-// The ONE list of paths that make a change risky, for the change tier (`change-tier.ts`). It is the union of the two lists the broker already had (`sensitive-paths.ts` for decision cards and
-// `proof/risk.ts` for a pull request's risk), plus the folder names for auth, money, permissions and deletion or data loss. The two older callers are NOT repointed here: that would change the
-// risk they show. They differ in exactly one pattern: the decision-card list also names other code hosts' pipeline files, while the risk list judges those separately (`CI_CONFIG_PATH_PATTERNS`,
-// only for a fix, and `.github/workflows` is on both). The tier treats continuous-integration files as their own kind (`ci_file`, `CI_FILE_PATTERNS`), not as sensitive paths.
+// The ONE list of paths that decide the change tier (`change-tier.ts`). It is the union of the two lists the broker already had (`sensitive-paths.ts` for decision cards and `proof/risk.ts` for a pull request's
+// risk), widened to words in file names and to the places where code runs on its own or an agent is told what to do. The two older callers are NOT repointed here: that would change the risk they show.
 //
-// Every match is made on a NORMALIZED path: Unicode compatibility form (so a full-width `ａｕｔｈ` is `auth`), `\` as `/`, no leading `./`, lower case. A directory name is a whole path segment (`src/author.ts`
-// is not `auth`), and a file whose NAME is one of the words, or is made of one joined by `-`, `_` or `.` (`user-auth.ts`), is sensitive too, unless it is a document.
+// A deny-list always leaks, so the tier is decided the other way round: a path is LOW only when it is on an allowlist (a recognised source extension or a known config file, outside every area named here). Everything this
+// file names, and every file type it does not know, goes up. Every match is made on a skeleton of the path: Unicode compatibility form, look-alike letters (Cyrillic and Greek) mapped to Latin, control and zero-width
+// characters dropped, `\` as `/`, no leading `./`, lower case, no trailing dots or spaces.
 
-/** A path as the rules read it: one form, so a case or width trick cannot step round them. */
+/** Letters from other scripts that read as a Latin letter in a path. A path that holds one is never matched on the look-alike: it is risky by itself. */
+const CONFUSABLES: ReadonlyMap<string, string> = new Map(Object.entries({
+  "а": "a", "в": "b", "с": "c", "ԁ": "d", "е": "e", "һ": "h", "і": "i", "ј": "j", "к": "k", "ӏ": "l", "м": "m", "н": "h", "о": "o", "р": "p", "ԛ": "q", "г": "r", "ѕ": "s", "т": "t", "ս": "u", "ѵ": "v", "ѡ": "w", "х": "x", "у": "y", "ᴢ": "z",
+  "α": "a", "β": "b", "γ": "y", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x", "ɑ": "a", "ɡ": "g", "ı": "i", "ӊ": "h",
+  "А": "a", "В": "b", "С": "c", "Е": "e", "Н": "h", "І": "i", "Ј": "j", "К": "k", "М": "m", "О": "o", "Р": "p", "Ѕ": "s", "Т": "t", "Х": "x", "У": "y",
+  "Α": "a", "Β": "b", "Ε": "e", "Ζ": "z", "Η": "h", "Ι": "i", "Κ": "k", "Μ": "m", "Ν": "n", "Ο": "o", "Ρ": "p", "Τ": "t", "Υ": "y", "Χ": "x",
+}));
+
+/** A path as the rules read it: one form, so a case, width, script or invisible-character trick cannot step round them. */
 export function normalizedTierPath(path: string): string {
-  const plain = path.normalize("NFKC").replace(/[\p{Cc}\p{Cf}]/gu, "").replaceAll("\\", "/").replace(/\/{2,}/gu, "/").replace(/^(?:\.\/)+/u, "").toLowerCase();
+  const plain = [...path.normalize("NFKC").replace(/[\p{Cc}\p{Cf}]/gu, "")].map((char) => CONFUSABLES.get(char) ?? char).join("")
+    .replaceAll("\\", "/").replace(/\/{2,}/gu, "/").replace(/^(?:\.\/)+/u, "").toLowerCase();
   // A name that ends in dots or spaces opens the same file on some systems (`AGENTS.md.`, `AGENTS.md `): read it without them. A segment of only dots (`..`) is left as it is.
   return plain.split("/").map((segment) => (/^\.+$/u.test(segment) ? segment : segment.replace(/[. ]+$/u, ""))).join("/");
 }
 
-/** The directory words that make everything under them sensitive. Auth, money, permissions, deletion and data loss, and the older lists' infrastructure words. */
-const SENSITIVE_DIRECTORY_WORDS = [
+/** Whether a path holds a letter of another script that looks like a Latin one (`аuth` with a Cyrillic а). */
+export function hasConfusableLetter(path: string): boolean {
+  return [...path.normalize("NFKC")].some((char) => CONFUSABLES.has(char));
+}
+
+// ---- words in names
+
+/** The words of one path segment: split on `-`, `_`, `.`, spaces and camelCase (`deleteAccount`, `user-auth`), lower case, a plural read as its singular. */
+export function wordsOf(segment: string): string[] {
+  const plain = [...segment.normalize("NFKC").replace(/[\p{Cc}\p{Cf}]/gu, "")].map((char) => CONFUSABLES.get(char) ?? char).join("");
+  return plain.replace(/([a-z0-9])([A-Z])/gu, "$1 $2").split(/[\s\-_.]+/u).map((word) => word.toLowerCase()).filter((word) => word.length > 0)
+    .map((word) => (word.length > 3 && word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.length > 3 && word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : word));
+}
+
+/** The words that make a folder or a file sensitive: auth, money, permissions, deletion and data loss, and where the code runs. Singular forms; `wordsOf` reads a plural as one. */
+const SENSITIVE_WORDS: ReadonlySet<string> = new Set([
   // auth
-  "auth", "authn", "authz", "authentication", "authorization", "login", "oauth", "saml", "sso", "jwt", "mfa", "password", "passwords", "security", "crypto", "credentials", "secrets",
+  "auth", "authn", "authz", "authentication", "authorization", "login", "logout", "signin", "signup", "oauth", "saml", "sso", "jwt", "mfa", "otp", "password", "passwd", "passphrase", "security", "crypto", "credential",
+  "secret", "token", "session", "cookie", "keychain", "certificate", "apikey",
   // permissions and IAM
-  "iam", "permissions", "permission", "policies", "rbac", "acl",
+  "iam", "permission", "policy", "policie", "rbac", "acl", "role", "privilege", "entitlement", "approval", "approve",
   // money
-  "payments", "payment", "billing", "money", "invoices", "invoice", "checkout", "stripe", "ledger", "wallet",
+  "payment", "billing", "money", "invoice", "checkout", "stripe", "paypal", "ledger", "wallet", "refund", "charge", "payout",
   // deletion and data loss
-  "migrations", "delete", "deletion", "erase", "purge", "retention",
+  "delete", "deletion", "erase", "purge", "retention", "destroy", "wipe", "truncate", "migrate", "migration",
   // where the code runs
   "infra", "terraform", "cdk",
-] as const;
-const SENSITIVE_DIRECTORY = new RegExp(`(^|/)(${SENSITIVE_DIRECTORY_WORDS.join("|")})(/|$)`, "u");
+]);
 
-/** The words that make a file sensitive when its name is one, or is made of one joined to others by `-`, `_` or `.`; `author.ts` and `secretsanta.ts` are not. */
-const SENSITIVE_NAME_WORDS: ReadonlySet<string> = new Set(["auth", "authn", "authz", "security", "oauth", "saml", "sso", "jwt", "crypto", "permissions", "credentials", "secrets", "iam", "rbac", "billing", "payments", "payment"]);
-/** Documents about a topic are not code for it (but a document UNDER a sensitive folder is still sensitive). */
+/** The words that are not a sensitive word in a FILE NAME of a document (a page about a topic is not code for it), but still are as a folder. */
 const DOCUMENT_EXTENSIONS = /\.(md|mdx|markdown|txt|rst|adoc)$/u;
 
-/** Files and folders that decide who must approve, how a branch is protected, how the project works, and what is built or deleted. Not CI files: those are `ci_file`. */
+/** Folders that hold schema changes: any folder with `migrat` in its name, Rails' `db/migrate`, alembic's `versions`, prisma's `migrations`. */
+const MIGRATION_FOLDERS: readonly RegExp[] = [/(^|\/)[^/]*migrat[^/]*(\/|$)/u, /(^|\/)alembic\/versions(\/|$)/u, /(^|\/)db\/(migrate|schema)(\/|$)/u, /(^|\/)(flyway|liquibase)(\/|$)/u];
+
+/** Files and folders that decide who must approve, how a branch is protected, how the project works, and what is built or deleted. */
 const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = [
-  // Who must approve and how a branch is protected: a change to them changes the rules every later merge follows.
   /(^|\/)codeowners$/u,
-  // How the project works (the playbook file) and what its meta repository configures.
   /(^|\/)\.rovara\/(playbook|project)\.(ya?ml|json)$/u,
   /(^|\/)\.github\/(settings\.ya?ml|rulesets?(\/|$)|branch[-_]protection[^/]*)$/u,
-  // Data shape and where the code is built and runs.
-  /\.(sql|tf)$/u,
-  /(^|\/)dockerfile(\.[^/]*)?$/u,
-  // Dependabot and renovate decide which updates arrive without a person asking.
+  /\.sql$/u,
   /(^|\/)\.github\/(dependabot|renovate)\.(ya?ml|json)$/u,
+  /(^|\/)renovate\.json5?$/u,
 ];
 
-/** The paths of continuous-integration configuration: their own kind (`ci_file`), checked by a reviewer for leaked secrets. Normalized paths. */
+/** Whether a path is sensitive: a sensitive word as a folder, or as a word of a file name (not of a document's name), a migration folder, or one of the named files. */
+export function isTierSensitivePath(path: string): boolean {
+  const value = normalizedTierPath(path);
+  if (SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(value)) || MIGRATION_FOLDERS.some((pattern) => pattern.test(value))) return true;
+  const segments = value.split("/");
+  const name = segments.at(-1) ?? "";
+  for (const folder of segments.slice(0, -1)) if (wordsOf(folder).some((word) => SENSITIVE_WORDS.has(word))) return true;
+  return !DOCUMENT_EXTENSIONS.test(name) && wordsOf(name.replace(/\.[^.]*$/u, "")).some((word) => SENSITIVE_WORDS.has(word));
+}
+
+// ---- infrastructure, files that run on their own, agent configuration
+
+/** Where the code is built, deployed or provisioned: a change reaches production without a code review of what it does. */
+const INFRA_PATTERNS: readonly RegExp[] = [
+  /(^|\/)(dockerfile|containerfile)[^/]*$/u, /\.(dockerfile|containerfile)$/u,
+  /\.(tf|tfvars|tf\.json|tfvars\.json|hcl|nomad|bicep|tfstate)$/u, /(^|\/)(terragrunt|packer)[^/]*\.hcl$/u, /(^|\/)(terraform|\.terraform)(\/|$)/u,
+  /(^|\/)(k8s|kubernetes|helm|manifests|kustomize|ansible|pulumi|cdk\.out)(\/|$)/u, /(^|\/)(kustomization|chart)\.ya?ml$/u, /(^|\/)pulumi\.[^/]*\.ya?ml$/u,
+  /(^|\/)(serverless|docker-compose[^/]*|compose|samconfig|skaffold|fly|app)\.(ya?ml|toml)$/u, /(^|\/)(cdk\.json|procfile|vercel\.json|netlify\.toml|render\.ya?ml|appspec\.ya?ml|buildspec[^/]*\.ya?ml)$/u,
+  /(^|\/)(infra|infrastructure|deploy|deployment|deployments)(\/|$)/u,
+];
+export const isInfraPath = (path: string): boolean => INFRA_PATTERNS.some((pattern) => pattern.test(normalizedTierPath(path)));
+
+/** Files that run on their own when a person opens the folder, commits, or enters the directory, or that pull code from another place when they do. */
+const SELF_RUNNING_PATTERNS: readonly RegExp[] = [
+  /(^|\/)\.git(\/|$)/u, /(^|\/)\.githooks\//u, /(^|\/)\.husky\//u, /(^|\/)(lefthook|\.lefthook)[^/]*\.ya?ml$/u, /(^|\/)\.pre-commit(-config|-hooks)?\.ya?ml$/u, /(^|\/)\.overcommit\.yml$/u,
+  /(^|\/)\.vscode\//u, /(^|\/)\.devcontainer(\/|\.json$)/u, /(^|\/)devcontainer\.json$/u, /(^|\/)\.gitpod\.ya?ml$/u, /(^|\/)\.codespaces\//u, /(^|\/)\.idea\//u, /(^|\/)\.zed\//u,
+  /(^|\/)\.lfsconfig$/u, /(^|\/)\.envrc$/u, /(^|\/)\.?mise\.toml$/u, /(^|\/)\.mise\//u, /(^|\/)\.tool-versions$/u, /(^|\/)\.devbox\//u, /(^|\/)devbox\.json$/u, /(^|\/)\.direnv\//u,
+  /(^|\/)gradle\/wrapper\//u, /(^|\/)gradlew(\.bat)?$/u, /(^|\/)mvnw(\.cmd)?$/u, /(^|\/)\.mvn\//u,
+];
+export const isHookPath = (path: string): boolean => SELF_RUNNING_PATTERNS.some((pattern) => pattern.test(normalizedTierPath(path)));
+
+/** Files that tell an AI agent what to do, and the folders that hold prompts, skills and templates: a change to one changes what every later task is told. Any path depth. */
+const INSTRUCTION_PATTERNS: readonly RegExp[] = [
+  /(^|\/)(agents?|claude|gemini|skill|copilot-instructions|cursorrules|windsurfrules|clinerules|codex|conventions|llms(-full)?)\.(md|mdx|txt|ya?ml|json)$/u,
+  /(^|\/)\.(cursorrules|windsurfrules|clinerules|aiderignore|aider\.conf\.ya?ml|aider\.[\w.-]+)$/u,
+  /(^|\/)\.?(mcp|mcp\.[\w-]+)\.json$/u,
+  /(^|\/)\.(cursor|claude|codex|agents?|windsurf|continue|gemini|amazonq|kiro|roo|cline|aider|trae|junie|opencode|qwen|goose|augment|zed|copilot)\//u,
+  /(^|\/)\.github\/(copilot-instructions\.md|instructions\/|prompts\/|chatmodes\/|agents\/)/u,
+  /(^|\/)\.rovara\//u,
+  // Prompt, skill and template folders, and prompt files by name.
+  /(^|\/)(prompts?|templates?|\.prompts?|skills?|steering|chatmodes?)\//u,
+  /(^|\/)[^/]*prompt[^/]*\.(md|mdx|txt|ya?ml|json|toml|jinja2?|j2|hbs|mustache|tmpl|tpl|liquid)$/u,
+  /(^|\/)[^/]*\.prompt(\.[^/]*)?$/u,
+];
+
+/** Prose and config files that name an agent, a skill, an instruction, a prompt or an MCP server in the NAME or a folder (not code: `src/agent/runner.ts` is code). */
+const INSTRUCTION_WORDS: ReadonlySet<string> = new Set(["agent", "skill", "instruction", "prompt", "steering", "persona", "mcp", "claude", "gemini", "copilot", "llms"]);
+const INSTRUCTION_LIKE_EXTENSIONS = /\.(md|mdx|markdown|rst|adoc|txt|ya?ml|json|toml)$/u;
+
+export function isInstructionPath(path: string): boolean {
+  const value = normalizedTierPath(path);
+  if (INSTRUCTION_PATTERNS.some((pattern) => pattern.test(value))) return true;
+  if (!INSTRUCTION_LIKE_EXTENSIONS.test(value)) return false;
+  return value.split("/").some((segment) => wordsOf(segment.replace(/\.[^.]*$/u, "")).some((word) => INSTRUCTION_WORDS.has(word)));
+}
+
+// ---- continuous integration
+
+/** The paths of continuous-integration configuration (and the files that run the same commands): their own kind (`ci_file`), checked by a reviewer for leaked secrets. Normalized paths. */
 export const CI_FILE_PATTERNS: readonly RegExp[] = [
-  /(^|\/)\.github\/workflows\//u,
+  /(^|\/)\.github\/(workflows|actions)\//u,
   /(^|\/)\.gitlab-ci\.ya?ml$/u,
   /(^|\/)\.circleci\//u,
   /(^|\/)buildspec[^/]*\.ya?ml$/u,
   /(^|\/)jenkinsfile[^/]*$/u,
-  /(^|\/)azure-pipelines\.ya?ml$/u,
+  /(^|\/)azure-pipelines[^/]*\.ya?ml$/u,
   /(^|\/)\.buildkite\//u,
   /(^|\/)bitbucket-pipelines\.ya?ml$/u,
   /(^|\/)\.gitlab\//u,
+  /(^|\/)\.(travis|appveyor|drone|woodpecker)\.ya?ml$/u, /(^|\/)\.woodpecker\//u,
+  /(^|\/)cloudbuild[^/]*\.ya?ml$/u,
+  /(^|\/)(gnumakefile|makefile|justfile|taskfile\.ya?ml|build\.sbt|noxfile\.py|tox\.ini)$/u,
 ];
-
 export function isCiFilePath(path: string): boolean {
   const value = normalizedTierPath(path);
   return CI_FILE_PATTERNS.some((pattern) => pattern.test(value));
 }
 
-/** Whether a path has a segment, or a file name, that makes it sensitive. */
-export function isTierSensitivePath(path: string): boolean {
-  const value = normalizedTierPath(path);
-  if (SENSITIVE_DIRECTORY.test(value) || SENSITIVE_FILE_PATTERNS.some((pattern) => pattern.test(value))) return true;
-  const name = value.split("/").at(-1) ?? "";
-  return !DOCUMENT_EXTENSIONS.test(name) && name.split(/[-_.]/u).some((word) => SENSITIVE_NAME_WORDS.has(word));
-}
-
-/**
- * Files that tell an AI agent what to do, and the folders that hold prompts and templates: a change to one changes what every later task is told, so it always gets full planning.
- * Matched on any path depth, on the normalized path.
- */
-const INSTRUCTION_PATTERNS: readonly RegExp[] = [
-  /(^|\/)(agents|claude|gemini|skill|copilot-instructions|cursorrules|windsurfrules|clinerules)\.md$/u,
-  /(^|\/)\.(cursorrules|windsurfrules|clinerules)$/u,
-  /(^|\/)\.cursor\//u,
-  /(^|\/)\.claude\//u,
-  /(^|\/)\.codex\//u,
-  /(^|\/)\.agents\//u,
-  /(^|\/)\.windsurf\//u,
-  /(^|\/)\.continue\//u,
-  /(^|\/)\.github\/(copilot-instructions\.md|instructions\/|prompts\/|chatmodes\/)/u,
-  /(^|\/)\.rovara\//u,
-  // Prompt and template folders, and prompt files by name.
-  /(^|\/)(prompts?|templates?|\.prompts?)\//u,
-  /(^|\/)[^/]*\.prompt(\.[^/]*)?$/u,
+/** The test runners' and security scanners' own configuration: deleting or weakening one changes what is checked. */
+const CHECK_CONFIG_PATTERNS: readonly RegExp[] = [
+  /(^|\/)(vitest|jest|playwright|karma|cypress|mocha|ava|tap)[^/]*\.(config|workspace)\.[cm]?[jt]s(on)?$/u, /(^|\/)\.mocharc(\.[\w]+)?$/u, /(^|\/)(pytest\.ini|conftest\.py|setup\.cfg|\.coveragerc|\.nycrc[\w.]*)$/u,
+  /(^|\/)(\.snyk|\.gitleaks\.toml|\.gitleaksignore|\.semgrep[\w.]*|semgrep\.ya?ml|\.trivyignore|\.codeql[\w.-]*|sonar-project\.properties|\.bandit|\.safety-policy\.ya?ml|\.secrets\.baseline|\.trufflehog[\w.]*)$/u,
+  /(^|\/)\.github\/codeql\//u, /(^|\/)(\.eslintrc[\w.]*|eslint\.config\.[cm]?[jt]s)$/u,
 ];
+export const isCheckConfigPath = (path: string): boolean => CHECK_CONFIG_PATTERNS.some((pattern) => pattern.test(normalizedTierPath(path)));
 
-export function isInstructionPath(path: string): boolean {
-  const value = normalizedTierPath(path);
-  return INSTRUCTION_PATTERNS.some((pattern) => pattern.test(value));
+// ---- shape of an API
+
+/** Files that define what an API or a stored record looks like: a change reaches every caller. At least standard. */
+const API_SHAPE_PATTERNS: readonly RegExp[] = [
+  /(^|\/)schema\.prisma$/u, /(^|\/)(openapi|swagger|asyncapi)[^/]*\.(ya?ml|json)$/u, /\.(proto|graphql|gql|avsc|thrift|smithy|capnp|fbs)$/u,
+  /(^|\/)(schemas?|serializers?|dtos?)(\/|\.[a-z]+$)/u, /(^|\/)[\w.-]*\.(schema|dto)\.[a-z]+$/u, /(^|\/)(api|apis)\/[^/]*\.(ya?ml|json)$/u,
+];
+export const isApiShapePath = (path: string): boolean => API_SHAPE_PATTERNS.some((pattern) => pattern.test(normalizedTierPath(path)));
+
+// ---- what a file is
+
+/** Recognised source code, markup and style files. A file of any other type is at least standard: the classifier does not know what it does. */
+const CODE_EXTENSIONS = new Set([
+  "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "py", "pyi", "java", "kt", "kts", "go", "rs", "rb", "cs", "cpp", "cc", "cxx", "c", "h", "hpp", "swift", "scala", "php", "lua", "dart", "ex", "exs", "erl", "clj", "hs", "ml", "r", "jl", "m",
+  "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "css", "scss", "sass", "less", "html", "htm", "vue", "svelte", "astro", "mdx", "svg", "ejs", "hbs",
+]);
+/** Recognised data and configuration extensions. */
+const CONFIG_EXTENSIONS = new Set(["json", "json5", "jsonc", "yaml", "yml", "toml", "ini", "cfg", "conf", "xml", "properties", "gradle", "csproj", "props", "lock", "csv", "env"]);
+export const PROSE_EXTENSIONS = new Set(["md", "markdown", "rst", "adoc", "txt"]);
+/** Known extensionless and dot files that are plain configuration. */
+const KNOWN_CONFIG_NAMES = /^(?:\.gitignore|\.dockerignore|\.npmignore|\.eslintignore|\.prettierignore|\.editorconfig|\.nvmrc|\.node-version|\.python-version|\.ruby-version|\.browserslistrc|\.babelrc[\w.]*|\.prettierrc[\w.]*|\.eslintrc[\w.]*|\.stylelintrc[\w.]*|\.swcrc|\.flake8|\.pylintrc|\.rubocop\.ya?ml|\.gitkeep|\.nojekyll|license[\w.-]*|notice|authors|contributors|codeowners|makefile|gnumakefile|justfile|gemfile|rakefile|pipfile|podfile|brewfile|vagrantfile|requirements[\w.-]*|constraints[\w.-]*)$/u;
+
+export type FileType = "code" | "config" | "prose" | "unknown";
+/** What a file is by its name: recognised source code, recognised configuration, prose, or a type the classifier does not know. */
+export function fileTypeOf(path: string): FileType {
+  const name = (normalizedTierPath(path).split("/").at(-1) ?? "");
+  if (KNOWN_CONFIG_NAMES.test(name)) return "config";
+  const dot = name.lastIndexOf(".");
+  const extension = dot <= 0 ? "" : name.slice(dot + 1);
+  if (PROSE_EXTENSIONS.has(extension)) return "prose";
+  if (CODE_EXTENSIONS.has(extension)) return "code";
+  if (CONFIG_EXTENSIONS.has(extension)) return "config";
+  return "unknown";
 }
-
-/** Folders that run code on their own when git operates: hooks. Whole path segments, also under `.git`. */
-const HOOK_PATTERNS: readonly RegExp[] = [/(^|\/)\.git(\/|$)/u, /(^|\/)\.githooks\//u, /(^|\/)\.husky\//u];
-export const isHookPath = (path: string): boolean => HOOK_PATTERNS.some((pattern) => pattern.test(normalizedTierPath(path)));

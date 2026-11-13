@@ -51,7 +51,7 @@ import { readyToMerge } from "../../packages/broker/src/local/app/attention.js";
 import { retryBlockedStep } from "../../packages/broker/src/local/app/retry.js";
 import { recordedHeadOf } from "../../packages/broker/src/core/build-step/head-check.js";
 import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
+import { commitWorkflow, runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { secondReviewReplayKey, secondReviewVerdictKey } from "../../packages/broker/src/core/second-review/index.js";
 import { plain, replayRun, verdictFor } from "../support/second-review-world.js";
@@ -2453,12 +2453,12 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(cr.body).toBe(openingBody);
   });
 
-  /** The host lists each changed file with the text of its change, as GitHub does (the fake gives none). */
-  const givePatches = (h: Awaited<ReturnType<typeof launch>>): void => {
+  /** The host lists the changed files without the text of any change (it does so for a very large or binary diff). */
+  const withoutPatches = (h: Awaited<ReturnType<typeof launch>>): void => {
     const original = h.host.changedFiles.bind(h.host);
     h.host.changedFiles = async (ref, page, scope) => {
       const read = await original(ref, page, scope);
-      return { ...read, files: read.files.map((file) => (file.status === "removed" ? file : { ...file, patch: `@@ -0,0 +1,1 @@\n+${file.path}` })) };
+      return { ...read, files: read.files.map(({ patch: _patch, ...file }) => file) }; // eslint-disable-line @typescript-eslint/no-unused-vars -- left out on purpose
     };
   };
   type TierShape = { tier?: { level: string; kinds: string[]; source: string; headSha?: string; mergeBase?: string; reasons: Array<{ code: string }> }; tierHistory?: Array<{ source: string }>; catchCounters?: Array<{ step: string; findings: number; mustFix: number; changedCode: number }>; rulesVersion?: number };
@@ -2467,7 +2467,6 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
   it("the change tier is written at plan time (an estimate), after the push (the host's diff, bound to the head and the base) and per review step (catch counters)", async () => {
     const clock = movingClock();
     const h = await launch({ host: true, now: clock.now });
-    givePatches(h);
     const { taskId, commit } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
     // Before the host's files are read, the estimate from the plan and the review counters are on the record.
     const early = await flowOf(h, taskId);
@@ -2484,11 +2483,30 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
   it("a host that gives no patch text puts the change at risky (it cannot be cleared), and the tier never goes back down on a later read", async () => {
     const clock = movingClock();
     const h = await launch({ host: true, now: clock.now });
+    withoutPatches(h);
     const { taskId } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
     await h.runtime.tick();
     const flow = await flowOf(h, taskId);
     expect(flow.tier).toMatchObject({ level: "risky", source: "diff" });
     expect(flow.tier?.reasons.map((reason) => reason.code)).toContain("unreadable_content");
+  });
+
+  it("a writer that read the task before the tier was written cannot write its whole older workflow back over the tier", async () => {
+    const clock = movingClock();
+    const h = await launch({ host: true, now: clock.now });
+    const { taskId } = await published(h, { "src/health.ts": "export const health = 200;\n" }, undefined);
+    const flowDeps = h.runtime.app.flow.deps;
+    const stale = (await readTask(flowDeps, taskId))!;
+    const before = stale.workflow!.revision;
+    await h.runtime.tick();
+    const after = await flowOf(h, taskId);
+    expect(after.tier?.source).toBe("diff");
+    // The revision did not move (the step in flight waits for it), yet a stale writer is stopped.
+    expect(((await taskRecord(h, taskId)).workflow as unknown as { revision: number }).revision).toBe(before);
+    // A stale writer: it holds the older workflow (no diff tier) and writes it whole, as the engine's own transitions do.
+    const written = await commitWorkflow(flowDeps, stale, { ...stale.workflow!, revision: before + 1 });
+    expect(written).toBe(false);
+    expect((await flowOf(h, taskId)).tier?.source).toBe("diff");
   });
 
   it("lessons are on in a fresh install (the description says none were used yet), and ROVARA_LESSONS=0 turns them off (the description says so)", async () => {

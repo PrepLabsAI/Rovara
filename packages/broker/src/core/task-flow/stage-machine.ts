@@ -53,6 +53,7 @@ import { readTask } from "./reads.js";
 import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
+import { flowIs } from "./flow-guard.js";
 import type { StepOutcome } from "./outcome.js";
 import { knowledgeCommitToStore } from "../meta-repo/prepare-meta.js";
 import { SETUP_AGENT_FEATURE } from "@agentx/contracts";
@@ -185,7 +186,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
       kind: "update",
       key: taskKey(task.taskId),
       ops: [...(input.workflow === undefined ? [] : [change.set("workflow", toDocument(input.workflow.next))]), change.set("updatedAt", now), ...(fed === undefined ? [] : fed.ops)],
-      condition: when.and(when.notExists("closedAt"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision)]), ...(fed === undefined ? [] : [fed.condition])),
+      condition: when.and(when.notExists("closedAt"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision), flowIs(input.workflow.current.flow)]), ...(fed === undefined ? [] : [fed.condition])),
     },
     holdWorkspaceItem(workspace, built.operation.id, now),
     ...built.items,
@@ -231,7 +232,7 @@ export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next:
   const result = await deps.store.transact([
     {
       kind: "update", key: taskKey(task.taskId), ops: [change.set("workflow", toDocument(next)), ...taskOps, change.set("updatedAt", iso(deps))],
-      condition: when.and(when.notExists("closedAt"), when.eq(["workflow", "revision"], current.revision)),
+      condition: when.and(when.notExists("closedAt"), when.eq(["workflow", "revision"], current.revision), flowIs(current.flow)),
     },
     ...extra,
   ]);
