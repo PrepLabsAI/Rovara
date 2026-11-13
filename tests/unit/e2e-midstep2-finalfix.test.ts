@@ -222,12 +222,47 @@ describe("F-4: one-time sign-in URL parameters are credentials", () => {
     expect(await e.executorSays(`at https://app.test/__/auth/action?mode=signIn&oobCode=${OOB}`)).toBe("credential-in-prompt");
     expect(e.registry.sessionSecrets).toContain(OOB);
   });
+  // A seeded generator (mulberry32), so the tokens of one run are the tokens of every run: the old test drew 50 tokens from `randomBytes` and failed about 1 run in 200, when one token's `-`/`_` cut it
+  // into pieces that read as a slug (`dfakcoe9_do-eLOSC0ZGdO48bORcH9QZ`). A failure now names its token and repeats.
+  const seededBytes = (seed: number, length: number): Buffer => {
+    let state = seed >>> 0;
+    const out = Buffer.alloc(length);
+    for (let index = 0; index < length; index += 1) {
+      state = (state + 0x6d2b79f5) >>> 0;
+      let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
+      mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
+      out[index] = ((mixed ^ (mixed >>> 14)) >>> 0) & 0xff;
+    }
+    return out;
+  };
+  // The seed 11,300,000 is one the code before the fix failed on (4 of the 10,000 tokens below), found by scanning 300 seeds; the mean was 0.6.
+  const masked = (token: string): boolean => tierOf(urlSecrets(`https://app.test/x?ref=${token}`), token) !== null;
   it("random tokens under a neutral parameter name are masked (weak); hex ids and UUIDs are not registered", () => {
     for (let index = 0; index < 50; index += 1) {
-      const token = randomBytes(24).toString("base64url");
+      const token = seededBytes(1000 + index, 24).toString("base64url");
       if (!/[0-9]/.test(token) || !/[A-Za-z]/.test(token)) continue;
       expect(tierOf(urlSecrets(`https://app.test/x?ref=${token}`), token), token).not.toBeNull();
     }
     expect(urlSecrets(`https://app.test/x?ref=${"a1".repeat(16)}&id=3f2504e0-4f89-11d3-9a0c-0305e82c3301`)).toEqual([]);
+  });
+  it("random tokens whose - and _ cut them into word-like pieces are still masked (the CI flake: a slug is made of words, not of a long mixed-case and digit run)", () => {
+    for (const token of ["dfakcoe9_do-eLOSC0ZGdO48bORcH9QZ", "AxMGcuG16Qzv1umqOSlA9dIcra-eb-ug", "sni-azy_8rcF9mm0NjTo7m19tclN4XoO", "qy-613rGz5ikXquVMiqO06NSS3V_ip90"]) expect(masked(token), token).toBe(true);
+  });
+  it("slugs stay unregistered, even with a long camel-case word or a long number in them (the fix reads only a piece of both cases AND a digit as random)", () => {
+    for (const slug of ["my-quarterly-report-NotificationsServiceHandler-2024", "my-quarterly-report-2024-final-version-notes", "projects_alpha_settings_notifications2_page", "release-notes-for-november-20241113123456"]) expect(masked(slug), slug).toBe(false);
+  });
+  it("10,000 seeded random base64url tokens of 24, 32 and 48 bytes are all masked, and 10,000 hex ids and UUIDs are none of them", () => {
+    const missed: string[] = [];
+    const overMasked: string[] = [];
+    for (let index = 0; index < 10_000; index += 1) {
+      const bytes = [24, 32, 48][index % 3];
+      const token = seededBytes(11_300_000 + index, bytes).toString("base64url");
+      if (/[0-9]/.test(token) && /[A-Za-z]/.test(token) && !masked(token)) missed.push(token);
+      const hex = seededBytes(0xface + index, bytes).toString("hex");
+      const uuid = [hex.slice(0, 8), hex.slice(8, 12), `4${hex.slice(13, 16)}`, `a${hex.slice(17, 20)}`, hex.slice(20, 32)].join("-");
+      for (const id of [hex, uuid]) if (urlSecrets(`https://app.test/x?ref=${id}`).length > 0) overMasked.push(id);
+    }
+    expect(missed.slice(0, 5), `${missed.length} random tokens were not masked`).toEqual([]);
+    expect(overMasked.slice(0, 5), `${overMasked.length} hex ids or UUIDs were registered`).toEqual([]);
   });
 });
