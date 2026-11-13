@@ -1,6 +1,6 @@
 /** Iterative lexical scanner, not an AST evaluator. Rules and precision signals are in prompt-change-rules.ts.
  * Strings include Python prefixes/triples and JS templates; interpolation holes are balanced but never evaluated.
- * Nonliteral expressions are ignored. Malformed strings, containers, YAML aliases/merges and depth >64 fail closed
+ * Nonliteral SDK prompt expressions yield nonliteral_prompt. Malformed strings, containers, YAML aliases/merges and depth >64 fail closed
  * as unreadable_diff (the fixed v1 vocabulary also covers unreadable source). Config block scalars use indentation.
  */
 import type { ModelFamily } from "./model-catalog.js";
@@ -9,7 +9,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { MODEL_NAME_PATTERN } from "./model-family-common.js";
 import { PROMPT_CHANGE_LIMITS, SETTING_ENUM_WORDS, type ModelSettingKey, type PromptChangeItem, type PromptChangeKind } from "./prompt-change.js";
 import { fingerprint, hash, normalizePromptText, type Work } from "./prompt-change-internal.js";
-import { aiPath, knownSdk, MODEL_CALLS, MODEL_KEYS, modelFamily, PROMPT_CALLS, PROMPT_KEYS, SDK_CALLS, SETTING_ALIASES, sourceMode, SYSTEM_KEYS, TOOL_KEYS } from "./prompt-change-rules.js";
+import { knownSdk, MODEL_CALLS, MODEL_KEYS, modelFamily, PROMPT_CALLS, PROMPT_KEYS, SDK_CALLS, SETTING_ALIASES, SYSTEM_KEYS, TOOL_KEYS } from "./prompt-change-rules.js";
 
 export interface ScannedValue {
   kind: PromptChangeKind; basis: PromptChangeItem["basis"]; anchor: string; fingerprint: string;
@@ -215,18 +215,29 @@ function importSignal(tokens: Token[], work: Work): boolean {
   }
   return false;
 }
-export function scanPromptSource(path: string, text: string, work: Work): ScannedValue[] {
-  const mode = sourceMode(path);
+export function scanPromptSource(info: { mode: "code" | "config" | "other"; ai: boolean }, text: string, work: Work): ScannedValue[] {
+  const mode = info.mode;
   if (mode === "other") return [];
   const tokens = tokenize(text, mode === "config", work);
   const values: ScannedValue[] = [];
   const roles = new Map<number, string>();
-  let signal = aiPath(path) || importSignal(tokens, work);
+  let signal = info.ai || importSignal(tokens, work);
   for (let i = 0; i < tokens.length; i++) {
     work.stats.steps++;
     const token = tokens[i]!;
     if (token.value === "role" && tokens[i + 1]?.value === ":" && tokens[i + 2]?.type === "string") roles.set(token.parent, tokens[i + 2]!.value);
     if ((token.type === "string" || (mode === "config" && token.type === "word")) && modelFamily(token.value) !== null) signal = true;
+  }
+  // Parent summaries are computed once, rather than walking up to 64 ancestors for every token.
+  const rootContext = { system: false, sdk: false, tool: false, promptBlock: false, fromMessages: false, contents: false };
+  const contexts: Array<typeof rootContext> = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!; const parent = contexts[token.parent] ?? rootContext;
+    work.stats.steps += 7;
+    contexts.push({ system: parent.system || SYSTEM_KEYS.has(token.label) || roles.get(i) === "system",
+      sdk: parent.sdk || SDK_CALLS.has(token.label), tool: parent.tool || TOOL_KEYS.has(token.label),
+      promptBlock: parent.promptBlock || SYSTEM_KEYS.has(token.label) || ["messages", "content", "contents", "parts"].includes(token.label),
+      fromMessages: parent.fromMessages || token.label === "from_messages", contents: parent.contents || token.label === "contents" });
   }
   const ordinals = new Map<string, number>();
   const add = (kind: PromptChangeKind, token: Token, value: string, key: string, basis: PromptChangeItem["basis"], family: ModelFamily | null = null, settingKey?: ModelSettingKey) => {
@@ -252,15 +263,20 @@ export function scanPromptSource(path: string, text: string, work: Work): Scanne
     const key = isKey ? keyToken?.value ?? "" : "";
     const settingKey = SETTING_ALIASES.get(key) ?? (mode === "config" ? SETTING_ALIASES.get(key.toLowerCase()) : undefined);
     const next = tokens[i + 1];
-    const expressionTail = next !== undefined && next.line === token.line && !new Set([",", ";", ")", "]", "}", ":"]).has(next.value);
+    const expressionTail = next !== undefined && (next.line === token.line || ["+", "-", ".", "?", "*", "/", "&", "|"].includes(next.value)) && !new Set([",", ";", ")", "]", "}", ":"]).has(next.value);
     const isLiteral = (token.type === "string" || token.type === "number" || (mode === "config" && token.type === "word")) && !expressionTail;
     const isContainer = token.type === "punct" && (token.value === "{" || token.value === "[");
-    const ancestors: string[] = [];
-    let systemContext = false;
-    let ancestor = token.parent;
-    while (ancestor >= 0) { work.stats.steps++; ancestors.push(tokens[ancestor]!.label); if (SYSTEM_KEYS.has(tokens[ancestor]!.label) || roles.get(ancestor) === "system") systemContext = true; ancestor = tokens[ancestor]!.parent; }
-    const sdk = ancestors.some((name) => SDK_CALLS.has(name));
-    const tool = TOOL_KEYS.has(key) || (key === "parameters" && ancestors.some((name) => TOOL_KEYS.has(name)));
+    const context = contexts[token.parent] ?? rootContext;
+    const sdk = context.sdk;
+    const tool = TOOL_KEYS.has(key) || (key === "parameters" && context.tool);
+    const firstPromptArgument = parent?.value === "(" && PROMPT_CALLS.has(parent.label) && previous === parent;
+    const promptArgument = (sdk && (SYSTEM_KEYS.has(key) || PROMPT_KEYS.has(key) || ["messages", "content", "contents", "input", "message"].includes(key) || (key === "text" && context.promptBlock))) || firstPromptArgument;
+    const shorthand = sdk && parent?.value === "{" && token.type === "word" && (SYSTEM_KEYS.has(token.value) || PROMPT_KEYS.has(token.value) || token.value === "messages") && (previous?.value === "{" || previous?.value === ",") && (next?.value === "}" || next?.value === ",");
+    const unresolvedBlock = sdk && context.promptBlock && parent?.value === "[" && token.type === "word";
+    if (shorthand || unresolvedBlock) work.reasons.add("nonliteral_prompt");
+    const containerNext = isContainer && token.close >= 0 ? tokens[token.close + 1] : undefined;
+    const containerTail = containerNext !== undefined && ["+", ".", "?"].includes(containerNext.value);
+    if (promptArgument && ((!isLiteral && !isContainer) || containerTail)) work.reasons.add("nonliteral_prompt");
     if ((tool || (settingKey !== undefined && signal)) && (isContainer || isLiteral)) {
       const end = isContainer ? token.close : i;
       if (end < i) continue;
@@ -275,20 +291,22 @@ export function scanPromptSource(path: string, text: string, work: Work): Scanne
       if (family !== undefined) add("model_endpoint", token, token.value, key || "endpoint", "catalog_host", family);
     }
     if (!isLiteral) continue;
-    if (MODEL_KEYS.has(key) || (parent?.value === "(" && MODEL_CALLS.has(parent.label) && previous === parent)) {
+    if ((signal && MODEL_KEYS.has(key)) || (parent?.value === "(" && MODEL_CALLS.has(parent.label) && previous === parent)) {
       if (token.type !== "number") add("model_name", token, token.value, key || parent?.label || "model", MODEL_KEYS.has(key) ? "key_name" : "model_table", modelFamily(token.value));
       continue;
     }
     if (token.type !== "string" && mode !== "config") continue;
+    work.stats.steps += key.length + 1;
     let kind: "prompt_text" | "system_prompt" | undefined;
     if (SYSTEM_KEYS.has(key)) kind = "system_prompt";
-    else if (PROMPT_KEYS.has(key)) kind = "prompt_text";
+    else if (PROMPT_KEYS.has(key) && (key !== "template" || signal)) kind = "prompt_text";
+    else if (signal && previous?.value === "=" && keyToken?.type === "word" && /(?:PROMPT|INSTRUCTION|SYSTEM|TEMPLATE)/iu.test(key)) kind = "prompt_text";
     else if (signal && key === "content" && roles.has(token.parent)) kind = roles.get(token.parent) === "system" ? "system_prompt" : "prompt_text";
-    else if (signal && sdk && (key === "input" || key === "contents" || key === "message" || (key === "text" && ancestors.some((name) => name === "parts" || name === "contents" || name === "content")))) kind = "prompt_text";
+    else if (signal && sdk && (key === "input" || key === "contents" || key === "message" || (key === "text" && context.promptBlock))) kind = "prompt_text";
     else if (parent?.value === "(" && PROMPT_CALLS.has(parent.label) && previous === parent) kind = "prompt_text";
-    else if (ancestors.includes("from_messages") && previous?.value === "," && tokens[i - 2]?.type === "string") kind = tokens[i - 2]!.value === "system" ? "system_prompt" : "prompt_text";
-    else if (signal && sdk && ancestors.includes("contents") && token.type === "string" && !isKey && tokens[i + 1]?.value !== ":") kind = "prompt_text";
-    if (kind === "prompt_text" && systemContext) kind = "system_prompt";
+    else if (context.fromMessages && previous?.value === "," && tokens[i - 2]?.type === "string") kind = tokens[i - 2]!.value === "system" ? "system_prompt" : "prompt_text";
+    else if (signal && sdk && context.contents && token.type === "string" && !isKey && tokens[i + 1]?.value !== ":") kind = "prompt_text";
+    if (kind === "prompt_text" && context.system) kind = "system_prompt";
     if (kind) add(kind, token, token.value, key || parent?.label || "argument", sdk ? "sdk_call" : "key_name");
   }
   return values;

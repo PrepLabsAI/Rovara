@@ -1,7 +1,7 @@
 /** Narrow static rules, not a resolver: TS/JS/Python and line/token based JSON/YAML/TOML/env/INI.
  * AI signals: SDK import/require (openai, anthropic, @anthropic-ai/sdk, @google/genai, @google/generative-ai,
  * google.genai, google.generativeai, ai, @ai-sdk/*, langchain*, cohere, litellm, ollama), a model prefix below,
- * or a prompts/models/llm/ai/agents folder. Content/input/settings need that signal; input also needs an SDK call.
+ * or a prompts/models/llm/ai/agents folder. Model/template/content/input/settings need that signal; input also needs an SDK call.
  * Unsupported languages, variable resolution, YAML aliases/merges and computed keys are deliberately not guessed.
  */
 import type { ModelFamily } from "./model-catalog.js";
@@ -41,8 +41,9 @@ export function promptFilePath(path: string): boolean {
   return /(?:^|\/)(?:prompts|prompt|system-prompts)\//u.test(lower) && new Set(["md", "txt", "yaml", "yml", "json", "toml"]).has(extension);
 }
 export function sourceMode(path: string): "code" | "config" | "other" {
+  const name = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
   if (/\.(?:[cm]?[jt]sx?|py|pyi)$/iu.test(path)) return "code";
-  if (/\.(?:json|ya?ml|toml|ini)$/iu.test(path) || /(?:^|[/.])env(?:\.[^/]*)?$/iu.test(path)) return "config";
+  if (/\.(?:json|ya?ml|toml|ini)$/iu.test(path) || name === "env" || name.startsWith("env.") || name === ".env" || name.includes(".env.") || name.endsWith(".env")) return "config";
   return "other";
 }
 export function aiPath(path: string): boolean { return /(?:^|\/)(?:prompts|models|llm|ai|agents)\//iu.test(path); }

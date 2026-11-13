@@ -81,9 +81,10 @@ export function parsePromptDiffInternal(text: string, options: PromptChangeOptio
   };
   for (let start = 0; start < text.length;) {
     let end = start;
-    while (end < text.length && text[end] !== "\n" && text[end] !== "\r") { end++; work.stats.steps++; }
-    const line = text.slice(start, end);
-    start = end + (text[end] === "\r" && text[end + 1] === "\n" ? 2 : 1);
+    while (end < text.length && text[end] !== "\n") { end++; work.stats.steps++; }
+    // Git frames records with LF only. A lone CR belongs to the hunk payload.
+    const line = text.slice(start, end > start && text[end - 1] === "\r" ? end - 1 : end);
+    start = end + 1;
     work.stats.steps++;
     if (line.startsWith("[workspace diff truncated") || line.startsWith("[the commit this workspace was prepared at is not in this repository")) { reasons.add("diff_truncated"); continue; }
     if (line.startsWith("## ")) { finishFile(); current = undefined; statusSection = false; sawInput = true; continue; }
@@ -127,7 +128,9 @@ export function parsePromptDiffInternal(text: string, options: PromptChangeOptio
     else if (line.startsWith("rename to ")) { const path = unquote(line.slice(10), work); if (path === undefined) reasons.add("unreadable_diff"); else current.path = path; current.status = "renamed"; }
     else if (line.startsWith("Binary files ") || line === "GIT binary patch") { current.binary = true; reasons.add("binary_file"); }
     else if (line.startsWith("--- ") || line.startsWith("+++ ")) {
-      const path = unquote(line.slice(4), work);
+      // Git appends a TAB to unquoted ---/+++ names containing spaces.
+      const raw = line.slice(4);
+      const path = unquote(raw.endsWith("\t") ? raw.slice(0, -1) : raw, work);
       if (path === undefined) reasons.add("unreadable_diff");
       else if (path !== "/dev/null" && line.startsWith("+++ ") && path.startsWith("b/")) current.path = path.slice(2);
     } else if (!(line === "" || line === "\\ No newline at end of file" || /^(?:index |old mode |new mode |similarity index |dissimilarity index )/u.test(line) || current.binary)) reasons.add("unreadable_diff");

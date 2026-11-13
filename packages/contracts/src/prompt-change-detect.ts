@@ -9,19 +9,34 @@ import { MODEL_NAME_PATTERN } from "./model-family-common.js";
 import { isSafePromptChangePath, PROMPT_CHANGE_INCOMPLETE_REASONS, PROMPT_CHANGE_LIMITS, SETTING_ENUM_WORDS, type PromptChangeItem, type PromptChangeReport } from "./prompt-change.js";
 import { parsePromptDiffInternal, type PromptChangedFile, type PromptChangeInput } from "./prompt-change-diff.js";
 import { byteLength, fingerprint, hash, limits, newWork, type PromptChangeOptions, type PromptChangeStats, type Work } from "./prompt-change-internal.js";
-import { promptFilePath, sourceMode } from "./prompt-change-rules.js";
+import { aiPath, knownSdk, SDK_CALLS, promptFilePath, sourceMode } from "./prompt-change-rules.js";
 import { scanPromptSource, type ScannedValue } from "./prompt-change-scan.js";
 export type { PromptChangeOptions, PromptChangeStats } from "./prompt-change-internal.js";
 export type { PromptChangedFile, PromptChangeInput } from "./prompt-change-diff.js";
 export interface PromptChangeResult { report: PromptChangeReport; stats?: PromptChangeStats }
-function displayPath(path: string, work: Work): { path: string; fingerprint?: string } {
-  work.stats.steps += Math.min(path.length, PROMPT_CHANGE_LIMITS.pathChars) + 1;
-  return isSafePromptChangePath(path) && path !== "path_refused" ? { path } : { path: "path_refused", fingerprint: hash(path, work) };
+interface PathInfo {
+  display: { path: string; fingerprint?: string }; id: string; bytes: number;
+  mode: ReturnType<typeof sourceMode>; prompt: boolean; ai: boolean; documentation: boolean; embedded: boolean;
 }
-interface FileIdentity { path: ReturnType<typeof displayPath>; oldPath?: ReturnType<typeof displayPath>; idPath: string }
-function fileIdentity(file: PromptChangedFile, work: Work): FileIdentity {
-  return { path: displayPath(file.path, work), ...(file.oldPath === undefined ? {} : { oldPath: displayPath(file.oldPath, work) }), idPath: hash(file.path, work) };
+function inspectPath(path: string, work: Work): PathInfo {
+  // Refuse before regexes, lowercasing, set membership or hashing unbounded names. The prefix/length
+  // reference intentionally does not identify distinct equal-length names sharing this prefix.
+  const prefix = path.slice(0, PROMPT_CHANGE_LIMITS.pathBytes);
+  const bytes = byteLength(prefix, work);
+  const refused = path.length > PROMPT_CHANGE_LIMITS.pathBytes || bytes > PROMPT_CHANGE_LIMITS.pathBytes;
+  const id = hash(refused ? canonicalJson(["rovara.path-prefix.v1", path.length, prefix]) : path, work);
+  if (refused) work.reasons.add("unreadable_diff");
+  // A bounded suffix can still supply extension hints; unknown folders remain partial, never complete.
+  const rulePath = refused ? path.slice(-128) : path;
+  work.stats.steps += rulePath.length * 8 + Math.min(path.length, PROMPT_CHANGE_LIMITS.pathChars) + 1;
+  const mode = sourceMode(rulePath);
+  const safe = !refused && isSafePromptChangePath(path) && path !== "path_refused";
+  return { display: safe ? { path } : { path: "path_refused", fingerprint: id }, id,
+    bytes: refused ? Math.max(bytes, path.length) : bytes,
+    mode: refused && mode === "other" ? "code" : mode, prompt: promptFilePath(rulePath), ai: aiPath(rulePath),
+    documentation: /\.(?:md|mdx|txt|rst|adoc|csv|svg|css|html)$/iu.test(rulePath), embedded: /\.(?:html|md|mdx)$/iu.test(rulePath) };
 }
+interface FileIdentity { path: PathInfo["display"]; oldPath?: PathInfo["display"]; idPath: string }
 function makeItem(identity: FileIdentity, before: ScannedValue | undefined, after: ScannedValue | undefined, verb: PromptChangeItem["verb"], work: Work): PromptChangeItem {
   const value: ScannedValue = after ?? before ?? { kind: "prompt_file", basis: "path_rule", anchor: "file/0", family: null, fingerprint: "", line: 1 };
   const { path, oldPath } = identity;
@@ -82,22 +97,27 @@ function pair(identity: FileIdentity, before: ScannedValue[], after: ScannedValu
   for (let i = 0; i < before.length; i++) { work.stats.steps++; if (!matchedBefore.has(i)) items.push(makeItem(identity, before[i], undefined, "removed", work)); }
   return items;
 }
-function scan(file: PromptChangedFile, before: boolean, work: Work): ScannedValue[] {
+function scan(file: PromptChangedFile, before: boolean, info: PathInfo, work: Work): ScannedValue[] {
   if ((before && file.status === "added") || (!before && file.status === "removed")) return [];
   const text = before ? file.before : file.after; if (text === undefined) return [];
-  const path = before ? file.oldPath ?? file.path : file.path;
-  if (promptFilePath(path)) return [{ kind: "prompt_file", basis: "path_rule", anchor: "file/0", fingerprint: fingerprint(text, work), line: file.hunks?.[0]?.afterLine || 1, family: null }];
-  if (sourceMode(path) === "other") {
-    // Known documentation remains outside the source scanner; unfamiliar executable formats are deferred.
-    if (!/\.(?:md|txt|rst|adoc|csv|svg|css|html)$/iu.test(path) && text.length > 0) work.reasons.add("unreadable_diff");
+  if (info.prompt) return [{ kind: "prompt_file", basis: "path_rule", anchor: "file/0", fingerprint: fingerprint(text, work), line: file.hunks?.[0]?.afterLine || 1, family: null }];
+  if (info.mode === "other") {
+    if (!info.documentation && text.length > 0) work.reasons.add("unreadable_diff");
+    if (info.embedded) {
+      work.stats.steps += text.length * 2 + 1;
+      // Embedded grammars are not parsed. SDK names/calls make coverage partial, including inline scripts.
+      for (const token of text.matchAll(/[A-Za-z_$@][A-Za-z0-9_$@/.-]*/gu)) {
+        if (knownSdk(token[0]) || SDK_CALLS.has(token[0]) || SDK_CALLS.has(token[0].slice(token[0].lastIndexOf(".") + 1))) { work.reasons.add("unreadable_diff"); break; }
+      }
+    }
     return [];
   }
-  if (!file.hunks) return scanPromptSource(path, text, work);
+  if (!file.hunks) return scanPromptSource(info, text, work);
   const values: ScannedValue[] = [];
   const ordinals = new Map<string, number>();
   for (const hunk of file.hunks) {
     work.stats.steps++;
-    const found = scanPromptSource(path, before ? hunk.before : hunk.after, work);
+    const found = scanPromptSource(info, before ? hunk.before : hunk.after, work);
     for (const value of found) {
       const group = value.anchor.slice(0, value.anchor.lastIndexOf("/"));
       const ordinal = ordinals.get(group) ?? 0; ordinals.set(group, ordinal + 1); value.anchor = `${group}/${ordinal}`;
@@ -110,7 +130,7 @@ function detect(input: PromptChangeInput, options: PromptChangeOptions, work: Wo
   const caps = limits(options); const items: PromptChangeItem[] = [];
   if (!input || !isArray(input.files)) { work.reasons.add("unreadable_diff"); return items; }
   if (input.files.length > caps.files) { work.reasons.add("too_many_files"); work.stats.skippedFiles += input.files.length; return items; }
-  const eligible: PromptChangedFile[] = []; let total = 0;
+  const eligible: Array<{ file: PromptChangedFile; path: PathInfo; oldPath: PathInfo }> = []; let total = 0;
   const paths = new Set<string>(); let duplicate = false;
   for (const supplied of input.files) {
     work.stats.steps++;
@@ -126,15 +146,16 @@ function detect(input: PromptChangeInput, options: PromptChangeOptions, work: Wo
     if (fromDiff && supplied.hunks !== undefined) file.hunks = supplied.hunks;
     if (!file || typeof file.path !== "string" || (file.oldPath !== undefined && typeof file.oldPath !== "string") || (file.before !== undefined && typeof file.before !== "string") || (file.after !== undefined && typeof file.after !== "string")) { work.reasons.add("unreadable_diff"); continue; }
     if ((file.wholeFile !== undefined && typeof file.wholeFile !== "boolean") || (file.binary !== undefined && typeof file.binary !== "boolean") || (file.status !== undefined && !["added", "removed", "modified", "renamed"].includes(file.status))) { work.reasons.add("unreadable_diff"); continue; }
-    if (paths.has(file.path)) duplicate = true;
-    paths.add(file.path);
+    const path = inspectPath(file.path, work);
+    const oldPath = file.oldPath === undefined || file.oldPath === file.path ? path : inspectPath(file.oldPath, work);
+    if (paths.has(path.id)) duplicate = true;
+    paths.add(path.id);
     if (!file.wholeFile) work.reasons.add("hunks_only");
-    if (file.path.length + (file.oldPath?.length ?? 0) > caps.totalBytes) { work.reasons.add("total_too_large"); total = caps.totalBytes + 1; work.stats.skippedFiles++; continue; }
-    const pathBytes = byteLength(file.path, work) + (file.oldPath === undefined ? 0 : byteLength(file.oldPath, work));
+    const pathBytes = path.bytes + (file.oldPath === undefined ? 0 : oldPath.bytes);
     work.stats.bytes += pathBytes; total += pathBytes;
     if (file.binary) { work.reasons.add("binary_file"); work.stats.skippedFiles++; continue; }
     if (file.before === undefined && file.after === undefined) { if (file.wholeFile) work.reasons.add("unreadable_diff"); work.stats.skippedFiles++;
-      if (file.oldPath !== undefined && file.status === "renamed" && (promptFilePath(file.path) || promptFilePath(file.oldPath))) eligible.push(file);
+      if (file.oldPath !== undefined && file.status === "renamed" && (path.prompt || oldPath.prompt)) eligible.push({ file, path, oldPath });
       continue;
     }
     if (file.wholeFile && ((file.before === undefined && file.status !== "added") || (file.after === undefined && file.status !== "removed"))) work.reasons.add("unreadable_diff");
@@ -146,15 +167,15 @@ function detect(input: PromptChangeInput, options: PromptChangeOptions, work: Wo
       const bytes = byteLength(side, work); work.stats.bytes += bytes; total += bytes;
       if (bytes > caps.fileBytes) { work.reasons.add("file_too_large"); tooLarge = true; }
     }
-    if (tooLarge) work.stats.skippedFiles++; else eligible.push(file);
+    if (tooLarge) work.stats.skippedFiles++; else eligible.push({ file, path, oldPath });
   }
   if (total > caps.totalBytes) { work.reasons.add("total_too_large"); work.stats.skippedFiles += eligible.length; return items; }
   if (duplicate) { work.reasons.add("unreadable_diff"); return items; }
-  for (const file of eligible) {
+  for (const { file, path, oldPath } of eligible) {
     work.stats.scannedFiles++;
-    const identity = fileIdentity(file, work);
-    const before = scan(file, true, work); const after = scan(file, false, work);
-    if (file.oldPath !== undefined && file.oldPath !== file.path && (promptFilePath(file.path) || promptFilePath(file.oldPath))) {
+    const identity: FileIdentity = { path: path.display, ...(file.oldPath === undefined ? {} : { oldPath: oldPath.display }), idPath: path.id };
+    const before = scan(file, true, oldPath, work); const after = scan(file, false, path, work);
+    if (file.oldPath !== undefined && file.oldPath !== file.path && (path.prompt || oldPath.prompt)) {
       // One rename item, even when only one of the two names satisfies a prompt-file rule.
       const entry = (text: string | undefined, line: number): ScannedValue | undefined => text === undefined ? undefined : { kind: "prompt_file", basis: "path_rule", anchor: "file/0", fingerprint: fingerprint(text, work), line, family: null };
       items.push(makeItem(identity, entry(file.before, 1), entry(file.after, file.hunks?.[0]?.afterLine || 1), "renamed", work));

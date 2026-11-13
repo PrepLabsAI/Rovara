@@ -6,6 +6,8 @@
  * other setting echoes come only from SETTING_ENUM_WORDS. No unknown source keys are copied into an object.
  */
 import { z } from "zod";
+import { canonicalJson } from "./canonical-json.js";
+import { sha256HexOf } from "./service-catalog-verify.js";
 import { MODEL_FAMILIES } from "./model-catalog.js";
 import { MODEL_NAME_PATTERN } from "./model-family-common.js";
 
@@ -15,7 +17,7 @@ export const PROMPT_CHANGE_VERBS = ["added", "removed", "modified", "renamed"] a
 export const PROMPT_CHANGE_BASES = ["path_rule", "sdk_call", "key_name", "model_table", "catalog_host"] as const;
 export const MODEL_SETTING_KEYS = ["temperature", "top_p", "top_k", "max_tokens", "stop_sequences", "seed", "frequency_penalty", "presence_penalty", "response_format", "reasoning_effort", "thinking_budget", "tool_choice"] as const;
 export const SETTING_ENUM_WORDS = ["auto", "none", "required", "any", "text", "json_object", "json_schema", "minimal", "low", "medium", "high", "max", "enabled", "disabled"] as const;
-export const PROMPT_CHANGE_INCOMPLETE_REASONS = ["too_many_files", "file_too_large", "total_too_large", "binary_file", "unreadable_diff", "diff_truncated", "hunks_only"] as const;
+export const PROMPT_CHANGE_INCOMPLETE_REASONS = ["too_many_files", "file_too_large", "total_too_large", "binary_file", "unreadable_diff", "diff_truncated", "hunks_only", "nonliteral_prompt"] as const;
 export type PromptChangeKind = (typeof PROMPT_CHANGE_KINDS)[number];
 export type ModelSettingKey = (typeof MODEL_SETTING_KEYS)[number];
 export type PromptChangeIncompleteReason = (typeof PROMPT_CHANGE_INCOMPLETE_REASONS)[number];
@@ -27,8 +29,9 @@ export const PROMPT_CHANGE_INCOMPLETE_SENTENCES: Record<PromptChangeIncompleteRe
   unreadable_diff: "Some source or diff text could not be read completely.",
   diff_truncated: "The workspace diff does not contain the whole change.",
   hunks_only: "Only changed hunks were available, so whole file coverage is unknown.",
+  nonliteral_prompt: "A prompt expression could not be resolved statically.",
 };
-export const PROMPT_CHANGE_LIMITS = { files: 2000, fileBytes: 1024 * 1024, totalBytes: 32 * 1024 * 1024, pathChars: 512, items: 500, nesting: 64 } as const;
+export const PROMPT_CHANGE_LIMITS = { files: 2000, fileBytes: 1024 * 1024, totalBytes: 32 * 1024 * 1024, pathChars: 512, pathBytes: 4096, items: 500, nesting: 64 } as const;
 
 /** Deliberately narrow ordinary paths: letters/numbers, spaces, underscore, dot, slash and hyphen. */
 export function isSafePromptChangePath(path: string): boolean {
@@ -49,6 +52,7 @@ export const PromptChangeItemSchema = z.discriminatedUnion("kind", [
   z.object({ ...common, kind: z.literal("model_setting"), settingKey: z.enum(MODEL_SETTING_KEYS), before: z.union([z.number().finite(), z.enum(SETTING_ENUM_WORDS)]).optional(), after: z.union([z.number().finite(), z.enum(SETTING_ENUM_WORDS)]).optional() }).strict(),
 ]).superRefine((item, ctx) => {
   if ((item.path === "path_refused" && !item.pathFingerprint) || (item.oldPath === "path_refused" && !item.oldPathFingerprint)) ctx.addIssue({ code: "custom", message: "refused path needs fingerprint" });
+  if ((item.path !== "path_refused" && item.pathFingerprint !== undefined) || (item.oldPath !== "path_refused" && item.oldPathFingerprint !== undefined)) ctx.addIssue({ code: "custom", message: "safe path cannot carry a fingerprint" });
   if (item.verb === "renamed" && item.oldPath === undefined) ctx.addIssue({ code: "custom", message: "rename needs old path" });
   if (item.verb === "added" && (item.fingerprintBefore !== null || item.fingerprintAfter === null)) ctx.addIssue({ code: "custom", message: "invalid added fingerprints" });
   if (item.verb === "removed" && (item.fingerprintAfter !== null || item.fingerprintBefore === null)) ctx.addIssue({ code: "custom", message: "invalid removed fingerprints" });
@@ -58,7 +62,7 @@ export type PromptChangeItem = z.infer<typeof PromptChangeItemSchema>;
 const Count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const PromptChangeReportSchema = z.object({
   schemaVersion: z.literal(PROMPT_CHANGE_SCHEMA_VERSION), status: z.enum(["changes", "none_found", "incomplete"]),
-  coverage: z.enum(["complete", "hunks_only", "partial"]), incompleteReasons: z.array(z.enum(PROMPT_CHANGE_INCOMPLETE_REASONS)).max(7),
+  coverage: z.enum(["complete", "hunks_only", "partial"]), incompleteReasons: z.array(z.enum(PROMPT_CHANGE_INCOMPLETE_REASONS)).max(PROMPT_CHANGE_INCOMPLETE_REASONS.length),
   counts: z.object({ prompt_file: Count, prompt_text: Count, system_prompt: Count, model_name: Count, model_setting: Count, tool_schema: Count, model_endpoint: Count }).strict(),
   items: z.array(PromptChangeItemSchema).max(PROMPT_CHANGE_LIMITS.items), itemsTruncated: z.boolean(), reportDigest: Hash,
 }).strict().superRefine((report, ctx) => {
@@ -67,6 +71,16 @@ export const PromptChangeReportSchema = z.object({
   if (report.status === "changes" && report.items.length === 0) ctx.addIssue({ code: "custom", message: "changes needs an item" });
   if (report.status === "incomplete" && (report.coverage === "complete" || report.incompleteReasons.length === 0)) ctx.addIssue({ code: "custom", message: "incomplete needs a refusal" });
   if (report.coverage !== "complete" && report.incompleteReasons.length === 0) ctx.addIssue({ code: "custom", message: "partial coverage needs a refusal" });
+  if (new Set(report.incompleteReasons).size !== report.incompleteReasons.length) ctx.addIssue({ code: "custom", message: "duplicate incomplete reason" });
+  const ids = new Set<string>();
+  for (let i = 0; i < report.items.length; i++) {
+    const item = report.items[i]!; const previous = report.items[i - 1];
+    if (ids.has(item.id)) ctx.addIssue({ code: "custom", message: "duplicate item id" });
+    ids.add(item.id);
+    if (previous && (previous.path > item.path || (previous.path === item.path && (previous.kind > item.kind || (previous.kind === item.kind && previous.id > item.id))))) ctx.addIssue({ code: "custom", message: "items must be sorted" });
+  }
+  // The digest includes omitted items, so a truncated report cannot be reverified from its display list.
+  if (!report.itemsTruncated && report.reportDigest !== sha256HexOf(new TextEncoder().encode(canonicalJson(report.items.map((item) => [item.id, item.fingerprintBefore, item.fingerprintAfter]))))) ctx.addIssue({ code: "custom", message: "report digest mismatch" });
   const actual = { prompt_file: 0, prompt_text: 0, system_prompt: 0, model_name: 0, model_setting: 0, tool_schema: 0, model_endpoint: 0 };
   for (const item of report.items) actual[item.kind]++;
   let total = 0;
