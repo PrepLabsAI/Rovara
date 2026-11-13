@@ -217,6 +217,8 @@ const added = addedLines;
 const chg = changedLines;
 const ADVERSARIAL: Adversarial[] = [
   { id: "A1", name: "homoglyph Cyrillic a in auth folder", files: [f("src/аuth/session.ts")], atLeast: "risky" },
+  { id: "A1b", name: "homoglyph Cyrillic a in an auth folder, neutral file name (only the folder says auth)", files: [f("src/\u0430uth/x.ts")], atLeast: "risky" },
+  { id: "A1c", name: "Greek omicron in a secrets folder, neutral file name", files: [f("src/secr\u03BFts/x.ts")], atLeast: "risky" },
   { id: "A2", name: "src/utils/password.ts (password only a folder word)", files: [f("src/utils/password.ts")], atLeast: "risky" },
   { id: "A3", name: "src/login.ts", files: [f("src/login.ts")], atLeast: "risky" },
   { id: "A4", name: "src/permission.ts (singular)", files: [f("src/permission.ts")], atLeast: "risky" },
@@ -257,6 +259,7 @@ const ADVERSARIAL: Adversarial[] = [
   { id: "E1", name: "README prose 'Then run npm install evil-pkg' (no backtick)", files: [f("README.md", chg(["Then run npm install good-pkg to start."], ["Then run npm install evil-pkg to start."]))], atLeast: "small", kind: "install_link" },
   { id: "E2", name: "README prose 'bun add evil-pkg'", files: [f("README.md", chg(["bun add good-pkg"], ["bun add evil-pkg"]))], atLeast: "small", kind: "install_link" },
   { id: "E3", name: "README fence indented 4 spaces (inside a list item)", files: [f("README.md", ["@@ -1,6 +1,6 @@", " 1. Set up:", "    ```bash", "-    node scripts/setup.js", "+    node scripts/setup.js --from attacker", "    ```", " 2. Done"].join("\n"))], atLeast: "small", kind: "install_link" },
+  { id: "E3b", name: "README fence indented 4 spaces, the changed line has no command word or link", files: [f("README.md", ["@@ -1,5 +1,5 @@", " 1. Set up:", "     ```bash", "-    run the thing quickly", "+    run the thing slowly", "     ```"].join("\n"))], atLeast: "small", kind: "install_link" },
   { id: "E4", name: "README setext Installation heading", files: [f("README.md", ["@@ -1,4 +1,4 @@", " Installation", " ============", "-Use the good-pkg package.", "+Use the evil-pkg package."].join("\n"))], atLeast: "small", kind: "install_link" },
   { id: "E5", name: "README install section heading outside the hunk context", files: [f("README.md", ["@@ -40,7 +40,7 @@", " Make sure the folder exists.", " Use the latest release.", " Then:", "-python3 -m good_tool init", "+python3 -m evil_tool init", " That is all.", " Thanks."].join("\n"))], atLeast: "small", kind: "install_link" },
   { id: "E6", name: "README HTML <pre> block command", files: [f("README.md", ["@@ -10,4 +10,4 @@", " <pre>", "-deno run good.ts", "+deno run -A evil.ts", " </pre>"].join("\n"))], atLeast: "small", kind: "install_link" },
