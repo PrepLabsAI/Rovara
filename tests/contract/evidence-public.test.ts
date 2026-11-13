@@ -377,7 +377,7 @@ describe("free text stays inert (and is not printed at all)", () => {
 
   it("the sign-in link is built from ONE configured origin and an opaque task id, and nothing else", () => {
     expect(publicDetailsUrl(DETAILS.origin, DETAILS.taskId)).toBe(DETAILS_LINK);
-    expect(publicDetailsUrl("https://app.rovara.dev", "01HZX3K9M2Q7R8T5V6W4Y1Z0AB")).toBe("https://app.rovara.dev/t/01HZX3K9M2Q7R8T5V6W4Y1Z0AB");
+    expect(publicDetailsUrl("https://app.example.test", "01HZX3K9M2Q7R8T5V6W4Y1Z0AB")).toBe("https://app.example.test/t/01HZX3K9M2Q7R8T5V6W4Y1Z0AB");
     const badOrigins = ["http://app.example.test", "https://10.0.0.5", "https://10.0.0.5:8443", "https://127.0.0.1", "https://[::1]", "https://[2001:db8::1]", "https://localhost", "https://intranet", "https://a..b", "https://a.b.", "https://.a.b", "https://app.example.test:8443", "https://app.example.test/", "https://app.example.test/acme", "https://app.example.test?x=1", "https://app.example.test#f", "https://user:pw@app.example.test", "https://app.example.test/x)[y](z", "https://app.example.test y", "https://app.example.test\nHello", "https://", "https://a.123", "https://1.2.3.4.5", "https://-a.example.test", "https://a-.example.test", "javascript:alert(1)", "//app.example.test", `https://${"a".repeat(64)}.example.test`, `https://${"a.".repeat(130)}com`, "https://rovara.internal.acme.com/acme/payments-team", 5, undefined, null];
     for (const bad of badOrigins) {
       expect(publicDetailsUrl(bad as string, DETAILS.taskId), `origin ${String(bad)}`).toBeUndefined();
