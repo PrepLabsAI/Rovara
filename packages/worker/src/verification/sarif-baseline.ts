@@ -7,7 +7,7 @@
 import { lstat, unlink, writeFile } from "node:fs/promises";
 import type { ProjectCommand } from "@agentx/contracts";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
-import { AgentFilesRestoreError, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
+import { isUnconfirmedStop, isWorkspaceUnsafe, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
 import { containedReportPath, readContainedReport } from "./report-file.js";
 import { SARIF_REPORT_MAX_BYTES } from "./sarif.js";
 
@@ -60,6 +60,8 @@ export async function runBaselineScans(scans: readonly BaselineScan[], run: Base
   if (scans.length === 0 || run.signal.aborted || run.budgetMs < MIN_BASELINE_BUDGET_MS || run.repositories.length === 0) return found;
   const subPlan: CheckPlan = { source: "project", readiness: scans.map((scan) => scan.command), projectBefore: scans.map(() => "unknown" as const) };
   const originalCode = (run.originalCode ?? gitOriginalCode)(run.repositories.map((repository) => ({ directory: repository.directory, commit: repository.commit })));
+  // A stop that could not be confirmed: the scan files are not put back either, because a command that may still be running would write over them.
+  let unconfirmedStop = false;
   try {
     await originalCode.run(async () => {
       // A file the candidate's run left is removed first, so one the baseline run did not write is never read as its result.
@@ -76,10 +78,13 @@ export async function runBaselineScans(scans: readonly BaselineScan[], run: Base
     });
   } catch (error) {
     // The one fault that must stop the task: the agent's files are not back.
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) {
+      unconfirmedStop = isUnconfirmedStop(error);
+      throw error;
+    }
     found.clear();
   } finally {
-    for (const scan of scans) await putBack(run.rootPath, scan);
+    if (!unconfirmedStop) for (const scan of scans) await putBack(run.rootPath, scan);
   }
   return found;
 }

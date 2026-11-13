@@ -8,6 +8,7 @@
 //   - a failed step gives a fixed failure word and a redacted tail (at most 4 KiB) of what the command printed; the command's own words are never a reason;
 //   - one overall deadline bounds the run, and a stop signal ends it; either fails the step in progress with `infrastructure`;
 //   - a suite that is longer than the round budget is NOT a failure (it is why test selection exists); a suite that hits its own time limit is.
+import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import {
   TEST_ENV_DEPENDENCY_PROVE_STEPS,
   TEST_ENV_PROVE_STEPS,
@@ -85,7 +86,9 @@ export async function proveEnvironment(ports: ProvePorts, input: ProveInput): Pr
     let outcome: Omit<StepResult, "durationMs"> | undefined;
     try {
       outcome = aborted() ? { status: "failed", failure: "infrastructure" } : await work();
-    } catch {
+    } catch (error) {
+      // A command whose stop could not be confirmed may still be running: not an "infrastructure" failure to step past and go on (FIX-RUNNER-ABORT-JOIN).
+      if (error instanceof RunnerKillUnconfirmedError) throw error;
       outcome = { status: "failed", failure: "infrastructure" };
     }
     if (outcome === undefined) { record(step, { status: "skipped", durationMs: 0 }); return; }

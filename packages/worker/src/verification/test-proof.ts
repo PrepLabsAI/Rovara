@@ -22,7 +22,7 @@ import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
 import { testIdResolver } from "./test-ids.js";
 import { displayLine } from "./test-report.js";
-import { AgentFilesRestoreError, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
+import { isUnconfirmedStop, isWorkspaceUnsafe, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
 
 /** The whole run on the original code gets this long, inside what is left of the check round's budget. */
 export const TEST_PROOF_CAP_MS = 10 * 60_000;
@@ -157,6 +157,8 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
     .map(({ repository, changed }) => ({ directory: repository.directory, commit: repository.startCommit, overlay: changed.paths })));
   const budgetMs = Math.max(0, Math.min(options.capMs ?? TEST_PROOF_CAP_MS, options.budgetMs));
   let ran: { entries: CheckEntry[]; oldReports: Map<number, ReadResult> };
+  // A stop that could not be confirmed: the report files are not put back either, because a command that may still be running would write over them.
+  let unconfirmedStop = false;
   try {
     ran = await originalCode.run(async () => {
       for (const report of reports.values()) await unlink(report.path).catch(() => undefined);
@@ -168,10 +170,13 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
     });
   } catch (error) {
     // The one fault that must stop the task: the agent's files are not back.
-    if (error instanceof AgentFilesRestoreError) throw error;
+    if (isWorkspaceUnsafe(error)) {
+      unconfirmedStop = isUnconfirmedStop(error);
+      throw error;
+    }
     return result("not_checked", options.signal.aborted ? "stopped" : "original_code_unavailable", changedTests, items);
   } finally {
-    for (const report of reports.values()) await restoreFile(report);
+    if (!unconfirmedStop) for (const report of reports.values()) await restoreFile(report);
   }
 
   const perCheck: TestProofItem[] = [];

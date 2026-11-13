@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js";
 import { publishWorkspace, runReadinessChecks } from "../../packages/worker/src/publish.js";
 import { storedCommandOutput } from "../../packages/worker/src/command-failure.js";
-import { TIMEOUT_KILL_GRACE_MS } from "../../packages/worker/src/collected-process.js";
+import { RunnerKillUnconfirmedError, TIMEOUT_KILL_GRACE_MS } from "../../packages/worker/src/collected-process.js";
 import type { DevcontainerCli, DevcontainerProcess } from "../../packages/worker/src/devcontainer.js";
 import type { PreparationManifest } from "../../packages/worker/src/prepare.js";
 import { createWorkerCallbackSinks, type PullRequestSink } from "../../packages/worker/src/callback-client.js";
@@ -1105,17 +1105,15 @@ describe("publication checks in a devcontainer (#183)", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(1_000 + TIMEOUT_KILL_GRACE_MS);
   }, 30_000);
 
-  it("says in a timed-out check's stored output when the container refused to stop it", async () => {
+  it("does not record a timed-out check whose container refused to stop it as a failed check and go on: the publication readiness run rejects (FIX-RUNNER-ABORT-JOIN)", async () => {
     const fixture = await createFixture(true, "remote.git", { devcontainer: true });
     const { cli } = stoppableCli({ kill: async () => ({ exitCode: 1, stdout: "bash: kill: (4242) - Operation not permitted\n", stderr: "" }) });
-    const [check] = await runReadinessChecks(
+    await expect(runReadinessChecks(
       await realpath(fixture.root),
-      withReadiness(fixture, [{ cwd: "repo/demo", executable: "sleep", args: ["300"], timeoutSeconds: 1 }]),
+      withReadiness(fixture, [{ cwd: "repo/demo", executable: "sleep", args: ["300"], timeoutSeconds: 1 }, { cwd: "repo/demo", executable: "true", args: [], timeoutSeconds: 60 }]),
       await manifestOf(fixture),
       { devcontainerCli: cli },
-    );
-    expect(check!.outcome).toBe("timed_out");
-    expect(check!.stderr).toContain("AgentX could not stop the command in the container (TERM): bash: kill: (4242) - Operation not permitted");
+    )).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
   }, 30_000);
 
   it("stores a devcontainer check's output redacted and cut to its last lines, as on the host (#170)", async () => {
