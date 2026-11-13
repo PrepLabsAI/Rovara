@@ -16,7 +16,7 @@ export const plugin: PluginModule<"queue"> = {
     const pollMs = optionalNumber(settings, "pollMs", 1, 60_000);
     const synchronous = synchronousSetting(settings);
     return SqliteQueueService.open({
-      path: databasePath(settings, { ...(context.stateDirectory === undefined ? {} : { stateDirectory: context.stateDirectory }), notice: (line) => console.warn(line) }),
+      path: databasePath(settings, { ...(context.stateDirectory === undefined ? {} : { stateDirectory: context.stateDirectory }) }),
       now: () => context.now().getTime(),
       ...(busyTimeoutMs === undefined ? {} : { busyTimeoutMs }),
       ...(pollMs === undefined ? {} : { pollMs }),

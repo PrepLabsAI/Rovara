@@ -207,7 +207,7 @@ SQLite `Queue`. They are plug-ins for the registry. `rovara up` registers them a
 
 A relative `path` (like `state.db`) is kept in the state folder, `~/.rovara`, whatever folder you start Rovara from; an absolute path is used as it is.
 A path inside a git work tree is refused at start (the check follows symbolic links and reads the folders itself, so a `GIT_DIR` in your environment cannot change it):
-choose a path outside any git repository. A database that an older version made inside a repository is not moved or deleted; the start line names the old and the new place, and you copy the file yourself if you want its data.
+choose a path outside any git repository. A database that an older version made where you started Rovara (inside a repository, say) is not moved or deleted; the start is refused with the old and the new path until you stop Rovara and move all three files (`state.db`, `-wal` and `-shm`) to the new place, or delete them on purpose, or give an absolute path outside any repository.
 
 The store plug-in always keeps `OUTBOX_PENDING_INDEX`, and `ttlAttribute` is `expiresAt` unless set (`null` turns expiry off); `indexes`
 adds the core's other indexes. The queue may share the store's file (two connections) or use its own. Both plug-ins refuse a setting they do not know, and a

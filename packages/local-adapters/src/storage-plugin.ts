@@ -64,7 +64,7 @@ export const plugin: PluginModule<"storage"> = {
       };
     }
     return SqliteDocumentStore.open({
-      path: databasePath(settings, { ...(context.stateDirectory === undefined ? {} : { stateDirectory: context.stateDirectory }), notice: (line) => console.warn(line) }),
+      path: databasePath(settings, { ...(context.stateDirectory === undefined ? {} : { stateDirectory: context.stateDirectory }) }),
       indexes: indexesOf(settings.indexes),
       ...(ttl === null ? {} : { ttlAttribute: ttl }),
       // The plug-in's config owns the file's layout: a new index in the config is built at the next start.

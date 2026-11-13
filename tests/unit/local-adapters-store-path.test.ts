@@ -2,10 +2,11 @@
 // in), and a path inside a git work tree is refused, whatever GIT_* variables the process inherited and through symbolic links.
 // Linux-safe: only git and Node are used.
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PluginRegistryError } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
 import { SettingsError, databasePath, STORE_PATH_IN_REPOSITORY_SENTENCE } from "../../packages/local-adapters/src/settings.js";
@@ -40,11 +41,23 @@ beforeEach(async () => {
 afterEach(async () => {
   for (const key of Object.keys(process.env)) if (!(key in savedEnvironment)) delete process.env[key];
   Object.assign(process.env, savedEnvironment);
+  for (const file of cwdFiles.splice(0)) await rm(file, { force: true });
   for (const folder of folders.splice(0)) {
     await chmod(join(folder, "locked"), 0o700).catch(() => undefined);
     await rm(folder, { recursive: true, force: true });
   }
 });
+
+const SQLITE_FILE = Buffer.concat([Buffer.from("SQLite format 3\u0000", "latin1"), Buffer.alloc(84)]);
+const cwdFiles: string[] = [];
+/** A file in the folder the process runs in (where the old rule put a relative path), and the place the new rule gives the same value. Removed after the test. */
+async function oldDatabase(content: Buffer | string): Promise<{ value: string; old: string; fresh: string }> {
+  const value = `.te-d10a-old-${randomBytes(6).toString("hex")}.db`;
+  const old = resolve(value);
+  cwdFiles.push(old);
+  await writeFile(old, content);
+  return { value, old, fresh: join(stateDirectory, value) };
+}
 
 const refusedAsInsideRepository = (call: () => unknown): void => {
   let caught: unknown;
@@ -78,23 +91,39 @@ describe("a relative store path", () => {
     expect(databasePath({ path: elsewhere }, { stateDirectory })).toBe(elsewhere);
   });
 
-  it("names the old and the new place when a database from the old rule is still where the old rule put it", async () => {
-    const old = join(root, "old-place", "state.db");
-    await mkdir(join(root, "old-place"));
-    await writeFile(old, "");
-    const value = relative(process.cwd(), old);
+  it("refuses to move on silently: an old SQLite database where the old rule put it, and no database at the new place", async () => {
+    const { value, old, fresh } = await oldDatabase(SQLITE_FILE);
+    let caught: unknown;
+    try {
+      databasePath({ path: value }, { stateDirectory });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(PluginRegistryError);
+    expect((caught as PluginRegistryError).code).toBe("create_failed");
+    expect((caught as PluginRegistryError).message).toBe(`Rovara's database moved: stop Rovara, then move ${old} and its -wal and -shm files to ${fresh} (or delete them on purpose), or give an absolute path outside any repository.`);
+  });
+
+  it("carries on, with no message, once the new file exists", async () => {
+    const { value, fresh } = await oldDatabase(SQLITE_FILE);
+    await writeFile(fresh, SQLITE_FILE);
     const lines: string[] = [];
-    const resolved = databasePath({ path: value }, { stateDirectory, notice: (line) => lines.push(line) });
-    expect(resolved).toBe(resolve(stateDirectory, value));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain(old);
-    expect(lines[0]).toContain(resolved);
-    expect(lines[0]).toMatch(/not moved or deleted/i);
-    // No old file: nothing to say. An absolute path: nothing to say.
-    const quiet: string[] = [];
-    databasePath({ path: "never-existed-anywhere.db" }, { stateDirectory, notice: (line) => quiet.push(line) });
-    databasePath({ path: old }, { stateDirectory, notice: (line) => quiet.push(line) });
-    expect(quiet).toEqual([]);
+    const log = vi.spyOn(console, "warn").mockImplementation((line: unknown) => void lines.push(String(line)));
+    try {
+      expect(databasePath({ path: value }, { stateDirectory })).toBe(fresh);
+    } finally {
+      log.mockRestore();
+    }
+    expect(lines).toEqual([]);
+  });
+
+  it("does not refuse for a file that is not a SQLite database, an absolute path, or a missing old file", async () => {
+    const { value, fresh } = await oldDatabase("this is a text file, not a database");
+    expect(databasePath({ path: value }, { stateDirectory })).toBe(fresh);
+    const absolute = join(root, "absolute.db");
+    await writeFile(absolute, SQLITE_FILE);
+    expect(databasePath({ path: absolute }, { stateDirectory })).toBe(absolute);
+    expect(databasePath({ path: "never-existed-anywhere.db" }, { stateDirectory })).toBe(join(stateDirectory, "never-existed-anywhere.db"));
   });
 });
 
@@ -204,14 +233,26 @@ describe("the SQLite plug-ins", () => {
     return registry;
   }
 
-  it("open a relative path under the state folder", async () => {
-    const registry = await load("storage", { path: "state.db", sweepIntervalMs: 0 });
-    const store = registry.require("storage") as SqliteDocumentStore;
-    await store.close();
-    const queues = await load("queue", { path: "state.db" });
-    await (queues.require("queue") as SqliteQueueService).close();
-    expect((await readFile(join(stateDirectory, "state.db"))).length).toBeGreaterThan(0);
-  });
+  // Each plug-in on its own, with HOME pointed at a scratch folder: a plug-in that ignored the state folder would fall back to HOME/.rovara and leave the file there.
+  for (const point of ["storage", "queue"] as const) {
+    it(`${point}: opens a relative path under context.stateDirectory, not under HOME/.rovara or the working folder`, async () => {
+      const home = join(root, "scratch-home");
+      await mkdir(home, { recursive: true });
+      process.env.HOME = home;
+      process.env.USERPROFILE = home;
+      const registry = await load(point, point === "storage" ? { path: "plugin-only.db", sweepIntervalMs: 0 } : { path: "plugin-only.db" });
+      await (registry.require(point) as SqliteDocumentStore | SqliteQueueService).close();
+      expect((await readFile(join(stateDirectory, "plugin-only.db"))).length).toBeGreaterThan(0);
+      await expect(readFile(join(home, ".rovara", "plugin-only.db"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readFile(resolve("plugin-only.db"))).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it(`${point}: refuses, through the registry, an old SQLite file where the old rule put the path, until the new file exists`, async () => {
+      const { value, old, fresh } = await oldDatabase(SQLITE_FILE);
+      await expect(load(point, { path: value })).rejects.toMatchObject({ code: "create_failed", message: expect.stringContaining(`Rovara's database moved: stop Rovara, then move ${old}`) as string });
+      await expect(readFile(fresh)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+  }
 
   it("refuse a path inside a repository with the sentence, through the registry that loads them", async () => {
     const repository = join(root, "checkout");
