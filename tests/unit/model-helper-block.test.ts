@@ -12,7 +12,7 @@ import {
 } from "@agentx/contracts";
 import { installNetworkTripwire } from "../../packages/testing/src/ports/no-network.js";
 import {
-  GOOGLE_TOKEN_HOSTS, MODEL_BLACKHOLE_ADDRESS, MODEL_HOST_BLOCK_GATE_NAME, AZURE_OPENAI_NOT_BLOCKED_SENTENCE, blockModeForRound, modelBlockEvidenceInput, sealedModelBlockEvidenceInput, modelBlockHosts, modelHostAddHostArgs, planModelHostBlock, resolveWithBlock, sealedModelHostPairs,
+  MODEL_BLACKHOLE_ADDRESS, MODEL_HOST_BLOCK_GATE_NAME, AZURE_OPENAI_NOT_BLOCKED_SENTENCE, blockModeForRound, modelBlockEvidenceInput, sealedModelBlockEvidenceInput, modelBlockHosts, modelHostAddHostArgs, planModelHostBlock, resolveWithBlock, sealedModelHostPairs,
 } from "../../packages/worker/src/model-helper-block.js";
 import { ModelHostRecorder } from "../../packages/worker/src/model-helper-recorder.js";
 import { MODEL_HELPER_ALIAS } from "../../packages/worker/src/run-network.js";
@@ -26,11 +26,11 @@ const HELPER_IP = "172.30.7.9";
 const addHostPairs = (args: readonly string[]): Array<[string, string]> => args.flatMap((arg, index) => (args[index - 1] === "--add-host" ? [arg.split(":") as [string, string]] : []));
 
 describe("the block list is generated from the catalog, never written by hand", () => {
-  it("holds every catalog host, every auth (token) host, every gateway host and every regional Vertex host", () => {
+  it("holds every model host, every gateway host and every regional Vertex host", () => {
     const hosts = modelBlockHosts(rows(), GATEWAYS);
-    for (const row of rows()) for (const host of [...row.hosts, ...row.authHosts]) expect(hosts, host).toContain(host);
+    for (const row of rows()) for (const host of row.hosts) expect(hosts, host).toContain(host);
     for (const host of GATEWAYS.map((entry) => entry.host)) expect(hosts).toContain(host);
-    for (const host of ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"]) expect(hosts).toContain(host);
+    for (const host of ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"]) expect(hosts).not.toContain(host);
     const vertex = rows().find((row) => row.id === "vertex");
     expect(vertex).toBeDefined();
     const regional = vertex!.hosts.filter((host) => /-aiplatform\.googleapis\.com$/u.test(host));
@@ -38,13 +38,23 @@ describe("the block list is generated from the catalog, never written by hand", 
     for (const host of regional) expect(hosts).toContain(host);
     for (const host of ["generativelanguage.googleapis.com", "api.openai.com", "api.anthropic.com", "openrouter.ai", "us-central1-aiplatform.googleapis.com"]) expect(hosts).toContain(host);
   });
-  it("is F0a's list plus the three Google token hosts, sorted and without duplicates", () => {
-    const hosts = modelBlockHosts(rows(), GATEWAYS);
-    expect(hosts).toEqual([...new Set([...modelHostBlockList(rows(), GATEWAYS), ...GOOGLE_TOKEN_HOSTS])].sort());
-    expect([...GOOGLE_TOKEN_HOSTS]).toEqual(["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"]);
-    // Even a catalog with no Google row blocks the token hosts: they are a model host's own, never reachable by name.
+  it("is F0a's model-host list, with no token host even without Google rows", () => {
+    expect(modelBlockHosts(rows(), GATEWAYS)).toEqual(modelHostBlockList(rows(), GATEWAYS));
     const noGoogle = rows().filter((row) => !["vertex", "gemini", "gemini-openai"].includes(row.id));
-    for (const host of GOOGLE_TOKEN_HOSTS) expect(modelBlockHosts(noGoogle, [])).toContain(host);
+    for (const host of ["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"]) expect(modelBlockHosts(noGoogle, [])).not.toContain(host);
+    expect(modelBlockHosts(noGoogle, [])).toContain("api.openai.com");
+  });
+  it("keeps token hosts out of helper, blackhole and sealed DNS mappings", () => {
+    for (const hasModelRow of [true, false]) {
+      const block = planModelHostBlock({ hasModelRow, helperIp: HELPER_IP, nonAiGate: true, wallsOffered: true });
+      for (const host of ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"]) {
+        expect(resolveWithBlock(block, host)).toBeUndefined();
+        expect(addHostPairs(modelHostAddHostArgs(block)).map(([name]) => name)).not.toContain(host);
+        expect(sealedModelHostPairs(block).map((pair) => pair.split("=")[0])).not.toContain(host);
+      }
+      expect(resolveWithBlock(block, "firebasevertexai.googleapis.com")).toBe(hasModelRow ? HELPER_IP : MODEL_BLACKHOLE_ADDRESS);
+      expect(resolveWithBlock(block, "api.openai.com")).toBe(hasModelRow ? HELPER_IP : MODEL_BLACKHOLE_ADDRESS);
+    }
   });
   it("a row added to the catalog without any block code gets a block entry in BOTH the --add-host list and the sealed DNS table", () => {
     const extra: ModelCatalogRow = { ...rows().find((row) => row.id === "openai")!, id: "newprovider", hosts: ["api.new-provider-example.com"], pathPrefix: "/v1" };
@@ -70,7 +80,7 @@ describe("no wildcard, and no host that is not a model host", () => {
   it("never blocks Cloud Storage or the shared Google API names", () => {
     const hosts = modelBlockHosts(rows(), GATEWAYS);
     for (const host of ["storage.googleapis.com", "www.googleapis.com", "googleapis.com", "oauth2.googleapis.com.evil.example", "compute.googleapis.com", "cloudresourcemanager.googleapis.com", "secretmanager.googleapis.com"]) expect(hosts).not.toContain(host);
-    expect(hosts.filter((host) => host.endsWith(".googleapis.com")).every((host) => /^(?:[a-z0-9-]+-)?aiplatform(?:\.mtls)?\.googleapis\.com$|^generativelanguage(?:\.mtls)?\.googleapis\.com$|^(?:iamcredentials|oauth2|sts)\.googleapis\.com$/u.test(host))).toBe(true);
+    expect(hosts.filter((host) => host.endsWith(".googleapis.com")).every((host) => /^(?:[a-z0-9-]+-)?aiplatform(?:\.mtls)?\.googleapis\.com$|^generativelanguage(?:\.mtls)?\.googleapis\.com$|^firebasevertexai\.googleapis\.com$|^aiplatform\.[a-z0-9-]+\.rep(?:\.mtls)?\.googleapis\.com$/u.test(host))).toBe(true);
     for (const arg of modelHostAddHostArgs(planModelHostBlock({ rows: rows(), gatewayRows: GATEWAYS, hasModelRow: true, helperIp: HELPER_IP }))) expect(arg).not.toContain("*");
   });
   it("refuses a wildcard, an address, a scheme and a path wherever a host could come from (a row, a gateway, the planner)", () => {
@@ -262,7 +272,7 @@ describe("the required test: no request reaches a real model host (offline)", ()
     const recorder = new ModelHostRecorder({ listenAddress: "127.0.0.1", allowedSources: ["127.0.0.1"], tlsPort: 0, httpPort: 0, readTimeoutMs: 500 });
     const ports = await recorder.start();
     const tripwire = installNetworkTripwire();
-    const sample = ["generativelanguage.googleapis.com", "api.openai.com", "us-central1-aiplatform.googleapis.com", "oauth2.googleapis.com", "api.anthropic.com", "llm.gateway-example.com", "openrouter.ai"];
+    const sample = ["generativelanguage.googleapis.com", "api.openai.com", "us-central1-aiplatform.googleapis.com", "firebasevertexai.googleapis.com", "api.anthropic.com", "llm.gateway-example.com", "openrouter.ai"];
     try {
       for (const host of sample) {
         // The name block: this is the address /etc/hosts gives the client. A name the block does not list would resolve to undefined here and the test would fail below.

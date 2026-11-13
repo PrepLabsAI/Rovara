@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   PullRequestResultSchema,
   PullRequestLifecycleResultSchema,
+  ROVARA_NEVER_COMMIT_EXCLUDE,
   AgentXError,
   WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE,
   agentXError,
@@ -20,6 +21,7 @@ import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME } from "./git.js";
 import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository, type CredentialedGitRunner } from "./git-auth.js";
 import { CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, candidateLayout, snapshotTree, withIsolatedGit } from "./isolated-git.js";
 import { assertLessonsFileUntouched } from "./lessons-file-guard.js";
+import { assertNoRovaraWorkingFiles, unstageRovaraWorkingFiles } from "./never-commit-guard.js";
 import { assertWorkspaceIsPlain, runIsolatedGit, withIsolatedRepository } from "./isolated-repository.js";
 import { stopWorkspaceProcesses } from "./workspace-processes.js";
 import { sweepWorkspaceContainers } from "./workspace-containers.js";
@@ -210,7 +212,7 @@ export async function publishWorkspace(
         if (error instanceof AgentXError) throw error;
         throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
       }
-      const workspaceTree = await temporaryIndexTree({ directory: git.directory });
+      const workspaceTree = await temporaryIndexTree({ directory: git.directory }, pinnedBase);
       const candidateTree = (await git(["rev-parse", `${candidateCommitSha}^{tree}`])).trim();
       const currentHead = (await git(["rev-parse", "HEAD"])).trim();
       const currentTree = (await git(["rev-parse", "HEAD^{tree}"])).trim();
@@ -250,7 +252,13 @@ export async function publishWorkspace(
 
   // Owner decision 50.4: a task never pushes a change to the team's lessons file. Checked on the commit about to go, before any readiness check or credential. A workflow publication's commits are the task's own on its pinned
   // base; any other publication is one commit on the latest base, so its first parent is the base.
-  await assertLessonsFileUntouched(git, commit, candidateTreeSha !== undefined && invocation.payload.publicationMode === "COMMITTED_HEAD" ? (invocation.payload.workflowBaseCommit ?? manifestRepository.resolvedCommit) : undefined);
+  const publicationBase = candidateTreeSha !== undefined && invocation.payload.publicationMode === "COMMITTED_HEAD" ? (invocation.payload.workflowBaseCommit ?? manifestRepository.resolvedCommit) : undefined;
+  await assertLessonsFileUntouched(git, commit, publicationBase);
+  // TE-B9 (O38): the same moment, the same commit: none of Rovara's own working files (`ROVARA_NEVER_COMMIT`) is in what is about to go, whatever the workspace layout. Fails closed, before any check, credential or push.
+  // A retry of a committed publication is HEAD as the task (or an earlier attempt) left it, possibly several commits on the preparation commit, so its first parent is not the base: check against the commit preparation
+  // checked out (L2). Every other path builds one commit on the base it names, whose first parent is that base.
+  const neverCommitBase = publicationBase ?? (candidateTreeSha === undefined && retryingCommittedPublication ? manifestRepository.resolvedCommit : undefined);
+  await assertNoRovaraWorkingFiles(git, commit, neverCommitBase);
 
   // A workflow publication runs no project command here: its checks already ran, on this same tree, before its reviews,
   // and the tree is checked again above. Only an ordinary publication runs the project's readiness checks.
@@ -357,7 +365,7 @@ export async function prepareCandidatePublicationCommit(input: {
     if (error instanceof AgentXError) throw error;
     throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
   }
-  const workspaceTree = await temporaryIndexTree({ directory: input.git.directory });
+  const workspaceTree = await temporaryIndexTree({ directory: input.git.directory }, input.preparationCommit);
   if (workspaceTree !== input.candidateTreeSha) throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
   if (input.retrying) {
     const head = (await input.git(["rev-parse", "HEAD"])).trim();
@@ -452,9 +460,9 @@ async function prepareRevertCommit(input: {
  * workspace's config (isolated-git.ts), the same way the verified candidate's tree is computed, so a filter the agent writes while this runs cannot execute and
  * the tree compared to the checked candidate is the one that capture computes. It takes only the directory: no environment built from a read of the workspace's config applies.
  */
-export async function temporaryIndexTree(git: { readonly directory: string }): Promise<string> {
+export async function temporaryIndexTree(git: { readonly directory: string }, base?: string): Promise<string> {
   try {
-    return await withIsolatedGit(git.directory, "write", async (isolated) => snapshotTree(isolated, await isolated.headCommit()));
+    return await withIsolatedGit(git.directory, "write", async (isolated) => snapshotTree(isolated, await isolated.headCommit(), base));
   } catch (error) {
     if (error instanceof AgentXError) throw error;
     throw agentXError("CONFIG_INVALID", sanitizeGitError(error instanceof Error ? error.message : "Git could not read the repository's files"));
@@ -477,7 +485,9 @@ async function prepareCleanPublicationCommit(input: {
     if (error instanceof AgentXError) throw error;
     throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
   }
-  await input.git(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC]);
+  await input.git(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...ROVARA_NEVER_COMMIT_EXCLUDE]);
+  // A working file the task force-added is in the index already (an exclude keeps `add` from staging new changes; it does not remove an entry): take it out, so the pull request holds none (TE-B9).
+  await unstageRovaraWorkingFiles(input.git, input.preparationCommit);
   const workspaceTree = (await input.git(["write-tree"])).trim();
   const workspaceCommit = (await input.git([
     "-c",
