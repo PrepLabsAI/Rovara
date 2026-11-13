@@ -4,11 +4,27 @@ import { matchPolicyGlob } from "../../packages/contracts/src/policy-glob.js";
 import { resolvePolicy } from "../../packages/contracts/src/policy.js";
 
 describe("policy glob", () => {
+  it("stops dead matches and charges only active states", () => {
+    const short = matchPolicyGlob("services/payments/**/*.ts", "p");
+    const long = matchPolicyGlob("services/payments/**/*.ts", "packages/" + "x".repeat(500));
+    expect(short.matched).toBe(false);
+    expect(long.matched).toBe(false);
+    expect(long.steps).toBe(short.steps);
+    expect(short.steps).toBeLessThanOrEqual(30);
+    expect(matchPolicyGlob("a".repeat(256), "a".repeat(256)).steps).toBeLessThan(1_100);
+  });
+  it("resolves 100 rules against 2000 realistic paths, including a last-path match", () => {
+    const changedPaths = Array.from({ length: 2000 }, (_, i) => `packages/some-module-${i}/src/component-file-${i}.ts`);
+    const pathRules = Array.from({ length: 100 }, (_, i) => ({ pattern: `services/payments-${i}/**/*.ts`, values: { real_check: "rovara_real_run" } }));
+    expect(resolvePolicy({ changedPaths, pathRules })).toMatchObject({ status: "resolved", issues: [], values: { real_check: { value: "their_ci_fix" } } });
+    changedPaths[1999] = "services/payments-99/x.ts";
+    expect(resolvePolicy({ changedPaths, pathRules })).toMatchObject({ status: "resolved", issues: [], values: { real_check: { value: "rovara_real_run", origin: "path_rule" } } });
+  });
   it("glob double star crosses segments and accepts zero directories", () => {
     for (const [pattern, path, matched] of [["src/*", "src/a/b", false], ["src/**", "src/a/b", true], ["**/a.ts", "a.ts", true], ["src/**/a.ts", "src/a.ts", true], ["src/**/a.ts", "src/x/y/a.ts", true], ["**/a.ts", "xa.ts", false], ["a?c", "abc", true], ["a?c", "a/c", false], ["a[bc]", "ab", false], ["a[bc]", "a[bc]", true], ["src/🐈?", "src/🐈x", true]] as const) expect(matchPolicyGlob(pattern, path).matched, `${pattern} ${path}`).toBe(matched);
   });
   it("pattern refusal and path refusal never turn hostile input into a match", () => {
-    for (const pattern of ["*".repeat(1_000_000), "x".repeat(1024 * 1024), "**/".repeat(1000), "a\0*", "\u202e**", "a\u200d*", "a\ufe0f*", "../**", "/**", "C:/**", "a/../**", "a\\**"]) {
+    for (const pattern of ["*".repeat(1_000_000), "x".repeat(1024 * 1024), "**/".repeat(1000), "a\0*", "\u202e**", "a\u200d*", "a\ufe0f*", "../**", "/**", "services/**/", "C:/**", "a/../**", "a\\**"]) {
       expect(matchPolicyGlob(pattern, "a/b")).toMatchObject({ matched: false, reason: "invalid_pattern" });
       expect(resolvePolicy({ branch: "a/b", branchRules: [{ pattern, values: { real_check: "rovara_real_run" } }] }).values["real_check"]?.value).toBe("their_ci_fix");
     }

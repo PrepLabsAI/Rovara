@@ -26,7 +26,7 @@ export const policySourceChecks: readonly ContractCheck<PolicySourceWorld>[] = [
   {
     name: "task raises are only upward and only on raisable fields",
     async run({ source, scope }) {
-      const lower = await source.resolve(scope, { taskRaises: { real_check: "sandbox_only", ci_fix_rounds: 100 } });
+      const lower = await source.resolve(scope, { taskRaises: { real_check: "sandbox_only", ci_fix_rounds: 0 } });
       expect(lower.values["real_check"]?.value).toBe("their_ci_fix");
       expect(lower.values["ci_fix_rounds"]?.value).toBe(3);
       const raised = await source.resolve(scope, { taskRaises: { real_check: "rovara_real_run" } });

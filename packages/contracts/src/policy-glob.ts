@@ -15,9 +15,9 @@ export interface PolicyGlobResult { matched: boolean; steps: number; reason?: "i
 /**
  * A forward-only NFA: a star retains its state; epsilon edges only move forward.
  * A double star followed by a slash has an entry and tail, so it accepts zero directories but never half a directory.
- * At most 256 states and two visits/state/character: steps <= 512*(pattern bytes + path bytes + 1).
+ * At most 257 states and two visits/state/character: steps <= 1024*(pattern units + path units + 1).
  * Thus work is linear in input bytes under the fixed pattern cap, even for alternating stars.
- * `steps` counts compilation, closure and transitions (including inactive-state visits), not just matches.
+ * `steps` counts compilation, consumed characters, and active closure/transition visits only.
  */
 export function matchPolicyGlob(pattern: unknown, path: unknown): PolicyGlobResult {
   if (!validPolicyPath(pattern, POLICY_PATTERN_MAX)) return { matched: false, steps: 0, reason: "invalid_pattern" };
@@ -36,28 +36,31 @@ export function matchPolicyGlob(pattern: unknown, path: unknown): PolicyGlobResu
     else if (text === "?") tokens.push({ kind: "one" });
     else tokens.push({ kind: "literal", text });
   }
-  const close = (states: Uint8Array): void => {
-    for (let i = 0; i < tokens.length; i += 1) {
+  const close = (states: Set<number>): void => {
+    // Set iteration visits newly added forward epsilon states once, without scanning dead states.
+    for (const i of states) {
       steps += 1;
-      if (states[i] === 0) continue;
+      if (i === tokens.length) continue;
       const kind = tokens[i]!.kind;
-      if (kind === "star" || kind === "all") states[i + 1] = 1;
-      if (kind === "dirs") { states[i + 1] = 1; states[i + 2] = 1; }
+      if (kind === "star" || kind === "all") states.add(i + 1);
+      if (kind === "dirs") { states.add(i + 1); states.add(i + 2); }
     }
   };
-  let states = new Uint8Array(tokens.length + 1); states[0] = 1; close(states);
+  let states = new Set([0]); close(states);
   // Limits count UTF-16 units; matching counts Unicode characters. Unpaired surrogates are refused.
   for (const character of path) {
-    const next = new Uint8Array(tokens.length + 1);
-    for (let i = 0; i < tokens.length; i += 1) {
+    steps += 1;
+    const next = new Set<number>();
+    for (const i of states) {
       steps += 1;
-      if (states[i] === 0) continue;
+      if (i === tokens.length) continue;
       const token = tokens[i]!;
-      if (token.kind === "literal" && token.text === character || token.kind === "one" && character !== "/") next[i + 1] = 1;
-      if (token.kind === "star" && character !== "/" || token.kind === "all") next[i] = 1;
-      if (token.kind === "dir_tail") { next[i] = 1; if (character === "/") next[i + 1] = 1; }
+      if (token.kind === "literal" && token.text === character || token.kind === "one" && character !== "/") next.add(i + 1);
+      if (token.kind === "star" && character !== "/" || token.kind === "all") next.add(i);
+      if (token.kind === "dir_tail") { next.add(i); if (character === "/") next.add(i + 1); }
     }
+    if (next.size === 0) return { matched: false, steps };
     close(next); states = next;
   }
-  return { matched: states[tokens.length] === 1, steps };
+  return { matched: states.has(tokens.length), steps };
 }

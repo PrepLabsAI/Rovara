@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { POLICY_FIELDS, POLICY_ORIGINS, resolvePolicy, type PolicyValues } from "../../packages/contracts/src/policy.js";
+import { POLICY_FIELDS, POLICY_ORIGINS, PolicyRowsSchema, resolvePolicy, type PolicyValues } from "../../packages/contracts/src/policy.js";
 import { POLICY_PRESETS } from "../../packages/contracts/src/presets.js";
 import { CI_FIX_ROUNDS_MAX } from "../../packages/contracts/src/rovara-code.js";
 import { TEST_ENV_ROUND_BUDGET_MIN } from "../../packages/contracts/src/test-environment.js";
@@ -9,6 +9,78 @@ import { inertEvidenceText } from "../../packages/contracts/src/evidence-inert.j
 const value = (input: unknown, field = "real_check") => resolvePolicy(input).values[field];
 
 describe("policy resolver", () => {
+  it("ignores budget raises without a configured numeric ceiling", () => {
+    for (const id of ["model_budget_usd", "machine_budget_minutes"]) {
+      for (const companyCeilings of [undefined, {}, { [id]: null }]) {
+        const got = resolvePolicy({ project: { [id]: 2 }, taskRaises: { [id]: 1e300 }, companyCeilings });
+        expect(got.status).toBe("resolved");
+        expect(got.values[id]).toEqual({ value: 2, origin: "changed_here" });
+        expect(got.issues).toEqual(["no_ceiling"]);
+      }
+    }
+  });
+  it("company preset minimums expand and cannot be weakened by explicit locks", () => {
+    const got = resolvePolicy({ companyLocks: { preset_level: "careful", real_check: "sandbox_only", extra_review: false, mutation_spot_check: "off", round_time_minutes: 60 }, project: { preset_level: "lightweight", extra_review: false, round_time_minutes: 30 } });
+    expect(got.status).toBe("resolved");
+    for (const [id, expected] of Object.entries({ preset_level: "careful", real_check: "rovara_real_run", extra_review: true, mutation_spot_check: "on", prompt_side_by_side: "on", round_time_minutes: 60 })) {
+      expect(got.values[id], id).toEqual({ value: expected, origin: "company_lock", clampedBy: "company_lock" });
+    }
+  });
+  it("Balanced company minimum beats lower project, branch, path and task settings", () => {
+    const got = resolvePolicy({ companyLocks: { preset_level: "balanced" }, project: { preset_level: "lightweight", extra_review: false, after_merge_revert: "off", ci_fix_rounds: 0 },
+      branch: "release/a", changedPaths: ["pay/a"], branchRules: [{ pattern: "**", values: { preset_level: "lightweight" } }],
+      pathRules: [{ pattern: "**", values: { real_check: "sandbox_only" } }], taskRaises: { real_check: "their_ci_watch", extra_review: false } });
+    expect(got.status).toBe("resolved");
+    for (const [id, expected] of Object.entries({ preset_level: "balanced", real_check: "their_ci_fix", extra_review: true, after_merge_revert: "offer_revert", ci_fix_rounds: 3 })) {
+      expect(got.values[id]?.value, id).toBe(expected);
+    }
+    expect(got.values["real_check"]).toEqual({ value: "their_ci_fix", origin: "company_lock", clampedBy: "company_lock" });
+  });
+  it("preserves preset origin for expanded fields and source origin for explicit fields", () => {
+    expect(resolvePolicy({ project: { preset_level: "careful", extra_review: false } }).values).toMatchObject({
+      preset_level: { value: "careful", origin: "changed_here" }, real_check: { value: "rovara_real_run", origin: "preset" }, extra_review: { value: false, origin: "changed_here" },
+    });
+    for (const layer of ["branchRules", "pathRules"]) {
+      const got = resolvePolicy({ branch: "release/a", changedPaths: ["pay/a"], [layer]: [{ pattern: "**", values: { preset_level: "careful", extra_review: true } }] });
+      expect(got.values["real_check"]).toEqual({ value: "rovara_real_run", origin: "preset", rule: inertEvidenceText("**", 256) });
+      expect(got.values["extra_review"]?.origin).toBe(layer === "branchRules" ? "branch_rule" : "path_rule");
+    }
+  });
+  it("refuses numeric settings outside today's contracts at parse time", () => {
+    for (const [id, invalid] of [["ci_fix_rounds", [-1, 0.5, 4, 1e6]], ["round_time_minutes", [0.5, 29, 30.5, 121, 5000]]] as const) {
+      for (const number of invalid) {
+        for (const layer of ["project", "measured", "companyLocks", "companyCeilings", "taskRaises"]) {
+          const input = { [layer]: { [id]: number } };
+          expect(resolvePolicy(input)).toMatchObject({ status: "refused", values: {}, issues: ["invalid_input"] });
+          if (layer !== "taskRaises") expect(PolicyRowsSchema.safeParse(input).success).toBe(false);
+        }
+      }
+    }
+    for (const [id, valid] of [["ci_fix_rounds", [0, 3]], ["round_time_minutes", [30, 120]]] as const) {
+      for (const number of valid) expect(value({ project: { [id]: number } }, id)?.value).toBe(number);
+    }
+  });
+  it("treats fewer automatic CI repair rounds as stricter between rules", () => {
+    const got = resolvePolicy({ branch: "main", branchRules: [{ pattern: "**", values: { ci_fix_rounds: 1 } }, { pattern: "main", values: { ci_fix_rounds: 2 } }] });
+    expect(got.values["ci_fix_rounds"]?.value).toBe(1);
+  });
+  it("customer rows cannot set the operator emergency switch", () => {
+    expect(PolicyRowsSchema.safeParse({ installOff: true }).success).toBe(false);
+    expect(resolvePolicy({ installOff: true })).toMatchObject({ status: "refused", values: {}, issues: ["invalid_input"] });
+  });
+  it("validates the separate operator parameter without throwing or accepting customer fields", () => {
+    for (const operator of [null, { installOff: "true" }, { project: {} }, JSON.parse('{"__proto__":{}}') as unknown]) {
+      expect(resolvePolicy({}, operator)).toEqual({ status: "refused", values: {}, issues: ["invalid_input"] });
+    }
+    expect(resolvePolicy({}, { installOff: false }).status).toBe("resolved");
+  });
+  it("retains the review probes for numeric floors, zero ceilings and absent branch context", () => {
+    expect(value({ companyLocks: { model_budget_usd: 10 }, project: { model_budget_usd: 5000 } }, "model_budget_usd")?.value).toBe(5000);
+    expect(value({ companyLocks: { model_budget_usd: 10 }, pathRules: [{ pattern: "**", values: { model_budget_usd: 1 } }], changedPaths: ["a"] }, "model_budget_usd")?.value).toBe(10);
+    expect(value({ companyCeilings: { model_budget_usd: -0 }, taskRaises: { model_budget_usd: 5 }, project: { model_budget_usd: 1 } }, "model_budget_usd")?.value).toBe(-0);
+    expect(value({ companyCeilings: { machine_budget_minutes: 0 }, taskRaises: { machine_budget_minutes: 5 } }, "machine_budget_minutes")?.value).toBe(0);
+    expect(value({ branchOverrides: [{ branch: "main", values: { extra_review: true } }] }, "extra_review")?.value).toBe(false);
+  });
   it("absent rows preserve every today's value without applying Balanced", () => {
     // rovara-code.ts:40; test-environment.ts:42; second-review.ts:72–74;
     // broker/core/ci-fix/ci-fix.ts:44–49; broker/core/cost/limits.ts:6,16–20.
@@ -33,7 +105,7 @@ describe("policy resolver", () => {
     expect(value({ taskRaises: { real_check: "rovara_real_run" } })?.origin).toBe("task_raise");
     expect(value({ companyLocks: { real_check: "rovara_real_run" } })?.origin).toBe("company_lock");
     expect(value({ project: { model_budget_usd: 9 }, companyCeilings: { model_budget_usd: 5 } }, "model_budget_usd")?.origin).toBe("company_ceiling");
-    expect(value({ installOff: true })?.origin).toBe("install_off");
+    expect(resolvePolicy({}, { installOff: true }).values["real_check"]?.origin).toBe("install_off");
     expect(new Set(POLICY_ORIGINS).size).toBe(12);
   });
 
@@ -48,8 +120,8 @@ describe("policy resolver", () => {
 
   it("floor clamps every field, including numeric budgets", () => {
     for (const field of POLICY_FIELDS) {
-      const high = field.order?.at(-1) ?? (field.kind === "boolean" ? true : 80);
-      const low = field.order?.[0] ?? (field.kind === "boolean" ? false : 1);
+      const high = field.order?.at(-1) ?? (field.kind === "boolean" ? true : field.id === "ci_fix_rounds" ? 3 : 80);
+      const low = field.order?.[0] ?? (field.kind === "boolean" ? false : field.id === "round_time_minutes" ? 30 : 0);
       const got = value({ project: { [field.id]: low }, companyLocks: { [field.id]: high } }, field.id);
       expect(got, field.id).toMatchObject({ value: high, origin: "company_lock", clampedBy: "company_lock" });
     }
@@ -69,14 +141,20 @@ describe("policy resolver", () => {
   it("raise direction is upward only; absent budget cannot be raised to infinity", () => {
     expect(value({ taskRaises: { real_check: "sandbox_only" } })?.value).toBe("their_ci_fix");
     expect(resolvePolicy({ taskRaises: { real_check: "sandbox_only" } }).issues).toContain("not_upward");
-    expect(value({ project: { model_budget_usd: 5 }, taskRaises: { model_budget_usd: 2 } }, "model_budget_usd")?.value).toBe(5);
-    expect(value({ project: { model_budget_usd: 5 }, taskRaises: { model_budget_usd: null } }, "model_budget_usd")?.value).toBe(5);
-    expect(value({ taskRaises: { model_budget_usd: 5 } }, "model_budget_usd")?.value).toBeNull();
+    expect(value({ companyCeilings: { model_budget_usd: 10 }, project: { model_budget_usd: 5 }, taskRaises: { model_budget_usd: 2 } }, "model_budget_usd")?.value).toBe(5);
+    expect(value({ companyCeilings: { model_budget_usd: 10 }, project: { model_budget_usd: 5 }, taskRaises: { model_budget_usd: null } }, "model_budget_usd")?.value).toBe(5);
+    expect(value({ companyCeilings: { model_budget_usd: null }, taskRaises: { model_budget_usd: 5 } }, "model_budget_usd")?.value).toBeNull();
+  });
+
+  it("absent budget is not a task raise even when a ceiling exists", () => {
+    const got = resolvePolicy({ taskRaises: { model_budget_usd: 5 }, companyCeilings: { model_budget_usd: 10 } });
+    expect(got.values["model_budget_usd"]).toEqual({ value: 10, origin: "company_ceiling", clampedBy: "company_ceiling" });
+    expect(got.issues).toContain("not_upward");
   });
 
   it("raisable check refuses every non-raisable field", () => {
     for (const field of POLICY_FIELDS.filter((row) => !row.raisable)) {
-      const next = field.order?.at(-1) ?? 99;
+      const next = field.order?.at(-1) ?? (field.id === "ci_fix_rounds" ? 3 : 99);
       const got = resolvePolicy({ taskRaises: { [field.id]: next } });
       expect(got.values[field.id]?.value).toBe(field.today);
       expect(got.issues).toContain("not_raisable");
@@ -93,12 +171,9 @@ describe("policy resolver", () => {
   });
 
   it("install off is last and disables every action even under locks", () => {
-    const got = resolvePolicy({ preset: "careful", companyLocks: { real_check: "rovara_real_run", extra_review: true }, taskRaises: { real_check: "rovara_real_run" }, installOff: true });
+    const got = resolvePolicy({ preset: "careful", companyLocks: { real_check: "rovara_real_run", extra_review: true }, taskRaises: { real_check: "rovara_real_run" } }, { installOff: true });
     expect(got.status).toBe("disabled");
-    for (const row of Object.values(got.values)) expect(row.origin).toBe("install_off");
-    expect(got.values["real_check"]?.value).toBe("sandbox_only");
-    expect(got.values["extra_review"]?.value).toBe(false);
-    expect(got.values["model_budget_usd"]?.value).toBe(0);
+    for (const row of Object.values(got.values)) expect(row).toEqual({ value: null, origin: "install_off" });
   });
 
   it("presets are deeply frozen, ordered data; Careful only offers reverts", () => {
