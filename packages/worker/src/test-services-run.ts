@@ -616,6 +616,11 @@ function workingSandboxAttachment(docker: DockerCli, sandboxName: string): Sandb
   };
 }
 
+/** The `--env K=V` arguments of a working-sandbox exec: the command's own variables, without a name the run owns (the env file sets it) and without a value that is `undefined` (a variable to remove, never the text "undefined"). */
+export function execEnvArgs(env: Readonly<Record<string, string>> | undefined, owned: ReadonlySet<string>): string[] {
+  return Object.entries(env ?? {}).filter(([name, value]) => !owned.has(name) && value !== undefined).flatMap(([name, value]) => ["--env", `${name}=${value}`]);
+}
+
 /** `docker exec [--env-file F] [--env K=V ...] <sandbox> <command>`: the run's variables come from the env file, and a name the run sets is taken out of the command's own `env` (Docker lets `--env` win over `--env-file`). */
 function workingExec(docker: DockerCli, files: HelperFiles, sandboxName: string, environment: ServiceEnvironment, active: () => boolean): (inner: ContainerExec) => ContainerExec {
   const owned = new Set(environment.entries.map(([name]) => name));
@@ -624,9 +629,9 @@ function workingExec(docker: DockerCli, files: HelperFiles, sandboxName: string,
   return (inner) => async (command, options) => {
     if (!active()) return inner(command, options);
     counter += 1;
-    const own = Object.entries(options.env ?? {}).filter(([name]) => !owned.has(name));
+    const own = execEnvArgs(options.env, owned);
     return withServiceEnvFile(files, `wrk-${prefix}-${String(counter)}`, environment, (envFileArgs) => docker.run([
-      "exec", ...envFileArgs, ...own.flatMap(([name, value]) => ["--env", `${name}=${value}`]), sandboxName, ...command,
+      "exec", ...envFileArgs, ...own, sandboxName, ...command,
     ], {
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
