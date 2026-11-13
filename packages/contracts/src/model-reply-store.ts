@@ -222,7 +222,7 @@ export interface ReplySetQuery {
 /** Why a reply sent to `putIndependentOverlay` was not added. */
 export const REPLY_SKIP_REASONS = ["already_in_overlay"] as const;
 export type ReplySkipReason = (typeof REPLY_SKIP_REASONS)[number];
-export type ImportOrigin = Exclude<BeforeTaskOrigin, "real_recording_capped">;
+export type ImportOrigin = Extract<BeforeTaskOrigin, "customer_written" | "setup_agent_from_fakes" | "prompt_and_expected_shape">;
 export type JoinStatus = "joined" | "already_joined";
 
 /**
