@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { evidencePackKey, loadEvidencePack } from "../../packages/broker/src/core/proof/evidence-keep.js";
-import { EvidencePackReadSchema, EvidencePackSchema, TestProofSchema, TestProofWriteSchema, type EvidencePack } from "../../packages/contracts/src/index.js";
+import { DeveloperTaskViewSchema, EvidencePackReadSchema, EvidenceViewReadSchema, EvidenceViewSchema, EvidencePackSchema, TestProofSchema, TestProofWriteSchema, type EvidencePack } from "../../packages/contracts/src/index.js";
 
 const DIGEST = "c".repeat(64);
 const pack = (testsPart: Record<string, unknown> = {}): unknown => ({
@@ -89,5 +89,22 @@ describe("the broker's loader of a kept pack", () => {
     const read = await loadEvidencePack(blobs, task, DIGEST);
     expect(read?.checks[0]?.tests).toMatchObject({ total: 4, absentOnNew: ["a::t"], absentOnNewCount: 1 });
     expect(read?.checks[0]?.tests).not.toHaveProperty("newerPart");
+  });
+});
+
+describe("the evidence view of the task page and the CLI (TaskView.evidence)", () => {
+  const view = (testsPart: Record<string, unknown> = {}): unknown => pack(testsPart);
+  it("is read tolerantly: a key a newer writer added to the tests part is dropped, and the optional parts round-trip", () => {
+    expect(EvidenceViewSchema.safeParse(view({ somethingNewer: 1 })).success).toBe(false);
+    const read = EvidenceViewReadSchema.parse(view({ somethingNewer: 1, skippedBefore: 0, skippedAfter: 1, absentOnNew: ["a::t"], absentOnNewCount: 2 }));
+    expect(testsOf(read)).toMatchObject({ skippedBefore: 0, skippedAfter: 1, absentOnNew: ["a::t"], absentOnNewCount: 2 });
+    expect(testsOf(read)).not.toHaveProperty("somethingNewer");
+    expect(EvidenceViewReadSchema.parse(JSON.parse(JSON.stringify(read)))).toEqual(read);
+  });
+  it("the task view's evidence field reads it: an old client does not fail the whole task view on the new part", () => {
+    const field = DeveloperTaskViewSchema.shape.evidence;
+    expect(field.safeParse(view({ absentOnNew: ["a::t"], absentOnNewCount: 1, somethingNewer: 1 })).success).toBe(true);
+    expect(field.safeParse(undefined).success).toBe(true);
+    expect(field.safeParse({ ...(view() as object), extra: 1 }).success).toBe(false);
   });
 });

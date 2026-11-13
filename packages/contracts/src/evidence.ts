@@ -476,6 +476,8 @@ export type EvidencePack = z.infer<typeof EvidencePackSchema>;
 
 /** What the task page reads (version 2 views, full reads only): the pack with each artifact as a link, or as expired or withheld. */
 export const EvidenceViewSchema = evidencePackShape(ArtifactLinkSchema);
+/** The view as a READER parses it (the task view that the page and the CLI read): the `tests` part of a check ignores a key it does not know and accepts TE-B3's two optional parts. The broker keeps `EvidenceViewSchema` to build it. */
+export const EvidenceViewReadSchema = evidencePackShape(ArtifactLinkSchema, true);
 export type EvidenceView = z.infer<typeof EvidenceViewSchema>;
 export const EvidenceViewReaderSchema = forwardReader(EvidenceViewSchema);
 
