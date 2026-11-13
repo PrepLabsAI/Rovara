@@ -7,8 +7,7 @@ import { AMBIGUOUS_REPOSITORY_HOST_MESSAGE, NO_HOST_MESSAGE, assertRepositoryHos
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { githubCodeHostPlugin } from "../../packages/broker/src/plugins/code-host/github/plugin.js";
 import { registryRepositoryResolver } from "../../packages/broker/src/core/merge/resolver.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
 import { GITHUB_REPO_URL, GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
 
 const fakeModel = () => new FakeHostModel({ url: "https://git.examplehost.test/acme/app", id: "1", fullName: "acme/app" });

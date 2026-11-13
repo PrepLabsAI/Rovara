@@ -493,8 +493,7 @@ describe("the press", () => {
 });
 
 import type { CodeHost } from "../../packages/contracts/src/index.js";
-import type { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
+import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
 /** A host that is ready by every read and then says no to the merge itself (branch protection the reads cannot see). */
 function refusingMerge(model: FakeHostModel): CodeHost {
   const fake = new FakeCodeHost(model);

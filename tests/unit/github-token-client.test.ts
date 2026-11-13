@@ -7,7 +7,7 @@ import { HostRateLimitError, SecretValue, hostRateLimitRetryAt } from "@agentx/c
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { GITHUB_CODE_HOST_PROVIDER_METHODS, type GitHubCodeHostProvider } from "../../packages/broker/src/plugins/code-host/github/provider.js";
 import { PERSONAL_CREDENTIAL_LIFETIME_MS, PERSONAL_REPLY_MARKER, boundToCompany, forwardGuarded, foldRequest, githubTokenClient, githubTokenReach, tokenExpirationOf } from "../../packages/broker/src/plugins/code-host/github/token-client.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { FakeHostModel } from "@agentx/broker/fakes";
 import { codeHostChecks, type CodeHostWorld } from "../support/ports/code-host-conformance.js";
 import { runContract } from "../support/ports/plugin-contract-kit.js";
 import { githubClientChecks, runGitHubClientConformance, RecordingNetwork, TenantBinding, operationsForProbe, type GitHubClientWorld } from "../support/ports/github-client-conformance.js";

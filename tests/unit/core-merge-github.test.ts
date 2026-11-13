@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
+import { FakeCodeHost } from "@agentx/broker/fakes";
 import { NO_HOST_MESSAGE } from "../../packages/broker/src/plugins/routing.js";
 import { pressMerge, registryRepositoryResolver, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
 import { GitHubFixtureApi } from "../support/ports/github-fixture-api.js";

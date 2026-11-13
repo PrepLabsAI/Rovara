@@ -3,8 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { MERGE_NOT_READY_MESSAGES as M, type Approvers, type CodeHost } from "../../packages/contracts/src/index.js";
 import { createLocalOwnerApprovers, localOwnerPrincipal, CODE_HOST_COMMENT_METHOD } from "../../packages/broker/src/ports/policy-defaults.js";
-import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
-import type { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
 import { ORG, TASK_ID, githubShapedHost, mergeWorld, wrapStore, OWNER_SESSION, type MergeWorld } from "../support/merge-world.js";
 import { commentReads, freshComment } from "../support/comment-fakes.js";

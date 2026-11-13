@@ -11,7 +11,7 @@ import type {
   GitHubPullRequestUpdate, GitHubRepositoryCredential, GitHubRepositoryIdentity, MergePullRequestResult, PullRequestCheck, PullRequestStatus, WorkingBranchPage,
 } from "../../../packages/broker/src/plugins/code-host/github/provider.js";
 import type { CommitFilesRequest } from "../../../packages/broker/src/plugins/code-host/github/commit-files.js";
-import type { FakeChangeRequest, FakeHostModel } from "../../../packages/broker/src/plugins/fake/model.js";
+import type { FakeChangeRequest, FakeHostModel } from "@agentx/broker/fakes";
 
 export const GITHUB_OWNER = "acme";
 export const GITHUB_NAME = "app";

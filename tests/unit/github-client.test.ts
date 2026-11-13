@@ -10,7 +10,7 @@ import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/gith
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
 import { githubAppClient } from "../../packages/broker/src/plugins/code-host/github/app-client.js";
 import { missingGitHubProviderMethods } from "../../packages/broker/src/plugins/code-host/github/provider.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { FakeHostModel } from "@agentx/broker/fakes";
 import { checkRunnerChecks, type CheckRunnerWorld } from "../support/ports/check-runner-conformance.js";
 import { codeHostChecks, type CodeHostWorld } from "../support/ports/code-host-conformance.js";
 import { runContract } from "../support/ports/plugin-contract-kit.js";

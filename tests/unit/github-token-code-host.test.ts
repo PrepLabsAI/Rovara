@@ -9,7 +9,7 @@ import { SecretValue, type ModelKeyStore, type SecretStore } from "@agentx/contr
 import { createFileModelKeyStore, createLocalSecretStore } from "../../packages/broker/src/ports/index.js";
 import { parseIssueUrl } from "../../packages/broker/src/plugins/code-host/github/client.js";
 import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";
-import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
+import { FakeHostModel } from "@agentx/broker/fakes";
 import { codeHostChecks, type CodeHostWorld } from "../support/ports/code-host-conformance.js";
 import { runContract } from "../support/ports/plugin-contract-kit.js";
 import { GITHUB_OTHER_URL, GITHUB_REPO_URL, GITHUB_ORG_SCOPE, GitHubFixtureApi } from "../support/ports/github-fixture-api.js";
