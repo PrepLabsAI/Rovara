@@ -466,7 +466,7 @@ describe("production release pipeline", () => {
       TimeoutInMinutes: 60,
       Environment: Match.objectLike({
         Type: "ARM_CONTAINER",
-        ComputeType: "BUILD_GENERAL1_LARGE",
+        ComputeType: "BUILD_GENERAL1_XLARGE",
         Image: "aws/codebuild/amazonlinux-aarch64-standard:3.0",
         PrivilegedMode: true,
       }),
