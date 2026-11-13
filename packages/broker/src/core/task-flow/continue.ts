@@ -25,7 +25,7 @@ export const continueRecordKey = (taskId: string, requestId: string) => ({ pk: `
 
 export async function continueTask(deps: TaskFlowDeps, options: TaskActionsOptions, caller: TaskCaller, taskId: string, value: unknown): Promise<TaskView> {
   const request = parseBody(ContinueDeveloperTaskRequestSchema, value);
-  const { task } = await loadTaskAsOwner(deps, caller, taskId);
+  const { task, acting } = await loadTaskAsOwner(deps, caller, taskId);
   const payloadHash = hashJson({ instructions: request.instructions });
   // A repeat answers what the first one did and writes nothing; the same id for other words is refused. Asked before the task's state, so a repeat of a continue that was accepted still answers once its round ended.
   const earlier = await deps.store.get(continueRecordKey(task.taskId, request.requestId));
@@ -48,6 +48,7 @@ export async function continueTask(deps: TaskFlowDeps, options: TaskActionsOptio
   const operationId = newId(deps);
   const now = iso(deps);
   const extra: TransactItem[] = [
+    ...(acting.items ?? []),
     { kind: "put", item: { ...continueRecordKey(task.taskId, request.requestId), entityType: "TASK_CONTINUE", taskId: task.taskId, requestId: request.requestId, payloadHash, operationId, at: now }, condition: when.absent() },
     ...stageAudit(deps, { eventId: `task.continued:${task.taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.continued", subject: { type: "task", id: task.taskId }, details: { project: task.project } }),
   ];

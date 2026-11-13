@@ -7,7 +7,9 @@
 //   5. the round, its idempotency record and its audit line commit together.
 import { describe, expect, it } from "vitest";
 import type { Admission } from "@agentx/contracts";
-import { change, queryAll } from "@agentx/contracts";
+import { change, queryAll, when } from "@agentx/contracts";
+import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
+import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
@@ -169,6 +171,19 @@ describe("continue", () => {
     racingWorld = await seedPlain({ harness: { admission: racing("taken") } });
     await expect(createTaskActions(racingWorld.h.deps).continue(racingWorld.caller, TASK_ID, ask())).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(await secondRound(racingWorld.h)).toHaveLength(0);
+  });
+
+  it("commits the steps the access seam asks for with the round, and a fence that no longer holds refuses it with nothing written", async () => {
+    const fence = (): TaskFlowDeps["access"] => ({ ...createOwnerTaskAccess(), ownerActing: async (_principal, task) => ({ actorId: task.ownerKey, items: [{ kind: "put", item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" }, condition: when.absent() }] }) });
+    const holds = await seedPlain({ access: fence() });
+    await createTaskActions(holds.h.deps).continue(holds.caller, TASK_ID, ask());
+    expect(await holds.h.store.get({ pk: "ACCESS_FENCE#payments", sk: "META" })).toBeDefined();
+    expect(await secondRound(holds.h)).toHaveLength(1);
+    const broken = await seedPlain({ access: fence() });
+    await broken.h.store.put({ item: { pk: "ACCESS_FENCE#payments", sk: "META", entityType: "ACCESS_FENCE" } });
+    await expect(createTaskActions(broken.h.deps).continue(broken.caller, TASK_ID, ask())).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
+    expect(await secondRound(broken.h)).toHaveLength(0);
+    expect(await broken.h.store.get(continueRecordKey(TASK_ID, REQUEST_A))).toBeUndefined();
   });
 
   it("does not start a second round while the first is still running, whatever the request id", async () => {
