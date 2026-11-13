@@ -151,7 +151,14 @@ describe("packages are reached only through named entries", () => {
 
   it("core keeps the entries Cloud imports today", () => {
     const entries = entriesByPackage.get("@rovara-code/core")!;
-    for (const name of ["", "/ports", "/channel", "/task-flow", "/cost", "/lessons/approval-rules"]) expect(entries.has(`@rovara-code/core${name}`), name).toBe(true);
+    for (const name of ["", "/ports", "/channel", "/task-flow", "/cost", "/lessons/audit-sink", "/lessons/types"]) expect(entries.has(`@rovara-code/core${name}`), name).toBe(true);
+  });
+
+  it("the lessons package has the entries Cloud imports, and core's old lessons paths are only the two Cloud used (compatibility for one release)", () => {
+    const lessons = entriesByPackage.get("@rovara-code/lessons")!;
+    expect([...lessons.keys()].sort()).toEqual(["@rovara-code/lessons", "@rovara-code/lessons/audit-sink", "@rovara-code/lessons/types"]);
+    const oldPaths = [...entriesByPackage.get("@rovara-code/core")!.keys()].filter((name) => name.startsWith("@rovara-code/core/lessons/")).sort();
+    expect(oldPaths).toEqual(["@rovara-code/core/lessons/audit-sink", "@rovara-code/core/lessons/types"]);
   });
 
   it("stamping puts one version on a package and on its dependencies on other packages, and leaves the rest", () => {

@@ -1,9 +1,9 @@
 // Lessons outcomes lane: the correction judge that rates a correction against a lesson loaded into the task. It rides the company's own learning model path (customer pays): the same quote, spend look, Public per-task
 // cap, pause codes and failure counts as the curator's judge. A failure is an unjudged correction (no helpful mark), never a thrown-away task.
 import { describe, expect, it } from "vitest";
-import { modelCorrectionJudge } from "../../../packages/core/src/lessons/judge-model.js";
-import { LearningRefusal, MODEL_FAILURES_BEFORE_PAUSE, newTaskFailureTally, type CurrentPause, type FailureKind, type LessonsPauseStore } from "../../../packages/core/src/lessons/pause.js";
-import type { PipelineModel } from "../../../packages/core/src/lessons/ports.js";
+import { modelCorrectionJudge } from "../../../packages/lessons/src/judge-model.js";
+import { LearningRefusal, MODEL_FAILURES_BEFORE_PAUSE, newTaskFailureTally, type CurrentPause, type FailureKind, type LessonsPauseStore } from "../../../packages/lessons/src/pause.js";
+import type { PipelineModel } from "../../../packages/lessons/src/ports.js";
 import { ScriptedModel, Spend, WS, PROJECT, lessonRecord } from "./lesson-helpers.js";
 
 class MemoryPause implements LessonsPauseStore {

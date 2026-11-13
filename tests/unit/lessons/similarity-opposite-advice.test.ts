@@ -2,14 +2,14 @@
 // names no rejected lesson stays in front of people when it is settled again; the judge sees five live lessons PLUS two reserved rejected ones; the embedder pause starts only when the function was really
 // given time, the SDK load is outside the load budget and the vector read has its own timeout; the prefix-antonym rule refuses a merge but never lets a draft evade a rejected lesson.
 import { beforeEach, describe, expect, it } from "vitest";
-import { hasUnclassifiedNegation, relate } from "../../../packages/core/src/lessons/copy-match.js";
-import { curateDraft, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
-import { approveLesson, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { earnedAttention, processDraft, settleLesson, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import type { LessonEmbedder } from "../../../packages/core/src/lessons/ports.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { closeEnoughForSame, docOf, matchesRejected, resetNoEmbedderNotice } from "../../../packages/core/src/lessons/similarity.js";
-import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
+import { hasUnclassifiedNegation, relate } from "../../../packages/lessons/src/copy-match.js";
+import { curateDraft, type CurateDeps } from "../../../packages/lessons/src/curate.js";
+import { approveLesson, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { earnedAttention, processDraft, settleLesson, type ProcessDeps } from "../../../packages/lessons/src/process.js";
+import type { LessonEmbedder } from "../../../packages/lessons/src/ports.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { closeEnoughForSame, docOf, matchesRejected, resetNoEmbedderNotice } from "../../../packages/lessons/src/similarity.js";
+import type { LessonDraft } from "../../../packages/lessons/src/reflect.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, directory, draft, embedder, facts, allowAllAccess, lessonRecord, seed, settings, verifier } from "./lesson-helpers.js";
 
 const answer = (...verdicts: string[]): string => JSON.stringify({ verdicts: verdicts.map((verdict, i) => ({ n: i + 1, verdict })) });

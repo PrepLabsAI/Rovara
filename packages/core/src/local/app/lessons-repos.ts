@@ -3,11 +3,9 @@
 // stand in for it. An answer is kept for a few minutes; a host that cannot say leaves the repository out (nothing is then treated as a project repository).
 import { PROJECT_REVISION_SK_PREFIX, codeRepositoriesOf, orgProjectCatalogKey, projectPk, type CodeHost, type HostScope, type OrgId, type RegistryView, type RepositoryRef } from "@rovara-code/contracts";
 import { providerOf } from "../../plugins/routing.js";
-import type { ProjectRepoScopesPort } from "../../lessons/project-repo-audience.js";
-import type { RepoFileTarget } from "../../lessons/repo-file-pass.js";
+import { type ProjectRepoScopesPort, type RepoFileTarget, normalizeRemote } from "@rovara-code/lessons";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { createRepositoryResolver } from "./tracking.js";
-import { normalizeRemote } from "../../lessons/repo-remote.js";
 
 export interface LessonRepository {
   /** The project's name for the repository. */

@@ -1,13 +1,13 @@
 // The copy test is ORDERED and keeps polarity, direction and numbers, a rejected lesson cannot come back,
 // a judge's "same" needs a stronger closeness, vector writes are fenced (in document-vectors.test.ts), the embedder has a timeout, the shortlist is limited to what the draft's audience may read, and the lows.
 import { beforeEach, describe, expect, it } from "vitest";
-import { approveLesson, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { relate, covers, wordsOf, normalizedText } from "../../../packages/core/src/lessons/copy-match.js";
-import { recordFeedback, type CounterDeps } from "../../../packages/core/src/lessons/counters.js";
-import { curateDraft, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { EMBED_TIMEOUT_MS, NO_EMBEDDER_NOTICE_MS, SIMILARITY_LOG, docOf, docOfText, rankLessons, resetNoEmbedderNotice } from "../../../packages/core/src/lessons/similarity.js";
-import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
+import { approveLesson, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { relate, covers, wordsOf, normalizedText } from "../../../packages/lessons/src/copy-match.js";
+import { recordFeedback, type CounterDeps } from "../../../packages/lessons/src/counters.js";
+import { curateDraft, type CurateDeps } from "../../../packages/lessons/src/curate.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { EMBED_TIMEOUT_MS, NO_EMBEDDER_NOTICE_MS, SIMILARITY_LOG, docOf, docOfText, rankLessons, resetNoEmbedderNotice } from "../../../packages/lessons/src/similarity.js";
+import type { LessonDraft } from "../../../packages/lessons/src/reflect.js";
 import { Alerts, Audit, Clock, Judge, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, allowAllAccess, directory, draft, embedder, lessonRecord, seed, settings, verifier } from "./lesson-helpers.js";
 
 const answer = (...verdicts: string[]): string => JSON.stringify({ verdicts: verdicts.map((verdict, i) => ({ n: i + 1, verdict })) });

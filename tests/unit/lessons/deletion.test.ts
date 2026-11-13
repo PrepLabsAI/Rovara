@@ -1,8 +1,8 @@
 // ForgetSources prunes provenance and record citations; a lesson with nothing left to rest on is withdrawn.
 import { describe, expect, it } from "vitest";
-import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { lessonDeletionPort } from "../../../packages/lessons/src/deletion.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, codeCite, embedder, lessonRecord, seed } from "./lesson-helpers.js";
 
 function setup() {

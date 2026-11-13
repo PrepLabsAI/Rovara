@@ -1,13 +1,13 @@
 // The human-edit extractor. The compare's changed lines are handed over once, in memory; the reflector makes lessons from them; only the lessons and a link to
 // the pull request are kept. Authors are the company's canonical developer ids; an outsider or an erased author means nothing is learned.
 import { describe, expect, it } from "vitest";
-import type { HumanEditInput } from "../../../packages/core/src/lessons/capture-types.js";
-import { createHumanEditExtractor, type HumanEditExtractorDeps } from "../../../packages/core/src/lessons/human-edit.js";
-import type { CurrentPause, LessonsPauseStore } from "../../../packages/core/src/lessons/pause.js";
-import type { ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { TaskSubjectBase } from "../../../packages/core/src/lessons/task-end.js";
+import type { HumanEditInput } from "../../../packages/lessons/src/capture-types.js";
+import { createHumanEditExtractor, type HumanEditExtractorDeps } from "../../../packages/lessons/src/human-edit.js";
+import type { CurrentPause, LessonsPauseStore } from "../../../packages/lessons/src/pause.js";
+import type { ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { lessonDeletionPort } from "../../../packages/lessons/src/deletion.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { TaskSubjectBase } from "../../../packages/lessons/src/task-end.js";
 import { Alerts, Audit, BASE, Clock, MERGED, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, candidateJson, embedder, facts, memberSpan, reply, settings, verifier } from "./lesson-helpers.js";
 
 const LINK = "https://github.com/acme/api/pull/7";

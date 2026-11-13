@@ -2,9 +2,9 @@
 // time, and a go-live is a conditional write that requires the stored version to be the version the approvals were given for. Every ordering below ends with the same promise:
 // nothing is live unless two different people approved THAT text.
 import { describe, expect, it } from "vitest";
-import { activateLesson, approveLesson, rollbackLessonSet, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { LessonAuditEvent } from "../../../packages/core/src/lessons/ports.js";
+import { activateLesson, approveLesson, rollbackLessonSet, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { LessonAuditEvent } from "../../../packages/lessons/src/ports.js";
 import { Audit, Clock, KEY, directory, lessonRecord, seed, settings, allowAllAccess } from "./lesson-helpers.js";
 
 const ID = "les_pend0001";

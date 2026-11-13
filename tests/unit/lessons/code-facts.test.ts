@@ -1,8 +1,8 @@
 // The real CodeFacts port. It reads only the project's own repositories, only at a full commit id, with comments and strings dropped, and every failure is
 // "nothing verified" (undefined), never a guess.
 import { describe, expect, it } from "vitest";
-import { codeHostFactsReader, createCodeFacts, type CodeFactsReader } from "../../../packages/core/src/lessons/code-facts.js";
-import { gatherMaterial } from "../../../packages/core/src/lessons/material.js";
+import { codeHostFactsReader, createCodeFacts, type CodeFactsReader } from "../../../packages/lessons/src/code-facts.js";
+import { gatherMaterial } from "../../../packages/lessons/src/material.js";
 import { lessonRecord } from "./lesson-helpers.js";
 
 const COMMIT = "a".repeat(40);

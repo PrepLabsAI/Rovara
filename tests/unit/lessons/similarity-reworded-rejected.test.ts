@@ -2,13 +2,13 @@
 // stemming; a judge's "same" needs the antonym, unit and closeness floors; the lessons' embedder client has a short wait, a pause after a timeout and no fan-out; a card never names a rejected
 // lesson its draft's audience cannot read. is left as documented.
 import { beforeEach, describe, expect, it } from "vitest";
-import { relate, wordsOf } from "../../../packages/core/src/lessons/copy-match.js";
-import { curateDraft, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
-import { processDraft, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import type { LessonEmbedder } from "../../../packages/core/src/lessons/ports.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { closeEnoughForSame, docOf, matchesRejected, resetNoEmbedderNotice, type Ranked } from "../../../packages/core/src/lessons/similarity.js";
-import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
+import { relate, wordsOf } from "../../../packages/lessons/src/copy-match.js";
+import { curateDraft, type CurateDeps } from "../../../packages/lessons/src/curate.js";
+import { processDraft, type ProcessDeps } from "../../../packages/lessons/src/process.js";
+import type { LessonEmbedder } from "../../../packages/lessons/src/ports.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { closeEnoughForSame, docOf, matchesRejected, resetNoEmbedderNotice, type Ranked } from "../../../packages/lessons/src/similarity.js";
+import type { LessonDraft } from "../../../packages/lessons/src/reflect.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, closeEmbedder, draft, embedder, facts, lessonRecord, seed, settings, verifier } from "./lesson-helpers.js";
 
 const answer = (...verdicts: string[]): string => JSON.stringify({ verdicts: verdicts.map((verdict, i) => ({ n: i + 1, verdict })) });

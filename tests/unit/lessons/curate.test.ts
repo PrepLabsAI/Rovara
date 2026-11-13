@@ -1,10 +1,10 @@
 // The curator and the lesson store. Poisoning classes, and land here.
 import { describe, expect, it } from "vitest";
-import { curateDraft, type CurateDeps } from "../../../packages/core/src/lessons/curate.js";
-import { InMemoryLessonStore, nextVersion, type CommitResult, type ScopeKey } from "../../../packages/core/src/lessons/store.js";
-import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
-import { trialBlockers } from "../../../packages/core/src/lessons/trial.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { curateDraft, type CurateDeps } from "../../../packages/lessons/src/curate.js";
+import { InMemoryLessonStore, nextVersion, type CommitResult, type ScopeKey } from "../../../packages/lessons/src/store.js";
+import type { LessonDraft } from "../../../packages/lessons/src/reflect.js";
+import { trialBlockers } from "../../../packages/lessons/src/trial.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, codeCite, closeEmbedder, draft, embedder, lessonRecord, seed, settings, verifier } from "./lesson-helpers.js";
 
 class FlakyStore extends InMemoryLessonStore {

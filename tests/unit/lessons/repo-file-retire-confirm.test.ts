@@ -2,11 +2,11 @@
 // someone who can approve lessons confirms the retire, or keeps the lessons (they stay live and the next weekly pull request proposes their blocks back). A small number still retires at once. Nothing retires by itself after the week.
 import { afterEach, describe, expect, it } from "vitest";
 import { LessonsRepoFileBodySchema } from "@rovara-code/contracts";
-import { setLearnedLessonsGate } from "../../../packages/core/src/lessons/policy.js";
-import { lessonsRepoFilePublishJob, type RepoFileRuntime } from "../../../packages/core/src/lessons/repo-file-job.js";
-import { rowOf } from "../../../packages/core/src/lessons/repo-file-pr.js";
-import { repoFileAction, repoFileStatus } from "../../../packages/core/src/lessons/repo-file-routes.js";
-import { parseLessonsFile } from "../../../packages/core/src/lessons/repo-file-format.js";
+import { setLearnedLessonsGate } from "../../../packages/lessons/src/policy.js";
+import { lessonsRepoFilePublishJob, type RepoFileRuntime } from "../../../packages/lessons/src/repo-file-job.js";
+import { rowOf } from "../../../packages/lessons/src/repo-file-pr.js";
+import { repoFileAction, repoFileStatus } from "../../../packages/lessons/src/repo-file-routes.js";
+import { parseLessonsFile } from "../../../packages/lessons/src/repo-file-format.js";
 import { DAY, FILE, WS, passSetup, repoLesson } from "./repo-file-helpers.js";
 
 afterEach(() => { setLearnedLessonsGate(undefined); });

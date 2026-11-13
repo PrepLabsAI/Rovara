@@ -4,10 +4,10 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { RepositoryMismatch, guardTarget, headOf, readOwnPr, repositoryIdOfPlace, verifyRepository } from "../../../packages/core/src/lessons/repo-file-host.js";
+import { RepositoryMismatch, guardTarget, headOf, readOwnPr, repositoryIdOfPlace, verifyRepository } from "../../../packages/lessons/src/repo-file-host.js";
 import { FakeRepoHost, passSetup } from "./repo-file-helpers.js";
 
-const dir = join(import.meta.dirname, "../../../packages/core/src/lessons");
+const dir = join(import.meta.dirname, "../../../packages/lessons/src");
 const source = (name: string): string => readFileSync(join(dir, name), "utf8");
 
 /**

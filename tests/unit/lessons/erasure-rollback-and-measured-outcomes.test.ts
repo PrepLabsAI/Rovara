@@ -1,15 +1,15 @@
 // Full-history deletion and erasure, rollback never restores approval, one measured-outcome rule, a real allow-list for the
 // free-text slots, and an all-or-nothing withdraw. The reviewer's probes are used as tests.
 import { describe, expect, it } from "vitest";
-import { approveLesson, rollbackLessonSet, type ApproveDeps } from "../../../packages/core/src/lessons/approve.js";
-import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
-import { isPlainSlot, vocabularyOf } from "../../../packages/core/src/lessons/guards.js";
-import { processDraft, settleLesson, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { reflectSubject } from "../../../packages/core/src/lessons/reflect.js";
-import type { EvidenceSpan } from "../../../packages/core/src/lessons/reflect-input.js";
-import { InMemoryLessonStore, type CommitResult, type ScopeKey } from "../../../packages/core/src/lessons/store.js";
-import { type TierInput } from "../../../packages/core/src/lessons/tier.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { approveLesson, rollbackLessonSet, type ApproveDeps } from "../../../packages/lessons/src/approve.js";
+import { lessonDeletionPort } from "../../../packages/lessons/src/deletion.js";
+import { isPlainSlot, vocabularyOf } from "../../../packages/lessons/src/guards.js";
+import { processDraft, settleLesson, type ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { reflectSubject } from "../../../packages/lessons/src/reflect.js";
+import type { EvidenceSpan } from "../../../packages/lessons/src/reflect-input.js";
+import { InMemoryLessonStore, type CommitResult, type ScopeKey } from "../../../packages/lessons/src/store.js";
+import { type TierInput } from "../../../packages/lessons/src/tier.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, candidateJson, codeCite, directory, draft, embedder, lessonRecord, memberSpan, reply, seed, settings, subject, verifier, classifyTier, facts, autoSettings, allowAllAccess } from "./lesson-helpers.js";
 
 const valid = [{ index: 0, result: "valid" as const, at: 1 }];

@@ -26,32 +26,13 @@ import { readTask } from "../../core/task-flow/reads.js";
 import { fromDocument, type TaskPointerRecord, type TaskRecord } from "../../core/task-flow/records.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
-import { applyLoadReport, recordFeedback } from "../../lessons/counters.js";
+import { applyLoadReport, recordFeedback, approveLesson, retireByPerson, learnedContextForDispatch, readVisible, modeAllows, requireAudit, resolveLearning, setLearnedLessonsGate, createLessonsRuntime, type LessonsRuntime, documentReflectClaims, reflectQueueOf, queueReflectQueue, queueReflectVisibility, retryDelayFor, runReflectMessage, type ReflectWorkerDeps, learnFromEndedTaskTyped, learningTaskEndHandler, type TaskEndOutcome, type TaskLearningDeps, buildLessonsView, repoFileAction, repoFileStatus, readLocalToolsState, setCompanyLocalTools, setProjectLocalTools, type LocalToolsSetResult, lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, type RepositoryVisibility, localLessonsEnabled, documentRepoFileStore, lessonsRepoFilePublishJob, lessonsRepoFileSweepJob, type RepoFileRuntime, planLoadFacts, type CodeFactsReader, type Lesson } from "@rovara-code/lessons";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
-import { approveLesson, retireByPerson } from "../../lessons/approve.js";
-import { learnedContextForDispatch } from "../../lessons/load.js";
-import { readVisible } from "../../lessons/read-visible.js";
-import { modeAllows, requireAudit, resolveLearning, setLearnedLessonsGate } from "../../lessons/policy.js";
-import { createLessonsRuntime, type LessonsRuntime } from "../../lessons/runtime.js";
-import { documentReflectClaims } from "../../lessons/reflect-claims.js";
-import { reflectQueueOf, queueReflectQueue, queueReflectVisibility } from "../../lessons/reflect-queue.js";
-import { retryDelayFor, runReflectMessage, type ReflectWorkerDeps } from "../../lessons/reflect-worker.js";
-import { learnFromEndedTaskTyped, learningTaskEndHandler, type TaskEndOutcome, type TaskLearningDeps } from "../../lessons/task-end.js";
-import { buildLessonsView } from "../../lessons/view.js";
-import { repoFileAction, repoFileStatus } from "../../lessons/repo-file-routes.js";
-import { readLocalToolsState, setCompanyLocalTools, setProjectLocalTools, type LocalToolsSetResult } from "../../lessons/local-tools-setting.js";
-import { lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, type RepositoryVisibility } from "../../lessons/used-in-pr.js";
-import { localLessonsEnabled } from "../../lessons/switch.js";
-import { documentRepoFileStore } from "../../lessons/document-repo-file.js";
-import { lessonsRepoFilePublishJob, lessonsRepoFileSweepJob, type RepoFileRuntime } from "../../lessons/repo-file-job.js";
-import { planLoadFacts } from "../../lessons/plan-facts.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
 import { createLocalLessonSources } from "./lessons-sources.js";
-import type { CodeFactsReader } from "../../lessons/code-facts.js";
 import type { LessonsUsedSection } from "../../core/proof/pull-request-body.js";
 import type { PrCommandWorld } from "../../core/pr-commands/handler.js";
-import type { Lesson } from "../../lessons/types.js";
 
 /** The longest a step's dispatch waits for the loader: a slow load sends nothing, and the step runs as it would without lessons. */
 export const LESSON_LOAD_DEADLINE_MS = 2_500;
@@ -548,8 +529,8 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
 
   async function nightly(): Promise<void> {
     const names = await projectNames();
-    const { sweepExpired } = await import("../../lessons/expiry.js");
-    const { promoteStableTrials } = await import("../../lessons/trial.js");
+    const { sweepExpired } = await import("@rovara-code/lessons");
+    const { promoteStableTrials } = await import("@rovara-code/lessons");
     for (const project of names) {
       const key = { workspaceId: companyId, project };
       const resolved = await resolveLearning(runtime.settings, companyId, project);

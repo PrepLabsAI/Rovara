@@ -2,10 +2,10 @@
 // and nothing but ids and versions needs to sit in an outbox row, a queue message or a dead-letter copy.
 import { describe, expect, it } from "vitest";
 import { learnedRefsOf, type LearnedRefs } from "../../../packages/contracts/src/index.js";
-import { learnedContextFromRefs, type DeliveryDeps } from "../../../packages/core/src/lessons/deliver.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
-import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
+import { learnedContextFromRefs, type DeliveryDeps } from "../../../packages/lessons/src/deliver.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
+import { lessonDeletionPort } from "../../../packages/lessons/src/deletion.js";
 import { Audit, Clock, KEY, WS, PROJECT, allSharedTasks, allowAllAccess, lessonRecord, seed, settings, NO_VECTORS } from "./lesson-helpers.js";
 
 const ann = { approvalId: "ap-ann", by: "ann", at: 1, mode: "one" as const };

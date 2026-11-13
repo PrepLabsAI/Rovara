@@ -2,12 +2,12 @@
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, learningModeKey, teamRecordPk } from "@rovara-code/contracts";
 import { MemoryDocumentStore } from "../../packages/core/src/ports/memory-document-store.js";
-import { createHashingEmbedder, createLocalLearningAdapter, HASHING_EMBEDDER_DIMENSION } from "../../packages/core/src/lessons/local-embedder.js";
-import { DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings, documentLearningSettings, writeLearningMode, writeLoadBudget } from "../../packages/core/src/lessons/document-settings.js";
-import { resolveLearning, setLearnedLessonsGate } from "../../packages/core/src/lessons/policy.js";
-import { cosine } from "../../packages/core/src/lessons/similarity.js";
+import { createHashingEmbedder, createLocalLearningAdapter, HASHING_EMBEDDER_DIMENSION } from "../../packages/lessons/src/local-embedder.js";
+import { DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings, documentLearningSettings, writeLearningMode, writeLoadBudget } from "../../packages/lessons/src/document-settings.js";
+import { resolveLearning, setLearnedLessonsGate } from "../../packages/lessons/src/policy.js";
+import { cosine } from "../../packages/lessons/src/similarity.js";
 import { createLocalPipelineModel } from "../../packages/core/src/local/app/lessons-model.js";
-import { LearningRefusal } from "../../packages/core/src/lessons/pause.js";
+import { LearningRefusal } from "../../packages/lessons/src/pause.js";
 import { createMemoryModelKeyStore } from "../../packages/core/src/ports/model-key-stores.js";
 import { builtinModelProviderBook } from "../../packages/core/src/local/model-proxy/index.js";
 import { createPriceTableMetering } from "../../packages/core/src/ports/policy-defaults.js";
@@ -125,7 +125,7 @@ describe("the learning model path", () => {
   });
 
   it("throws, and marks the attempt's fault final, when the provider answers with an error", async () => {
-    const { withLearningAttempt } = await import("../../packages/core/src/lessons/learning-deadline.js");
+    const { withLearningAttempt } = await import("../../packages/lessons/src/learning-deadline.js");
     const model = createLocalPipelineModel({ choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: key, companyId: WS, providers: builtinModelProviderBook(), fetch: (async () => new Response("{}", { status: 500 })) });
     const attempt = { deadlineAt: Date.now() + 60_000 } as { deadlineAt: number; fault?: "retryable" | "final" };
     await expect(withLearningAttempt(attempt, () => model.complete(request))).rejects.toThrow();

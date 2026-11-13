@@ -26,6 +26,7 @@ step). No test changed except an import path or a path string.
 | `@rovara/aws-adapters` | `@rovara-code/aws` | `packages/aws-adapters` (directory unchanged, see "How the move was done") | renamed; the four generic adapters only |
 | `@agentx/worker` | `@rovara-code/worker` | `packages/worker` (unchanged) | renamed; entries added (it had none) |
 | `@agentx/testing` | `@rovara-code/testing` | `packages/testing` (unchanged) | renamed; the `./ports/*` wildcard written out |
+| (inside `@rovara-code/core`: `src/lessons/`, 96 files) | `@rovara-code/lessons` | `packages/lessons` | phase 2b step 5: moved out of core with `git mv`; see "The lessons package" |
 | `@agentx/gateway`, `mcp`, `model-runtime`, `orchestrator`, `verifier`, `local-adapters`, `slack-service`, `cli`, `infra` | unchanged | unchanged | not in the target table; they keep their names and directories until a later step says where they go |
 
 Not done, by design: `@rovara-code/local` (phase 2b: the laptop app, `rovara up`), the per-outside-system packages (`@rovara-code/github`,
@@ -36,7 +37,8 @@ Not done, by design: `@rovara-code/local` (phase 2b: the laptop app, `rovara up`
 ```
 contracts
   <- aws, gateway, local-adapters, mcp, model-runtime, verifier
-       <- core   (aws, contracts, gateway, local-adapters, model-runtime, verifier)
+  <- lessons   (contracts only)
+       <- core   (aws, contracts, gateway, lessons, local-adapters, model-runtime, verifier)
             <- testing (core, contracts)
             <- cli     (core, contracts, gateway, mcp, model-runtime)
   <- worker         (contracts, model-runtime, verifier)
@@ -69,8 +71,11 @@ module added to `index.ts` is not in the browser entry until someone adds it on 
 | `./plugins/channel-slack`, `./plugins/object-storage-s3`, `./plugins/secrets-aws` | the three plug-in module files |
 | `./services` | `src/services/index.ts` (the service layer) |
 | `./task-flow`, `./cost` | `src/core/task-flow/index.ts`, `src/core/cost/index.ts` (named for Cloud, below) |
-| `./lessons/<name>` | one entry per file of `src/lessons/` (96), for the path Cloud imports as `dist/lessons/<name>.js` (below) |
+| `./lessons/audit-sink`, `./lessons/types` | compatibility for one release: `src/lessons/audit-sink.ts` and `src/lessons/types.ts` re-export `@rovara-code/lessons/audit-sink` and `/types` (the only two lessons paths Cloud imports; see "The lessons package"). Before step 5 there was one entry per lessons file (96). |
+| `./host`, `./plugin-kit` | generated, written-out entries (phase 2b step 6; see "The host and plug-in kit entries"): `src/host.ts`, `src/plugin-kit.ts` |
 | `./merge-tracking`, `./sessions`, `./notices`, `./decisions`, `./callbacks`, `./candidate-export`, `./context-tools`, `./documents` | `src/services/<name>.ts`, one per service |
+
+**`@rovara-code/lessons`** (phase 2b step 5): `.` (`src/index.ts`, a written-out barrel of 75 names, below), `./audit-sink`, `./types`.
 
 **`@rovara-code/aws`**: `.`, `./dynamodb`, `./s3`, `./secrets-manager`, `./sqs` (unchanged apart from the name).
 
@@ -92,9 +97,51 @@ The Cloud install lane listed the broker paths Cloud uses. Each is now a named e
 | `@agentx/broker` `core/channel` (`dist/core/channel`) | `@rovara-code/core/channel` |
 | `@agentx/broker` `core/task-flow` (`dist/core/task-flow`) | `@rovara-code/core/task-flow` (new) |
 | `@agentx/broker` `core/cost` (`dist/core/cost`) | `@rovara-code/core/cost` (new) |
-| `@agentx/broker` `dist/lessons/<file>.js` | `@rovara-code/core/lessons/<file>`; there is no `lessons/index.ts`, so each of the 96 files is its own entry. This list is wide on purpose (the exact files Cloud uses are not known here); trim it to what Cloud needs |
+| `@agentx/broker` `dist/lessons/audit-sink.js` and `types.js` (the only two lessons files Cloud imports) | `@rovara-code/lessons/audit-sink` and `@rovara-code/lessons/types`. `@rovara-code/core/lessons/audit-sink` and `/types` stay for one release as re-exports. The other 94 `./lessons/<file>` entries (a wide list written before the exact files were known) are gone. |
 | `@agentx/local-adapters` (and `/storage`, `/queue`, `/object-storage`, `/audit-sink`, `/company-instructions`) | unchanged name and entries |
 | `@agentx/contracts` | `@rovara-code/contracts` |
+
+## The lessons package (phase 2b step 5)
+
+`git mv packages/core/src/lessons packages/lessons/src`: the 96 files moved unchanged. `lessons/` imports only `@rovara-code/contracts`, `zod` and `node:` modules (checked: no relative import leaves
+the folder), so it is a package below core. Core depends on it for now because `local/` still lives in core.
+
+- **Entries.** `.` is `src/index.ts`, a written-out barrel of the 75 names `local/` uses (73 static, 2 dynamic: `sweepExpired`, `promoteStableTrials`). It has no `export *`, which would clash on six
+  names (`approversRequired`, `LEASE_MS`, `ReflectOutcome`, `ReflectResult`, `REVERT_WINDOW_MS`, `textHash`). `./audit-sink` and `./types` are the two files Cloud imports.
+- **Core.** The 96 `./lessons/<name>` entries are gone, except `./lessons/audit-sink` and `./lessons/types`, which re-export the package's entries for one release (`packages/core/src/lessons/audit-sink.ts`,
+  `types.ts`). `local/` imports `@rovara-code/lessons`. 87 test files follow the move by path (`packages/core/src/lessons` to `packages/lessons/src`); no test changed otherwise.
+- **Tests.** `vitest.config.ts` aliases `@rovara-code/lessons` (and its two entries) to the package's `src`, so the laptop app under test and the tests that import `packages/lessons/src/...` by path share one copy of each module
+  (a class such as `LearningRefusal`, and the module-level `setLearnedLessonsGate`, would otherwise exist twice, once from `dist`). `tests/unit/lessons/read-paths.test.ts`, the access-check guard, now builds its program over core and the lessons package.
+- **Build and images.** The package is in the root `tsconfig.json` references, the lockfile, and the three `environments/*/Dockerfile` manifest copies and the two release input lists in
+  `scripts/release-production.ts` (so `npm ci` sees every workspace). It is left out of `AGENTX_RELEASE_TRIGGER_PATHS`, like `aws-adapters` and `testing`: the lessons engine runs only in the laptop app, and no
+  deployed image ships it. The legacy production template stays byte-identical. Its source used to sit under `core/**`, so a lessons-only change no longer starts the release pipeline.
+- **What Cloud must change in the same vendor bump.** Cloud imports the lessons library from the vendored copy by path, not by a named entry:
+  1. `scripts/modular/code-entries-legacy.json`: delete the three lessons lines (`tests/support/core-audit-actions.ts` x2 and `tests/unit/cloud-audit-sink.test.ts` x1, the `packages/broker/dist/lessons/audit-sink.js` and `types.js` uses).
+  2. `tests/support/core-audit-actions.ts` lines 237, 241 and 250: `.../vendor/rovara-code/packages/broker/dist/lessons/audit-sink.js` becomes `@rovara-code/lessons/audit-sink`, and `.../dist/lessons/types.js` becomes `@rovara-code/lessons/types`.
+  3. `tests/unit/cloud-audit-sink.test.ts` line 92: the same `audit-sink` path becomes `@rovara-code/lessons/audit-sink`.
+  4. The same Cloud file also scans Code's source for audit events and names two lessons files in `SINK_IMPLEMENTATIONS` (`lessons/audit-sink.ts`, `lessons/approve.ts`). Its source walk starts at the vendored core's `src`; add the lessons package's `src` as a second root, with the same relative names.
+  5. Cloud's vendor and install step must take the new `code-packages` tarball for `@rovara-code/lessons` (the pack job now has one more package), and `@rovara-code/core` needs it installed beside it.
+  The core compatibility entries mean a Cloud that has not made these edits yet still resolves `@rovara-code/core/lessons/audit-sink` and `/types` for one release.
+  Anyone else who adopts lessons (Cloud's X2 lane) imports `@rovara-code/lessons`, not a core path.
+
+## The host and plug-in kit entries (phase 2b step 6)
+
+Two files are added to core and nothing else changes: no area barrel is edited, so the lanes that add exports to `core/sessions/index.ts`, `core/task-flow/index.ts` and the rest do not collide.
+`scripts/generate-core-entries.ts` writes both from the imports (`node scripts/generate-core-entries.ts`, or `npm run generate:core-entries`); `tests/contract/core-entries-generated.test.ts` fails when a file is
+out of date. That is the same as failing when `local/` imports a name `host.ts` does not have, or when `host.ts` exports a name nobody imports.
+
+- **`./host`** (`src/host.ts`, 485 names in 232 lines, no `export *`): every name `local/` takes from a file outside `local/` and outside the lessons package (the map counted about 477 on an older base). A name imported through
+  a barrel and through its own file (eight of them, for example `localOwnerPrincipal` from `ports/index.ts` and `ports/policy-defaults.ts`) is exported once, from the file the barrel re-exports from; the generator checks that one
+  re-exports the other and stops otherwise. Once local's imports are rewritten to `../host.js` (step 7), the generator keeps reading them: a name `local/` takes through `host.ts` is taken from the module `host.ts` already names it from.
+  The GitHub token files (`plugins/code-host/github/token-access.ts`, `token-code-host.ts`) are in it for now; they leave for `@rovara-code/github/token` with step 10. Names from `services/` and `ports/` are in it too, in
+  addition to the existing `./services` and `./ports` entries.
+- **`./plugin-kit`** (`src/plugin-kit.ts`, 11 names): what the Slack and GitHub plug-ins take from core outside their own folders: `contextSecretReader`, `readPluginSettings`, `SecretSourceSchema` and `secretReader`
+  (`plugins/module-support.ts`), `SpecGitClient` and `SpecHostError` (`core/spec/publish.ts`), `LocalSecretError` (`ports/secret-error.ts`), `RepositoryAccess` and `RepositoryCredential` (`repository-access.ts`), `readCodeOwnersFile`
+  (`plugins/code-host/code-owners-file.ts`) and `parseGitHubRepository` (`plugins/code-host/github-repository.ts`). The three GitHub-only helpers (`github-job-log.ts`, `github-pull-status.ts`,
+  `agents/github-agent-tools.ts`) move with the plug-in and are not in the kit.
+- **Neither is part of the engine boundary** (`tests/contract/engine-boundary-files.txt`): they name files of the laptop app's world and the plug-ins. They are API surface for the later `local`, `slack` and `github` packages.
+- **API reports.** `packages/core/api-report.txt` gains the `./host` and `./plugin-kit` sections and loses the 94 `./lessons/<name>` sections that were removed; `./lessons/audit-sink` and `./lessons/types` are unchanged.
+  `packages/lessons/api-report.txt` is new.
 
 ## Packing for Cloud
 
@@ -122,7 +169,7 @@ it. "Later" is a proposal, not something this step did.
 | root files (`auth.ts`, `handler.ts`, `registry.ts`, `projects.ts`, `callbacks.ts`, ...) | 27 | the broker's shared helpers and the handler | stay |
 | `plugins/` | 53 | the built-in plug-ins (GitHub, Slack, Linear, Jira, CodeBuild, Bedrock, S3, Secrets Manager, fakes) and the registry that lists them | the outside-system plug-ins leave once the registry moves up (see cycles) |
 | `local/` | 76 | the laptop app | phase 2b: `@rovara-code/local` |
-| `lessons/` | 96 | the lessons engine, used only by `local/` | goes with `local/`, or its own package |
+| `lessons/` | 96 | the lessons engine, used only by `local/` | now `packages/lessons` (`@rovara-code/lessons`); `src/lessons/` in core holds two re-export files |
 | `aws/` | 129 | the AWS control plane: Lambda handlers, Slack web, admin pages, workflows | not one of the four generic adapters; a later decision where it belongs (it is already public, see the port guard note) |
 
 ## What the split could not do without a real logic change

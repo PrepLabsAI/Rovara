@@ -3,9 +3,9 @@
 // staged rollback that does not finish is put back.
 import { queryAll, teamRecordPk, type DocumentStore, type TransactItem } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
-import { DocumentLessonStore, MAX_COMMIT_WRITES } from "../../../packages/core/src/lessons/document-store.js";
-import { InMemoryLessonStore, type LessonStore, type LoadManifest } from "../../../packages/core/src/lessons/store.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { DocumentLessonStore, MAX_COMMIT_WRITES } from "../../../packages/lessons/src/document-store.js";
+import { InMemoryLessonStore, type LessonStore, type LoadManifest } from "../../../packages/lessons/src/store.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
 import { draft, lessonRecord } from "./lesson-helpers.js";
 

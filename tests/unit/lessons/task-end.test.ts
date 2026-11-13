@@ -1,17 +1,17 @@
 // The terminal-task hook. A finished task is reflected on only when the project's learning mode allows it, with a subject built from the real sources of who did
 // what; the send-back action tells the record WHO sent the task back; and where learning is not wired nothing is registered at all.
 import { describe, expect, it } from "vitest";
-import type { ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { withLearningAttempt, noteLearningFault, type LearningAttempt } from "../../../packages/core/src/lessons/learning-deadline.js";
-import { logRef } from "../../../packages/core/src/lessons/log-ref.js";
-import { LearningRefusal, MODEL_FAILURES_BEFORE_PAUSE, noteModelFailure, failuresCountedOncePerTask, newTaskFailureTally, type CurrentPause, type LessonsPauseStore } from "../../../packages/core/src/lessons/pause.js";
-import { type TaskEndEvent, inheritedTasksOf, learnFromEndedTask, learnFromEndedTaskTyped, learningTaskEndHandler, reflectOutcomeOf, subjectForTask, type TaskLearningDeps, type TaskSubjectBase } from "../../../packages/core/src/lessons/task-end.js";
-import type { OutcomeRowReader } from "../../../packages/core/src/lessons/task-outcome-rows.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { SendBackFact, TaskSubjectFacts } from "../../../packages/core/src/lessons/task-subject.js";
-import type { CounterDeps } from "../../../packages/core/src/lessons/counters.js";
-import type { CorrectionJudge } from "../../../packages/core/src/lessons/ports.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import type { ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { withLearningAttempt, noteLearningFault, type LearningAttempt } from "../../../packages/lessons/src/learning-deadline.js";
+import { logRef } from "../../../packages/lessons/src/log-ref.js";
+import { LearningRefusal, MODEL_FAILURES_BEFORE_PAUSE, noteModelFailure, failuresCountedOncePerTask, newTaskFailureTally, type CurrentPause, type LessonsPauseStore } from "../../../packages/lessons/src/pause.js";
+import { type TaskEndEvent, inheritedTasksOf, learnFromEndedTask, learnFromEndedTaskTyped, learningTaskEndHandler, reflectOutcomeOf, subjectForTask, type TaskLearningDeps, type TaskSubjectBase } from "../../../packages/lessons/src/task-end.js";
+import type { OutcomeRowReader } from "../../../packages/lessons/src/task-outcome-rows.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { SendBackFact, TaskSubjectFacts } from "../../../packages/lessons/src/task-subject.js";
+import type { CounterDeps } from "../../../packages/lessons/src/counters.js";
+import type { CorrectionJudge } from "../../../packages/lessons/src/ports.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Alerts, Audit, BASE, Clock, MERGED, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, candidateJson, embedder, facts, lessonRecord, memberSpan, reply, seed, settings, verifier } from "./lesson-helpers.js";
 
 /** A judge on an install whose model path answers nothing for a rating (usable, but every rating fails): a correction in scope stays unjudged. */

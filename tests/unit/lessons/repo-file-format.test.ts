@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   FILE_HEADER, WHOLE_REPOSITORY, applyFileChanges, blockOf, cleanLessonLine, compareHeadings, looseItems, normalizeBlockText, parseLessonsFile, renderLessonsFile, textHash, wrapBullet,
-} from "../../../packages/core/src/lessons/repo-file-format.js";
+} from "../../../packages/lessons/src/repo-file-format.js";
 
 type B = { id: string; heading: string; text: string };
 const blocks: B[] = [

@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   GATE, JUDGE_CANDIDATES, MAX_EMBED_PER_CALL, SIMILARITY_LOG, docOf, docOfText, fuse, isFlippedCopy, isNearExact, isVerbatim, keepVector, lessonTextOf, passesGate, pathOverlap, rankLessons, resetNoEmbedderNotice, textHash,
   tokensOf, type LessonLike, type SimilarityDeps,
-} from "../../../packages/core/src/lessons/similarity.js";
+} from "../../../packages/lessons/src/similarity.js";
 import { BASE, KEY, MemoryVectors, embedder } from "./lesson-helpers.js";
 
 interface FixtureLesson { id: string; title: string; description: string; body: string; scope: { paths?: string[] }; citations: Array<{ repo: string; path: string }>; active: boolean }

@@ -17,13 +17,8 @@ import { INDEX_EXPIRY_ATTRIBUTE, LocalLessonsBodySchema, agentXError, change, co
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
-import { repoFileStatus } from "../../lessons/repo-file-routes.js";
-import { buildLessonHistory, buildLessonsView, buildLoadedLessons } from "../../lessons/view.js";
+import { repoFileStatus, buildLessonHistory, buildLessonsView, buildLoadedLessons, LocalLessonsUnavailable, lessonsForLocalTool, type LocalLessonsDeps, type LocalToolsCounter, readLocalToolsState, peopleOf, type Lesson, type ScopeKey } from "@rovara-code/lessons";
 import { takeRate } from "../../core/script-tokens/rate.js";
-import { LocalLessonsUnavailable, lessonsForLocalTool, type LocalLessonsDeps, type LocalToolsCounter } from "../../lessons/local-tools.js";
-import { readLocalToolsState } from "../../lessons/local-tools-setting.js";
-import { peopleOf, type Lesson } from "../../lessons/types.js";
-import type { ScopeKey } from "../../lessons/store.js";
 import type { LocalLessons } from "./lessons.js";
 
 const PROJECT_LESSONS = /^\/v1\/app\/projects\/([^/]+)\/lessons(?:\/([A-Za-z0-9_-]{1,64})(?:\/(approve|reject|merge|retire|history))?)?$/u;

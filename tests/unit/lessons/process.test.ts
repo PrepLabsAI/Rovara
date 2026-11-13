@@ -1,10 +1,10 @@
 // (routing part): promotion to pending, tier-0 auto-apply and the settle step, run through the whole draft-to-lesson pipeline.
 import { describe, expect, it } from "vitest";
-import { curateDraft } from "../../../packages/core/src/lessons/curate.js";
-import { processDraft, resumeAndResettle, settleLesson, type ProcessDeps } from "../../../packages/core/src/lessons/process.js";
+import { curateDraft } from "../../../packages/lessons/src/curate.js";
+import { processDraft, resumeAndResettle, settleLesson, type ProcessDeps } from "../../../packages/lessons/src/process.js";
 
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { LessonDraft } from "../../../packages/lessons/src/reflect.js";
 import { Alerts, Audit, Clock, KEY, uniqueDraft, MemoryVectors, ScriptedModel, Spend, draft, embedder, settings, verifier, facts, autoSettings } from "./lesson-helpers.js";
 
 function setup(over: { store?: InMemoryLessonStore; model?: ScriptedModel; settings?: ReturnType<typeof settings>; verifier?: ReturnType<typeof verifier> } = {}) {

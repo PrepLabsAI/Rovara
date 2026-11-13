@@ -2,7 +2,7 @@
 // lessons may leave; a stored value that is not a boolean is not "unset" (the read throws, so the caller refuses); the items name no person.
 import { teamRecordPk } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
-import { DocumentLocalToolsSettings } from "../../../packages/core/src/lessons/document-settings.js";
+import { DocumentLocalToolsSettings } from "../../../packages/lessons/src/document-settings.js";
 import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
 import { PROJECT, WS } from "./lesson-helpers.js";
 

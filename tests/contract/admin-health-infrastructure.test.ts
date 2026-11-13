@@ -149,7 +149,7 @@ describe("the health route's grants (A13)", () => {
       // Thread notices (2026-11-12): the once-claim of each plan card and milestone line sent to a task's chat thread, kept for the session retention (SESSION_RETENTION_DAYS) and then expired; none a durable record.
       "packages/core/src/core/channel/thread-notices.ts",
       // Lessons: the rows that record a lesson's source events expire after a named retention (SOURCE_EVENT_TTL_DAYS), none a durable record.
-      "packages/core/src/lessons/document-store.ts",
+      "packages/lessons/src/document-store.ts",
       // Lessons for local coding tools (decision 46b): the day counter of a person's reads of one project (LESSON_LOCAL_DAY, numbers only) is a per-day row that must expire after the index retention, never a durable record.
       "packages/core/src/local/app/lessons-routes.ts",
       // Parallel parts: the first progress line of a coding run (event rows, kept as long as the other event rows) and the milestone rows (their retention).

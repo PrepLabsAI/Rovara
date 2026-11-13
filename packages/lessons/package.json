@@ -1,0 +1,24 @@
+{
+  "name": "@rovara-code/lessons",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The lessons engine of Rovara Code: learning from finished tasks, the lesson store, approval and loading into a task. Depends only on @rovara-code/contracts.",
+  "exports": {
+    ".": "./dist/index.js",
+    "./audit-sink": "./dist/audit-sink.js",
+    "./types": "./dist/types.js"
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.map"
+  ],
+  "engines": {
+    "node": ">=22.19.0 <23"
+  },
+  "dependencies": {
+    "@rovara-code/contracts": "0.1.0",
+    "zod": "4.6.6"
+  }
+}

@@ -2,11 +2,11 @@
 // text, so it must never outlive its lesson.
 import { lessonKey, queryAll, teamRecordPk, type DocumentStore } from "@rovara-code/contracts";
 import { describe, expect, it } from "vitest";
-import { retireLesson } from "../../../packages/core/src/lessons/curate.js";
-import { lessonDeletionPort } from "../../../packages/core/src/lessons/deletion.js";
-import { documentLessonVectors, lessonVectorKey } from "../../../packages/core/src/lessons/document-vectors.js";
-import { DocumentLessonStore } from "../../../packages/core/src/lessons/document-store.js";
-import { docOf, keepVector, rankLessons } from "../../../packages/core/src/lessons/similarity.js";
+import { retireLesson } from "../../../packages/lessons/src/curate.js";
+import { lessonDeletionPort } from "../../../packages/lessons/src/deletion.js";
+import { documentLessonVectors, lessonVectorKey } from "../../../packages/lessons/src/document-vectors.js";
+import { DocumentLessonStore } from "../../../packages/lessons/src/document-store.js";
+import { docOf, keepVector, rankLessons } from "../../../packages/lessons/src/similarity.js";
 import { MemoryDocumentStore } from "../../../packages/core/src/ports/memory-document-store.js";
 import { Audit, Clock, embedder, lessonRecord } from "./lesson-helpers.js";
 

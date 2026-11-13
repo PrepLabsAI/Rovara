@@ -1,10 +1,10 @@
 // Review: a passing fault is injected, once, at EVERY call the draft's curate-and-settle makes (the store, the vectors, the audit sink, the alert sink), one position per run, for four kinds of draft.
 // Whatever the position and whatever the retry does, the end is never MORE than the fault-free run made: no second card, no second audit line of any kind, no extra lesson, and no paid judge call at all.
 import { describe, expect, it } from "vitest";
-import { processDraftRetrying } from "../../../packages/core/src/lessons/draft-retry.js";
-import type { ProcessDeps } from "../../../packages/core/src/lessons/process.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import type { LessonDraft } from "../../../packages/core/src/lessons/reflect.js";
+import { processDraftRetrying } from "../../../packages/lessons/src/draft-retry.js";
+import type { ProcessDeps } from "../../../packages/lessons/src/process.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import type { LessonDraft } from "../../../packages/lessons/src/reflect.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, allowAllAccess, directory, draft, embedder, facts, settings, verifier } from "./lesson-helpers.js";
 
 const throttled = (): Error => Object.assign(new Error("secret table text"), { name: "ThrottlingException" });

@@ -1,12 +1,12 @@
 // A lesson fades after N days without helping, and never before its trial period ends. The sweep skips a lesson with a queued helpful mark, recording an outcome holds nothing, and a task end
 // delivered again after its mark settled queues nothing. Related cases are in curate.test.ts, lessons-jobs.test.ts and task-end.test.ts.
 import { describe, expect, it } from "vitest";
-import { activateLesson } from "../../../packages/core/src/lessons/approve.js";
-import { recordTaskOutcome, settleHelpful, type CounterDeps } from "../../../packages/core/src/lessons/counters.js";
-import { renewLesson, sweepExpired } from "../../../packages/core/src/lessons/expiry.js";
-import { InMemoryLessonStore } from "../../../packages/core/src/lessons/store.js";
-import { TRIAL_APPROVER, TRIAL_STABLE_AFTER_DAYS } from "../../../packages/core/src/lessons/trial.js";
-import type { Lesson } from "../../../packages/core/src/lessons/types.js";
+import { activateLesson } from "../../../packages/lessons/src/approve.js";
+import { recordTaskOutcome, settleHelpful, type CounterDeps } from "../../../packages/lessons/src/counters.js";
+import { renewLesson, sweepExpired } from "../../../packages/lessons/src/expiry.js";
+import { InMemoryLessonStore } from "../../../packages/lessons/src/store.js";
+import { TRIAL_APPROVER, TRIAL_STABLE_AFTER_DAYS } from "../../../packages/lessons/src/trial.js";
+import type { Lesson } from "../../../packages/lessons/src/types.js";
 import { Audit, Clock, Judge, KEY, WS, lessonRecord, seed, settings } from "./lesson-helpers.js";
 
 const DAY = 86_400_000;
@@ -39,7 +39,7 @@ describe("a lesson fades after N days without helping, and never before its tria
     // A preference fades after 90 days like every other type (the 180-day default is gone).
     const preference = await goLive({ id: "les_fadeone1", days: undefined, type: "preference", action: "lesson.activated" });
     expect(preference.live.expiresAt).toBe(preference.created + (TRIAL_STABLE_AFTER_DAYS + 90) * DAY);
-    expect(await import("../../../packages/core/src/lessons/trial.js")).not.toHaveProperty("TRIAL_MIN_EXPIRY_DAYS");
+    expect(await import("../../../packages/lessons/src/trial.js")).not.toHaveProperty("TRIAL_MIN_EXPIRY_DAYS");
   });
   it("N=14 and the lesson is never used: it lives through its trial and fades 14 days after the trial ends (alive on day 27, gone on day 28)", async () => {
     const { store, audit, clock, created } = await goLive({ id: "les_fadeone1", days: 14 });
