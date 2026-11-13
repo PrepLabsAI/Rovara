@@ -9,6 +9,7 @@ import {
 import { AGENTX_SLACK_ORCHESTRATOR_REPOSITORY } from "../../infra/lib/slack-orchestrator.js";
 import {
   RELEASE_TEST_ACCOUNT,
+  RELEASE_TEST_WORKERS,
   Runner as ReleaseRunner,
   assertDigestImage,
   testEnvironment,
@@ -328,20 +329,20 @@ describe("the release's test suite as root (CodeBuild)", () => {
   it("runs the tests directly when the release is not root", () => {
     const { runner, calls } = recorder();
     runTests(runner, 501);
-    expect(calls).toEqual([["npm", "test"]]);
+    expect(calls).toEqual([["npm", "test", "--", `--maxWorkers=${String(RELEASE_TEST_WORKERS)}`]]);
   });
 
   it("runs them as nobody when it is root, and gives the checkout back to root", () => {
     const { runner, calls } = recorder();
     runTests(runner, 0);
-    expect(calls.map((call) => (call[0] === "as" ? ["as", "npm", "test"] : call))).toEqual([
+    expect(calls.map((call) => (call[0] === "as" ? ["as", ...call.slice(2)] : call))).toEqual([
       ["mkdir", "-p", home],
       ["chown", "-R", `${String(uid)}:${String(gid)}`, process.cwd(), home],
-      ["as", "npm", "test"],
+      ["as", "npm", "test", "--", `--maxWorkers=${String(RELEASE_TEST_WORKERS)}`],
       ["chown", "-R", "0:0", process.cwd()],
     ]);
     const account = calls[2]![1] as { uid: number; gid: number; env: NodeJS.ProcessEnv };
-    expect([account.uid, account.gid, account.env.HOME, calls[2]!.slice(2)]).toEqual([uid, gid, home, ["npm", "test"]]);
+    expect([account.uid, account.gid, account.env.HOME, calls[2]!.slice(2)]).toEqual([uid, gid, home, ["npm", "test", "--", `--maxWorkers=${String(RELEASE_TEST_WORKERS)}`]]);
   });
 
   it("still gives the checkout back to root when the tests fail", () => {
