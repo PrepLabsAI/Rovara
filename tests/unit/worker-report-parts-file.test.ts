@@ -31,6 +31,6 @@ describe("report parts file", () => {
     expect(await read()).toMatchObject({ ok: false, reason: "unreadable" });
     await writeFile(join(root, "report.json"), "{"); expect(await read()).toMatchObject({ ok: false, reason: "malformed" });
     await writeFile(join(root, "report.json"), valid + " ".repeat(8 * 1024 * 1024)); expect(await read()).toMatchObject({ ok: false, reason: "too_large" });
-    await writeFile(join(root, "report.json"), '{"schemaVersion":2,"measures":[]}'); expect(await read()).toEqual({ ok: false, reason: "newer" });
+    await writeFile(join(root, "report.json"), '{"schemaVersion":3,"measures":[]}'); expect(await read()).toEqual({ ok: false, reason: "newer" });
   }));
 });

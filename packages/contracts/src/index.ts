@@ -348,3 +348,8 @@ export * from "./eval-hidden-set.js";
 export * from "./eval-pacing.js";
 export * from "./eval-base-cache.js";
 export * from "./eval-check.js";
+// TE-F3-b (DECISIONS 170 gate). eval-gate-labels.ts is a local mirror of A3-2's label contract and is deliberately NOT exported here.
+export * from "./eval-gate-stats.js";
+export * from "./eval-gate-inputs.js";
+export * from "./eval-gate.js";
+export * from "./eval-holdout.js";

@@ -28,7 +28,7 @@ describe("measures file", () => {
     }
   });
   it("ignores unknown versions as newer without interpreting their payload", () => {
-    expect(readMeasuresFile({ schemaVersion: 2, measures: "unknown" })).toEqual({ status: "newer" });
+    expect(readMeasuresFile({ schemaVersion: 3, measures: "unknown" })).toEqual({ status: "newer" });
     for (const schemaVersion of [0, -1, "2", NaN, Infinity, 1.2]) expect(readMeasuresFile({ schemaVersion }).status).toBe("unreadable");
   });
   it("rejects prototype keys without assigning them and refuses malformed or too-large text", () => {

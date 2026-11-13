@@ -11,7 +11,7 @@
 // The store is the existing `DocumentStore` port with company-scoped partitions (no new port, so no DECISIONS 42/63 item): partition `ORG#<company>#EVALBASE`, sort key `K#<key>`, a 30-day expiry.
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
-import { MeasuresFileEntrySchema } from "./measures-file.js";
+import { EvalQuestionRowSchema, EvalSeedSchema, MEASURES_FILE_QUESTIONS_MAX, MeasuresFileEntrySchema } from "./measures-file.js";
 import { EVIDENCE_MEASURES_MAX } from "./evidence.js";
 import { companyScoped } from "./ports/company-scope.js";
 import { DOCUMENT_STORE_LIMITS, type DocumentStore, type StoredDocument } from "./ports/document-store.js";
@@ -37,6 +37,10 @@ export const EvalBaseRecordSchema = z.object({
   roundKind: z.enum(EVAL_BASE_ROUND_KINDS),
   /** The measures-file schema version the runner wrote. */
   runnerSchemaVersion: z.number().int().min(1).max(1_000),
+  /** TE-F3-b (additive; a record without them still reads): every question's result in every old-code run (the paired noise band comes from these), the seed the base round ran with, and the EXACT model version it called. */
+  questions: z.array(EvalQuestionRowSchema).max(MEASURES_FILE_QUESTIONS_MAX).optional(),
+  seed: EvalSeedSchema.optional(),
+  modelVersion: z.string().regex(/^[A-Za-z0-9._:/@+-]{1,200}$/u).optional(),
 }).strict();
 export type EvalBaseRecord = z.infer<typeof EvalBaseRecordSchema>;
 
