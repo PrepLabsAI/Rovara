@@ -3,6 +3,12 @@
   "comment": "Findings the port guard accepts, each pinned to one file's exact content (its git blob id at the tip): any change to the file flags it again, and an entry whose file changed or is gone is itself a finding (accepted-stale). Only cloud-aws and secret findings can be listed. CI reads this file from code/next, never from the pull request. Editing it is a guard edit, reviewed by hand.",
   "accepted": [
     {
+      "path": "packages/core/src/aws/broker-shared.ts",
+      "rule": "cloud-aws",
+      "blob": "18e7dd762f68fab45502284ecddc18ccf7f8c676",
+      "reason": "already public on mainline as packages/broker/src/aws/broker-shared.ts; the modular split only moved it (git pairs it with developer/plan-instructions.ts, so a range from mainline reads it as new)"
+    },
+    {
       "path": "packages/core/src/aws/channel-api-lambda.ts",
       "rule": "cloud-aws",
       "blob": "c7e705423aa7731a32261db8cd44a3ad3421c0db",

@@ -65,6 +65,12 @@
   "awsImportFixturePaths": [],
   "knownHistory": [
     {
+      "commit": "df0d55d2ad5e097735e3a848bde875a123941184",
+      "rule": "cloud-aws",
+      "file": "packages/broker/src/plugins/model-provider/bedrock/credentials.ts",
+      "reason": "The sanctioned Bedrock credentials file, at the path it had before the modular split moved the package to packages/core; the sanctioned folder above names the new path, and public history is not rewritten."
+    },
+    {
       "commit": "45eb9a7dd7c279e3a5002ab7d9c8909af3ffddf6",
       "rule": "private-name",
       "file": "packages/contracts/src/ports/company-instructions.ts",
