@@ -5,7 +5,7 @@
 //   1. The child gets a MINIMAL environment, built here: nothing of the user's shell, so no real model key and no `NODE_OPTIONS`. A test builds a fake real-looking key at run time and shows it never reaches the child.
 //   2. The commands of the round get the dummy key in EVERY model key variable (model-helper-env.ts), overriding what the user's shell holds.
 //   3. Nothing blocks model hosts on a laptop (the egress gateway's list is a separate matter: default-allow-domains.ts), so the block state is `not_blocked_here` and the evidence says exactly "model hosts not blocked on this
-//      machine". A client that ignores the redirect can still reach a real host there; the dummy key is all it sends. This is said in the PR body and in the evidence, never hidden.
+//      machine". A client that ignores the redirect can still reach a real host there; project-provided Google credentials are preserved. This is said in the PR body and in the evidence, never hidden.
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -71,7 +71,7 @@ export function localModelHelperPlan(input: LocalModelHelperInput): ModelHelperR
         const listening = await readListeningLine(child, signal);
         const baseUrl = `http://127.0.0.1:${String(listening.port)}`;
         if (listening.metaPort === null) throw new Error("the model helper has no metadata port");
-        // An EMPTY worker-owned directory: `CLOUDSDK_CONFIG` points at it, so the user's real gcloud config is never found.
+        // An EMPTY worker-owned directory: only a Vertex round points `CLOUDSDK_CONFIG` at it.
         const cloudsdkConfigDir = join(files.dir, "cloudsdk");
         await mkdir(cloudsdkConfigDir, { mode: 0o700 });
         const environment = laptopModelEnvironment({

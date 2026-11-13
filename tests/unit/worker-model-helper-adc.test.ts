@@ -1,4 +1,4 @@
-// TE-F2 part B, M1: on a laptop the user's REAL Google Application Default Credentials (a refresh token in ~/.config/gcloud, or a key file named by GOOGLE_APPLICATION_CREDENTIALS) must never be found, used or sent by a customer's
+// TE-F2 part B, M1: in a Vertex round the laptop shell's Google Application Default Credentials (a refresh token in ~/.config/gcloud, or a key file named by GOOGLE_APPLICATION_CREDENTIALS) must never be found, used or sent by a customer's
 // test in a helper round. Run with the real google-auth-library under a temporary HOME holding a fake ADC file with a real-looking refresh token built at run time, under the network tripwire.
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -70,7 +70,8 @@ describe("Application Default Credentials in a laptop round", () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       const env = result.environment;
-      expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBe("");
+      expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
+      expect(result.unset).toContain("GOOGLE_APPLICATION_CREDENTIALS");
       expect(env.CLOUDSDK_CONFIG).toBe(cloudsdk);
       expect(env.GCE_METADATA_HOST).toBe(metaHost);
       for (const [name, value] of Object.entries(env)) setEnv(name, value);

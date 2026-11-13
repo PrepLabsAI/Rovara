@@ -13,10 +13,9 @@
 //      pattern above: `OPENAI_API_KEY_PASS` is unset), `SSH_AUTH_SOCK`, `SENTRY_DSN`, `GCLOUD_PROJECT`, `GOOGLE_CLOUD_QUOTA_PROJECT`, `TOKENIZERS_PARALLELISM`, and BARE non-vendor `*_KEY` names such as `STRIPE_KEY` and
 //      `CACHE_KEY` (as often a cache key as a secret). The rule and the kept list are `isCredentialVariable` and `KEPT_VARIABLES` below; the PR body and the release notes repeat them.
 //      A project test that needs one of the unset names in a helper round on a laptop must be given it by the readiness run, never inherited from the shell.
-//   3. Google Application Default Credentials: `GOOGLE_APPLICATION_CREDENTIALS` is empty, `CLOUDSDK_CONFIG` is an EMPTY worker-owned directory (the user's real `application_default_credentials.json`, a real refresh token, is
-//      never found) and `GCE_METADATA_HOST` is the helper's metadata server, so google-auth (JS: verified by the reviewer) takes the metadata path, gets the dummy token and never calls `oauth2.googleapis.com`.
-//      Python google-auth against this is UNVERIFIED.
-// A client that ignores the redirect can still reach a real host on a laptop (nothing blocks model hosts there), and the dummy is all it sends.
+//   3. Only a round with a Vertex row points `CLOUDSDK_CONFIG` at an EMPTY worker-owned directory and `GCE_METADATA_*` at the helper. The inherited shell's `GOOGLE_APPLICATION_CREDENTIALS` is removed by layer 2;
+//      the project's own setting survives in `withModelHelperRound`. Its library may mint a token with its own credential; the helper drops any inbound bearer.
+// A client that ignores the redirect can still reach a real host on a laptop without the name block; project-provided Google credentials are preserved.
 import { MODEL_REDIRECT_ENV_NAMES, isServedModelFamily, type ModelCatalogRow } from "@agentx/contracts";
 
 export const MODEL_DUMMY_KEY = ["rovara", "test", "key"].join("-");
@@ -66,11 +65,11 @@ export interface LaptopModelEnvironmentInput {
   readonly rowIds: readonly string[];
   /** `http://127.0.0.1:<port>`. */
   readonly baseUrl: string;
-  /** `127.0.0.1:<meta port>`: always set, so a Google client's credential search ends at the helper's metadata server. */
+  /** `127.0.0.1:<meta port>`: used only when a selected row is Vertex. */
   readonly metadataHostPort: string;
   readonly projectId?: string | undefined;
   readonly location?: string | undefined;
-  /** An EMPTY worker-owned directory for `CLOUDSDK_CONFIG` (the user's real gcloud config is never found). */
+  /** An EMPTY worker-owned directory for `CLOUDSDK_CONFIG`, used only for a Vertex round. */
   readonly adc: { readonly cloudsdkConfigDir: string };
   /** The user's shell (default `process.env`): every credential-shaped name in it is unset. */
   readonly inherited?: Readonly<Record<string, string | undefined>>;
@@ -79,11 +78,12 @@ export type LaptopModelEnvironment = { readonly ok: true; readonly environment: 
 
 /**
  * The variables a laptop run's commands get (`environment`, set) and lose (`unset`): each selected row's base-URL variables pointed at the helper, its companion variables, the dummy key in EVERY model key variable, the
- * Google credential search ended at the helper's metadata server, and every AI-provider or cloud credential of the user's shell removed. Two rows that want one variable with different values are a conflict, refused.
+ * Vertex credential search pointed at the helper's metadata server, and every AI-provider or cloud credential of the user's shell removed. Two rows that want one variable with different values are a conflict, refused.
  */
 export function laptopModelEnvironment(input: LaptopModelEnvironmentInput): LaptopModelEnvironment {
   const environment: Record<string, string> = Object.create(null) as Record<string, string>;
   let conflict = false;
+  let hasVertex = false;
   const set = (name: string, value: string): void => {
     if (environment[name] !== undefined && environment[name] !== value) conflict = true;
     environment[name] = value;
@@ -94,6 +94,7 @@ export function laptopModelEnvironment(input: LaptopModelEnvironmentInput): Lapt
     if (!isServedModelFamily(row.family)) return { ok: false, reason: "not_served" };
     const redirect = row.redirect.find((entry) => entry.kind === "env_var");
     if (redirect?.kind !== "env_var") return { ok: false, reason: "not_served" };
+    if (row.family === "vertex") hasVertex = true;
     const url = modelRowBaseUrl(row, input.baseUrl);
     for (const name of redirect.names) set(name, url);
     for (const name of redirect.companion) {
@@ -104,11 +105,12 @@ export function laptopModelEnvironment(input: LaptopModelEnvironmentInput): Lapt
   }
   if (conflict) return { ok: false, reason: "conflict" };
   for (const name of modelKeyVariables(input.rows)) if (environment[name] === undefined) environment[name] = MODEL_DUMMY_KEY;
-  // Layer 3: no Google credential is found by the search; it ends at the helper's metadata server.
-  environment.GOOGLE_APPLICATION_CREDENTIALS = "";
-  environment.CLOUDSDK_CONFIG = input.adc.cloudsdkConfigDir;
-  environment.GCE_METADATA_HOST = input.metadataHostPort;
-  environment.GCE_METADATA_IP = input.metadataHostPort;
+  // Layer 3 is Vertex-only. Never overwrite the project's own credential-file setting.
+  if (hasVertex) {
+    environment.CLOUDSDK_CONFIG = input.adc.cloudsdkConfigDir;
+    environment.GCE_METADATA_HOST = input.metadataHostPort;
+    environment.GCE_METADATA_IP = input.metadataHostPort;
+  }
   // Layer 2: everything else of the shell that is an AI or cloud credential is UNSET (never blanked).
   const unset = new Set<string>(EXPLICIT_UNSET_VARIABLES);
   for (const name of Object.keys(input.inherited ?? process.env)) if (isCredentialVariable(name)) unset.add(name);
