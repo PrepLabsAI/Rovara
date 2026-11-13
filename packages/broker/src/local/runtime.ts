@@ -47,6 +47,7 @@ import type { AutomationSwitch } from "../core/automation/switch.js";
 import type { BrowserOpener } from "./open-browser.js";
 import { createLocalApp, type LocalApp } from "./app/app.js";
 import { localAllowedDomains } from "./isolation/allow-list.js";
+import { laptopSandboxDenyList, sandboxModelHostsAllowed } from "./isolation/sandbox-model-deny.js";
 import { devcontainerRegistriesForInstall } from "./isolation/stack.js";
 import type { LocalComments } from "./app/comments.js";
 import { configurationAnswer } from "./app/routes.js";
@@ -470,6 +471,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const callbackServer: { current?: CallbackServer } = {};
   // The hosts the owner approved for a setup run: read at each machine start (the app is made after the machines, so it is read late).
   const approvedHosts: { current?: (project: string | undefined) => Promise<string[]> } = {};
+  const sandboxDeny = laptopSandboxDenyList();
   const docker = new DockerWorkerMachines({
     image: options.workerImage,
     stateDirectory,
@@ -478,6 +480,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       return { tcpPort: callbackServer.current.tcpPort, socketDirectory: callbackServer.current.socketDirectory };
     },
     ...(options.allowedDomains === undefined ? {} : { allowedDomains: options.allowedDomains }),
+    // FIX-0518 (security): the sandboxes' network may not reach a model host, unless the owner's config says so for that project. The worker's own network keeps them: the agent's model loop runs there, through the key proxy.
+    modelHostsDeniedInSandbox: sandboxDeny,
+    sandboxModelHostsAllowed: (project) => sandboxModelHostsAllowed(config, project),
     extraAllowedDomains: async (project) => (await approvedHosts.current?.(project)) ?? [],
     // The registries a project's dev container may pull from: the owner's `ROVARA_DEVCONTAINER_REGISTRIES` (`0` turns dev containers off); with none said, the default list on a Docker that runs in a virtual machine and none on a host where root in a container is root.
     devcontainerRegistries: await devcontainerRegistriesForInstall(options.environment, options.docker ?? createDockerRunner(options.environment)),
@@ -627,6 +632,9 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     // The setup agent (`ROVARA_SETUP_AGENT=0` turns it off): a run that sets a project up by running its commands in a sandbox.
     setupAgent: options.environment["ROVARA_SETUP_AGENT"] !== "0",
     installDomains: () => localAllowedDomains(options.allowedDomains),
+    sandboxModelHostsAllowed: (project) => sandboxModelHostsAllowed(config, project),
+    sandboxModelHostsOf: (machineId) => docker.sandboxModelHostsOf(machineId),
+    sandboxDenied: (project) => (sandboxModelHostsAllowed(config, project) ? [] : sandboxDeny),
   });
   approvedHosts.current = (project) => app.setupAgent.approvedHosts(project);
 
