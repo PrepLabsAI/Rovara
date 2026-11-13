@@ -30,6 +30,10 @@ describe("admin changes in the legacy deployment (spec 064)", () => {
     const applied = await harness.apply((planned.body.change as { changeId: string }).changeId, "cli");
     expect(applied.status).toBe(200);
     expect(rows()).toEqual([expect.objectContaining({ sk: "CLIENT#rovara-cloud", audience: "rovara-cloud" })]);
+    // The list `update` reads first, served by the linking-only sign-in too.
+    const listed = await harness.admin("GET", "/v1/admin/sign-in-clients");
+    expect(listed.status).toBe(200);
+    expect(listed.body.clients).toEqual([expect.objectContaining({ clientId: "rovara-cloud", audience: "rovara-cloud" })]);
 
     const removal = await harness.propose({ kind: "remove_sign_in_client", clientId: "rovara-cloud" }, ["cli"]);
     await harness.apply((removal.body.change as { changeId: string }).changeId, "cli");

@@ -1497,7 +1497,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // Spec 063: the registered sign-in clients, never a secret's hash.
       if (request.method === "GET" && url.pathname === "/v1/admin/sign-in-clients") {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-        const registry = dependencies.developer?.signInClients;
+        // Spec 064: the legacy deployment's linking-only sign-in keeps the same registry.
+        const registry = (dependencies.developer ?? dependencies.linking)?.signInClients;
         if (registry === undefined) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json({ clients: await registry.list() }, request.requestId);
       }
