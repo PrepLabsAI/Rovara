@@ -53,7 +53,7 @@ describe("runChecks joins an abort", () => {
   it("rethrows a runner's own kill-unconfirmed, not an 'aborted' check entry", async () => {
     const controller = new AbortController();
     const runners = runnersOf((_command, signal) => new Promise((_resolve, reject) => {
-      signal.addEventListener("abort", () => reject(new RunnerKillUnconfirmedError()), { once: true });
+      signal.addEventListener("abort", () => reject(new RunnerKillUnconfirmedError({ kind: "local" })), { once: true });
     }));
     setTimeout(() => controller.abort(), 20);
     await expect(runChecks(plan, runners, budget(controller.signal, 5_000))).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
@@ -72,7 +72,7 @@ describe("runChecks joins an abort", () => {
     const controller = new AbortController();
     controller.abort();
     const seeds = [{ command }] as unknown as Parameters<typeof runSeeds>[1];
-    const ports = { runCommand: async () => { throw new RunnerKillUnconfirmedError(); }, applyFixture: async () => undefined } as unknown as Parameters<typeof runSeeds>[2];
+    const ports = { runCommand: async () => { throw new RunnerKillUnconfirmedError({ kind: "local" }); }, applyFixture: async () => undefined } as unknown as Parameters<typeof runSeeds>[2];
     // The signal is aborted AFTER the first check, so the seed command is reached.
     const live = new AbortController();
     const running = runSeeds("db", seeds, ports, live.signal);
@@ -81,7 +81,7 @@ describe("runChecks joins an abort", () => {
     const reset = runnersOf(async () => ({ exitCode: 0, timedOut: false, stdout: "", stderr: "" }));
     const failing: CheckRunners = {
       ...reset,
-      freshServices: async () => { throw new RunnerKillUnconfirmedError(); },
+      freshServices: async () => { throw new RunnerKillUnconfirmedError({ kind: "local" }); },
     };
     await expect(runChecks(plan, failing, budget(new AbortController().signal))).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
   });
@@ -107,7 +107,7 @@ describe("gitOriginalCode after a stop that could not be confirmed", () => {
 
   it("does not restore (and so cannot be overwritten by a late write): the agent's files stay under the private ref, the task must stop", async () => {
     const { directory, start } = await repository();
-    const work = async () => { throw new RunnerKillUnconfirmedError(); };
+    const work = async () => { throw new RunnerKillUnconfirmedError({ kind: "local" }); };
     const failure = await gitOriginalCode([{ directory, commit: start }]).run(work).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(AgentFilesRestoreError);
     expect(isWorkspaceUnsafe(failure)).toBe(true);
@@ -126,7 +126,7 @@ describe("gitOriginalCode after a stop that could not be confirmed", () => {
     git(directory, "add", "-A");
     git(directory, "commit", "-q", "-m", "agent");
     const head = git(directory, "rev-parse", "HEAD");
-    const failure = await gitOriginalCode([{ directory, commit: head }]).run(async () => { throw new RunnerKillUnconfirmedError(); }).catch((error: unknown) => error);
+    const failure = await gitOriginalCode([{ directory, commit: head }]).run(async () => { throw new RunnerKillUnconfirmedError({ kind: "local" }); }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(RunnerKillUnconfirmedError);
     expect(isWorkspaceUnsafe(failure)).toBe(true);
   });

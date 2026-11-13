@@ -50,7 +50,7 @@ describe("host runners and an unconfirmed stop", () => {
   it("createCheckRunners passes an unconfirmed stop of the agent's shell through on an aborted signal, never as 'aborted'", async () => {
     killUnconfirmed.on = false;
     const controller = new AbortController();
-    const bashOperations = { exec: async () => { controller.abort(); throw new RunnerKillUnconfirmedError(); } };
+    const bashOperations = { exec: async () => { controller.abort(); throw new RunnerKillUnconfirmedError({ kind: "local" }); } };
     const runners = createCheckRunners({ rootPath: await root(), bashOperations });
     await expect(runners.runAgentCommand("make test", 60_000, controller.signal)).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
   });

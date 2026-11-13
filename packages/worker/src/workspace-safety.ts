@@ -18,7 +18,18 @@ export interface UnconfirmedStop {
   pgid?: number;
 }
 
+/** Something the worker can kill, remove and check gone when a command in it could not be confirmed stopped (a task sandbox). */
+export interface Quarantinable {
+  readonly name: string;
+  quarantine(): Promise<{ name: string; verified: boolean }>;
+}
+
 export class WorkspaceSafety {
+  /** The sandboxes of the task, quarantined as soon as the latch is set (workspace-quarantine.ts). The list is the task's own, read when it is needed. */
+  readonly quarantinables: Array<readonly Quarantinable[]> = [];
+  /** The quarantine in progress, so the task's end can wait for it. */
+  pending: Promise<void> = Promise.resolve();
+
   private readonly stops: UnconfirmedStop[] = [];
   private firstFailure: Error | undefined;
   private readonly listeners: Array<(stop: UnconfirmedStop) => void> = [];
@@ -72,6 +83,14 @@ export function withWorkspaceSafety<T>(safety: WorkspaceSafety, work: () => T): 
 
 export function currentWorkspaceSafety(): WorkspaceSafety | undefined {
   return scope.getStore();
+}
+
+/**
+ * Runs `fn` in `safety`'s scope, or in NO task's scope when `safety` is undefined. For code that runs later, in whatever context made it run (an abort listener, a timer), and must
+ * still act for the task that asked for the work: the latch belongs to the task that started the command, never to the canceller's context, nor to another task's.
+ */
+export function inWorkspaceScope<T>(safety: WorkspaceSafety | undefined, fn: () => T): T {
+  return safety === undefined ? scope.exit(fn) : scope.run(safety, fn);
 }
 
 /** Records an unconfirmed stop on the current task's latch. A no-op outside a task (a test, a CLI). */

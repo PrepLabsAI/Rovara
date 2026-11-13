@@ -10,7 +10,7 @@ import { join, resolve } from "node:path";
 import { agentXError } from "@agentx/contracts";
 import { groupAlive } from "./collected-process.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
-import type { UnconfirmedStop } from "./workspace-safety.js";
+import { WorkspaceSafety, currentWorkspaceSafety, withWorkspaceSafety, type UnconfirmedStop } from "./workspace-safety.js";
 
 const MARKER_DIRECTORY = ".agentx";
 const MARKER_NAME = "workspace-unsafe.json";
@@ -26,6 +26,11 @@ export interface UnsafeWorkspaceRecord {
   at: string;
   stops: UnconfirmedStop[];
   sandboxes: QuarantinedSandbox[];
+}
+
+/** Tests: forget the in-memory refusals. */
+export function forgetUnwritableMarkers(): void {
+  unwritableMarkers.clear();
 }
 
 export const workspaceUnsafeMarkerPath = (rootPath: string): string => join(resolve(rootPath), MARKER_DIRECTORY, MARKER_NAME);
@@ -55,6 +60,39 @@ export async function readWorkspaceUnsafeMarker(rootPath: string): Promise<Unsaf
   }
 }
 
+/**
+ * Roots whose marker could not be written to disk: this worker refuses them from memory until it is restarted (L-3). A marker that cannot be written must not be a way in.
+ */
+const unwritableMarkers = new Set<string>();
+
+/**
+ * Opens the task's latch for `work` (workspace-safety.ts) and, when the latch is set, quarantines what the worker can (the sandboxes registered on it) and marks the workspace unsafe.
+ * Every kind of invocation runs inside one (main.ts), so a stop that could not be confirmed in a preparation, a publication or a maintenance run is recorded too; an inner call (runTaskInvocation
+ * under main.ts's) joins the outer latch instead of opening a second one. A marker that cannot be written fails closed: the root is refused from memory (`assertWorkspaceReset`).
+ */
+export async function withWorkspaceGuard<T>(rootPath: string, work: (safety: WorkspaceSafety) => Promise<T>): Promise<T> {
+  const outer = currentWorkspaceSafety();
+  if (outer !== undefined) return work(outer);
+  const safety = new WorkspaceSafety();
+  safety.onUnsafe(() => {
+    // At once, and again for each further stop: the sandboxes are killed, removed and checked gone, and the workspace is marked unsafe for the next task.
+    safety.pending = safety.pending.then(async () => {
+      const results: QuarantinedSandbox[] = await Promise.all(safety.quarantinables.flat().map((sandbox) => sandbox.quarantine().catch(() => ({ name: sandbox.name, verified: false }))));
+      try {
+        await markWorkspaceUnsafeOnDisk(rootPath, { at: new Date().toISOString(), stops: [...safety.unconfirmed], sandboxes: results });
+      } catch (error) {
+        unwritableMarkers.add(resolve(rootPath));
+        console.log(JSON.stringify({ component: "worker", event: "workspace-unsafe-marker.failed", reason: error instanceof Error ? error.message : String(error) }));
+      }
+    });
+  });
+  try {
+    return await withWorkspaceSafety(safety, () => work(safety));
+  } finally {
+    await safety.pending;
+  }
+}
+
 export interface ResetDependencies {
   docker?: Pick<DockerCli, "run">;
   /** Whether a host process group still has a live member. */
@@ -68,6 +106,7 @@ const REFUSED = "AgentX did not start: a command of an earlier task could not be
  * in which case the marker is removed. A marker that cannot be read, or that names a devcontainer, is never cleared here.
  */
 export async function assertWorkspaceReset(rootPath: string, deps: ResetDependencies = {}): Promise<void> {
+  if (unwritableMarkers.has(resolve(rootPath))) throw agentXError("RUNTIME_UNAVAILABLE", REFUSED);
   const record = await readWorkspaceUnsafeMarker(rootPath);
   if (record === undefined) return;
   if (record === "unreadable") throw agentXError("RUNTIME_UNAVAILABLE", REFUSED);

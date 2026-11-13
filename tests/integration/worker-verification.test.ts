@@ -25,6 +25,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import type { WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import { RunnerKillUnconfirmedError } from "../../packages/worker/src/collected-process.js";
+import { markWorkspaceUnsafe } from "../../packages/worker/src/workspace-safety.js";
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import { createDefaultPiSessionAdapter, type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
@@ -123,6 +124,9 @@ async function runTask(options: {
   budgets?: number[];
   /** An artifact name whose upload fails, so the task throws after the agent finished. */
   failArtifact?: string;
+  /** Called with each artifact's name as the task saves it, inside the task's own context. */
+  onArtifact?: (name: string) => void;
+
   /** D-16: the original code AgentX measures before results on. Default: none (the fixture has no repositories). */
   originalCode?: OriginalCode;
   /** The scripted model's context window. Pi 1.5 compacts a long transcript on its own, and a compaction asks the scripted model for a summary, which would use up the script; a run with huge outputs gives the model room. */
@@ -158,9 +162,10 @@ async function runTask(options: {
       ...(options.budgets === undefined ? {} : { checkBudgetMs: budgetSequence(options.budgets) }),
       ...(options.cancellation === undefined ? {} : { cancellationController: options.cancellation }),
       ...(options.originalCode === undefined ? {} : { originalCode: options.originalCode }),
-      eventSink: async (batch) => { events.push(...batch); },
+      eventSink: async (batch) => { events.push(...batch) },
       artifactSink: async (artifact) => {
         if (artifact.name === options.failArtifact) throw new Error(`upload of ${artifact.name} failed`);
+        options.onArtifact?.(artifact.name);
         artifacts.push(artifact);
       },
     });
@@ -1854,7 +1859,7 @@ describe("a stop that could not be confirmed ends the run and touches nothing (F
 
   it("(b) the agent's own shell: Pi turns the thrown error into a tool result, but the run still fails and reads and writes nothing in the workspace", async () => {
     const rootPath = await gitWorkspaceRoot();
-    const shell = { commands: [] as string[], operations: { exec: async () => { throw new RunnerKillUnconfirmedError(); } } satisfies BashOperations };
+    const shell = { commands: [] as string[], operations: { exec: async () => { throw new RunnerKillUnconfirmedError({ kind: "devcontainer" }); } } satisfies BashOperations };
     const run = await runTask({ steps: [bash("make test", "b1"), fauxAssistantMessage(`Ran it.\n${DONE}`), fauxAssistantMessage(`Ran it.\n${DONE}`)], shell, rootPath });
     expect(run.failure).toBeInstanceOf(RunnerKillUnconfirmedError);
     // The ending did not read the workspace (no diff, no evidence) and did not write the check history into it.
@@ -1879,5 +1884,17 @@ describe("a stop that could not be confirmed ends the run and touches nothing (F
     // A host stop whose group is gone clears itself at the next task.
     const next = await runTask({ steps: CHANGED_ONE_FILE, rootPath });
     expect(next.failure).toBeUndefined();
+  });
+
+  it("(L-2) a latch set during the ending stops the check-history write, and the run does not report success past it", async () => {
+    const control = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [lint], runners: fakeRunners().runners, rootPath: await gitWorkspaceRoot() });
+    expect(control.failure).toBeUndefined();
+    // Positive control: without the late latch the ending does write the history.
+    await expect(readFile(join(control.rootPath, ".agentx/last-checks.json"), "utf8")).resolves.toContain("outcomes");
+    const rootPath = await gitWorkspaceRoot();
+    const run = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [lint], runners: fakeRunners().runners, rootPath,
+      onArtifact: (name) => { if (name === "checks.json") markWorkspaceUnsafe({ kind: "local" }); } });
+    expect(run.failure).toBeDefined();
+    await expect(readFile(join(rootPath, ".agentx/last-checks.json"), "utf8")).rejects.toThrow(/ENOENT/u);
   });
 });

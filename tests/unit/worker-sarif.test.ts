@@ -298,7 +298,7 @@ describe("the baseline run on the original code", () => {
 
   it("a stop that could not be confirmed is rethrown and the candidate's file is NOT put back (a command that may still run would overwrite it) (FIX-RUNNER-ABORT-JOIN)", async () => {
     const stuck: CheckRunners = {
-      async runProjectCommand() { throw new RunnerKillUnconfirmedError(); },
+      async runProjectCommand() { throw new RunnerKillUnconfirmedError({ kind: "local" }); },
       async runAgentCommand() { throw new Error("not used"); },
     };
     const target = await scan();

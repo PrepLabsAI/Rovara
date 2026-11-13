@@ -1,13 +1,15 @@
 // FIX-RUNNER-ABORT-JOIN review fixes: the latch (H1), the quarantine (M3), the zombie branch (L2).
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RunnerKillUnconfirmedError, groupAlive, type GroupProbe } from "../../packages/worker/src/collected-process.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
+import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
+import { runChecks, type CheckPlan, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import {
-  assertWorkspaceReset, markWorkspaceUnsafeOnDisk, readWorkspaceUnsafeMarker, workspaceUnsafeMarkerPath, type UnsafeWorkspaceRecord,
+  assertWorkspaceReset, forgetUnwritableMarkers, markWorkspaceUnsafeOnDisk, readWorkspaceUnsafeMarker, withWorkspaceGuard, workspaceUnsafeMarkerPath, type UnsafeWorkspaceRecord,
 } from "../../packages/worker/src/workspace-quarantine.js";
 import { WorkspaceSafety, currentWorkspaceSafety, markWorkspaceUnsafe, withWorkspaceSafety } from "../../packages/worker/src/workspace-safety.js";
 
@@ -42,7 +44,7 @@ describe("the workspace-safety latch (H1)", () => {
     expect(first.unsafe).toBe(true);
     expect(second.unsafe).toBe(false);
     expect(currentWorkspaceSafety()).toBeUndefined();
-    expect(() => new RunnerKillUnconfirmedError()).not.toThrow();
+    expect(() => new RunnerKillUnconfirmedError({ kind: "local" })).not.toThrow();
   });
 
   it("calls a listener for each stop, and for the ones that came before it", () => {
@@ -203,5 +205,89 @@ describe("the zombie branch of the group probe (L2)", () => {
     const failing = (code: string): GroupProbe => ({ kill: () => { throw Object.assign(new Error(code), { code }); }, platform: "linux", procRoot: "/nonexistent" });
     expect(groupAlive(100, failing("ESRCH"))).toBe(false);
     expect(groupAlive(100, failing("EPERM"))).toBe(true);
+  });
+});
+
+describe("the join timeout belongs to the task that asked for the work (review M-A)", () => {
+  const plan: CheckPlan = { source: "project", readiness: [{ cwd: ".", executable: "x", args: [], timeoutSeconds: 5 }], projectBefore: ["passed"] };
+  const hanging = (kind?: CheckRunners["kind"]): CheckRunners => ({ ...(kind === undefined ? {} : { kind }), runProjectCommand: () => new Promise(() => undefined), runAgentCommand: async () => { throw new Error("not used"); } });
+  const round = (runners: CheckRunners, stop: AbortController) => runChecks(plan, runners, { budgetMs: 60_000, signal: stop.signal, abortJoinMs: 100 });
+
+  it("an abort from the task's own context latches that task, with the runners' own kind", async () => {
+    const safety = new WorkspaceSafety();
+    const stop = new AbortController();
+    const running = withWorkspaceSafety(safety, () => round(hanging("sandbox"), stop));
+    withWorkspaceSafety(safety, () => setTimeout(() => stop.abort(), 20));
+    await expect(running).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
+    expect(safety.unconfirmed).toEqual([{ kind: "sandbox" }]);
+  });
+
+  it("an abort from a context that is in no task (a cancel invocation) still latches the task that asked", async () => {
+    const safety = new WorkspaceSafety();
+    const stop = new AbortController();
+    const running = withWorkspaceSafety(safety, () => round(hanging(), stop));
+    setTimeout(() => stop.abort(), 20);
+    await expect(running).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
+    // A runner that does not say where it runs is "local" (never the devcontainer default, which no reset could verify).
+    expect(safety.unconfirmed).toEqual([{ kind: "local" }]);
+  });
+
+  it("an abort from ANOTHER task's context latches the task that asked, and not the other", async () => {
+    const asking = new WorkspaceSafety();
+    const other = new WorkspaceSafety();
+    const stop = new AbortController();
+    const running = withWorkspaceSafety(asking, () => round(hanging("devcontainer"), stop));
+    withWorkspaceSafety(other, () => setTimeout(() => stop.abort(), 20));
+    await expect(running).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
+    expect(asking.unsafe).toBe(true);
+    expect(other.unsafe).toBe(false);
+  });
+});
+
+describe("the guard around every invocation (review M-B, L-3, L-5)", () => {
+  it("opens a latch for work that is not a task, quarantines what is registered on it and marks the workspace", async () => {
+    const root = await directory();
+    const quarantined: string[] = [];
+    await withWorkspaceGuard(root, async (safety) => {
+      safety.quarantinables.push([{ name: "agentx-task-x", quarantine: async () => { quarantined.push("agentx-task-x"); return { name: "agentx-task-x", verified: true }; } }]);
+      expect(currentWorkspaceSafety()).toBe(safety);
+      markWorkspaceUnsafe({ kind: "sandbox" });
+    });
+    expect(quarantined).toEqual(["agentx-task-x"]);
+    expect(await readWorkspaceUnsafeMarker(root)).toMatchObject({ stops: [{ kind: "sandbox" }], sandboxes: [{ name: "agentx-task-x", verified: true }] });
+  });
+
+  it("an inner guard joins the outer latch instead of opening a second one", async () => {
+    const root = await directory();
+    await withWorkspaceGuard(root, async (outer) => {
+      await withWorkspaceGuard(root, async (inner) => { expect(inner).toBe(outer); });
+    });
+  });
+
+  it.skipIf(process.getuid?.() === 0)("L-3: a marker that cannot be written fails closed: the next task is refused from memory", async () => {
+    const root = await directory();
+    // The state directory exists but cannot be written to: the marker cannot be written, and reading it says "no marker" (so only the in-memory refusal can refuse).
+    await mkdir(join(root, ".agentx"), { mode: 0o500 });
+    await chmod(join(root, ".agentx"), 0o500);
+    try {
+      await withWorkspaceGuard(root, async () => { markWorkspaceUnsafe({ kind: "local", pgid: 1 }); });
+      await expect(readWorkspaceUnsafeMarker(root)).resolves.toBeUndefined();
+      await expect(assertWorkspaceReset(root)).rejects.toThrow(/could not be confirmed stopped/u);
+    } finally {
+      forgetUnwritableMarkers();
+      await chmod(join(root, ".agentx"), 0o700);
+    }
+    await expect(assertWorkspaceReset(root)).resolves.toBeUndefined();
+  });
+
+  it("L-5: preparation refuses while the marker stands (it is the first thing prepareWorkspace does)", async () => {
+    const root = await directory();
+    await markWorkspaceUnsafeOnDisk(root, { at: "x", stops: [{ kind: "devcontainer" }], sandboxes: [] });
+    await expect(prepareWorkspace({ rootPath: root, project: {} as never })).rejects.toThrow(/could not be confirmed stopped/u);
+  });
+
+  it("main.ts runs every kind of invocation inside the guard (prepare, publish, maintain, task)", async () => {
+    const source = await readFile(join(import.meta.dirname, "../../packages/worker/src/main.ts"), "utf8");
+    expect(source).toMatch(/execute: \(invocation: WorkerInvocation\): Promise<unknown> => withWorkspaceGuard\(rootPath, async \(\) => \{/u);
   });
 });

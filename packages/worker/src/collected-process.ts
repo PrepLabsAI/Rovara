@@ -24,9 +24,13 @@ export const KILL_CONFIRM_MS = 5_000;
 export class RunnerKillUnconfirmedError extends Error {
   /**
    * Making one is what sets the task's WorkspaceSafety latch (workspace-safety.ts), so that no producer can forget it and no catch between here and the
-   * run's ending can turn the fact into an ordinary failure. `stop` says where the command ran (the default: a command on a container, which a devcontainer may be).
+   * run's ending can turn the fact into an ordinary failure. `stop` says where the command ran and is REQUIRED: a wrong kind decides how the workspace is
+   * quarantined and whether the next task is let in, so every producer states it.
+   *
+   * Do not construct one in a catch that rewraps an error you caught: that records a second unconfirmed stop that did not happen, and the latch cannot be
+   * unset. Rethrow the one you caught. Construct it where the stop is found to be unconfirmed, inside the scope of the task that started the command.
    */
-  constructor(stop: UnconfirmedStop = { kind: "devcontainer" }) {
+  constructor(stop: UnconfirmedStop) {
     super("AgentX could not confirm that the command stopped, so it did not touch the workspace afterwards");
     this.name = "RunnerKillUnconfirmedError";
     markWorkspaceUnsafe(stop, this);

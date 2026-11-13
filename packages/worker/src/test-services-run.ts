@@ -1133,6 +1133,7 @@ export async function startTestServicesRun(config: TestServicesConfig, input: St
     ids,
     checkRunners() {
       return {
+        kind: "sealed",
         runProjectCommand: async (command, signal) => {
           const result = await currentRound().runProjectCommand(command, signal);
           if (result.exitCode !== 0 || result.timedOut) checkFailed = true;

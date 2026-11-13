@@ -1,3 +1,4 @@
+import { RunnerKillUnconfirmedError } from "./collected-process.js";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
@@ -632,6 +633,8 @@ async function runReadinessCommands(
     try {
       result = await runner(command, index, rootPath);
     } catch (error) {
+      // A command whose stop could not be confirmed may still be running beside the next command and the push: not a failed check to step past (FIX-RUNNER-ABORT-JOIN).
+      if (error instanceof RunnerKillUnconfirmedError) throw error;
       // For example, the devcontainer has no bash (#174). A failed check, as at preparation.
       result = { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : "readiness command could not run" };
     }

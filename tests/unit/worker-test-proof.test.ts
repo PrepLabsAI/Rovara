@@ -137,7 +137,7 @@ describe("TESTPROOF", () => {
     const command: ProjectCommand = { ...FAKE_TEST_COMMAND, args: ["test", "--", "--reporter=json", "--outputFile=report.json"] };
     // The report the candidate's checks wrote: it is taken away before the run on the original code, and normally put back after it.
     await writeFile(join(made.directory, "report.json"), JSON.stringify({ testResults: [] }));
-    const stuck = { ...fakeTestRunner(made.directory), runProjectCommand: async () => { throw new RunnerKillUnconfirmedError(); } };
+    const stuck = { ...fakeTestRunner(made.directory), runProjectCommand: async () => { throw new RunnerKillUnconfirmedError({ kind: "local" }); } };
     const failure = await runTestProof(proofOptions(made, { runners: stuck, plan: { source: "project", readiness: [command], projectBefore: ["unknown"] } })).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(AgentFilesRestoreError);
     expect(isUnconfirmedStop(failure)).toBe(true);

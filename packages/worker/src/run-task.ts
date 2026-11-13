@@ -69,9 +69,9 @@ import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/re
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { RunFindings, type FindingsRecorder } from "./no-change-findings.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
-import { currentWorkspaceSafety, WorkspaceSafety, withWorkspaceSafety } from "./workspace-safety.js";
+import { currentWorkspaceSafety } from "./workspace-safety.js";
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
-import { markWorkspaceUnsafeOnDisk, assertWorkspaceReset, type QuarantinedSandbox } from "./workspace-quarantine.js";
+import { assertWorkspaceReset, withWorkspaceGuard } from "./workspace-quarantine.js";
 import { isWorkspaceUnsafe, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { runTestProof, serializeTestProof } from "./verification/test-proof.js";
 import { saveEvidenceRaw } from "./verification/evidence-raw.js";
@@ -228,28 +228,20 @@ export async function runTaskInvocation(
 ): Promise<TaskInvocationResult> {
   // The task sandbox, when there is one, is removed when the task ends, whether it succeeded, failed or was cancelled.
   const sandboxes: TaskSandbox[] = [];
-  // FIX-RUNNER-ABORT-JOIN: the task's latch for "a command we stopped may still be writing the workspace" (workspace-safety.ts). Every runner of this task finds it through the async context.
-  const safety = new WorkspaceSafety();
-  let quarantine: Promise<void> = Promise.resolve();
-  safety.onUnsafe(() => {
-    // At once, and again for each further stop: the task sandboxes are killed, removed and checked gone, and the workspace is marked unsafe for the next task (workspace-quarantine.ts).
-    quarantine = quarantine.then(async () => {
-      const results: QuarantinedSandbox[] = await Promise.all(sandboxes.map((sandbox) => sandbox.quarantine().catch(() => ({ name: sandbox.name, verified: false }))));
-      await markWorkspaceUnsafeOnDisk(dependencies.rootPath, { at: new Date().toISOString(), stops: [...safety.unconfirmed], sandboxes: results }).catch((error: unknown) => {
-        console.log(JSON.stringify({ component: "worker", event: "workspace-unsafe-marker.failed", reason: error instanceof Error ? error.message : String(error) }));
-      });
-    });
-  });
-  try {
-    return await withWorkspaceSafety(safety, () => runTask(untrustedInvocation, dependencies, sandboxes));
-  } finally {
-    await quarantine;
-    for (const sandbox of sandboxes) {
-      await sandbox.dispose().catch((error: unknown) => {
-        console.log(JSON.stringify({ component: "worker", event: "task-sandbox.remove.failed", container: sandbox.name, reason: error instanceof Error ? error.message : String(error) }));
-      });
+  // FIX-RUNNER-ABORT-JOIN: the latch for "a command we stopped may still be writing the workspace" (workspace-safety.ts), normally opened by main.ts around every invocation; opened here when a caller (a test) did not.
+  return withWorkspaceGuard(dependencies.rootPath, async (safety) => {
+    safety.quarantinables.push(sandboxes);
+    try {
+      return await runTask(untrustedInvocation, dependencies, sandboxes);
+    } finally {
+      await safety.pending;
+      for (const sandbox of sandboxes) {
+        await sandbox.dispose().catch((error: unknown) => {
+          console.log(JSON.stringify({ component: "worker", event: "task-sandbox.remove.failed", container: sandbox.name, reason: error instanceof Error ? error.message : String(error) }));
+        });
+      }
     }
-  }
+  });
 }
 
 /**
@@ -259,7 +251,7 @@ export async function runTaskInvocation(
  */
 function assertWorkspaceSafe(): void {
   const safety = currentWorkspaceSafety();
-  if (safety?.unsafe === true) throw safety.failure ?? new RunnerKillUnconfirmedError();
+  if (safety?.unsafe === true) throw safety.failure ?? new RunnerKillUnconfirmedError(safety.unconfirmed[0] ?? { kind: "local" });
 }
 
 async function runTask(
@@ -1495,6 +1487,7 @@ async function runTask(
         }
       }
       if (designReviewBinding !== undefined) {
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN_CRITIQUE" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN_CRITIQUE" };
@@ -1505,6 +1498,7 @@ async function runTask(
         monitor.stop();
         if (critique === undefined) throw agentXError("OPERATION_INTERRUPTED", "the plan check produced no answer");
         await artifactSink({ name: PLAN_CRITIQUE_ARTIFACT, mediaType: "text/markdown; charset=utf-8", content: critique });
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN_CRITIQUE" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN_CRITIQUE" };
@@ -1517,6 +1511,7 @@ async function runTask(
         monitor.stop();
         const diagnosisAnswer = (finalText ?? "").trim();
         if (diagnosisAnswer === "") throw agentXError("OPERATION_INTERRUPTED", "the diagnosis run produced no answer");
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "SETUP_DRAFT" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "SETUP_DRAFT", diagnosisAnswer: cutDiagnosisAnswer(diagnosisAnswer) };
@@ -1532,6 +1527,7 @@ async function runTask(
         }
         monitor.stop();
         if (!read.ok) throw agentXError("OPERATION_INTERRUPTED", "the setup draft run produced no readable proposal");
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "SETUP_DRAFT" });
         const detected = invocation.payload.testEnvDetect === true ? await testEnvDraftResult({ rootPath: canonicalRoot, repositories: manifest.repositories, setupProposal: read.proposal, ...(invocation.payload.testEnvRecipes === undefined ? {} : { recipes: invocation.payload.testEnvRecipes }) }) : {};
@@ -1547,6 +1543,7 @@ async function runTask(
         }
         monitor.stop();
         if (!read.ok) throw agentXError("OPERATION_INTERRUPTED", "the spec write run produced no readable spec");
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "SPEC_WRITE" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "SPEC_WRITE", specDraft: read.draft };
@@ -1624,6 +1621,8 @@ async function runTask(
             } catch (error) {
               if (verificationStop.signal.aborted && dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
               if (error instanceof WorkerOperationCancelledError) throw error;
+              // The dry run is informational and never fails the planning run, except for a stop that could not be confirmed: that command may still be running.
+              if (isWorkspaceUnsafe(error)) throw error;
             }
             if (dryRun !== undefined) await emit("progress", { message: "AgentX tried the proposed checks on the code as the task started.", planDryRun: dryRun });
           }
@@ -1637,6 +1636,7 @@ async function runTask(
             planGroundingSource = await exportBaselineSource({ signal: verificationStop.signal, repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase) });
           }
         }
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN", ...(planGroundingSource === undefined ? {} : { workflowBaselineSource: planGroundingSource }) };
@@ -1647,6 +1647,7 @@ async function runTask(
         monitor.stop();
         await artifactSink({ name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify(assessment) });
         await publishEvidence();
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "UNDERSTAND" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "UNDERSTAND" };
@@ -1703,6 +1704,7 @@ async function runTask(
           if (secondReview?.report !== undefined) secondReview = { ...secondReview, report: { ...secondReview.report, status: "UNKNOWN", findings: [] } };
         }
         await publishEvidence();
+        assertWorkspaceSafe();
         outcome = "SUCCEEDED";
         await emit("result", {
           status: "SUCCEEDED", conversationId, workflowMode: "REVIEW",
@@ -1870,6 +1872,8 @@ async function runTask(
       }
     }
 
+    // Whatever ended the run (a latch set while the ending itself ran, a path that kept its own error): nothing is written into a workspace a stopped command may still be writing.
+    workspaceUnsafe ||= currentWorkspaceSafety()?.unsafe === true;
     if (!planning && !understanding && !workspaceUnsafe) await restoreHistory();
     await flushDiagnostics().catch(() => undefined);
 

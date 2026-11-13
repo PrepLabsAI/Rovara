@@ -48,6 +48,7 @@ function createSealedCheckRunners(rootPath: string, seam: SealedSeam): CheckRunn
   const canonicalRoot = realpath(resolve(rootPath));
   canonicalRoot.catch(() => undefined);
   return {
+    kind: "sealed",
     async runProjectCommand(command, signal) {
       if (signal.aborted) throw new Error("aborted");
       const root = await canonicalRoot;
